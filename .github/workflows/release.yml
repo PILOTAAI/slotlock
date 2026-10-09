@@ -54,13 +54,13 @@ jobs:
       postgres:
         image: postgres:16.15@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
         env:
-          POSTGRES_USER: slotlock
-          POSTGRES_PASSWORD: slotlock
+          POSTGRES_USER: slotlock_ci
+          POSTGRES_PASSWORD: ci-only-password
           POSTGRES_DB: slotlock
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready --username=slotlock --dbname=slotlock"
+          --health-cmd "pg_isready --username=slotlock_ci --dbname=slotlock"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
@@ -83,7 +83,7 @@ jobs:
       - name: Test, build and verify the package
         run: npm test
         env:
-          DATABASE_URL: postgresql://slotlock:slotlock@localhost:5432/slotlock
+          DATABASE_URL: postgresql://slotlock_ci:ci-only-password@localhost:5432/slotlock
       - name: Pack dist/
         id: pack
         run: |

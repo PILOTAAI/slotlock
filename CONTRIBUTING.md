@@ -19,11 +19,15 @@ Database suites (`*.integration.test.ts`) run when `DATABASE_URL` points at a Po
 database whose connecting role can create roles and extensions, and are skipped otherwise:
 
 ```sh
-DATABASE_URL=postgresql://slotlock:slotlock@localhost:5432/slotlock_test npm test
+DATABASE_URL=postgresql://slotlock_dev:dev-only-password@localhost:5432/slotlock_test npm test
 ```
 
 Use a disposable database: the suites apply the schema and forced RLS, and create short-lived
-roles. Never point them at production or shared customer data.
+roles. Never point them at production or shared customer data. Connect as any role except one named
+`slotlock`, and with a password of 12 or more characters that does not contain "slot" or "lock". A
+role named `slotlock` is the package's schema, which `"$user"` puts first on the search path. The
+command-line tool redacts the database password from everything it prints, so a short or
+product-like password rewrites the output the tests read.
 
 ## Sign off your commits
 

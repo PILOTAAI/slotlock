@@ -160,6 +160,38 @@ function repository() {
   return { cwd, git, commit, script };
 }
 
+describe('database suite credentials', () => {
+  // The suites and the CLI both see who they connect as. A role named slotlock is the package's own
+  // schema, which "$user" puts first on the default search path, so names resolve as they never do
+  // for a deployment role. And the CLI redacts the database password from everything it prints, so
+  // a password that is a word in that output rewrites it. With slotlock:slotlock, both turned four
+  // integration tests red on the first CI run while they passed locally as another role.
+  it('runs them as a role that is not the schema, with a password its output never contains', () => {
+    const sources = [...workflows, { file: 'CONTRIBUTING.md', text: read('CONTRIBUTING.md') }];
+    const roles: { file: string; value: string }[] = [];
+    const passwords: { file: string; value: string }[] = [];
+    for (const { file, text } of sources) {
+      for (const [, user, password] of text.matchAll(/postgres(?:ql)?:\/\/([^:@/\s]+):([^@/\s]+)@/g)) {
+        roles.push({ file, value: user as string });
+        passwords.push({ file, value: password as string });
+      }
+      for (const [, user] of text.matchAll(/(?:POSTGRES_USER:\s*|--username=)([^\s"]+)/g)) {
+        roles.push({ file, value: user as string });
+      }
+      for (const [, password] of text.matchAll(/POSTGRES_PASSWORD:\s*(\S+)/g)) {
+        passwords.push({ file, value: password as string });
+      }
+    }
+    expect(roles.length, 'canary: CI, release and CONTRIBUTING name their roles').toBeGreaterThanOrEqual(10);
+    expect(passwords.length, 'canary: and their passwords').toBeGreaterThanOrEqual(7);
+    for (const { file, value } of roles) expect(value, `${file}: role`).not.toBe('slotlock');
+    for (const { file, value } of passwords) {
+      expect(value, `${file}: password`).not.toMatch(/slot|lock/i);
+      expect(value.length, `${file}: password ${value} is short enough to occur in output`).toBeGreaterThanOrEqual(12);
+    }
+  });
+});
+
 describe('DCO check', () => {
   it('passes signed-off commits and names each one without a sign-off from its author', () => {
     const repo = repository();
