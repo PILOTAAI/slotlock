@@ -1,0 +1,81 @@
+{
+  "name": "slotlock",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Resource-first, deterministic calendar and availability engine for AI agents.",
+  "license": "Apache-2.0",
+  "author": "TREFT LTD",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./node-server": {
+      "types": "./src/node-server.ts",
+      "default": "./src/node-server.ts"
+    },
+    "./manifest": "./slotlock.manifest.json",
+    "./manifest.schema": "./slotlock-manifest.schema.json",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "slotlock": "./dist/cli.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PILOTAAI/slotlock.git"
+  },
+  "homepage": "https://slotlock.pylota.io",
+  "bugs": {
+    "url": "https://github.com/PILOTAAI/slotlock/issues"
+  },
+  "keywords": [
+    "agents",
+    "calendar",
+    "scheduling",
+    "availability",
+    "booking",
+    "reservations",
+    "free-busy",
+    "icalendar",
+    "postgresql",
+    "mcp",
+    "model-context-protocol",
+    "a2a"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "npm run clean && tsc -p tsconfig.build.json && node scripts/prepare-package.mjs",
+    "clean": "node scripts/clean-dist.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc -p tsconfig.examples.json",
+    "test": "vitest run && npm run build && npm run verify:package",
+    "verify:package": "node scripts/verify-package.mjs"
+  },
+  "dependencies": {
+    "ical.js": "2.2.1",
+    "rrule": "2.8.1",
+    "zod": "3.25.76",
+    "zod-to-json-schema": "3.25.2"
+  },
+  "peerDependencies": {
+    "postgres": "^3.4.5"
+  },
+  "devDependencies": {
+    "@a2a-js/sdk": "1.2.1",
+    "@modelcontextprotocol/client": "2.1.0",
+    "@modelcontextprotocol/sdk": "1.30.1",
+    "@types/node": "22.19.17",
+    "ajv": "8.18.0",
+    "jsdom": "25.0.1",
+    "typescript": "5.7.2",
+    "vitest": "3.2.4"
+  }
+}

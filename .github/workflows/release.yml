@@ -1,0 +1,154 @@
+# Release: on a v* tag, verify the tag, run the suite against PostgreSQL, pack the npm artifact
+# (dist/), and STAGE it on npm. Nothing in this workflow can make a version public.
+#
+# Staging uses npm trusted publishing: npm exchanges this job's GitHub OIDC token (id-token: write)
+# for a short-lived credential, so no npm token exists anywhere. Provenance is attached. The staged
+# version stays private until a maintainer approves it with two-factor authentication, which an
+# OIDC token cannot do:
+#   npm stage list slotlock
+#   npm stage view <stage-id>         (the stage id is in this run's summary)
+#   npm stage approve <stage-id>      (prompts for 2FA; also possible in the npmjs.com
+#                                      "Staged Packages" tab)
+#   npm stage reject <stage-id>       (discards it instead)
+#
+# One-time setup by the repository owner:
+#   - A GitHub environment named `npm` (Settings > Environments), with deployment tags limited
+#     to v*.
+#   - On npmjs.com, a trusted publisher for the slotlock package: GitHub Actions, organization
+#     PILOTAAI, repository slotlock, workflow filename release.yml, environment npm. npm only
+#     accepts a trusted publisher for a package that already exists, so the very first version
+#     is staged once by a maintainer (`npm stage publish` from their own session).
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # The suite runs on the Node.js the image ships.
+  NODE_VERSION: '22.23.3'
+  # Staging needs npm >= 11.15.0 (npm stage) on Node.js >= 22.14.0. Node.js 24.21.0 bundles npm
+  # 11.19.0, whose engines.node is "^20.17.0 || >=22.9.0", so nothing is installed outside a
+  # lockfile; the stage job checks the version before it uses it.
+  STAGE_NODE_VERSION: '24.21.0'
+  NPM_VERSION: '11.19.0'
+
+jobs:
+  build:
+    name: Verify, test and pack
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16.15@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+        env:
+          POSTGRES_USER: slotlock
+          POSTGRES_PASSWORD: slotlock
+          POSTGRES_DB: slotlock
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username=slotlock --dbname=slotlock"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    outputs:
+      tarball: ${{ steps.pack.outputs.tarball }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check the tag against main, package.json, CHANGELOG.md and server.json
+        run: scripts/check-release-tag.sh "$GITHUB_REF_NAME"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          # No dependency cache in a release build: nothing restored from another run.
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Test, build and verify the package
+        run: npm test
+        env:
+          DATABASE_URL: postgresql://slotlock:slotlock@localhost:5432/slotlock
+      - name: Pack dist/
+        id: pack
+        run: |
+          mkdir release
+          tarball=$(cd dist && npm pack --ignore-scripts --pack-destination ../release --json | jq -r '.[0].filename')
+          (cd release && sha256sum "$tarball" > SHA256SUMS)
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          {
+            echo '### npm artifact'
+            echo '```'
+            cat release/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-package
+          path: release/
+          if-no-files-found: error
+          retention-days: 30
+
+  stage:
+    name: Stage on npm
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: npm
+    permissions:
+      contents: read
+      # Trusted publishing and provenance: npm exchanges this job's OIDC token.
+      id-token: write
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.STAGE_NODE_VERSION }}
+          package-manager-cache: false
+      - name: Check npm is ${{ env.NPM_VERSION }}
+        run: |
+          if [ "$(npm --version)" != "$NPM_VERSION" ]; then
+            echo "::error::npm $(npm --version) is not the expected $NPM_VERSION"
+            exit 1
+          fi
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-package
+          path: release
+      - name: Verify the tarball checksum
+        working-directory: release
+        run: sha256sum --check SHA256SUMS
+      - name: Stage the tarball (trusted publishing, provenance)
+        working-directory: release
+        env:
+          TARBALL: ${{ needs.build.outputs.tarball }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          # A prerelease (1.2.0-rc.1) must not move `latest`; the tag is fixed once staged.
+          dist_tag=latest
+          case "$version" in *-*) dist_tag=next ;; esac
+          npm stage publish "./$TARBALL" --provenance --access public --tag "$dist_tag" | tee stage.log
+          # npm prints "+ slotlock@<version> (staged with id <stage-id>)".
+          stage_id=$(sed -n 's/^+ .* (staged with id \([^)]*\))$/\1/p' stage.log)
+          {
+            echo "### Staged slotlock@$version on npm (dist-tag $dist_tag)"
+            echo "Approve with two-factor authentication:"
+            echo '```'
+            echo "npm stage view ${stage_id:-<stage-id from npm stage list slotlock>}"
+            echo "npm stage approve ${stage_id:-<stage-id>}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

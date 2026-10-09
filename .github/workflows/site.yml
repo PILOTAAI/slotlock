@@ -1,0 +1,122 @@
+# Builds the site (site/) and deploys it, as one assets-only Cloudflare Worker, to
+# slotlock.pylota.io (site/wrangler.jsonc).
+#
+# Pull requests build and check only. A push to main, or a manual run on main, also deploys.
+# The site reads README.md, SPEC.md, SECURITY.md, CHANGELOG.md, src/ and the manifest schema at
+# build time, so changes to those rebuild it too.
+#
+# Every action is pinned to a full commit SHA, resolved with
+# `gh api repos/<owner>/<repo>/git/matching-refs/tags/<tag>` on 2026-10-09 (each tag is a
+# lightweight tag pointing at that commit). Wrangler is pinned exactly in site/package-lock.json.
+#
+# Secrets, on the `site` environment:
+#   CLOUDFLARE_API_TOKEN   Account: Workers Scripts: Edit; Zone (pylota.io only): Workers Routes: Edit, DNS: Edit
+#   CLOUDFLARE_ACCOUNT_ID  the Cloudflare account that holds the pylota.io zone
+name: Site
+
+on:
+  pull_request:
+    paths:
+      - "site/**"
+      - "README.md"
+      - "SPEC.md"
+      - "SECURITY.md"
+      - "CHANGELOG.md"
+      - "package.json"
+      - "slotlock-manifest.schema.json"
+      - "src/**"
+      - ".github/workflows/site.yml"
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "README.md"
+      - "SPEC.md"
+      - "SECURITY.md"
+      - "CHANGELOG.md"
+      - "package.json"
+      - "slotlock-manifest.schema.json"
+      - "src/**"
+      - ".github/workflows/site.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: site-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22" # Astro 7.3.8 needs >= 22.12.0
+      # Wrangler is a dev dependency and only the deploy job needs it.
+      - name: Install
+        run: npm ci --omit=dev --no-audit --no-fund
+      - name: Build (syncs docs and facts from the repository, then pins the CSP)
+        run: npm run build
+      - name: Check contrast and copy
+        run: npm run check
+      - name: Check the output
+        run: |
+          for f in index.html index.md 404.html llms.txt llms-full.txt _headers \
+                   docs/index.html docs/quickstart/index.html docs/quickstart.md \
+                   docs/reference/index.html docs/specification/index.html \
+                   schema/manifest.schema.json fonts/inter.woff2; do
+            test -s "dist/$f" || { echo "missing dist/$f"; exit 1; }
+          done
+          if grep -q "__SCRIPT_HASHES__\|__STYLE_HASHES__\|__STYLE_ATTR_HASHES__" dist/_headers; then
+            echo "dist/_headers still has a CSP placeholder"; exit 1
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: site
+          path: site/dist
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: site
+      url: https://slotlock.pylota.io
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22" # wrangler 4.149.0 needs >= 22.0.0
+      - name: Install Wrangler from the lockfile
+        run: npm ci --no-audit --no-fund
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: site
+          path: site/dist
+      - name: Deploy to Cloudflare Workers
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::error::Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID on the 'site' environment (see site/README.md)."
+            exit 1
+          fi
+          npm run deploy

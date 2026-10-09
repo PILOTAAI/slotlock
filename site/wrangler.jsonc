@@ -1,0 +1,22 @@
+// slotlock.pylota.io: the landing page and docs, deployed as an assets-only Worker (no Worker script,
+// no bindings). Build first (`npm run build` writes ./dist), then `npm run deploy`.
+// Config reference: https://developers.cloudflare.com/workers/static-assets/ (read 2026-10-09).
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "slotlock-site",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./dist",
+    // Unknown paths get Starlight's 404 page with a 404 status.
+    "not_found_handling": "404-page",
+    "html_handling": "auto-trailing-slash"
+  },
+  // Production hostname. A Custom Domain makes Cloudflare create the DNS record and certificate on
+  // the first deploy; the pylota.io zone must be in the same Cloudflare account, the hostname may
+  // not already have a CNAME record, and no Worker route in the zone may match it (a route runs
+  // before a Custom Domain). Self-hosters: put your own hostname here, or delete the block to serve
+  // the site on workers.dev only.
+  "routes": [{ "pattern": "slotlock.pylota.io", "custom_domain": true }],
+  "workers_dev": false,
+  "preview_urls": false
+}

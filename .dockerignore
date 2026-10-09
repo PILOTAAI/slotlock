@@ -1,0 +1,15 @@
+# An allow-list: the image build reads only these, so local secrets (.env), git history,
+# node_modules, dist and the site never enter the build context.
+*
+!package.json
+!package-lock.json
+!tsconfig.json
+!tsconfig.build.json
+!scripts/
+!src/
+src/__tests__/
+!*.md
+!LICENSE
+!NOTICE
+!slotlock.manifest.json
+!slotlock-manifest.schema.json

@@ -1,0 +1,10 @@
+---
+import { segments } from '../../lib/rich';
+
+interface Props {
+  text: string;
+}
+const { text } = Astro.props;
+---
+
+{segments(text).map((part) => (part.code ? <code>{part.text}</code> : part.text))}

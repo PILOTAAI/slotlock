@@ -1,0 +1,43 @@
+{
+  "$schema": "./slotlock-manifest.schema.json",
+  "schemaVersion": "1.0",
+  "name": "Slotlock",
+  "package": "slotlock",
+  "version": "0.1.0",
+  "description": "Resource-first, deterministic calendar and availability engine for AI agents.",
+  "intervalSemantics": {
+    "boundary": "[)",
+    "timezone": "IANA",
+    "timestampEncoding": "RFC3339"
+  },
+  "capabilities": [
+    "availability-rules",
+    "find-next-available",
+    "atomic-holds",
+    "conflict-safe-reservations",
+    "revisioned-external-commands",
+    "external-calendar-normalization",
+    "trusted-event-crud",
+    "bounded-recurrence-exceptions",
+    "organizer-attendee-rsvp",
+    "relative-reminders",
+    "coverage-aware-free-busy",
+    "icalendar-ingest",
+    "icalendar-export",
+    "itip-interchange",
+    "mcp-agent-server",
+    "mcp-app-calendar-ui",
+    "a2a-agent-server",
+    "tenant-rls",
+    "event-retention",
+    "oauth-protected-resource-metadata",
+    "all-day-events",
+    "long-events",
+    "mcp-human-confirmation",
+    "mcp-calendar-resources",
+    "mcp-live-updates",
+    "trace-context-propagation"
+  ],
+  "transportPolicy": "adapter-defined",
+  "externalCalendarsAreAuthority": false
+}
