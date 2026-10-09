@@ -1,0 +1,656 @@
+---
+// slotlock.pylota.io landing page. Copy lives in src/data/landing.ts (shared with /index.md); numbers
+// and names come from the repository through src/generated/facts.json.
+import '../styles/fonts.css';
+import '../generated/tokens.css';
+import '../styles/landing.css';
+import HeroScene from '../components/landing/HeroScene.astro';
+import Icon from '../components/landing/Icon.astro';
+import Rich from '../components/landing/Rich.astro';
+import {
+  closing,
+  compare,
+  DDL_URL,
+  developers,
+  facts,
+  faq,
+  footer,
+  hero,
+  legend,
+  legendCounts,
+  meta,
+  model,
+  modelAria,
+  ruleCode,
+  weekWindows,
+  nav,
+  openSource,
+  proof,
+  RACE_TEST_URL,
+  REPO_URL,
+  security,
+  specStrip,
+  steps,
+} from '../data/landing';
+
+const counts = legendCounts();
+const week = weekWindows();
+const pos = (prefix: "s" | "e", hour: number) => `${prefix}-${String(hour).replace(".", "-")}`;
+const a2aBody = JSON.stringify(
+  {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'SendMessage',
+    params: {
+      message: {
+        messageId: 'msg-1',
+        role: 'ROLE_USER',
+        parts: [
+          {
+            mediaType: 'application/json',
+            data: {
+              skill: 'calendar_find_next_available',
+              arguments: {
+                resource_ids: [facts.exampleResourceId],
+                start: facts.exampleWindow.start,
+                end: facts.exampleWindow.end,
+                duration_minutes: 120,
+              },
+            },
+          },
+        ],
+      },
+    },
+  },
+  null,
+  2,
+);
+const toolPad = Math.max(...facts.tools.map((tool) => tool.name.length)) + 2;
+const canonical = new URL('/', Astro.site).toString();
+---
+
+<!doctype html>
+<html lang="en-GB">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{meta.title}</title>
+    <meta name="description" content={meta.description} />
+    <link rel="canonical" href={canonical} />
+    <link rel="alternate" type="text/markdown" href="/index.md" title="Markdown" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="preload" href="/fonts/inter.woff2" as="font" type="font/woff2" crossorigin="anonymous" />
+    <link
+      rel="preload"
+      href="/fonts/inter-tight.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin="anonymous"
+    />
+    <meta name="theme-color" content="#F6F4EE" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)" />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:title" content={meta.title} />
+    <meta property="og:description" content={meta.description} />
+    <meta name="twitter:card" content="summary" />
+    <!-- Theme choice and the once-only hero motion, decided before first paint. -->
+    <script is:inline src="/js/head.js"></script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="site-header">
+      <div class="wrap site-header__row">
+        <a class="brand" href="/" aria-label="Slotlock home">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <rect x="2.65" y="4.65" width="18.7" height="14.7" rx="3.2" stroke="currentColor" stroke-width="1.3"></rect>
+            <path d="M2.65 9.35h18.7" stroke="currentColor" stroke-width="1.3"></path>
+            <rect class="brand__slot" x="8.5" y="11.9" width="7" height="4.6" rx="1.2"></rect>
+          </svg>
+          Slotlock
+        </a>
+        <nav class="site-nav" aria-label="Main">
+          {nav.map((item) => <a href={item.href}>{item.label}</a>)}
+        </nav>
+        <a class="gh-link" href={REPO_URL}>
+          <Icon name="repo" />
+          <span>GitHub</span>
+        </a>
+        <a class="btn btn--primary" href="/docs/quickstart/">Get started</a>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="wrap">
+          <a class="launch" href={hero.pill.href}>
+            <span class="launch__tag">{hero.pill.label}</span>
+            {hero.pill.link}
+            <Icon name="arrow" />
+          </a>
+          <p class="eyebrow">{hero.eyebrow}</p>
+          <h1 class="h1" id="hero-title">
+            <span class="soft">{hero.heading.soft}</span>
+            <span class="strong">{hero.heading.strong}</span>
+          </h1>
+          <p class="lede">{hero.lede}</p>
+          <div class="hero__actions">
+            <a class="btn btn--primary" href="/docs/quickstart/">Get started</a>
+            <div class="hero__install">
+              {
+                hero.install.map((target, index) => (
+                  <input
+                    class="sr-only"
+                    type="radio"
+                    name="install"
+                    id={`install-${target.id}`}
+                    checked={index === 0}
+                  />
+                ))
+              }
+              <div class="install">
+                <div class="install__targets" role="presentation">
+                  {hero.install.map((target) => <label for={`install-${target.id}`}>{target.label}</label>)}
+                </div>
+                {
+                  hero.install.map((target) => (
+                    <code class="install__cmd" data-install={target.id} id={`cmd-${target.id}`}>
+                      {target.command}
+                    </code>
+                  ))
+                }
+                <button class="copy" type="button" data-copy-install hidden>
+                  <Icon name="copy" />
+                  <span>Copy</span>
+                </button>
+              </div>
+              <div class="install__notes">
+                {
+                  hero.install.map((target) => (
+                    <p class="install__note" data-note={target.id}>
+                      <Rich text={target.note} />
+                    </p>
+                  ))
+                }
+              </div>
+            </div>
+          </div>
+          <HeroScene />
+        </div>
+      </section>
+
+      <section class="spec" aria-label="What is in the box">
+        <div class="wrap">
+          <ul>
+            {specStrip.map((item) => <li>{item}</li>)}
+          </ul>
+        </div>
+      </section>
+
+      <section class="band" id={proof.id} aria-labelledby="proof-title">
+        <div class="wrap">
+          <div class="head head--split">
+            <p class="counter">{proof.counter} / Proof</p>
+            <h2 class="h2" id="proof-title">
+              <span class="soft">{proof.heading.soft}</span>
+              <span class="strong">{proof.heading.strong}</span>
+            </h2>
+            <p class="lede">{proof.lede}</p>
+          </div>
+          <div class="proof-grid">
+            <figure class="code">
+              <figcaption class="code__bar">
+                <span class="grow">{proof.constraintCaption}</span>
+                <a class="copy" href={DDL_URL}>Source</a>
+              </figcaption>
+              <pre><code><span class="k">CREATE TABLE</span> slotlock.reservations (
+  …
+{facts.excludeConstraint.replace(/^/gm, '  ')}
+);
+
+<span class="c">-- two writers, same van, same instant</span>
+{proof.race.map((line) => (
+<>{line.who}  {line.what}  <span class={line.tone}>{line.result}</span>{'\n'}</>
+))}<span class="c">-- {proof.raceNote}</span></code></pre>
+            </figure>
+            <div class="result-card">
+              <h3>{proof.resultCaption}</h3>
+              <div class="result">
+                <span class="eyebrow">{proof.storeLabel}</span>
+                <div class="code"><pre><code class="r">{proof.storeResult}</code></pre></div>
+              </div>
+              <div class="result">
+                <span class="eyebrow">{proof.mcpLabel}</span>
+                <div class="code"><pre><code class="r">{proof.mcpResult}</code></pre></div>
+              </div>
+              <a class="arrow-link" href={RACE_TEST_URL}>{proof.testLink} <Icon name="arrow" /></a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band band--tint" id={steps.id} aria-labelledby="how-title">
+        <div class="wrap">
+          <div class="head">
+            <p class="counter">{steps.counter} / How it works</p>
+            <h2 class="h2" id="how-title">
+              <span class="soft">{steps.heading.soft}</span>
+              <span class="strong">{steps.heading.strong}</span>
+            </h2>
+          </div>
+          <ol class="steps">
+            <li class="step">
+              <div
+                class="step__scene"
+                role="img"
+                aria-label="A resource card: Van AB12 CDE, time zone Europe/London, bookable Monday to Friday from 08:00 for nine hours."
+              >
+                <div class="mini-card" aria-hidden="true">
+                  <dl>
+                    <dt>Resource</dt><dd>vehicle-42 · Van AB12 CDE</dd>
+                    <dt>Zone</dt><dd>Europe/London</dd>
+                    <dt>Rule</dt><dd>FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR</dd>
+                    <dt>Hours</dt><dd>startMinutes 480 · durationMinutes 540</dd>
+                  </dl>
+                </div>
+              </div>
+              <div class="step__body">
+                <span class="step__n">{steps.items[0]!.n}</span>
+                <h3>{steps.items[0]!.title}</h3>
+                <p><Rich text={steps.items[0]!.body} /></p>
+                <a class="arrow-link" href={steps.items[0]!.link.href}>{steps.items[0]!.link.label} <Icon name="arrow" /></a>
+              </div>
+            </li>
+            <li class="step">
+              <div
+                class="step__scene"
+                role="img"
+                aria-label="A two-hour hold from 10:00 to 12:00 drawn as a dashed amber bar, after the slot search answered 10:00 to 12:00, certain."
+              >
+                <div class="mini-line" aria-hidden="true">
+                  <span>calendar_find_next_available</span><span class="ok">10:00–12:00 · certain</span>
+                </div>
+                <div class="mini-track" aria-hidden="true">
+                  <span class="block block--hold s-10 e-12"><span class="block__label">hold · to 09:51</span></span>
+                </div>
+                <div class="mini-line" aria-hidden="true">
+                  <span>acquireHold · ttl 10 min</span><span class="hold">held</span>
+                </div>
+              </div>
+              <div class="step__body">
+                <span class="step__n">{steps.items[1]!.n}</span>
+                <h3>{steps.items[1]!.title}</h3>
+                <p><Rich text={steps.items[1]!.body} /></p>
+                <a class="arrow-link" href={steps.items[1]!.link.href}>{steps.items[1]!.link.label} <Icon name="arrow" /></a>
+              </div>
+            </li>
+            <li class="step">
+              <div
+                class="step__scene"
+                role="img"
+                aria-label="Two outcomes. Confirmed: the hold becomes a solid green booking. Not confirmed: the hold expires at 09:51 and the next writer that wants the time clears it."
+              >
+                <div class="mini-track" aria-hidden="true">
+                  <span class="block block--confirmed s-10 e-12"><span class="block__label">booked</span></span>
+                </div>
+                <div class="mini-line" aria-hidden="true">
+                  <span>confirmHold</span><span class="ok">ok: confirmed</span>
+                </div>
+                <div class="mini-line" aria-hidden="true">
+                  <span>no confirm by 09:51</span><span class="muted">freed for the next writer</span>
+                </div>
+              </div>
+              <div class="step__body">
+                <span class="step__n">{steps.items[2]!.n}</span>
+                <h3>{steps.items[2]!.title}</h3>
+                <p><Rich text={steps.items[2]!.body} /></p>
+                <a class="arrow-link" href={steps.items[2]!.link.href}>{steps.items[2]!.link.label} <Icon name="arrow" /></a>
+              </div>
+            </li>
+          </ol>
+          <div class="arch" role="img" aria-label={steps.diagram.aria}>
+            <div class="arch__group" aria-hidden="true">
+              {steps.diagram.inputs.map((input) => <span class="arch__node">{input}</span>)}
+            </div>
+            <span class="arch__arrow" aria-hidden="true"><Icon name="arrow" /></span>
+            <div class="arch__core" aria-hidden="true">
+              {steps.diagram.core}
+              <small>{steps.diagram.store}</small>
+            </div>
+            <span class="arch__arrow" aria-hidden="true"><Icon name="arrow" /></span>
+            <div class="arch__group" aria-hidden="true">
+              {steps.diagram.outputs.map((output) => <span class="arch__node">{output}</span>)}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band" id={model.id} aria-labelledby="model-title">
+        <div class="wrap">
+          <div class="head head--split">
+            <p class="counter">{model.counter} / Resources</p>
+            <h2 class="h2" id="model-title">
+              <span class="soft">{model.heading.soft}</span>
+              <span class="strong">{model.heading.strong}</span>
+            </h2>
+            <p class="lede">{model.lede}</p>
+          </div>
+          <div class="model-grid" role="img" aria-label={modelAria()}>
+            <div class="panel week-panel" aria-hidden="true">
+              <figure class="code week-code">
+                <figcaption class="code__bar">{model.ruleCaption}</figcaption>
+                <pre><code>{ruleCode()}</code></pre>
+              </figure>
+              <div class="week">
+                <div class="week__axis">
+                  <span></span>
+                  <div class="week__ticks">
+                    <span class="wt-0">00</span><span class="wt-6">06</span><span class="wt-12">12</span><span class="wt-18">18</span><span class="wt-24">24</span>
+                  </div>
+                </div>
+                {
+                  week.map((day) => (
+                    <div class="week__row">
+                      <span class="week__day">{day.short}</span>
+                      <div class="week__track">
+                        {day.open ? (
+                          <span class={`block block--open ${pos('s', day.start)} ${pos('e', day.end)}`}>
+                            <span class="block__label">{day.label}</span>
+                          </span>
+                        ) : (
+                          <span class="block block--closed s-0 e-24">
+                            <span class="block__label">closed by rule</span>
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                }
+              </div>
+            </div>
+            <div class="model-side" aria-hidden="true">
+              <div class="panel">
+                <div class="panel__head">Legend · the calendar at the top</div>
+                <ul class="legend">
+                  {
+                    legend.map((item) => (
+                      <li>
+                        <span class={`block block--${item.kind}`} />
+                        <span>{item.label}</span>
+                        <span class="legend__count">{counts[item.kind]}</span>
+                      </li>
+                    ))
+                  }
+                </ul>
+              </div>
+              <div class="panel clocks">
+                <div class="clock">
+                  <span class="clock__label">{model.resourceTime.label}</span>
+                  <span class="clock__value">{model.resourceTime.value}</span>
+                  <span class="clock__zone">{model.resourceTime.zone}</span>
+                </div>
+                <div class="clock">
+                  <span class="clock__label">{model.yourTime.label}</span>
+                  <span class="clock__value">{model.yourTime.value}</span>
+                  <span class="clock__zone">{model.yourTime.zone}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band band--tint" id={developers.id} aria-labelledby="dev-title">
+        <div class="wrap">
+          <div class="head head--split">
+            <p class="counter">{developers.counter} / Developers</p>
+            <h2 class="h2" id="dev-title">
+              <span class="soft">{developers.heading.soft}</span>
+              <span class="strong">{developers.heading.strong}</span>
+            </h2>
+            <p class="lede">{developers.lede}</p>
+          </div>
+          <div class="dev-grid">
+            <div class="code tabs">
+              <input type="radio" name="dev" id="dev-mcp" checked />
+              <input type="radio" name="dev" id="dev-a2a" />
+              <input type="radio" name="dev" id="dev-ts" />
+              <div class="code__bar">
+                <label for="dev-mcp">MCP</label>
+                <label for="dev-a2a">A2A</label>
+                <label for="dev-ts">TypeScript</label>
+                <span class="grow"></span>
+                <button class="copy" type="button" data-copy-tab hidden>
+                  <Icon name="copy" /><span>Copy</span>
+                </button>
+              </div>
+              <pre data-panel="mcp"><code><span class="c"># Claude Code, against your own server</span>
+{facts.claudeMcpAdd}
+
+<span class="c"># tools/list: {facts.toolCount} tools</span>
+{facts.tools.map((tool) => (
+<>{tool.name.padEnd(toolPad)}<span class={tool.readOnly ? 'g' : 'a'}>{tool.readOnly ? 'read' : tool.destructive ? 'write, destructive' : 'write'}</span>{'\n'}</>
+))}</code></pre>
+              <pre data-panel="a2a"><code><span class="c">POST {facts.composeUp ? 'http://localhost:8080/a2a' : 'https://calendar.example.com/slotlock/a2a'}</span>
+<span class="c">A2A-Version: {facts.a2a}</span>
+<span class="c">Authorization: Bearer {facts.composeUp ? '$SLOTLOCK_AUTH_TOKEN' : '$SLOTLOCK_TOKEN'}</span>
+
+{a2aBody}</code></pre>
+              <pre data-panel="ts"><code><span class="c">// No database needed for the availability maths.</span>
+{facts.readmeQuickStart}</code></pre>
+            </div>
+            <ul class="chevrons">
+              {
+                developers.links.map((link) => (
+                  <li>
+                    <a href={link.href}>
+                      {link.label}
+                      <Icon name="chevron" />
+                    </a>
+                  </li>
+                ))
+              }
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="band" id={security.id} aria-labelledby="security-title">
+        <div class="wrap">
+          <div class="head">
+            <p class="counter">{security.counter} / Security</p>
+            <h2 class="h2" id="security-title">
+              <span class="soft">{security.heading.soft}</span>
+              <span class="strong">{security.heading.strong}</span>
+            </h2>
+          </div>
+          <div class="security-grid">
+            <div class="approval" role="img" aria-label={security.aria}>
+              <div class="approval__card" aria-hidden="true">
+                <p class="eyebrow eyebrow--plain">{security.approval.eyebrow}</p>
+                <p class="approval__msg">{security.approval.message}</p>
+                <div class="approval__check">
+                  <span class="approval__box"><Icon name="check" /></span>
+                  <span>
+                    {security.approval.checkbox}
+                    <span class="approval__help">{security.approval.help}</span>
+                  </span>
+                </div>
+                <div class="approval__actions">
+                  <span>{security.approval.decline}</span>
+                  <span class="accept">{security.approval.accept}</span>
+                </div>
+                <p class="approval__seal">{security.approval.seal}</p>
+              </div>
+              <div class="receipt" aria-hidden="true">
+                <Icon name="check" />
+                <strong>{security.receipt.label}</strong>
+                <span class="mono">{security.receipt.detail}</span>
+              </div>
+            </div>
+            <ul class="statements">
+              {security.statements.map((statement) => <li><Rich text={statement} /></li>)}
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="band band--tint" id={compare.id} aria-labelledby="compare-title">
+        <div class="wrap">
+          <div class="head">
+            <p class="counter">{compare.counter} / Compare</p>
+            <h2 class="h2" id="compare-title">
+              <span class="soft">{compare.heading.soft}</span>
+              <span class="strong">{compare.heading.strong}</span>
+            </h2>
+          </div>
+          <div class="table-wrap">
+            <table class="compare">
+              <caption class="sr-only">Slotlock compared with a bookings table and a cron job</caption>
+              <thead>
+                <tr>
+                  <th scope="col"><span class="sr-only">Situation</span></th>
+                  <th scope="col">{compare.columns[1]}</th>
+                  <th scope="col" class="ours">{compare.columns[2]}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {
+                  compare.rows.map(([situation, theirs, ours]) => (
+                    <tr>
+                      <th scope="row">{situation}</th>
+                      <td data-label={compare.columns[1]}><Rich text={theirs ?? ""} /></td>
+                      <td data-label={compare.columns[2]} class="ours">
+                        <Rich text={ours ?? ""} />
+                      </td>
+                    </tr>
+                  ))
+                }
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="band" id={openSource.id} aria-labelledby="oss-title">
+        <div class="wrap">
+          <div class="head">
+            <p class="counter">{openSource.counter} / Open source</p>
+            <h2 class="h2" id="oss-title">
+              <span class="soft">{openSource.heading.soft}</span>
+              <span class="strong">{openSource.heading.strong}</span>
+            </h2>
+          </div>
+          <div class="security-grid">
+            <div class="repo">
+              <div class="repo__top">
+                <div>
+                  <p class="repo__name">{openSource.repo.name}</p>
+                  <p class="repo__caption">{openSource.repo.caption}</p>
+                </div>
+                <span class="badge">{facts.license}</span>
+              </div>
+              <dl>
+                <dt>Includes</dt>
+                <dd>{openSource.repo.includes.map((item) => <span class="tag">{item}</span>)}</dd>
+                <dt>Run it</dt>
+                <dd><code>{openSource.repo.run}</code></dd>
+              </dl>
+              <a class="btn btn--ghost" href={REPO_URL}>
+                <Icon name="repo" />
+                {openSource.repo.cta}
+              </a>
+            </div>
+            <ul class="statements">
+              {openSource.statements.map((statement) => <li><Rich text={statement} /></li>)}
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="band band--tint" id={faq.id} aria-labelledby="faq-title">
+        <div class="wrap">
+          <div class="head">
+            <h2 class="h2" id="faq-title">
+              <span class="soft">{faq.heading.soft}</span>
+              <span class="strong">{faq.heading.strong}</span>
+            </h2>
+          </div>
+          <dl class="faq">
+            {
+              faq.items.map((item) => (
+                <div>
+                  <dt>{item.q}</dt>
+                  <dd><Rich text={item.a} /></dd>
+                </div>
+              ))
+            }
+          </dl>
+        </div>
+      </section>
+
+      <section class="band closing" aria-labelledby="closing-title">
+        <div class="wrap">
+          <h2 class="h2" id="closing-title">
+            <span class="soft">{closing.heading.soft}</span>
+            <span class="strong">{closing.heading.strong}</span>
+          </h2>
+          <div class="hero__actions">
+            <a class="btn btn--primary" href="/docs/quickstart/">Get started</a>
+            <a class="btn btn--ghost" href="/docs/specification/">Read the specification</a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap">
+        <div class="footer-grid">
+          <div>
+            <a class="brand" href="/">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <rect x="2.65" y="4.65" width="18.7" height="14.7" rx="3.2" stroke="currentColor" stroke-width="1.3"></rect>
+                <path d="M2.65 9.35h18.7" stroke="currentColor" stroke-width="1.3"></path>
+                <rect class="brand__slot" x="8.5" y="11.9" width="7" height="4.6" rx="1.2"></rect>
+              </svg>
+              Slotlock
+            </a>
+            <p>{footer.tagline}</p>
+          </div>
+          {
+            footer.columns.map((column) => (
+              <div class="footer-col">
+                <h2>{column.title}</h2>
+                <ul>
+                  {column.links.map((link) => (
+                    <li>
+                      <a href={link.href}>{link.label}</a>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))
+          }
+        </div>
+        <div class="footer-base">
+          <span class="agents-links">
+            Markdown for agents:
+            <a href="/index.md">index.md</a>
+            <a href="/llms.txt">llms.txt</a>
+            <a href="/llms-full.txt">llms-full.txt</a>
+          </span>
+          <button class="theme-toggle" type="button" data-theme-toggle hidden>
+            <Icon name="contrast" />
+            <span data-theme-label>Theme: system</span>
+          </button>
+          <span class="legal">{footer.legal}</span>
+        </div>
+      </div>
+    </footer>
+
+    <script>
+      import '../scripts/landing';
+    </script>
+  </body>
+</html>

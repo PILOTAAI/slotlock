@@ -1,0 +1,21 @@
+Slotlock
+Copyright 2026 TREFT LTD
+
+This product includes software developed by TREFT LTD and the Slotlock contributors, distributed
+under the Apache License 2.0.
+
+Runtime dependencies are not bundled into the Slotlock artifact; npm installs them alongside it and
+each retains its own license:
+
+- ical.js 2.2.1, Mozilla Public License 2.0, https://github.com/kewisch/ical.js
+- rrule 2.8.1, BSD 3-Clause License, https://github.com/jakubroztocil/rrule
+  - tslib (via rrule), BSD Zero Clause License (0BSD), https://github.com/microsoft/tslib
+- zod 3.25.76, MIT License, https://github.com/colinhacks/zod
+- zod-to-json-schema 3.25.2, ISC License, https://github.com/StefanTerdell/zod-to-json-schema
+
+Peer dependency, installed and versioned by the application that embeds Slotlock:
+
+- Postgres.js (postgres) ^3.4.5, The Unlicense, https://github.com/porsager/postgres
+
+If Slotlock distributes a modified MPL-covered ical.js file in the future, that file and its source
+must remain available under MPL-2.0. Slotlock currently imports the unmodified external dependency.

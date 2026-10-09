@@ -1,0 +1,88 @@
+# Image: on a v* tag, build the server image for linux/amd64 and linux/arm64, push it to
+# ghcr.io/pilotaai/slotlock, and attest its build provenance (verify with
+# `gh attestation verify oci://ghcr.io/pilotaai/slotlock:<version> --repo PILOTAAI/slotlock`).
+# Its second job runs mcp-registry.yml, which publishes server.json, once the image is pushed.
+#
+# One-time setup by the repository owner: after the first push, make the ghcr.io/pilotaai/slotlock
+# package public (Package settings > Change visibility). New GHCR packages start private, and the
+# MCP Registry only accepts images it can pull anonymously.
+name: Image
+
+on:
+  push:
+    tags: ['v*']
+
+permissions: {}
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  image:
+    name: Build, push and attest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      # Push to ghcr.io/pilotaai/slotlock.
+      packages: write
+      # actions/attest: sign with an OIDC-issued certificate, store the attestation, and record
+      # where the image is stored (push-to-registry).
+      attestations: write
+      id-token: write
+      artifact-metadata: write
+    env:
+      IMAGE: ghcr.io/pilotaai/slotlock
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check the tag against main, package.json, CHANGELOG.md and server.json
+        run: scripts/check-release-tag.sh "$GITHUB_REF_NAME"
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          # The Dockerfile sets the descriptive labels, including io.modelcontextprotocol.server.name.
+          labels: |
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  registry:
+    name: MCP Registry
+    needs: image
+    permissions:
+      contents: read
+      # mcp-publisher login github-oidc.
+      id-token: write
+    uses: ./.github/workflows/mcp-registry.yml

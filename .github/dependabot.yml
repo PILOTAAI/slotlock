@@ -1,0 +1,52 @@
+# Weekly version updates for npm packages (the library and the site), GitHub Actions (pinned by
+# commit SHA), the Dockerfile's base images and the Compose file's postgres image (pinned by
+# digest). A cooldown keeps a release out until it has been public for a week; security updates
+# are not delayed by it.
+# Dependabot's commits carry no Signed-off-by line; scripts/check-dco.sh exempts GitHub bot authors.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      development:
+        dependency-type: development
+        update-types: [minor, patch]
+
+  # The site has its own lockfile (Astro, Starlight, Wrangler).
+  - package-ecosystem: npm
+    directory: /site
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      site:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ['*']
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7

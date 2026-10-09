@@ -1,0 +1,21 @@
+---
+// The not-found page, in Starlight's layout so it carries the docs navigation. Cloudflare serves it
+// with a 404 status for any unknown path (wrangler.jsonc: not_found_handling = "404-page").
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+---
+
+<StarlightPage
+  frontmatter={{
+    title: 'Page not found',
+    description: 'There is no page at this address.',
+    template: 'splash',
+    hero: {
+      title: 'Page not found',
+      tagline: 'There is no page at this address. It may have moved when the docs were reorganised.',
+      actions: [
+        { text: 'Go to the docs', link: '/docs/', variant: 'primary' },
+        { text: 'Back to slotlock.pylota.io', link: '/', variant: 'secondary' },
+      ],
+    },
+  }}
+/>

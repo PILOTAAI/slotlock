@@ -1,0 +1,133 @@
+---
+// The hero window: four resource calendars on an 08:00-18:00 axis, the race between two agents
+// for the van, and the calls in the order they ran. Drawn in HTML and CSS, final state by default;
+// the CSS plays it once on load when html.motion is set (see public/js/head.js).
+import { type Block, heroAria, heroLog, heroRefusal, heroRows } from '../../data/landing';
+
+const pos = (prefix: 's' | 'e', hour: number) => `${prefix}-${String(hour).replace('.', '-')}`;
+
+/** Which animation step each element joins; elements without one are there from the start. */
+const stepAt: Record<NonNullable<Block['step']>, string> = {
+  'a-hold': '2',
+  'b-refused': '3',
+  'b-hold': '5',
+  'a-confirm': '6',
+};
+
+const hours = Array.from({ length: 11 }, (_, i) => 8 + i);
+const tickClass = (hour: number) => `tick-${hour}`;
+---
+
+<figure class="window hero-window" role="img" aria-label={heroAria}>
+  <div class="window__bar" aria-hidden="true">
+    <span class="window__dots"><i></i><i></i><i></i></span>
+    <span class="window__title">Today · each resource in its own time zone</span>
+    <span class="mono">now 09:41</span>
+  </div>
+  <div class="scene-grid" aria-hidden="true">
+    <div class="timeline">
+      <div class="axis">
+        <span></span>
+        <div class="axis__ticks">
+          {hours.map((hour) => <span class={tickClass(hour)}>{String(hour).padStart(2, '0')}</span>)}
+        </div>
+      </div>
+      {
+        heroRows.map((row) => {
+          const bars = row.blocks.filter((block) => block.kind !== 'refused');
+          const requests = row.blocks.filter((block) => block.kind === 'refused');
+          return (
+            <div class={row.requestLane ? "row row--request" : "row"}>
+              <div class="row__label">
+                <span class="row__name">{row.name}</span>
+                <span class="row__zone">{row.zone}</span>
+              </div>
+              <div class="lanes">
+                {row.requestLane && (
+                  <div class="track track--request">
+                    {requests.map((block) => (
+                      <span
+                        class={`block block--refused ${pos('s', block.start)} ${pos('e', block.end)}`}
+                        data-at={block.step ? stepAt[block.step] : undefined}
+                      >
+                        <svg class="icon block__tick" viewBox="0 0 16 16">
+                          <path d="M4 4l8 8M12 4l-8 8" />
+                        </svg>
+                        <span class="block__label block__label--long">{block.label}</span>
+                        <span class="block__label block__label--short">B</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <div class="track">
+                  {bars.map((block) => (
+                    <span
+                      class={`block block--${block.kind} ${pos("s", block.start)} ${pos("e", block.end)}${block.step === "b-hold" ? " block--stack" : ""}`}
+                      data-at={block.step ? stepAt[block.step] : undefined}
+                    >
+                      {block.kind === 'confirmed' && block.step === 'a-confirm' && (
+                        <svg class="icon block__tick" viewBox="0 0 16 16">
+                          <path d="M3.5 8.5l3 3 6-7" />
+                        </svg>
+                      )}
+                      {block.label && (
+                        <span class="block__label block__label--long">{block.label}</span>
+                      )}
+                      {block.short && (
+                        <span class="block__label block__label--short">{block.short}</span>
+                      )}
+                      {block.step === 'b-hold' && <span class="block__left">9:25 left</span>}
+                    </span>
+                  ))}
+                  <span class={row.zone === 'Europe/Berlin' ? 'now now--berlin' : 'now'} />
+                </div>
+                {row.requestLane && (
+                  <div class="refusal" data-at="3b">
+                    <p class="refusal__title">
+                      <svg class="icon" viewBox="0 0 16 16">
+                        <circle cx="8" cy="8" r="6" />
+                        <path d="M5.8 5.8l4.4 4.4M10.2 5.8l-4.4 4.4" />
+                      </svg>
+                      {heroRefusal.title}
+                    </p>
+                    <p>{heroRefusal.body}</p>
+                    <code>{heroRefusal.result}</code>
+                    <div class="refusal__next" data-at="4">
+                      <span>{heroRefusal.next}</span>
+                      <span class="chip chip--certain">{heroRefusal.chip} · certain</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })
+      }
+    </div>
+    <div class="log">
+      <p class="log__title">Calls, in order</p>
+      <ol>
+        {
+          heroLog.map((line) => (
+            <li data-at={String(line.step)}>
+              <span class={line.agent === 'A' ? 'log__agent' : 'log__agent log__agent--b'}>
+                {line.agent}
+              </span>
+              <span>
+                <span class="log__time">{line.time}</span>
+                <span class="log__surface">
+                  {line.call.startsWith('calendar_') ? 'mcp' : 'ts'}
+                </span>
+                <br />
+                <span class="log__call">{line.call}</span>{' '}
+                <span class="log__args">{line.args}</span>
+              </span>
+              <span class={`log__result log__result--${line.tone}`}>→ {line.result}</span>
+            </li>
+          ))
+        }
+      </ol>
+      <p class="log__foot">mcp: MCP tool call · ts: TypeScript store</p>
+    </div>
+  </div>
+</figure>

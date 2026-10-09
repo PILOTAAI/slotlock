@@ -1,0 +1,151 @@
+// Slotlock — resource-first, deterministic calendar and availability primitives for agents.
+// The public types use Node's globals (Request, Response, AbortSignal) and `node:` modules. The
+// directive is kept in the emitted index.d.ts so a consumer compiling with `"types": []` (the
+// TypeScript 6 default) still loads @types/node.
+/// <reference types="node" preserve="true" />
+export { findNextAvailable, mergeIntervals, subtractBusy } from './engine.js';
+export { expandRules } from './rules.js';
+export {
+  createTimeZoneConverter,
+  zonedCalendarDate,
+  zonedDateTimeToUtc,
+  zonedWallTime,
+} from './timezone.js';
+export type {
+  LocalDateTime,
+  TimeZoneConverter,
+  ZonedCalendarDate,
+  ZonedWallTime,
+} from './timezone.js';
+export {
+  createSlotlockAgentServer,
+  clientSupportsSlotlockMcpApp,
+  invokeSlotlockAgentOperation,
+  isSlotlockAgentOperation,
+  slotlockAgentTools,
+  slotlockCalendarResourceUri,
+  slotlockMcpToolResult,
+  parseSlotlockA2ATimestamp,
+  resolveSlotlockAgentOperation,
+  SLOTLOCK_A2A_PROTOCOL_VERSION,
+  SLOTLOCK_A2A_TASK_PAGE_SIZE,
+  SLOTLOCK_A2A_TASK_STATES,
+  SLOTLOCK_AGENT_OPERATION_LEGACY_NAMES,
+  SLOTLOCK_AGENT_SERVER_VERSION,
+  SLOTLOCK_MCP_LEGACY_PROTOCOL_VERSION,
+  SLOTLOCK_MCP_PROTOCOL_VERSION,
+  SLOTLOCK_MCP_RATE_LIMITED_ERROR_CODE,
+  SLOTLOCK_MCP_RESOURCE_URI_TEMPLATE,
+  SLOTLOCK_MCP_SUPPORTED_PROTOCOL_VERSIONS,
+  SLOTLOCK_MCP_APP_HTML,
+  SLOTLOCK_MCP_APP_MIME_TYPE,
+  SLOTLOCK_MCP_APP_RESOURCE,
+  SLOTLOCK_MCP_APP_RESOURCE_URI,
+  SLOTLOCK_MCP_APPS_EXTENSION,
+  SlotlockAgentOperationError,
+} from './agent-server.js';
+export type {
+  SlotlockAgentCalendarBackend,
+  SlotlockAgentConfirmationOptions,
+  SlotlockAgentInvocationContext,
+  SlotlockAgentOperation,
+  SlotlockAgentOperationDispatchOptions,
+  SlotlockAgentOperationDispatchResult,
+  SlotlockAgentPrincipal,
+  SlotlockAgentServerEvent,
+  SlotlockAgentServerOAuthOptions,
+  SlotlockAgentServerOptions,
+  SlotlockAgentSubscriptionOptions,
+  SlotlockAgentWriteOperation,
+  SlotlockMcpToolResult,
+  SlotlockTraceContext,
+} from './agent-server.js';
+export { createSlotlockNodeServer } from './node-server.js';
+export type {
+  SlotlockNodeListenOptions,
+  SlotlockNodeServer,
+  SlotlockNodeServerAddress,
+  SlotlockNodeServerCloseResult,
+  SlotlockNodeServerErrorPhase,
+  SlotlockNodeServerFetchTarget,
+  SlotlockNodeServerOptions,
+} from './node-server.js';
+export { createSlotlockStoreAgentBackend } from './agent-store-backend.js';
+export type { SlotlockStoreAgentBackendOptions } from './agent-store-backend.js';
+export {
+  CalendarContractError,
+  emitICalendar,
+  emitITipCalendar,
+  expandCalendarEventOccurrences,
+  normalizeCalendarEventContent,
+  normalizeExternalCalendarChange,
+  parseICalendarChanges,
+  parseTrustedICalendarEvents,
+} from './sync.js';
+export type {
+  ExternalCalendarChange,
+  ExternalCalendarChangeInput,
+  ExternalCalendarStatus,
+  ICalendarEvent,
+  ICalendarExpansionWindow,
+  ITipMethod,
+} from './sync.js';
+export {
+  createSlotlockApplicationRoleGrantsDdl,
+  createSlotlockTenantRlsDdl,
+  SLOTLOCK_CORE_DDL,
+  SLOTLOCK_TENANT_CONTEXT_SETTING,
+  SLOTLOCK_TENANT_RLS_DDL,
+  SLOTLOCK_TENANT_TABLES,
+} from './ddl.js';
+export {
+  calendarEventRollingHorizon,
+  createSlotlockStore,
+  SLOTLOCK_AGENT_OWNER_COMMAND_QUOTA,
+  SLOTLOCK_AGENT_OWNER_EVENT_QUOTA,
+  SLOTLOCK_CALENDAR_HORIZON_DAYS,
+  SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS,
+  SLOTLOCK_INTERNAL_EVENT_OWNER_REF,
+  SLOTLOCK_LOCAL_RECURRENCE_COVERAGE_SOURCE,
+  SLOTLOCK_MAX_EVENT_DURATION_DAYS,
+  type SlotlockSql,
+  type SlotlockStore,
+  type SlotlockStoreOptions,
+  type SlotlockTenantStore,
+} from './store.js';
+export type {
+  AcquireHoldResult,
+  CalendarAttendee,
+  CalendarAttendeeRole,
+  CalendarCoverageAssessment,
+  CalendarCoverageCommand,
+  CalendarCoverageResult,
+  CalendarEventContent,
+  CalendarEventOccurrence,
+  CalendarEventRetentionResult,
+  CalendarEventStatus,
+  CalendarFreeBusy,
+  CalendarHorizonRollResult,
+  CalendarOrganizer,
+  CalendarParticipationStatus,
+  CalendarRecurrence,
+  CalendarRecurrenceException,
+  CalendarReminder,
+  CalendarTransparency,
+  ConfirmHoldResult,
+  CancelCalendarEventResult,
+  CancelExternalReservationResult,
+  CreateReservationResult,
+  ExternalReservationCommand,
+  ExternalReservationResult,
+  Interval,
+  SlotlockHold,
+  SlotlockCalendarEvent,
+  SlotlockReservation,
+  SlotlockResource,
+  PutCalendarEventCommand,
+  PutCalendarEventResult,
+  ReleaseHoldResult,
+  TrustedICalendarEvent,
+  WeeklyAvailabilityRule,
+} from './types.js';

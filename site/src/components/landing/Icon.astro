@@ -1,0 +1,37 @@
+---
+// 1.3px-stroke outline icons, 16px grid. Decorative: always aria-hidden.
+interface Props {
+  name: 'arrow' | 'chevron' | 'copy' | 'check' | 'repo' | 'contrast';
+}
+const { name } = Astro.props;
+---
+
+<svg class="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+  {name === 'arrow' && <path d="M3 8h10M9 4l4 4-4 4" />}
+  {name === 'chevron' && <path d="M6 3.5L10.5 8 6 12.5" />}
+  {
+    name === 'copy' && (
+      <>
+        <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" />
+        <path d="M10.5 5.5V3.75A1.25 1.25 0 0 0 9.25 2.5h-5.5A1.25 1.25 0 0 0 2.5 3.75v5.5a1.25 1.25 0 0 0 1.25 1.25H5.5" />
+      </>
+    )
+  }
+  {name === 'check' && <path d="M3.5 8.5l3 3 6-7" />}
+  {
+    name === 'repo' && (
+      <>
+        <path d="M3.5 12.5V3.25A1.25 1.25 0 0 1 4.75 2h7.75v9.5H4.75a1.25 1.25 0 0 0-1.25 1.25v0A1.25 1.25 0 0 0 4.75 14H12.5" />
+        <path d="M6 5h4" />
+      </>
+    )
+  }
+  {
+    name === 'contrast' && (
+      <>
+        <circle cx="8" cy="8" r="5.5" />
+        <path d="M8 2.5v11" />
+      </>
+    )
+  }
+</svg>

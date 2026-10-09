@@ -1,0 +1,112 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.PILOTAAI/slotlock",
+  "title": "Slotlock",
+  "description": "Calendars for AI agents: free/busy, next free slot, and bookings PostgreSQL never double-books.",
+  "version": "0.1.0",
+  "websiteUrl": "https://slotlock.pylota.io",
+  "repository": {
+    "url": "https://github.com/PILOTAAI/slotlock",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/pilotaai/slotlock:0.1.0",
+      "runtimeHint": "docker",
+      "transport": {
+        "type": "streamable-http",
+        "url": "http://localhost:{PORT}/mcp",
+        "headers": [
+          {
+            "name": "Authorization",
+            "description": "The bearer token the server was started with (SLOTLOCK_AUTH_TOKEN).",
+            "value": "Bearer {SLOTLOCK_AUTH_TOKEN}",
+            "isRequired": true,
+            "isSecret": true,
+            "variables": {
+              "SLOTLOCK_AUTH_TOKEN": {
+                "description": "The same value as the SLOTLOCK_AUTH_TOKEN environment variable.",
+                "isRequired": true,
+                "isSecret": true
+              }
+            }
+          }
+        ]
+      },
+      "runtimeArguments": [
+        {
+          "type": "named",
+          "name": "-p",
+          "value": "127.0.0.1:{PORT}:{PORT}",
+          "description": "Publish the server on this machine's loopback interface only.",
+          "variables": {
+            "PORT": {
+              "description": "The same value as the PORT environment variable.",
+              "format": "number",
+              "default": "8080",
+              "isRequired": true
+            }
+          }
+        }
+      ],
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "serve",
+          "description": "Serve MCP and A2A over HTTP."
+        },
+        {
+          "type": "positional",
+          "value": "--migrate",
+          "description": "Apply the schema first (idempotent)."
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "DATABASE_URL",
+          "description": "postgres:// URL of a PostgreSQL 16 database the container can reach. Without SLOTLOCK_MIGRATE_DATABASE_URL this role also applies the schema, so it must be able to create it.",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "SLOTLOCK_AUTH_TOKEN",
+          "description": "Bearer token MCP and A2A clients must send: at least 32 random characters (openssl rand -hex 32).",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "SLOTLOCK_CONFIRMATION_SECRET",
+          "description": "Signs pending write confirmations: at least 32 random characters, different from the token. Not needed when SLOTLOCK_CONFIRM_WRITES is none.",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "PORT",
+          "description": "Port the server listens on inside the container.",
+          "format": "number",
+          "default": "8080"
+        },
+        {
+          "name": "SLOTLOCK_MIGRATE_DATABASE_URL",
+          "description": "postgres:// URL of the schema owner. When set, migration runs as this role and grants the DATABASE_URL role only what it needs at runtime.",
+          "isSecret": true
+        },
+        {
+          "name": "SLOTLOCK_CONFIRM_WRITES",
+          "description": "Writes that wait for a person to confirm them: all, none, or a comma-separated list of calendar_create_event, calendar_update_event, calendar_delete_event. Clients without MCP 2026-07-28 form elicitation have guarded writes refused.",
+          "default": "all"
+        },
+        {
+          "name": "SLOTLOCK_AVAILABILITY",
+          "description": "JSON array of weekly bookable-hours rules, e.g. [{\"rrule\":\"FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR\",\"startMinutes\":540,\"durationMinutes\":480}]. Without rules no slot is ever offered."
+        },
+        {
+          "name": "SLOTLOCK_TENANT",
+          "description": "The tenant every request acts in.",
+          "default": "default"
+        }
+      ]
+    }
+  ]
+}

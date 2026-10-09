@@ -1,0 +1,38 @@
+---
+// Starlight's footer plus a "Markdown for agents" line, as on the landing page.
+import Default from '@astrojs/starlight/components/Footer.astro';
+import { markdownTwinPath } from '../../lib/markdown-twin';
+
+const twin = markdownTwinPath(Astro.locals.starlightRoute.id);
+const links = [
+  ...(twin ? [{ href: twin, label: 'this page' }] : []),
+  { href: '/llms.txt', label: 'llms.txt' },
+  { href: '/llms-full.txt', label: 'llms-full.txt' },
+];
+---
+
+<Default><slot /></Default>
+<p class="agents">
+  <span>Markdown for agents:</span>
+  {links.map((link) => <a href={link.href}>{link.label}</a>)}
+</p>
+<p class="licence">Apache-2.0 · A Pylota project · © 2026 TREFT LTD</p>
+
+<style>
+  .agents {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.75rem;
+    margin-top: 1.5rem;
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+  }
+  .licence {
+    margin-top: 0.5rem;
+    font-family: var(--sl-font-mono);
+    font-size: var(--sl-text-xs);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--sl-color-gray-3);
+  }
+</style>

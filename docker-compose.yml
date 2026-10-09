@@ -1,0 +1,89 @@
+# Slotlock quickstart: PostgreSQL 16 and the Slotlock MCP/A2A server, reachable only from this
+# machine.
+#   cp .env.example .env     then fill in every empty value (openssl rand -hex 32)
+#   docker compose up --build
+# MCP: http://localhost:8080/mcp   A2A: http://localhost:8080/a2a   health: /healthz
+#
+# Two database roles, as the README recommends. `db-roles` creates slotlock_app, a role that owns
+# nothing and cannot bypass row-level security; `migrate` applies the schema as the database owner
+# and grants slotlock_app what it needs; the long-running server connects only as slotlock_app and
+# never sees the owner's password. Both one-off services are idempotent and rerun on every `up`.
+name: slotlock
+
+x-slotlock: &slotlock
+  build: .
+  image: slotlock:local
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  postgres:
+    image: postgres:16.15@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+    environment:
+      POSTGRES_DB: slotlock
+      POSTGRES_USER: slotlock_owner
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready --username=slotlock_owner --dbname=slotlock"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  db-roles:
+    image: postgres:16.15@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+    environment:
+      PGHOST: postgres
+      PGDATABASE: slotlock
+      PGUSER: slotlock_owner
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      APP_PASSWORD: ${SLOTLOCK_APP_DB_PASSWORD:?set SLOTLOCK_APP_DB_PASSWORD in .env}
+    # The password reaches SQL as a psql variable that psql quotes, never spliced into a statement.
+    # `$$` keeps Compose from interpolating; the shell inside the container expands it.
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        psql --no-psqlrc -v ON_ERROR_STOP=1 -v app_password="$$APP_PASSWORD" <<'SQL'
+        SELECT 'CREATE ROLE slotlock_app LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION'
+         WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'slotlock_app') \gexec
+        ALTER ROLE slotlock_app PASSWORD :'app_password';
+        SQL
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  migrate:
+    <<: *slotlock
+    command: ["migrate"]
+    environment:
+      DATABASE_URL: postgresql://slotlock_app:${SLOTLOCK_APP_DB_PASSWORD}@postgres:5432/slotlock
+      SLOTLOCK_MIGRATE_DATABASE_URL: postgresql://slotlock_owner:${POSTGRES_PASSWORD}@postgres:5432/slotlock
+    depends_on:
+      db-roles:
+        condition: service_completed_successfully
+    restart: "no"
+
+  slotlock:
+    <<: *slotlock
+    command: ["serve"]
+    environment:
+      DATABASE_URL: postgresql://slotlock_app:${SLOTLOCK_APP_DB_PASSWORD}@postgres:5432/slotlock
+      SLOTLOCK_AUTH_TOKEN: ${SLOTLOCK_AUTH_TOKEN:?set SLOTLOCK_AUTH_TOKEN in .env}
+      SLOTLOCK_CONFIRMATION_SECRET: ${SLOTLOCK_CONFIRMATION_SECRET:-}
+      SLOTLOCK_CONFIRM_WRITES: ${SLOTLOCK_CONFIRM_WRITES:-all}
+      SLOTLOCK_PUBLIC_URL: ${SLOTLOCK_PUBLIC_URL:-http://localhost:${SLOTLOCK_PORT:-8080}}
+      SLOTLOCK_TENANT: ${SLOTLOCK_TENANT:-default}
+      SLOTLOCK_AVAILABILITY: ${SLOTLOCK_AVAILABILITY:-}
+    ports:
+      - "127.0.0.1:${SLOTLOCK_PORT:-8080}:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  postgres-data:

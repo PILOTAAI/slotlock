@@ -1,0 +1,72 @@
+/* Starlight in Pylota's tokens. The token values come from src/generated/tokens.css, imported
+   first, which switches them with Starlight's own data-theme attribute. */
+@import '../generated/tokens.css';
+
+/* Without JavaScript Starlight cannot set data-theme; follow the system preference instead of
+   defaulting to dark. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    color-scheme: light;
+  }
+}
+
+:root,
+:root[data-theme='light'] {
+  --sl-font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --sl-font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  --sl-color-white: var(--ink);
+  --sl-color-gray-1: var(--ink);
+  --sl-color-gray-2: var(--ink-2);
+  --sl-color-gray-3: var(--ink-2);
+  --sl-color-gray-4: var(--ink-3);
+  --sl-color-gray-5: var(--ink-4);
+  --sl-color-gray-6: var(--canvas-3);
+  --sl-color-gray-7: var(--canvas-2);
+  --sl-color-black: var(--canvas);
+
+  --sl-color-accent-low: var(--accent-soft);
+  --sl-color-accent: var(--accent);
+  --sl-color-accent-high: var(--accent-ink);
+  --sl-color-text-accent: var(--accent);
+  --sl-color-text-invert: var(--on-accent);
+
+  --sl-color-bg: var(--canvas);
+  --sl-color-bg-nav: var(--canvas);
+  --sl-color-bg-sidebar: var(--canvas);
+  --sl-color-bg-inline-code: var(--canvas-2);
+  --sl-color-hairline: var(--line);
+  --sl-color-hairline-light: var(--line-2);
+  --sl-color-hairline-shade: var(--line);
+}
+
+body {
+  font-feature-settings: 'cv11', 'ss01';
+}
+
+.sl-markdown-content h1,
+.sl-markdown-content h2,
+h1#_top {
+  font-family: 'Inter Tight', 'Inter', system-ui, sans-serif;
+  font-weight: 400;
+  letter-spacing: -0.02em;
+}
+
+.sl-markdown-content h3 {
+  letter-spacing: -0.01em;
+}
+
+.sl-markdown-content table {
+  font-size: var(--sl-text-sm);
+}
+
+.sl-markdown-content code:not(pre code) {
+  border-radius: 4px;
+  padding: 0.1em 0.3em;
+}
+
+.site-title {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
