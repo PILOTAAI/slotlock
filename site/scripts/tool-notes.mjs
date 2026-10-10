@@ -57,7 +57,7 @@ export const INPUT_NOTES = {
   title: 'What people see. Without one the event is titled Busy.',
   transparency: '`opaque` occupies the time; `transparent` blocks nothing.',
   recurrence_rule:
-    'An RFC 5545 RRULE, for example `FREQ=WEEKLY;COUNT=8`: its own parts only, each once (no `X-` parts).',
+    'An RFC 5545 RRULE, for example `FREQ=WEEKLY;COUNT=8`: its own parts only, each once (no `X-` parts), repeating daily or less often.',
   recurrence_exceptions: 'Moved or cancelled occurrences of a recurring event.',
   idempotency_key:
     'Your key for this write. Retry with the same key and arguments; the same key with other arguments returns `idempotency_conflict`.',

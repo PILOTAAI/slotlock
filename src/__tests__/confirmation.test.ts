@@ -10,7 +10,7 @@ import {
   type SlotlockAgentServerEvent,
   createSlotlockAgentServer,
 } from '../agent-server.js';
-import { canonicalRecurrenceRule } from '../sync.js';
+import { canonicalRecurrenceRule, isBookableRecurrenceRule } from '../sync.js';
 
 const createEvent = vi.fn();
 const updateEvent = vi.fn();
@@ -205,7 +205,7 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
     expect(request?.method).toBe('elicitation/create');
     expect(request?.params.mode).toBe('form');
     expect(request?.params.message).toBe(
-      'Book resource vehicle-1 for 2027-03-02 09:00–10:00 (Europe/London, UTC+00:00): "Vehicle handover".',
+      'Book resource vehicle-1 for 2027-03-02 09:00–10:00 UTC+00:00 (Europe/London): "Vehicle handover".',
     );
     expect(request?.params.requestedSchema).toEqual({
       type: 'object',
@@ -513,7 +513,7 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
       idempotency_key: 'move-1',
     });
     expect(update.inputRequests.slotlock_confirm?.params.message).toBe(
-      `Change event ${EVENT.id}: time to 2027-03-02 10:00–11:00 (Europe/London, UTC+00:00); title to "Movedhandover".`,
+      `Change event ${EVENT.id} and every time it repeats, if it does: time to 2027-03-02 10:00–11:00 UTC+00:00 (Europe/London); title to "Movedhandover".`,
     );
     const removal = await prompt(server, 'slotlock_delete_event', {
       event_id: EVENT.id,
@@ -521,7 +521,7 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
       idempotency_key: 'delete-1',
     });
     expect(removal.inputRequests.slotlock_confirm?.params.message).toBe(
-      `Delete event ${EVENT.id}.`,
+      `Delete event ${EVENT.id} and every time it repeats, if it does.`,
     );
   });
 
@@ -659,7 +659,7 @@ describe('a confirmation question a person can trust', () => {
     describeResource.mockRejectedValue(new Error('database unavailable'));
     const { inputRequests } = await prompt(describing());
     expect(inputRequests.slotlock_confirm?.params.message).toBe(
-      'Book resource vehicle-1 for 2027-03-02 09:00–10:00 (Europe/London, UTC+00:00): "Vehicle handover".',
+      'Book resource vehicle-1 for 2027-03-02 09:00–10:00 UTC+00:00 (Europe/London): "Vehicle handover".',
     );
     getEvent.mockResolvedValue({ event: { id: EVENT.id } });
     const removal = await prompt(describing(), 'slotlock_delete_event', {
@@ -668,7 +668,7 @@ describe('a confirmation question a person can trust', () => {
       idempotency_key: 'delete-1',
     });
     expect(removal.inputRequests.slotlock_confirm?.params.message).toBe(
-      `Delete event ${EVENT.id}.`,
+      `Delete event ${EVENT.id} and every time it repeats, if it does.`,
     );
   });
 
@@ -679,7 +679,7 @@ describe('a confirmation question a person can trust', () => {
     });
     const created = await prompt(writeOnly);
     expect(created.inputRequests.slotlock_confirm?.params.message).toBe(
-      'Book resource vehicle-1 for 2027-03-02 09:00–10:00 (Europe/London, UTC+00:00): "Vehicle handover".',
+      'Book resource vehicle-1 for 2027-03-02 09:00–10:00 UTC+00:00 (Europe/London): "Vehicle handover".',
     );
     const removal = await prompt(writeOnly, 'slotlock_delete_event', {
       event_id: EVENT.id,
@@ -687,7 +687,7 @@ describe('a confirmation question a person can trust', () => {
       idempotency_key: 'delete-1',
     });
     expect(removal.inputRequests.slotlock_confirm?.params.message).toBe(
-      `Delete event ${EVENT.id}.`,
+      `Delete event ${EVENT.id} and every time it repeats, if it does.`,
     );
     expect(getEvent).not.toHaveBeenCalled();
     expect(describeResource).not.toHaveBeenCalled();
@@ -701,7 +701,7 @@ describe('a confirmation question a person can trust', () => {
     const server = describing();
     const created = await prompt(server);
     expect(created.inputRequests.slotlock_confirm?.params.message).toBe(
-      'Book resource vehicle-1 for 2027-03-02 09:00–10:00 (Europe/London, UTC+00:00): "Vehicle handover".',
+      'Book resource vehicle-1 for 2027-03-02 09:00–10:00 UTC+00:00 (Europe/London): "Vehicle handover".',
     );
     const removal = await prompt(server, 'slotlock_delete_event', {
       event_id: EVENT.id,
@@ -709,7 +709,7 @@ describe('a confirmation question a person can trust', () => {
       idempotency_key: 'delete-1',
     });
     expect(removal.inputRequests.slotlock_confirm?.params.message).toBe(
-      `Delete event ${EVENT.id}.`,
+      `Delete event ${EVENT.id} and every time it repeats, if it does.`,
     );
     expect(getEvent).not.toHaveBeenCalled();
     expect(describeResource).not.toHaveBeenCalled();
@@ -728,11 +728,11 @@ describe('a confirmation question a person can trust', () => {
   it('turns every character that reads as a double quote into a single one', async () => {
     const message = await asked({
       ...BOOKING,
-      title: 'Handover”. Also delete “Board” ＂x″ «z» on vehicle-7',
+      title: 'Handover”. Also delete “Board” ＂x″ «z» „y〃״ˮ⹂\u{1F677} on vehicle-7',
     });
     expect(message.match(QUOTE_LIKE)).toHaveLength(2);
     expect(message).toBe(
-      `Book vehicle-42 for 2027-03-02 09:00–10:00 (Europe/London): "Handover'. Also delete 'Board' 'x' 'z' on vehicle-7".`,
+      `Book vehicle-42 for 2027-03-02 09:00–10:00 (Europe/London): "Handover'. Also delete 'Board' 'x' 'z' 'y''''' on vehicle-7".`,
     );
   });
 
@@ -766,7 +766,7 @@ describe('a confirmation question a person can trust', () => {
       timezone: 'Etc/GMT+5',
     });
     expect(inputRequests.slotlock_confirm?.params.message).toBe(
-      'Book resource vehicle-1 for 2027-03-02 04:00–05:00 (Etc/GMT+5, UTC-05:00): "Vehicle handover".',
+      'Book resource vehicle-1 for 2027-03-02 04:00–05:00 UTC-05:00 (Etc/GMT+5): "Vehicle handover".',
     );
   });
 
@@ -778,6 +778,12 @@ describe('a confirmation question a person can trust', () => {
     ['a value with trailing junk', 'FREQ=WEEKLY;INTERVAL=2ABC'],
     ['UNTIL with COUNT', 'FREQ=DAILY;COUNT=2;UNTIL=20271231T000000Z'],
     ['no FREQ', 'BYDAY=MO;COUNT=2'],
+    ['a day that never comes, on which ical.js searches forever', 'FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30'],
+    ['a numbered weekday in a daily rule, likewise', 'FREQ=DAILY;BYDAY=5MO'],
+    ['a sub-daily frequency', 'FREQ=HOURLY;BYMONTH=1'],
+    ['BYMONTHDAY in a weekly rule', 'FREQ=WEEKLY;BYMONTHDAY=3'],
+    ['BYYEARDAY in a daily rule', 'FREQ=DAILY;BYYEARDAY=1'],
+    ['BYWEEKNO in a monthly rule', 'FREQ=MONTHLY;BYWEEKNO=2'],
   ])('refuses a recurrence rule with %s before asking anyone', async (_name, rule) => {
     const server = describing();
     for (const name of ['slotlock_create_event', 'slotlock_update_event'] as const) {
@@ -788,7 +794,21 @@ describe('a confirmation question a person can trust', () => {
       expect(await toolError(await server.fetch(toolCall(name, args)))).toBe('invalid_arguments');
     }
     expect(createEvent).not.toHaveBeenCalled();
-    expect(canonicalRecurrenceRule(rule)).toBeNull();
+    expect(isBookableRecurrenceRule(rule)).toBe(false);
+  });
+
+  it('books the rules agents need, rare ones included', () => {
+    for (const rule of [
+      'FREQ=DAILY;BYMONTH=2;BYMONTHDAY=29',
+      'FREQ=DAILY;BYHOUR=9,13',
+      'FREQ=MONTHLY;BYDAY=-1FR',
+      'FREQ=MONTHLY;BYMONTHDAY=31;BYMONTH=2',
+      'FREQ=YEARLY;BYWEEKNO=1;BYDAY=MO',
+      'freq=weekly;interval=2;byday=mo,we',
+    ]) {
+      expect(isBookableRecurrenceRule(rule), rule).toBe(true);
+    }
+    expect(isBookableRecurrenceRule('FREQ=YEARLY;BYWEEKNO=1;BYDAY=1MO')).toBe(false);
   });
 
   it('accepts RFC 5545 rules in any case and order, and shows their canonical form', () => {
@@ -813,11 +833,22 @@ describe('a confirmation question a person can trust', () => {
       );
     });
 
+    it('says what the rule says about the dates past the window the store keeps booked', async () => {
+      expect(
+        await asked({ ...BOOKING, recurrence_rule: 'FREQ=MONTHLY;UNTIL=20281231T000000Z' }),
+      ).toBe(
+        'Book vehicle-42 8 times before 2027-10-11, from 2027-03-02 09:00–10:00 to 2027-10-02 09:00–10:00 (Europe/London), repeating FREQ=MONTHLY;UNTIL=20281231T000000Z, until 2028-12-31: "Vehicle handover".',
+      );
+      expect(await asked({ ...BOOKING, recurrence_rule: 'FREQ=WEEKLY;BYDAY=TU;COUNT=40' })).toBe(
+        'Book vehicle-42 32 times before 2027-10-11, from 2027-03-02 09:00–10:00 to 2027-10-05 09:00–10:00 (Europe/London), repeating FREQ=WEEKLY;COUNT=40;BYDAY=TU, 40 counted by its rule, cancelled ones included: "Vehicle handover".',
+      );
+    });
+
     it('says a rule with no end goes on past the window the store keeps booked', async () => {
       expect(
         await asked({ ...BOOKING, recurrence_rule: 'FREQ=WEEKLY;BYDAY=TU', status: 'tentative' }),
       ).toBe(
-        'Book vehicle-42 32 times before 2027-10-11 and more after, from 2027-03-02 09:00–10:00 to 2027-10-05 09:00–10:00 (Europe/London), repeating FREQ=WEEKLY;BYDAY=TU, tentatively: "Vehicle handover".',
+        'Book vehicle-42 32 times before 2027-10-11, from 2027-03-02 09:00–10:00 to 2027-10-05 09:00–10:00 (Europe/London), repeating FREQ=WEEKLY;BYDAY=TU, with no end, tentatively: "Vehicle handover".',
       );
     });
 
@@ -851,7 +882,112 @@ describe('a confirmation question a person can trust', () => {
           ],
         }),
       ).toBe(
-        'Book vehicle-42 2 times, from 2027-03-02 09:00–10:00 to 2027-03-13 03:00–04:00 (Europe/London), repeating FREQ=WEEKLY;COUNT=3;BYDAY=TU, 1 moved (2027-03-16 09:00 to 2027-03-13 03:00–04:00), 1 cancelled: "Vehicle handover".',
+        'Book vehicle-42 2 times before 2027-10-11, from 2027-03-02 09:00–10:00 to 2027-03-13 03:00–04:00 (Europe/London), repeating FREQ=WEEKLY;COUNT=3;BYDAY=TU, 3 counted by its rule, cancelled ones included, 1 moved (2027-03-16 09:00 to 2027-03-13 03:00–04:00): "Vehicle handover".',
+      );
+    });
+
+    it('names only the occurrences the store actually moves, all of them up to ten', async () => {
+      // An exception for an occurrence the rule never makes moves nothing.
+      expect(
+        await asked({
+          ...BOOKING,
+          recurrence_rule: 'FREQ=DAILY;COUNT=2',
+          recurrence_exceptions: [
+            {
+              recurrence_id: '2027-03-03T08:00:00Z',
+              starts_at: '2027-03-20T13:00:00Z',
+              ends_at: '2027-03-20T18:00:00Z',
+            },
+          ],
+        }),
+      ).toBe(
+        'Book vehicle-42 2 times, from 2027-03-02 09:00–10:00 to 2027-03-03 09:00–10:00 (Europe/London), repeating FREQ=DAILY;COUNT=2: "Vehicle handover".',
+      );
+      const moved = Array.from({ length: 12 }, (_, index) => {
+        const day = String(index + 2).padStart(2, '0');
+        return {
+          recurrence_id: `2027-03-${day}T09:00:00Z`,
+          starts_at: `2027-03-${day}T02:00:00Z`,
+          ends_at: `2027-03-${day}T23:00:00Z`,
+        };
+      });
+      const message = await asked({
+        ...BOOKING,
+        recurrence_rule: 'FREQ=DAILY;COUNT=12',
+        recurrence_exceptions: moved,
+      });
+      expect(message).toContain('12 moved (2027-03-02 09:00 to 2027-03-02 02:00–23:00; ');
+      expect(message).toContain('2027-03-11 09:00 to 2027-03-11 02:00–23:00 and 2 more not listed)');
+    });
+
+    it('never expands a stored rule ical.js could search forever, and still asks', async () => {
+      getEvent.mockResolvedValue({
+        event: { ...series, recurrence_rule: 'FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30' },
+      });
+      expect(
+        await asked(
+          {
+            event_id: EVENT.id,
+            expected_revision: 1,
+            starts_at: '2027-03-02T10:00:00Z',
+            ends_at: '2027-03-02T11:00:00Z',
+            idempotency_key: 'never',
+          },
+          'slotlock_update_event',
+        ),
+      ).toBe(
+        'Change the booking on vehicle-42, 2027-03-02 09:00–10:00 (Europe/London) and every time it repeats: time to 2027-03-02 10:00–11:00 (Europe/London); so it books from 2027-03-02 10:00–11:00 (Europe/London), on dates Slotlock could not work out, repeating FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30. It is titled "Vehicle handover".',
+      );
+    });
+
+    it('skips a stored exception it cannot read instead of failing', async () => {
+      getEvent.mockResolvedValue({
+        event: {
+          ...series,
+          recurrence_exceptions: [
+            {
+              recurrence_id: '2027-03-09T09:00:00Z',
+              cancelled: false,
+              starts_at: '2027-03-09T15:00:00Z',
+              ends_at: null,
+            },
+          ],
+        },
+      });
+      const message = await asked(
+        {
+          event_id: EVENT.id,
+          expected_revision: 1,
+          starts_at: '2027-03-02T10:00:00Z',
+          ends_at: '2027-03-02T11:00:00Z',
+          idempotency_key: 'broken',
+        },
+        'slotlock_update_event',
+      );
+      expect(message).toContain(
+        'so it books 4 times, from 2027-03-02 10:00–11:00 to 2027-03-23 10:00–11:00',
+      );
+    });
+
+    it("gives each time in an agent's zone its own offset, across a change of clocks", async () => {
+      const { inputRequests } = await prompt(buildServer(), 'slotlock_create_event', {
+        ...BOOKING,
+        starts_at: '2027-03-01T14:00:00Z',
+        ends_at: '2027-03-01T15:00:00Z',
+        timezone: 'America/New_York',
+        recurrence_rule: 'FREQ=WEEKLY;COUNT=10',
+      });
+      expect(inputRequests.slotlock_confirm?.params.message).toBe(
+        'Book resource vehicle-1 10 times, from 2027-03-01 09:00–10:00 UTC-05:00 to 2027-05-03 09:00–10:00 UTC-04:00 (America/New_York), repeating FREQ=WEEKLY;COUNT=10: "Vehicle handover".',
+      );
+      const overnight = await prompt(buildServer(), 'slotlock_create_event', {
+        ...BOOKING,
+        starts_at: '2027-03-13T14:00:00Z',
+        ends_at: '2027-03-15T13:00:00Z',
+        timezone: 'America/New_York',
+      });
+      expect(overnight.inputRequests.slotlock_confirm?.params.message).toBe(
+        'Book resource vehicle-1 for 2027-03-13 09:00 UTC-05:00 – 2027-03-15 09:00 UTC-04:00 (America/New_York): "Vehicle handover".',
       );
     });
 
@@ -874,7 +1010,7 @@ describe('a confirmation question a person can trust', () => {
           'slotlock_update_event',
         ),
       ).toBe(
-        'Change the booking on vehicle-42, 2027-03-02 09:00–10:00 (Europe/London): so it books 4 times, from 2027-03-02 09:00–10:00 to 2027-03-23 09:00–10:00 (Europe/London), repeating FREQ=WEEKLY;COUNT=4;BYDAY=TU, 1 moved (2027-03-09 09:00 to 2027-03-10 03:00–04:00). It is titled "Vehicle handover".',
+        'Change the booking on vehicle-42, 2027-03-02 09:00–10:00 (Europe/London) and every time it repeats: so it books 4 times, from 2027-03-02 09:00–10:00 to 2027-03-23 09:00–10:00 (Europe/London), repeating FREQ=WEEKLY;COUNT=4;BYDAY=TU, 1 moved (2027-03-09 09:00 to 2027-03-10 03:00–04:00). It is titled "Vehicle handover".',
       );
       getEvent.mockResolvedValue({
         event: {
@@ -896,7 +1032,27 @@ describe('a confirmation question a person can trust', () => {
           'slotlock_update_event',
         ),
       ).toBe(
-        'Change the booking on vehicle-42, 2027-03-02 09:00–10:00 (Europe/London): so it books 2 times, from 2027-03-02 09:00–10:00 to 2027-03-09 09:00–10:00 (Europe/London), repeating FREQ=WEEKLY;COUNT=2;BYDAY=TU. It is titled "Vehicle handover".',
+        'Change the booking on vehicle-42, 2027-03-02 09:00–10:00 (Europe/London) and every time it repeats: so it books 2 times, from 2027-03-02 09:00–10:00 to 2027-03-09 09:00–10:00 (Europe/London), repeating FREQ=WEEKLY;COUNT=2;BYDAY=TU. It is titled "Vehicle handover".',
+      );
+      getEvent.mockResolvedValue({
+        event: { ...series, recurrence_rule: 'FREQ=WEEKLY;COUNT=6;BYDAY=TU' },
+      });
+      // A new zone moves every date: the store expands the series again in it.
+      expect(
+        await asked(
+          { event_id: EVENT.id, expected_revision: 1, timezone: 'Asia/Kolkata', idempotency_key: 'z' },
+          'slotlock_update_event',
+        ),
+      ).toBe(
+        'Change the booking on vehicle-42, 2027-03-02 09:00–10:00 (Europe/London) and every time it repeats: timezone to Asia/Kolkata; so it books 6 times, from 2027-03-02 09:00–10:00 to 2027-04-06 10:00–11:00 (Europe/London), repeating FREQ=WEEKLY;COUNT=6;BYDAY=TU. It is titled "Vehicle handover".',
+      );
+      expect(
+        await asked(
+          { event_id: EVENT.id, expected_revision: 1, resource_id: 'vehicle-7', idempotency_key: 'r' },
+          'slotlock_update_event',
+        ),
+      ).toBe(
+        'Change the booking on vehicle-42, 2027-03-02 09:00–10:00 (Europe/London) and every time it repeats: resource to van-7. It is titled "Vehicle handover".',
       );
       getEvent.mockResolvedValue({ event: series });
       expect(await asked(removal, 'slotlock_delete_event')).toBe(
@@ -909,7 +1065,7 @@ describe('a confirmation question a person can trust', () => {
     describeResource.mockResolvedValue({ name: 'R'.repeat(300), timezone: 'Europe/London' });
     getEvent.mockResolvedValue({ event: { ...series, title: 'T'.repeat(600) } });
     const moved = ['09', '16', '23', '30'].map((day) => ({
-      recurrence_id: `2027-03-${day}T09:00:00Z`,
+      recurrence_id: `2027-03-${day}T12:00:59Z`,
       starts_at: `2027-03-${day}T03:00:00Z`,
       ends_at: `2027-03-${day}T04:00:00Z`,
     }));
@@ -917,8 +1073,8 @@ describe('a confirmation question a person can trust', () => {
       {
         event_id: EVENT.id,
         expected_revision: 1,
-        starts_at: '2027-03-02T09:00:59.999Z',
-        ends_at: '2027-03-04T10:00:59.999Z',
+        starts_at: '2027-03-02T09:00:59Z',
+        ends_at: '2027-03-04T10:00:59Z',
         timezone: 'America/Argentina/ComodRivadavia',
         resource_id: 'vehicle-7',
         status: 'tentative',
@@ -934,12 +1090,44 @@ describe('a confirmation question a person can trust', () => {
       },
       'slotlock_update_event',
     );
-    expect(message).toContain('4 moved (');
-    expect(message).toContain('and 1 more)');
+    expect(message).toContain('4 moved (2027-03-09 12:00:59 to 2027-03-09 03:00–04:00; ');
     expect(message).toContain('; also description, location, attendees, reminders; ');
     expect(message).toContain(`; title to "${'N'.repeat(119)}…"`);
     expect(message.endsWith(`. It is titled "${'T'.repeat(119)}…".`)).toBe(true);
     expect(message.length).toBeLessThan(1_600);
+  });
+
+  it('asks nobody when the rate limit refuses the write, and reads nothing for it', async () => {
+    const consumeRateLimit = vi.fn(
+      async ({ operation }: { operation: string }) => operation === 'protocol',
+    );
+    const server = buildServer({
+      backend: { ...backend, describeResource } as SlotlockAgentCalendarBackend,
+      consumeRateLimit,
+    });
+    expect(await toolError(await server.fetch(toolCall('slotlock_create_event', BOOKING)))).toBe(
+      'rate_limited',
+    );
+    expect(consumeRateLimit).toHaveBeenCalledWith({
+      principal: { subject: 'principal-1', tenantRef: 'tenant-a' },
+      operation: 'slotlock_create_event',
+    });
+    expect(describeResource).not.toHaveBeenCalled();
+    expect(createEvent).not.toHaveBeenCalled();
+  });
+
+  it('asks at once, by id, for a request already aborted', async () => {
+    const gone = new AbortController();
+    gone.abort();
+    const request = new Request(toolCall('slotlock_create_event', BOOKING), {
+      signal: gone.signal,
+    });
+    const response = await describing().fetch(request);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { result: InputRequired };
+    expect(body.result.inputRequests.slotlock_confirm?.params.message).toBe(
+      'Book resource vehicle-1 for 2027-03-02 09:00–10:00 UTC+00:00 (Europe/London): "Vehicle handover".',
+    );
   });
 
   it('asks each read permission once per question', async () => {
@@ -979,8 +1167,8 @@ describe('a confirmation question a person can trust', () => {
     const body = (await response.json()) as { result: InputRequired };
     expect(body.result.inputRequests.slotlock_confirm?.params.message).toBe(
       name === 'slotlock_create_event'
-        ? 'Book resource vehicle-1 for 2027-03-02 09:00–10:00 (Europe/London, UTC+00:00): "Vehicle handover".'
-        : `Delete event ${EVENT.id}.`,
+        ? 'Book resource vehicle-1 for 2027-03-02 09:00–10:00 UTC+00:00 (Europe/London): "Vehicle handover".'
+        : `Delete event ${EVENT.id} and every time it repeats, if it does.`,
     );
     const lookupSignal = (describeResource.mock.calls[0]?.[0] ?? getEvent.mock.calls[0]?.[0]) as
       | { signal: AbortSignal }

@@ -139,7 +139,7 @@ describe('Slotlock with the official MCP TypeScript SDK v2 (MCP 2026-07-28)', ()
 
     const booked = await connected.callTool({ name: 'slotlock_create_event', arguments: booking });
     expect(asked).toEqual([
-      'Book resource resource-1 for 2027-03-02 09:00–10:00 (Europe/London, UTC+00:00): "Vehicle handover".',
+      'Book resource resource-1 for 2027-03-02 09:00–10:00 UTC+00:00 (Europe/London): "Vehicle handover".',
     ]);
     expect(booked.isError).toBeFalsy();
     expect(booked.structuredContent).toEqual({ event, replayed: false });

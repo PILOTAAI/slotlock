@@ -195,13 +195,13 @@ describe.skipIf(!url)('the confirmation question on the real store', () => {
       idempotency_key: `cross-${randomUUID()}`,
     });
     expect(book.inputRequests?.slotlock_confirm.params.message).toBe(
-      `Book resource ${resourceB} for ${day(3).slice(0, 10)} 09:00–10:00 (UTC, UTC+00:00).`,
+      `Book resource ${resourceB} for ${day(3).slice(0, 10)} 09:00–10:00 UTC+00:00 (UTC).`,
     );
     const removal = await call(server(true), 'a', 'slotlock_delete_event', {
       event_id: eventB,
       expected_revision: 1,
       idempotency_key: `cross-delete-${randomUUID()}`,
     });
-    expect(removal.inputRequests?.slotlock_confirm.params.message).toBe(`Delete event ${eventB}.`);
+    expect(removal.inputRequests?.slotlock_confirm.params.message).toBe(`Delete event ${eventB} and every time it repeats, if it does.`);
   });
 });

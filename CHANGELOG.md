@@ -46,17 +46,21 @@ request replaces "Unreleased" with the release date.
   the ones the write makes. It now:
   - names the resource by its own reference and shows times in the resource's zone (through the
     new optional backend method `describeResource`, which the store backend has), and names an
-    event by its current time; anything else carries its UTC offset;
+    event by its current time; in any other zone each time carries its own UTC offset;
   - puts the agent's own text, and an event's stored title, after every fact, with anything that
     reads as a double quote (curly, full-width, primes) turned into a single one;
   - describes a repeating booking from the store's own expansion: how many times it books, the
-    first and the last, and every moved occurrence (a moved or padded rule could book dates the
-    question never named);
+    first and the last, every moved occurrence, and what the rule says past the window the store
+    keeps booked (a moved or padded rule could book dates the question never named); a change to a
+    series says it covers every repeat;
   - shows seconds when a time has them, and bounds each part, so no change is cut off the end;
   - reads only what the caller's scopes and `authorize` allow, and gives up on lookups after 2
     seconds, so a slow backend delays the question but cannot withhold it.
-- Agents may only send recurrence rules RFC 5545 allows: known parts, each once, with valid
-  values. ical.js read `COUNT=0` as no end, `COUNT=3X` as 3, and a repeated `FREQ` as the last one.
+- Agents may only send recurrence rules RFC 5545 allows (known parts, each once, with valid values,
+  and none it forbids for the frequency) that repeat daily or less often and can occur. ical.js read
+  `COUNT=0` as no end, `COUNT=3X` as 3 and a repeated `FREQ` as the last one, and searched forever
+  for a daily rule that cannot occur (`BYMONTH=2;BYMONTHDAY=30`), holding the whole process.
+- A rate limit is charged before a write's confirmation is asked for, not only when it runs.
 - The sealed confirmation state compares its MAC as text: three other spellings of the same MAC
   (the last base64url character's two spare bits) were accepted.
 - `slotlock_list_resources` with a `cursor` that is not a resource id answers the `invalid_cursor`

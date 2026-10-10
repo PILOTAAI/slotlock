@@ -509,10 +509,11 @@ handover".` Only an explicit yes runs the write.
 
 - Facts come first: the resource by its own reference, times in its own zone, and an event as it
   stands now, read through your backend's `describeResource` and `getEvent` when the caller may
-  read them (within 2 seconds in all). Otherwise things are named by id, and times carry their UTC
-  offset. The agent's own text comes last, quoted.
+  read them (within 2 seconds in all). Otherwise things are named by id, and each time carries its
+  UTC offset. The agent's own text comes last, quoted.
 - A repeating booking says how many times it books, the first and the last, and each moved
-  occurrence, from the same expansion the store books with. Agents may only send RFC 5545 rules.
+  occurrence, from the same expansion the store books with; a change to one says it covers every
+  repeat. Agents may send RFC 5545 rules that repeat daily or less often and can occur.
 - The pending question is sealed (HMAC-SHA256) to the caller, the tool and the exact arguments, and
   expires after `ttlSeconds` (600).
 - Clients that cannot ask (MCP 2025 revisions, A2A) get `confirmation_required`; nothing is written.

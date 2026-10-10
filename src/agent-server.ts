@@ -30,7 +30,11 @@ import {
   SLOTLOCK_MAX_EVENT_DURATION_DAYS,
   calendarEventRollingHorizon,
 } from './store.js';
-import { canonicalRecurrenceRule, expandCalendarEventOccurrences } from './sync.js';
+import {
+  canonicalRecurrenceRule,
+  expandCalendarEventOccurrences,
+  isBookableRecurrenceRule,
+} from './sync.js';
 import { zonedOffsetMinutes, zonedWallTime } from './timezone.js';
 import type { CalendarEventContent, CalendarRecurrenceException } from './types.js';
 
@@ -189,13 +193,11 @@ const REMINDER_INPUT = z
     channel: z.enum(['display', 'email']),
   })
   .strict();
-/** A rule as RFC 5545 writes it: ical.js reads looser ones as something other than they say. */
-const RECURRENCE_RULE = z
-  .string()
-  .trim()
-  .min(1)
-  .max(2_000)
-  .refine((rule) => canonicalRecurrenceRule(rule) !== null);
+/**
+ * A rule as RFC 5545 writes it, daily or less often, that can occur: ical.js reads looser ones as
+ * something other than they say, and searches forever for one that cannot occur.
+ */
+const RECURRENCE_RULE = z.string().trim().min(1).max(2_000).refine(isBookableRecurrenceRule);
 
 const RECURRENCE_EXCEPTION_INPUT = z
   .object({
@@ -1194,6 +1196,14 @@ export async function invokeSlotlockAgentOperation(args: {
     ) {
       return { ok: false, status: 403, code: 'forbidden' };
     }
+    // Charged before a confirmation is asked for, so every round of a guarded write counts and a
+    // call that could not run is never put to a person.
+    if (
+      args.options.consumeRateLimit &&
+      !(await args.options.consumeRateLimit({ principal, operation: operation.name }))
+    ) {
+      return { ok: false, status: 429, code: 'rate_limited' };
+    }
     if (args.options.confirm) {
       const halt = await args.options.confirm({
         principal,
@@ -1201,12 +1211,6 @@ export async function invokeSlotlockAgentOperation(args: {
         input: parsed.data,
       });
       if (halt) return { ok: false, status: halt.status, code: halt.code };
-    }
-    if (
-      args.options.consumeRateLimit &&
-      !(await args.options.consumeRateLimit({ principal, operation: operation.name }))
-    ) {
-      return { ok: false, status: 429, code: 'rate_limited' };
     }
     const method = args.options.backend[operation.invoke] as (
       context: SlotlockAgentInvocationContext,
@@ -1645,7 +1649,7 @@ function promptText(value: unknown, max = 120): string {
 }
 
 /** Every character that reads as a double quote: curly, full-width, primes and the rest. */
-const QUOTE_LIKE = /["\p{Pi}\p{Pf}ʺ˝″‶❝❞〝-〟＂]/gu;
+const QUOTE_LIKE = /["\p{Pi}\p{Pf}ʺ˝ˮ״‚„″‶❝❞⹂〃〝-〟＂\u{1F676}-\u{1F678}]/gu;
 
 /**
  * Text the agent chose (a title), shown inside double quotes: anything that reads as a double quote
@@ -1689,76 +1693,128 @@ function promptClock(instant: Date, zone: string): { date: string; time: string 
   return { date: wall.date, time: `${wall.time}:${String(seconds).padStart(2, '0')}${fraction}` };
 }
 
-function promptSpan(start: Date, end: Date, zone: string): string {
-  const from = promptClock(start, zone);
-  const to = promptClock(end, zone);
-  const until = to.date === from.date ? `–${to.time}` : ` – ${to.date} ${to.time}`;
-  return `${from.date} ${from.time}${until}`;
+/** `UTC-05:00`: how far `zone` is from UTC at `instant`. */
+function promptOffset(instant: Date, zone: string): string {
+  const offset = zonedOffsetMinutes(instant, zone);
+  const hours = String(Math.floor(Math.abs(offset) / 60)).padStart(2, '0');
+  const minutes = String(Math.abs(offset) % 60).padStart(2, '0');
+  return `UTC${offset < 0 ? '-' : '+'}${hours}:${minutes}`;
 }
 
 /**
- * `(Europe/London)` for the resource's own zone. A zone the agent chose also says its offset, which
- * a name such as `Etc/GMT+5` (five hours behind UTC) can hide.
+ * One moment. In a zone the agent chose rather than the resource's own, every time carries its own
+ * UTC offset: a name such as `Etc/GMT+5` (five hours behind UTC) can hide it, and daylight saving
+ * changes it from one date to the next.
  */
-function promptZoneLabel(zone: PromptZone, at: Date): string {
-  const name = promptText(zone.zone, 64);
-  if (zone.own) return `(${name})`;
-  const offset = zonedOffsetMinutes(at, zone.zone);
-  const hours = String(Math.floor(Math.abs(offset) / 60)).padStart(2, '0');
-  const minutes = String(Math.abs(offset) % 60).padStart(2, '0');
-  return `(${name}, UTC${offset < 0 ? '-' : '+'}${hours}:${minutes})`;
+function promptMoment(instant: Date, zone: PromptZone): string {
+  const clock = promptClock(instant, zone.zone);
+  return `${clock.date} ${clock.time}${zone.own ? '' : ` ${promptOffset(instant, zone.zone)}`}`;
+}
+
+function promptSpan(start: Date, end: Date, zone: PromptZone): string {
+  const from = promptClock(start, zone.zone);
+  const to = promptClock(end, zone.zone);
+  const toOffset = zone.own ? '' : ` ${promptOffset(end, zone.zone)}`;
+  const sameOffset = zone.own || promptOffset(start, zone.zone) === promptOffset(end, zone.zone);
+  if (to.date === from.date && sameOffset) return `${from.date} ${from.time}–${to.time}${toOffset}`;
+  return `${promptMoment(start, zone)} – ${to.date} ${to.time}${toOffset}`;
+}
+
+function promptZoneName(zone: PromptZone): string {
+  return `(${promptText(zone.zone, 64)})`;
 }
 
 function promptRange(start: Date, end: Date, zone: PromptZone): string {
-  return `${promptSpan(start, end, zone.zone)} ${promptZoneLabel(zone, start)}`;
+  return `${promptSpan(start, end, zone)} ${promptZoneName(zone)}`;
 }
 
 function promptInstant(instant: Date, zone: PromptZone): string {
-  const clock = promptClock(instant, zone.zone);
-  return `${clock.date} ${clock.time} ${promptZoneLabel(zone, instant)}`;
+  return `${promptMoment(instant, zone)} ${promptZoneName(zone)}`;
 }
 
-/** A recurrence rule as the question shows it: its RFC 5545 form, never cut. */
+/** A recurrence rule as the question shows it: its RFC 5545 form, in full. */
 function promptRule(rule: string): string {
-  const canonical = canonicalRecurrenceRule(rule);
-  if (canonical === null) return 'a repeat rule Slotlock cannot show';
-  return canonical.length <= 160 ? canonical : 'a repeat rule too long to show';
+  return canonicalRecurrenceRule(rule) ?? 'a repeat rule Slotlock cannot show';
 }
 
-/** Agent-shaped exceptions as the store reads them (`exceptionsFromInput`). */
+/** Agent-shaped exceptions as the store reads them (`exceptionsFromInput`), unreadable ones left out. */
 function promptExceptionList(value: unknown): CalendarRecurrenceException[] {
   if (!Array.isArray(value)) return [];
-  return value.filter(isRecord).map((exception) => ({
-    recurrenceId: promptInstantOf(exception.recurrence_id),
-    ...(exception.cancelled === true ? { cancelled: true } : {}),
-    ...(typeof exception.starts_at === 'string' ? { start: new Date(exception.starts_at) } : {}),
-    ...(typeof exception.ends_at === 'string' ? { end: new Date(exception.ends_at) } : {}),
-  }));
+  const exceptions: CalendarRecurrenceException[] = [];
+  for (const exception of value) {
+    if (!isRecord(exception)) continue;
+    const recurrenceId = promptInstantOf(exception.recurrence_id);
+    if (!Number.isFinite(recurrenceId.getTime())) continue;
+    const start = promptInstantOf(exception.starts_at);
+    const end = promptInstantOf(exception.ends_at);
+    const moved = Number.isFinite(start.getTime()) && Number.isFinite(end.getTime());
+    // Neither cancelled nor moved to a readable time: the store would refuse it, so skip it.
+    if (exception.cancelled !== true && !moved) continue;
+    exceptions.push({
+      recurrenceId,
+      ...(exception.cancelled === true ? { cancelled: true } : {}),
+      ...(moved ? { start, end } : {}),
+    });
+  }
+  return exceptions;
 }
 
-/** Moved occurrences one by one (up to three), then how many are cancelled. */
-function promptExceptions(
-  exceptions: readonly CalendarRecurrenceException[],
-  zone: string,
+/** How many moved occurrences a question names one by one; it says how many more it does not. */
+const PROMPT_MOVED_SHOWN = 10;
+
+/** Moved occurrences, from where each was to where it is. */
+function promptMoved(
+  moved: readonly { from: Date; start: Date; end: Date }[],
+  zone: PromptZone,
 ): string {
-  const parts: string[] = [];
-  const moved = exceptions.filter((exception) => !exception.cancelled && exception.start);
-  if (moved.length > 0) {
-    const shown = moved.slice(0, 3).map((exception) => {
-      const from = promptClock(exception.recurrenceId, zone);
-      return `${from.date} ${from.time} to ${promptSpan(exception.start as Date, exception.end as Date, zone)}`;
-    });
-    const rest = moved.length > 3 ? ` and ${moved.length - 3} more` : '';
-    parts.push(`${moved.length} moved (${shown.join('; ')}${rest})`);
-  }
+  if (moved.length === 0) return '';
+  const shown = moved
+    .slice(0, PROMPT_MOVED_SHOWN)
+    .map(
+      ({ from, start, end }) => `${promptMoment(from, zone)} to ${promptSpan(start, end, zone)}`,
+    );
+  const rest =
+    moved.length > PROMPT_MOVED_SHOWN
+      ? ` and ${moved.length - PROMPT_MOVED_SHOWN} more not listed`
+      : '';
+  return `${moved.length} moved (${shown.join('; ')}${rest})`;
+}
+
+/** Exceptions an update asks for, when the series they apply to cannot be read. */
+function promptRequestedExceptions(value: unknown, zone: PromptZone): string {
+  const exceptions = promptExceptionList(value);
+  const moved = exceptions.flatMap((exception) =>
+    exception.cancelled || !exception.start || !exception.end
+      ? []
+      : [{ from: exception.recurrenceId, start: exception.start, end: exception.end }],
+  );
   const cancelled = exceptions.filter((exception) => exception.cancelled).length;
-  if (cancelled > 0) parts.push(`${cancelled} cancelled`);
-  return parts.join(', ');
+  const parts = [promptMoved(moved, zone), cancelled > 0 ? `${cancelled} cancelled` : ''];
+  return parts.filter(Boolean).join(', ') || 'none';
+}
+
+/** What a rule says about the dates past the window the store keeps booked; `null` if nothing. */
+function promptSeriesEnd(rule: string, booked: number, windowEnd: Date): string | null {
+  const canonical = canonicalRecurrenceRule(rule);
+  if (canonical === null) return null;
+  const parts = new Map(canonical.split(';').map((part) => part.split('=') as [string, string]));
+  const until = parts.get('UNTIL');
+  const count = parts.get('COUNT');
+  if (until === undefined && count === undefined) return 'with no end';
+  if (until !== undefined) {
+    const day = `${until.slice(0, 4)}-${until.slice(4, 6)}-${until.slice(6, 8)}`;
+    return Date.parse(`${day}T00:00:00Z`) >= windowEnd.getTime() ? `until ${day}` : null;
+  }
+  // The rule's own total whenever the window shows another number: the rest are cancelled, or
+  // outside the window, before it or after.
+  return Number(count) === booked ? null : `${count} counted by its rule, cancelled ones included`;
 }
 
 /**
  * When a repeating booking books, worked out as the store books it: the same expansion over the
- * same rolling window, so neither the rule's spelling nor an exception can hide a date.
+ * same rolling window, so neither the rule's spelling nor an exception can hide a date, and every
+ * occurrence that is not where the rule puts it is named from the expansion itself. Only a rule an
+ * agent may send is expanded (`isBookableRecurrenceRule`): ical.js can search forever for others.
  */
 function promptSeries(
   series: { start: unknown; end: unknown; timezone: unknown; rule: string; exceptions: unknown },
@@ -1768,7 +1824,10 @@ function promptSeries(
   const end = promptInstantOf(series.end);
   const exceptions = promptExceptionList(series.exceptions);
   let when: string;
+  let beyond: string | null = null;
+  let moved = '';
   try {
+    if (!isBookableRecurrenceRule(series.rule)) throw new Error('not_bookable');
     const content: CalendarEventContent = {
       start,
       end,
@@ -1778,29 +1837,38 @@ function promptSeries(
     };
     const horizon = calendarEventRollingHorizon();
     const booked = expandCalendarEventOccurrences(content, horizon);
-    const later = {
-      start: horizon.end,
-      end: new Date(horizon.end.getTime() + SLOTLOCK_CALENDAR_HORIZON_DAYS * DAY_MS),
-    };
-    const more = expandCalendarEventOccurrences(content, later).length > 0;
+    beyond = promptSeriesEnd(series.rule, booked.length, horizon.end);
+    const length = end.getTime() - start.getTime();
+    moved = promptMoved(
+      booked.flatMap((occurrence) => {
+        const from = new Date(occurrence.recurrenceId);
+        const shifted =
+          occurrence.start.getTime() !== from.getTime() ||
+          occurrence.end.getTime() - occurrence.start.getTime() !== length;
+        return shifted && Number.isFinite(from.getTime())
+          ? [{ from, start: occurrence.start, end: occurrence.end }]
+          : [];
+      }),
+      zone,
+    );
     const first = booked[0];
     const last = booked[booked.length - 1];
     const until = promptClock(horizon.end, zone.zone).date;
     if (!first || !last) {
-      when = `with no booking before ${until} ${promptZoneLabel(zone, horizon.end)}`;
-    } else if (booked.length === 1 && !more) {
+      when = `with no booking before ${until} ${promptZoneName(zone)}`;
+    } else if (booked.length === 1 && beyond === null) {
       when = `for ${promptRange(first.start, first.end, zone)}`;
     } else {
-      const count = `${booked.length} times${more ? ` before ${until} and more after` : ''}`;
-      when = `${count}, from ${promptSpan(first.start, first.end, zone.zone)} to ${promptSpan(last.start, last.end, zone.zone)} ${promptZoneLabel(zone, first.start)}`;
+      const times = `${booked.length} ${booked.length === 1 ? 'time' : 'times'}`;
+      const count = beyond === null ? times : `${times} before ${until}`;
+      when = `${count}, from ${promptSpan(first.start, first.end, zone)} to ${promptSpan(last.start, last.end, zone)} ${promptZoneName(zone)}`;
     }
   } catch {
     when = `from ${promptRange(start, end, zone)}, on dates Slotlock could not work out`;
   }
-  const changed = promptExceptions(exceptions, zone.zone);
-  return `${when}, repeating ${promptRule(series.rule)}${changed ? `, ${changed}` : ''}`;
+  const rest = [beyond, moved].filter((part): part is string => Boolean(part));
+  return `${when}, repeating ${promptRule(series.rule)}${rest.map((part) => `, ${part}`).join('')}`;
 }
-
 /** A resource as the question names it: its own reference, or its id. */
 interface ConfirmationResource {
   label: string;
@@ -1844,11 +1912,14 @@ function confirmationLookup(
   const deadline = new AbortController();
   const timer = setTimeout(() => deadline.abort(), CONFIRMATION_LOOKUP_MS);
   const signal = AbortSignal.any([context.signal, deadline.signal]);
-  const lapsed = new Promise<never>((_, reject) => {
-    signal.addEventListener('abort', () => reject(new Error('confirmation_lookup_lapsed')), {
-      once: true,
-    });
-  });
+  // A request already gone has no lookups to wait for; the event never fires for it.
+  const lapsed = signal.aborted
+    ? Promise.reject(new Error('confirmation_lookup_lapsed'))
+    : new Promise<never>((_, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('confirmation_lookup_lapsed')), {
+          once: true,
+        });
+      });
   lapsed.catch(() => undefined);
   const within = <T>(work: () => Promise<T>): Promise<T> =>
     signal.aborted ? lapsed : Promise.race([work(), lapsed]);
@@ -1974,12 +2045,13 @@ async function confirmationMessage(
   ]);
   const target =
     event && current
-      ? `the booking on ${current.label}, ${promptRange(event.start, event.end, zone)}`
-      : `event ${promptText(input.event_id, 120)}`;
+      ? `the booking on ${current.label}, ${promptRange(event.start, event.end, zone)}${event.rule ? ' and every time it repeats' : ''}`
+      : // Unread, it may be a series: say so rather than describe one booking.
+        `event ${promptText(input.event_id, 120)} and every time it repeats, if it does`;
   // The event's own title, which an earlier write chose, comes after everything else.
   const titled = event?.title ? ` It is titled ${promptQuoted(event.title)}.` : '';
   if (operation === 'slotlock_delete_event') {
-    return `Delete ${target}${event?.rule ? ' and every time it repeats' : ''}.${titled}`;
+    return `Delete ${target}.${titled}`;
   }
 
   const changes: string[] = [];
@@ -2001,9 +2073,11 @@ async function confirmationMessage(
     input.recurrence_rule !== undefined
       ? input.recurrence_exceptions
       : (input.recurrence_exceptions ?? event?.exceptions);
+  // A new zone moves the series' dates too: the store expands it again in that zone.
   const reshaped =
     input.recurrence_rule !== undefined ||
     input.recurrence_exceptions !== undefined ||
+    input.timezone !== undefined ||
     startsAt !== null ||
     endsAt !== null;
   const seriesStart = startsAt ?? event?.start;
@@ -2020,8 +2094,7 @@ async function confirmationMessage(
       changes.push(`repeats ${promptRule(input.recurrence_rule)}`);
     }
     if (input.recurrence_exceptions !== undefined) {
-      const listed = promptExceptions(promptExceptionList(input.recurrence_exceptions), zone.zone);
-      changes.push(`exceptions to ${listed || 'none'}`);
+      changes.push(`exceptions to ${promptRequestedExceptions(input.recurrence_exceptions, zone)}`);
     }
   }
   const details = ['description', 'location', 'organizer', 'attendees', 'reminders'].filter(

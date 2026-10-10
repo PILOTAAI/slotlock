@@ -255,31 +255,62 @@ const RECUR_RULE_PARTS: ReadonlyMap<string, RegExp> = new Map([
   ['WKST', new RegExp(`^${WEEKDAY}$`)],
 ]);
 
+/** The longest each month can be, February in a leap year. */
+const MONTH_DAYS = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
 /**
  * A recurrence rule as RFC 5545 §3.3.10 writes it, in ical.js's canonical spelling, or `null`.
  * ical.js accepts more than it should: it drops unknown parts, lets a repeated part replace the
  * first, reads `COUNT=3X` as 3 and `COUNT=0` as no count at all. So every part must be one RFC 5545
- * names, appear once and match its grammar, with FREQ present and never UNTIL and COUNT together.
+ * names, appear once and match its grammar, with FREQ present and never UNTIL and COUNT together,
+ * and the parts RFC 5545 forbids for a frequency (BYWEEKNO but YEARLY, BYYEARDAY with DAILY, WEEKLY
+ * or MONTHLY, BYMONTHDAY with WEEKLY, a numbered BYDAY but MONTHLY or YEARLY) are refused.
  */
 export function canonicalRecurrenceRule(rule: string): string | null {
   const text = rule.trim().toUpperCase();
   if (!text || text.length > 2_000) return null;
-  const seen = new Set<string>();
+  const parts = new Map<string, string>();
   for (const part of text.split(';')) {
     const equals = part.indexOf('=');
     const key = part.slice(0, equals);
+    const value = part.slice(equals + 1);
     const pattern = RECUR_RULE_PARTS.get(key);
-    if (equals <= 0 || !pattern || seen.has(key) || !pattern.test(part.slice(equals + 1))) {
-      return null;
-    }
-    seen.add(key);
+    if (equals <= 0 || !pattern || parts.has(key) || !pattern.test(value)) return null;
+    parts.set(key, value);
   }
-  if (!seen.has('FREQ') || (seen.has('UNTIL') && seen.has('COUNT'))) return null;
+  const freq = parts.get('FREQ');
+  if (!freq || (parts.has('UNTIL') && parts.has('COUNT'))) return null;
+  if (parts.has('BYWEEKNO') && freq !== 'YEARLY') return null;
+  if (parts.has('BYYEARDAY') && ['DAILY', 'WEEKLY', 'MONTHLY'].includes(freq)) return null;
+  if (parts.has('BYMONTHDAY') && freq === 'WEEKLY') return null;
+  const numberedDay = /\d/.test(parts.get('BYDAY') ?? '');
+  if (numberedDay && (!['MONTHLY', 'YEARLY'].includes(freq) || parts.has('BYWEEKNO'))) return null;
   try {
     return ICAL.Recur.fromString(text).toString();
   } catch {
     return null;
   }
+}
+
+/**
+ * A rule Slotlock books from an agent: valid as RFC 5545 writes it, daily or less often, and able to
+ * occur. ical.js searches day by day (or faster) for a DAILY, HOURLY, MINUTELY or SECONDLY rule's
+ * next occurrence with no limit, so one that can never occur (`BYMONTH=2;BYMONTHDAY=30`), or a
+ * sub-daily one that rarely does, holds the process forever.
+ */
+export function isBookableRecurrenceRule(rule: string): boolean {
+  const canonical = canonicalRecurrenceRule(rule);
+  if (canonical === null) return false;
+  const parts = new Map(canonical.split(';').map((part) => part.split('=') as [string, string]));
+  const freq = parts.get('FREQ') as string;
+  if (!['DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY'].includes(freq)) return false;
+  const monthDays = parts.get('BYMONTHDAY');
+  if (freq !== 'DAILY' || monthDays === undefined) return true;
+  const months = (parts.get('BYMONTH') ?? '1,2,3,4,5,6,7,8,9,10,11,12').split(',').map(Number);
+  const days = monthDays.split(',').map((day) => Math.abs(Number(day)));
+  return months.some((month) =>
+    days.some((day) => day >= 1 && day <= (MONTH_DAYS[month - 1] ?? 0)),
+  );
 }
 
 function normalizeRecurrence(
