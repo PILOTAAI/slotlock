@@ -31,7 +31,11 @@ request replaces "Unreleased" with the release date.
   personal tenant per GitHub user, and pages to create, rotate and revoke API keys (each shown
   once), add resources and copy the MCP and A2A URLs. Sessions are signed HttpOnly cookies checked
   against `SLOTLOCK_DASHBOARD_USERS` on every request; forms carry CSRF tokens and must come from
-  the server's origin; no inline script runs.
+  the server's origin; no inline script runs. Finished sign-ins, sent forms and signed-out sessions
+  are recorded in Postgres (`createSlotlockDashboardState`; digests only, a day at most), so they
+  hold across servers, and the 100-resource cap is held in the database.
+- `createResource` takes `maxTenantResources`, a per-tenant cap enforced under a database lock, and
+  `withTenant` takes `{ isolation: 'read committed' }`.
 
 ### Fixed for the standalone release
 

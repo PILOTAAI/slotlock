@@ -71,6 +71,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_CALENDAR_WINDOW_MS = SLOTLOCK_CALENDAR_HORIZON_DAYS * DAY_MS;
 const MAX_EVENT_DURATION_MS = SLOTLOCK_MAX_EVENT_DURATION_DAYS * DAY_MS;
 const MAX_RESOURCE_LIST_LIMIT = 1_000;
+/** Highest per-tenant resource cap `createResource` accepts. */
+const MAX_TENANT_RESOURCE_LIMIT = 100_000;
 const MAX_CALENDAR_LIST_LIMIT = 1_000;
 const MAX_FREE_BUSY_INTERVALS = 10_000;
 const MAX_COVERAGE_SOURCES = 64;
@@ -108,12 +110,37 @@ export function calendarEventRollingHorizon(now = new Date()): Interval {
 export type SlotlockSql = Sql | TransactionSql;
 type StoreSql = SlotlockSql;
 
+/**
+ * Run `callback` in a transaction: a new one on a client (READ COMMITTED when asked, else the role's
+ * default), or a savepoint inside the caller's, whose isolation cannot change.
+ */
 async function inTransaction<T>(
   executor: StoreSql,
   callback: (tx: TransactionSql) => Promise<T>,
+  isolation?: 'read committed',
 ): Promise<T> {
-  if ('begin' in executor) return (await executor.begin(callback)) as T;
+  if ('begin' in executor) {
+    if (isolation === 'read committed') {
+      return (await executor.begin('isolation level read committed', callback)) as T;
+    }
+    return (await executor.begin(callback)) as T;
+  }
   return (await executor.savepoint(callback)) as T;
+}
+
+function invalidIsolationError(): Error & { code: 'invalid_transaction_isolation' } {
+  return Object.assign(
+    new Error(
+      'Slotlock needs a READ COMMITTED transaction here, so its lock-then-count check sees every row committed before the lock',
+    ),
+    { code: 'invalid_transaction_isolation' as const },
+  );
+}
+
+async function assertReadCommitted(tx: TransactionSql): Promise<void> {
+  const [row] = await tx<{ level: string }[]>`
+    SELECT current_setting('transaction_isolation') AS level`;
+  if (row?.level !== 'read committed') throw invalidIsolationError();
 }
 
 /**
@@ -797,6 +824,51 @@ function pgCode(err: unknown): string | undefined {
   return undefined;
 }
 
+async function upsertResource(
+  executor: StoreSql,
+  params: { externalRef?: string; tenantRef?: string; timezone?: string },
+): Promise<SlotlockResource> {
+  type ResourceIdentityRow = {
+    id: string;
+    external_ref: string | null;
+    tenant_ref: string | null;
+    timezone: string;
+  };
+  let rows: ResourceIdentityRow[];
+  if (params.tenantRef !== undefined && params.externalRef !== undefined) {
+    rows = await executor<ResourceIdentityRow[]>`
+      INSERT INTO slotlock.resources (external_ref, tenant_ref, timezone)
+      VALUES (${params.externalRef}, ${params.tenantRef}, ${params.timezone ?? 'UTC'})
+      ON CONFLICT (tenant_ref, external_ref)
+        WHERE tenant_ref IS NOT NULL AND external_ref IS NOT NULL
+      DO UPDATE SET timezone = EXCLUDED.timezone
+      RETURNING id, external_ref, tenant_ref, timezone`;
+  } else if (params.externalRef !== undefined) {
+    rows = await executor<ResourceIdentityRow[]>`
+      INSERT INTO slotlock.resources (external_ref, tenant_ref, timezone)
+      VALUES (${params.externalRef}, NULL, ${params.timezone ?? 'UTC'})
+      ON CONFLICT (external_ref)
+        WHERE tenant_ref IS NULL AND external_ref IS NOT NULL
+      DO UPDATE SET external_ref = EXCLUDED.external_ref
+      RETURNING id, external_ref, tenant_ref, timezone`;
+  } else {
+    rows = await executor<ResourceIdentityRow[]>`
+      INSERT INTO slotlock.resources (external_ref, tenant_ref, timezone)
+      VALUES (NULL, NULL, ${params.timezone ?? 'UTC'})
+      RETURNING id, external_ref, tenant_ref, timezone`;
+  }
+  const row = rows[0];
+  if (!row) {
+    throw new Error('slotlock: resource upsert returned no row');
+  }
+  return {
+    id: row.id,
+    externalRef: row.external_ref,
+    tenantRef: row.tenant_ref,
+    timezone: row.timezone,
+  };
+}
+
 export interface SlotlockStore {
   /**
    * Apply the Slotlock DDL (idempotent). Owns the `slotlock` schema on the connected DB. Refuses
@@ -825,16 +897,34 @@ export interface SlotlockStore {
    * detected until it runs again, and it is not exhaustive (SECURITY.md lists what it does not read).
    */
   grantApplicationRole(role: string): Promise<void>;
-  /** Run store operations with one transaction-local tenant context on the same connection. */
-  withTenant<T>(tenantRef: string, callback: (store: SlotlockTenantStore) => Promise<T>): Promise<T>;
+  /**
+   * Run store operations with one transaction-local tenant context on the same connection. With
+   * `isolation: 'read committed'` the transaction is READ COMMITTED whatever the role's default (a
+   * capped `createResource` needs it); inside a caller's transaction of another level it refuses
+   * (`invalid_transaction_isolation`).
+   */
+  withTenant<T>(
+    tenantRef: string,
+    callback: (store: SlotlockTenantStore) => Promise<T>,
+    options?: { isolation?: 'read committed' },
+  ): Promise<T>;
   /**
    * INVARIANT (erasure completeness): a tenant integration must use a stable, erasable business
    * identifier for externalRef and include this schema in its own data-erasure workflow.
+   *
+   * With `maxTenantResources` (1-100,000, tenant-owned resources only) a new resource is refused
+   * (`resource_limit_reached`) once the tenant has that many; an existing `externalRef` is still
+   * updated. Capped creates for one tenant run one at a time under a database lock, so racing ones
+   * on any number of servers stop at the cap. The count needs READ COMMITTED: a capped create opens
+   * one itself, and inside a caller's transaction of another level it refuses
+   * (`invalid_transaction_isolation`). Uncapped creates do not wait for the lock and are not
+   * counted against a cap until they commit.
    */
   createResource(params: {
     externalRef?: string;
     tenantRef?: string;
     timezone?: string;
+    maxTenantResources?: number;
   }): Promise<SlotlockResource>;
   /** Resolve one tenant-owned resource without revealing another tenant's matching id. */
   getResource(params: { tenantRef: string; id: string }): Promise<SlotlockResource | null>;
@@ -1236,13 +1326,16 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
       );
     },
 
-    async withTenant(tenantRef, callback) {
+    async withTenant(tenantRef, callback, options) {
       if (!isValidIdentity(tenantRef)) {
         throw Object.assign(new Error('Slotlock tenant reference must be 1-500 UTF-8 bytes'), {
           code: 'invalid_tenant_ref' as const,
         });
       }
+      const isolation = options?.isolation;
+      if (isolation !== undefined && isolation !== 'read committed') throw invalidIsolationError();
       return inTransaction(sql, async (tx) => {
+        if (isolation !== undefined) await assertReadCommitted(tx);
         const previous = await tx<{ value: string | null }[]>`
           SELECT current_setting(${configuredTenantSetting}, true) AS value`;
         await tx`SELECT set_config(${configuredTenantSetting}, ${tenantRef}, true)`;
@@ -1257,50 +1350,52 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
         } finally {
           await tx`SELECT set_config(${configuredTenantSetting}, ${previous[0]?.value ?? ''}, true)`;
         }
-      });
+      }, isolation);
     },
 
     async createResource(params) {
       assertValidResourceInput(params);
-      type ResourceIdentityRow = {
-        id: string;
-        external_ref: string | null;
-        tenant_ref: string | null;
-        timezone: string;
-      };
-      let rows: ResourceIdentityRow[];
-      if (params.tenantRef !== undefined && params.externalRef !== undefined) {
-        rows = await sql<ResourceIdentityRow[]>`
-          INSERT INTO slotlock.resources (external_ref, tenant_ref, timezone)
-          VALUES (${params.externalRef}, ${params.tenantRef}, ${params.timezone ?? 'UTC'})
-          ON CONFLICT (tenant_ref, external_ref)
-            WHERE tenant_ref IS NOT NULL AND external_ref IS NOT NULL
-          DO UPDATE SET timezone = EXCLUDED.timezone
-          RETURNING id, external_ref, tenant_ref, timezone`;
-      } else if (params.externalRef !== undefined) {
-        rows = await sql<ResourceIdentityRow[]>`
-          INSERT INTO slotlock.resources (external_ref, tenant_ref, timezone)
-          VALUES (${params.externalRef}, NULL, ${params.timezone ?? 'UTC'})
-          ON CONFLICT (external_ref)
-            WHERE tenant_ref IS NULL AND external_ref IS NOT NULL
-          DO UPDATE SET external_ref = EXCLUDED.external_ref
-          RETURNING id, external_ref, tenant_ref, timezone`;
-      } else {
-        rows = await sql<ResourceIdentityRow[]>`
-          INSERT INTO slotlock.resources (external_ref, tenant_ref, timezone)
-          VALUES (NULL, NULL, ${params.timezone ?? 'UTC'})
-          RETURNING id, external_ref, tenant_ref, timezone`;
+      const max = params.maxTenantResources;
+      if (max === undefined) return upsertResource(sql, params);
+      if (
+        !Number.isSafeInteger(max) ||
+        max < 1 ||
+        max > MAX_TENANT_RESOURCE_LIMIT ||
+        params.tenantRef === undefined ||
+        params.externalRef === undefined
+      ) {
+        throw Object.assign(
+          new Error(
+            `Slotlock maxTenantResources must be a whole number from 1 to ${MAX_TENANT_RESOURCE_LIMIT}, for a tenant-owned resource`,
+          ),
+          { code: 'invalid_resource_limit' as const },
+        );
       }
-      const row = rows[0];
-      if (!row) {
-        throw new Error('slotlock: resource upsert returned no row');
-      }
-      return {
-        id: row.id,
-        externalRef: row.external_ref,
-        tenantRef: row.tenant_ref,
-        timezone: row.timezone,
-      };
+      const { tenantRef, externalRef } = params;
+      return inTransaction(
+        sql,
+        async (tx) => {
+          await assertReadCommitted(tx);
+          // An object, so the key never equals a [tenantRef, externalRef] identity lock's.
+          await tx`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify({ resourceCount: tenantRef })}, 0))`;
+          // READ COMMITTED: each statement below sees every create committed before the lock.
+          const known = await tx<{ id: string }[]>`
+            SELECT id FROM slotlock.resources
+             WHERE tenant_ref = ${tenantRef} AND external_ref = ${externalRef}`;
+          if (known.length === 0) {
+            const [counted] = await tx<{ count: string }[]>`
+              SELECT count(*) AS count FROM slotlock.resources WHERE tenant_ref = ${tenantRef}`;
+            if (Number(counted?.count ?? 0) >= max) {
+              throw Object.assign(
+                new Error(`Slotlock tenant already has ${max} resources, the most allowed here`),
+                { code: 'resource_limit_reached' as const, limit: max },
+              );
+            }
+          }
+          return upsertResource(tx, params);
+        },
+        'read committed',
+      );
     },
 
     async getResource(params) {

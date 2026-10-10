@@ -6,7 +6,11 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createSlotlockApiKeyStore } from '../api-keys.js';
-import { createSlotlockDashboard, createSlotlockDashboardResources } from '../dashboard.js';
+import {
+  createSlotlockDashboard,
+  createSlotlockDashboardResources,
+  createSlotlockDashboardState,
+} from '../dashboard.js';
 import { createSlotlockStore } from '../store.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
@@ -54,6 +58,7 @@ describe.skipIf(!url)('dashboard (real Postgres)', () => {
       allowedUsers: [String(githubId)],
       keys,
       resources: createSlotlockDashboardResources(store),
+      state: createSlotlockDashboardState(application),
       fetch: async (input) =>
         String(input).endsWith('/access_token')
           ? Response.json({ access_token: 'gho_fake' })

@@ -128,6 +128,30 @@ export const SLOTLOCK_API_KEY_FUNCTIONS = Object.freeze([
   'slotlock.erase_api_keys(text)',
 ] as const);
 
+/**
+ * The table behind the dashboard's shared records (dashboard.ts). No role but its owner holds a
+ * right on it; it is reached only through SLOTLOCK_DASHBOARD_FUNCTIONS.
+ */
+export const SLOTLOCK_DASHBOARD_TABLES = Object.freeze(['dashboard_tokens'] as const);
+
+/** The SECURITY DEFINER functions through which the serving role reaches the dashboard's records. */
+export const SLOTLOCK_DASHBOARD_FUNCTIONS = Object.freeze([
+  'slotlock.use_dashboard_token(text, bytea, timestamptz)',
+  'slotlock.dashboard_token_used(text, bytea)',
+] as const);
+
+/** Every SECURITY DEFINER function the serving role may execute, by signature. */
+export const SLOTLOCK_DEFINER_FUNCTIONS = Object.freeze([
+  ...SLOTLOCK_API_KEY_FUNCTIONS,
+  ...SLOTLOCK_DASHBOARD_FUNCTIONS,
+]);
+
+/** Tables no role but their owner reads or writes, reached only through SLOTLOCK_DEFINER_FUNCTIONS. */
+export const SLOTLOCK_DEFINER_TABLES = Object.freeze([
+  ...SLOTLOCK_API_KEY_TABLES,
+  ...SLOTLOCK_DASHBOARD_TABLES,
+]);
+
 const API_KEY_COLUMNS = `key_id uuid,
   key_tenant_ref text,
   key_name text,
@@ -361,6 +385,80 @@ REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[5]} FROM PUBLIC;
 `;
 
 // btree_gist is created in slotlock when it is missing; one installed elsewhere stays where it is.
+// The dashboard's records (dashboard.ts), shared by every server on this database: a finished sign-in
+// (its callback works once), a sent form (it runs once) and a signed-out session (a copied cookie
+// stays out). Each is a SHA-256 digest of a value only the dashboard's sealed cookies and pages
+// carry, kept until that cookie or form expires and never past a day (plus five minutes for clock
+// skew between the application and the database). Nothing here names a tenant or a person. Row-level
+// security is enabled with no policy and no role is granted anything, so the serving role reaches
+// the table only through the two functions below.
+const SLOTLOCK_DASHBOARD_DDL = `
+CREATE TABLE IF NOT EXISTS slotlock.dashboard_tokens (
+  kind text NOT NULL,
+  token_hash bytea NOT NULL,
+  expires_at timestamptz NOT NULL,
+  CONSTRAINT slotlock_dashboard_tokens_pkey PRIMARY KEY (kind, token_hash),
+  CONSTRAINT slotlock_dashboard_tokens_kind_valid CHECK (kind IN ('sign_in', 'form', 'ended_session')),
+  CONSTRAINT slotlock_dashboard_tokens_hash_valid CHECK (octet_length(token_hash) = 32)
+);
+CREATE INDEX IF NOT EXISTS slotlock_dashboard_tokens_expiry_idx
+  ON slotlock.dashboard_tokens (expires_at);
+ALTER TABLE slotlock.dashboard_tokens ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.dashboard_tokens FROM PUBLIC;
+
+-- True the first time a token is recorded, false while it stays recorded. Racing calls for one token
+-- meet at the primary key: the second waits for the first to commit, then finds its row. An expired
+-- record counts as absent and is replaced. Each call deletes up to 100 expired rows, so the table
+-- holds what is live and little more.
+CREATE OR REPLACE FUNCTION slotlock.use_dashboard_token(
+  requested_kind text,
+  requested_hash bytea,
+  requested_expires_at timestamptz
+)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_use_dashboard_token$
+DECLARE
+  recorded boolean;
+BEGIN
+  DELETE FROM slotlock.dashboard_tokens stale
+   WHERE (stale.kind, stale.token_hash) IN (
+     SELECT expired.kind, expired.token_hash
+       FROM slotlock.dashboard_tokens expired
+      WHERE expired.expires_at <= now()
+      LIMIT 100
+        FOR UPDATE SKIP LOCKED);
+  INSERT INTO slotlock.dashboard_tokens AS used (kind, token_hash, expires_at)
+  VALUES (requested_kind, requested_hash,
+          LEAST(requested_expires_at, now() + interval '1 day') + interval '5 minutes')
+  ON CONFLICT (kind, token_hash) DO UPDATE
+     SET expires_at = EXCLUDED.expires_at
+   WHERE used.expires_at <= now()
+  RETURNING true INTO recorded;
+  RETURN coalesce(recorded, false);
+END
+$slotlock_use_dashboard_token$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[0]} FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION slotlock.dashboard_token_used(requested_kind text, requested_hash bytea)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_dashboard_token_used$
+  SELECT EXISTS (
+    SELECT 1 FROM slotlock.dashboard_tokens used
+     WHERE used.kind = requested_kind
+       AND used.token_hash = requested_hash
+       AND used.expires_at > now());
+$slotlock_dashboard_token_used$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[1]} FROM PUBLIC;
+`;
+
 export const SLOTLOCK_CORE_DDL: string = `
 ${DEPLOYMENT_SEARCH_PATH_PIN}CREATE SCHEMA IF NOT EXISTS slotlock;
 ${SLOTLOCK_SCHEMA_CONTROL_CHECK}CREATE EXTENSION IF NOT EXISTS btree_gist SCHEMA slotlock;
@@ -1276,7 +1374,7 @@ CREATE INDEX IF NOT EXISTS slotlock_calendar_event_occurrences_resource_time_idx
   ON slotlock.calendar_event_occurrences (tenant_ref, starts_at, ends_at);
 CREATE INDEX IF NOT EXISTS slotlock_reservations_calendar_event_idx
   ON slotlock.reservations (calendar_event_id) WHERE calendar_event_id IS NOT NULL;
-${SLOTLOCK_API_KEYS_DDL}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
+${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_DASHBOARD_DDL}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
 
 export const SLOTLOCK_TENANT_CONTEXT_SETTING = 'slotlock.tenant_ref';
 
@@ -1306,8 +1404,8 @@ const RESERVED_ROLE_NAMES = new Set(['public', 'current_role', 'current_user', '
 
 /**
  * Build the grants for the application role: USAGE on the `slotlock` schema, DML on the store's
- * tables and EXECUTE on the API key functions. Nothing else: no ownership, DDL, sequence,
- * RLS-contract or API key table access. The role must not be
+ * tables and EXECUTE on the API key and dashboard functions. Nothing else: no ownership, DDL,
+ * sequence, RLS-contract, API key or dashboard table access. The role must not be
  * able to leave forced RLS, itself or through a role it belongs to (`grantApplicationRole` refuses
  * the known ways out; these statements check nothing). Rerun after every `applySchema()`, since a
  * release may add a table.
@@ -1322,7 +1420,7 @@ export function createSlotlockApplicationRoleGrantsDdl(role: string): string {
   const tables = SLOTLOCK_TENANT_TABLES.map((table) => `slotlock.${table}`).join(', ');
   return `GRANT USAGE ON SCHEMA slotlock TO "${role}";
 GRANT SELECT, INSERT, UPDATE, DELETE ON ${tables} TO "${role}";
-GRANT EXECUTE ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS.join(', ')} TO "${role}";
+GRANT EXECUTE ON FUNCTION ${SLOTLOCK_DEFINER_FUNCTIONS.join(', ')} TO "${role}";
 `;
 }
 

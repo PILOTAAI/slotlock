@@ -24,7 +24,11 @@ import {
   createSlotlockApiKeyStore,
   slotlockBearerCredential,
 } from './api-keys.js';
-import { createSlotlockDashboard, createSlotlockDashboardResources } from './dashboard.js';
+import {
+  createSlotlockDashboard,
+  createSlotlockDashboardResources,
+  createSlotlockDashboardState,
+} from './dashboard.js';
 import {
   type SlotlockNodeServerAddress,
   type SlotlockNodeServerCloseResult,
@@ -669,6 +673,7 @@ export async function startSlotlockServer(
             allowedUsers: config.dashboard.allowedUsers,
             keys: createSlotlockApiKeyStore(sql),
             resources: createSlotlockDashboardResources(store),
+            state: createSlotlockDashboardState(sql),
             availability: config.availability,
             onError: (error) => log.error('dashboard_error', describeError(error)),
           });

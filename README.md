@@ -145,13 +145,16 @@ resources, which is how the hosted Slotlock hands out keys:
   pages run no inline script, under a Content-Security-Policy that allows only their own files.
 - Give the dashboard an origin of its own (`https://slotlock.example.com`, not a path beside other
   apps): its cookies are host-wide, so any other app on the same origin could read them.
-- Each instance remembers, in bounded memory, sign-ins it finished (a callback works once), sessions
-  signed out (a copied cookie stays out) and forms sent (a reload does not create or rotate a key
-  twice). Run one instance, or route each person to one, for these to hold across instances; the
-  signed cookies, the allowlist and CSRF hold everywhere.
-- A person may add 100 resources. Bookable hours come from `SLOTLOCK_AVAILABILITY` and apply to every
-  tenant's resources. Rate-limit `/dashboard/sign-in` and `/dashboard/callback` at your proxy: each
-  callback costs a call to GitHub, and an instance runs at most eight at once.
+- Finished sign-ins (a callback works once), signed-out sessions (a copied cookie stays out) and sent
+  forms (a reload does not create or rotate a key twice) are recorded in Postgres, so they hold on
+  every server that shares the database, behind any load balancer. Each is a SHA-256 digest with
+  nothing about the person, kept until its cookie or form expires and never longer than a day. The
+  server role reaches them only through two SECURITY DEFINER functions.
+- A person may add 100 resources. The database holds the cap, so adds racing on any number of servers
+  stop at 100; a resource they already have can still change time zone. Bookable hours come from
+  `SLOTLOCK_AVAILABILITY` and apply to every tenant's resources.
+- Rate-limit `/dashboard/sign-in` and `/dashboard/callback` at your proxy: each callback costs a
+  database write and a call to GitHub, and an instance runs at most eight at once.
 
 ## Connect an MCP client
 
@@ -356,6 +359,15 @@ export async function bookHandover(store: SlotlockStore, tenantRef: string) {
 `withTenant` validates the tenant, sets the context transaction-locally on the one connection every
 callback call uses, supports nested savepoints, and restores the previous context. Do not issue a
 standalone `set_config(..., true)` through a pool: its transaction ends before the next call.
+`withTenant(tenantRef, callback, { isolation: 'read committed' })` runs the callback in a READ
+COMMITTED transaction whatever the role's default, and refuses inside a caller's transaction of
+another level.
+
+`createResource({ ..., maxTenantResources })` refuses a new resource (`resource_limit_reached`) once
+the tenant has that many (1-100,000); an existing `externalRef` is still updated. Capped creates for
+one tenant take a database lock and count under READ COMMITTED, so racing ones stop at the cap on
+any number of servers; inside a REPEATABLE READ or SERIALIZABLE transaction they refuse
+(`invalid_transaction_isolation`). Uncapped creates take no lock.
 
 Writing rules:
 
@@ -931,7 +943,7 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
   occurrences, commands and coverage rows in your tenant-erasure workflow and delete order, and
   delete the tenant's API keys with `createSlotlockApiKeyStore(sql).erase({ tenantRef })`. Only
   their SHA-256 digests stay, with nothing about the tenant, so an erased key is never accepted
-  again.
+  again. The dashboard's records hold no tenant or person and expire within a day.
 
 ### Production checklist
 
