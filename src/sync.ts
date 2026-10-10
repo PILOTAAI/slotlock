@@ -235,6 +235,53 @@ function normalizeExceptions(
   });
 }
 
+const WEEKDAY = '(?:SU|MO|TU|WE|TH|FR|SA)';
+const list = (item: string) => new RegExp(`^${item}(?:,${item})*$`);
+/** RFC 5545 §3.3.10, one pattern per rule part. */
+const RECUR_RULE_PARTS: ReadonlyMap<string, RegExp> = new Map([
+  ['FREQ', /^(?:SECONDLY|MINUTELY|HOURLY|DAILY|WEEKLY|MONTHLY|YEARLY)$/],
+  ['UNTIL', /^\d{8}(?:T\d{6}Z?)?$/],
+  ['COUNT', /^[1-9]\d{0,5}$/],
+  ['INTERVAL', /^[1-9]\d{0,5}$/],
+  ['BYSECOND', list('\\d{1,2}')],
+  ['BYMINUTE', list('\\d{1,2}')],
+  ['BYHOUR', list('\\d{1,2}')],
+  ['BYDAY', list(`(?:[+-]?\\d{1,2})?${WEEKDAY}`)],
+  ['BYMONTHDAY', list('[+-]?\\d{1,2}')],
+  ['BYYEARDAY', list('[+-]?\\d{1,3}')],
+  ['BYWEEKNO', list('[+-]?\\d{1,2}')],
+  ['BYMONTH', list('\\d{1,2}')],
+  ['BYSETPOS', list('[+-]?\\d{1,3}')],
+  ['WKST', new RegExp(`^${WEEKDAY}$`)],
+]);
+
+/**
+ * A recurrence rule as RFC 5545 §3.3.10 writes it, in ical.js's canonical spelling, or `null`.
+ * ical.js accepts more than it should: it drops unknown parts, lets a repeated part replace the
+ * first, reads `COUNT=3X` as 3 and `COUNT=0` as no count at all. So every part must be one RFC 5545
+ * names, appear once and match its grammar, with FREQ present and never UNTIL and COUNT together.
+ */
+export function canonicalRecurrenceRule(rule: string): string | null {
+  const text = rule.trim().toUpperCase();
+  if (!text || text.length > 2_000) return null;
+  const seen = new Set<string>();
+  for (const part of text.split(';')) {
+    const equals = part.indexOf('=');
+    const key = part.slice(0, equals);
+    const pattern = RECUR_RULE_PARTS.get(key);
+    if (equals <= 0 || !pattern || seen.has(key) || !pattern.test(part.slice(equals + 1))) {
+      return null;
+    }
+    seen.add(key);
+  }
+  if (!seen.has('FREQ') || (seen.has('UNTIL') && seen.has('COUNT'))) return null;
+  try {
+    return ICAL.Recur.fromString(text).toString();
+  } catch {
+    return null;
+  }
+}
+
 function normalizeRecurrence(
   input: CalendarRecurrence | undefined,
 ): CalendarRecurrence | undefined {

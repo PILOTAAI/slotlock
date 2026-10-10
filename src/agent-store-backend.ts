@@ -311,7 +311,9 @@ export function createSlotlockStoreAgentBackend(
           tenantRef: context.principal.tenantRef,
           id: resourceId,
         });
-        return resource?.externalRef ?? null;
+        return resource
+          ? { name: resource.externalRef ?? null, timezone: resource.timezone }
+          : null;
       });
     },
 

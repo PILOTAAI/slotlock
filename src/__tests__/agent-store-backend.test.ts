@@ -108,7 +108,10 @@ describe('Slotlock store-backed agent server adapter', () => {
 
   it("names a resource for a confirmation question by its reference, inside the caller's tenant", async () => {
     const backend = createSlotlockStoreAgentBackend(store, { availabilityRules });
-    expect(await backend.describeResource?.(context, resource.id)).toBe('vehicle-1');
+    expect(await backend.describeResource?.(context, resource.id)).toEqual({
+      name: 'vehicle-1',
+      timezone: 'Europe/London',
+    });
     expect(getResource).toHaveBeenCalledWith({ tenantRef, id: resource.id });
     expect(withTenant).toHaveBeenCalledWith(tenantRef, expect.any(Function));
 

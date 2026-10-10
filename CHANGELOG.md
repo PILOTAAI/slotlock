@@ -42,12 +42,21 @@ request replaces "Unreleased" with the release date.
 
 ### Fixed for the standalone release
 
-- A write's confirmation question names the resource by its own reference and an event by its
-  title and current time, instead of by id, and puts those facts before the agent's own text,
-  whose double quotes can no longer close the quotes around it: a crafted title could make the
-  question show a different time or resource from the one being booked. Embedders' backends may
-  add `describeResource` for the names; the store backend has it. The lookups run as the reads
-  they are, only when the caller's scopes and `authorize` allow them.
+- A write's confirmation question could show a different time, resource or number of bookings from
+  the ones the write makes. It now:
+  - names the resource by its own reference and shows times in the resource's zone (through the
+    new optional backend method `describeResource`, which the store backend has), and names an
+    event by its current time; anything else carries its UTC offset;
+  - puts the agent's own text, and an event's stored title, after every fact, with anything that
+    reads as a double quote (curly, full-width, primes) turned into a single one;
+  - describes a repeating booking from the store's own expansion: how many times it books, the
+    first and the last, and every moved occurrence (a moved or padded rule could book dates the
+    question never named);
+  - shows seconds when a time has them, and bounds each part, so no change is cut off the end;
+  - reads only what the caller's scopes and `authorize` allow, and gives up on lookups after 2
+    seconds, so a slow backend delays the question but cannot withhold it.
+- Agents may only send recurrence rules RFC 5545 allows: known parts, each once, with valid
+  values. ical.js read `COUNT=0` as no end, `COUNT=3X` as 3, and a repeated `FREQ` as the last one.
 - The sealed confirmation state compares its MAC as text: three other spellings of the same MAC
   (the last base64url character's two spare bits) were accepted.
 - `slotlock_list_resources` with a `cursor` that is not a resource id answers the `invalid_cursor`
