@@ -91,17 +91,26 @@ request replaces "Unreleased" with the release date.
   `FREQ=DAILY;INTERVAL=7;BYDAY=TU` from a Monday, no longer freezes the process. Before, ical.js
   2.2.1 searched for its next occurrence without limit, whether the rule came from a feed
   (`parseICalendarChanges`), a write (`putCalendarEvent`), a library call
-  (`expandCalendarEventOccurrences`) or a stored series being rolled. Each expansion now has these
-  limits, and a rule that needs more is refused as `invalid_icalendar` (`invalid_event` on a
-  write):
-  - 50,000 search steps per feed or event;
-  - one second of searching per feed, a quarter of a second per event;
-  - for SECONDLY to WEEKLY rules, a step may move about a century at most (36,600 days), because
-    ical.js walks each step a day at a time.
+  (`expandCalendarEventOccurrences`) or a stored series being rolled. The same held for a feed's own
+  time zone: ical.js expands a VTIMEZONE's rule to read a time in a zone Intl does not know, so one
+  such rule froze `parseICalendarChanges` or `parseTrustedICalendarEvents` on the first event,
+  repeating or not. A huge `DURATION` did the same with no rule at all, since ical.js adds a span to
+  a time a month at a time. Reading or expanding a calendar now has these limits, and one that
+  needs more is refused as `invalid_icalendar` (`invalid_event` on a write):
+  - a feed, and a stored series as maintenance rolls it: 50,000 search steps (its time zones
+    included) and one second of searching and reading times;
+  - one event as it is written or asked about (`putCalendarEvent`,
+    `expandCalendarEventOccurrences`): half of that, so a daily or rarer series written today keeps
+    rolling for decades as its search grows;
+  - a SECONDLY to WEEKLY step, a `DURATION`, a DTEND after its DTSTART, or an occurrence moved by an
+    exception: about a century at most (36,600 days);
+  - 1,000 RDATE and EXDATE values per event.
 
-  `rollCalendarEventHorizon` skips a stored series refused this way and counts it in the new
-  `refused` field. Its old coverage stays, and the series after it still roll. The maintenance
-  example sums `refused`.
+  `rollCalendarEventHorizon` skips a stored series that goes past these limits, which includes a
+  daily series about 11 years after its start (4,000 occurrences). It counts the series in the new
+  `refused` field and lists it in `refusedEventIds`, keeps its old coverage, and still rolls the
+  series after it. Before, such a series made every roll for its tenant throw. A series Slotlock
+  cannot read at all still fails the roll. The maintenance example sums `refused`.
 
 ### Added
 

@@ -269,6 +269,8 @@ export interface CalendarHorizonRollResult {
    * occurs again, or almost never); their previous coverage remains intact.
    */
   refused: number;
+  /** The ids of those masters, to find and fix them. */
+  refusedEventIds: string[];
   /** True when more due masters remain beyond this bounded batch. */
   hasMore: boolean;
 }

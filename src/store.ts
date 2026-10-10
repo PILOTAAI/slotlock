@@ -14,7 +14,9 @@ import { findNextAvailable, mergeIntervals } from './engine.js';
 import { expandRules } from './rules.js';
 import {
   CalendarContractError,
+  CalendarExpansionLimitError,
   expandCalendarEventOccurrences,
+  expandStoredCalendarEventOccurrences,
   normalizeCalendarEventContent,
 } from './sync.js';
 import type {
@@ -2260,6 +2262,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
       let extended = 0;
       let conflicts = 0;
       let refused = 0;
+      const refusedEventIds: string[] = [];
 
       for (const candidate of due) {
         for (let attempt = 1; attempt <= 2; attempt++) {
@@ -2283,7 +2286,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
               }
               const childMap = await loadCalendarEventChildren(tx, [row.id]);
               const event = toCalendarEvent(row, childMap.get(row.id));
-              const occurrences = expandCalendarEventOccurrences(event, window);
+              const occurrences = expandStoredCalendarEventOccurrences(event, window);
               await replaceCalendarEventOccurrences(tx, {
                 tenantRef: params.tenantRef,
                 eventId: row.id,
@@ -2302,11 +2305,12 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
             if (changed) extended += 1;
             break;
           } catch (error) {
-            if (error instanceof CalendarContractError) {
-              // Its rule now takes more than the expansion budget (it is expanded from its start
-              // each time, so the search grows as the window moves). Nothing was written; its old
-              // coverage stays, and the masters after it still roll.
+            if (error instanceof CalendarExpansionLimitError) {
+              // It now takes more than Slotlock expands (it is expanded from its start each time,
+              // so the search grows as the window moves). Nothing was written; its old coverage
+              // stays, and the masters after it still roll.
               refused += 1;
+              refusedEventIds.push(candidate.id);
               break;
             }
             const code = pgCode(error);
@@ -2332,6 +2336,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
         extended,
         conflicts,
         refused,
+        refusedEventIds,
         hasMore: candidates.length > limit,
       };
     },

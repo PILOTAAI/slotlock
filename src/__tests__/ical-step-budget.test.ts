@@ -5,7 +5,13 @@
 // call or the store.
 import ICAL from 'ical.js';
 import { describe, expect, it } from 'vitest';
-import { expandCalendarEventOccurrences, parseICalendarChanges } from '../sync.js';
+import {
+  CalendarExpansionLimitError,
+  expandCalendarEventOccurrences,
+  expandStoredCalendarEventOccurrences,
+  parseICalendarChanges,
+  parseTrustedICalendarEvents,
+} from '../sync.js';
 
 const WINDOW = {
   start: new Date('2026-10-01T00:00:00Z'),
@@ -168,8 +174,8 @@ describe('the step budget on recurrence expansion', () => {
   });
 
   // These take few steps but slow ones, so the count alone would let them run for minutes. The time
-  // limit stops them: a second for a feed, a quarter of one for a single event (a stored series,
-  // or an agent's).
+  // limit stops them: a second for a feed (and a stored series as the roll expands it), half of one
+  // for a single event as it is written or asked about.
   const slow = [
     // A step of a century, the most allowed, walked a day at a time: about 4 ms each.
     ['29 February a century at a time', 'FREQ=DAILY;INTERVAL=36600;BYMONTH=2;BYMONTHDAY=29'],
@@ -189,7 +195,7 @@ describe('the step budget on recurrence expansion', () => {
     expect(ms).toBeLessThan(2_500);
   });
 
-  it.each(slow)('refuses %s as one event after a quarter of a second', (_name, rule) => {
+  it.each(slow)('refuses %s as one event after half a second', (_name, rule) => {
     const { ms, error } = timed(() =>
       expandCalendarEventOccurrences(
         {
@@ -203,8 +209,119 @@ describe('the step budget on recurrence expansion', () => {
       ),
     );
     expect(error).toEqual(refused);
-    expect(ms).toBeGreaterThanOrEqual(250);
+    expect(ms).toBeGreaterThanOrEqual(500);
+    // The time limit is wall-clock time, so it stops here however loaded the machine is.
     expect(ms).toBeLessThan(1_000);
+  });
+
+  it('gives one event half the steps of a feed, so a series written today keeps rolling', () => {
+    // A yearly date written as a daily rule from 1950: about 28,400 steps, over the 25,000 one event
+    // may take as it is written, within the 50,000 the roll expands a stored series with.
+    const series = {
+      start: new Date('1950-01-01T09:00:00Z'),
+      end: new Date('1950-01-01T10:00:00Z'),
+      timezone: 'UTC',
+      summary: 'Busy',
+      recurrence: { rrule: 'FREQ=DAILY;BYMONTH=1;BYMONTHDAY=1' },
+    };
+    expect(timed(() => expandCalendarEventOccurrences(series, WINDOW)).error).toEqual(refused);
+    expect(expandStoredCalendarEventOccurrences(series, WINDOW)).toHaveLength(1);
+  });
+
+  describe('spans and date lists', () => {
+    // ical.js adds a span to a time a month at a time (Time#adjust) and sorts RDATE and EXDATE
+    // values in one by one, so these are bounded before anything reads an end.
+    const single = (lines: string[]) =>
+      [
+        'BEGIN:VCALENDAR',
+        'VERSION:2.0',
+        'PRODID:-//Slotlock tests//EN',
+        'BEGIN:VEVENT',
+        'UID:span',
+        'DTSTAMP:20261010T000000Z',
+        'SUMMARY:Handover',
+        ...lines,
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n');
+    // Every other day from 3 November: ical.js gives up after 500 excluded occurrences in a row.
+    const days = (count: number) =>
+      Array.from({ length: count }, (_, day) =>
+        new Date(Date.UTC(2026, 10, 3 + 2 * day, 9))
+          .toISOString()
+          .replace(/[-:]/g, '')
+          .replace('.000', ''),
+      ).join(',');
+    const start = 'DTSTART:20261102T090000Z';
+
+    it.each([
+      ['a DURATION of a billion weeks', [start, 'DURATION:P999999999W']],
+      ['a DURATION of 10^20 seconds', [start, 'DURATION:PT99999999999999999999S']],
+      ['a negative DURATION of a billion weeks', [start, 'DURATION:-P999999999W']],
+      [
+        'a repeating DURATION of 10^15 seconds',
+        [start, 'DURATION:PT999999999999999S', 'RRULE:FREQ=DAILY;COUNT=20'],
+      ],
+      [
+        'a repeating event that ends 7,973 years after it starts',
+        [start, 'DTEND:99991231T090000Z', 'RRULE:FREQ=DAILY;COUNT=20'],
+      ],
+      [
+        '1,001 EXDATE values',
+        [start, 'DTEND:20261102T100000Z', 'RRULE:FREQ=DAILY', `EXDATE:${days(1_001)}`],
+      ],
+    ])('refuses %s, in both parsers, before reading it', (_name, lines) => {
+      for (const parse of [
+        () => parseICalendarChanges(single(lines), 'UTC', WINDOW),
+        () => parseTrustedICalendarEvents(single(lines), 'UTC'),
+      ]) {
+        const { ms, error } = timed(parse);
+        expect(error).toEqual(refused);
+        expect(ms).toBeLessThan(100);
+      }
+    });
+
+    it('refuses an occurrence moved more than a century later', () => {
+      const feedText = [
+        'BEGIN:VCALENDAR',
+        'VERSION:2.0',
+        'PRODID:-//Slotlock tests//EN',
+        'BEGIN:VEVENT',
+        'UID:moved',
+        'DTSTAMP:20261010T000000Z',
+        start,
+        'DTEND:20261102T100000Z',
+        'RRULE:FREQ=DAILY;COUNT=3',
+        'END:VEVENT',
+        'BEGIN:VEVENT',
+        'UID:moved',
+        'DTSTAMP:20261010T000000Z',
+        'RECURRENCE-ID:20261103T090000Z',
+        'DTSTART:21300101T090000Z',
+        'DTEND:21300101T100000Z',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n');
+      expect(timed(() => parseICalendarChanges(feedText, 'UTC', WINDOW)).error).toEqual(refused);
+    });
+
+    it('still reads a five-year span, a year-long repeating one and 1,000 EXDATE values', () => {
+      const [lease] = parseICalendarChanges(single([start, 'DURATION:P1826D']), 'UTC', WINDOW);
+      expect(lease?.end?.toISOString()).toBe('2031-11-02T09:00:00.000Z');
+      const yearly = parseICalendarChanges(
+        single([start, 'DTEND:20271102T090000Z', 'RRULE:FREQ=YEARLY;COUNT=2']),
+        'UTC',
+        WINDOW,
+      );
+      expect(yearly).toHaveLength(1);
+      const daily = parseICalendarChanges(
+        single([start, 'DTEND:20261102T100000Z', 'RRULE:FREQ=DAILY', `EXDATE:${days(1_000)}`]),
+        'UTC',
+        WINDOW,
+      );
+      // 2026-11-02 to 2027-10-01 is 333 days, and every other one from the second is excluded.
+      expect(daily).toHaveLength(167);
+    });
   });
 
   it('leaves ical.js itself as it was', () => {
@@ -255,6 +372,129 @@ describe('the step budget on recurrence expansion', () => {
     } finally {
       ICAL.Event.prototype.iterator = eventIterator;
     }
+  });
+
+  describe("a feed's own time zone", () => {
+    // ical.js expands a VTIMEZONE's rules whenever it reads a time in a zone Intl does not know, so
+    // the zone's rules get the same budget as the events'.
+    const zoned = (standard: string, start: string, eventRule?: string) =>
+      [
+        'BEGIN:VCALENDAR',
+        'VERSION:2.0',
+        'PRODID:-//Slotlock tests//EN',
+        'BEGIN:VTIMEZONE',
+        'TZID:Custom/Fleet',
+        'BEGIN:STANDARD',
+        'DTSTART:19701025T020000',
+        'TZOFFSETFROM:+0100',
+        'TZOFFSETTO:+0000',
+        `RRULE:${standard}`,
+        'END:STANDARD',
+        'BEGIN:DAYLIGHT',
+        'DTSTART:19700329T010000',
+        'TZOFFSETFROM:+0000',
+        'TZOFFSETTO:+0100',
+        'RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU',
+        'END:DAYLIGHT',
+        'END:VTIMEZONE',
+        'BEGIN:VEVENT',
+        'UID:zoned',
+        'DTSTAMP:20261010T000000Z',
+        'SUMMARY:Handover',
+        `DTSTART;TZID=Custom/Fleet:${start}`,
+        `DTEND;TZID=Custom/Fleet:${start.replace('T09', 'T10')}`,
+        ...(eventRule ? [`RRULE:${eventRule}`] : []),
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n');
+    const london = 'FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU';
+    const never = 'FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30';
+
+    it('still reads a time in it, by its rules', () => {
+      for (const [start, utc] of [
+        ['20261102T090000', '2026-11-02T09:00:00.000Z'],
+        ['20270701T090000', '2027-07-01T08:00:00.000Z'],
+      ] as const) {
+        const [change] = parseICalendarChanges(zoned(london, start), undefined, WINDOW);
+        expect(change?.start?.toISOString()).toBe(utc);
+      }
+    });
+
+    it.each([
+      [
+        'a one-off event',
+        () => parseICalendarChanges(zoned(never, '20261102T090000'), undefined, WINDOW),
+      ],
+      [
+        'a repeating event',
+        () =>
+          parseICalendarChanges(
+            zoned(never, '20261102T090000', 'FREQ=DAILY;COUNT=3'),
+            undefined,
+            WINDOW,
+          ),
+      ],
+      ['full event content', () => parseTrustedICalendarEvents(zoned(never, '20261102T090000'))],
+    ])('refuses a zone whose rule never occurs, read for %s, promptly', (_name, parse) => {
+      const { ms, error } = timed(parse);
+      expect(error).toEqual(refused);
+      expect(ms).toBeLessThan(2_500);
+    });
+
+    it('refuses a zone whose rule takes slow steps, after the time limit, in both parsers', () => {
+      // Reading a time is timed like a search: ical.js expands every year's days for each of this
+      // rule's yearly steps, so the step count alone would let it run for seconds.
+      const slowZone = zoned(
+        'FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30;BYDAY=MO,TU,WE,TH,FR,SA,SU',
+        '20261102T090000',
+      );
+      for (const parse of [
+        () => parseICalendarChanges(slowZone, undefined, WINDOW),
+        () => parseTrustedICalendarEvents(slowZone),
+      ]) {
+        const { ms, error } = timed(parse);
+        // Refused by the time limit itself: without it ical.js finishes its scan in seconds, and the
+        // full-content parser then refuses the private zone name instead.
+        expect(error).toBeInstanceOf(CalendarExpansionLimitError);
+        expect(ms).toBeLessThan(2_500);
+      }
+    });
+
+    it('refuses a zone named like an IANA zone, whose own rule never occurs, promptly', () => {
+      // ical.js compares a repeating event's times by the feed's own definition of the zone.
+      const { ms, error } = timed(() =>
+        parseICalendarChanges(
+          zoned(never, '20261102T090000', 'FREQ=DAILY;COUNT=3').replaceAll(
+            'Custom/Fleet',
+            'Europe/London',
+          ),
+          undefined,
+          WINDOW,
+        ),
+      );
+      expect(error).toEqual(refused);
+      expect(ms).toBeLessThan(2_500);
+    });
+
+    it('refuses a zone whose rule changes the clocks every minute, promptly', () => {
+      const { ms, error } = timed(() =>
+        parseICalendarChanges(zoned('FREQ=MINUTELY', '20261102T090000'), undefined, WINDOW),
+      );
+      expect(error).toEqual(refused);
+      expect(ms).toBeLessThan(2_500);
+    });
+
+    it('refuses a zone whose step is longer than a century', () => {
+      const { ms, error } = timed(() =>
+        parseICalendarChanges(
+          zoned('FREQ=DAILY;INTERVAL=1000000000', '20261102T090000'),
+          undefined,
+          WINDOW,
+        ),
+      );
+      expect(error).toEqual(refused);
+      expect(ms).toBeLessThan(100);
+    });
   });
 
   it('still reads an ordinary feed in full', () => {
