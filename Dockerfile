@@ -4,7 +4,7 @@
 # Every base image is pinned by digest; Dependabot proposes updates. The server listens on
 # 0.0.0.0:8080 inside the container: publish it on 127.0.0.1, or behind a TLS reverse proxy.
 
-FROM node:22.23.3-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS build
+FROM node:26.9.0-bookworm-slim@sha256:582460f614631b59b824ac6020533b9bf339c7fdf3a6d7db31abb6b4065f0212 AS build
 WORKDIR /src
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund
@@ -12,13 +12,13 @@ RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY . .
 RUN npm run build && chmod 0755 dist/cli.js
 
-FROM node:22.23.3-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS deps
+FROM node:26.9.0-bookworm-slim@sha256:582460f614631b59b824ac6020533b9bf339c7fdf3a6d7db31abb6b4065f0212 AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 # Runtime dependencies exactly as locked: the libraries plus postgres, the peer dependency.
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 
-FROM node:22.23.3-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS runtime
+FROM node:26.9.0-bookworm-slim@sha256:582460f614631b59b824ac6020533b9bf339c7fdf3a6d7db31abb6b4065f0212 AS runtime
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /src/dist ./dist
