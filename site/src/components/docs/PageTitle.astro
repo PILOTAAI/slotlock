@@ -1,0 +1,32 @@
+---
+// Starlight's page title with the section it sits in above it and the page's description below
+// it, as goshenemail.com/docs sets an eyebrow, the title and a lede. The description is the
+// frontmatter one (also the meta description and the llms.txt line), so every page says what it is
+// for in one sentence a reader sees. The h1 keeps Starlight's id, `_top` (PAGE_TITLE_ID in
+// @astrojs/starlight/dist/constants.js, which the package does not export), which its table of
+// contents points at.
+const PAGE_TITLE_ID = '_top';
+
+type Entry = { type: 'link'; isCurrent: boolean } | { type: 'group'; label: string; entries: Entry[] };
+
+const { entry, sidebar } = Astro.locals.starlightRoute;
+
+/** The label of the sidebar group holding the current page, if it is in one. */
+function section(entries: Entry[], group?: string): string | undefined {
+  for (const item of entries) {
+    if (item.type === 'link' && item.isCurrent) return group;
+    if (item.type === 'group') {
+      const found = section(item.entries, item.label);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
+const eyebrow = section(sidebar as Entry[]);
+const { title, description } = entry.data;
+---
+
+{eyebrow && <p class="sl-eyebrow">{eyebrow}</p>}
+<h1 id={PAGE_TITLE_ID}>{title}</h1>
+{description && <p class="sl-lede">{description}</p>}

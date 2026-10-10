@@ -8,12 +8,20 @@ project, not a workspace of the package at the repository root.
 site/
   astro.config.mjs        Starlight config, llms.txt plugin, sidebar
   docs-src/*.md           docs pages; <!-- include README.md#section --> pulls text from the repo
+                          (modifiers: body, lead, promote)
   src/data/landing.ts     every sentence on the landing page (the page and /index.md share it)
   src/pages/index.astro   the landing page; index.md.ts its Markdown twin
   src/pages/docs/[...slug].md.ts   a Markdown twin of every docs page
+  src/components/docs/    Starlight overrides: site title, page title (eyebrow, title, lede), footer
   src/styles/tokens.mjs   colour tokens (Pylota's, after PR #505), light and dark
+  src/styles/docs.css     the docs theme on those tokens
   scripts/sync-content.mjs  builds docs pages and src/generated/facts.json from README, SPEC,
                             SECURITY, CHANGELOG and src/*.ts; fails if a fact moved
+  scripts/tool-schemas.mjs  reads each tool's Zod input and output schemas and example from
+                            src/agent-server.ts as text (the site has no package dependencies)
+  scripts/tools-page.mjs  renders /docs/tools/ from those schemas and scripts/tool-notes.mjs
+  scripts/tool-notes.mjs  the words a schema cannot carry: summaries, field notes, error codes per
+                          tool; the build fails on a note for a field or code that does not exist
   scripts/postbuild.mjs   pins the CSP in dist/_headers to the hashes of Starlight's inline code
   scripts/contrast.mjs    WCAG AA check of every text/background pair, both themes
   scripts/copy-lint.mjs   Pylota's voice rules (no em dash, no filler words) and the word count
@@ -21,8 +29,8 @@ site/
   public/_headers         CSP, HSTS, caching, Markdown content types
 ```
 
-Tool names, versions, limits, the exclusion constraint and the README quick start are read from the
-repository on every build, so the site cannot claim something the code does not do. Generated files
+Tool names and schemas, versions, limits, the exclusion constraint and the README quick start are
+read from the repository on every build, so the site cannot claim something the code does not do. Generated files
 (`src/content/docs/`, `src/generated/`, `public/schema/`) are git-ignored.
 
 ## Work on it

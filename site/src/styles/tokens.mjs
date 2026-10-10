@@ -9,6 +9,7 @@ export const light = {
   canvas: '#F6F4EE', // bg-0
   'canvas-2': '#EEEBE3', // bg-1
   'canvas-3': '#E5E1D8', // bg-2
+  chip: '#EEEBE3', // bg-1: inline code, table headers and quotes in the docs
   paper: '#FFFFFF',
   ink: '#171716',
   'ink-2': '#5D5B56',
@@ -49,6 +50,7 @@ export const dark = {
   canvas: '#000000',
   'canvas-2': '#0A0A0B',
   'canvas-3': '#131315',
+  chip: '#131315', // one step above the page, so a chip shows on black
   paper: '#0E0E10',
   ink: '#F7F7F7',
   'ink-2': '#CFCFCF',

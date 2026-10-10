@@ -2,7 +2,8 @@
 //
 //   docs-src/*.md          hand-written pages with <!-- include … --> markers
 //   ../README.md, SPEC.md, CHANGELOG.md, SECURITY.md   included by heading
-//   ../src/*.ts            tool registry, protocol versions, limits, the exclusion constraint
+//   ../src/*.ts            tool registry and schemas, protocol versions, limits, the exclusion
+//                          constraint (the tools reference: scripts/tool-schemas.mjs, tools-page.mjs)
 //
 // Writes (all git-ignored, rebuilt on every `npm run dev` / `npm run build`):
 //   src/content/docs/docs/*.md        the Starlight pages
@@ -13,6 +14,8 @@
 import { copyFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readOperations } from './tool-schemas.mjs';
+import { renderToolsPage } from './tools-page.mjs';
 
 const SITE = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ROOT = resolve(SITE, '..');
@@ -81,11 +84,34 @@ function sections(markdown) {
   return out;
 }
 
-/** Render one included section. Modifiers: `body` drops the heading, `lead` stops at the first subheading. */
+/**
+ * Render one included section. Modifiers: `body` drops the heading, `lead` stops at the first
+ * subheading, `promote` raises every heading one level (### to ##, never above ##), for a README
+ * subsection that is a section of its docs page.
+ */
 function renderSection(section, modifiers) {
   const words = new Set((modifiers ?? '').trim().split(/\s+/).filter(Boolean));
   const content = words.has('lead') ? section.lead : section.body;
-  return words.has('body') || !section.heading ? content : `${section.heading}\n\n${content}`;
+  const text = words.has('body') || !section.heading ? content : `${section.heading}\n\n${content}`;
+  return words.has('promote') ? promoteHeadings(text) : text;
+}
+
+/** ### to ##, #### to ###, … outside fenced code; ## stays ##. */
+function promoteHeadings(markdown) {
+  let fence = null;
+  return markdown
+    .split('\n')
+    .map((line) => {
+      const marker = /^(```+|~~~+)/.exec(line);
+      if (marker) {
+        if (!fence) fence = marker[1];
+        else if (line.startsWith(fence)) fence = null;
+        return line;
+      }
+      if (fence) return line;
+      return line.replace(/^#(#{2,5}) /, '$1 ');
+    })
+    .join('\n');
 }
 
 const SITE_LINKS = {
@@ -97,6 +123,7 @@ const SITE_LINKS = {
 /** README in-page anchors whose section lives on another docs page (postbuild checks every link). */
 const ANCHORS = {
   '#confirm-before-writing': '/docs/security/#confirmation-before-writes',
+  '#operations': '/docs/security/#quotas-and-retention',
 };
 
 /** Rewrite repository-relative links so they work on slotlock.pylota.io. */
@@ -127,10 +154,10 @@ async function sourceSections(file) {
 }
 
 /** Expand the include markers of one docs-src page. */
-async function expand(template, facts, page) {
+async function expand(template, facts, page, toolsPage) {
   // Optional includes keep their fallback when the README section does not exist yet.
   const optional =
-    /<!-- include\? ([^#\s]+)#([a-z0-9_-]+)((?: (?:body|lead))*) -->\n([\s\S]*?)<!-- end include -->/g;
+    /<!-- include\? ([^#\s]+)#([a-z0-9_-]+)((?: (?:body|lead|promote))*) -->\n([\s\S]*?)<!-- end include -->/g;
   let out = '';
   let last = 0;
   for (const match of template.matchAll(optional)) {
@@ -143,7 +170,7 @@ async function expand(template, facts, page) {
   }
   out += template.slice(last);
 
-  const required = /<!-- include ([^#\s>]+)(?:#([a-z0-9_-]+))?((?: (?:body|lead))*) -->/g;
+  const required = /<!-- include ([^#\s>]+)(?:#([a-z0-9_-]+))?((?: (?:body|lead|promote))*) -->/g;
   const parts = [];
   last = 0;
   for (const match of out.matchAll(required)) {
@@ -161,22 +188,12 @@ async function expand(template, facts, page) {
     last = match.index + match[0].length;
   }
   parts.push(out.slice(last));
+  // Facts first: the generated tools reference is already final text.
   return clean(parts.join(''))
-    .replace(/<!-- tools-table -->/g, toolsTable(facts.tools))
-    .replace(/\{\{(\w+)\}\}/g, (_, key) => String(must(facts[key], `fact ${key}`)));
-}
-
-function toolsTable(tools) {
-  const hint = (tool) =>
-    tool.readOnly ? 'read-only' : tool.destructive ? 'write, destructive' : 'write';
-  return [
-    '| Tool | Title | Description | Hints |',
-    '| --- | --- | --- | --- |',
-    ...tools.map(
-      (tool) =>
-        `| \`${tool.name}\` | ${tool.title} | ${tool.description.replace(/\|/g, '\\|')} | ${hint(tool)}${tool.idempotent ? ', idempotent' : ''} |`,
-    ),
-  ].join('\n');
+    .replace(/\{\{(\w+)\}\}/g, (_, key) => String(must(facts[key], `fact ${key}`)))
+    .replace(/<!-- tools-overview -->/g, () => toolsPage.overview)
+    .replace(/<!-- tools-details -->/g, () => toolsPage.details)
+    .replace(/<!-- tools-objects -->/g, () => toolsPage.objects);
 }
 
 /** Read the operation registry the MCP and A2A servers are projected from. */
@@ -270,6 +287,10 @@ async function readFacts() {
     a2a: must(a2a, 'SLOTLOCK_A2A_PROTOCOL_VERSION'),
     horizonDays: must(numberConst(store, 'SLOTLOCK_CALENDAR_HORIZON_DAYS'), 'horizon days'),
     maxEventDays: must(numberConst(store, 'SLOTLOCK_MAX_EVENT_DURATION_DAYS'), 'max event days'),
+    maxEventDaysText: must(
+      numberConst(store, 'SLOTLOCK_MAX_EVENT_DURATION_DAYS'),
+      'max event days',
+    ).toLocaleString('en-GB'),
     retentionDays: must(
       numberConst(store, 'SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS'),
       'retention days',
@@ -304,8 +325,43 @@ async function readFacts() {
   };
 }
 
+/**
+ * The tools reference: each operation's schemas and example, parsed from the registry, plus the
+ * instructions the server gives the model. The names must match what readTools found.
+ */
+async function readToolsReference(facts) {
+  const [agentServer, store, backend, types] = await Promise.all([
+    read('src/agent-server.ts'),
+    read('src/store.ts'),
+    read('src/agent-store-backend.ts'),
+    read('src/types.ts'),
+  ]);
+  let parsed;
+  try {
+    parsed = readOperations(agentServer, {
+      SLOTLOCK_CALENDAR_HORIZON_DAYS: numberConst(store, 'SLOTLOCK_CALENDAR_HORIZON_DAYS'),
+      SLOTLOCK_MAX_EVENT_DURATION_DAYS: numberConst(store, 'SLOTLOCK_MAX_EVENT_DURATION_DAYS'),
+    });
+  } catch (error) {
+    fail(`could not read the tool schemas from src/agent-server.ts: ${error.message}`);
+  }
+  const { operations, reader } = parsed;
+  const names = operations.map((operation) => operation.name).join(',');
+  if (names !== facts.tools.map((tool) => tool.name).join(',')) {
+    fail(`the schema reader found ${names}, the registry reader ${facts.tools.map((t) => t.name)}`);
+  }
+  facts.mcpInstructions = must(
+    reader.value(reader.declaration('SLOTLOCK_MCP_INSTRUCTIONS')),
+    'SLOTLOCK_MCP_INSTRUCTIONS',
+  );
+  const page = renderToolsPage({ operations, facts, sources: [agentServer, backend, types], fail });
+  facts.commonErrors = page.commonErrors;
+  return page;
+}
+
 async function main() {
   const facts = await readFacts();
+  const toolsPage = await readToolsReference(facts);
   await rm(join(SITE, 'src/content/docs'), { recursive: true, force: true });
   await mkdir(DOCS_OUT, { recursive: true });
   await mkdir(GENERATED, { recursive: true });
@@ -313,7 +369,7 @@ async function main() {
   const pages = (await readdir(DOCS_SRC)).filter((file) => file.endsWith('.md')).sort();
   for (const page of pages) {
     const template = await readFile(join(DOCS_SRC, page), 'utf8');
-    const body = await expand(template, facts, page);
+    const body = await expand(template, facts, page, toolsPage);
     if (/<!-- include/.test(body)) fail(`${page}: an include marker was left unexpanded`);
     // 404.md is Starlight's not-found page and lives at the collection root.
     await writeFile(page === '404.md' ? join(DOCS_OUT, '..', page) : join(DOCS_OUT, page), body);

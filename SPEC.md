@@ -114,9 +114,9 @@ whether overlapping writes are safe.
 
 Operations are named `slotlock_<verb>` using only `[a-z_]`, which every tool-calling API accepts
 (Claude requires `^[a-zA-Z0-9_-]{1,128}$`; OpenAI function names allow the same characters up to 64).
-The names of earlier builds, dotted (`calendar.<verb>`) and underscored (`calendar_<verb>`, the
-names Pylota's Kairos endpoint advertised), resolve to the same operation on every entry point and
-are never advertised. Any other name is unknown.
+The names of earlier builds, dotted (`calendar.<verb>`) and underscored (`calendar_<verb>`),
+resolve to the same operation on every entry point and are never advertised. Any other name is
+unknown.
 
 ### Outcomes and errors
 
