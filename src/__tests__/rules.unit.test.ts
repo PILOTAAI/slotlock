@@ -114,6 +114,12 @@ describe('expandRules', () => {
       'FREQ=WEEKLY;BYWEEKDAY=MO',
       'FREQ=WEEKLY;BYDAY=MO;BYHOUR=9',
       `FREQ=WEEKLY;BYDAY=MO;BYHOUR=${list(24)};BYMINUTE=${list(60)};BYSECOND=${list(60)}`,
+      // These never occur, and rrule 2.8.1 searches for them as far as the year 9999: 0.65 to
+      // 1.06 s each, on every availability query, before the subset refused them.
+      'FREQ=WEEKLY;BYDAY=MO;BYMONTH=2;BYMONTHDAY=30',
+      'FREQ=WEEKLY;BYDAY=MO;BYSETPOS=9',
+      'FREQ=WEEKLY;BYDAY=MO;BYYEARDAY=400',
+      'FREQ=WEEKLY;BYDAY=MO;BYWEEKNO=54',
     ]) {
       const started = performance.now();
       expect(expandRules([{ rrule, startMinutes: 540, durationMinutes: 60 }], week), rrule).toEqual(
@@ -159,6 +165,21 @@ describe('expandRules', () => {
       'Pacific/Auckland',
     );
     expect(windows).toEqual([{ start: d('2027-07-04T21:00:00Z'), end: d('2027-07-04T22:00:00Z') }]);
+  });
+
+  it('refuses an UNTIL that is not a real date, which rrule would read as a later one', () => {
+    // rrule reads UNTIL with Date.UTC, which carries an overflowing field into the next unit:
+    // 31 February 2027 became 3 March, and Monday 1 March stayed bookable.
+    const rule = [
+      {
+        rrule: 'FREQ=WEEKLY;BYDAY=MO;UNTIL=20270231T000000Z',
+        startMinutes: 9 * 60,
+        durationMinutes: 60,
+      },
+    ];
+    const march = { start: d('2027-03-01T00:00:00Z'), end: d('2027-03-08T00:00:00Z') };
+    expect(expandRules(rule, march)).toEqual([]);
+    expect(expandRules(rule, march, 'Europe/London')).toEqual([]);
   });
 
   it('rejects out-of-range, fractional, and non-finite minute fields', () => {

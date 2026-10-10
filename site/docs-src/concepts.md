@@ -27,7 +27,8 @@ length, evaluated in the resource's time zone (09:00 stays 09:00 across daylight
   `setResourceAvailability`); otherwise it uses the server's (`SLOTLOCK_AVAILABILITY`).
 - No rule means never bookable, not open all week.
 - A rule Slotlock cannot evaluate adds nothing, and the CLI and store refuse it: anything but
-  `FREQ=WEEKLY`, `BYDAY`, `INTERVAL=1` and a UTC `UNTIL` (so no `COUNT`, `BYHOUR` or `DTSTART`).
+  `FREQ=WEEKLY`, `BYDAY`, `INTERVAL=1` and a UTC `UNTIL` on a real date (so no `COUNT`, `BYHOUR`,
+  `DTSTART` or 31 February).
 
 `expandRules` turns rules into windows and `findNextAvailable` finds the first slot that fits. Both
 are pure functions ([example](/docs/library/#quick-start-the-next-free-slot)).

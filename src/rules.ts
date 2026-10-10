@@ -36,7 +36,27 @@ function utcDayFloor(d: Date): Date {
 
 const RRULE_PART = /^([A-Z]+)=([0-9A-Z,]+)$/;
 const WEEKDAY = /^(?:MO|TU|WE|TH|FR|SA|SU)$/;
-const ABSOLUTE_UNTIL = /^\d{8}T\d{6}Z$/;
+const ABSOLUTE_UNTIL = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/;
+
+/**
+ * Whether `until` is an absolute UNTIL naming a real instant. rrule reads it with Date.UTC, which
+ * carries an overflowing field into the next unit: 31 February became 3 March, and the rule stayed
+ * bookable after the day it was written to end. A leap second (60) is real (RFC 5545 3.3.12).
+ */
+function isRealUntil(until: string): boolean {
+  const match = ABSOLUTE_UNTIL.exec(until);
+  if (!match) return false;
+  const [, year, month, day, hour, minute, second] = match as unknown as string[];
+  // Set without overflow checks, the date reads back differently when any part overflowed.
+  const date = new Date(0);
+  date.setUTCFullYear(Number(year), Number(month) - 1, Number(day));
+  return (
+    date.toISOString().startsWith(`${year}-${month}-${day}T`) &&
+    Number(hour) <= 23 &&
+    Number(minute) <= 59 &&
+    Number(second) <= 60
+  );
+}
 
 /**
  * Whether `rrule` is written in SPEC.md's subset: `FREQ=WEEKLY`, a `BYDAY` of plain weekdays,
@@ -57,7 +77,7 @@ function isWeeklySubset(rrule: string): boolean {
     parts.get('FREQ') === 'WEEKLY' &&
     (parts.get('BYDAY')?.split(',') ?? ['']).every((day) => WEEKDAY.test(day)) &&
     (parts.get('INTERVAL') ?? '1') === '1' &&
-    (until === undefined || ABSOLUTE_UNTIL.test(until))
+    (until === undefined || isRealUntil(until))
   );
 }
 

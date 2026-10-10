@@ -97,6 +97,36 @@ describe('availability rule validation', () => {
     );
   });
 
+  it.each([
+    ['31 February', '20270231T000000Z'],
+    ['29 February in a common year', '20270229T000000Z'],
+    ['month 13', '20271301T000000Z'],
+    ['day 0', '20270100T000000Z'],
+    ['hour 24', '20271231T240000Z'],
+    ['minute 60', '20271231T236000Z'],
+  ])('refuses an UNTIL on %s, which rrule would read as another date', (_name, until) => {
+    expect(
+      availabilityRuleProblem({
+        rrule: `FREQ=WEEKLY;BYDAY=MO;UNTIL=${until}`,
+        startMinutes: 540,
+        durationMinutes: 60,
+      }),
+    ).toBe('unsupported');
+  });
+
+  it('accepts an UNTIL on a leap day or at a leap second, which are real', () => {
+    for (const until of ['20280229T000000Z', '20271231T235960Z']) {
+      expect(
+        availabilityRuleProblem({
+          rrule: `FREQ=WEEKLY;BYDAY=MO;UNTIL=${until}`,
+          startMinutes: 540,
+          durationMinutes: 60,
+        }),
+        until,
+      ).toBeNull();
+    }
+  });
+
   it('accepts the subset in any order, with INTERVAL=1 and an absolute UNTIL', () => {
     for (const rrule of [
       'BYDAY=MO;FREQ=WEEKLY',
