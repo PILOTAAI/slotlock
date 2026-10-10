@@ -174,7 +174,7 @@ export const heroLog: LogLine[] = [
   {
     time: '09:41:02.108',
     agent: 'A',
-    call: 'calendar_find_next_available',
+    call: 'slotlock_find_next_available',
     args: 'van, 120 min, from 10:00',
     result: '10:00–12:00 · certain',
     tone: 'ok',
@@ -201,7 +201,7 @@ export const heroLog: LogLine[] = [
   {
     time: '09:41:02.150',
     agent: 'B',
-    call: 'calendar_find_next_available',
+    call: 'slotlock_find_next_available',
     args: 'van, 120 min, from 10:00',
     result: '12:00–14:00 · certain',
     tone: 'ok',
@@ -288,7 +288,7 @@ export const steps = {
     {
       n: '02',
       title: 'Find a slot and hold it',
-      body: `\`calendar_find_next_available\` returns the earliest certain slot; \`acquireHold\` keeps it for up to ${facts.maxHoldDays} days on the database clock.`,
+      body: `\`slotlock_find_next_available\` returns the earliest certain slot; \`acquireHold\` keeps it for up to ${facts.maxHoldDays} days on the database clock.`,
       link: { label: 'Holds', href: '/docs/concepts/#holds' },
     },
     {
@@ -433,7 +433,7 @@ export const security = {
   counter: '05',
   heading: { soft: 'Agents propose.', strong: 'A person confirms, PostgreSQL decides.' },
   approval: {
-    eyebrow: 'calendar_create_event · input required',
+    eyebrow: 'slotlock_create_event · input required',
     message:
       'Book "Vehicle handover" on resource vehicle-42: 2027-03-29 10:00–11:00 (Europe/London).',
     checkbox: 'Confirm this change',

@@ -113,7 +113,7 @@ it('does not present incomplete coverage as a next available interval', async ()
       },
     }),
   });
-  const result = await callTool(server, 'calendar_find_next_available', {
+  const result = await callTool(server, 'slotlock_find_next_available', {
     resource_ids: ['vehicle-1'],
     start: '2026-09-20T09:00:00.000Z',
     end: '2026-09-20T17:00:00.000Z',
@@ -131,7 +131,7 @@ it('does not present incomplete coverage as a next available interval', async ()
 // outputSchema), so the App reads the refusal from the text content.
 it('shows the error code of a refused call', async () => {
   const server = calendarServer({}, { authorize: async () => false });
-  const result = await callTool(server, 'calendar_get_free_busy', {
+  const result = await callTool(server, 'slotlock_get_free_busy', {
     resource_ids: ['vehicle-1'],
     start: '2026-09-20T09:00:00.000Z',
     end: '2026-09-20T17:00:00.000Z',

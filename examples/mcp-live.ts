@@ -42,7 +42,7 @@ export async function openLiveCalendar(options: LiveCalendarOptions) {
     watching: subscription.honoredFilter.resourceSubscriptions ?? [],
     book: (booking: Record<string, unknown>) =>
       client.callTool({
-        name: 'calendar_create_event',
+        name: 'slotlock_create_event',
         arguments: { resource_id: options.resourceId, ...booking },
       }),
     read: async () => {

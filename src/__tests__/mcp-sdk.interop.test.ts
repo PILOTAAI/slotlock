@@ -52,7 +52,7 @@ describe('Slotlock with the official MCP TypeScript SDK', () => {
     const { tools } = await connected.listTools();
     expect(tools).toHaveLength(8);
     for (const tool of tools) expect(tool.name).toMatch(PORTABLE_TOOL_NAME);
-    expect(tools.map((tool) => tool.name)).toContain('calendar_get_free_busy');
+    expect(tools.map((tool) => tool.name)).toContain('slotlock_get_free_busy');
   });
 
   it('returns successful structured results and tool failures the SDK does not throw on', async () => {
@@ -61,7 +61,7 @@ describe('Slotlock with the official MCP TypeScript SDK', () => {
     await connected.listTools(); // caches the output schemas the SDK validates against
 
     const listed = await connected.callTool({
-      name: 'calendar_list_resources',
+      name: 'slotlock_list_resources',
       arguments: { limit: 5 },
     });
     expect(listed.isError).toBeFalsy();
@@ -71,9 +71,9 @@ describe('Slotlock with the official MCP TypeScript SDK', () => {
     });
 
     for (const [name, args, code] of [
-      ['calendar_get_event', { event_id: 'missing' }, 'not_found'],
+      ['slotlock_get_event', { event_id: 'missing' }, 'not_found'],
       [
-        'calendar_create_event',
+        'slotlock_create_event',
         {
           resource_id: 'resource-1',
           starts_at: '2027-03-01T09:00:00Z',
@@ -84,7 +84,7 @@ describe('Slotlock with the official MCP TypeScript SDK', () => {
         'reservation_conflict',
       ],
       [
-        'calendar_list_events',
+        'slotlock_list_events',
         { resource_ids: [], start: 'soon', end: 'later' },
         'invalid_arguments',
       ],
@@ -106,7 +106,7 @@ describe('Slotlock with the official MCP TypeScript SDK', () => {
     });
     expect(legacy.isError).toBeFalsy();
     expect(fixture.backend.listResources).toHaveBeenCalledWith(
-      expect.objectContaining({ operation: 'calendar_list_resources' }),
+      expect.objectContaining({ operation: 'slotlock_list_resources' }),
       { limit: 1 },
     );
   });

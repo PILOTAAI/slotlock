@@ -129,7 +129,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         mcp: 'http://localhost:8080/mcp',
         a2a: 'http://localhost:8080/a2a',
         tenant: tenantRef,
-        confirm_writes: ['calendar_create_event', 'calendar_update_event', 'calendar_delete_event'],
+        confirm_writes: ['slotlock_create_event', 'slotlock_update_event', 'slotlock_delete_event'],
         availability_rules: 1,
       });
       const origin = listening.address as string;
@@ -183,14 +183,14 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         ({ name }) => name,
       );
       expect(toolNames.sort()).toEqual([
-        'calendar_create_event',
-        'calendar_delete_event',
-        'calendar_find_next_available',
-        'calendar_get_event',
-        'calendar_get_free_busy',
-        'calendar_list_events',
-        'calendar_list_resources',
-        'calendar_update_event',
+        'slotlock_create_event',
+        'slotlock_delete_event',
+        'slotlock_find_next_available',
+        'slotlock_get_event',
+        'slotlock_get_free_busy',
+        'slotlock_list_events',
+        'slotlock_list_resources',
+        'slotlock_update_event',
       ]);
 
       // The serving role reads through forced RLS, so the tenant's resource proves the grant.
@@ -199,7 +199,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
           jsonrpc: '2.0',
           id: 3,
           method: 'tools/call',
-          params: { name: 'calendar_list_resources', arguments: { limit: 10 } },
+          params: { name: 'slotlock_list_resources', arguments: { limit: 10 } },
         },
         versioned,
       );
@@ -215,7 +215,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
           id: 4,
           method: 'tools/call',
           params: {
-            name: 'calendar_create_event',
+            name: 'slotlock_create_event',
             arguments: {
               resource_id: randomUUID(),
               starts_at: '2027-03-29T09:00:00Z',

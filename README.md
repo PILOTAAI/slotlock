@@ -70,7 +70,7 @@ docker compose exec slotlock slotlock resource list
   one principal in one tenant (`SLOTLOCK_TENANT`).
 - Writes wait for a person by default (`SLOTLOCK_CONFIRM_WRITES=all`, see
   [Confirm before writing](#confirm-before-writing)). `SLOTLOCK_AVAILABILITY` sets the bookable
-  hours `calendar_find_next_available` searches; without it, no slot is ever offered.
+  hours `slotlock_find_next_available` searches; without it, no slot is ever offered.
 - To serve beyond this machine, put a TLS reverse proxy in front and set `SLOTLOCK_PUBLIC_URL` to
   its `https://` URL.
 
@@ -366,13 +366,13 @@ import { createSlotlockNodeServer } from 'slotlock/node-server';
 // An allow-list, so an operation added in a later release stays refused until you add it. This one
 // permits everything except deleting events; a real policy also looks at the principal and input.
 const ALLOWED_OPERATIONS: ReadonlySet<SlotlockAgentOperation> = new Set([
-  'calendar_list_resources',
-  'calendar_get_free_busy',
-  'calendar_find_next_available',
-  'calendar_create_event',
-  'calendar_get_event',
-  'calendar_list_events',
-  'calendar_update_event',
+  'slotlock_list_resources',
+  'slotlock_get_free_busy',
+  'slotlock_find_next_available',
+  'slotlock_create_event',
+  'slotlock_get_event',
+  'slotlock_list_events',
+  'slotlock_update_event',
 ]);
 
 export interface CalendarServerConfig {
@@ -397,7 +397,7 @@ export async function startCalendarServer(config: CalendarServerConfig) {
     ...(config.confirmationSecret
       ? {
           confirmation: {
-            operations: ['calendar_create_event', 'calendar_update_event'] as const,
+            operations: ['slotlock_create_event', 'slotlock_update_event'] as const,
             secrets: [config.confirmationSecret],
           },
         }
@@ -435,7 +435,7 @@ export async function startCalendarServer(config: CalendarServerConfig) {
   come from tool arguments; a request naming another tenant is rejected.
 - `authorize` runs after argument validation on every call; `consumeRateLimit` (optional) runs once
   per HTTP request (`operation: 'protocol'`) and once per operation. Both, and the backend's
-  `context.operation`, always receive the current name (`calendar_delete_event`), also when the
+  `context.operation`, always receive the current name (`slotlock_delete_event`), also when the
   client used a dotted alias, so key policy on current names and prefer an allow-list.
 - `publicBaseUrl` must be HTTPS. `allowInsecureLocalhost: true` permits `http://localhost`,
   `127.0.0.1` and `[::1]` for development. Mount `server.fetch(request)` in any Fetch-compatible
@@ -465,14 +465,14 @@ export async function startCalendarServer(config: CalendarServerConfig) {
 
 | Tool | Does | Hints |
 | --- | --- | --- |
-| `calendar_list_resources` | Resources visible to the tenant | read-only |
-| `calendar_get_free_busy` | Busy intervals plus coverage certainty | read-only |
-| `calendar_find_next_available` | Earliest *certain* slot across resources | read-only |
-| `calendar_list_events` | Events the caller created in a window | read-only |
-| `calendar_get_event` | One event the caller created | read-only |
-| `calendar_create_event` | Create an event of up to 3,660 days (idempotent) | write |
-| `calendar_update_event` | Patch at an expected revision | write |
-| `calendar_delete_event` | Tombstone at an expected revision | write, destructive |
+| `slotlock_list_resources` | Resources visible to the tenant | read-only |
+| `slotlock_get_free_busy` | Busy intervals plus coverage certainty | read-only |
+| `slotlock_find_next_available` | Earliest *certain* slot across resources | read-only |
+| `slotlock_list_events` | Events the caller created in a window | read-only |
+| `slotlock_get_event` | One event the caller created | read-only |
+| `slotlock_create_event` | Create an event of up to 3,660 days (idempotent) | write |
+| `slotlock_update_event` | Patch at an expected revision | write |
+| `slotlock_delete_event` | Tombstone at an expected revision | write, destructive |
 
 A query window (free/busy, slot search, event lists) is at most 367 days, and a slot search can look
 for a slot that long; an event itself may last up to 3,660 days, so a lease or a year-long rental is
@@ -481,8 +481,8 @@ APIs reject; those names still work on every entry point but are no longer adver
 `resolveSlotlockAgentOperation` maps either spelling to the current name; `isSlotlockAgentOperation`
 accepts current names only.
 
-Events are scoped to the principal that created them: `calendar_get_event`, `calendar_list_events`,
-`calendar_update_event` and `calendar_delete_event` see only the caller's own events. Everything
+Events are scoped to the principal that created them: `slotlock_get_event`, `slotlock_list_events`,
+`slotlock_update_event` and `slotlock_delete_event` see only the caller's own events. Everything
 else on a resource, including events your application wrote through the store, still counts as busy
 time in free/busy and slot search.
 
@@ -629,7 +629,7 @@ export async function findSlotOverMcp(mcpUrl: string, token: string, resourceId:
   await client.connect(transport);
   try {
     const result = await client.callTool({
-      name: 'calendar_find_next_available',
+      name: 'slotlock_find_next_available',
       arguments: {
         resource_ids: [resourceId],
         start: '2027-03-29T00:00:00Z',
@@ -703,7 +703,7 @@ export async function openLiveCalendar(options: LiveCalendarOptions) {
     watching: subscription.honoredFilter.resourceSubscriptions ?? [],
     book: (booking: Record<string, unknown>) =>
       client.callTool({
-        name: 'calendar_create_event',
+        name: 'slotlock_create_event',
         arguments: { resource_id: options.resourceId, ...booking },
       }),
     read: async () => {
@@ -766,7 +766,7 @@ export async function listResourcesOverA2a(baseUrl: string, token: string) {
         // One application/json data part: the skill id and its arguments (see the agent card).
         parts: [
           {
-            data: { skill: 'calendar_list_resources', arguments: { limit: 10 } },
+            data: { skill: 'slotlock_list_resources', arguments: { limit: 10 } },
             mediaType: 'application/json',
           },
         ],

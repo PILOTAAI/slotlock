@@ -99,7 +99,7 @@ describe('MCP 2026-07-28 on the Slotlock agent server', () => {
           resources: { subscribe: true },
           extensions: { [SLOTLOCK_MCP_APPS_EXTENSION]: { mimeTypes: [SLOTLOCK_MCP_APP_MIME_TYPE] } },
         },
-        instructions: expect.stringContaining('calendar_find_next_available'),
+        instructions: expect.stringContaining('slotlock_find_next_available'),
         ttlMs: 3_600_000,
         cacheScope: 'public',
         _meta: { [SERVER_INFO_KEY]: SERVER_INFO },
@@ -148,7 +148,7 @@ describe('MCP 2026-07-28 on the Slotlock agent server', () => {
     const server = buildServer();
     const listed = await rpc(
       await server.fetch(
-        modernRequest('tools/call', { name: 'calendar_list_resources', arguments: {} }),
+        modernRequest('tools/call', { name: 'slotlock_list_resources', arguments: {} }),
       ),
     );
     expect(listed.result).toEqual({
@@ -163,7 +163,7 @@ describe('MCP 2026-07-28 on the Slotlock agent server', () => {
 
     const failed = await rpc(
       await server.fetch(
-        modernRequest('tools/call', { name: 'calendar_get_event', arguments: { event_id: '' } }),
+        modernRequest('tools/call', { name: 'slotlock_get_event', arguments: { event_id: '' } }),
       ),
     );
     expect(failed.result).toEqual({
@@ -195,14 +195,14 @@ describe('MCP 2026-07-28 on the Slotlock agent server', () => {
 
   it('rejects headers that are missing, malformed or disagree with the body with 400 HeaderMismatch', async () => {
     const server = buildServer();
-    const call = { name: 'calendar_list_resources', arguments: {} };
+    const call = { name: 'slotlock_list_resources', arguments: {} };
     for (const request of [
       modernRequest('tools/list', {}, { headers: { 'MCP-Protocol-Version': null } }),
       modernRequest('tools/list', {}, { headers: { 'MCP-Protocol-Version': '2025-11-25' } }),
       modernRequest('tools/list', {}, { headers: { 'Mcp-Method': null } }),
       modernRequest('tools/list', {}, { headers: { 'Mcp-Method': 'tools/call' } }),
       modernRequest('tools/call', call, { headers: { 'Mcp-Name': null } }),
-      modernRequest('tools/call', call, { headers: { 'Mcp-Name': 'calendar_get_event' } }),
+      modernRequest('tools/call', call, { headers: { 'Mcp-Name': 'slotlock_get_event' } }),
       modernRequest('tools/call', call, { headers: { 'Mcp-Name': '=?base64?not base64?=' } }),
       modernRequest('tools/call', call, { headers: { 'Mcp-Name': '=?base64?//79?=' } }),
       modernRequest('tools/call', { ...call, name: 'café' }, { headers: { 'Mcp-Name': 'café' } }),
@@ -222,7 +222,7 @@ describe('MCP 2026-07-28 on the Slotlock agent server', () => {
     const encoded = await server.fetch(
       modernRequest('tools/call', call, {
         headers: {
-          'Mcp-Name': `=?base64?${Buffer.from('calendar_list_resources').toString('base64')}?=`,
+          'Mcp-Name': `=?base64?${Buffer.from('slotlock_list_resources').toString('base64')}?=`,
         },
       }),
     );
@@ -332,7 +332,7 @@ describe('MCP 2026-07-28 on the Slotlock agent server', () => {
   it('hands W3C trace context to the backend from _meta or HTTP headers, and drops malformed values', async () => {
     const server = buildServer();
     const traceparent = '00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7-01';
-    const call = { name: 'calendar_list_resources', arguments: {} };
+    const call = { name: 'slotlock_list_resources', arguments: {} };
     await server.fetch(
       modernRequest('tools/call', call, {
         meta: { traceparent, tracestate: 'slotlock=00f067aa0ba902b7', baggage: 'tenant.tier=gold' },

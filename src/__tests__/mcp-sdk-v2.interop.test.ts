@@ -72,7 +72,7 @@ describe('Slotlock with the official MCP TypeScript SDK v2 (MCP 2026-07-28)', ()
     expect(tools.map((tool) => tool.name)).toEqual(slotlockAgentTools().map((tool) => tool.name));
 
     const listed = await connected.callTool({
-      name: 'calendar_list_resources',
+      name: 'slotlock_list_resources',
       arguments: { limit: 5 },
     });
     expect(listed.isError).toBeFalsy();
@@ -83,7 +83,7 @@ describe('Slotlock with the official MCP TypeScript SDK v2 (MCP 2026-07-28)', ()
 
     // A tool failure is a result the model reads, not an exception.
     const failed = await connected.callTool({
-      name: 'calendar_get_event',
+      name: 'slotlock_get_event',
       arguments: { event_id: 'missing' },
     });
     expect(failed.isError).toBe(true);
@@ -93,7 +93,7 @@ describe('Slotlock with the official MCP TypeScript SDK v2 (MCP 2026-07-28)', ()
   it('asks the person through the client elicitation handler before a booking is written', async () => {
     fixture = await startSlotlockFixture({
       confirmation: {
-        operations: ['calendar_create_event'],
+        operations: ['slotlock_create_event'],
         secrets: ['interop-confirmation-secret-0123456789'],
       },
     });
@@ -137,7 +137,7 @@ describe('Slotlock with the official MCP TypeScript SDK v2 (MCP 2026-07-28)', ()
       idempotency_key: 'interop-handover',
     };
 
-    const booked = await connected.callTool({ name: 'calendar_create_event', arguments: booking });
+    const booked = await connected.callTool({ name: 'slotlock_create_event', arguments: booking });
     expect(asked).toEqual([
       'Book "Vehicle handover" on resource resource-1: 2027-03-02 09:00–10:00 (Europe/London).',
     ]);
@@ -147,7 +147,7 @@ describe('Slotlock with the official MCP TypeScript SDK v2 (MCP 2026-07-28)', ()
 
     answer = { action: 'decline' };
     const declined = await connected.callTool({
-      name: 'calendar_create_event',
+      name: 'slotlock_create_event',
       arguments: { ...booking, idempotency_key: 'interop-declined' },
     });
     expect(declined.isError).toBe(true);

@@ -44,7 +44,7 @@ const llmsDetails = `Slotlock is a pre-release (0.1) TypeScript library and MCP/
 Instructions for AI agents:
 
 - Append \`.md\` to a docs page URL for its Markdown source, for example https://slotlock.pylota.io/docs/quickstart.md. The landing page is https://slotlock.pylota.io/index.md.
-- Tool names are \`calendar_<verb>\` (for example \`calendar_find_next_available\`). A refused or conflicting call is a tool result \`{"error":{"code":"…"}}\`, not a protocol error: read the code, then act. \`overlap\` means the time is already taken.
+- Tool names are \`slotlock_<verb>\` (for example \`slotlock_find_next_available\`). A refused or conflicting call is a tool result \`{"error":{"code":"…"}}\`, not a protocol error: read the code, then act. \`overlap\` means the time is already taken.
 - A slot is free only when its coverage is certain. Treat \`uncertain\` (reason \`coverage_incomplete\`) as unknown, never as free.
 - Writes need an \`idempotency_key\`; retry with the same key and arguments. Updates and deletes need the \`expected_revision\` you last read.
 - Slotlock does not sync Google or Microsoft calendars by itself; adapters live in the embedding application.

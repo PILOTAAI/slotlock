@@ -87,7 +87,7 @@ describe('Slotlock with the official A2A JavaScript SDK', () => {
     const client = await connect(fixture);
 
     const reply = await client.sendMessage(
-      invocation('interop-list', 'calendar_list_resources', { limit: 2 }),
+      invocation('interop-list', 'slotlock_list_resources', { limit: 2 }),
       AUTH,
     );
     expect(replyData(reply)).toEqual({
@@ -101,13 +101,13 @@ describe('Slotlock with the official A2A JavaScript SDK', () => {
     const client = await connect(fixture);
 
     const missing = await client.sendMessage(
-      invocation('interop-missing', 'calendar_get_event', { event_id: 'missing' }),
+      invocation('interop-missing', 'slotlock_get_event', { event_id: 'missing' }),
       AUTH,
     );
     expect(replyData(missing)).toEqual({ error: { code: 'not_found' } });
 
     const invalid = await client.sendMessage(
-      invocation('interop-invalid', 'calendar_list_events', { resource_ids: [] }),
+      invocation('interop-invalid', 'slotlock_list_events', { resource_ids: [] }),
       AUTH,
     );
     expect(replyData(invalid)).toEqual({ error: { code: 'invalid_arguments' } });
@@ -123,7 +123,7 @@ describe('Slotlock with the official A2A JavaScript SDK', () => {
     );
     expect(replyData(reply)).toMatchObject({ next_cursor: null });
     expect(fixture.backend.listResources).toHaveBeenCalledWith(
-      expect.objectContaining({ operation: 'calendar_list_resources' }),
+      expect.objectContaining({ operation: 'slotlock_list_resources' }),
       { limit: 1 },
     );
   });
