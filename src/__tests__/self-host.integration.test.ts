@@ -42,6 +42,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
   const role = `slotlock_cli_${randomUUID().replaceAll('-', '').slice(0, 16)}`;
   const password = randomBytes(24).toString('hex');
   const tenantRef = `cli-tenant-${randomUUID()}`;
+  const otherTenantRef = `cli-other-${randomUUID()}`;
   const token = randomBytes(32).toString('hex');
   const confirmationSecret = randomBytes(32).toString('hex');
   let admin: ReturnType<typeof postgres>;
@@ -78,6 +79,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
 
   afterAll(async () => {
     await admin`DELETE FROM slotlock.resources WHERE tenant_ref = ${tenantRef}`;
+    await admin`DELETE FROM slotlock.api_keys WHERE tenant_ref IN (${tenantRef}, ${otherTenantRef})`;
     await admin.unsafe(`DROP OWNED BY ${role}`).catch(() => undefined);
     await admin.unsafe(`DROP ROLE IF EXISTS ${role}`);
     await admin.end();
@@ -248,5 +250,140 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     for (const secret of [token, confirmationSecret, password]) {
       expect(stdout.text()).not.toContain(secret);
     }
+  });
+
+  it("manages API keys from the command line and serves each as its key's tenant and scopes", async () => {
+    const created = await run(['key', 'create', 'Booking agent']);
+    expect(created.code).toBe(0);
+    expect(created.stderr.text()).toMatch(/shown once/);
+    const writer = JSON.parse(created.stdout.text()) as Record<string, unknown>;
+    expect(writer).toMatchObject({
+      name: 'Booking agent',
+      scopes: ['read', 'write'],
+      expires_at: null,
+      key: expect.stringMatching(/^slk_[0-9A-Za-z]{46}$/),
+    });
+    expect(writer.prefix).toBe((writer.key as string).slice(0, 12));
+
+    const before = Date.now();
+    const readerRun = await run(['key', 'create', 'Reader', '--scope', 'read', '--expires-in-days', '30']);
+    expect(readerRun.code).toBe(0);
+    const reader = JSON.parse(readerRun.stdout.text()) as Record<string, unknown>;
+    expect(reader.scopes).toEqual(['read']);
+    const expiresIn = Date.parse(reader.expires_at as string) - before;
+    expect(expiresIn).toBeGreaterThan(30 * 86_400_000 - 60_000);
+    expect(expiresIn).toBeLessThan(30 * 86_400_000 + 60_000);
+
+    const listed = await run(['key', 'list']);
+    expect(listed.code).toBe(0);
+    const rows = listed.stdout.events();
+    expect(rows.map(({ id }) => id)).toEqual([reader.id, writer.id]);
+    expect(rows.every((row) => !('key' in row))).toBe(true);
+    expect(listed.stdout.text()).not.toContain(writer.key as string);
+
+    // A key made for another tenant reaches only that tenant's resources.
+    const otherRun = await runSlotlockCli(['key', 'create', 'Other tenant'], {
+      env: { ...env, SLOTLOCK_TENANT: otherTenantRef },
+      stdout: output(),
+      stderr: output(),
+      signal: new AbortController().signal,
+    });
+    expect(otherRun).toBe(0);
+    const [otherRow] = await admin<{ id: string }[]>`
+      SELECT id FROM slotlock.api_keys WHERE tenant_ref = ${otherTenantRef}`;
+    expect(otherRow).toBeDefined();
+
+    const shutdown = new AbortController();
+    const stdout = output();
+    const stderr = output();
+    const { SLOTLOCK_AUTH_TOKEN: _token, ...keysOnly } = env;
+    const serving = runSlotlockCli(['serve'], {
+      env: keysOnly,
+      stdout,
+      stderr,
+      signal: shutdown.signal,
+    });
+    try {
+      const listening = await eventually(() =>
+        stdout.events().find(({ event }) => event === 'listening'),
+      );
+      expect(listening).toMatchObject({ auth: ['api_keys'] });
+      const origin = listening.address as string;
+      const versioned = { 'MCP-Protocol-Version': SLOTLOCK_MCP_LEGACY_PROTOCOL_VERSION };
+      const call = async (bearer: string, name: string, args: Record<string, unknown>) => {
+        const response = await fetch(`${origin}/mcp`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${bearer}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json, text/event-stream',
+            ...versioned,
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'tools/call',
+            params: { name, arguments: args },
+          }),
+        });
+        return response;
+      };
+      const toolError = async (response: Response) => {
+        const result = await rpcResult<{ isError: boolean; content: { text: string }[] }>(response);
+        expect(result.isError).toBe(true);
+        return (JSON.parse(result.content[0]?.text ?? '') as { error: { code: string } }).error.code;
+      };
+      const resourcesOf = async (bearer: string) => {
+        const response = await call(bearer, 'slotlock_list_resources', { limit: 10 });
+        expect(response.status).toBe(200);
+        return (
+          await rpcResult<{ structuredContent: { resources: { external_ref: string }[] } }>(response)
+        ).structuredContent.resources.map(({ external_ref }) => external_ref);
+      };
+      const write = {
+        resource_id: randomUUID(),
+        starts_at: '2027-03-29T09:00:00Z',
+        ends_at: '2027-03-29T10:00:00Z',
+        timezone: 'Europe/London',
+        idempotency_key: 'cli-key-test-create',
+      };
+
+      // The server token is not configured, so it no longer opens anything.
+      expect((await call(token, 'slotlock_list_resources', { limit: 1 })).status).toBe(401);
+
+      expect(await resourcesOf(reader.key as string)).toEqual(['vehicle-42']);
+      expect(await resourcesOf(writer.key as string)).toEqual(['vehicle-42']);
+      // A read key cannot write; a write key reaches the confirmation every write needs here.
+      expect(await toolError(await call(reader.key as string, 'slotlock_create_event', write))).toBe(
+        'forbidden',
+      );
+      expect(await toolError(await call(writer.key as string, 'slotlock_create_event', write))).toBe(
+        'confirmation_required',
+      );
+
+      const revoked = await run(['key', 'revoke', reader.id as string]);
+      expect(revoked.code).toBe(0);
+      expect(JSON.parse(revoked.stdout.text())).toMatchObject({
+        id: reader.id,
+        revoked_at: expect.any(String),
+      });
+      expect((await call(reader.key as string, 'slotlock_list_resources', { limit: 1 })).status).toBe(
+        401,
+      );
+      expect(await resourcesOf(writer.key as string)).toEqual(['vehicle-42']);
+    } finally {
+      shutdown.abort();
+    }
+    expect(await serving).toBe(0);
+    expect(stderr.text()).toBe('');
+    for (const key of [writer.key, reader.key] as string[]) {
+      expect(stdout.text()).not.toContain(key);
+    }
+
+    // Another tenant's key id is not found here, and nothing about it is revealed.
+    const foreign = await run(['key', 'revoke', otherRow?.id as string]);
+    expect(foreign.code).toBe(1);
+    expect(foreign.stdout.text()).toBe('');
+    expect(foreign.stderr.text()).toMatch(/no API key with that id/);
   });
 });

@@ -73,6 +73,26 @@ export type {
 export { createSlotlockStoreAgentBackend } from './agent-store-backend.js';
 export type { SlotlockStoreAgentBackendOptions } from './agent-store-backend.js';
 export {
+  createSlotlockApiKeyAuthenticator,
+  createSlotlockApiKeyStore,
+  generateSlotlockApiKey,
+  isSlotlockApiKey,
+  slotlockApiKeyDigest,
+  slotlockApiKeyScopeFor,
+  SLOTLOCK_API_KEY_ACTIVE_LIMIT,
+  SLOTLOCK_API_KEY_MAX_LIFETIME_DAYS,
+  SLOTLOCK_API_KEY_PREFIX,
+  SLOTLOCK_API_KEY_RETAINED_LIMIT,
+  SLOTLOCK_API_KEY_SCOPES,
+} from './api-keys.js';
+export type {
+  CreateSlotlockApiKeyInput,
+  SlotlockApiKey,
+  SlotlockApiKeyIdentity,
+  SlotlockApiKeyScope,
+  SlotlockApiKeyStore,
+} from './api-keys.js';
+export {
   CalendarContractError,
   emitICalendar,
   emitITipCalendar,
@@ -93,6 +113,7 @@ export type {
 export {
   createSlotlockApplicationRoleGrantsDdl,
   createSlotlockTenantRlsDdl,
+  SLOTLOCK_API_KEY_FUNCTIONS,
   SLOTLOCK_CORE_DDL,
   SLOTLOCK_TENANT_CONTEXT_SETTING,
   SLOTLOCK_TENANT_RLS_DDL,

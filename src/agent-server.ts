@@ -285,6 +285,11 @@ export interface SlotlockAgentPrincipal {
   subject: string;
   /** Authoritative tenant identity; request arguments cannot override it. */
   tenantRef: string;
+  /**
+   * What the credential may do, for `authorize` to check: an API key carries `read`, `write` or
+   * both (api-keys.ts). The agent server passes it through and never reads it.
+   */
+  scopes?: readonly string[];
 }
 
 export interface SlotlockAgentInvocationContext {

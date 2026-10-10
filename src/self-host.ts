@@ -2,6 +2,7 @@
 // Configuration comes from environment variables alone, so a container, process manager or CI job
 // supplies it the same way and nothing is read from a file or a request. A missing or weak secret
 // stops a command before it connects anywhere, and no secret is written to a log line or an error.
+// The one exception is the API key `key create` prints: that output is the key's only copy.
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
@@ -13,6 +14,16 @@ import {
   createSlotlockAgentServer,
 } from './agent-server.js';
 import { createSlotlockStoreAgentBackend } from './agent-store-backend.js';
+import {
+  SLOTLOCK_API_KEY_MAX_LIFETIME_DAYS,
+  SLOTLOCK_API_KEY_SCOPES,
+  type SlotlockApiKey,
+  type SlotlockApiKeyScope,
+  createSlotlockApiKeyAuthenticator,
+  createSlotlockApiKeyStore,
+  slotlockApiKeyScopeFor,
+  slotlockBearerCredential,
+} from './api-keys.js';
 import {
   type SlotlockNodeServerAddress,
   type SlotlockNodeServerCloseResult,
@@ -41,8 +52,11 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8080;
 const DEFAULT_TENANT = 'default';
-/** The principal every valid token resolves to: a self-hosted server has one operator and tenant. */
+/** The principal the server token resolves to: it acts in SLOTLOCK_TENANT with every scope. */
 const SELF_HOST_SUBJECT = 'self-host';
+/** Who `key create` records as a key's creator. */
+const CLI_KEY_CREATOR = 'cli';
+const DAY_MS = 86_400_000;
 const MIN_SECRET_CHARACTERS = 32;
 /** Rejects repeated or patterned values (`aaaa…`, `abcabc…`); random hex has about 16. */
 const MIN_DISTINCT_SECRET_CHARACTERS = 10;
@@ -98,7 +112,11 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
   port: number;
   /** Where clients reach the server; Slotlock publishes its endpoints under this URL. */
   publicUrl: string;
-  authToken: string;
+  /**
+   * A bearer token for SLOTLOCK_TENANT with every scope. Optional: API keys (`slotlock key create`)
+   * authenticate whether or not it is set, each as its own tenant and scopes.
+   */
+  authToken?: string;
   /** Writes that wait for a person's confirmation (MCP 2026-07-28) and are refused elsewhere. */
   confirmWrites: readonly SlotlockAgentWriteOperation[];
   /** Set exactly when `confirmWrites` is not empty. */
@@ -290,11 +308,6 @@ export function readSlotlockDatabaseConfig(env: SlotlockEnv): SlotlockDatabaseCo
 export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
   const database = readSlotlockDatabaseConfig(env);
   const authToken = readSecret(env, 'SLOTLOCK_AUTH_TOKEN');
-  if (authToken === undefined) {
-    throw new SlotlockConfigError(
-      `SLOTLOCK_AUTH_TOKEN is required: the bearer token MCP and A2A clients send; ${SECRET_HINT}`,
-    );
-  }
   const confirmWrites = readConfirmWrites(env);
   const confirmationSecret = readSecret(env, 'SLOTLOCK_CONFIRMATION_SECRET');
   if (confirmWrites.length > 0 && confirmationSecret === undefined) {
@@ -302,7 +315,7 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
       `SLOTLOCK_CONFIRMATION_SECRET is required while SLOTLOCK_CONFIRM_WRITES guards writes (the default): it signs each pending confirmation; ${SECRET_HINT}, or set SLOTLOCK_CONFIRM_WRITES=none to let agents write without asking a person`,
     );
   }
-  if (confirmationSecret !== undefined && confirmationSecret === authToken) {
+  if (confirmationSecret !== undefined && authToken !== undefined && confirmationSecret === authToken) {
     throw new SlotlockConfigError(
       'SLOTLOCK_CONFIRMATION_SECRET must differ from SLOTLOCK_AUTH_TOKEN',
     );
@@ -313,10 +326,10 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
     host: readHost(env),
     port,
     publicUrl: readPublicUrl(env, port),
-    authToken,
     confirmWrites,
     availability: readAvailability(env),
   };
+  if (authToken !== undefined) config.authToken = authToken;
   if (confirmWrites.length > 0 && confirmationSecret !== undefined) {
     config.confirmationSecret = confirmationSecret;
   }
@@ -350,10 +363,24 @@ export function createSlotlockTokenAuthenticator(
 ): (request: Request) => Promise<SlotlockAgentPrincipal | null> {
   const expected = sha256(token);
   return async (request) => {
-    const presented = /^Bearer +(\S+)$/i.exec(request.headers.get('authorization') ?? '')?.[1];
+    const presented = slotlockBearerCredential(request);
     if (presented === undefined) return null;
     return timingSafeEqual(sha256(presented), expected) ? { ...principal } : null;
   };
+}
+
+/**
+ * What `serve` lets a principal call: a served operation its scopes cover. The server token's
+ * principal carries every scope; a principal without scopes is refused everything.
+ */
+export function authorizeSlotlockServeOperation(args: {
+  principal: SlotlockAgentPrincipal;
+  operation: SlotlockAgentOperation;
+}): boolean {
+  return (
+    SERVED_OPERATIONS.has(args.operation) &&
+    args.principal.scopes?.includes(slotlockApiKeyScopeFor(args.operation)) === true
+  );
 }
 
 interface OutputStream {
@@ -500,6 +527,15 @@ export async function startSlotlockServer(
     }
     const store = createSlotlockStore(sql);
     const publicUrl = new URL(config.publicUrl);
+    const authenticateKey = createSlotlockApiKeyAuthenticator(createSlotlockApiKeyStore(sql));
+    const authenticateToken =
+      config.authToken === undefined
+        ? undefined
+        : createSlotlockTokenAuthenticator(config.authToken, {
+            subject: SELF_HOST_SUBJECT,
+            tenantRef: config.tenantRef,
+            scopes: SLOTLOCK_API_KEY_SCOPES,
+          });
     const agentServer = createSlotlockAgentServer({
       publicBaseUrl: config.publicUrl,
       // readPublicUrl admits plain HTTP only on a loopback host, which is all this permits anyway.
@@ -507,11 +543,11 @@ export async function startSlotlockServer(
       backend: createSlotlockStoreAgentBackend(store, {
         availabilityRules: async () => config.availability.map((rule) => ({ ...rule })),
       }),
-      authenticate: createSlotlockTokenAuthenticator(config.authToken, {
-        subject: SELF_HOST_SUBJECT,
-        tenantRef: config.tenantRef,
-      }),
-      authorize: async ({ operation }) => SERVED_OPERATIONS.has(operation),
+      // The token is compared in constant time first; only then is a key looked up.
+      authenticate: async (request) =>
+        (await authenticateToken?.(request)) ?? (await authenticateKey(request)),
+      authorize: async ({ principal, operation }) =>
+        authorizeSlotlockServeOperation({ principal, operation }),
       health: async () =>
         (await databaseReachable(sql))
           ? { ready: true, checks: ['database'] }
@@ -537,6 +573,7 @@ export async function startSlotlockServer(
       mcp: `${config.publicUrl}/mcp`,
       a2a: `${config.publicUrl}/a2a`,
       tenant: config.tenantRef,
+      auth: config.authToken === undefined ? ['api_keys'] : ['token', 'api_keys'],
       confirm_writes: config.confirmWrites,
       availability_rules: config.availability.length,
     });
@@ -600,6 +637,57 @@ async function listResources(config: SlotlockDatabaseConfig, out: OutputStream):
   }
 }
 
+/** One key as `key create`, `key list` and `key revoke` print it: never the digest. */
+function apiKeyLine(apiKey: SlotlockApiKey, key?: string): string {
+  return `${JSON.stringify({
+    id: apiKey.id,
+    name: apiKey.name,
+    prefix: apiKey.prefix,
+    scopes: apiKey.scopes,
+    created_by: apiKey.createdBy,
+    created_at: apiKey.createdAt.toISOString(),
+    expires_at: apiKey.expiresAt?.toISOString() ?? null,
+    last_used_at: apiKey.lastUsedAt?.toISOString() ?? null,
+    revoked_at: apiKey.revokedAt?.toISOString() ?? null,
+    ...(key !== undefined ? { key } : {}),
+  })}\n`;
+}
+
+/** `--scope`: read, write, or both comma-separated. */
+function parseKeyScopes(value: string | undefined): SlotlockApiKeyScope[] {
+  if (value === undefined) return [...SLOTLOCK_API_KEY_SCOPES];
+  const names = value.split(',').map((name) => name.trim());
+  const scopes = SLOTLOCK_API_KEY_SCOPES.filter((scope) => names.includes(scope));
+  if (names.length === 0 || names.some((name) => !scopes.includes(name as SlotlockApiKeyScope))) {
+    throw new Error('--scope must be read, write or read,write');
+  }
+  return scopes;
+}
+
+/** `--expires-in-days`: a whole number of days up to the longest a key may live. */
+function parseKeyLifetime(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const days = /^\d{1,4}$/.test(value) ? Number(value) : Number.NaN;
+  if (!(days >= 1 && days <= SLOTLOCK_API_KEY_MAX_LIFETIME_DAYS)) {
+    throw new Error(
+      `--expires-in-days must be a whole number from 1 to ${SLOTLOCK_API_KEY_MAX_LIFETIME_DAYS}`,
+    );
+  }
+  return days;
+}
+
+async function withApiKeys<T>(
+  config: SlotlockDatabaseConfig,
+  operation: (keys: ReturnType<typeof createSlotlockApiKeyStore>) => Promise<T>,
+): Promise<T> {
+  const sql = connect(config.databaseUrl, 1);
+  try {
+    return await operation(createSlotlockApiKeyStore(sql));
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
 async function healthcheck(env: SlotlockEnv): Promise<boolean> {
   try {
     const response = await fetch(slotlockHealthcheckUrl(env), {
@@ -646,6 +734,11 @@ Commands:
   resource add <ref> [--timezone <IANA zone>]
                            Create a calendar resource (a car, room, person or machine)
   resource list            Print the tenant's resources, one JSON object per line
+  key create <name> [--scope read|write|read,write] [--expires-in-days <n>]
+                           Create an API key for the tenant (default scope read,write, no
+                           expiry) and print it once; only its SHA-256 is stored
+  key list                 Print the tenant's API keys, one JSON object per line
+  key revoke <id>          Revoke one of the tenant's API keys at once
   healthcheck              Exit 0 when the local server reports ready
 
 Options:
@@ -655,11 +748,12 @@ Options:
 Environment:
   DATABASE_URL                   postgres:// URL of the role Slotlock serves as (required)
   SLOTLOCK_MIGRATE_DATABASE_URL  postgres:// URL of the schema owner, for migrate (optional)
-  SLOTLOCK_AUTH_TOKEN            Bearer token clients send, 32+ random characters (serve)
+  SLOTLOCK_AUTH_TOKEN            Optional bearer token for SLOTLOCK_TENANT with every scope,
+                                 32+ random characters (serve); API keys work with or without it
   SLOTLOCK_CONFIRMATION_SECRET   Signs pending write confirmations, 32+ random characters (serve)
   SLOTLOCK_CONFIRM_WRITES        all (default), none, or a comma-separated list of write tools
   SLOTLOCK_PUBLIC_URL            URL clients use (default http://localhost:$PORT)
-  SLOTLOCK_TENANT                Tenant every request acts in (default "default")
+  SLOTLOCK_TENANT                Tenant of the token, resource and key commands (default "default")
   SLOTLOCK_AVAILABILITY          JSON array of weekly bookable-hours rules (default: none)
   HOST                           Listen address (default 127.0.0.1)
   PORT                           Listen port (default 8080)
@@ -697,13 +791,17 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     io.stderr.write(SLOTLOCK_CLI_HELP);
     return 2;
   }
-  const subcommand = command === 'resource' ? `resource ${operands[0] ?? ''}`.trim() : command;
+  const subcommand =
+    command === 'resource' || command === 'key' ? `${command} ${operands[0] ?? ''}`.trim() : command;
   const expectedOperands: Record<string, number> = {
     migrate: 0,
     serve: 0,
     healthcheck: 0,
     'resource add': 2,
     'resource list': 1,
+    'key create': 2,
+    'key list': 1,
+    'key revoke': 2,
   };
   const expected = expectedOperands[subcommand];
   if (expected === undefined) return usage(`unknown command "${subcommand}"`);
@@ -711,6 +809,21 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
   if (values.migrate && subcommand !== 'serve') return usage('--migrate applies only to serve');
   if (values.timezone !== undefined && subcommand !== 'resource add') {
     return usage('--timezone applies only to resource add');
+  }
+  for (const option of ['scope', 'expires-in-days'] as const) {
+    if (values[option] !== undefined && subcommand !== 'key create') {
+      return usage(`--${option} applies only to key create`);
+    }
+  }
+  let keyScopes: SlotlockApiKeyScope[] = [];
+  let keyLifetimeDays: number | undefined;
+  if (subcommand === 'key create') {
+    try {
+      keyScopes = parseKeyScopes(values.scope);
+      keyLifetimeDays = parseKeyLifetime(values['expires-in-days']);
+    } catch (error) {
+      return usage((error as Error).message);
+    }
   }
 
   const log = createLogger(io);
@@ -739,6 +852,45 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
       case 'resource list':
         await listResources(readSlotlockDatabaseConfig(io.env), io.stdout);
         return 0;
+      case 'key create': {
+        const config = readSlotlockDatabaseConfig(io.env);
+        const created = await withApiKeys(config, (keys) =>
+          keys.create({
+            tenantRef: config.tenantRef,
+            name: operands[1] as string,
+            scopes: keyScopes,
+            createdBy: CLI_KEY_CREATOR,
+            ...(keyLifetimeDays !== undefined
+              ? { expiresAt: new Date(Date.now() + keyLifetimeDays * DAY_MS) }
+              : {}),
+          }),
+        );
+        io.stdout.write(apiKeyLine(created.apiKey, created.key));
+        io.stderr.write(
+          'slotlock: the key is shown once and only its SHA-256 is stored; keep it in a secret manager\n',
+        );
+        return 0;
+      }
+      case 'key list': {
+        const config = readSlotlockDatabaseConfig(io.env);
+        const listed = await withApiKeys(config, (keys) =>
+          keys.list({ tenantRef: config.tenantRef }),
+        );
+        for (const apiKey of listed) io.stdout.write(apiKeyLine(apiKey));
+        return 0;
+      }
+      case 'key revoke': {
+        const config = readSlotlockDatabaseConfig(io.env);
+        const revoked = await withApiKeys(config, (keys) =>
+          keys.revoke({ tenantRef: config.tenantRef, id: operands[1] as string }),
+        );
+        if (!revoked) {
+          io.stderr.write('slotlock: no API key with that id in this tenant\n');
+          return 1;
+        }
+        io.stdout.write(apiKeyLine(revoked));
+        return 0;
+      }
       default:
         return (await healthcheck(io.env)) ? 0 : 1;
     }
@@ -760,6 +912,8 @@ function parseCliArguments(argv: readonly string[]) {
     options: {
       migrate: { type: 'boolean' },
       timezone: { type: 'string' },
+      scope: { type: 'string' },
+      'expires-in-days': { type: 'string' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
     },

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  SLOTLOCK_API_KEY_FUNCTIONS,
   SLOTLOCK_CORE_DDL,
   SLOTLOCK_TENANT_CONTEXT_SETTING,
   SLOTLOCK_TENANT_RLS_DDL,
@@ -117,22 +118,55 @@ describe('deployment DDL name resolution', () => {
     expect(SLOTLOCK_TENANT_RLS_DDL).toContain('pg_catalog.sha256(');
   });
 
+  const functions = [
+    ...SLOTLOCK_CORE_DDL.matchAll(
+      /CREATE OR REPLACE FUNCTION (slotlock\.\w+)\(([^)]*)\)([\s\S]*?)\bAS \$/g,
+    ),
+  ];
+
   it('pins search_path on every function it defines', () => {
-    const functions = [
-      ...SLOTLOCK_CORE_DDL.matchAll(/CREATE OR REPLACE FUNCTION (slotlock\.\w+)\(\)([\s\S]*?)\bAS\b/g),
-    ];
     expect(functions.length).toBeGreaterThan(0);
-    for (const [, name, header] of functions) {
+    for (const [, name, , header] of functions) {
       expect(`${name}: ${header}`).toContain('SET search_path = pg_catalog, slotlock, pg_temp');
     }
+  });
+
+  // A function is executable by PUBLIC unless revoked, and a SECURITY DEFINER one runs as the owner.
+  it('defines the API key functions as SECURITY DEFINER, executable by no one by default', () => {
+    const definers = functions.filter(([, , , header]) => header?.includes('SECURITY DEFINER'));
+    expect(definers.map(([, name]) => name).sort()).toEqual(
+      SLOTLOCK_API_KEY_FUNCTIONS.map((signature) => signature.slice(0, signature.indexOf('('))).sort(),
+    );
+    for (const signature of SLOTLOCK_API_KEY_FUNCTIONS) {
+      expect(SLOTLOCK_CORE_DDL).toContain(`REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`);
+    }
+    for (const [, name, parameters] of functions) {
+      const types = (parameters ?? '')
+        .split(',')
+        .map((parameter) => parameter.trim().split(/\s+/).slice(1).join(' '))
+        .filter(Boolean)
+        .join(', ');
+      if (SLOTLOCK_API_KEY_FUNCTIONS.some((signature) => signature.startsWith(`${name}(`))) {
+        expect(SLOTLOCK_API_KEY_FUNCTIONS).toContain(`${name}(${types})`);
+      }
+    }
+  });
+
+  it('keeps API keys in a table no role but its owner reads or writes', () => {
+    expect(SLOTLOCK_CORE_DDL).toContain('CREATE TABLE IF NOT EXISTS slotlock.api_keys');
+    expect(SLOTLOCK_CORE_DDL).toContain('ALTER TABLE slotlock.api_keys ENABLE ROW LEVEL SECURITY;');
+    expect(SLOTLOCK_CORE_DDL).toContain('REVOKE ALL ON slotlock.api_keys FROM PUBLIC;');
+    expect(SLOTLOCK_CORE_DDL).toMatch(/secret_hash bytea NOT NULL/);
+    expect(SLOTLOCK_CORE_DDL).not.toMatch(/api_keys[^;]*\bkey text\b/);
   });
 });
 
 describe('application role grants', () => {
   it('covers exactly the tables the core schema creates, each under forced RLS', () => {
+    // rls_policy_contracts is deployment-only; api_keys is reached only through its functions.
     const created = [...SLOTLOCK_CORE_DDL.matchAll(/CREATE TABLE IF NOT EXISTS slotlock\.([a-z_]+)/g)]
       .map((match) => match[1])
-      .filter((table) => table !== 'rls_policy_contracts');
+      .filter((table) => table !== 'rls_policy_contracts' && table !== 'api_keys');
     expect([...SLOTLOCK_TENANT_TABLES].sort()).toEqual([...new Set(created)].sort());
     for (const table of SLOTLOCK_TENANT_TABLES) {
       expect(SLOTLOCK_TENANT_RLS_DDL).toContain(
@@ -141,12 +175,13 @@ describe('application role grants', () => {
     }
   });
 
-  it('grants schema usage and DML on those tables only', () => {
+  it('grants schema usage, DML on those tables and EXECUTE on the API key functions only', () => {
     const ddl = createSlotlockApplicationRoleGrantsDdl('slotlock_app');
     expect(ddl).toBe(
-      `GRANT USAGE ON SCHEMA slotlock TO "slotlock_app";\nGRANT SELECT, INSERT, UPDATE, DELETE ON ${SLOTLOCK_TENANT_TABLES.map((table) => `slotlock.${table}`).join(', ')} TO "slotlock_app";\n`,
+      `GRANT USAGE ON SCHEMA slotlock TO "slotlock_app";\nGRANT SELECT, INSERT, UPDATE, DELETE ON ${SLOTLOCK_TENANT_TABLES.map((table) => `slotlock.${table}`).join(', ')} TO "slotlock_app";\nGRANT EXECUTE ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS.join(', ')} TO "slotlock_app";\n`,
     );
     expect(ddl).not.toContain('rls_policy_contracts');
+    expect(ddl).not.toMatch(/slotlock\.api_keys\b/);
     expect(ddl).not.toMatch(/ALL|TRUNCATE|REFERENCES|TRIGGER|CREATE|OWNER/);
   });
 
