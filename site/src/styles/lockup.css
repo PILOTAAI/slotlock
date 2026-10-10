@@ -1,0 +1,93 @@
+/* "Slotlock by Pylota" (src/components/Lockup.astro), on the landing page and in the docs header.
+   The apex is Pylota's mark (logo-pack 2, mark-*.svg: the path M8 46 L26 14 L56 44, stroke 8 on a
+   64 grid). Its motion follows Pylota's welcome lockup: the mark settles in from 92% scale, then
+   the stroke draws from the left foot over the peak. stroke-dash* are inherited, so the load
+   animation lives on the <svg> and the hover redraw on the <path>: leaving the link drops the
+   path's animation without replaying the load one. */
+
+.lockup {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.lockup__mark {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  overflow: visible;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 0;
+}
+
+.lockup__apex {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 8;
+  stroke-linejoin: miter;
+}
+
+.lockup__words {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.lockup__name {
+  font-family: var(--font-display, 'Inter Tight', 'Inter', system-ui, sans-serif);
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.035em;
+}
+
+/* The endorsement is small and quiet: "by" in the muted ink, the parent name one step stronger. */
+.lockup__by {
+  font-family: var(--font-sans, 'Inter', system-ui, sans-serif);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1;
+  letter-spacing: 0;
+  color: var(--ink-3);
+}
+
+.lockup__parent {
+  font-family: var(--font-display, 'Inter Tight', 'Inter', system-ui, sans-serif);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--ink-2);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .lockup__mark {
+    animation:
+      lockup-settle 640ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)) both,
+      lockup-draw 900ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)) 120ms both;
+  }
+
+  a:hover .lockup__apex,
+  a:focus-visible .lockup__apex {
+    animation: lockup-draw 700ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)) both;
+  }
+}
+
+@keyframes lockup-settle {
+  from {
+    opacity: 0;
+    transform: scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes lockup-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
