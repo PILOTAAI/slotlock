@@ -8,19 +8,15 @@ export interface LiveCalendarOptions {
   mcpUrl: string;
   token: string;
   resourceId: string;
-  /** Show Slotlock's sentence ("Book … on resource …: 2027-03-29 10:00–12:00 (Europe/London).") */
   confirm(message: string): Promise<boolean>;
-  /** The resource's free/busy changed; call read() for the new one. */
   onChange(uri: string): void;
 }
 
 export async function openLiveCalendar(options: LiveCalendarOptions) {
   const client = new Client(
     { name: 'fleet-assistant', version: '1.0.0' },
-    // 'auto' asks server/discover first and speaks 2026-07-28 when the server does.
     { versionNegotiation: { mode: 'auto' }, capabilities: { elicitation: { form: {} } } },
   );
-  // Slotlock asks before a guarded write; the SDK calls this, then repeats the call with the answer.
   client.setRequestHandler('elicitation/create', async (request) =>
     (await options.confirm(request.params.message))
       ? { action: 'accept' as const, content: { confirm: true } }
@@ -36,7 +32,6 @@ export async function openLiveCalendar(options: LiveCalendarOptions) {
   );
 
   const uri = slotlockCalendarResourceUri(options.resourceId);
-  // The acknowledgment lists what the server agreed to watch: nothing when this token cannot read it.
   const subscription = await client.listen({ resourceSubscriptions: [uri] });
   return {
     watching: subscription.honoredFilter.resourceSubscriptions ?? [],

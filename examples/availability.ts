@@ -7,7 +7,6 @@ const searchWindow = {
   end: new Date('2026-09-21T00:00:00Z'),
 };
 
-// Weekdays 09:00-17:00, evaluated in the resource's own timezone (DST included).
 const windows = expandRules(
   [{ rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR', startMinutes: 9 * 60, durationMinutes: 8 * 60 }],
   searchWindow,
@@ -19,6 +18,5 @@ export const slot = findNextAvailable({
   busy: [{ start: new Date('2026-09-14T09:00:00Z'), end: new Date('2026-09-14T10:00:00Z') }],
   durationMs: 2 * 60 * 60 * 1000,
 });
-// slot = { start: 2026-09-14T10:00:00Z, end: 2026-09-14T12:00:00Z }: Monday 08:00-09:00 UTC
-// (09:00 London) is too short before the busy hour.
+// slot: 2026-09-14 10:00–12:00 UTC, the first two free hours after the busy one
 // #endregion next-slot

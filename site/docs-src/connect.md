@@ -3,11 +3,9 @@ title: Connect an agent
 description: Give Claude Code, Cursor, VS Code, the Claude API or your own MCP or A2A client the Slotlock tools.
 ---
 
-A Slotlock server answers MCP at `{base}/mcp` and A2A at `{base}/a2a`, with the same
-{{toolCount}} tools behind both and a bearer token in front. The editor setups below use the local
-server from the [Quickstart](/docs/quickstart/), `http://localhost:8080`, and its token in
-`SLOTLOCK_AUTH_TOKEN`. For a server you deploy, use its `https://` URL and a token your
-`authenticate` callback accepts.
+A Slotlock server answers MCP at `{base}/mcp` and A2A at `{base}/a2a`, with a bearer token. The
+examples use the [Quickstart](/docs/quickstart/) server, `http://localhost:8080`; for your own, use
+its `https://` URL.
 
 ## Editors and coding agents
 

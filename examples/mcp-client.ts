@@ -19,7 +19,6 @@ export async function findSlotOverMcp(mcpUrl: string, token: string, resourceId:
         duration_minutes: 120,
       },
     });
-    // A refusal or conflict is a result the model reads ({"error":{"code":…}}), not an exception.
     if (result.isError) {
       const [text] = result.content as Array<{ type: 'text'; text: string }>;
       return { error: JSON.parse(text?.text ?? '{}').error as { code: string } };
