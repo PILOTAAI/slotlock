@@ -8,6 +8,7 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
   const window = calendarEventRollingHorizon();
   let extended = 0;
   let conflicts = 0;
+  let refused = 0;
   let horizonCapped = true;
   for (let batch = 0; batch < MAX_BATCHES; batch++) {
     const roll = await store.withTenant(tenantRef, (tenant) =>
@@ -15,6 +16,7 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
     );
     extended += roll.extended;
     conflicts += roll.conflicts;
+    refused += roll.refused;
     if (!roll.hasMore) {
       horizonCapped = false;
       break;
@@ -33,6 +35,6 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
       break;
     }
   }
-  return { extended, conflicts, pruned, capped: horizonCapped || retentionCapped };
+  return { extended, conflicts, refused, pruned, capped: horizonCapped || retentionCapped };
 }
 // #endregion maintenance
