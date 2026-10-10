@@ -1,18 +1,14 @@
 ---
 title: Concepts
-description: The ideas Slotlock is built on, with the API names you will meet, from resources and availability rules to holds, free/busy certainty and tenancy.
+description: The ideas Slotlock is built on, from resources and availability rules to holds, free/busy certainty and tenancy.
 ---
 
-Nine short sections carry the whole model. The [specification](/docs/specification/) states each
-rule normatively; this page explains them, and the [tools reference](/docs/tools/) shows how each
-one reaches an agent.
+The [specification](/docs/specification/) states each rule exactly; this page explains them.
 
 ## Resources
 
-A resource is anything that can be booked: a vehicle, a room, a machine, a clinician. Calendars
-belong to resources, not to users. Each resource has a stable id, an IANA time zone, and, when a
-tenant owns it, a tenant reference plus your own stable `externalRef` (for example `vehicle-42`).
-Nothing in the semantics assumes an industry.
+Anything bookable: a vehicle, a room, a machine, a person. Calendars belong to resources, not users.
+Each has an id, an IANA time zone and, for a tenant, your own `externalRef`.
 
 ```ts
 const vehicle = await tenant.createResource({
@@ -24,115 +20,86 @@ const vehicle = await tenant.createResource({
 
 ## Availability rules
 
-Bookable hours are weekly rules (`WeeklyAvailabilityRule`): an RRULE with `FREQ=WEEKLY` and an
-explicit `BYDAY`, a start minute after local midnight, and a duration. They are evaluated in the
-resource's own time zone, so 09:00 stays 09:00 across daylight-saving changes. A wall time that
-does not exist moves forward by the gap; an ambiguous one resolves to its first occurrence.
+Bookable hours are weekly rules: `FREQ=WEEKLY` with an explicit `BYDAY`, a start minute and a
+length, evaluated in the resource's time zone (09:00 stays 09:00 across daylight saving).
 
-- No rule means no availability, not open all week.
-- A rule Slotlock cannot evaluate (`COUNT`, an interval above 1) contributes nothing. It never
-  manufactures a slot.
+- No rule means never bookable, not open all week.
+- A rule Slotlock cannot evaluate (`COUNT`, `INTERVAL` above 1) adds nothing. It never invents a
+  slot.
 
-`expandRules(rules, window, timeZone)` turns rules into windows, and `findNextAvailable` finds the
-earliest slot of a given length that fits inside them without touching busy time. Both are pure
-functions; see the [TypeScript library](/docs/library/#quick-start-the-next-free-slot).
+`expandRules` turns rules into windows and `findNextAvailable` finds the first slot that fits. Both
+are pure functions ([example](/docs/library/#quick-start-the-next-free-slot)).
 
 ## Half-open intervals
 
-Every interval is `[start, end)`: it contains its start and not its end. A booking that ends at
-12:00 and one that starts at 12:00 do not overlap, so back-to-back bookings need no spare minute.
-PostgreSQL uses the same boundary, `tstzrange(starts_at, ends_at, '[)')`.
+Every interval is `[start, end)`. A booking ending at 12:00 and one starting at 12:00 do not
+overlap.
 
-## Reservations and the exclusion constraint
+## The exclusion constraint
 
-The database, not a check in your application, decides whether two bookings overlap. The
-reservations table carries this constraint:
+PostgreSQL, not your application, decides whether two bookings overlap:
 
 ```sql
 {{excludeConstraint}}
 ```
 
-When two writers race for overlapping time, PostgreSQL lets exactly one insert through. The loser
-gets a structured result, not an exception:
+When two writers race, exactly one wins. The other gets data, not an exception:
 
 ```ts
 { ok: false, code: 'overlap', conflictingReservationId: '…' }
 ```
 
-The repository's integration suite runs that race against PostgreSQL ("two parallel overlapping
-inserts: exactly one wins", and the same for holds). A booking can carry a trailing buffer
-(`bufferAfterMs`) that keeps the resource occupied after the customer-visible end.
+A booking can keep a resource busy after it ends with `bufferAfterMs`, for cleaning or turnaround.
 
 ## Holds
 
-A hold occupies time without committing to it, under the same constraint as a reservation:
+A hold occupies time without committing to it, under the same constraint:
 
 ```ts
-const result = await store.withTenant(tenantRef, async (tenant) => {
-  const held = await tenant.acquireHold({ resourceId, start, end, ttlMs: 10 * 60_000 });
-  if (!held.ok) return held; // 'overlap', 'invalid_window' or 'invalid_ttl'
-  // … ask the customer, take a deposit, wait for a person …
-  return tenant.confirmHold(held.hold.id); // a reservation, or 'hold_expired' / 'hold_not_found'
-});
+const held = await tenant.acquireHold({ resourceId, start, end, ttlMs: 10 * 60_000 });
+if (held.ok) await tenant.confirmHold(held.hold.id);
 ```
 
-- The expiry is `now() + ttl` on the database clock, never the application's. A hold may last up
-  to {{maxHoldDays}} days.
-- `confirmHold` turns a live hold into a confirmed reservation and is safe to retry.
-  `releaseHold` frees the time at once.
-- An expired hold is removed by the next writer that wants its time, in the same transaction, so
-  no cron job is needed.
+- It expires on the database clock, after at most {{maxHoldDays}} days, and the next writer that
+  wants its time removes it. No cron job.
+- `confirmHold` turns it into a reservation and is safe to retry; `releaseHold` frees it at once.
 
-Holds are part of the TypeScript store. Over MCP and A2A, agents create events instead, and you can
-require a person to [confirm each write](/docs/security/#confirmation-before-writes).
+Holds are in the TypeScript store. Over MCP and A2A, agents create events, and you can make each
+write [wait for a person](/docs/security/#confirmation-before-writes).
 
 ## Events
 
-Events (`putCalendarEvent`) carry the calendar content people see: title, organizer, attendees and
-their replies, reminders, and recurrence with exceptions. Each opaque occurrence becomes a
-reservation under the same constraint; a transparent event stays visible but occupies nothing.
+Events carry what people see: title, organizer, attendees, reminders and recurrence. Each opaque
+occurrence is a reservation under the same constraint; a transparent event occupies nothing.
 
-- Writes take an expected revision (`0` creates) and an idempotency key. Replaying the same command
-  returns the original result; reusing a key with a different payload is `idempotency_conflict`.
-- Cancelling leaves a tombstone, so a delayed create cannot bring the event back.
-- A recurring event is materialized into a window of at most {{horizonDays}} days and 2,000
-  occurrences. A one-off event may last up to {{maxEventDaysText}} days.
-- Events created over MCP or A2A belong to the principal that created them; everyone else's still
-  counts as busy time.
+- Writes take an expected revision (`0` creates) and an idempotency key, so retries are safe.
+- Cancelling leaves a tombstone, so a late create cannot bring the event back.
+- Recurrence is stored for at most {{horizonDays}} days ahead; one event may last
+  {{maxEventDaysText}} days.
+- Over MCP and A2A, a caller sees only its own events, but everyone's count as busy time.
 
 ## Free/busy certainty
 
-Free time is only free if every calendar that could block it has been read. `getFreeBusy` returns
-busy intervals and a `coverage` assessment: `complete`, `partial` or `unknown`, with the names of
-the sources that are missing.
+Time is free only if every calendar that could block it has been read. `getFreeBusy` returns busy
+intervals and a coverage state, `complete`, `partial` or `unknown`, naming any missing sources.
 
-- A provider adapter records how much of a feed it has fully read with `recordCalendarCoverage`.
-- A query passes the sources a resource depends on as `requiredSources`. The window is `complete`
-  only when each of them has a fresh coverage interval that contains it.
-- An opaque recurring event adds its own source, `SLOTLOCK_LOCAL_RECURRENCE_COVERAGE_SOURCE`, so
-  time past its materialized horizon is unproven until maintenance rolls it forward.
+- An adapter records what it has fully read with `recordCalendarCoverage`; a query names the sources
+  a resource depends on in `requiredSources`.
+- Over MCP the answer is `coverage.certainty`: `certain` or `uncertain`.
+  `slotlock_find_next_available` offers no slot unless it is certain.
 
-Over MCP the same answer is `coverage.certainty`: `certain` or `uncertain` (reason
-`coverage_incomplete`). `slotlock_find_next_available` returns no slot unless every resource it
-was asked about is certain.
+## Tenancy
 
-## Tenancy and row-level security
+Every tenant row is guarded by forced row-level security against the transaction setting
+`slotlock.tenant_ref`. Without it, a query sees nothing.
 
-Every tenant-owned row carries a tenant reference. Forced PostgreSQL row-level security compares it
-with the transaction-local setting `slotlock.tenant_ref` and returns nothing when the setting is
-missing or empty.
-
-- `store.withTenant(tenantRef, callback)` pins one connection and sets the tenant for everything
-  inside the callback. A standalone `set_config` through a pool is not enough.
-- Over MCP and A2A the tenant comes from your `authenticate` callback. A tool argument can never
-  choose it.
-- Application traffic uses a role that is not a superuser and cannot bypass RLS;
-  `grantApplicationRole` grants it exactly what it needs and refuses a role that could get around
-  the policies.
+- `store.withTenant(tenantRef, callback)` sets the tenant for everything in the callback.
+- Over MCP and A2A the tenant comes from your `authenticate`, never from a tool argument.
+- Traffic runs as a role that cannot bypass row-level security; `grantApplicationRole` refuses one
+  that could.
 
 ## External calendars
 
-Provider adapters for Google, Microsoft, CalDAV or a marketplace live in your application, with
-their credentials. Slotlock gives them provider-neutral boundaries: `normalizeExternalCalendarChange`
-for webhook changes, `parseICalendarChanges` for bounded iCalendar input, and `emitICalendar` /
-`emitITipCalendar` for output. External events are busy time, never scheduling authority.
+Adapters for Google, Microsoft, CalDAV or a marketplace live in your application. Slotlock gives
+them neutral boundaries (`normalizeExternalCalendarChange`, `parseICalendarChanges`, `emitICalendar`)
+and treats external events as busy time, never as authority.
