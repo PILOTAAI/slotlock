@@ -670,7 +670,9 @@ says exactly what will change, for example `Book vehicle-42 for 2027-03-29 10:00
 and only an explicit acceptance runs the write. The question states the facts first (the resource
 by its own reference, the times, an event as it stands now, read through your backend's
 `describeResource` and `getEvent`) and the agent's own text last, quoted, so a title cannot pass
-itself off as the time or the resource. Without `describeResource`, resources are named by id. The pending confirmation travels as a
+itself off as the time or the resource. A lookup runs only when the caller's scopes and `authorize`
+allow that read, so a write-only key's question names everything by id, as it does without
+`describeResource`. The pending confirmation travels as a
 `requestState` sealed with your `secrets` (HMAC-SHA256) to the caller, the tool, the exact arguments
 and an expiry (`ttlSeconds`, default 600), so it cannot approve another booking, caller or change.
 Authorization and argument validation run first: nobody is asked to approve a call that could not

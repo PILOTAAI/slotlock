@@ -384,8 +384,9 @@ export interface SlotlockAgentCalendarBackend {
   ): Promise<Record<string, unknown>>;
   /**
    * Optional. The name a person knows a resource by (its own reference, such as `vehicle-42`), for
-   * the question a confirmation asks; `null` when the caller cannot see it. Without it, or when it
-   * fails, the question names the resource by id.
+   * the question a confirmation asks; `null` when the caller cannot see it. Called as the read
+   * `slotlock_list_resources`, only when the caller's scopes and `authorize` allow that read.
+   * Without it, or when it fails, the question names the resource by id.
    */
   describeResource?(
     context: SlotlockAgentInvocationContext,
@@ -1682,16 +1683,28 @@ interface ConfirmationLookup {
   event(id: unknown): Promise<ConfirmationEvent | null>;
 }
 
+/**
+ * The question shows only what the caller could read itself: each lookup runs as the read it is
+ * (`slotlock_list_resources`, `slotlock_get_event`), only when the caller's scopes and `authorize`
+ * allow that read. A write-only key's question names everything by id.
+ */
 function confirmationLookup(
-  backend: SlotlockAgentCalendarBackend,
-  context: SlotlockAgentInvocationContext,
+  options: Pick<SlotlockAgentServerOptions, 'backend' | 'authorize'>,
+  context: Omit<SlotlockAgentInvocationContext, 'operation'>,
 ): ConfirmationLookup {
+  const { backend } = options;
+  const { principal } = context;
+  const mayRead = async (operation: SlotlockAgentOperation, input: Record<string, unknown>) =>
+    principalScopesCover(principal, operation) &&
+    (await options.authorize({ principal, operation, input }));
   return {
     async resource(id) {
       const fallback = `resource ${promptText(id, 200)}`;
       if (typeof id !== 'string' || !backend.describeResource) return fallback;
       try {
-        const label = await backend.describeResource(context, id);
+        const list = OPERATIONS.get('slotlock_list_resources') as OperationDefinition;
+        if (!(await mayRead(list.name, list.input.parse({})))) return fallback;
+        const label = await backend.describeResource({ ...context, operation: list.name }, id);
         return typeof label === 'string' && promptText(label, 200).length > 0
           ? promptText(label, 200)
           : fallback;
@@ -1702,7 +1715,11 @@ function confirmationLookup(
     async event(id) {
       if (typeof id !== 'string') return null;
       try {
-        const found = await backend.getEvent(context, { event_id: id });
+        if (!(await mayRead('slotlock_get_event', { event_id: id }))) return null;
+        const found = await backend.getEvent(
+          { ...context, operation: 'slotlock_get_event' },
+          { event_id: id },
+        );
         const event = isRecord(found) && isRecord(found.event) ? found.event : null;
         if (
           !event ||
@@ -2110,9 +2127,8 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
                 message: await confirmationMessage(
                   operation,
                   gate.input,
-                  confirmationLookup(options.backend, {
+                  confirmationLookup(options, {
                     principal,
-                    operation,
                     signal: call.request.signal,
                     ...(call.trace ? { trace: call.trace } : {}),
                   }),

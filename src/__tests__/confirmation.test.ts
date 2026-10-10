@@ -591,10 +591,15 @@ describe('a confirmation question a person can trust', () => {
     expect(describeResource).toHaveBeenCalledWith(
       expect.objectContaining({
         principal: { subject: 'principal-1', tenantRef: 'tenant-a' },
-        operation: 'slotlock_create_event',
+        operation: 'slotlock_list_resources',
       }),
       'vehicle-1',
     );
+    expect(authorize).toHaveBeenCalledWith({
+      principal: { subject: 'principal-1', tenantRef: 'tenant-a' },
+      operation: 'slotlock_list_resources',
+      input: { limit: 50 },
+    });
   });
 
   it('puts the facts first, so a title cannot pass itself off as the time or the resource', async () => {
@@ -630,8 +635,11 @@ describe('a confirmation question a person can trust', () => {
       `Change "Vehicle handover" on vehicle-42, 2027-03-02 09:00–10:00 (Europe/London): time to 2027-03-02 10:00–11:00 (Europe/London); resource to van-7; title to "Moved 'handover'".`,
     );
     expect(getEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ operation: 'slotlock_update_event' }),
+      expect.objectContaining({ operation: 'slotlock_get_event' }),
       { event_id: EVENT.id },
+    );
+    expect(authorize).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: 'slotlock_get_event', input: { event_id: EVENT.id } }),
     );
     const removal = await prompt(server, 'slotlock_delete_event', {
       event_id: EVENT.id,
@@ -658,6 +666,49 @@ describe('a confirmation question a person can trust', () => {
     expect(removal.inputRequests.slotlock_confirm?.params.message).toBe(
       `Delete event ${EVENT.id}.`,
     );
+  });
+
+  it('shows a write-only key nothing it could not read: the question names by id', async () => {
+    const writeOnly = buildServer({
+      backend: { ...backend, describeResource } as SlotlockAgentCalendarBackend,
+      authenticate: async () => ({ subject, tenantRef: 'tenant-a', scopes: ['write'] }),
+    });
+    const created = await prompt(writeOnly);
+    expect(created.inputRequests.slotlock_confirm?.params.message).toBe(
+      'Book resource vehicle-1 for 2027-03-02 09:00–10:00 (Europe/London): "Vehicle handover".',
+    );
+    const removal = await prompt(writeOnly, 'slotlock_delete_event', {
+      event_id: EVENT.id,
+      expected_revision: 1,
+      idempotency_key: 'delete-1',
+    });
+    expect(removal.inputRequests.slotlock_confirm?.params.message).toBe(
+      `Delete event ${EVENT.id}.`,
+    );
+    expect(getEvent).not.toHaveBeenCalled();
+    expect(describeResource).not.toHaveBeenCalled();
+  });
+
+  it('names by id when authorize refuses the read, though it allows the write', async () => {
+    authorize.mockImplementation(
+      async ({ operation }: { operation: string }) =>
+        operation !== 'slotlock_get_event' && operation !== 'slotlock_list_resources',
+    );
+    const server = describing();
+    const created = await prompt(server);
+    expect(created.inputRequests.slotlock_confirm?.params.message).toBe(
+      'Book resource vehicle-1 for 2027-03-02 09:00–10:00 (Europe/London): "Vehicle handover".',
+    );
+    const removal = await prompt(server, 'slotlock_delete_event', {
+      event_id: EVENT.id,
+      expected_revision: 1,
+      idempotency_key: 'delete-1',
+    });
+    expect(removal.inputRequests.slotlock_confirm?.params.message).toBe(
+      `Delete event ${EVENT.id}.`,
+    );
+    expect(getEvent).not.toHaveBeenCalled();
+    expect(describeResource).not.toHaveBeenCalled();
   });
 
   it('reads nothing extra when the person answers, only when asking', async () => {

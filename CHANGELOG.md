@@ -46,7 +46,8 @@ request replaces "Unreleased" with the release date.
   title and current time, instead of by id, and puts those facts before the agent's own text,
   whose double quotes can no longer close the quotes around it: a crafted title could make the
   question show a different time or resource from the one being booked. Embedders' backends may
-  add `describeResource` for the names; the store backend has it.
+  add `describeResource` for the names; the store backend has it. The lookups run as the reads
+  they are, only when the caller's scopes and `authorize` allow them.
 - The sealed confirmation state compares its MAC as text: three other spellings of the same MAC
   (the last base64url character's two spare bits) were accepted.
 - `slotlock_list_resources` with a `cursor` that is not a resource id answers the `invalid_cursor`
