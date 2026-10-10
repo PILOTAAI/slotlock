@@ -280,11 +280,50 @@ export const SLOTLOCK_AGENT_OPERATION_LEGACY_NAMES: Readonly<Record<string, Slot
     calendar_delete_event: 'slotlock_delete_event',
   });
 
+/** What a principal's `scopes` must include to call an operation. */
+export type SlotlockAgentScope = 'read' | 'write';
+
+/**
+ * The scope each operation needs. A record over every operation, so one a later release adds does
+ * not compile until it is given a scope here.
+ */
+const OPERATION_SCOPES: Readonly<Record<SlotlockAgentOperation, SlotlockAgentScope>> = Object.freeze({
+  slotlock_list_resources: 'read',
+  slotlock_get_free_busy: 'read',
+  slotlock_find_next_available: 'read',
+  slotlock_create_event: 'write',
+  slotlock_get_event: 'read',
+  slotlock_list_events: 'read',
+  slotlock_update_event: 'write',
+  slotlock_delete_event: 'write',
+});
+
+/** `write` for the operations that change a calendar, `read` for every other one. */
+export function slotlockAgentOperationScope(operation: SlotlockAgentOperation): SlotlockAgentScope {
+  return OPERATION_SCOPES[operation];
+}
+
 export interface SlotlockAgentPrincipal {
   /** Opaque stable identity. It is never included in a protocol result. */
   subject: string;
   /** Authoritative tenant identity; request arguments cannot override it. */
   tenantRef: string;
+  /**
+   * What the credential may do (an API key carries `read`, `write` or both; api-keys.ts). When set,
+   * the server refuses with `forbidden`, before `authorize` runs, every operation whose scope
+   * (`slotlockAgentOperationScope`) it lacks; an empty list or anything but a list refuses all.
+   * Unset, `authorize` alone decides.
+   */
+  scopes?: readonly string[];
+}
+
+/** Whether a principal's scopes, if it carries any, cover an operation. */
+function principalScopesCover(principal: SlotlockAgentPrincipal, operation: SlotlockAgentOperation) {
+  const scopes: unknown = principal.scopes;
+  return (
+    scopes === undefined ||
+    (Array.isArray(scopes) && scopes.includes(slotlockAgentOperationScope(operation)))
+  );
 }
 
 export interface SlotlockAgentInvocationContext {
@@ -1103,6 +1142,9 @@ export async function invokeSlotlockAgentOperation(args: {
     const resolved = resolveSlotlockAgentOperation(args.operation);
     const operation = resolved ? OPERATIONS.get(resolved) : undefined;
     if (!operation) return { ok: false, status: 404, code: 'operation_not_found' };
+    if (!principalScopesCover(principal, operation.name)) {
+      return { ok: false, status: 403, code: 'forbidden' };
+    }
     const input =
       args.input && typeof args.input === 'object' && !Array.isArray(args.input)
         ? (args.input as Record<string, unknown>)
