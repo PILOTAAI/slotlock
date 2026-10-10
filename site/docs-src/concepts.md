@@ -1,10 +1,11 @@
 ---
 title: Concepts
-description: Resources, availability rules, half-open intervals, holds, reservations, free/busy certainty and tenancy.
+description: The ideas Slotlock is built on, with the API names you will meet, from resources and availability rules to holds, free/busy certainty and tenancy.
 ---
 
-Seven ideas carry the whole model. The [specification](/docs/specification/) states each one
-normatively; this page explains them with the API names you will meet.
+Nine short sections carry the whole model. The [specification](/docs/specification/) states each
+rule normatively; this page explains them, and the [tools reference](/docs/tools/) shows how each
+one reaches an agent.
 
 ## Resources
 
@@ -34,7 +35,7 @@ does not exist moves forward by the gap; an ambiguous one resolves to its first 
 
 `expandRules(rules, window, timeZone)` turns rules into windows, and `findNextAvailable` finds the
 earliest slot of a given length that fits inside them without touching busy time. Both are pure
-functions; see the [Quickstart](/docs/quickstart/#quick-start-the-next-free-slot).
+functions; see the [TypeScript library](/docs/library/#quick-start-the-next-free-slot).
 
 ## Half-open intervals
 
@@ -95,7 +96,7 @@ reservation under the same constraint; a transparent event stays visible but occ
   returns the original result; reusing a key with a different payload is `idempotency_conflict`.
 - Cancelling leaves a tombstone, so a delayed create cannot bring the event back.
 - A recurring event is materialized into a window of at most {{horizonDays}} days and 2,000
-  occurrences. A one-off event may last up to {{maxEventDays}} days.
+  occurrences. A one-off event may last up to {{maxEventDaysText}} days.
 - Events created over MCP or A2A belong to the principal that created them; everyone else's still
   counts as busy time.
 

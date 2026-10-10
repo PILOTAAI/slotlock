@@ -1,5 +1,9 @@
-/* Starlight in Pylota's tokens. The token values come from src/generated/tokens.css, imported
-   first, which switches them with Starlight's own data-theme attribute. */
+/* Starlight in Pylota's tokens, laid out after goshenemail.com/docs: a section eyebrow, a 600-weight
+   title and a muted lede (src/components/docs/PageTitle.astro); body copy in full ink; H2s that sit
+   on a hairline; reference tables framed like cards that stack on a phone; a quiet sidebar.
+   The token values come from src/generated/tokens.css, imported first, which switches them with
+   Starlight's own data-theme attribute. This file is unlayered, so it wins over Starlight's
+   @layer starlight.* rules without !important. */
 @import '../generated/tokens.css';
 
 /* Without JavaScript Starlight cannot set data-theme; follow the system preference instead of
@@ -30,25 +34,102 @@
   --sl-color-accent-high: var(--accent-ink);
   --sl-color-text-accent: var(--accent);
   --sl-color-text-invert: var(--on-accent);
+  /* Body copy in full ink on the light page (Starlight's default is a grey). */
+  --sl-color-text: var(--ink);
 
   --sl-color-bg: var(--canvas);
   --sl-color-bg-nav: var(--canvas);
   --sl-color-bg-sidebar: var(--canvas);
-  --sl-color-bg-inline-code: var(--canvas-2);
+  --sl-color-bg-inline-code: var(--chip);
   --sl-color-hairline: var(--line);
   --sl-color-hairline-light: var(--line-2);
   --sl-color-hairline-shade: var(--line);
+
+  /* Asides in the calendar's own colours: a note is the accent, a caution a hold, a danger a
+     refusal, a tip a confirmation. */
+  --sl-color-blue-low: var(--accent-soft);
+  --sl-color-blue: var(--accent);
+  --sl-color-blue-high: var(--accent-ink);
+  --sl-color-purple-low: var(--accent-soft);
+  --sl-color-purple: var(--accent);
+  --sl-color-purple-high: var(--accent-ink);
+  --sl-color-orange-low: var(--hold-soft);
+  --sl-color-orange: var(--hold);
+  --sl-color-orange-high: var(--hold);
+  --sl-color-red-low: var(--refused-soft);
+  --sl-color-red: var(--refused);
+  --sl-color-red-high: var(--refused);
+  --sl-color-green-low: var(--confirmed-soft);
+  --sl-color-green: var(--confirmed);
+  --sl-color-green-high: var(--confirmed);
+
+  /* goshenemail.com/docs type scale: 40px title, 24px section, 18px subsection. */
+  --sl-text-h1: 2.5rem;
+  --sl-text-h2: 1.5rem;
+  --sl-text-h3: 1.125rem;
+  --sl-text-h4: 1rem;
+  --sl-line-height-headings: 1.25;
+  --sl-sidebar-width: 16.5rem;
+
+  /* The lede is one ink below the body copy, in either theme. */
+  --docs-lede: var(--ink-2);
+
+}
+
+/* On black, full ink glares; body copy steps down one ink, as the landing page's ledes do. */
+:root[data-theme='dark'] {
+  --sl-color-text: var(--ink-2);
+  --docs-lede: var(--ink-3);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --sl-color-text: var(--ink-2);
+    --docs-lede: var(--ink-3);
+  }
 }
 
 body {
   font-feature-settings: 'cv11', 'ss01';
 }
 
-.sl-markdown-content h1,
-.sl-markdown-content h2,
+/* Title panel: eyebrow, title, lede. */
+.sl-eyebrow {
+  margin: 0 0 0.75rem;
+  font-family: var(--sl-font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  line-height: 1.4;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
 h1#_top {
-  font-family: 'Inter Tight', 'Inter', system-ui, sans-serif;
-  font-weight: 400;
+  margin-top: 0;
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: var(--sl-text-h1);
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  color: var(--ink);
+}
+
+.sl-lede {
+  margin-top: 0.875rem;
+  max-width: 40rem;
+  font-size: 1.1875rem;
+  line-height: 1.6;
+  color: var(--docs-lede);
+  text-wrap: pretty;
+}
+
+/* Headings */
+.sl-markdown-content :is(h2, h3, h4) {
+  font-family: 'Inter', system-ui, sans-serif;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.sl-markdown-content h2 {
   letter-spacing: -0.02em;
 }
 
@@ -56,13 +137,217 @@ h1#_top {
   letter-spacing: -0.01em;
 }
 
-.sl-markdown-content table {
-  font-size: var(--sl-text-sm);
+/* Every section after the first starts on a hairline. */
+.sl-markdown-content .sl-heading-wrapper.level-h2:not(:first-child) {
+  margin-top: 3rem;
+  padding-top: 1.75rem;
+  border-top: 1px solid var(--line);
+}
+
+.sl-markdown-content .sl-heading-wrapper.level-h3 {
+  margin-top: 2rem;
+}
+
+/* A tool's name as its heading: monospace, the heading's weight, no chip. */
+.sl-markdown-content :is(h2, h3) code:not(pre code) {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 0.92em;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  overflow-wrap: anywhere;
+}
+
+/* Prose */
+.sl-markdown-content a:not(:where(.not-content *)) {
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+  text-decoration-color: color-mix(in srgb, currentColor 35%, transparent);
+}
+
+.sl-markdown-content a:not(:where(.not-content *)):hover {
+  color: var(--ink);
+  text-decoration-color: currentColor;
+}
+
+.sl-markdown-content strong {
+  font-weight: 600;
+  color: var(--ink);
 }
 
 .sl-markdown-content code:not(pre code) {
-  border-radius: 4px;
-  padding: 0.1em 0.3em;
+  padding: 0.1em 0.35em;
+  border: 1px solid var(--line-2);
+  border-radius: 5px;
+  background: var(--chip);
+  color: var(--ink);
+  font-size: 0.86em;
+  /* Breaks a long identifier only when it cannot fit its line, so table columns keep their names
+     whole (anywhere would let a column shrink to one character). */
+  overflow-wrap: break-word;
+}
+
+/* A type that links to its object reads as a link. */
+.sl-markdown-content a code:not(pre code) {
+  color: var(--accent);
+}
+
+/* A quote is what Slotlock says to the model, or a sentence to ask an agent. */
+.sl-markdown-content blockquote:not(:where(.not-content *)) {
+  padding: 0.875rem 1.125rem;
+  border: 1px solid var(--line);
+  border-inline-start: 3px solid var(--accent);
+  border-radius: 0 10px 10px 0;
+  background: var(--chip);
+  color: var(--ink-2);
+}
+
+/* Tables: a framed card with a tinted header row. */
+.sl-markdown-content table:not(:where(.not-content *)) {
+  display: table;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: var(--sl-text-sm);
+  line-height: 1.6;
+}
+
+.sl-markdown-content :is(th, td):not(:where(.not-content *)) {
+  padding: 0.625rem 0.875rem;
+  border-bottom: 1px solid var(--line-2);
+  vertical-align: top;
+}
+
+.sl-markdown-content :is(th:first-child, td:first-child):not(:where(.not-content *)) {
+  padding-inline-start: 0.875rem;
+}
+
+.sl-markdown-content :is(th:last-child, td:last-child):not(:where(.not-content *)) {
+  padding-inline-end: 0.875rem;
+}
+
+.sl-markdown-content th:not(:where(.not-content *)) {
+  background: var(--chip);
+  border-bottom-color: var(--line);
+  font-size: var(--sl-text-xs);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.sl-markdown-content thead th:first-child {
+  border-start-start-radius: 9px;
+}
+
+.sl-markdown-content thead th:last-child {
+  border-start-end-radius: 9px;
+}
+
+.sl-markdown-content tbody tr:last-child > td {
+  border-bottom: 0;
+}
+
+/* Names and types stay whole; a long union wraps between its alternatives instead. */
+.sl-markdown-content td code:not(pre code) {
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+/* Pagination: two hairline cards, as goshen's Previous and Next. */
+.pagination-links a {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: none;
+  background: transparent;
+  color: var(--ink-3);
+  font-size: var(--sl-text-xs);
+}
+
+.pagination-links a:hover {
+  border-color: var(--line-strong);
+}
+
+.pagination-links .link-title {
+  margin-top: 0.125rem;
+  font-size: 1.0625rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* Sidebar: mono section labels, quiet links, a soft accent for the page you are on. */
+.sidebar-content .group-label .large {
+  font-family: var(--sl-font-mono);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.sidebar-content ul ul li {
+  margin-inline-start: 0;
+  padding-inline-start: 0;
+  border-inline-start: 0;
+}
+
+.sidebar-content ul ul {
+  margin-top: 0.25rem;
+}
+
+.sidebar-content a {
+  padding: 0.375rem 0.625rem;
+  border-radius: 6px;
+  color: var(--ink-2);
+}
+
+.sidebar-content a:hover,
+.sidebar-content a:focus-visible {
+  background: var(--chip);
+  color: var(--ink);
+}
+
+.sidebar-content a[aria-current='page'],
+.sidebar-content a[aria-current='page']:hover,
+.sidebar-content a[aria-current='page']:focus {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+/* On this page */
+starlight-toc h2,
+mobile-starlight-toc .toggle {
+  font-family: var(--sl-font-mono);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+mobile-starlight-toc .toggle {
+  font-size: var(--sl-text-xs);
+  letter-spacing: 0.04em;
+  text-transform: none;
+}
+
+starlight-toc a {
+  border-radius: 0;
+  font-size: var(--sl-text-xs);
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+
+starlight-toc a:hover {
+  color: var(--ink);
+}
+
+starlight-toc a[aria-current='true'] {
+  color: var(--ink);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 /* "Slotlock by Pylota" (src/components/docs/SiteTitle.astro replaces Starlight's, and with it the
@@ -71,4 +356,100 @@ h1#_top {
   color: var(--ink);
   text-decoration: none;
   white-space: nowrap;
+}
+
+/* Phones */
+@media (max-width: 49.99rem) {
+  :root,
+  :root[data-theme='light'],
+  :root[data-theme='dark'] {
+    --sl-text-h1: 2rem;
+    --sl-text-h2: 1.375rem;
+  }
+
+  .sl-lede {
+    font-size: 1.0625rem;
+  }
+
+  /* Tables that cannot stack scroll inside their frame. */
+  .sl-markdown-content table:not(:where(.not-content *)) {
+    display: block;
+    overflow-x: auto;
+  }
+
+  /* Reference tables (code in the first column: fields, tools, codes, endpoints) stack:
+     each row is a card, the name and its type side by side and the notes underneath, the way
+     API references set parameters on a narrow screen. The header row stays for screen readers. */
+  .sl-markdown-content table:has(> tbody > tr > td:first-child code) {
+    overflow: visible;
+  }
+
+  .sl-markdown-content table:has(> tbody > tr > td:first-child code) thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .sl-markdown-content table:has(> tbody > tr > td:first-child code) tbody {
+    display: block;
+  }
+
+  .sl-markdown-content table:has(> tbody > tr > td:first-child code) tr {
+    display: grid;
+    grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+    gap: 0.25rem 0.75rem;
+    padding: 0.75rem 0.875rem;
+    border-bottom: 1px solid var(--line-2);
+  }
+
+  .sl-markdown-content table:has(> tbody > tr > td:first-child code) tr:last-child {
+    border-bottom: 0;
+  }
+
+  .sl-markdown-content table:has(> tbody > tr > td:first-child code) td {
+    display: block;
+    padding: 0;
+    border: 0;
+    min-width: 0;
+  }
+
+  /* Starlight spaces sibling blocks with a top margin; cells and rows in a grid must not move. */
+  .sl-markdown-content table:has(> tbody > tr > td:first-child code) :is(tbody, tr, td) {
+    margin: 0;
+  }
+
+  .sl-markdown-content
+    table:has(> tbody > tr > td:first-child code)
+    td:is(:nth-child(n + 3), :nth-child(2):last-child) {
+    grid-column: 1 / -1;
+  }
+
+  .sl-markdown-content
+    table:has(> tbody > tr > td:first-child code)
+    td:nth-child(2):not(:last-child) {
+    justify-self: start;
+  }
+
+  .sl-markdown-content
+    table:has(> tbody > tr > td:first-child code)
+    td:is(:nth-child(n + 3), :nth-child(2):last-child):empty {
+    display: none;
+  }
+
+  /* On a phone a long name may have to break. */
+  .sl-markdown-content td code:not(pre code) {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+
+/* On a touch screen Expressive Code shows its copy button all the time, on top of the first line
+   of code. Start the code below it, so the button sits in a strip of its own. */
+@media (hover: none) {
+  .sl-markdown-content .expressive-code pre > code {
+    padding-top: 3.25rem;
+  }
 }
