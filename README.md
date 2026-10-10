@@ -122,6 +122,39 @@ docker compose exec slotlock slotlock key revoke <id>
   keys cannot take the connections authenticated requests use. Rate-limit a public server in front
   of Slotlock as well.
 
+### Dashboard
+
+The server can also serve a dashboard where people sign in with GitHub and manage their own keys and
+resources, which is how the hosted Slotlock hands out keys:
+
+1. On GitHub, open Settings, Developer settings, OAuth apps, New OAuth App, and set the
+   "Authorization callback URL" to `<SLOTLOCK_PUBLIC_URL>/dashboard/callback`. Then generate a
+   client secret on the app's page.
+2. Set `SLOTLOCK_GITHUB_CLIENT_ID` and `SLOTLOCK_GITHUB_CLIENT_SECRET` from the app,
+   `SLOTLOCK_SESSION_SECRET` to 32+ random characters (`openssl rand -hex 32`), and
+   `SLOTLOCK_DASHBOARD_USERS` to the GitHub user ids that may sign in (`gh api users/<login> --jq .id`),
+   or to `*` for every GitHub account.
+3. Run `slotlock serve` and open `<SLOTLOCK_PUBLIC_URL>/dashboard`.
+
+- Each person gets a tenant of their own, `github:<user id>`: the keys, resources and bookings in it
+  are theirs alone. Keys made with `slotlock key create` act in `SLOTLOCK_TENANT` instead.
+- Sign-in asks GitHub for no scope, uses `state` and PKCE, and keeps nothing from GitHub but the user
+  id and login: the GitHub token is used once and dropped.
+- A session is a signed, HttpOnly cookie that lasts 12 hours. The allowlist is checked on every
+  request, dashboard and API alike: removing an id and restarting the server signs that person out
+  and stops every key in their tenant at once.
+- Every form carries a token bound to the session and must come from the server's own origin; the
+  pages run no inline script, under a Content-Security-Policy that allows only their own files.
+- Give the dashboard an origin of its own (`https://slotlock.example.com`, not a path beside other
+  apps): its cookies are host-wide, so any other app on the same origin could read them.
+- Each instance remembers, in bounded memory, sign-ins it finished (a callback works once), sessions
+  signed out (a copied cookie stays out) and forms sent (a reload does not create or rotate a key
+  twice). Run one instance, or route each person to one, for these to hold across instances; the
+  signed cookies, the allowlist and CSRF hold everywhere.
+- A person may add 100 resources. Bookable hours come from `SLOTLOCK_AVAILABILITY` and apply to every
+  tenant's resources. Rate-limit `/dashboard/sign-in` and `/dashboard/callback` at your proxy: each
+  callback costs a call to GitHub, and an instance runs at most eight at once.
+
 ## Connect an MCP client
 
 Any MCP client that speaks Streamable HTTP connects to `http://localhost:8080/mcp` with the token
