@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { SlotlockAgentInvocationContext } from '../agent-server.js';
+import {
+  type SlotlockAgentInvocationContext,
+  invokeSlotlockAgentOperation,
+} from '../agent-server.js';
 import { createSlotlockStoreAgentBackend } from '../agent-store-backend.js';
 import type { SlotlockStore, SlotlockTenantStore } from '../store.js';
 
@@ -101,6 +104,42 @@ describe('Slotlock store-backed agent server adapter', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  // A resource cursor is a resource id. The store refuses anything else with a plain error, which
+  // the dispatcher reports as internal_error (HTTP 500) unless the backend refuses it first.
+  it('refuses a resource cursor that is not a resource id as invalid_cursor, without a query', async () => {
+    const backend = createSlotlockStoreAgentBackend(store, { availabilityRules });
+    listResources.mockRejectedValue(
+      Object.assign(new Error('Slotlock resource cursor is invalid'), { code: 'invalid_cursor' }),
+    );
+    for (const cursor of ['not-a-cursor', '', 'x'.repeat(600), 42, resource.id.toUpperCase().replace('4', 'Z')]) {
+      await expect(backend.listResources(context, { limit: 5, cursor })).rejects.toMatchObject({
+        code: 'invalid_cursor',
+        status: 400,
+      });
+    }
+    expect(listResources).not.toHaveBeenCalled();
+
+    const outcome = await invokeSlotlockAgentOperation({
+      operation: 'slotlock_list_resources',
+      input: { limit: 5, cursor: 'not-a-cursor' },
+      request: new Request('http://localhost/mcp'),
+      options: {
+        backend,
+        authenticate: async () => context.principal,
+        authorize: async () => true,
+      },
+    });
+    expect(outcome).toEqual({ ok: false, status: 400, code: 'invalid_cursor' });
+    // Refused before a tenant transaction is opened.
+    expect(withTenant).not.toHaveBeenCalled();
+
+    listResources.mockResolvedValue([resource]);
+    await expect(backend.listResources(context, { limit: 5, cursor: resource.id })).resolves.toMatchObject({
+      next_cursor: null,
+    });
+    expect(listResources).toHaveBeenCalledWith(expect.objectContaining({ after: resource.id }));
   });
 
   it('binds every store call to the authenticated tenant and derives a private event identity', async () => {

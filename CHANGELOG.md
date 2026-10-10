@@ -35,6 +35,8 @@ request replaces "Unreleased" with the release date.
 
 ### Fixed for the standalone release
 
+- `slotlock_list_resources` with a `cursor` that is not a resource id answers the `invalid_cursor`
+  tool error (HTTP 400) instead of an internal error (HTTP 500, JSON-RPC -32603).
 - The legacy-schema upgrade test creates `btree_gist` itself, so the database suites pass on a fresh
   PostgreSQL 16 database rather than only on one that already had the extension installed.
 
