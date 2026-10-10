@@ -33,4 +33,6 @@ kinds.
 
 <!-- include README.md#caching-and-tracing promote -->
 
+<!-- include README.md#rest-and-openapi promote -->
+
 <!-- include README.md#supported-versions -->
