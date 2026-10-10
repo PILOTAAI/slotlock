@@ -568,8 +568,9 @@ export interface SlotlockAgentOperationDispatchOptions {
     operation: SlotlockAgentOperation;
   }) => Promise<boolean>;
   /**
-   * A gate between authorization and the rate limiter: `null` lets the operation run; anything else
-   * is the failure the dispatch returns instead. The agent server uses it for human confirmation.
+   * A gate after authorization and the rate limit (so every round of a guarded write is charged):
+   * `null` lets the operation run; anything else is the failure the dispatch returns instead. The
+   * agent server uses it for human confirmation.
    */
   confirm?: (args: {
     principal: SlotlockAgentPrincipal;
@@ -1720,23 +1721,48 @@ function promptOffset(instant: Date, zone: string): string {
   return `UTC${offset < 0 ? '-' : '+'}${hours}:${minutes}`;
 }
 
+const PROMPT_DAY_MS = 24 * 60 * 60 * 1000;
+
 /**
- * One moment. In a zone the agent chose rather than the resource's own, every time carries its own
- * UTC offset: a name such as `Etc/GMT+5` (five hours behind UTC) can hide it, and daylight saving
- * changes it from one date to the next.
+ * Whether `zone`'s UTC offset changes within a day of `instant`. When clocks go back, a wall time
+ * happens twice (01:15 EDT and 01:15 EST), so near a change a time needs its offset to be one time.
  */
-function promptMoment(instant: Date, zone: PromptZone): string {
-  const clock = promptClock(instant, zone.zone);
-  return `${clock.date} ${clock.time}${zone.own ? '' : ` ${promptOffset(instant, zone.zone)}`}`;
+function nearOffsetChange(instant: Date, zone: string): boolean {
+  const offset = zonedOffsetMinutes(instant, zone);
+  return (
+    zonedOffsetMinutes(new Date(instant.getTime() - PROMPT_DAY_MS), zone) !== offset ||
+    zonedOffsetMinutes(new Date(instant.getTime() + PROMPT_DAY_MS), zone) !== offset
+  );
 }
 
+/**
+ * Whether times are written with their UTC offsets. In a zone the agent chose rather than the
+ * resource's own, always: a name such as `Etc/GMT+5` (five hours behind UTC) can hide it, and
+ * daylight saving changes it from one date to the next. In the resource's own zone, only within a
+ * day of a change of its clocks.
+ */
+function promptOffsets(zone: PromptZone, ...instants: Date[]): boolean {
+  return !zone.own || instants.some((instant) => nearOffsetChange(instant, zone.zone));
+}
+
+/** One moment. */
+function promptMoment(instant: Date, zone: PromptZone): string {
+  const clock = promptClock(instant, zone.zone);
+  const offset = promptOffsets(zone, instant) ? ` ${promptOffset(instant, zone.zone)}` : '';
+  return `${clock.date} ${clock.time}${offset}`;
+}
+
+/** A start and an end, with both offsets or neither. */
 function promptSpan(start: Date, end: Date, zone: PromptZone): string {
   const from = promptClock(start, zone.zone);
   const to = promptClock(end, zone.zone);
-  const toOffset = zone.own ? '' : ` ${promptOffset(end, zone.zone)}`;
-  const sameOffset = zone.own || promptOffset(start, zone.zone) === promptOffset(end, zone.zone);
-  if (to.date === from.date && sameOffset) return `${from.date} ${from.time}–${to.time}${toOffset}`;
-  return `${promptMoment(start, zone)} – ${to.date} ${to.time}${toOffset}`;
+  const offsets = promptOffsets(zone, start, end);
+  const fromOffset = offsets ? ` ${promptOffset(start, zone.zone)}` : '';
+  const toOffset = offsets ? ` ${promptOffset(end, zone.zone)}` : '';
+  if (to.date === from.date && fromOffset === toOffset) {
+    return `${from.date} ${from.time}–${to.time}${toOffset}`;
+  }
+  return `${from.date} ${from.time}${fromOffset} – ${to.date} ${to.time}${toOffset}`;
 }
 
 function promptZoneName(zone: PromptZone): string {
@@ -1785,6 +1811,7 @@ const PROMPT_MOVED_SHOWN = 10;
 function promptMoved(
   moved: readonly { from: Date; start: Date; end: Date }[],
   zone: PromptZone,
+  label = 'moved',
 ): string {
   if (moved.length === 0) return '';
   const shown = moved
@@ -1796,7 +1823,7 @@ function promptMoved(
     moved.length > PROMPT_MOVED_SHOWN
       ? ` and ${moved.length - PROMPT_MOVED_SHOWN} more not listed`
       : '';
-  return `${moved.length} moved (${shown.join('; ')}${rest})`;
+  return `${moved.length} ${label} (${shown.join('; ')}${rest})`;
 }
 
 /** Exceptions an update asks for, when the series they apply to cannot be read. */
@@ -1826,7 +1853,9 @@ function promptSeriesEnd(rule: string, booked: number, windowEnd: Date): string 
   }
   // The rule's own total whenever the window shows another number: the rest are cancelled, or
   // outside the window, before it or after.
-  return Number(count) === booked ? null : `${count} counted by its rule, cancelled ones included`;
+  return Number(count) === booked
+    ? null
+    : `${count} counted by its rule, moved and cancelled ones included`;
 }
 
 /**
@@ -1870,9 +1899,33 @@ function promptSeries(
       }),
       zone,
     );
+    const until = promptClock(horizon.end, zone.zone).date;
+    // An occurrence moved past the window is booked later, when the window reaches it, so it is
+    // named too: only one the rule makes, which an expansion without the exceptions shows.
+    const later = exceptions.flatMap((exception) =>
+      !exception.cancelled &&
+      exception.start &&
+      exception.end &&
+      exception.start.getTime() >= horizon.end.getTime()
+        ? [{ from: exception.recurrenceId, start: exception.start, end: exception.end }]
+        : [],
+    );
+    if (later.length > 0) {
+      const made = new Set(
+        expandCalendarEventOccurrences(
+          { ...content, recurrence: { rrule: series.rule } },
+          horizon,
+        ).map((occurrence) => Date.parse(occurrence.recurrenceId)),
+      );
+      const movedLater = promptMoved(
+        later.filter(({ from }) => made.has(from.getTime())),
+        zone,
+        `moved past ${until}`,
+      );
+      moved = [moved, movedLater].filter(Boolean).join(', ');
+    }
     const first = booked[0];
     const last = booked[booked.length - 1];
-    const until = promptClock(horizon.end, zone.zone).date;
     if (!first || !last) {
       when = `with no booking before ${until} ${promptZoneName(zone)}`;
     } else if (booked.length === 1 && beyond === null) {
