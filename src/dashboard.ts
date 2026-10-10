@@ -13,6 +13,7 @@
 // keeps these in Postgres, so they hold on every server that shares the database; the resource cap
 // is held in the database too.
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import type { Sql } from 'postgres';
 import type { SlotlockApiKey, SlotlockApiKeyScope, SlotlockApiKeyStore } from './api-keys.js';
 import type { SlotlockSql, SlotlockStore } from './store.js';
 import type { SlotlockResource, WeeklyAvailabilityRule } from './types.js';
@@ -158,21 +159,28 @@ function assertExpiry(expiresAt: number): Date {
  * The dashboard's records in Postgres, shared by every server on the database. Run `applySchema()`
  * and `grantApplicationRole()` first: the serving role reaches the records only through
  * SLOTLOCK_DASHBOARD_FUNCTIONS. Only SHA-256 digests of the values are stored.
+ *
+ * Each record is written in a READ COMMITTED transaction of its own, whatever the role's default:
+ * under REPEATABLE READ, a use racing another of the same value, or two prunes of the same expired
+ * rows, would fail with a serialization error instead of answering.
  */
 export function createSlotlockDashboardState(sql: SlotlockSql): SlotlockDashboardState {
   const digest = (kind: string, value: string) =>
     createHash('sha256').update(`slotlock-dashboard-${kind}.${value}`).digest();
-  return {
-    async use(kind, value, expiresAt) {
-      const expires = assertExpiry(expiresAt);
-      const [row] = await sql<{ used: boolean }[]>`
+  const record = async (kind: string, value: string, expiresAt: number): Promise<boolean> => {
+    const expires = assertExpiry(expiresAt);
+    const query = async (executor: SlotlockSql) => {
+      const [row] = await executor<{ used: boolean }[]>`
         SELECT slotlock.use_dashboard_token(${kind}, ${digest(kind, value)}, ${expires}) AS used`;
       return row?.used === true;
-    },
+    };
+    if (!('begin' in sql)) return query(sql);
+    return (await (sql as Sql).begin('isolation level read committed', (tx) => query(tx))) as boolean;
+  };
+  return {
+    use: (kind, value, expiresAt) => record(kind, value, expiresAt),
     async endSession(sid, expiresAt) {
-      const expires = assertExpiry(expiresAt);
-      await sql`
-        SELECT slotlock.use_dashboard_token('ended_session', ${digest('ended_session', sid)}, ${expires})`;
+      await record('ended_session', sid, expiresAt);
     },
     async sessionEnded(sid) {
       const [row] = await sql<{ ended: boolean }[]>`

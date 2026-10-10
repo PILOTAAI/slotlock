@@ -2,7 +2,7 @@
 // a sign-in, a sent form and a signed-out session are each honoured by both, and racing resource
 // adds on both stop at the cap. The serving role is a LOGIN role without BYPASSRLS granted by
 // grantApplicationRole. Skipped without DATABASE_URL.
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createSlotlockApiKeyStore } from '../api-keys.js';
@@ -285,6 +285,22 @@ describe.skipIf(!url)('capped resource creation in the store (real Postgres)', (
         tenant.createResource({ tenantRef, externalRef: 'x', timezone: 'UTC', maxTenantResources: 50 }),
       ),
     ).rejects.toMatchObject({ code: 'invalid_transaction_isolation' });
+  });
+
+  it('records a token once under a REPEATABLE READ role default, while the first use commits', async () => {
+    const state = createSlotlockDashboardState(repeatable);
+    const value = randomBytes(18).toString('base64url');
+    const digest = createHash('sha256').update(`slotlock-dashboard-form.${value}`).digest();
+    let second: Promise<boolean> | undefined;
+    // The first use holds its row uncommitted; the second waits on it, then finds it committed.
+    await repeatable.begin(async (tx) => {
+      const [first] = await tx<{ used: boolean }[]>`
+        SELECT slotlock.use_dashboard_token('form', ${digest}, now() + interval '1 hour') AS used`;
+      expect(first?.used).toBe(true);
+      second = state.use('form', value, Date.now() + 3_600_000);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    });
+    await expect(second).resolves.toBe(false);
   });
 
   it("adds through the dashboard's adapter under a REPEATABLE READ role default", async () => {
