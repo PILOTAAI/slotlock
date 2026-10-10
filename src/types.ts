@@ -264,6 +264,11 @@ export interface CalendarHorizonRollResult {
   extended: number;
   /** Masters whose new occurrence collided; their previous coverage remains intact. */
   conflicts: number;
+  /**
+   * Masters whose rule takes more than the expansion budget to reach the window (one that never
+   * occurs again, or almost never); their previous coverage remains intact.
+   */
+  refused: number;
   /** True when more due masters remain beyond this bounded batch. */
   hasMore: boolean;
 }
