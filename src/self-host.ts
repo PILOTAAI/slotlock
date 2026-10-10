@@ -51,6 +51,7 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_PUBLIC_URL',
   'SLOTLOCK_TENANT',
   'SLOTLOCK_AVAILABILITY',
+  'SLOTLOCK_REST_API',
   'SLOTLOCK_GITHUB_CLIENT_ID',
   'SLOTLOCK_GITHUB_CLIENT_SECRET',
   'SLOTLOCK_SESSION_SECRET',
@@ -144,6 +145,8 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
   availability: readonly WeeklyAvailabilityRule[];
   /** Set exactly when SLOTLOCK_GITHUB_CLIENT_ID is. */
   dashboard?: SlotlockServeDashboardConfig;
+  /** Serve the REST API under /v1 and its OpenAPI document (SLOTLOCK_REST_API=on). */
+  restApi: boolean;
 }
 
 /** An unset variable and an empty one (`FOO=` in an env file) both mean "not configured". */
@@ -381,6 +384,14 @@ export function readSlotlockDatabaseConfig(env: SlotlockEnv): SlotlockDatabaseCo
   return config;
 }
 
+function readRestApi(env: SlotlockEnv): boolean {
+  const value = optional(env, 'SLOTLOCK_REST_API') ?? 'off';
+  if (value !== 'on' && value !== 'off') {
+    throw new SlotlockConfigError('SLOTLOCK_REST_API must be on or off');
+  }
+  return value === 'on';
+}
+
 export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
   const database = readSlotlockDatabaseConfig(env);
   const authToken = readSecret(env, 'SLOTLOCK_AUTH_TOKEN');
@@ -404,6 +415,7 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
     publicUrl: readPublicUrl(env, port),
     confirmWrites,
     availability: readAvailability(env),
+    restApi: readRestApi(env),
   };
   if (authToken !== undefined) config.authToken = authToken;
   const dashboard = readDashboard(env);
@@ -667,6 +679,7 @@ export async function startSlotlockServer(
           : { ready: false, checks: ['database_unreachable'] },
       // Outcomes and counts only: the server never reports arguments or identities.
       onEvent: ({ type, ...fields }) => log.info(type, fields),
+      ...(config.restApi ? { rest: true } : {}),
       ...(config.confirmationSecret !== undefined
         ? {
             confirmation: {

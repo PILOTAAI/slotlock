@@ -26,6 +26,10 @@ request replaces "Unreleased" with the release date.
   the database pool. `SLOTLOCK_AUTH_TOKEN` is now optional for `serve`.
 - A principal may carry `scopes`; the agent server then refuses, before `authorize`, every
   operation whose scope (`slotlockAgentOperationScope`: `read` or `write`) it lacks.
+- A REST API (`rest: true`, or `SLOTLOCK_REST_API=on` for `serve`): one route per tool under `/v1`,
+  described by an OpenAPI 3.1 document at `/openapi.json` built from the tools' own schemas, behind
+  the same authentication, scopes, `authorize` and rate limit. A write that waits for a person
+  answers 428 `confirmation_required`. `onEvent` reports each call's operation and status.
 - A dashboard at `<SLOTLOCK_PUBLIC_URL>/dashboard` (`createSlotlockDashboard`), served by `serve`
   when `SLOTLOCK_GITHUB_CLIENT_ID` is set: GitHub sign-in (OAuth with state and PKCE, no scope), a
   personal tenant per GitHub user, and pages to create, rotate and revoke API keys (each shown

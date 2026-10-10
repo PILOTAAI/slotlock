@@ -25,6 +25,12 @@ import {
   stateSecrets,
   traceContextFrom,
 } from './mcp-modern.js';
+import {
+  matchSlotlockRestRoute,
+  restInputFromBody,
+  restQueryInput,
+  slotlockOpenApiDocument,
+} from './rest-api.js';
 import { SLOTLOCK_CALENDAR_HORIZON_DAYS, SLOTLOCK_MAX_EVENT_DURATION_DAYS } from './store.js';
 import { zonedWallTime } from './timezone.js';
 
@@ -462,6 +468,12 @@ export type SlotlockAgentServerEvent =
         | 'unavailable';
     }
   | {
+      /** A REST call that reached an operation, and the HTTP status it answered. */
+      type: 'rest';
+      operation: SlotlockAgentOperation;
+      status: number;
+    }
+  | {
       type: 'subscription';
       outcome: 'opened' | 'closed';
       /** Why a subscription closed. */
@@ -489,6 +501,13 @@ export interface SlotlockAgentServerOptions {
   maxRequestBytes?: number;
   /** Publish OAuth protected-resource metadata so OAuth-capable MCP hosts can obtain a token. */
   oauth?: SlotlockAgentServerOAuthOptions;
+  /**
+   * Also serve the tools as a REST API under `/v1`, described by an OpenAPI 3.1 document at
+   * `/openapi.json`, with the same authentication, scopes, `authorize`, confirmation and rate
+   * limits. A write listed in `confirmation` answers 428 `confirmation_required`: REST has no way
+   * to ask a person. Off unless set.
+   */
+  rest?: boolean;
   /** Require a person's confirmation before the listed writes run. Off unless set. */
   confirmation?: SlotlockAgentConfirmationOptions;
   /**
@@ -1849,6 +1868,20 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
   shutdown(): Promise<void>;
 } {
   const config = validateOptions(options);
+  if (options.rest !== undefined && typeof options.rest !== 'boolean') {
+    throw new Error('Slotlock agent server rest must be a boolean');
+  }
+  const restTools = options.rest ? slotlockAgentTools() : [];
+  const restInputSchemas = new Map(restTools.map((tool) => [tool.name, tool.inputSchema]));
+  const openApi = options.rest
+    ? Object.freeze(
+        slotlockOpenApiDocument({
+          publicBaseUrl: config.publicBaseUrl,
+          version: SLOTLOCK_AGENT_SERVER_VERSION,
+          tools: restTools,
+        }),
+      )
+    : null;
   const manifest = Object.freeze({
     name: 'Slotlock Agent Calendar',
     version: SLOTLOCK_AGENT_SERVER_VERSION,
@@ -2454,6 +2487,84 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     }
   }
 
+  /**
+   * One REST call, checked as /mcp and /a2a are (origin, credential, rate limit), then run through
+   * the same dispatcher: scopes, arguments, `authorize`, and confirmation, which REST cannot ask
+   * for, so a guarded write answers 428 `confirmation_required`.
+   */
+  async function restCall(request: Request, path: string, url: URL): Promise<Response> {
+    const refuse = (status: number, code: string, headers: Record<string, string> = {}) =>
+      json(status, { error: { code } }, headers);
+    if (path === '/openapi.json') {
+      return request.method === 'GET'
+        ? json(200, openApi)
+        : refuse(405, 'method_not_allowed', { Allow: 'GET' });
+    }
+    const match = matchSlotlockRestRoute(request.method, path);
+    if (match === null) return refuse(404, 'not_found');
+    if ('allow' in match) {
+      return refuse(405, 'method_not_allowed', { Allow: match.allow.join(', ') });
+    }
+    const origin = request.headers.get('origin');
+    if (origin) {
+      const normalized = normalizeOrigin(origin);
+      if (!normalized || !config.allowedOrigins.has(normalized)) {
+        return refuse(403, 'origin_not_allowed');
+      }
+    }
+    const principal = await options.authenticate(request);
+    if (
+      !principal ||
+      !isCanonicalPrincipalIdentity(principal.subject) ||
+      !isCanonicalPrincipalIdentity(principal.tenantRef)
+    ) {
+      return refuse(401, 'authentication_required', {
+        'WWW-Authenticate': 'Bearer realm="slotlock"',
+      });
+    }
+    if (
+      options.consumeRateLimit &&
+      !(await options.consumeRateLimit({ principal, operation: 'protocol' }))
+    ) {
+      return refuse(429, 'rate_limited');
+    }
+    if ('invalid' in match) return refuse(400, 'invalid_arguments');
+    const { route, params } = match;
+    let given: Record<string, unknown>;
+    if (restInputFromBody(route)) {
+      const contentType = request.headers.get('content-type')?.split(';')[0]?.trim();
+      if (contentType !== 'application/json') return refuse(415, 'unsupported_media_type');
+      let body: unknown;
+      try {
+        body = await readJson(request, config.maxRequestBytes);
+      } catch (error) {
+        const tooLarge = error instanceof Error && error.message === 'request_too_large';
+        return refuse(tooLarge ? 413 : 400, tooLarge ? 'request_too_large' : 'invalid_json');
+      }
+      if (!isRecord(body)) return refuse(400, 'invalid_arguments');
+      given = body;
+    } else {
+      given = restQueryInput(url.searchParams, restInputSchemas.get(route.operation) ?? {});
+    }
+    // The path names the event; the body or query may not name another.
+    if (Object.keys(params).some((name) => Object.hasOwn(given, name))) {
+      return refuse(400, 'invalid_arguments');
+    }
+    const trace = traceContextFrom(undefined, request.headers);
+    const outcome = await invokeSlotlockAgentOperation({
+      operation: route.operation,
+      input: { ...given, ...params },
+      request,
+      options: withoutConfirmationRound(principal, route.operation),
+      ...(trace ? { trace } : {}),
+    });
+    const internal = !outcome.ok && INTERNAL_FAILURES.has(outcome.code);
+    const status = outcome.ok ? 200 : internal ? 500 : outcome.status;
+    emit({ type: 'rest', operation: route.operation, status });
+    if (outcome.ok) return json(200, outcome.data);
+    return refuse(status, internal ? 'internal_error' : outcome.code);
+  }
+
   return {
     manifest,
     async shutdown(): Promise<void> {
@@ -2471,6 +2582,9 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       }
       const path = routePath(url.pathname, config.basePath);
       if (path === null) return json(404, { error: { code: 'not_found' } });
+      if (openApi && (path === '/openapi.json' || path.startsWith('/v1/'))) {
+        return restCall(request, path, url);
+      }
 
       // MCP requires Origin validation on every HTTP connection, including the optional GET
       // stream and session DELETE methods. This server is deliberately stateless and JSON-only,

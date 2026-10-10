@@ -102,6 +102,11 @@
           "description": "JSON array of weekly bookable-hours rules, e.g. [{\"rrule\":\"FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR\",\"startMinutes\":540,\"durationMinutes\":480}]. Without rules no slot is ever offered."
         },
         {
+          "name": "SLOTLOCK_REST_API",
+          "description": "on: also serve the tools as a REST API under /v1, described by an OpenAPI 3.1 document at /openapi.json. Writes that wait for confirmation answer 428 there.",
+          "default": "off"
+        },
+        {
           "name": "SLOTLOCK_TENANT",
           "description": "The tenant every request acts in.",
           "default": "default"
