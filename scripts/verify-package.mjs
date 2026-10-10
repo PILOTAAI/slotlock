@@ -110,6 +110,8 @@ const expectedFiles = new Set([
   'mcp-modern.d.ts',
   'node-server.js',
   'node-server.d.ts',
+  'rest-api.js',
+  'rest-api.d.ts',
   'rules.js',
   'rules.d.ts',
   'self-host.js',
@@ -553,6 +555,7 @@ if (databaseUrl) {
       SLOTLOCK_AUTH_TOKEN: token,
       SLOTLOCK_CONFIRMATION_SECRET: randomBytes(32).toString('hex'),
       SLOTLOCK_TENANT: 'package-verification',
+      SLOTLOCK_REST_API: 'on',
       PORT: '0',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -610,13 +613,40 @@ if (databaseUrl) {
       { 'MCP-Protocol-Version': '2025-11-25' },
     );
     assert.equal((await tools.json()).result.tools.length, 8);
+    // The REST API: its document is public, its routes take the same token, and a write that
+    // waits for a person (SLOTLOCK_CONFIRM_WRITES defaults to all) answers 428.
+    const openApi = await fetch(`${listening.address}/openapi.json`);
+    assert.equal(openApi.status, 200);
+    assert.equal((await openApi.json()).openapi, '3.1.0');
+    const rest = (method, path, body) =>
+      fetch(`${listening.address}${path}`, {
+        method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...(body ? { 'Content-Type': 'application/json' } : {}),
+        },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      });
+    const resources = await rest('GET', '/v1/resources');
+    assert.equal(resources.status, 200);
+    assert.ok(Array.isArray((await resources.json()).resources));
+    const guarded = await rest('POST', '/v1/events', {
+      resource_id: '00000000-0000-4000-8000-000000000000',
+      starts_at: '2030-01-01T09:00:00Z',
+      ends_at: '2030-01-01T10:00:00Z',
+      timezone: 'UTC',
+      idempotency_key: 'package-verification',
+    });
+    assert.equal(guarded.status, 428);
+    assert.deepEqual(await guarded.json(), { error: { code: 'confirmation_required' } });
   } finally {
     child.kill('SIGTERM');
   }
   assert.equal(await exited, 0, `packed serve must stop cleanly on SIGTERM:\n${stderr}`);
   assert.match(stdout, /"event":"stopped"/);
   assert.ok(!stdout.includes(token) && !stderr.includes(token), 'serve must not log the token');
-  liveServe = 'migrated, served MCP initialize/tools/list, stopped on SIGTERM';
+  liveServe =
+    'migrated, served MCP initialize/tools/list and REST (/openapi.json, /v1/resources, 428 on a guarded write), stopped on SIGTERM';
 }
 
 // A strict TypeScript consumer: its own postgres client (and transaction) passes into the store,

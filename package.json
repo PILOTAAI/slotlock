@@ -71,6 +71,7 @@
     "@a2a-js/sdk": "1.3.0",
     "@modelcontextprotocol/client": "2.3.0",
     "@modelcontextprotocol/sdk": "1.32.0",
+    "@seriousme/openapi-schema-validator": "2.11.0",
     "@types/node": "22.19.17",
     "ajv": "8.20.0",
     "jsdom": "30.1.1",

@@ -63,6 +63,7 @@ describe('slotlock serve configuration', () => {
       confirmWrites: ['slotlock_create_event', 'slotlock_update_event', 'slotlock_delete_event'],
       confirmationSecret: env.SLOTLOCK_CONFIRMATION_SECRET,
       availability: [],
+      restApi: false,
     });
   });
 
@@ -76,9 +77,11 @@ describe('slotlock serve configuration', () => {
         SLOTLOCK_TENANT: ' fleet-7 ',
         SLOTLOCK_CONFIRM_WRITES: 'slotlock_delete_event, slotlock_create_event',
         SLOTLOCK_AVAILABILITY: WEEKDAYS,
+        SLOTLOCK_REST_API: 'on',
       }),
     );
     expect(config).toMatchObject({
+      restApi: true,
       migrateDatabaseUrl: 'postgres://owner:pw@db.internal/slotlock',
       host: '0.0.0.0',
       port: 3000,
@@ -144,6 +147,7 @@ describe('slotlock serve configuration', () => {
       { SLOTLOCK_CONFIRM_WRITES: 'slotlock_list_events' },
       /SLOTLOCK_CONFIRM_WRITES must be all, none/,
     ],
+    ['the REST switch is neither on nor off', { SLOTLOCK_REST_API: 'yes' }, /SLOTLOCK_REST_API must be on or off/],
     ['PORT is not a number', { PORT: 'http' }, /PORT must be an integer/],
     ['PORT is out of range', { PORT: '65536' }, /PORT must be an integer/],
     ['PORT is fractional', { PORT: '80.5' }, /PORT must be an integer/],

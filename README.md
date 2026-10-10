@@ -429,6 +429,7 @@ export async function startCalendarServer(config: CalendarServerConfig) {
 | `GET {base}/manifest.json` | Protocol versions, endpoints and every tool's JSON Schemas |
 | `GET {base}/healthz` | Readiness from your `health` callback |
 | `GET /.well-known/oauth-protected-resource{/path}` | OAuth metadata, when `oauth` is set |
+| `{base}/v1/…`, `GET {base}/openapi.json` | [REST API](#rest-and-openapi) and its OpenAPI 3.1 document, when `rest` is on |
 
 ### Tools
 
@@ -529,6 +530,33 @@ returns busy time and coverage for the next `resourceWindowDays` (30). `subscrip
 
 2026-07-28 results carry cache hints: discovery and tool lists are public for an hour, free/busy is
 never cached. W3C `traceparent`, `tracestate` and `baggage` reach your backend as `context.trace`.
+
+### REST and OpenAPI
+
+`rest: true` (`SLOTLOCK_REST_API=on` for `slotlock serve`) also serves each tool as plain HTTP,
+described by an OpenAPI 3.1 document at `/openapi.json`:
+
+| Request | Tool |
+| --- | --- |
+| `GET /v1/resources` | `slotlock_list_resources` |
+| `GET /v1/free-busy` | `slotlock_get_free_busy` |
+| `GET /v1/next-available` | `slotlock_find_next_available` |
+| `GET /v1/events` | `slotlock_list_events` |
+| `POST /v1/events` | `slotlock_create_event` |
+| `GET /v1/events/{event_id}` | `slotlock_get_event` |
+| `PATCH /v1/events/{event_id}` | `slotlock_update_event` |
+| `DELETE /v1/events/{event_id}` | `slotlock_delete_event` |
+
+```sh
+curl "http://localhost:8080/v1/resources" -H "Authorization: Bearer $SLOTLOCK_API_KEY"
+```
+
+- `GET` and `DELETE` take the tool's arguments as query parameters (a list repeats:
+  `resource_ids=a&resource_ids=b`); `POST` and `PATCH` take a JSON body. The event id is in the path.
+- Keys, scopes, `authorize` and the rate limit apply as over MCP. The body is the tool's output, or
+  `{"error":{"code":…}}` with the matching HTTP status.
+- REST cannot ask a person, so a write listed in `confirmation` answers `428 confirmation_required`.
+- There are no CORS headers: call it from a server, not a browser.
 
 ## Connect an agent
 
