@@ -32,8 +32,11 @@ request replaces "Unreleased" with the release date.
   once), add resources and copy the MCP and A2A URLs. Sessions are signed HttpOnly cookies checked
   against `SLOTLOCK_DASHBOARD_USERS` on every request; forms carry CSRF tokens and must come from
   the server's origin; no inline script runs. Finished sign-ins, sent forms and signed-out sessions
-  are recorded in Postgres (`createSlotlockDashboardState`; digests only, a day at most), so they
-  hold across servers, and the 100-resource cap is held in the database.
+  are recorded in Postgres (`createSlotlockDashboardState`; digests only, until the cookie or form
+  expires by the database's clock), so they hold across servers whatever their clocks, and the
+  100-resource cap is held in the database. Forms carry a single-use value bound to the session,
+  and one person may have 1,000 recorded at once (429 past that). `serve` refuses to start the
+  dashboard until `migrate` has granted its functions.
 - `createResource` takes `maxTenantResources`, a per-tenant cap enforced under a database lock, and
   `withTenant` takes `{ isolation: 'read committed' }`.
 

@@ -16,6 +16,7 @@ import {
   createSlotlockDashboard,
   createSlotlockMemoryDashboardState,
 } from '../dashboard.js';
+import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from '../ddl.js';
 import type { SlotlockResource } from '../types.js';
 
 const PUBLIC_URL = 'https://slotlock.example.com/base';
@@ -609,6 +610,33 @@ describe('resources in the dashboard', () => {
   });
 });
 
+describe('the in-memory dashboard state', () => {
+  it('follows the shared rules by its own clock: expiry, a day at most, an owner and a cap per form', async () => {
+    let clock = Date.UTC(2026, 9, 10, 12);
+    const state = createSlotlockMemoryDashboardState(() => clock);
+    expect(await state.use('sign_in', 'a', clock + 60_000)).toBe(true);
+    expect(await state.use('sign_in', 'a', clock + 60_000)).toBe(false);
+    expect(await state.use('sign_in', 'b', clock)).toBe(false);
+    expect(await state.use('sign_in', 'c', clock + 25 * 3_600_000)).toBe(false);
+    await expect(state.use('form', 'd', clock + 60_000)).rejects.toThrow('name their owner');
+    for (let index = 0; index < SLOTLOCK_DASHBOARD_FORM_LIMIT; index += 1) {
+      expect(await state.use('form', `f${index}`, clock + 60_000, '4242')).toBe(true);
+    }
+    await expect(state.use('form', 'over', clock + 60_000, '4242')).rejects.toMatchObject({
+      code: 'dashboard_form_limit',
+    });
+    expect(await state.use('form', 'other-person', clock + 60_000, '7')).toBe(true);
+    clock += 61_000;
+    expect(await state.use('form', 'after-expiry', clock + 60_000, '4242')).toBe(true);
+
+    expect(await state.sessionEnded('s', clock + 60_000)).toBe(false);
+    expect(await state.sessionEnded('s', clock)).toBe(true);
+    expect(await state.sessionEnded('s', clock + 25 * 3_600_000)).toBe(true);
+    await state.endSession('s', clock + 60_000);
+    expect(await state.sessionEnded('s', clock + 60_000)).toBe(true);
+  });
+});
+
 describe('limits found in review', () => {
   it('refuses a form body over 8 KB, declared or streamed, before reading it', async () => {
     const target = dashboard();
@@ -773,7 +801,7 @@ describe('limits found in review', () => {
     const html = await (await get(target, '/base/dashboard', session)).text();
     const token = /name="csrf" value="([^"]+)"/.exec(html)?.[1] as string;
     const once = /action="\/base\/dashboard\/keys">\s*<input type="hidden" name="csrf" value="[^"]+">\s*<input type="hidden" name="once" value="([^"]+)">/.exec(html)?.[1];
-    expect(once).toMatch(/^[A-Za-z0-9_-]{22,}$/);
+    expect(once).toMatch(/^[A-Za-z0-9_-]{24}\.[A-Za-z0-9_-]{43}$/);
     const fields = { csrf: token, once: once as string, name: 'Once', access: 'read', expires: 'never' };
     expect((await post(target, '/base/dashboard/keys', fields, session)).status).toBe(200);
     const again = await post(target, '/base/dashboard/keys', fields, session);

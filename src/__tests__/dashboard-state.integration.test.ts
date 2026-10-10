@@ -2,10 +2,11 @@
 // a sign-in, a sent form and a signed-out session are each honoured by both, and racing resource
 // adds on both stop at the cap. The serving role is a LOGIN role without BYPASSRLS granted by
 // grantApplicationRole. Skipped without DATABASE_URL.
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createSlotlockApiKeyStore } from '../api-keys.js';
+import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from '../ddl.js';
 import {
   SLOTLOCK_DASHBOARD_MAX_RESOURCES,
   createSlotlockDashboard,
@@ -40,10 +41,11 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
     return pool;
   }
 
-  /** One server: its own pool, the shared database. */
-  function server() {
+  /** One server: its own pool, the shared database, and a clock `skew()` ms apart from the database's. */
+  function server(skew: () => number = () => 0) {
     const sql = connectAsServer();
     return createSlotlockDashboard({
+      now: () => Date.now() + skew(),
       publicUrl: ORIGIN,
       github: { clientId: 'Ov23liShared', clientSecret: randomBytes(20).toString('hex') },
       sessionSecret,
@@ -90,6 +92,26 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
     return sessionOf(callback) as string;
   }
 
+  /** A session cookie exactly as a server with this secret would have sealed it. */
+  function sealedSession(exp: number, sid = randomBytes(24).toString('base64url')) {
+    const body = Buffer.from(
+      JSON.stringify({ uid: String(githubId), login: 'two-servers', sid, exp }),
+      'utf8',
+    ).toString('base64url');
+    const mac = createHmac('sha256', sessionSecret)
+      .update(`slotlock-dashboard-session-v1.${body}`)
+      .digest('base64url');
+    return `__Host-slotlock-session=${body}.${mac}`;
+  }
+
+  const formRows = async () =>
+    Number(
+      (await admin<{ count: string }[]>`
+        SELECT count(*) AS count FROM slotlock.dashboard_tokens WHERE kind = 'form'`)[0]?.count,
+    );
+  const ownerHash = createHash('sha256').update(`slotlock-dashboard-owner.${githubId}`).digest();
+  const MIN = 60_000;
+
   beforeAll(async () => {
     admin = postgres(url as string, { max: 1, onnotice: () => {} });
     const owner = createSlotlockStore(admin);
@@ -114,36 +136,51 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
     const sql = connectAsServer();
     for (const statement of [
       'SELECT count(*) FROM slotlock.dashboard_tokens',
-      "INSERT INTO slotlock.dashboard_tokens VALUES ('form', decode(repeat('00', 32), 'hex'), now())",
+      "INSERT INTO slotlock.dashboard_tokens (kind, token_hash, expires_at) VALUES ('sign_in', decode(repeat('00', 32), 'hex'), now())",
       'DELETE FROM slotlock.dashboard_tokens',
     ]) {
       await expect(sql.unsafe(statement)).rejects.toMatchObject({ code: '42501' });
     }
     // A kind outside the three, or a digest that is not 32 bytes, is refused by the table itself.
     await expect(
-      sql`SELECT slotlock.use_dashboard_token('session', ${Buffer.alloc(32)}, now() + interval '1 hour')`,
+      sql`SELECT slotlock.use_dashboard_token('session', ${Buffer.alloc(32)}, now() + interval '1 hour', NULL)`,
     ).rejects.toMatchObject({ code: '23514' });
     await expect(
-      sql`SELECT slotlock.use_dashboard_token('form', ${Buffer.alloc(31)}, now() + interval '1 hour')`,
+      sql`SELECT slotlock.use_dashboard_token('sign_in', ${Buffer.alloc(31)}, now() + interval '1 hour', NULL)`,
+    ).rejects.toMatchObject({ code: '23514' });
+    // Outside READ COMMITTED the per-person count would not be exact, so the function refuses.
+    await expect(
+      sql.begin('isolation level repeatable read', (tx) =>
+        tx`SELECT slotlock.use_dashboard_token('sign_in', ${randomBytes(32)}, now() + interval '1 hour', NULL)`,
+      ),
+    ).rejects.toMatchObject({ code: '25000' });
+    // A form record always names its owner, so the per-person cap can count it.
+    await expect(
+      sql`SELECT slotlock.use_dashboard_token('form', ${randomBytes(32)}, now() + interval '1 hour', NULL)`,
     ).rejects.toMatchObject({ code: '23514' });
   });
 
   it('records a token once until it expires, and prunes expired records as it goes', async () => {
     const state = createSlotlockDashboardState(connectAsServer());
+    const owner = String(githubId);
     const live = randomBytes(18).toString('base64url');
-    expect(await state.use('form', live, Date.now() + 3_600_000)).toBe(true);
-    expect(await state.use('form', live, Date.now() + 3_600_000)).toBe(false);
+    expect(await state.use('form', live, Date.now() + 3_600_000, owner)).toBe(true);
+    expect(await state.use('form', live, Date.now() + 3_600_000, owner)).toBe(false);
     // The same value is a different record under another kind.
     expect(await state.use('sign_in', live, Date.now() + 3_600_000)).toBe(true);
 
-    // Expired (past the five-minute skew allowance): absent, so it is recorded again.
-    const old = randomBytes(18).toString('base64url');
-    expect(await state.use('form', old, Date.now() - 3_600_000)).toBe(true);
-    expect(await state.use('form', old, Date.now() - 3_600_000)).toBe(true);
+    // The database's clock decides: a token it holds expired, or one claiming to outlive a day, is
+    // refused and nothing is stored.
+    const formsBefore = await formRows();
+    expect(await state.use('form', randomBytes(18).toString('base64url'), Date.now() - 1_000, owner)).toBe(false);
+    expect(
+      await state.use('form', randomBytes(18).toString('base64url'), Date.now() + 25 * 3_600_000, owner),
+    ).toBe(false);
+    expect(await formRows()).toBe(formsBefore);
 
     await admin`
       INSERT INTO slotlock.dashboard_tokens (kind, token_hash, expires_at)
-      SELECT 'form', decode(md5(random()::text) || md5(random()::text), 'hex'), now() - interval '1 hour'
+      SELECT 'sign_in', decode(md5(random()::text) || md5(random()::text), 'hex'), now() - interval '1 hour'
         FROM generate_series(1, 3)`;
     const expired = async () =>
       Number(
@@ -152,23 +189,137 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
       );
     const before = await expired();
     expect(before).toBeGreaterThanOrEqual(3);
-    await state.use('form', randomBytes(18).toString('base64url'), Date.now() + 3_600_000);
+    await state.use('sign_in', randomBytes(18).toString('base64url'), Date.now() + 3_600_000);
     expect(await expired()).toBeLessThanOrEqual(Math.max(0, before - 100));
-    await expect(state.use('form', 'x'.repeat(22), Number.NaN)).rejects.toThrow('finite expiry');
+    await expect(state.use('sign_in', 'x'.repeat(22), Number.NaN)).rejects.toThrow('finite expiry');
   });
 
-  it('keeps a stored record no longer than a day, plus the skew allowance', async () => {
+  it('keeps a record exactly as long as its token can be accepted', async () => {
     const state = createSlotlockDashboardState(connectAsServer());
     const value = randomBytes(18).toString('base64url');
-    await state.use('form', value, Date.now() + 365 * 86_400_000);
-    const [row] = await admin<{ hours: number }[]>`
-      SELECT extract(epoch FROM max(expires_at) - now()) / 3600 AS hours
-        FROM slotlock.dashboard_tokens
+    const expiresAt = Date.now() + 3 * 3_600_000;
+    await state.use('form', value, expiresAt, String(githubId));
+    const [row] = await admin<{ expires: Date }[]>`
+      SELECT expires_at AS expires FROM slotlock.dashboard_tokens
        WHERE kind = 'form'
          AND token_hash = sha256(convert_to(${`slotlock-dashboard-form.${value}`}, 'UTF8'))`;
-    expect(Number(row?.hours)).toBeGreaterThan(24);
-    expect(Number(row?.hours)).toBeLessThanOrEqual(24 + 5 / 60);
+    expect(row?.expires.getTime()).toBe(expiresAt);
   });
+
+  it("lets the database's clock decide: a lagging server cannot finish a sign-in it holds expired", async () => {
+    let skew = -16 * MIN;
+    const lagging = server(() => skew);
+    // Issued 16 minutes ago by the database's clock, so it expired 6 minutes ago; the lagging
+    // server, 8 minutes behind, still reads it as live.
+    const { state, pending } = await startSignIn(lagging);
+    skew = -8 * MIN;
+    github.mockClear();
+    const first = await get(lagging, `/dashboard/callback?code=c&state=${state}`, pending);
+    const replay = await get(lagging, `/dashboard/callback?code=c&state=${state}`, pending);
+    expect([first.status, replay.status]).toEqual([400, 400]);
+    expect(github).not.toHaveBeenCalled();
+  });
+
+  it('signs out, on a lagging server, a session the database holds expired', async () => {
+    const lagging = server(() => -8 * MIN);
+    const session = sealedSession(Date.now() - 6 * MIN);
+    expect(await (await get(lagging, '/dashboard', session)).text()).not.toContain('@two-servers');
+    const html = await (await get(lagging, '/dashboard', session)).text();
+    expect(html).toContain('href="/dashboard/sign-in"');
+  });
+
+  it('refuses a session that claims to outlive a day, from a server running ahead', async () => {
+    const ahead = server(() => 13 * 3_600_000);
+    const session = await signIn(ahead);
+    expect(session).toMatch(/^__Host-slotlock-session=/);
+    // Its 12 hours end 25 hours from now by the database's clock: no server takes it.
+    expect(await (await get(ahead, '/dashboard', session)).text()).not.toContain('@two-servers');
+    expect(await (await get(server(), '/dashboard', session)).text()).not.toContain('@two-servers');
+  });
+
+  it("writes nothing for a made-up form value, another session's, or a route that does not exist", async () => {
+    const target = server();
+    const session = await signIn(target);
+    const other = await signIn(target);
+    const page = async (cookie: string) => {
+      const html = await (await get(target, '/dashboard', cookie)).text();
+      return {
+        csrf: /name="csrf" value="([^"]+)"/.exec(html)?.[1] as string,
+        once: /name="once" value="([^"]+)"/.exec(html)?.[1] as string,
+      };
+    };
+    const mine = await page(session);
+    const theirs = await page(other);
+    const before = await formRows();
+    const made = `${randomBytes(18).toString('base64url')}.${randomBytes(32).toString('base64url')}`;
+    for (const once of [made, theirs.once, 'x'.repeat(40)]) {
+      const sent = await post(target, '/dashboard/keys', { csrf: mine.csrf, once, name: 'Forged', access: 'read', expires: 'never' }, session);
+      expect(sent.status).toBe(409);
+    }
+    const nowhere = await post(target, '/dashboard/nowhere', { csrf: mine.csrf, once: mine.once }, session);
+    expect(nowhere.status).toBe(404);
+    expect(await formRows()).toBe(before);
+    const keys = await createSlotlockApiKeyStore(admin).list({ tenantRef });
+    expect(keys.filter(({ name }) => name === 'Forged')).toHaveLength(0);
+    // The real value still works once.
+    const sent = await post(target, '/dashboard/keys', { csrf: mine.csrf, once: mine.once, name: 'Real', access: 'read', expires: 'never' }, session);
+    expect(sent.status).toBe(200);
+  });
+
+  it('holds the per-person form cap when forms race on two servers', async () => {
+    const [first, second] = [server(), server()];
+    const session = await signIn(first);
+    const pages = await Promise.all(
+      Array.from({ length: 10 }, async () => (await get(first, '/dashboard', session)).text()),
+    );
+    const csrf = /name="csrf" value="([^"]+)"/.exec(pages[0] as string)?.[1] as string;
+    const onces = pages.flatMap((html) => [...html.matchAll(/name="once" value="([^"]+)"/g)].map((m) => m[1] as string));
+    expect(onces.length).toBeGreaterThanOrEqual(20);
+    // Earlier tests left forms of this person live; fill to exactly five below the cap.
+    const [live] = await admin<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM slotlock.dashboard_tokens
+       WHERE owner_hash = ${ownerHash} AND kind = 'form' AND expires_at > now()`;
+    await admin`
+      INSERT INTO slotlock.dashboard_tokens (kind, token_hash, owner_hash, expires_at)
+      SELECT 'form', sha256(convert_to(${randomUUID()} || n::text, 'UTF8')), ${ownerHash}, now() + interval '1 hour'
+        FROM generate_series(1, ${SLOTLOCK_DASHBOARD_FORM_LIMIT - 5 - (live?.n ?? 0)}) AS n`;
+    try {
+      // Each spends its form value, then finds no such key (404); past the cap, 429.
+      const outcomes = await Promise.all(
+        onces.slice(0, 20).map((once, index) =>
+          post(index % 2 === 0 ? first : second, '/dashboard/keys/revoke', { csrf, once, id: randomUUID() }, session),
+        ),
+      );
+      expect(outcomes.filter(({ status }) => status === 404)).toHaveLength(5);
+      expect(outcomes.filter(({ status }) => status === 429)).toHaveLength(15);
+    } finally {
+      await admin`DELETE FROM slotlock.dashboard_tokens WHERE owner_hash = ${ownerHash}`;
+    }
+  });
+
+  it('caps the live form records one person can leave, on every server', async () => {
+    const [first, second] = [server(), server()];
+    const session = await signIn(first);
+    await admin`
+      INSERT INTO slotlock.dashboard_tokens (kind, token_hash, owner_hash, expires_at)
+      SELECT 'form', sha256(convert_to(${randomUUID()} || n::text, 'UTF8')), ${ownerHash}, now() + interval '1 hour'
+        FROM generate_series(1, ${SLOTLOCK_DASHBOARD_FORM_LIMIT}) AS n`;
+    try {
+      const html = await (await get(second, '/dashboard', session)).text();
+      const csrf = /name="csrf" value="([^"]+)"/.exec(html)?.[1] as string;
+      const once = /name="once" value="([^"]+)"/.exec(html)?.[1] as string;
+      const refused = await post(second, '/dashboard/keys', { csrf, once, name: 'Over', access: 'read', expires: 'never' }, session);
+      expect(refused.status).toBe(429);
+      expect(await refused.text()).toContain('Too many forms');
+      // Signing out is never refused.
+      const out = await post(first, '/dashboard/sign-out', { csrf }, session);
+      expect(out.status).toBe(303);
+      expect(await (await get(second, '/dashboard', session)).text()).not.toContain('@two-servers');
+    } finally {
+      await admin`DELETE FROM slotlock.dashboard_tokens WHERE owner_hash = ${ownerHash}`;
+    }
+  });
+
 
   it('finishes a sign-in once, whichever server the callback reaches', async () => {
     const [first, second] = [server(), server()];
@@ -189,6 +340,13 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
     await post(first, '/dashboard/sign-out', { csrf }, session);
     expect(await (await get(second, '/dashboard', session)).text()).not.toContain('@two-servers');
     expect(await (await get(first, '/dashboard', session)).text()).not.toContain('@two-servers');
+  });
+
+  it('refuses a transaction in place of a client, where a rollback would undo a record', async () => {
+    const sql = connectAsServer();
+    await sql.begin(async (tx) => {
+      expect(() => createSlotlockDashboardState(tx)).toThrow('a client, not a transaction');
+    });
   });
 
   it('runs a form once, whichever server it is sent to again', async () => {
@@ -290,14 +448,14 @@ describe.skipIf(!url)('capped resource creation in the store (real Postgres)', (
   it('records a token once under a REPEATABLE READ role default, while the first use commits', async () => {
     const state = createSlotlockDashboardState(repeatable);
     const value = randomBytes(18).toString('base64url');
-    const digest = createHash('sha256').update(`slotlock-dashboard-form.${value}`).digest();
+    const digest = createHash('sha256').update(`slotlock-dashboard-sign_in.${value}`).digest();
     let second: Promise<boolean> | undefined;
     // The first use holds its row uncommitted; the second waits on it, then finds it committed.
-    await repeatable.begin(async (tx) => {
+    await repeatable.begin('isolation level read committed', async (tx) => {
       const [first] = await tx<{ used: boolean }[]>`
-        SELECT slotlock.use_dashboard_token('form', ${digest}, now() + interval '1 hour') AS used`;
+        SELECT slotlock.use_dashboard_token('sign_in', ${digest}, now() + interval '1 hour', NULL) AS used`;
       expect(first?.used).toBe(true);
-      second = state.use('form', value, Date.now() + 3_600_000);
+      second = state.use('sign_in', value, Date.now() + 3_600_000);
       await new Promise((resolve) => setTimeout(resolve, 150));
     });
     await expect(second).resolves.toBe(false);

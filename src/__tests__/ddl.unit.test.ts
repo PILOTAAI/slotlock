@@ -3,6 +3,7 @@ import {
   SLOTLOCK_API_KEY_FUNCTIONS,
   SLOTLOCK_API_KEY_TABLES,
   SLOTLOCK_CORE_DDL,
+  SLOTLOCK_DASHBOARD_FORM_LIMIT,
   SLOTLOCK_DASHBOARD_FUNCTIONS,
   SLOTLOCK_DASHBOARD_TABLES,
   SLOTLOCK_DEFINER_FUNCTIONS,
@@ -177,20 +178,46 @@ describe('deployment DDL name resolution', () => {
     );
   });
 
-  it('records a dashboard token once, as a digest, for a day at most', () => {
+  it("records a dashboard token once, as a digest, by the database's clock", () => {
     const use = SLOTLOCK_CORE_DDL.slice(
       SLOTLOCK_CORE_DDL.indexOf('CREATE OR REPLACE FUNCTION slotlock.use_dashboard_token('),
       SLOTLOCK_CORE_DDL.indexOf('$slotlock_use_dashboard_token$;'),
     );
     expect(SLOTLOCK_CORE_DDL).toContain('CHECK (octet_length(token_hash) = 32)');
     expect(SLOTLOCK_CORE_DDL).toContain("CHECK (kind IN ('sign_in', 'form', 'ended_session'))");
-    // A recorded token that has not expired is never replaced, so the second use comes back false.
-    expect(use).toContain('ON CONFLICT (kind, token_hash) DO UPDATE');
-    expect(use).toContain('WHERE used.expires_at <= now()');
+    expect(SLOTLOCK_CORE_DDL).toContain("CHECK (kind <> 'form' OR owner_hash IS NOT NULL)");
+    // The database's clock refuses an expired token, or one claiming to outlive a day, before
+    // anything is written; a live token's record lasts exactly as long as the token.
+    const refused = use.indexOf("OR requested_expires_at > now() + interval '1 day' THEN\n    RETURN false;");
+    const written = use.indexOf('INSERT INTO slotlock.dashboard_tokens');
+    expect(refused).toBeGreaterThan(0);
+    expect(written).toBeGreaterThan(refused);
+    expect(use).toContain('VALUES (requested_kind, requested_hash, requested_owner_hash, requested_expires_at)');
+    // A recorded token is never replaced, so its second use comes back false.
+    expect(use).toContain('ON CONFLICT (kind, token_hash) DO NOTHING');
+    expect(use).not.toContain('DO UPDATE');
     expect(use).toContain('RETURN coalesce(recorded, false);');
-    expect(use).toContain("LEAST(requested_expires_at, now() + interval '1 day') + interval '5 minutes'");
     // Pruning is bounded per call and never waits on a row another call holds.
     expect(use).toMatch(/LIMIT 100\s+FOR UPDATE SKIP LOCKED/);
+    // One person's live forms are counted under a lock on that person, in READ COMMITTED.
+    const isolation = use.indexOf("current_setting('transaction_isolation') <> 'read committed'");
+    const lock = use.indexOf('pg_advisory_xact_lock(');
+    const count = use.indexOf('count(*)');
+    expect(isolation).toBeGreaterThan(refused);
+    expect(lock).toBeGreaterThan(isolation);
+    expect(count).toBeGreaterThan(lock);
+    expect(written).toBeGreaterThan(count);
+    expect(use).toContain(`>= ${SLOTLOCK_DASHBOARD_FORM_LIMIT} THEN`);
+  });
+
+  it('ends a session past its expiry by the database clock, whatever the asking server reads', () => {
+    const ended = SLOTLOCK_CORE_DDL.slice(
+      SLOTLOCK_CORE_DDL.indexOf('CREATE OR REPLACE FUNCTION slotlock.dashboard_session_ended('),
+      SLOTLOCK_CORE_DDL.indexOf('$slotlock_dashboard_session_ended$;'),
+    );
+    expect(ended).toContain('requested_expires_at <= now()');
+    expect(ended).toContain("requested_expires_at > now() + interval '1 day'");
+    expect(ended).toContain("ended.kind = 'ended_session'");
   });
 
   it('creates keys only under READ COMMITTED, where its lock makes the limit count exact', () => {

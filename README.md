@@ -149,14 +149,22 @@ resources, which is how the hosted Slotlock hands out keys:
   apps): its cookies are host-wide, so any other app on the same origin could read them.
 - Finished sign-ins (a callback works once), signed-out sessions (a copied cookie stays out) and sent
   forms (a reload does not create or rotate a key twice) are recorded in Postgres, so they hold on
-  every server that shares the database, behind any load balancer. Each is a SHA-256 digest with
-  nothing about the person, kept until its cookie or form expires and never longer than a day. The
-  server role reaches them only through two SECURITY DEFINER functions.
+  every server that shares the database, behind any load balancer. Each is a SHA-256 digest, kept
+  until its cookie or form expires (12 hours at most); a form record also carries a digest of the
+  GitHub user id that sent it. The server role reaches them only through two SECURITY DEFINER
+  functions, and `serve` refuses to start the dashboard until `migrate` has granted them.
+- The database's clock decides when a sign-in or session has expired, so servers whose clocks drift
+  from it or from each other cannot let a replay or a signed-out session through. Keep clocks in
+  sync all the same: a server more than 12 hours ahead of the database cannot sign anyone in.
+- Each form carries a single-use value bound to its session. A person may have 1,000 forms
+  recorded at once (12 hours' worth); past that the dashboard answers 429 until the oldest expire.
+  Signing out always works.
 - A person may add 100 resources. The database holds the cap, so adds racing on any number of servers
   stop at 100; a resource they already have can still change time zone. Bookable hours come from
   `SLOTLOCK_AVAILABILITY` and apply to every tenant's resources.
-- Rate-limit `/dashboard/sign-in` and `/dashboard/callback` at your proxy: each callback costs a
-  database write and a call to GitHub, and an instance runs at most eight at once.
+- Rate-limit `/dashboard/sign-in`, `/dashboard/callback` and the dashboard's POSTs at your proxy:
+  each callback costs a database write and a call to GitHub (an instance runs at most eight at
+  once), and each form a database write.
 
 ## Connect an MCP client
 
@@ -954,7 +962,8 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
   occurrences, commands and coverage rows in your tenant-erasure workflow and delete order, and
   delete the tenant's API keys with `createSlotlockApiKeyStore(sql).erase({ tenantRef })`. Only
   their SHA-256 digests stay, with nothing about the tenant, so an erased key is never accepted
-  again. The dashboard's records hold no tenant or person and expire within a day.
+  again. The dashboard's records hold no tenant and expire within 12 hours; a form record carries a
+  SHA-256 digest of the GitHub user id that sent it.
 
 ### Production checklist
 
