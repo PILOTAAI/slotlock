@@ -400,4 +400,60 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     expect(foreign.stdout.text()).toBe('');
     expect(foreign.stderr.text()).toMatch(/no API key with that id/);
   });
+  it('serves the GitHub sign-in dashboard beside MCP when configured, and keeps its secrets out of the log', async () => {
+    const clientSecret = randomBytes(20).toString('hex');
+    const sessionSecret = randomBytes(32).toString('hex');
+    const shutdown = new AbortController();
+    const stdout = output();
+    const stderr = output();
+    const serving = runSlotlockCli(['serve'], {
+      env: {
+        ...env,
+        SLOTLOCK_GITHUB_CLIENT_ID: 'Ov23liIntegrationTest',
+        SLOTLOCK_GITHUB_CLIENT_SECRET: clientSecret,
+        SLOTLOCK_SESSION_SECRET: sessionSecret,
+        SLOTLOCK_DASHBOARD_USERS: '4242',
+      },
+      stdout,
+      stderr,
+      signal: shutdown.signal,
+    });
+    try {
+      const listening = await eventually(() =>
+        stdout.events().find(({ event }) => event === 'listening'),
+      );
+      expect(listening).toMatchObject({ dashboard: 'http://localhost:8080/dashboard' });
+      const origin = listening.address as string;
+
+      const page = await fetch(`${origin}/dashboard`);
+      expect(page.status).toBe(200);
+      expect(page.headers.get('content-security-policy')).toContain("default-src 'none'");
+      expect(await page.text()).toContain('href="/dashboard/sign-in"');
+
+      const signIn = await fetch(`${origin}/dashboard/sign-in`, { redirect: 'manual' });
+      expect(signIn.status).toBe(302);
+      const location = new URL(signIn.headers.get('location') ?? '');
+      expect(location.origin + location.pathname).toBe('https://github.com/login/oauth/authorize');
+      expect(location.searchParams.get('client_id')).toBe('Ov23liIntegrationTest');
+      expect(location.searchParams.get('redirect_uri')).toBe(
+        'http://localhost:8080/dashboard/callback',
+      );
+      expect(signIn.headers.get('set-cookie')).toMatch(/^__Host-slotlock-oauth=/);
+
+      // MCP still answers beside it.
+      const mcp = await fetch(`${origin}/mcp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+      });
+      expect(mcp.status).toBe(401);
+    } finally {
+      shutdown.abort();
+    }
+    expect(await serving).toBe(0);
+    expect(stderr.text()).toBe('');
+    for (const secretValue of [clientSecret, sessionSecret]) {
+      expect(stdout.text()).not.toContain(secretValue);
+    }
+  });
 });

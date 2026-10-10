@@ -24,6 +24,7 @@ import {
   createSlotlockApiKeyStore,
   slotlockBearerCredential,
 } from './api-keys.js';
+import { createSlotlockDashboard, createSlotlockDashboardResources } from './dashboard.js';
 import {
   type SlotlockNodeServerAddress,
   type SlotlockNodeServerCloseResult,
@@ -45,6 +46,10 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_PUBLIC_URL',
   'SLOTLOCK_TENANT',
   'SLOTLOCK_AVAILABILITY',
+  'SLOTLOCK_GITHUB_CLIENT_ID',
+  'SLOTLOCK_GITHUB_CLIENT_SECRET',
+  'SLOTLOCK_SESSION_SECRET',
+  'SLOTLOCK_DASHBOARD_USERS',
   'HOST',
   'PORT',
 ] as const);
@@ -107,6 +112,15 @@ export interface SlotlockDatabaseConfig {
   tenantRef: string;
 }
 
+/** The GitHub sign-in dashboard (dashboard.ts), served at `<publicUrl>/dashboard` when configured. */
+export interface SlotlockServeDashboardConfig {
+  githubClientId: string;
+  githubClientSecret: string;
+  sessionSecret: string;
+  /** GitHub user ids that may sign in, or `'*'` for every GitHub account. */
+  allowedUsers: '*' | string[];
+}
+
 export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
   host: string;
   port: number;
@@ -123,6 +137,8 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
   confirmationSecret?: string;
   /** Bookable hours, applied to every resource in its own timezone. Empty: never bookable. */
   availability: readonly WeeklyAvailabilityRule[];
+  /** Set exactly when SLOTLOCK_GITHUB_CLIENT_ID is. */
+  dashboard?: SlotlockServeDashboardConfig;
 }
 
 /** An unset variable and an empty one (`FOO=` in an env file) both mean "not configured". */
@@ -292,6 +308,61 @@ function readAvailability(env: SlotlockEnv): WeeklyAvailabilityRule[] {
   });
 }
 
+const DASHBOARD_VARIABLES = [
+  'SLOTLOCK_GITHUB_CLIENT_ID',
+  'SLOTLOCK_GITHUB_CLIENT_SECRET',
+  'SLOTLOCK_SESSION_SECRET',
+  'SLOTLOCK_DASHBOARD_USERS',
+] as const;
+
+/**
+ * The dashboard's settings, or undefined when none is set. Setting any of them means serving the
+ * dashboard, so the rest are then required: a half-configured sign-in is a startup error.
+ */
+function readDashboard(env: SlotlockEnv): SlotlockServeDashboardConfig | undefined {
+  if (DASHBOARD_VARIABLES.every((name) => optional(env, name) === undefined)) return undefined;
+  const githubClientId = optional(env, 'SLOTLOCK_GITHUB_CLIENT_ID');
+  if (githubClientId === undefined || !/^[A-Za-z0-9._-]{1,100}$/.test(githubClientId)) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_GITHUB_CLIENT_ID is required to serve the dashboard: the Client ID of a GitHub OAuth app whose callback URL is <SLOTLOCK_PUBLIC_URL>/dashboard/callback',
+    );
+  }
+  const githubClientSecret = readSecret(env, 'SLOTLOCK_GITHUB_CLIENT_SECRET');
+  if (githubClientSecret === undefined) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_GITHUB_CLIENT_SECRET is required to serve the dashboard: a client secret of that GitHub OAuth app',
+    );
+  }
+  const sessionSecret = readSecret(env, 'SLOTLOCK_SESSION_SECRET');
+  if (sessionSecret === undefined) {
+    throw new SlotlockConfigError(
+      `SLOTLOCK_SESSION_SECRET is required to serve the dashboard: it signs sign-in sessions; ${SECRET_HINT}`,
+    );
+  }
+  const others = [
+    env.SLOTLOCK_GITHUB_CLIENT_SECRET,
+    env.SLOTLOCK_AUTH_TOKEN,
+    env.SLOTLOCK_CONFIRMATION_SECRET,
+  ];
+  if (others.includes(sessionSecret)) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_SESSION_SECRET must differ from every other secret',
+    );
+  }
+  const users = optional(env, 'SLOTLOCK_DASHBOARD_USERS')?.replaceAll(' ', '');
+  if (users === undefined || (users !== '*' && !/^[1-9]\d{0,19}(,[1-9]\d{0,19})*$/.test(users))) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_DASHBOARD_USERS is required to serve the dashboard: * for every GitHub account, or a comma-separated list of GitHub user ids (gh api users/<login> --jq .id)',
+    );
+  }
+  return {
+    githubClientId,
+    githubClientSecret,
+    sessionSecret,
+    allowedUsers: users === '*' ? '*' : [...new Set(users.split(','))],
+  };
+}
+
 export function readSlotlockDatabaseConfig(env: SlotlockEnv): SlotlockDatabaseConfig {
   const databaseUrl = readDatabaseUrl(env, 'DATABASE_URL');
   if (databaseUrl === undefined) {
@@ -330,6 +401,8 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
     availability: readAvailability(env),
   };
   if (authToken !== undefined) config.authToken = authToken;
+  const dashboard = readDashboard(env);
+  if (dashboard !== undefined) config.dashboard = dashboard;
   if (confirmWrites.length > 0 && confirmationSecret !== undefined) {
     config.confirmationSecret = confirmationSecret;
   }
@@ -404,7 +477,12 @@ export interface SlotlockLogger {
 /** Every configured secret, and each database password alone, so no log line can carry one. */
 function secretsIn(env: SlotlockEnv): string[] {
   const secrets: string[] = [];
-  for (const name of ['SLOTLOCK_AUTH_TOKEN', 'SLOTLOCK_CONFIRMATION_SECRET']) {
+  for (const name of [
+    'SLOTLOCK_AUTH_TOKEN',
+    'SLOTLOCK_CONFIRMATION_SECRET',
+    'SLOTLOCK_GITHUB_CLIENT_SECRET',
+    'SLOTLOCK_SESSION_SECRET',
+  ]) {
     const value = env[name]?.trim();
     if (value) secrets.push(value);
   }
@@ -564,7 +642,30 @@ export async function startSlotlockServer(
           }
         : {}),
     });
-    const listener = createSlotlockNodeServer(agentServer, {
+    const dashboard =
+      config.dashboard === undefined
+        ? undefined
+        : createSlotlockDashboard({
+            publicUrl: config.publicUrl,
+            github: {
+              clientId: config.dashboard.githubClientId,
+              clientSecret: config.dashboard.githubClientSecret,
+            },
+            sessionSecret: config.dashboard.sessionSecret,
+            allowedUsers: config.dashboard.allowedUsers,
+            keys: createSlotlockApiKeyStore(sql),
+            resources: createSlotlockDashboardResources(store),
+            availability: config.availability,
+            onError: (error) => log.error('dashboard_error', describeError(error)),
+          });
+    const target = dashboard
+      ? {
+          fetch: (request: Request) =>
+            dashboard.handles(request) ? dashboard.fetch(request) : agentServer.fetch(request),
+          shutdown: () => agentServer.shutdown(),
+        }
+      : agentServer;
+    const listener = createSlotlockNodeServer(target, {
       requestOrigin: publicUrl.origin,
       onError: (error, phase) => log.error('http_error', { phase, ...describeError(error) }),
     });
@@ -575,6 +676,7 @@ export async function startSlotlockServer(
       a2a: `${config.publicUrl}/a2a`,
       tenant: config.tenantRef,
       auth: config.authToken === undefined ? ['api_keys'] : ['token', 'api_keys'],
+      dashboard: dashboard ? `${config.publicUrl}/dashboard` : null,
       confirm_writes: config.confirmWrites,
       availability_rules: config.availability.length,
     });
@@ -758,6 +860,11 @@ Environment:
   SLOTLOCK_PUBLIC_URL            URL clients use (default http://localhost:$PORT)
   SLOTLOCK_TENANT                Tenant of the token, resource and key commands (default "default")
   SLOTLOCK_AVAILABILITY          JSON array of weekly bookable-hours rules (default: none)
+  SLOTLOCK_GITHUB_CLIENT_ID      Serve the dashboard at $SLOTLOCK_PUBLIC_URL/dashboard: the Client ID
+                                 of a GitHub OAuth app with callback .../dashboard/callback
+  SLOTLOCK_GITHUB_CLIENT_SECRET  That app's client secret (dashboard)
+  SLOTLOCK_SESSION_SECRET        Signs dashboard sessions, 32+ random characters (dashboard)
+  SLOTLOCK_DASHBOARD_USERS       * or comma-separated GitHub user ids that may sign in (dashboard)
   HOST                           Listen address (default 127.0.0.1)
   PORT                           Listen port (default 8080)
 

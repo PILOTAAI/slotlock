@@ -220,6 +220,57 @@ describe('slotlock serve configuration', () => {
     for (const env of cases) expect(refusal(env).message).not.toContain(weak);
   });
 
+  describe('dashboard', () => {
+    const dashboardEnv = (overrides: Record<string, string | undefined> = {}) =>
+      serveEnv({
+        SLOTLOCK_GITHUB_CLIENT_ID: 'Ov23liAbCdEfGhIjKlMn',
+        SLOTLOCK_GITHUB_CLIENT_SECRET: secret(),
+        SLOTLOCK_SESSION_SECRET: secret(),
+        SLOTLOCK_DASHBOARD_USERS: '4242, 7,4242',
+        ...overrides,
+      });
+
+    it('is off unless configured, and reads every setting when it is', () => {
+      expect('dashboard' in readSlotlockServeConfig(serveEnv())).toBe(false);
+      const env = dashboardEnv();
+      expect(readSlotlockServeConfig(env).dashboard).toEqual({
+        githubClientId: 'Ov23liAbCdEfGhIjKlMn',
+        githubClientSecret: env.SLOTLOCK_GITHUB_CLIENT_SECRET,
+        sessionSecret: env.SLOTLOCK_SESSION_SECRET,
+        allowedUsers: ['4242', '7'],
+      });
+      expect(
+        readSlotlockServeConfig(dashboardEnv({ SLOTLOCK_DASHBOARD_USERS: '*' })).dashboard
+          ?.allowedUsers,
+      ).toBe('*');
+    });
+
+    it.each([
+      ['the client id is missing', { SLOTLOCK_GITHUB_CLIENT_ID: undefined }, /SLOTLOCK_GITHUB_CLIENT_ID is required/],
+      ['the client id has a space', { SLOTLOCK_GITHUB_CLIENT_ID: 'a b' }, /SLOTLOCK_GITHUB_CLIENT_ID is required/],
+      ['the client secret is missing', { SLOTLOCK_GITHUB_CLIENT_SECRET: undefined }, /SLOTLOCK_GITHUB_CLIENT_SECRET is required/],
+      ['the session secret is missing', { SLOTLOCK_SESSION_SECRET: undefined }, /SLOTLOCK_SESSION_SECRET is required/],
+      ['the session secret is weak', { SLOTLOCK_SESSION_SECRET: 'z'.repeat(40) }, /SLOTLOCK_SESSION_SECRET is too weak/],
+      ['no one is allowed', { SLOTLOCK_DASHBOARD_USERS: undefined }, /SLOTLOCK_DASHBOARD_USERS is required/],
+      ['users are logins, not ids', { SLOTLOCK_DASHBOARD_USERS: 'octocat' }, /SLOTLOCK_DASHBOARD_USERS is required/],
+      ['only the users are set', { SLOTLOCK_GITHUB_CLIENT_ID: undefined, SLOTLOCK_GITHUB_CLIENT_SECRET: undefined, SLOTLOCK_SESSION_SECRET: undefined }, /SLOTLOCK_GITHUB_CLIENT_ID is required/],
+    ])('refuses to start when %s', (_case, overrides, message) => {
+      expect(refusal(dashboardEnv(overrides)).message).toMatch(message);
+    });
+
+    it('refuses a session secret that is another secret, without printing it', () => {
+      const shared = secret();
+      for (const env of [
+        dashboardEnv({ SLOTLOCK_SESSION_SECRET: shared, SLOTLOCK_GITHUB_CLIENT_SECRET: shared }),
+        dashboardEnv({ SLOTLOCK_SESSION_SECRET: shared, SLOTLOCK_AUTH_TOKEN: shared }),
+      ]) {
+        const message = refusal(env).message;
+        expect(message).toMatch(/SLOTLOCK_SESSION_SECRET must differ/);
+        expect(message).not.toContain(shared);
+      }
+    });
+  });
+
   it('reads the database settings alone for migrate and resource', () => {
     expect(readSlotlockDatabaseConfig({ DATABASE_URL, SLOTLOCK_TENANT: 'fleet-7' })).toEqual({
       databaseUrl: DATABASE_URL,

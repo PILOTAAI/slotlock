@@ -26,6 +26,12 @@ request replaces "Unreleased" with the release date.
   the database pool. `SLOTLOCK_AUTH_TOKEN` is now optional for `serve`.
 - A principal may carry `scopes`; the agent server then refuses, before `authorize`, every
   operation whose scope (`slotlockAgentOperationScope`: `read` or `write`) it lacks.
+- A dashboard at `<SLOTLOCK_PUBLIC_URL>/dashboard` (`createSlotlockDashboard`), served by `serve`
+  when `SLOTLOCK_GITHUB_CLIENT_ID` is set: GitHub sign-in (OAuth with state and PKCE, no scope), a
+  personal tenant per GitHub user, and pages to create, rotate and revoke API keys (each shown
+  once), add resources and copy the MCP and A2A URLs. Sessions are signed HttpOnly cookies checked
+  against `SLOTLOCK_DASHBOARD_USERS` on every request; forms carry CSRF tokens and must come from
+  the server's origin; no inline script runs.
 
 ### Fixed for the standalone release
 

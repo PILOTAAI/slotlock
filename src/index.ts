@@ -86,6 +86,16 @@ export {
   SLOTLOCK_API_KEY_RETAINED_LIMIT,
   SLOTLOCK_API_KEY_SCOPES,
 } from './api-keys.js';
+export {
+  createSlotlockDashboard,
+  createSlotlockDashboardResources,
+  SLOTLOCK_DASHBOARD_MAX_RESOURCES,
+} from './dashboard.js';
+export type {
+  SlotlockDashboard,
+  SlotlockDashboardOptions,
+  SlotlockDashboardResources,
+} from './dashboard.js';
 export type {
   CreateSlotlockApiKeyInput,
   SlotlockApiKey,
