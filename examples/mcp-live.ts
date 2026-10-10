@@ -8,7 +8,7 @@ export interface LiveCalendarOptions {
   mcpUrl: string;
   token: string;
   resourceId: string;
-  /** Show Slotlock's sentence ("Book … on resource …: 2027-03-29 10:00–12:00 (Europe/London).") */
+  /** Show Slotlock's sentence ("Book vehicle-42 for 2027-03-29 10:00–12:00 (Europe/London): …") */
   confirm(message: string): Promise<boolean>;
   /** The resource's free/busy changed; call read() for the new one. */
   onChange(uri: string): void;

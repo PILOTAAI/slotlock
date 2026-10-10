@@ -665,9 +665,12 @@ its audience is your `/mcp` URL.
 
 `confirmation` (see the server example) makes the listed writes wait for a person. On MCP
 2026-07-28 the first `tools/call` answers `input_required` with a one-checkbox form whose message
-says exactly what will change, for example `Book "Vehicle handover" on resource vehicle-42:
-2027-03-29 10:00–11:00 (Europe/London).`; the client shows it and repeats the call with the answer,
-and only an explicit acceptance runs the write. The pending confirmation travels as a
+says exactly what will change, for example `Book vehicle-42 for 2027-03-29 10:00–11:00
+(Europe/London): "Vehicle handover".`; the client shows it and repeats the call with the answer,
+and only an explicit acceptance runs the write. The question states the facts first (the resource
+by its own reference, the times, an event as it stands now, read through your backend's
+`describeResource` and `getEvent`) and the agent's own text last, quoted, so a title cannot pass
+itself off as the time or the resource. Without `describeResource`, resources are named by id. The pending confirmation travels as a
 `requestState` sealed with your `secrets` (HMAC-SHA256) to the caller, the tool, the exact arguments
 and an expiry (`ttlSeconds`, default 600), so it cannot approve another booking, caller or change.
 Authorization and argument validation run first: nobody is asked to approve a call that could not
@@ -774,7 +777,7 @@ export interface LiveCalendarOptions {
   mcpUrl: string;
   token: string;
   resourceId: string;
-  /** Show Slotlock's sentence ("Book … on resource …: 2027-03-29 10:00–12:00 (Europe/London).") */
+  /** Show Slotlock's sentence ("Book vehicle-42 for 2027-03-29 10:00–12:00 (Europe/London): …") */
   confirm(message: string): Promise<boolean>;
   /** The resource's free/busy changed; call read() for the new one. */
   onChange(uri: string): void;

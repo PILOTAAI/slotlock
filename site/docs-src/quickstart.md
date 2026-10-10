@@ -114,8 +114,8 @@ answer is Monday morning, and it is certain:
 ```
 
 To book it, the agent calls `slotlock_create_event`. Because of `SLOTLOCK_CONFIRM_WRITES=all`,
-Slotlock first asks the person: Book "Vehicle handover" on resource …: 2027-03-01 09:00–11:00
-(Europe/London), with the resource's `id` in place of the dots. The write runs only if they accept. A client that cannot
+Slotlock first asks the person: Book vehicle-42 for 2027-03-01 09:00–11:00 (Europe/London):
+"Vehicle handover". The write runs only if they accept. A client that cannot
 show that question (one without MCP 2026-07-28 form elicitation) gets `confirmation_required`, and
 nothing is written.
 

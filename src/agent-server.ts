@@ -382,6 +382,15 @@ export interface SlotlockAgentCalendarBackend {
     context: SlotlockAgentInvocationContext,
     input: Record<string, unknown>,
   ): Promise<Record<string, unknown>>;
+  /**
+   * Optional. The name a person knows a resource by (its own reference, such as `vehicle-42`), for
+   * the question a confirmation asks; `null` when the caller cannot see it. Without it, or when it
+   * fails, the question names the resource by id.
+   */
+  describeResource?(
+    context: SlotlockAgentInvocationContext,
+    resourceId: string,
+  ): Promise<string | null>;
 }
 
 /**
@@ -1652,22 +1661,93 @@ function promptInstant(instant: unknown, timezone: unknown): string {
   return `${wall.date} ${wall.time} (${promptText(zone, 64)})`;
 }
 
-/** The sentence a person confirms: what changes, where and when, from validated arguments. */
-function confirmationMessage(
+/**
+ * Text the agent chose (a title), shown inside double quotes: its own double quotes become single
+ * ones, so it cannot close the quotes and pass itself off as part of the sentence.
+ */
+function promptQuoted(value: unknown, max = 120): string {
+  return `"${promptText(value, max).replaceAll('"', "'")}"`;
+}
+
+/** An event as the question shows it: what it is, where and when it is now. */
+interface ConfirmationEvent {
+  title: string | null;
+  resourceId: string;
+  range: string;
+}
+
+/** What the question may read for the calling principal; every lookup falls back to an id. */
+interface ConfirmationLookup {
+  resource(id: unknown): Promise<string>;
+  event(id: unknown): Promise<ConfirmationEvent | null>;
+}
+
+function confirmationLookup(
+  backend: SlotlockAgentCalendarBackend,
+  context: SlotlockAgentInvocationContext,
+): ConfirmationLookup {
+  return {
+    async resource(id) {
+      const fallback = `resource ${promptText(id, 200)}`;
+      if (typeof id !== 'string' || !backend.describeResource) return fallback;
+      try {
+        const label = await backend.describeResource(context, id);
+        return typeof label === 'string' && promptText(label, 200).length > 0
+          ? promptText(label, 200)
+          : fallback;
+      } catch {
+        return fallback;
+      }
+    },
+    async event(id) {
+      if (typeof id !== 'string') return null;
+      try {
+        const found = await backend.getEvent(context, { event_id: id });
+        const event = isRecord(found) && isRecord(found.event) ? found.event : null;
+        if (
+          !event ||
+          typeof event.resource_id !== 'string' ||
+          typeof event.starts_at !== 'string' ||
+          typeof event.ends_at !== 'string'
+        ) {
+          return null;
+        }
+        return {
+          title: typeof event.title === 'string' && event.title.length > 0 ? event.title : null,
+          resourceId: event.resource_id,
+          range: promptRange(event.starts_at, event.ends_at, event.timezone),
+        };
+      } catch {
+        return null;
+      }
+    },
+  };
+}
+
+/**
+ * The sentence a person confirms: what changes, where and when. The facts the server establishes
+ * (the resource, the times, the event as it stands) come first; text the agent chose comes after
+ * them, quoted, so a title cannot pass itself off as the time or the resource.
+ */
+async function confirmationMessage(
   operation: SlotlockAgentOperation,
   input: Record<string, unknown>,
-): string {
+  lookup: ConfirmationLookup,
+): Promise<string> {
   let message: string;
   if (operation === 'slotlock_create_event') {
-    const title = typeof input.title === 'string' ? promptText(input.title) : '';
-    const resource = promptText(input.resource_id, 200);
-    message = `${title ? `Book "${title}" on resource ${resource}` : `Book resource ${resource}`}: ${promptRange(input.starts_at, input.ends_at, input.timezone)}.`;
+    const where = await lookup.resource(input.resource_id);
+    const title = typeof input.title === 'string' && input.title.length > 0 ? input.title : null;
+    message = `Book ${where} for ${promptRange(input.starts_at, input.ends_at, input.timezone)}${title ? `: ${promptQuoted(title)}` : ''}.`;
     if (typeof input.recurrence_rule === 'string') {
       message += ` Repeats: ${promptText(input.recurrence_rule, 200)}.`;
     }
     if (input.status === 'tentative') message += ' Tentative.';
   } else {
-    const target = `event ${promptText(input.event_id, 500)} (revision ${String(input.expected_revision)})`;
+    const event = await lookup.event(input.event_id);
+    const target = event
+      ? `${event.title ? promptQuoted(event.title) : 'the booking'} on ${await lookup.resource(event.resourceId)}, ${event.range}`
+      : `event ${promptText(input.event_id, 500)}`;
     if (operation === 'slotlock_delete_event') {
       message = `Delete ${target}.`;
     } else {
@@ -1682,12 +1762,7 @@ function confirmationMessage(
         changes.push(`timezone to ${promptText(input.timezone, 64)}`);
       }
       if (typeof input.resource_id === 'string') {
-        changes.push(`resource to ${promptText(input.resource_id, 200)}`);
-      }
-      if (input.title !== undefined) {
-        changes.push(
-          input.title === null ? 'title removed' : `title to "${promptText(input.title)}"`,
-        );
+        changes.push(`resource to ${await lookup.resource(input.resource_id)}`);
       }
       for (const field of ['status', 'transparency'] as const) {
         if (input[field] !== undefined) changes.push(`${field} to ${promptText(input[field], 20)}`);
@@ -1708,6 +1783,10 @@ function confirmationMessage(
         'recurrence_exceptions',
       ].filter((field) => input[field] !== undefined);
       if (details.length > 0) changes.push(`also ${details.join(', ')}`);
+      // The agent's own text goes last.
+      if (input.title !== undefined) {
+        changes.push(input.title === null ? 'title removed' : `title to ${promptQuoted(input.title)}`);
+      }
       message = `Change ${target}: ${changes.join('; ')}.`;
     }
   }
@@ -2028,7 +2107,16 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
               method: 'elicitation/create',
               params: {
                 mode: 'form',
-                message: confirmationMessage(operation, gate.input),
+                message: await confirmationMessage(
+                  operation,
+                  gate.input,
+                  confirmationLookup(options.backend, {
+                    principal,
+                    operation,
+                    signal: call.request.signal,
+                    ...(call.trace ? { trace: call.trace } : {}),
+                  }),
+                ),
                 requestedSchema: CONFIRMATION_SCHEMA,
               },
             },

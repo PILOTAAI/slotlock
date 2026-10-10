@@ -436,7 +436,7 @@ export const security = {
   approval: {
     eyebrow: 'slotlock_create_event · input required',
     message:
-      'Book "Vehicle handover" on resource vehicle-42: 2027-03-29 10:00–11:00 (Europe/London).',
+      'Book vehicle-42 for 2027-03-29 10:00–11:00 (Europe/London): "Vehicle handover".',
     checkbox: 'Confirm this change',
     help: 'The agent changes the calendar only if this is ticked.',
     decline: 'Decline',
@@ -444,7 +444,7 @@ export const security = {
     seal: `requestState sealed with HMAC-SHA256 · expires in ${facts.confirmTtlSeconds / 60} min`,
   },
   receipt: { label: 'Created', detail: 'revision 1 · replayed: false' },
-  aria: `A confirmation form shown to a person before an agent's write runs. It reads: Book "Vehicle handover" on resource vehicle-42, 29 March 2027, 10:00 to 11:00, Europe/London, with one tick box and Decline and Accept buttons. Below it, the receipt after acceptance: the event was created at revision 1.`,
+  aria: `A confirmation form shown to a person before an agent's write runs. It reads: Book vehicle-42 for 29 March 2027, 10:00 to 11:00, Europe/London: Vehicle handover, with one tick box and Decline and Accept buttons. Below it, the receipt after acceptance: the event was created at revision 1.`,
   statements: [
     'Tenancy comes from your `authenticate` callback. No tool argument can choose a tenant.',
     'Forced row-level security returns nothing when the tenant setting is missing.',

@@ -42,6 +42,13 @@ request replaces "Unreleased" with the release date.
 
 ### Fixed for the standalone release
 
+- A write's confirmation question names the resource by its own reference and an event by its
+  title and current time, instead of by id, and puts those facts before the agent's own text,
+  whose double quotes can no longer close the quotes around it: a crafted title could make the
+  question show a different time or resource from the one being booked. Embedders' backends may
+  add `describeResource` for the names; the store backend has it.
+- The sealed confirmation state compares its MAC as text: three other spellings of the same MAC
+  (the last base64url character's two spare bits) were accepted.
 - `slotlock_list_resources` with a `cursor` that is not a resource id answers the `invalid_cursor`
   tool error (HTTP 400) instead of an internal error (HTTP 500, JSON-RPC -32603).
 - The legacy-schema upgrade test creates `btree_gist` itself, so the database suites pass on a fresh

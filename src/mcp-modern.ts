@@ -209,9 +209,13 @@ export function openRequestState(
   ) {
     return null;
   }
-  const given = Buffer.from(mac, 'base64url');
+  // Compared as text: decoding drops the two spare bits of the last character, so three other
+  // spellings of the same MAC would pass.
+  const given = Buffer.from(mac);
   for (const key of keys) {
-    const expected = createHmac('sha256', key).update(`${STATE_MAC_CONTEXT}.${body}`).digest();
+    const expected = Buffer.from(
+      createHmac('sha256', key).update(`${STATE_MAC_CONTEXT}.${body}`).digest('base64url'),
+    );
     if (given.length === expected.length && timingSafeEqual(given, expected)) {
       try {
         const payload: unknown = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));

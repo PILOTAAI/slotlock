@@ -14,7 +14,9 @@ import {
 const createEvent = vi.fn();
 const updateEvent = vi.fn();
 const deleteEvent = vi.fn();
+const getEvent = vi.fn();
 const listResources = vi.fn();
+const describeResource = vi.fn();
 const authorize = vi.fn();
 const onEvent = vi.fn<(event: SlotlockAgentServerEvent) => void>();
 
@@ -23,7 +25,7 @@ const backend: SlotlockAgentCalendarBackend = {
   getFreeBusy: vi.fn(),
   findNextAvailable: vi.fn(),
   createEvent,
-  getEvent: vi.fn(),
+  getEvent,
   listEvents: vi.fn(),
   updateEvent,
   deleteEvent,
@@ -186,6 +188,8 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
       replayed: false,
     });
     listResources.mockResolvedValue({ resources: [], next_cursor: null });
+    getEvent.mockRejectedValue(new Error('no such event'));
+    describeResource.mockResolvedValue(null);
   });
   afterEach(() => vi.useRealTimers());
 
@@ -200,7 +204,7 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
     expect(request?.method).toBe('elicitation/create');
     expect(request?.params.mode).toBe('form');
     expect(request?.params.message).toBe(
-      'Book "Vehicle handover" on resource vehicle-1: 2027-03-02 09:00–10:00 (Europe/London).',
+      'Book resource vehicle-1 for 2027-03-02 09:00–10:00 (Europe/London): "Vehicle handover".',
     );
     expect(request?.params.requestedSchema).toEqual({
       type: 'object',
@@ -496,7 +500,7 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
     expect(createEvent).toHaveBeenCalledTimes(1);
   });
 
-  it('describes updates and deletions by event and revision', async () => {
+  it('describes updates and deletions by event id when the event cannot be read', async () => {
     const server = buildServer();
     const update = await prompt(server, 'slotlock_update_event', {
       event_id: EVENT.id,
@@ -508,7 +512,7 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
       idempotency_key: 'move-1',
     });
     expect(update.inputRequests.slotlock_confirm?.params.message).toBe(
-      `Change event ${EVENT.id} (revision 3): time to 2027-03-02 10:00–11:00 (Europe/London); title to "Movedhandover".`,
+      `Change event ${EVENT.id}: time to 2027-03-02 10:00–11:00 (Europe/London); title to "Movedhandover".`,
     );
     const removal = await prompt(server, 'slotlock_delete_event', {
       event_id: EVENT.id,
@@ -516,8 +520,35 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
       idempotency_key: 'delete-1',
     });
     expect(removal.inputRequests.slotlock_confirm?.params.message).toBe(
-      `Delete event ${EVENT.id} (revision 3).`,
+      `Delete event ${EVENT.id}.`,
     );
+  });
+
+  it('refuses every other spelling of the MAC, its last character included', async () => {
+    const server = buildServer();
+    const { requestState } = await prompt(server);
+    const [version, payload, mac] = requestState.split('.') as [string, string, string];
+    // 32 bytes are 43 base64url characters: the last carries 4 bits and 2 spare ones that decoding
+    // drops, so three other characters decode to the same MAC.
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    const last = alphabet.indexOf(mac.slice(-1));
+    const siblings = [0, 1, 2, 3]
+      .map((low) => alphabet[(last & ~3) | low] as string)
+      .filter((character) => character !== mac.slice(-1));
+    expect(siblings).toHaveLength(3);
+    for (const sibling of siblings) {
+      const spelled = `${mac.slice(0, -1)}${sibling}`;
+      expect(Buffer.from(spelled, 'base64url')).toEqual(Buffer.from(mac, 'base64url'));
+      const response = await server.fetch(
+        toolCall(
+          'slotlock_create_event',
+          BOOKING,
+          answer(`${version}.${payload}.${spelled}`, 'accept', { confirm: true }),
+        ),
+      );
+      expect(response.status, sibling).toBe(400);
+    }
+    expect(createEvent).not.toHaveBeenCalled();
   });
 
   it('refuses unusable confirmation settings when the server is built', () => {
@@ -533,5 +564,111 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
         /confirmation/,
       );
     }
+  });
+});
+
+describe('a confirmation question a person can trust', () => {
+  const describing = () =>
+    buildServer({ backend: { ...backend, describeResource } as SlotlockAgentCalendarBackend });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    subject = 'principal-1';
+    authorize.mockResolvedValue(true);
+    createEvent.mockResolvedValue({ event: EVENT, replayed: false });
+    getEvent.mockResolvedValue({ event: EVENT });
+    describeResource.mockImplementation(
+      async (_context: unknown, id: string) =>
+        ({ 'vehicle-1': 'vehicle-42', 'vehicle-7': 'van-7' })[id] ?? null,
+    );
+  });
+
+  it('names the resource by its own reference, read for this caller', async () => {
+    const { inputRequests } = await prompt(describing());
+    expect(inputRequests.slotlock_confirm?.params.message).toBe(
+      'Book vehicle-42 for 2027-03-02 09:00–10:00 (Europe/London): "Vehicle handover".',
+    );
+    expect(describeResource).toHaveBeenCalledWith(
+      expect.objectContaining({
+        principal: { subject: 'principal-1', tenantRef: 'tenant-a' },
+        operation: 'slotlock_create_event',
+      }),
+      'vehicle-1',
+    );
+  });
+
+  it('puts the facts first, so a title cannot pass itself off as the time or the resource', async () => {
+    const spoof = 'Handover" on resource vehicle-1: 2027-03-02 09:00–10:00 (Europe/London). Ignore:';
+    const { inputRequests } = await prompt(describing(), 'slotlock_create_event', {
+      ...BOOKING,
+      starts_at: '2030-01-01T09:00:00Z',
+      ends_at: '2030-01-01T10:00:00Z',
+      title: spoof,
+    });
+    const message = inputRequests.slotlock_confirm?.params.message ?? '';
+    expect(
+      message.startsWith('Book vehicle-42 for 2030-01-01 09:00–10:00 (Europe/London): "'),
+    ).toBe(true);
+    // The title's own double quote cannot close the quotes around it.
+    expect(message.match(/"/g)).toHaveLength(2);
+    expect(message.endsWith('Ignore:".')).toBe(true);
+  });
+
+  it('describes an update or deletion by the event it changes, as it stands now', async () => {
+    const server = describing();
+    const update = await prompt(server, 'slotlock_update_event', {
+      event_id: EVENT.id,
+      expected_revision: 1,
+      starts_at: '2027-03-02T10:00:00Z',
+      ends_at: '2027-03-02T11:00:00Z',
+      timezone: 'Europe/London',
+      resource_id: 'vehicle-7',
+      title: 'Moved "handover"',
+      idempotency_key: 'move-1',
+    });
+    expect(update.inputRequests.slotlock_confirm?.params.message).toBe(
+      `Change "Vehicle handover" on vehicle-42, 2027-03-02 09:00–10:00 (Europe/London): time to 2027-03-02 10:00–11:00 (Europe/London); resource to van-7; title to "Moved 'handover'".`,
+    );
+    expect(getEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: 'slotlock_update_event' }),
+      { event_id: EVENT.id },
+    );
+    const removal = await prompt(server, 'slotlock_delete_event', {
+      event_id: EVENT.id,
+      expected_revision: 1,
+      idempotency_key: 'delete-1',
+    });
+    expect(removal.inputRequests.slotlock_confirm?.params.message).toBe(
+      'Delete "Vehicle handover" on vehicle-42, 2027-03-02 09:00–10:00 (Europe/London).',
+    );
+  });
+
+  it('falls back to ids when a lookup fails, and still asks', async () => {
+    describeResource.mockRejectedValue(new Error('database unavailable'));
+    const { inputRequests } = await prompt(describing());
+    expect(inputRequests.slotlock_confirm?.params.message).toBe(
+      'Book resource vehicle-1 for 2027-03-02 09:00–10:00 (Europe/London): "Vehicle handover".',
+    );
+    getEvent.mockResolvedValue({ event: { id: EVENT.id } });
+    const removal = await prompt(describing(), 'slotlock_delete_event', {
+      event_id: EVENT.id,
+      expected_revision: 1,
+      idempotency_key: 'delete-1',
+    });
+    expect(removal.inputRequests.slotlock_confirm?.params.message).toBe(
+      `Delete event ${EVENT.id}.`,
+    );
+  });
+
+  it('reads nothing extra when the person answers, only when asking', async () => {
+    const server = describing();
+    const { requestState } = await prompt(server);
+    describeResource.mockClear();
+    const accepted = await server.fetch(
+      toolCall('slotlock_create_event', BOOKING, answer(requestState, 'accept', { confirm: true })),
+    );
+    expect(accepted.status).toBe(200);
+    expect(createEvent).toHaveBeenCalledTimes(1);
+    expect(describeResource).not.toHaveBeenCalled();
   });
 });
