@@ -26,6 +26,7 @@ on:
       - "slotlock-manifest.schema.json"
       - "src/**"
       - ".github/workflows/site.yml"
+      - "scripts/check-cloudflare-credentials.sh"
   push:
     branches: [main]
     paths:
@@ -38,6 +39,7 @@ on:
       - "slotlock-manifest.schema.json"
       - "src/**"
       - ".github/workflows/site.yml"
+      - "scripts/check-cloudflare-credentials.sh"
   workflow_dispatch:
 
 permissions:
@@ -110,13 +112,17 @@ jobs:
         with:
           name: site
           path: site/dist
+      # Asks Cloudflare whether the token is live and can reach Workers in the account, and names
+      # the mistake when not (an account ID or Global API Key in the token secret, a cut-off paste),
+      # instead of Wrangler's "Invalid format for Authorization header" (site/README.md).
+      - name: Check the Cloudflare credentials
+        working-directory: .
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: bash scripts/check-cloudflare-credentials.sh
       - name: Deploy to Cloudflare Workers
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
-            echo "::error::Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID on the 'site' environment (see site/README.md)."
-            exit 1
-          fi
-          npm run deploy
+        run: npm run deploy
