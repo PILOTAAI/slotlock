@@ -82,7 +82,7 @@ export const SLOTLOCK_A2A_TASK_STATES = Object.freeze([
   'TASK_STATE_AUTH_REQUIRED',
 ] as const);
 
-const DATE_TIME = z.iso.datetime({ offset: true });
+const DATE_TIME = z.string().datetime({ offset: true });
 const RESOURCE_ID = z.string().trim().min(1).max(200);
 const EVENT_ID = z.string().trim().min(1).max(500);
 const IDEMPOTENCY_KEY = z.string().trim().min(1).max(200);
@@ -123,13 +123,13 @@ const COVERAGE = z
   .strict();
 const ORGANIZER = z
   .object({
-    address: z.email().max(320),
+    address: z.string().email().max(320),
     name: z.string().trim().max(TRUSTED_PERSON_NAME_OUTPUT_MAX).nullable(),
   })
   .strict();
 const ATTENDEE = z
   .object({
-    address: z.email().max(320),
+    address: z.string().email().max(320),
     name: z.string().trim().max(TRUSTED_PERSON_NAME_OUTPUT_MAX).nullable(),
     role: z.enum(['chair', 'required', 'optional', 'non_participant']),
     participation_status: z.enum([
@@ -158,13 +158,13 @@ const RECURRENCE_EXCEPTION = z
   .strict();
 const ORGANIZER_INPUT = z
   .object({
-    address: z.email().max(320),
+    address: z.string().email().max(320),
     name: z.string().trim().max(200).optional(),
   })
   .strict();
 const ATTENDEE_INPUT = z
   .object({
-    address: z.email().max(320),
+    address: z.string().email().max(320),
     name: z.string().trim().max(200).optional(),
     role: z.enum(['chair', 'required', 'optional', 'non_participant']),
     participation_status: z.enum([
