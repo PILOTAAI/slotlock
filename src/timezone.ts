@@ -37,7 +37,25 @@ function utcFrame(
   return frame;
 }
 
+/**
+ * Formatters already built, by zone name. Building one costs far more than using it, and every
+ * conversion needs one: a recurring series reads about three times an occurrence. A formatter never
+ * changes, so one per zone serves every caller. Intl accepts every capitalisation of each zone's
+ * name, so the map is emptied when it fills rather than growing with whatever names arrive.
+ */
+const formatters = new Map<string, Intl.DateTimeFormat>();
+const MAX_CACHED_FORMATTERS = 256;
+
 function createFormatter(timezone: string): Intl.DateTimeFormat {
+  const cached = formatters.get(timezone);
+  if (cached) return cached;
+  const formatter = buildFormatter(timezone);
+  if (formatters.size >= MAX_CACHED_FORMATTERS) formatters.clear();
+  formatters.set(timezone, formatter);
+  return formatter;
+}
+
+function buildFormatter(timezone: string): Intl.DateTimeFormat {
   try {
     return new Intl.DateTimeFormat('en-US', {
       timeZone: timezone,

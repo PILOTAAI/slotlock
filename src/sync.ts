@@ -60,6 +60,17 @@ const MAX_ICAL_EXCEPTIONS_PER_SERIES = 1_000;
 const MAX_ICAL_WORK = 4_000;
 const MAX_ICAL_WINDOW_MS = 367 * 24 * 60 * 60 * 1000;
 /**
+ * A feed's own time zones (VTIMEZONE), their STANDARD and DAYLIGHT observances, and the RDATE values
+ * those list. A real feed carries one zone per zone its events use, each a few observances (a zone's
+ * full history, a few hundred). ical.js expands every observance of a zone again whenever it reads a
+ * later year than it has, appending all of them each time, and finds a zone by scanning them all for
+ * each value whose TZID it does not know: 40,000 RDATE values ran a feed out of memory, and 20,000
+ * zones held one for 31 seconds.
+ */
+const MAX_ICAL_TIMEZONES = 100;
+const MAX_ICAL_TIMEZONE_OBSERVANCES = 1_000;
+const MAX_ICAL_TIMEZONE_DATES = 2_000;
+/**
  * Steps ical.js may take, in one parse, looking for occurrences. RecurIterator.next() searches for a
  * SECONDLY to WEEKLY rule's next occurrence one step (second, minute, hour, day or week) at a time
  * with no limit, and gives up on a MONTHLY or YEARLY one only when whole months or years fail (not
@@ -71,10 +82,12 @@ const MAX_ICAL_WINDOW_MS = 367 * 24 * 60 * 60 * 1000;
  */
 const MAX_ICAL_STEPS = 50_000;
 /**
- * And the time those steps may take: a step costs from a microsecond (a daily rule) to a
- * millisecond (a WEEKLY rule with a huge INTERVAL, which ical.js walks a day at a time), so a count
- * alone does not bound it. A busy feed within MAX_ICAL_WORK takes up to about half a second (thirty
- * fifth-Monday series since 2000); one stored series, expanded from its start, a few milliseconds.
+ * And the time a whole parse may take, from before ical.js reads the text to the last occurrence: a
+ * step costs from a microsecond (a daily rule) to a millisecond (a WEEKLY rule with a huge INTERVAL,
+ * which ical.js walks a day at a time), so a count alone does not bound it, and ical.js does work no
+ * step is charged for (relating an exception for every later occurrence reads its time, and so its
+ * zone, as the event is built). A busy feed within MAX_ICAL_WORK takes about a fifth of a second
+ * (thirty fifth-Monday series since 2000); one stored series' window, a few tens of milliseconds.
  */
 const MAX_ICAL_EXPANSION_MS = 1_000;
 
@@ -100,6 +113,8 @@ const EVENT_LIMITS: ExpansionLimits = {
 
 /** RDATE and EXDATE values one event may list: ical.js sorts them in as it reads them. */
 const MAX_ICAL_DATES_PER_EVENT = MAX_ICAL_EXCEPTIONS_PER_SERIES;
+/** And a whole feed: each value is a time ical.js resolves, its zone looked up among the feed's. */
+const MAX_ICAL_DATES_PER_FEED = 20 * MAX_ICAL_DATES_PER_EVENT;
 /**
  * The furthest one step of a SECONDLY to WEEKLY rule may move, in days: about a century. ical.js
  * moves it a day at a time (RecurIterator#increment_monthday) inside one step, which is charged
@@ -551,37 +566,39 @@ function calendarTimeValue(
   throw new CalendarContractError('invalid_icalendar');
 }
 
-/** What one parse may spend searching for occurrences. */
+/**
+ * What one parse may spend: steps searching for occurrences, and time from its start. The time is
+ * checked at every step and after every piece of ical.js work the parse does, so work that takes no
+ * steps is stopped at the next check.
+ */
 class RecurrenceBudget {
   private steps: number;
-  private searchedMs = 0;
-  private searchStarted: number | undefined;
+  private readonly started = performance.now();
 
   constructor(private readonly limits: ExpansionLimits) {
     this.steps = limits.steps;
   }
 
+  /** Throw once the parse has run longer than its limit. */
+  check(): void {
+    if (performance.now() - this.started > this.limits.ms) expansionLimit();
+  }
+
   /**
-   * Run one search, its time charged: building an event's expansion, its next occurrence, or
-   * reading a time, which can expand a feed's own time zone.
+   * Run one piece of ical.js work, then check the time: building an event's expansion, its next
+   * occurrence, or reading a time, which can expand a feed's own time zone.
    */
   search<T>(work: () => T): T {
-    const started = performance.now();
-    this.searchStarted = started;
-    try {
-      return work();
-    } finally {
-      this.searchedMs += performance.now() - started;
-      this.searchStarted = undefined;
-    }
+    const result = work();
+    this.check();
+    return result;
   }
 
   /** Charge one step, throwing past either limit. */
   charge(): void {
     this.steps -= 1;
-    const searchingMs =
-      this.searchStarted === undefined ? 0 : performance.now() - this.searchStarted;
-    if (this.steps < 0 || this.searchedMs + searchingMs > this.limits.ms) expansionLimit();
+    if (this.steps < 0) expansionLimit();
+    this.check();
   }
 }
 
@@ -639,6 +656,14 @@ function budgetedExpansion(
   return expansion;
 }
 
+/**
+ * How many values a property lists, read from its raw form: reading the values themselves makes
+ * ical.js resolve each one's zone.
+ */
+function valueCount(property: ICAL.Property): number {
+  return Math.max(0, property.jCal.length - 3);
+}
+
 /** Milliseconds since 1970 of a time's own fields, ignoring its zone: within a day of the instant. */
 function fieldsMs(time: ICAL.Time): number {
   return Date.UTC(time.year, time.month - 1, time.day, time.hour, time.minute, time.second);
@@ -648,9 +673,10 @@ function fieldsMs(time: ICAL.Time): number {
  * Refuse a VEVENT that ical.js would spend unbounded work reading, before anything reads its end:
  * a DURATION, or a DTEND after its DTSTART, longer than MAX_ICAL_STEP_DAYS (ical.js adds a span to
  * a time a month at a time, Time#adjust, and `DURATION:PT99999999999999999999S` held the process),
- * a negative DURATION, or more RDATE and EXDATE values than MAX_ICAL_DATES_PER_EVENT.
+ * a negative DURATION, or more RDATE and EXDATE values than MAX_ICAL_DATES_PER_EVENT. Returns how
+ * many it lists, for the feed's own limit.
  */
-function boundComponent(component: ICAL.Component): void {
+function boundComponent(component: ICAL.Component): number {
   const maxMs = MAX_ICAL_STEP_DAYS * 24 * 60 * 60 * 1000;
   for (const property of component.getAllProperties('duration')) {
     const duration = property.getFirstValue();
@@ -665,9 +691,45 @@ function boundComponent(component: ICAL.Component): void {
   }
   let dates = 0;
   for (const name of ['rdate', 'exdate']) {
-    for (const property of component.getAllProperties(name)) dates += property.getValues().length;
+    for (const property of component.getAllProperties(name)) dates += valueCount(property);
   }
   if (dates > MAX_ICAL_DATES_PER_EVENT) expansionLimit();
+  return dates;
+}
+
+/** Bound every VEVENT of a feed, and the date values of all of them together. */
+function boundComponents(components: ICAL.Component[], budget: RecurrenceBudget): void {
+  let dates = 0;
+  for (const component of components) {
+    dates += boundComponent(component);
+    if (dates > MAX_ICAL_DATES_PER_FEED) expansionLimit();
+    budget.check();
+  }
+}
+
+/**
+ * The feed's VEVENTs as ical.js events, each related to no exception yet. Left to itself, ical.js
+ * relates every VEVENT with a RECURRENCE-ID in the calendar to every series, whatever its UID, by
+ * local time, so one series' cancelled 09:00 cancelled every other series' 09:00 that day; the
+ * parsers relate each series' own exceptions themselves.
+ */
+function feedEvents(components: ICAL.Component[], budget: RecurrenceBudget): ICAL.Event[] {
+  return components.map((component) => {
+    const event = new ICAL.Event(component, { exceptions: [] });
+    budget.check();
+    return event;
+  });
+}
+
+/** Refuse a feed whose text alone shows it is past a limit, before ical.js parses it. */
+function boundInput(input: string): void {
+  if (
+    Buffer.byteLength(input, 'utf8') > MAX_ICAL_INPUT_BYTES ||
+    (input.match(/^BEGIN:VEVENT\r?$/gim)?.length ?? 0) > MAX_ICAL_COMPONENTS
+  ) {
+    throw new CalendarContractError('invalid_icalendar');
+  }
+  if ((input.match(/^BEGIN:VTIMEZONE\r?$/gim)?.length ?? 0) > MAX_ICAL_TIMEZONES) expansionLimit();
 }
 
 /**
@@ -680,7 +742,20 @@ function budgetTimezoneRules(
   root: ICAL.Component,
   Budgeted: () => typeof ICAL.RecurIterator,
 ): void {
-  for (const zone of root.getAllSubcomponents('vtimezone')) {
+  const zones = root.getAllSubcomponents('vtimezone');
+  if (zones.length > MAX_ICAL_TIMEZONES) expansionLimit();
+  let observances = 0;
+  let dates = 0;
+  for (const zone of zones) {
+    for (const observance of zone.getAllSubcomponents()) {
+      observances += 1;
+      for (const property of observance.getAllProperties('rdate')) dates += valueCount(property);
+    }
+  }
+  if (observances > MAX_ICAL_TIMEZONE_OBSERVANCES || dates > MAX_ICAL_TIMEZONE_DATES) {
+    expansionLimit();
+  }
+  for (const zone of zones) {
     for (const observance of zone.getAllSubcomponents()) {
       for (const property of observance.getAllProperties('rrule')) {
         budgetRule(property.getFirstValue(), Budgeted());
@@ -706,15 +781,11 @@ function parseCalendarChanges(
 ): ExternalCalendarChange[] {
   try {
     // Bound work before ical.js allocates and normalizes the full component tree. The parsed-tree
-    // check below remains authoritative; this cheap standards-shaped count is an early DoS guard.
-    if (
-      Buffer.byteLength(input, 'utf8') > MAX_ICAL_INPUT_BYTES ||
-      (input.match(/^BEGIN:VEVENT\r?$/gim)?.length ?? 0) > MAX_ICAL_COMPONENTS
-    ) {
-      throw new CalendarContractError('invalid_icalendar');
-    }
-    const root = new ICAL.Component(ICAL.parse(input));
+    // checks below remain authoritative; these cheap standards-shaped counts are an early DoS guard.
+    boundInput(input);
     const budget = new RecurrenceBudget(limits);
+    const root = new ICAL.Component(ICAL.parse(input));
+    budget.check();
     let Budgeted: typeof ICAL.RecurIterator | undefined;
     const budgeted = () => (Budgeted ??= budgetedRecurIterator(budget));
     budgetTimezoneRules(root, budgeted);
@@ -729,8 +800,8 @@ function parseCalendarChanges(
     if (components.length > MAX_ICAL_COMPONENTS) {
       throw new CalendarContractError('invalid_icalendar');
     }
-    for (const component of components) boundComponent(component);
-    const events = components.map((component) => new ICAL.Event(component));
+    boundComponents(components, budget);
+    const events = feedEvents(components, budget);
     const masters = new Map<string, ICAL.Event>();
     const exceptionsByUid = new Map<string, ICAL.Event[]>();
     for (const event of events) {
@@ -748,7 +819,13 @@ function parseCalendarChanges(
     }
     for (const [uid, exceptions] of exceptionsByUid) {
       const master = masters.get(uid);
-      if (master) for (const exception of exceptions) master.relateException(exception);
+      if (!master) continue;
+      for (const exception of exceptions) {
+        // An exception for this and every later occurrence (RANGE=THISANDFUTURE) is placed by its
+        // time, which reads its zone.
+        master.relateException(exception);
+        budget.check();
+      }
     }
 
     const normalizeEvent = (
@@ -1263,14 +1340,10 @@ export function parseTrustedICalendarEvents(
   calendarTimezone?: string,
 ): TrustedICalendarEvent[] {
   try {
-    if (
-      Buffer.byteLength(input, 'utf8') > MAX_ICAL_INPUT_BYTES ||
-      (input.match(/^BEGIN:VEVENT\r?$/gim)?.length ?? 0) > MAX_ICAL_COMPONENTS
-    ) {
-      throw new CalendarContractError('invalid_icalendar');
-    }
-    const root = new ICAL.Component(ICAL.parse(input));
+    boundInput(input);
     const budget = new RecurrenceBudget(FEED_LIMITS);
+    const root = new ICAL.Component(ICAL.parse(input));
+    budget.check();
     let Budgeted: typeof ICAL.RecurIterator | undefined;
     budgetTimezoneRules(root, () => (Budgeted ??= budgetedRecurIterator(budget)));
     const timeValue = (value: unknown, zone: unknown, fallback: string | undefined) =>
@@ -1281,14 +1354,13 @@ export function parseTrustedICalendarEvents(
       (typeof embeddedTimezone === 'string' ? embeddedTimezone.trim() : '') ||
       undefined;
     const components = root.getAllSubcomponents('vevent');
-    for (const component of components) boundComponent(component);
     if (components.length > MAX_ICAL_COMPONENTS) {
       throw new CalendarContractError('invalid_icalendar');
     }
+    boundComponents(components, budget);
     const masters = new Map<string, ICAL.Event>();
     const exceptionsByUid = new Map<string, ICAL.Event[]>();
-    for (const component of components) {
-      const event = new ICAL.Event(component);
+    for (const event of feedEvents(components, budget)) {
       if (event.isRecurrenceException()) {
         const exceptions = exceptionsByUid.get(event.uid) ?? [];
         if (exceptions.length >= MAX_ICAL_EXCEPTIONS_PER_SERIES) {
