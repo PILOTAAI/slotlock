@@ -295,10 +295,7 @@ export const steps = {
       n: '03',
       title: 'Confirm, or let it lapse',
       body: '`confirmHold` turns the hold into a booking. An expired hold is cleared by the next writer that wants the time, with no cron job.',
-      link: {
-        label: 'Reservations',
-        href: '/docs/concepts/#reservations-and-the-exclusion-constraint',
-      },
+      link: { label: 'The exclusion constraint', href: '/docs/concepts/#the-exclusion-constraint' },
     },
   ],
   diagram: {
