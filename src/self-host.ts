@@ -35,9 +35,13 @@ import {
   type SlotlockNodeServerCloseResult,
   createSlotlockNodeServer,
 } from './node-server.js';
-import { expandRules } from './rules.js';
 import { type SlotlockSql, createSlotlockStore } from './store.js';
 import type { SlotlockResource, WeeklyAvailabilityRule } from './types.js';
+import {
+  SLOTLOCK_MAX_AVAILABILITY_RULES,
+  availabilityRuleProblem,
+  parseAvailabilityRules,
+} from './weekly-hours.js';
 
 export type SlotlockEnv = Readonly<Record<string, string | undefined>>;
 
@@ -91,8 +95,6 @@ const SERVED_OPERATIONS: ReadonlySet<SlotlockAgentOperation> = new Set([
   'slotlock_update_event',
   'slotlock_delete_event',
 ]);
-const AVAILABILITY_RULE_KEYS = new Set(['rrule', 'startMinutes', 'durationMinutes']);
-const MAX_AVAILABILITY_RULES = 50;
 const HEALTH_QUERY_TIMEOUT_MS = 2_000;
 const HEALTHCHECK_TIMEOUT_MS = 5_000;
 const POOL_SIZE = 10;
@@ -258,9 +260,6 @@ function readConfirmWrites(env: SlotlockEnv): SlotlockAgentWriteOperation[] {
   return operations;
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
-
 /**
  * `SLOTLOCK_AVAILABILITY`: a JSON array of weekly rules. Each must produce a window in a two-week
  * sample, so a rule `expandRules` cannot evaluate (not weekly, COUNT, INTERVAL>1, no BYDAY) is a
@@ -271,7 +270,7 @@ function readAvailability(env: SlotlockEnv): WeeklyAvailabilityRule[] {
   if (value === undefined) return [];
   const invalid = (detail: string) =>
     new SlotlockConfigError(
-      `SLOTLOCK_AVAILABILITY must be a JSON array of at most ${MAX_AVAILABILITY_RULES} weekly rules like {"rrule":"FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR","startMinutes":540,"durationMinutes":480}: ${detail}`,
+      `SLOTLOCK_AVAILABILITY must be a JSON array of at most ${SLOTLOCK_MAX_AVAILABILITY_RULES} weekly rules like {"rrule":"FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR","startMinutes":540,"durationMinutes":480}: ${detail}`,
     );
   let parsed: unknown;
   try {
@@ -279,37 +278,25 @@ function readAvailability(env: SlotlockEnv): WeeklyAvailabilityRule[] {
   } catch {
     throw invalid('it is not valid JSON');
   }
-  if (!Array.isArray(parsed) || parsed.length > MAX_AVAILABILITY_RULES) {
+  if (!Array.isArray(parsed) || parsed.length > SLOTLOCK_MAX_AVAILABILITY_RULES) {
     throw invalid('it is not an array of rules');
   }
-  const sample = { start: new Date('2026-01-05T00:00:00Z'), end: new Date('2026-01-19T00:00:00Z') };
   return parsed.map((candidate: unknown, index) => {
-    if (
-      !isRecord(candidate) ||
-      Object.keys(candidate).some((key) => !AVAILABILITY_RULE_KEYS.has(key)) ||
-      typeof candidate.rrule !== 'string' ||
-      candidate.rrule.length === 0 ||
-      candidate.rrule.length > 500 ||
-      !Number.isInteger(candidate.startMinutes) ||
-      (candidate.startMinutes as number) < 0 ||
-      (candidate.startMinutes as number) > 1_439 ||
-      !Number.isInteger(candidate.durationMinutes) ||
-      (candidate.durationMinutes as number) < 1 ||
-      (candidate.durationMinutes as number) > 10_080
-    ) {
+    const problem = availabilityRuleProblem(candidate);
+    if (problem === 'shape') {
       throw invalid(
         `rule ${index} needs rrule (string), startMinutes (0-1439) and durationMinutes (1-10080)`,
       );
     }
-    const rule: WeeklyAvailabilityRule = {
-      rrule: candidate.rrule,
-      startMinutes: candidate.startMinutes as number,
-      durationMinutes: candidate.durationMinutes as number,
-    };
-    if (expandRules([rule], sample).length === 0) {
+    if (problem === 'unsupported') {
       throw invalid(`rule ${index} is not a weekly rule with BYDAY that Slotlock can evaluate`);
     }
-    return rule;
+    const rule = candidate as WeeklyAvailabilityRule;
+    return {
+      rrule: rule.rrule,
+      startMinutes: rule.startMinutes,
+      durationMinutes: rule.durationMinutes,
+    };
   });
 }
 
@@ -350,9 +337,7 @@ function readDashboard(env: SlotlockEnv): SlotlockServeDashboardConfig | undefin
     env.SLOTLOCK_CONFIRMATION_SECRET,
   ];
   if (others.includes(sessionSecret)) {
-    throw new SlotlockConfigError(
-      'SLOTLOCK_SESSION_SECRET must differ from every other secret',
-    );
+    throw new SlotlockConfigError('SLOTLOCK_SESSION_SECRET must differ from every other secret');
   }
   const users = optional(env, 'SLOTLOCK_DASHBOARD_USERS')?.replaceAll(' ', '');
   if (users === undefined || (users !== '*' && !/^[1-9]\d{0,19}(,[1-9]\d{0,19})*$/.test(users))) {
@@ -391,7 +376,11 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
       `SLOTLOCK_CONFIRMATION_SECRET is required while SLOTLOCK_CONFIRM_WRITES guards writes (the default): it signs each pending confirmation; ${SECRET_HINT}, or set SLOTLOCK_CONFIRM_WRITES=none to let agents write without asking a person`,
     );
   }
-  if (confirmationSecret !== undefined && authToken !== undefined && confirmationSecret === authToken) {
+  if (
+    confirmationSecret !== undefined &&
+    authToken !== undefined &&
+    confirmationSecret === authToken
+  ) {
     throw new SlotlockConfigError(
       'SLOTLOCK_CONFIRMATION_SECRET must differ from SLOTLOCK_AUTH_TOKEN',
     );
@@ -546,7 +535,10 @@ async function currentRole(sql: SlotlockSql): Promise<string> {
  * Apply the schema and forced row-level security as the owning role (idempotent and serialized
  * across instances), then grant the serving role its runtime access when that is another role.
  */
-export async function migrateSlotlock(config: SlotlockDatabaseConfig, log: SlotlockLogger): Promise<void> {
+export async function migrateSlotlock(
+  config: SlotlockDatabaseConfig,
+  log: SlotlockLogger,
+): Promise<void> {
   const owner = connect(config.migrateDatabaseUrl ?? config.databaseUrl, 1);
   try {
     const store = createSlotlockStore(owner);
@@ -775,6 +767,82 @@ async function listResources(config: SlotlockDatabaseConfig, out: OutputStream):
   }
 }
 
+/** One resource's hours as the `hours` commands print them: `null` means the server's. */
+function hoursLine(resource: SlotlockResource): string {
+  return `${JSON.stringify({
+    id: resource.id,
+    external_ref: resource.externalRef,
+    timezone: resource.timezone,
+    hours: resource.availabilityRules ?? null,
+  })}\n`;
+}
+
+/** Every resource of the tenant, a page at a time. */
+async function tenantResources(
+  store: ReturnType<typeof createSlotlockStore>,
+  tenantRef: string,
+): Promise<SlotlockResource[]> {
+  const all: SlotlockResource[] = [];
+  let after: string | undefined;
+  for (;;) {
+    const page = await store.withTenant(tenantRef, (tenant) =>
+      tenant.listResources({
+        tenantRef,
+        limit: RESOURCE_PAGE_SIZE,
+        ...(after !== undefined ? { after } : {}),
+      }),
+    );
+    all.push(...page);
+    after = page.at(-1)?.id;
+    if (page.length < RESOURCE_PAGE_SIZE || after === undefined) return all;
+  }
+}
+
+/**
+ * `hours show|set|clear`: print, set or clear (`rules` null) the hours of the tenant's resource
+ * named by reference or id, or of every resource. Returns false when no resource has that name.
+ */
+async function runHours(
+  config: SlotlockDatabaseConfig,
+  out: OutputStream,
+  target: { resource: string } | 'all' | 'show',
+  rules?: WeeklyAvailabilityRule[] | null,
+): Promise<boolean> {
+  const sql = connect(config.databaseUrl, 1);
+  try {
+    const store = createSlotlockStore(sql);
+    const tenantRef = config.tenantRef;
+    if (target === 'all') {
+      const updated = await store.withTenant(tenantRef, (tenant) =>
+        tenant.setTenantAvailability({ tenantRef, rules: rules ?? null }),
+      );
+      out.write(`${JSON.stringify({ updated })}\n`);
+      return true;
+    }
+    const resources = await tenantResources(store, tenantRef);
+    if (target === 'show') {
+      for (const resource of resources) out.write(hoursLine(resource));
+      return true;
+    }
+    const named = resources.find(
+      (resource) => resource.id === target.resource || resource.externalRef === target.resource,
+    );
+    if (!named) return false;
+    if (rules === undefined) {
+      out.write(hoursLine(named));
+      return true;
+    }
+    const updated = await store.withTenant(tenantRef, (tenant) =>
+      tenant.setResourceAvailability({ tenantRef, id: named.id, rules }),
+    );
+    if (!updated) return false;
+    out.write(hoursLine(updated));
+    return true;
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
 /** One key as `key create`, `key list` and `key revoke` print it: never the digest. */
 function apiKeyLine(apiKey: SlotlockApiKey, key?: string): string {
   return `${JSON.stringify({
@@ -872,6 +940,12 @@ Commands:
   resource add <ref> [--timezone <IANA zone>]
                            Create a calendar resource (a car, room, person or machine)
   resource list            Print the tenant's resources, one JSON object per line
+  hours show [--resource <ref>]
+                           Print each resource's bookable hours (null: the server's)
+  hours set <json> (--resource <ref> | --all)
+                           Give one resource, or every one, weekly hours of its own; [] closes
+  hours clear (--resource <ref> | --all)
+                           Hand one resource, or every one, back to the server's hours
   key create <name> [--scope read|write|read,write] [--expires-in-days <n>]
                            Create an API key for the tenant (default scope read,write, no
                            expiry) and print it once; only its SHA-256 is stored
@@ -937,7 +1011,9 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     return 2;
   }
   const subcommand =
-    command === 'resource' || command === 'key' ? `${command} ${operands[0] ?? ''}`.trim() : command;
+    command === 'resource' || command === 'key' || command === 'hours'
+      ? `${command} ${operands[0] ?? ''}`.trim()
+      : command;
   const expectedOperands: Record<string, number> = {
     migrate: 0,
     serve: 0,
@@ -948,6 +1024,9 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     'key list': 1,
     'key rotate': 2,
     'key revoke': 2,
+    'hours show': 1,
+    'hours set': 2,
+    'hours clear': 1,
   };
   const expected = expectedOperands[subcommand];
   if (expected === undefined) return usage(`unknown command "${subcommand}"`);
@@ -959,6 +1038,34 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
   for (const option of ['scope', 'expires-in-days'] as const) {
     if (values[option] !== undefined && subcommand !== 'key create') {
       return usage(`--${option} applies only to key create`);
+    }
+  }
+  if (values.all && subcommand !== 'hours set' && subcommand !== 'hours clear') {
+    return usage('--all applies only to hours set and hours clear');
+  }
+  if (values.resource !== undefined && !subcommand.startsWith('hours ')) {
+    return usage('--resource applies only to hours commands');
+  }
+  if (
+    (subcommand === 'hours set' || subcommand === 'hours clear') &&
+    (values.resource === undefined) === (values.all !== true)
+  ) {
+    return usage(`${subcommand} needs --resource <ref> or --all, one of them`);
+  }
+  let hours: WeeklyAvailabilityRule[] | null = null;
+  if (subcommand === 'hours set') {
+    let candidate: unknown;
+    try {
+      candidate = JSON.parse(operands[1] as string);
+    } catch {
+      return usage(
+        'hours must be a JSON array of weekly rules like [{"rrule":"FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR","startMinutes":540,"durationMinutes":480}]',
+      );
+    }
+    try {
+      hours = parseAvailabilityRules(candidate);
+    } catch (error) {
+      return usage((error as Error).message);
     }
   }
   let keyScopes: SlotlockApiKeyScope[] = [];
@@ -998,6 +1105,27 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
       case 'resource list':
         await listResources(readSlotlockDatabaseConfig(io.env), io.stdout);
         return 0;
+      case 'hours show':
+      case 'hours set':
+      case 'hours clear': {
+        const target =
+          values.all === true
+            ? 'all'
+            : values.resource !== undefined
+              ? { resource: values.resource }
+              : 'show';
+        const found = await runHours(
+          readSlotlockDatabaseConfig(io.env),
+          io.stdout,
+          target,
+          subcommand === 'hours show' ? undefined : hours,
+        );
+        if (!found) {
+          io.stderr.write('slotlock: no resource with that reference or id in this tenant\n');
+          return 1;
+        }
+        return 0;
+      }
       case 'key create': {
         const config = readSlotlockDatabaseConfig(io.env);
         const created = await withApiKeys(config, (keys) =>
@@ -1075,6 +1203,8 @@ function parseCliArguments(argv: readonly string[]) {
       timezone: { type: 'string' },
       scope: { type: 'string' },
       'expires-in-days': { type: 'string' },
+      resource: { type: 'string' },
+      all: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
     },

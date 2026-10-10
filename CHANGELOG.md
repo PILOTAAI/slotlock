@@ -39,6 +39,11 @@ request replaces "Unreleased" with the release date.
   dashboard until `migrate` has granted its functions.
 - `createResource` takes `maxTenantResources`, a per-tenant cap enforced under a database lock, and
   `withTenant` takes `{ isolation: 'read committed' }`.
+- Bookable hours per resource: `setResourceAvailability` and `setTenantAvailability` store a
+  resource's own weekly rules (`null` uses the default, `[]` closes), and the agent backend uses
+  them before `availabilityRules`. Set them on the dashboard's hours page (a week of windows, for
+  one resource or all) or with `slotlock hours show|set|clear`. `SLOTLOCK_AVAILABILITY` is now
+  the default for resources without hours of their own.
 
 ### Fixed for the standalone release
 

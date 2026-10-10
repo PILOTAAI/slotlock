@@ -359,6 +359,19 @@ describe('slotlock command line', () => {
     [['key', 'create', 'agent', '--expires-in-days', '0'], /--expires-in-days must be/],
     [['key', 'create', 'agent', '--expires-in-days', '3651'], /--expires-in-days must be/],
     [['key', 'create', 'agent', '--expires-in-days', '7.5'], /--expires-in-days must be/],
+    [['hours'], /unknown command "hours"/],
+    [['hours', 'delete'], /unknown command "hours delete"/],
+    [['hours', 'set', '--all'], /wrong number of arguments for "hours set"/],
+    [['hours', 'show', 'van'], /wrong number of arguments for "hours show"/],
+    [['hours', 'set', '[]'], /hours set needs --resource <ref> or --all/],
+    [['hours', 'clear', '--resource', 'van', '--all'], /hours clear needs --resource <ref> or --all/],
+    [['hours', 'show', '--all'], /--all applies only to hours set and hours clear/],
+    [['resource', 'list', '--resource', 'van'], /--resource applies only to hours commands/],
+    [['hours', 'set', 'Mon 9-5', '--all'], /hours must be a JSON array of weekly rules/],
+    [
+      ['hours', 'set', '[{"rrule":"FREQ=DAILY","startMinutes":540,"durationMinutes":60}]', '--all'],
+      /Rule 0 is not a weekly rule/,
+    ],
   ])('refuses %j as a usage error', async (argv, message) => {
     const result = await run(argv, serveEnv());
     expect(result.code).toBe(2);

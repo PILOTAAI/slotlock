@@ -20,7 +20,10 @@ import type {
 } from './types.js';
 
 export interface SlotlockStoreAgentBackendOptions {
-  /** Business-authored availability. Omitting/invalid rules returns no slot; it never means 24x7. */
+  /**
+   * The default bookable hours, for resources without hours of their own
+   * (`SlotlockResource.availabilityRules`, which win). No rules means no slot, never 24x7.
+   */
   availabilityRules(
     context: SlotlockAgentInvocationContext,
     resource: SlotlockResource,
@@ -386,7 +389,8 @@ export function createSlotlockStoreAgentBackend(
             incomplete = true;
             continue;
           }
-          const rules = await options.availabilityRules(context, resource);
+          const rules =
+            resource.availabilityRules ?? (await options.availabilityRules(context, resource));
           const candidate = findNextAvailable({
             busy: freeBusy.busy,
             windows: expandRules(rules, window, resource.timezone),

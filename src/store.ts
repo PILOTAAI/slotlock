@@ -45,6 +45,7 @@ import type {
   ReleaseHoldResult,
   WeeklyAvailabilityRule,
 } from './types.js';
+import { parseAvailabilityRules } from './weekly-hours.js';
 
 /** Postgres exclusion_violation — the EXCLUDE constraint fired. */
 const EXCLUSION_VIOLATION = '23P01';
@@ -824,16 +825,50 @@ function pgCode(err: unknown): string | undefined {
   return undefined;
 }
 
+type ResourceRow = {
+  id: string;
+  external_ref: string | null;
+  tenant_ref: string | null;
+  timezone: string;
+  availability_rules: unknown;
+};
+
+function toResource(row: ResourceRow): SlotlockResource {
+  const resource: SlotlockResource = {
+    id: row.id,
+    externalRef: row.external_ref,
+    tenantRef: row.tenant_ref,
+    timezone: row.timezone,
+  };
+  if (row.availability_rules !== null && row.availability_rules !== undefined) {
+    // Written through setResourceAvailability, which validates; anything else reads as closed.
+    try {
+      resource.availabilityRules = parseAvailabilityRules(row.availability_rules);
+    } catch {
+      resource.availabilityRules = [];
+    }
+  }
+  return resource;
+}
+
+/** Validated rules as a jsonb parameter, or null for "use the default". */
+function availabilityParameter(sql: StoreSql, rules: readonly WeeklyAvailabilityRule[] | null) {
+  // sql.json, not JSON.stringify: a string bound to jsonb is stored as a JSON string.
+  if (rules === null) return null;
+  return sql.json(
+    parseAvailabilityRules(rules).map(({ rrule, startMinutes, durationMinutes }) => ({
+      rrule,
+      startMinutes,
+      durationMinutes,
+    })),
+  );
+}
+
 async function upsertResource(
   executor: StoreSql,
   params: { externalRef?: string; tenantRef?: string; timezone?: string },
 ): Promise<SlotlockResource> {
-  type ResourceIdentityRow = {
-    id: string;
-    external_ref: string | null;
-    tenant_ref: string | null;
-    timezone: string;
-  };
+  type ResourceIdentityRow = ResourceRow;
   let rows: ResourceIdentityRow[];
   if (params.tenantRef !== undefined && params.externalRef !== undefined) {
     rows = await executor<ResourceIdentityRow[]>`
@@ -842,7 +877,7 @@ async function upsertResource(
       ON CONFLICT (tenant_ref, external_ref)
         WHERE tenant_ref IS NOT NULL AND external_ref IS NOT NULL
       DO UPDATE SET timezone = EXCLUDED.timezone
-      RETURNING id, external_ref, tenant_ref, timezone`;
+      RETURNING id, external_ref, tenant_ref, timezone, availability_rules`;
   } else if (params.externalRef !== undefined) {
     rows = await executor<ResourceIdentityRow[]>`
       INSERT INTO slotlock.resources (external_ref, tenant_ref, timezone)
@@ -850,23 +885,18 @@ async function upsertResource(
       ON CONFLICT (external_ref)
         WHERE tenant_ref IS NULL AND external_ref IS NOT NULL
       DO UPDATE SET external_ref = EXCLUDED.external_ref
-      RETURNING id, external_ref, tenant_ref, timezone`;
+      RETURNING id, external_ref, tenant_ref, timezone, availability_rules`;
   } else {
     rows = await executor<ResourceIdentityRow[]>`
       INSERT INTO slotlock.resources (external_ref, tenant_ref, timezone)
       VALUES (NULL, NULL, ${params.timezone ?? 'UTC'})
-      RETURNING id, external_ref, tenant_ref, timezone`;
+      RETURNING id, external_ref, tenant_ref, timezone, availability_rules`;
   }
   const row = rows[0];
   if (!row) {
     throw new Error('slotlock: resource upsert returned no row');
   }
-  return {
-    id: row.id,
-    externalRef: row.external_ref,
-    tenantRef: row.tenant_ref,
-    timezone: row.timezone,
-  };
+  return toResource(row);
 }
 
 export interface SlotlockStore {
@@ -928,6 +958,21 @@ export interface SlotlockStore {
   }): Promise<SlotlockResource>;
   /** Resolve one tenant-owned resource without revealing another tenant's matching id. */
   getResource(params: { tenantRef: string; id: string }): Promise<SlotlockResource | null>;
+  /**
+   * Set one resource's own weekly bookable hours, or clear them (`null`) so it uses the default;
+   * `[]` makes it never bookable. Null for an id that is not the tenant's. Refuses rules Slotlock
+   * cannot evaluate (`invalid_availability`): at most 50, each weekly with BYDAY.
+   */
+  setResourceAvailability(params: {
+    tenantRef: string;
+    id: string;
+    rules: readonly WeeklyAvailabilityRule[] | null;
+  }): Promise<SlotlockResource | null>;
+  /** Set (or clear, with `null`) the bookable hours of every resource the tenant has; returns how many. */
+  setTenantAvailability(params: {
+    tenantRef: string;
+    rules: readonly WeeklyAvailabilityRule[] | null;
+  }): Promise<number>;
   /** Bounded tenant resource discovery, ordered and keyset-paginated by immutable UUID. */
   listResources(params: {
     tenantRef: string;
@@ -1404,20 +1449,42 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
           code: 'invalid_identity' as const,
         });
       }
-      const rows = await sql<
-        { id: string; external_ref: string | null; tenant_ref: string | null; timezone: string }[]
-      >`
-        SELECT id, external_ref, tenant_ref, timezone
+      const rows = await sql<ResourceRow[]>`
+        SELECT id, external_ref, tenant_ref, timezone, availability_rules
           FROM slotlock.resources
          WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}`;
       const row = rows[0];
-      if (!row) return null;
-      return {
-        id: row.id,
-        externalRef: row.external_ref,
-        tenantRef: row.tenant_ref,
-        timezone: row.timezone,
-      };
+      return row ? toResource(row) : null;
+    },
+
+    async setResourceAvailability(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidResourceId(params.id)) {
+        throw Object.assign(new Error('Slotlock resource identity is invalid'), {
+          code: 'invalid_identity' as const,
+        });
+      }
+      const rules = availabilityParameter(sql, params.rules);
+      const rows = await sql<ResourceRow[]>`
+        UPDATE slotlock.resources
+           SET availability_rules = ${rules}::jsonb
+         WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
+        RETURNING id, external_ref, tenant_ref, timezone, availability_rules`;
+      const row = rows[0];
+      return row ? toResource(row) : null;
+    },
+
+    async setTenantAvailability(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw Object.assign(new Error('Slotlock tenant reference must be 1-500 UTF-8 bytes'), {
+          code: 'invalid_identity' as const,
+        });
+      }
+      const rules = availabilityParameter(sql, params.rules);
+      const updated = await sql`
+        UPDATE slotlock.resources
+           SET availability_rules = ${rules}::jsonb
+         WHERE tenant_ref = ${params.tenantRef}`;
+      return updated.count;
     },
 
     async listResources(params) {
@@ -1437,21 +1504,14 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
           code: 'invalid_cursor' as const,
         });
       }
-      const rows = await sql<
-        { id: string; external_ref: string | null; tenant_ref: string | null; timezone: string }[]
-      >`
-        SELECT id, external_ref, tenant_ref, timezone
+      const rows = await sql<ResourceRow[]>`
+        SELECT id, external_ref, tenant_ref, timezone, availability_rules
           FROM slotlock.resources
          WHERE tenant_ref = ${params.tenantRef}
            AND (${params.after ?? null}::uuid IS NULL OR id > ${params.after ?? null}::uuid)
          ORDER BY id
          LIMIT ${limit}`;
-      return rows.map((row) => ({
-        id: row.id,
-        externalRef: row.external_ref,
-        tenantRef: row.tenant_ref,
-        timezone: row.timezone,
-      }));
+      return rows.map(toResource);
     },
 
     async createReservation(params) {

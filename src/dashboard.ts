@@ -18,6 +18,14 @@ import type { SlotlockApiKey, SlotlockApiKeyScope, SlotlockApiKeyStore } from '.
 import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from './ddl.js';
 import type { SlotlockSql, SlotlockStore } from './store.js';
 import type { SlotlockResource, WeeklyAvailabilityRule } from './types.js';
+import {
+  WEEKDAYS,
+  WEEKDAY_NAMES as DAY_NAMES,
+  type Weekday,
+  type WeeklyHours,
+  rulesToWeeklyHours,
+  weeklyHoursToRules,
+} from './weekly-hours.js';
 
 /** Resources one dashboard tenant may hold. */
 export const SLOTLOCK_DASHBOARD_MAX_RESOURCES = 100;
@@ -39,6 +47,7 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/keys/rotate',
   '/keys/revoke',
   '/resources',
+  '/hours',
 ]);
 const SIGN_IN_AGAIN = 'That sign-in did not finish here, or took too long. Sign in again.';
 const GITHUB_ERROR_CODE = /^[a-z0-9_]{1,64}$/;
@@ -82,6 +91,16 @@ export interface SlotlockDashboardResources {
    * SLOTLOCK_DASHBOARD_MAX_RESOURCES, however many adds race, on however many servers.
    */
   add(tenantRef: string, externalRef: string, timezone: string): Promise<SlotlockResource>;
+  /**
+   * Set the bookable hours of one of the tenant's resources (`{ id }`) or of all of them; `null`
+   * hands them back to the server's and `[]` closes. Returns how many resources changed: 0 for an
+   * id that is not the tenant's.
+   */
+  setHours(
+    tenantRef: string,
+    target: { id: string } | 'all',
+    rules: WeeklyAvailabilityRule[] | null,
+  ): Promise<number>;
 }
 
 /**
@@ -166,6 +185,12 @@ export function createSlotlockDashboardResources(store: SlotlockStore): Slotlock
           }),
         { isolation: 'read committed' },
       ),
+    setHours: (tenantRef, target, rules) =>
+      store.withTenant(tenantRef, async (tenant) => {
+        if (target === 'all') return tenant.setTenantAvailability({ tenantRef, rules });
+        const updated = await tenant.setResourceAvailability({ tenantRef, id: target.id, rules });
+        return updated ? 1 : 0;
+      }),
   };
 }
 
@@ -406,6 +431,78 @@ function hoursOf(startMinutes: number, durationMinutes: number): string {
     : `from ${formatMinutes(startMinutes)} for ${String(durationMinutes / 60)} h`;
 }
 
+const daysOf = (rrule: string) =>
+  (/BYDAY=([A-Z,]+)/.exec(rrule)?.[1] ?? '')
+    .split(',')
+    .map((day) => WEEKDAY_NAMES[day] ?? day)
+    .join(', ');
+
+/** One line for a resource's hours: the server's, closed, or its own rules. */
+function hoursSummary(rules: readonly WeeklyAvailabilityRule[] | undefined): string {
+  if (rules === undefined) return "Server's hours";
+  if (rules.length === 0) return 'Closed';
+  return rules
+    .map((rule) => `${daysOf(rule.rrule)} ${hoursOf(rule.startMinutes, rule.durationMinutes)}`)
+    .join('; ');
+}
+
+type HoursMode = 'server' | 'closed' | 'custom';
+/** The editor's fields as typed: two windows a day, each an opening and a closing `HH:MM`. */
+type WeekForm = Record<Weekday, { from: string; to: string }[]>;
+const TIME = /^([01]\d|2[0-3]):([0-5]\d)$/;
+const WINDOW_NAMES = ['first', 'second'] as const;
+
+function emptyWeekForm(): WeekForm {
+  const form = {} as WeekForm;
+  for (const day of WEEKDAYS) form[day] = WINDOW_NAMES.map(() => ({ from: '', to: '' }));
+  return form;
+}
+
+function weekFormOf(week: WeeklyHours | null): WeekForm {
+  const form = emptyWeekForm();
+  if (!week) return form;
+  for (const day of WEEKDAYS) {
+    week[day].forEach((window, index) => {
+      form[day][index] = { from: formatMinutes(window.from), to: formatMinutes(window.to) };
+    });
+  }
+  return form;
+}
+
+function readWeekForm(form: URLSearchParams): WeekForm {
+  const week = emptyWeekForm();
+  for (const day of WEEKDAYS) {
+    WINDOW_NAMES.forEach((_name, index) => {
+      const field = (end: string) =>
+        (form.get(`${day.toLowerCase()}_${end}_${index + 1}`) ?? '').trim().slice(0, 16);
+      week[day][index] = { from: field('from'), to: field('to') };
+    });
+  }
+  return week;
+}
+
+/** The week typed, or `invalid_availability` naming the day and window that cannot be read. */
+function weekFromForm(form: WeekForm): WeeklyHours {
+  const invalid = (message: string) => Object.assign(new Error(message), { code: 'invalid_availability' });
+  const week: WeeklyHours = { MO: [], TU: [], WE: [], TH: [], FR: [], SA: [], SU: [] };
+  for (const day of WEEKDAYS) {
+    form[day].forEach(({ from, to }, index) => {
+      if (from === '' && to === '') return;
+      const name = `${DAY_NAMES[day]}'s ${WINDOW_NAMES[index]} window`;
+      if (from === '' || to === '') {
+        throw invalid(`Give ${name} both an opening and a closing time.`);
+      }
+      const [opens, closes] = [TIME.exec(from), TIME.exec(to)];
+      if (!opens || !closes) throw invalid(`${name} needs times like 09:30.`);
+      week[day].push({
+        from: Number(opens[1]) * 60 + Number(opens[2]),
+        to: Number(closes[1]) * 60 + Number(closes[2]),
+      });
+    });
+  }
+  return week;
+}
+
 export function createSlotlockDashboard(options: SlotlockDashboardOptions): SlotlockDashboard {
   const publicUrl = new URL(options.publicUrl);
   const origin = publicUrl.origin;
@@ -591,11 +688,6 @@ ${notice ? html`<p class="notice" role="alert">${notice}</p>` : html``}
     ]);
     const token = csrfToken(session);
     const rules = options.availability ?? [];
-    const days = (rrule: string) =>
-      (/BYDAY=([A-Z,]+)/.exec(rrule)?.[1] ?? '')
-        .split(',')
-        .map((day) => WEEKDAY_NAMES[day] ?? day)
-        .join(', ');
     const content = html`${notice ? html`<p class="notice" role="alert">${notice}</p>` : html``}
 <section class="card">
 <h2>Connect an agent</h2>
@@ -631,9 +723,9 @@ ${
 ${
   resources.length === 0
     ? html`<p class="empty">No resources yet. Agents can only book what is listed here.</p>`
-    : html`<div class="table"><table><thead><tr><th>Reference</th><th>Time zone</th><th>Resource id</th></tr></thead><tbody>${resources.map(
+    : html`<div class="table"><table><thead><tr><th>Reference</th><th>Time zone</th><th>Bookable hours</th><th>Resource id</th></tr></thead><tbody>${resources.map(
         (resource) =>
-          html`<tr><td data-label="Reference">${resource.externalRef ?? ''}</td><td data-label="Time zone">${resource.timezone}</td><td data-label="Resource id"><code>${resource.id}</code></td></tr>`,
+          html`<tr><td data-label="Reference">${resource.externalRef ?? ''}</td><td data-label="Time zone">${resource.timezone}</td><td data-label="Bookable hours">${hoursSummary(resource.availabilityRules)} <a href="${root}/hours?resource=${resource.id}">Set hours</a></td><td data-label="Resource id"><code>${resource.id}</code></td></tr>`,
       )}</tbody></table></div>`
 }
 </section>
@@ -641,15 +733,154 @@ ${
 <h2>Bookable hours</h2>
 ${
   rules.length === 0
-    ? html`<p class="empty">This server offers no bookable hours, so agents will find no free slot.</p>`
+    ? html`<p class="empty">This server offers no bookable hours: agents find a free slot only on resources with hours of their own.</p>`
     : html`<ul class="hours">${rules.map(
         (rule) =>
-          html`<li>${days(rule.rrule)}: ${hoursOf(rule.startMinutes, rule.durationMinutes)}</li>`,
+          html`<li>${daysOf(rule.rrule)}: ${hoursOf(rule.startMinutes, rule.durationMinutes)}</li>`,
       )}</ul>`
 }
-<p class="fine">Set by the server for every resource, in each resource's own time zone.</p>
+<p class="fine">The server's hours, for resources without hours of their own, in each resource's own time zone.</p>
+${resources.length > 0 ? html`<p><a href="${root}/hours">Set hours for every resource</a></p>` : html``}
 </section>`;
     return respond(status, layout('Dashboard', content, session));
+  }
+
+  function hoursPage(
+    session: Session,
+    state: {
+      target: SlotlockResource | 'all';
+      mode: HoursMode;
+      week: WeekForm;
+      unshown?: readonly WeeklyAvailabilityRule[];
+      status?: number;
+      notice?: string;
+    },
+  ): Response {
+    const { target, mode } = state;
+    const checked = (value: HoursMode) => (mode === value ? html` checked` : html``);
+    const server = options.availability ?? [];
+    const title =
+      target === 'all' ? 'Hours for every resource' : `Hours for ${target.externalRef ?? target.id}`;
+    const rows = WEEKDAYS.map((day) => {
+      const cells = state.week[day].flatMap(({ from, to }, index) => {
+        const which = index + 1;
+        const lower = day.toLowerCase();
+        return [
+          html`<td data-label="Opens"><input type="time" name="${lower}_from_${which}" value="${from}" aria-label="${DAY_NAMES[day]} opens (${WINDOW_NAMES[index]} window)"></td>`,
+          html`<td data-label="Closes"><input type="time" name="${lower}_to_${which}" value="${to}" aria-label="${DAY_NAMES[day]} closes (${WINDOW_NAMES[index]} window)"></td>`,
+        ];
+      });
+      return html`<tr><th scope="row">${DAY_NAMES[day]}</th>${cells}</tr>`;
+    });
+    const content = html`${state.notice ? html`<p class="notice" role="alert">${state.notice}</p>` : html``}
+<section>
+<p><a href="${root}">Back to the dashboard</a></p>
+<h1>${title}</h1>
+<p>${
+      target === 'all'
+        ? 'The same hours for every resource, each in its own time zone. Saving replaces their hours.'
+        : `When agents may book it, in its time zone: ${target.timezone}.`
+    }</p>
+${
+  state.unshown
+    ? html`<div class="notice warn" role="alert"><p>These hours were set outside the dashboard, so the week below cannot show them. Saving replaces them.</p><ul class="hours">${state.unshown.map(
+        (rule) =>
+          html`<li><code>${rule.rrule}</code> from ${formatMinutes(rule.startMinutes)} for ${String(rule.durationMinutes)} min</li>`,
+      )}</ul></div>`
+    : html``
+}
+<form method="post" action="${root}/hours">
+<input type="hidden" name="csrf" value="${csrfToken(session)}">
+<input type="hidden" name="once" value="${formNonce(session)}">
+<input type="hidden" name="resource" value="${target === 'all' ? 'all' : target.id}">
+<fieldset class="modes"><legend>Bookable hours</legend>
+<label class="choice"><input type="radio" name="mode" value="server"${checked('server')}> The server's hours (${server.length === 0 ? 'none' : hoursSummary(server)})</label>
+<label class="choice"><input type="radio" name="mode" value="closed"${checked('closed')}> Closed: agents find no free slot</label>
+<label class="choice"><input type="radio" name="mode" value="custom"${checked('custom')}> These hours</label>
+</fieldset>
+<div class="table"><table class="week"><thead><tr><th>Day</th><th>Opens</th><th>Closes</th><th>Opens</th><th>Closes</th></tr></thead><tbody>${rows}</tbody></table></div>
+<p class="fine">A closing time at or before the opening time closes the next day; 00:00 to 00:00 is the whole day. Leave a window empty for none.</p>
+<button class="primary" type="submit">Save hours</button>
+</form>
+</section>`;
+    return respond(state.status ?? 200, layout('Bookable hours', content, session));
+  }
+
+  /** The tenant's resource with that id, or null for anything else. */
+  async function ownResource(session: Session, id: string): Promise<SlotlockResource | null> {
+    if (!UUID_PATTERN.test(id)) return null;
+    const resources = await options.resources.list(tenantOf(session));
+    return resources.find((resource) => resource.id === id) ?? null;
+  }
+
+  const notFound = (session: Session) =>
+    respond(404, layout('Not found', html`<p class="notice">That resource is not one of yours.</p>`, session));
+
+  async function hoursEditor(session: Session, url: URL): Promise<Response> {
+    const id = url.searchParams.get('resource');
+    if (id === null) {
+      const server = rulesToWeeklyHours(options.availability ?? []);
+      return hoursPage(session, { target: 'all', mode: 'server', week: weekFormOf(server) });
+    }
+    const resource = await ownResource(session, id);
+    if (!resource) return notFound(session);
+    const rules = resource.availabilityRules;
+    if (rules === undefined) {
+      const server = rulesToWeeklyHours(options.availability ?? []);
+      return hoursPage(session, { target: resource, mode: 'server', week: weekFormOf(server) });
+    }
+    if (rules.length === 0) {
+      return hoursPage(session, { target: resource, mode: 'closed', week: emptyWeekForm() });
+    }
+    const week = rulesToWeeklyHours(rules);
+    return hoursPage(session, {
+      target: resource,
+      mode: 'custom',
+      week: weekFormOf(week),
+      ...(week === null ? { unshown: rules } : {}),
+    });
+  }
+
+  async function saveHours(session: Session, form: URLSearchParams): Promise<Response> {
+    const id = form.get('resource') ?? '';
+    const target = id === 'all' ? 'all' : await ownResource(session, id);
+    if (!target) return notFound(session);
+    const mode = form.get('mode');
+    const week = readWeekForm(form);
+    if (mode !== 'server' && mode !== 'closed' && mode !== 'custom') {
+      return hoursPage(session, { target, mode: 'custom', week, status: 400, notice: 'Choose which hours to use.' });
+    }
+    let rules: WeeklyAvailabilityRule[] | null = mode === 'server' ? null : [];
+    if (mode === 'custom') {
+      try {
+        rules = weeklyHoursToRules(weekFromForm(week));
+        if (rules.length === 0) {
+          throw Object.assign(new Error('Add a window to at least one day, or choose Closed.'), {
+            code: 'invalid_availability',
+          });
+        }
+      } catch (error) {
+        if ((error as { code?: unknown }).code !== 'invalid_availability') throw error;
+        return hoursPage(session, {
+          target,
+          mode,
+          week,
+          status: 400,
+          notice: (error as Error).message,
+        });
+      }
+    }
+    const changed = await options.resources.setHours(
+      tenantOf(session),
+      target === 'all' ? 'all' : { id: target.id },
+      rules,
+    );
+    if (changed === 0) {
+      return target === 'all'
+        ? dashboardPage(session, 409, 'Add a resource first, then set its hours.')
+        : notFound(session);
+    }
+    return redirect(303, root);
   }
 
   function shownOncePage(session: Session, key: string, apiKey: SlotlockApiKey, rotated: boolean): Response {
@@ -953,6 +1184,8 @@ ${
         return changeKey(session, form, 'revoke');
       case '/resources':
         return addResource(session, form);
+      case '/hours':
+        return saveHours(session, form);
       default:
         return respond(404, layout('Not found', html`<p class="notice">Nothing is here.</p>`, session));
     }
@@ -982,6 +1215,10 @@ ${
               return await startSignIn();
             case '/callback':
               return await finishSignIn(request, url);
+            case '/hours': {
+              const session = await readSession(request);
+              return session ? await hoursEditor(session, url) : redirect(303, root);
+            }
             default:
               return respond(404, layout('Not found', html`<p class="notice">Nothing is here.</p>`, null));
           }
@@ -1079,6 +1316,13 @@ tr:last-child td { border-bottom: 0; }
 .copy input { flex: 1; }
 pre { background: var(--wash); border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .hours { margin: 0 0 8px; padding-left: 20px; color: var(--ink-2); }
+.modes { border: 0; padding: 0; margin: 0 0 16px; display: grid; gap: 8px; }
+.modes legend { font-weight: 600; color: var(--ink); padding: 0; margin-bottom: 4px; }
+.choice { display: flex; align-items: center; gap: 8px; font-size: 15px; color: var(--ink); }
+.choice input { height: auto; }
+.week input { width: 100%; }
+.week th[scope="row"] { text-transform: none; letter-spacing: 0; font-size: 14px; color: var(--ink); background: none; }
+form > .table { margin-bottom: 12px; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 @media (max-width: 720px) {
   .bar { padding: 12px 16px; }

@@ -17,7 +17,7 @@ import {
   createSlotlockMemoryDashboardState,
 } from '../dashboard.js';
 import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from '../ddl.js';
-import type { SlotlockResource } from '../types.js';
+import type { SlotlockResource, WeeklyAvailabilityRule } from '../types.js';
 
 const PUBLIC_URL = 'https://slotlock.example.com/base';
 const ORIGIN = 'https://slotlock.example.com';
@@ -97,6 +97,23 @@ function memoryResources() {
         rows.push(resource as SlotlockResource & { tenantRef: string });
         return resource as unknown as SlotlockResource;
       }),
+      // Like the store: only the tenant's own resources change, and the count says how many did.
+      setHours: vi.fn(
+        async (
+          tenantRef: string,
+          target: { id: string } | 'all',
+          rules: WeeklyAvailabilityRule[] | null,
+        ) => {
+          const changed = rows.filter(
+            (row) => row.tenantRef === tenantRef && (target === 'all' || row.id === target.id),
+          );
+          for (const row of changed) {
+            if (rules === null) delete row.availabilityRules;
+            else row.availabilityRules = rules.map((rule) => ({ ...rule }));
+          }
+          return changed.length;
+        },
+      ),
     } satisfies SlotlockDashboardResources,
   };
 }
@@ -607,6 +624,212 @@ describe('resources in the dashboard', () => {
     );
     expect(rezoned.status).toBe(303);
     expect(resources.rows.find((row) => row.externalRef === 'vehicle-42')?.timezone).toBe('Europe/Paris');
+  });
+});
+
+describe('bookable hours in the dashboard', () => {
+  const OTHER = '99999999-9999-4999-8999-999999999999';
+  const weekdays = { rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR', startMinutes: 540, durationMinutes: 480 };
+
+  function own(externalRef: string, availabilityRules?: WeeklyAvailabilityRule[]) {
+    const row = {
+      id: randomUUID(),
+      externalRef,
+      tenantRef: 'github:4242',
+      timezone: 'Europe/London',
+      ...(availabilityRules ? { availabilityRules } : {}),
+    };
+    resources.rows.push(row);
+    return row;
+  }
+
+  /** The editor's fields: every window empty unless given, e.g. { mo_from_1: '09:00' }. */
+  function weekFields(fields: Record<string, string>) {
+    const all: Record<string, string> = {};
+    for (const day of ['mo', 'tu', 'we', 'th', 'fr', 'sa', 'su']) {
+      for (const n of [1, 2]) {
+        all[`${day}_from_${n}`] = '';
+        all[`${day}_to_${n}`] = '';
+      }
+    }
+    return { ...all, ...fields };
+  }
+
+  it("shows each resource's hours and links to its editor", async () => {
+    const plain = own('car-plain');
+    const closed = own('car-closed', []);
+    const custom = own('car-custom', [weekdays]);
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const html = await (await get(target, '/base/dashboard', session)).text();
+    expect(html).toContain('Server&#39;s hours');
+    expect(html).toContain('Closed');
+    expect(html).toContain('Mon, Tue, Wed, Thu, Fri 09:00–17:00');
+    for (const resource of [plain, closed, custom]) {
+      expect(html).toContain(`href="/base/dashboard/hours?resource=${resource.id}"`);
+    }
+    expect(html).toContain('href="/base/dashboard/hours"');
+  });
+
+  it("edits one resource's hours as a week of windows, overnight included", async () => {
+    const car = own('car-1', [weekdays]);
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const page = await get(target, `/base/dashboard/hours?resource=${car.id}`, session);
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain('car-1');
+    expect(html).toContain('Europe/London');
+    expect(html).toMatch(/name="mo_from_1" value="09:00"/);
+    expect(html).toMatch(/name="fr_to_1" value="17:00"/);
+    expect(html).toMatch(/name="sa_from_1" value=""/);
+    expect(html).toMatch(/value="custom" checked/);
+    expect(html).toMatch(/name="once" value="[^"]+"/);
+
+    const token = await csrf(target, session);
+    const saved = await post(
+      target,
+      '/base/dashboard/hours',
+      {
+        csrf: token,
+        resource: car.id,
+        mode: 'custom',
+        ...weekFields({
+          mo_from_1: '08:00',
+          mo_to_1: '12:00',
+          mo_from_2: '13:00',
+          mo_to_2: '17:30',
+          fr_from_1: '22:00',
+          fr_to_1: '06:00',
+          su_from_1: '00:00',
+          su_to_1: '00:00',
+        }),
+      },
+      session,
+    );
+    expect(saved.status).toBe(303);
+    expect(resources.store.setHours).toHaveBeenCalledWith('github:4242', { id: car.id }, [
+      { rrule: 'FREQ=WEEKLY;BYDAY=SU', startMinutes: 0, durationMinutes: 1_440 },
+      { rrule: 'FREQ=WEEKLY;BYDAY=MO', startMinutes: 480, durationMinutes: 240 },
+      { rrule: 'FREQ=WEEKLY;BYDAY=MO', startMinutes: 780, durationMinutes: 270 },
+      { rrule: 'FREQ=WEEKLY;BYDAY=FR', startMinutes: 1_320, durationMinutes: 480 },
+    ]);
+  });
+
+  it("hands a resource back to the server's hours, or closes it", async () => {
+    const car = own('car-2', [weekdays]);
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const token = await csrf(target, session);
+    for (const [mode, rules] of [
+      ['server', null],
+      ['closed', []],
+    ] as const) {
+      const saved = await post(
+        target,
+        '/base/dashboard/hours',
+        { csrf: token, resource: car.id, mode, ...weekFields({ mo_from_1: '09:00', mo_to_1: '17:00' }) },
+        session,
+      );
+      expect(saved.status).toBe(303);
+      expect(resources.store.setHours).toHaveBeenLastCalledWith('github:4242', { id: car.id }, rules);
+    }
+    const html = await (await get(target, `/base/dashboard/hours?resource=${car.id}`, session)).text();
+    expect(html).toMatch(/value="closed" checked/);
+  });
+
+  it('sets the same hours on every resource at once', async () => {
+    own('car-a');
+    own('car-b');
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const page = await (await get(target, '/base/dashboard/hours', session)).text();
+    expect(page).toContain('every resource');
+    expect(page).toMatch(/name="resource" value="all"/);
+    const token = await csrf(target, session);
+    const saved = await post(
+      target,
+      '/base/dashboard/hours',
+      { csrf: token, resource: 'all', mode: 'custom', ...weekFields({ sa_from_1: '10:00', sa_to_1: '14:00' }) },
+      session,
+    );
+    expect(saved.status).toBe(303);
+    expect(resources.store.setHours).toHaveBeenCalledWith('github:4242', 'all', [
+      { rrule: 'FREQ=WEEKLY;BYDAY=SA', startMinutes: 600, durationMinutes: 240 },
+    ]);
+  });
+
+  it.each([
+    ['overlapping windows', { tu_from_1: '09:00', tu_to_1: '13:00', tu_from_2: '12:00', tu_to_2: '17:00' }, "Tuesday's two windows overlap"],
+    ['half a window', { we_from_1: '09:00' }, 'Give Wednesday'],
+    ['a time that is not one', { th_from_1: '25:00', th_to_1: '26:00' }, 'Thursday'],
+    ['custom hours with no window', {}, 'Add a window'],
+  ])('refuses %s, says why, and keeps what was typed', async (_case, fields, message) => {
+    const car = own('car-3');
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const token = await csrf(target, session);
+    const refused = await post(
+      target,
+      '/base/dashboard/hours',
+      { csrf: token, resource: car.id, mode: 'custom', ...weekFields(fields) },
+      session,
+    );
+    expect(refused.status).toBe(400);
+    const html = await refused.text();
+    expect(html).toContain(message.replaceAll("'", '&#39;'));
+    for (const [name, value] of Object.entries(fields)) {
+      expect(html).toContain(`name="${name}" value="${value}"`);
+    }
+    expect(resources.store.setHours).not.toHaveBeenCalled();
+  });
+
+  it("does not show or change another tenant's resource, or an id that is not one", async () => {
+    resources.rows.push({ id: OTHER, externalRef: 'theirs', tenantRef: 'github:7', timezone: 'UTC', availabilityRules: [weekdays] });
+    const target = dashboard();
+    const { session } = await signIn(target);
+    for (const id of [OTHER, 'not-a-uuid']) {
+      expect((await get(target, `/base/dashboard/hours?resource=${id}`, session)).status).toBe(404);
+    }
+    const token = await csrf(target, session);
+    for (const id of [OTHER, 'not-a-uuid']) {
+      const sent = await post(
+        target,
+        '/base/dashboard/hours',
+        { csrf: token, resource: id, mode: 'closed', ...weekFields({}) },
+        session,
+      );
+      expect(sent.status).toBe(404);
+    }
+    expect(resources.rows.find(({ id }) => id === OTHER)?.availabilityRules).toEqual([weekdays]);
+  });
+
+  it('shows hours the week cannot express as they are, and replaces them only when saved', async () => {
+    const until = { rrule: 'FREQ=WEEKLY;BYDAY=MO;UNTIL=20271231T000000Z', startMinutes: 540, durationMinutes: 60 };
+    const car = own('car-4', [until]);
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const html = await (await get(target, `/base/dashboard/hours?resource=${car.id}`, session)).text();
+    expect(html).toContain('set outside the dashboard');
+    expect(html).toContain('FREQ=WEEKLY;BYDAY=MO;UNTIL=20271231T000000Z');
+    expect(html).toMatch(/name="mo_from_1" value=""/);
+    expect(resources.store.setHours).not.toHaveBeenCalled();
+  });
+
+  it('needs a signed-in session, a CSRF token, and runs a sent form once', async () => {
+    const car = own('car-5');
+    const target = dashboard();
+    expect((await get(target, '/base/dashboard/hours')).headers.get('location')).toBe('/base/dashboard');
+    const { session } = await signIn(target);
+    const forged = await post(target, '/base/dashboard/hours', { csrf: 'x', resource: car.id, mode: 'closed' }, session);
+    expect(forged.status).toBe(403);
+    const html = await (await get(target, `/base/dashboard/hours?resource=${car.id}`, session)).text();
+    const token = /name="csrf" value="([^"]+)"/.exec(html)?.[1] as string;
+    const once = /name="once" value="([^"]+)"/.exec(html)?.[1] as string;
+    const fields = { csrf: token, once, resource: car.id, mode: 'closed', ...weekFields({}) };
+    expect((await post(target, '/base/dashboard/hours', fields, session)).status).toBe(303);
+    expect((await post(target, '/base/dashboard/hours', fields, session)).status).toBe(409);
+    expect(resources.store.setHours).toHaveBeenCalledOnce();
   });
 });
 

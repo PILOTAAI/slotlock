@@ -23,6 +23,8 @@ const vehicle = await tenant.createResource({
 Bookable hours are weekly rules: `FREQ=WEEKLY` with an explicit `BYDAY`, a start minute and a
 length, evaluated in the resource's time zone (09:00 stays 09:00 across daylight saving).
 
+- A resource can have rules of its own (`slotlock hours set`, the dashboard, or
+  `setResourceAvailability`); otherwise it uses the server's (`SLOTLOCK_AVAILABILITY`).
 - No rule means never bookable, not open all week.
 - A rule Slotlock cannot evaluate (`COUNT`, `INTERVAL` above 1) adds nothing. It never invents a
   slot.

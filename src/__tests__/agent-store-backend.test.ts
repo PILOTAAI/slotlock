@@ -386,6 +386,36 @@ describe('Slotlock store-backed agent server adapter', () => {
     );
   });
 
+  it("answers from a resource's own hours before the default, and its [] as closed", async () => {
+    const backend = createSlotlockStoreAgentBackend(store, { availabilityRules });
+    const find = () =>
+      backend.findNextAvailable(
+        { ...context, operation: 'slotlock_find_next_available' },
+        {
+          resource_ids: [resource.id],
+          start: '2027-01-10T00:00:00.000Z',
+          end: '2027-01-11T00:00:00.000Z',
+          duration_minutes: 60,
+        },
+      ) as Promise<{ start: string | null }>;
+    // 10 January 2027 is a Sunday; the default (all day Sunday) would answer midnight.
+    getResource.mockResolvedValueOnce({
+      ...resource,
+      timezone: 'UTC',
+      availabilityRules: [{ rrule: 'FREQ=WEEKLY;BYDAY=SU', startMinutes: 600, durationMinutes: 60 }],
+    });
+    expect((await find()).start).toBe('2027-01-10T10:00:00.000Z');
+    expect(availabilityRules).not.toHaveBeenCalled();
+
+    getResource.mockResolvedValueOnce({ ...resource, timezone: 'UTC', availabilityRules: [] });
+    expect((await find()).start).toBeNull();
+    expect(availabilityRules).not.toHaveBeenCalled();
+
+    getResource.mockResolvedValueOnce({ ...resource, timezone: 'UTC' });
+    expect((await find()).start).toBe('2027-01-10T00:00:00.000Z');
+    expect(availabilityRules).toHaveBeenCalledOnce();
+  });
+
   it('never manufactures availability beyond complete required provider coverage', async () => {
     getFreeBusy.mockResolvedValueOnce({
       busy: [],

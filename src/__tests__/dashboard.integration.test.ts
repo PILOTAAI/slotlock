@@ -124,6 +124,32 @@ describe.skipIf(!url)('dashboard (real Postgres)', () => {
       ),
     ).resolves.toEqual([]);
 
+    // Bookable hours: one resource's own, then every resource closed, then the server's again.
+    const van = mine[0]?.id as string;
+    const editor = await get(`/dashboard/hours?resource=${van}`, session);
+    expect(editor.status).toBe(200);
+    const hours = await post(
+      '/dashboard/hours',
+      { csrf, resource: van, mode: 'custom', mo_from_1: '08:00', mo_to_1: '12:00', fr_from_1: '22:00', fr_to_1: '06:00' },
+      session,
+    );
+    expect(hours.status).toBe(303);
+    const read = () =>
+      store.withTenant(tenantRef, (tenant) => tenant.getResource({ tenantRef, id: van }));
+    expect((await read())?.availabilityRules).toEqual([
+      { rrule: 'FREQ=WEEKLY;BYDAY=MO', startMinutes: 480, durationMinutes: 240 },
+      { rrule: 'FREQ=WEEKLY;BYDAY=FR', startMinutes: 1_320, durationMinutes: 480 },
+    ]);
+    expect(
+      (await post('/dashboard/hours', { csrf, resource: 'all', mode: 'closed' }, session)).status,
+    ).toBe(303);
+    expect((await read())?.availabilityRules).toEqual([]);
+    expect(await (await get('/dashboard', session)).text()).toContain('Closed <a href');
+    expect(
+      (await post('/dashboard/hours', { csrf, resource: van, mode: 'server' }, session)).status,
+    ).toBe(303);
+    expect(await read()).not.toHaveProperty('availabilityRules');
+
     const revoked = await post('/dashboard/keys/revoke', { csrf, id: listed?.id as string }, session);
     expect(revoked.status).toBe(303);
     await expect(keys.authenticate(key)).resolves.toBeNull();

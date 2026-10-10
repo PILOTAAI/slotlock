@@ -25,8 +25,9 @@ for name in POSTGRES_PASSWORD SLOTLOCK_APP_DB_PASSWORD \
 done && rm .env.bak
 ```
 
-The defaults make every resource bookable on weekdays 09:00 to 17:00 (`SLOTLOCK_AVAILABILITY`) and
-make every write wait for a person (`SLOTLOCK_CONFIRM_WRITES=all`).
+The defaults make every resource bookable on weekdays 09:00 to 17:00 (`SLOTLOCK_AVAILABILITY`,
+unless the resource has hours of its own: `slotlock hours set`) and make every write wait for a
+person (`SLOTLOCK_CONFIRM_WRITES=all`).
 
 ## 3. Start Slotlock
 
