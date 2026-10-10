@@ -12,6 +12,7 @@ import {
   type SlotlockAgentPrincipal,
   type SlotlockAgentWriteOperation,
   createSlotlockAgentServer,
+  slotlockAgentOperationScope,
 } from './agent-server.js';
 import { createSlotlockStoreAgentBackend } from './agent-store-backend.js';
 import {
@@ -21,7 +22,6 @@ import {
   type SlotlockApiKeyScope,
   createSlotlockApiKeyAuthenticator,
   createSlotlockApiKeyStore,
-  slotlockApiKeyScopeFor,
   slotlockBearerCredential,
 } from './api-keys.js';
 import {
@@ -371,7 +371,8 @@ export function createSlotlockTokenAuthenticator(
 
 /**
  * What `serve` lets a principal call: a served operation its scopes cover. The server token's
- * principal carries every scope; a principal without scopes is refused everything.
+ * principal carries every scope; a principal without scopes is refused everything here, though the
+ * agent server alone would leave it to this function.
  */
 export function authorizeSlotlockServeOperation(args: {
   principal: SlotlockAgentPrincipal;
@@ -379,7 +380,7 @@ export function authorizeSlotlockServeOperation(args: {
 }): boolean {
   return (
     SERVED_OPERATIONS.has(args.operation) &&
-    args.principal.scopes?.includes(slotlockApiKeyScopeFor(args.operation)) === true
+    args.principal.scopes?.includes(slotlockAgentOperationScope(args.operation)) === true
   );
 }
 
@@ -738,6 +739,8 @@ Commands:
                            Create an API key for the tenant (default scope read,write, no
                            expiry) and print it once; only its SHA-256 is stored
   key list                 Print the tenant's API keys, one JSON object per line
+  key rotate <id>          Give an active key a new secret and print it once; the old one stops
+                           working at once, and the key keeps its id and what it booked
   key revoke <id>          Revoke one of the tenant's API keys at once
   healthcheck              Exit 0 when the local server reports ready
 
@@ -801,6 +804,7 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     'resource list': 1,
     'key create': 2,
     'key list': 1,
+    'key rotate': 2,
     'key revoke': 2,
   };
   const expected = expectedOperands[subcommand];
@@ -877,6 +881,21 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
           keys.list({ tenantRef: config.tenantRef }),
         );
         for (const apiKey of listed) io.stdout.write(apiKeyLine(apiKey));
+        return 0;
+      }
+      case 'key rotate': {
+        const config = readSlotlockDatabaseConfig(io.env);
+        const rotated = await withApiKeys(config, (keys) =>
+          keys.rotate({ tenantRef: config.tenantRef, id: operands[1] as string }),
+        );
+        if (!rotated) {
+          io.stderr.write('slotlock: no active API key with that id in this tenant\n');
+          return 1;
+        }
+        io.stdout.write(apiKeyLine(rotated.apiKey, rotated.key));
+        io.stderr.write(
+          'slotlock: the new key is shown once and the old one no longer works; keep it in a secret manager\n',
+        );
         return 0;
       }
       case 'key revoke': {

@@ -87,28 +87,38 @@ Give each agent or integration its own key instead of sharing the server token:
 docker compose exec slotlock slotlock key create "Booking agent"
 docker compose exec slotlock slotlock key create "Availability bot" --scope read --expires-in-days 90
 docker compose exec slotlock slotlock key list
+docker compose exec slotlock slotlock key rotate <id>
 docker compose exec slotlock slotlock key revoke <id>
 ```
 
 - `key create` prints the key once: `slk_` and 46 letters and digits, sent as
   `Authorization: Bearer slk_…`. Slotlock stores only its SHA-256, so a lost key cannot be shown
-  again; revoke it and create another.
+  again; rotate it.
 - A key acts in the tenant it was created for (`SLOTLOCK_TENANT` when you ran `key create`), not
   the server's, so one server can serve several tenants, each through its own keys.
 - `read` covers the five tools that only look; `write` covers `slotlock_create_event`,
   `slotlock_update_event` and `slotlock_delete_event`. The default is both. A key without the scope
   gets `forbidden`, and writes still wait for a person while `SLOTLOCK_CONFIRM_WRITES` guards them.
   `tools/list` shows every tool to every client.
-- A revoked or expired key stops working on its next request, including a live-update subscription
-  at its next poll. `key list` shows each key's prefix, scopes, expiry and last use (to the
-  minute), never the key.
+- Events belong to the key that booked them. `key rotate` gives a key a new secret and keeps its
+  id, scopes, expiry and events, so rotate a key that leaked or is due. `key revoke` retires the
+  key: its events stay on the calendar, but no other key can update or cancel them over MCP or A2A.
+- A revoked, expired or rotated-out key stops working on its next request, including a live-update
+  subscription at its next poll, and is never accepted again. `key list` shows each key's prefix,
+  scopes, expiry and last use (to the minute), never the key.
 - A tenant may hold 100 active keys and 1,000 in all, revoked and expired ones included.
 - The last six characters are a checksum, so a secret scanner can tell a real key from a
   look-alike offline: SHA-256 of the 40 characters after `slk_`, first 32 bits, as 6 base62 digits
   (`0-9A-Za-z`).
 - The server role reaches keys only through SECURITY DEFINER functions in the `slotlock` schema. It
-  can create, list, revoke and erase a tenant's keys and check a presented one; it cannot read a
-  stored digest or bring a revoked key back.
+  can create, list, rotate, revoke and erase a tenant's keys and check a presented one; it cannot
+  read a stored digest or bring back a revoked, rotated-out or erased key. It names the tenant of
+  each call, as it does for every query, so its `DATABASE_URL` opens every tenant: guard it like a
+  key to all of them.
+- Anyone can make a well-formed key, so key lookups use at most two database connections at a time
+  with up to 256 waiting, and a request past that is refused as unauthenticated: a flood of made-up
+  keys cannot take the connections authenticated requests use. Rate-limit a public server in front
+  of Slotlock as well.
 
 ## Connect an MCP client
 
@@ -886,7 +896,9 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
   created again. `retentionDays` (1-3650) changes the window; keep it longer than any client retries.
 - **Erasure.** Include Slotlock resources, reservations, tombstones, archives, event content,
   occurrences, commands and coverage rows in your tenant-erasure workflow and delete order, and
-  delete the tenant's API keys with `createSlotlockApiKeyStore(sql).erase({ tenantRef })`.
+  delete the tenant's API keys with `createSlotlockApiKeyStore(sql).erase({ tenantRef })`. Only
+  their SHA-256 digests stay, with nothing about the tenant, so an erased key is never accepted
+  again.
 
 ### Production checklist
 

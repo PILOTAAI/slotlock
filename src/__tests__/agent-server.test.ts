@@ -19,6 +19,7 @@ import {
   slotlockMcpToolResult,
   parseSlotlockA2ATimestamp,
   resolveSlotlockAgentOperation,
+  slotlockAgentOperationScope,
 } from '../agent-server.js';
 
 const listResources = vi.fn();
@@ -1958,5 +1959,93 @@ describe('parseSlotlockA2ATimestamp', () => {
     null,
   ])('refuses %j', (value) => {
     expect(parseSlotlockA2ATimestamp(value)).toBeNull();
+  });
+});
+
+// An integrator may authorize by operation alone (the README's allow-list pattern); a principal that
+// carries scopes must still never reach an operation they do not cover.
+describe('principal scopes', () => {
+  const asPrincipal = (scopes: unknown) => ({
+    authenticate: async () =>
+      ({ subject: 'api_key:1', tenantRef: 'tenant-a', scopes }) as {
+        subject: string;
+        tenantRef: string;
+        scopes?: readonly string[];
+      },
+  });
+  const call = (name: string, args: Record<string, unknown>) =>
+    rpcRequest({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    authorize.mockResolvedValue(true);
+    listResources.mockResolvedValue({ resources: [], next_cursor: null });
+    createEvent.mockResolvedValue({});
+  });
+
+  it('maps every operation to the scope it needs', () => {
+    expect(
+      Object.fromEntries(
+        slotlockAgentTools().map(({ name }) => [name, slotlockAgentOperationScope(name)]),
+      ),
+    ).toEqual({
+      slotlock_list_resources: 'read',
+      slotlock_get_free_busy: 'read',
+      slotlock_find_next_available: 'read',
+      slotlock_create_event: 'write',
+      slotlock_get_event: 'read',
+      slotlock_list_events: 'read',
+      slotlock_update_event: 'write',
+      slotlock_delete_event: 'write',
+    });
+  });
+
+  it('refuses a read principal every write, over MCP and A2A, before authorize runs', async () => {
+    const server = buildServer(asPrincipal(['read']));
+    for (const [name, args] of [
+      ['slotlock_create_event', CREATE_EVENT_ARGUMENTS],
+      ['slotlock_update_event', { event_id: 'event-1', expected_revision: 1, title: 'x' }],
+      ['slotlock_delete_event', { event_id: 'event-1', expected_revision: 1 }],
+    ] as const) {
+      expectToolError(await (await server.fetch(call(name, args))).json(), 'forbidden');
+    }
+    expect(
+      await a2aReplyData(
+        await server.fetch(
+          a2aSendMessage({ skill: 'slotlock_create_event', arguments: CREATE_EVENT_ARGUMENTS }),
+        ),
+      ),
+    ).toEqual({ error: { code: 'forbidden' } });
+    expect(authorize).not.toHaveBeenCalled();
+    expect(createEvent).not.toHaveBeenCalled();
+    expect(updateEvent).not.toHaveBeenCalled();
+    expect(deleteEvent).not.toHaveBeenCalled();
+
+    const read = await (await server.fetch(call('slotlock_list_resources', { limit: 5 }))).json();
+    expect(read).toMatchObject({ result: { structuredContent: { next_cursor: null } } });
+    expect(authorize).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['an empty list', []],
+    ['a list of unknown scopes', ['admin']],
+    ['a value that is not a list', 'read,write'],
+  ])('refuses everything to a principal whose scopes are %s', async (_case, scopes) => {
+    const server = buildServer(asPrincipal(scopes));
+    expectToolError(
+      await (await server.fetch(call('slotlock_list_resources', { limit: 5 }))).json(),
+      'forbidden',
+    );
+    expect(listResources).not.toHaveBeenCalled();
+  });
+
+  it('leaves a principal without scopes to authorize, as before', async () => {
+    const server = buildServer({
+      authenticate: async () => ({ subject: 'principal-1', tenantRef: 'tenant-a' }),
+    });
+    await server.fetch(call('slotlock_create_event', CREATE_EVENT_ARGUMENTS));
+    expect(authorize).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: 'slotlock_create_event' }),
+    );
   });
 });

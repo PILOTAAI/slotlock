@@ -1,13 +1,19 @@
-// API keys: per-tenant bearer credentials a person creates, scopes and revokes for MCP and A2A
-// clients. A key is shown once, when it is created; the database keeps only its SHA-256 digest, so
-// neither a backup nor a statement log holds a usable credential. An unsalted digest is safe to look
-// a key up by because the key is about 238 random bits, not a password a person chose.
+// API keys: per-tenant bearer credentials a person creates, scopes, rotates and revokes for MCP and
+// A2A clients. A key is shown once, when it is created or rotated; the database keeps only its
+// SHA-256 digest, so neither a backup nor a statement log holds a usable credential. An unsalted
+// digest is safe to look a key up by because the key is about 238 random bits, not a password.
 //
 // The serving role reaches slotlock.api_keys only through the schema's SECURITY DEFINER functions
-// (ddl.ts). It can create, list and revoke a tenant's keys and resolve a presented digest; it cannot
-// read a digest, revive a revoked key or move a key to another tenant.
+// (ddl.ts). It names the tenant of each call, as it does for every store query; within a call it
+// cannot reach another tenant's keys, read a digest, or bring back a revoked, rotated-out or erased
+// key.
 import { createHash, randomBytes } from 'node:crypto';
-import type { SlotlockAgentOperation, SlotlockAgentPrincipal } from './agent-server.js';
+import type { Sql } from 'postgres';
+import {
+  type SlotlockAgentPrincipal,
+  type SlotlockAgentScope,
+  slotlockAgentOperationScope,
+} from './agent-server.js';
 import { SLOTLOCK_API_KEY_ACTIVE_LIMIT, SLOTLOCK_API_KEY_RETAINED_LIMIT } from './ddl.js';
 import type { SlotlockSql } from './store.js';
 
@@ -15,7 +21,7 @@ export { SLOTLOCK_API_KEY_ACTIVE_LIMIT, SLOTLOCK_API_KEY_RETAINED_LIMIT };
 
 /** `read` covers the operations that only look; `write` the ones that change a calendar. */
 export const SLOTLOCK_API_KEY_SCOPES = Object.freeze(['read', 'write'] as const);
-export type SlotlockApiKeyScope = (typeof SLOTLOCK_API_KEY_SCOPES)[number];
+export type SlotlockApiKeyScope = SlotlockAgentScope;
 
 /** Every key starts with this, so a person or a secret scanner can tell what it is. */
 export const SLOTLOCK_API_KEY_PREFIX = 'slk_';
@@ -38,26 +44,8 @@ const MAX_CREATOR_BYTES = 200;
 const MAX_TENANT_BYTES = 500;
 const DAY_MS = 86_400_000;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/**
- * The scope each operation needs. A record over every operation, so one a later release adds does
- * not compile until it is given a scope here.
- */
-const OPERATION_SCOPES: Readonly<Record<SlotlockAgentOperation, SlotlockApiKeyScope>> =
-  Object.freeze({
-    slotlock_list_resources: 'read',
-    slotlock_get_free_busy: 'read',
-    slotlock_find_next_available: 'read',
-    slotlock_create_event: 'write',
-    slotlock_get_event: 'read',
-    slotlock_list_events: 'read',
-    slotlock_update_event: 'write',
-    slotlock_delete_event: 'write',
-  });
-
-export function slotlockApiKeyScopeFor(operation: SlotlockAgentOperation): SlotlockApiKeyScope {
-  return OPERATION_SCOPES[operation];
-}
+const DEFAULT_MAX_CONCURRENT_LOOKUPS = 2;
+const DEFAULT_MAX_WAITING_LOOKUPS = 256;
 
 /** A key as lists show it. The key itself is never stored and so never listed. */
 export interface SlotlockApiKey {
@@ -98,10 +86,21 @@ export interface SlotlockApiKeyStore {
    * Create a key and return it with its listing. `key` is the only copy there will ever be: show it
    * to the person once and drop it. Fails with `api_key_limit_reached` when the tenant holds
    * SLOTLOCK_API_KEY_ACTIVE_LIMIT active keys or SLOTLOCK_API_KEY_RETAINED_LIMIT keys in all.
+   * Runs in a READ COMMITTED transaction of its own; on a connection already inside a transaction,
+   * that transaction must be READ COMMITTED, or the database refuses.
    */
   create(input: CreateSlotlockApiKeyInput): Promise<{ key: string; apiKey: SlotlockApiKey }>;
   /** The tenant's keys, revoked and expired ones included, newest first. */
   list(input: { tenantRef: string }): Promise<SlotlockApiKey[]>;
+  /**
+   * Give an active key a new secret and return it, like `create`; null when the tenant has no
+   * active key with that id. The key keeps its id, so whatever it booked stays its own; the old
+   * secret stops working at once and can never be used again.
+   */
+  rotate(input: { tenantRef: string; id: string }): Promise<{
+    key: string;
+    apiKey: SlotlockApiKey;
+  } | null>;
   /**
    * Revoke one of the tenant's keys and return it; null when the tenant has no key with that id.
    * Revoking a revoked key returns it unchanged. Nothing un-revokes a key.
@@ -109,7 +108,10 @@ export interface SlotlockApiKeyStore {
   revoke(input: { tenantRef: string; id: string }): Promise<SlotlockApiKey | null>;
   /** Resolve a presented key to its tenant and scopes; null unless it is active. */
   authenticate(key: string): Promise<SlotlockApiKeyIdentity | null>;
-  /** Tenant erasure: delete every key the tenant holds and return how many there were. */
+  /**
+   * Tenant erasure: delete every key the tenant holds and return how many there were. Only the
+   * digests stay, in a list of retired digests no key may use again.
+   */
   erase(input: { tenantRef: string }): Promise<number>;
 }
 
@@ -234,6 +236,19 @@ function apiKeyFrom(row: ApiKeyRow): SlotlockApiKey {
 }
 
 /**
+ * Run `query` in a READ COMMITTED transaction of its own, so the database's per-tenant lock and
+ * limit count see every key committed before the lock, whatever the role's default isolation. A
+ * connection already in a transaction runs it there; the function refuses anything but READ
+ * COMMITTED.
+ */
+async function readCommitted<T>(sql: SlotlockSql, query: (sql: SlotlockSql) => Promise<T>): Promise<T> {
+  if ('begin' in sql) {
+    return (await (sql as Sql).begin('isolation level read committed', (tx) => query(tx))) as T;
+  }
+  return query(sql);
+}
+
+/**
  * API keys in the `slotlock` schema, through the connection's role. Every input is checked here
  * before a query runs; the functions and the table's constraints check the same rules again.
  */
@@ -282,16 +297,19 @@ export function createSlotlockApiKeyStore(sql: SlotlockSql): SlotlockApiKeyStore
       const { key, prefix, digest } = generateSlotlockApiKey();
       // Scopes travel as one string: postgres.js binds `sql.array` as text[] only once the pool
       // has fetched the server's array types, which the first query on a new pool precedes.
-      const [row] = await sql<ApiKeyRow[]>`
-        SELECT * FROM slotlock.create_api_key(
-          ${input.tenantRef}::text,
-          ${name}::text,
-          ${prefix}::text,
-          ${digest}::bytea,
-          pg_catalog.string_to_array(${scopes.join(',')}::text, ','),
-          ${expiresAt ?? null}::timestamptz,
-          ${createdBy ?? null}::text
-        )`;
+      const [row] = await readCommitted(
+        sql,
+        (tx) => tx<ApiKeyRow[]>`
+          SELECT * FROM slotlock.create_api_key(
+            ${input.tenantRef}::text,
+            ${name}::text,
+            ${prefix}::text,
+            ${digest}::bytea,
+            pg_catalog.string_to_array(${scopes.join(',')}::text, ','),
+            ${expiresAt ?? null}::timestamptz,
+            ${createdBy ?? null}::text
+          )`,
+      );
       if (!row) {
         throw invalid(
           'api_key_limit_reached',
@@ -306,6 +324,17 @@ export function createSlotlockApiKeyStore(sql: SlotlockSql): SlotlockApiKeyStore
       const rows = await sql<ApiKeyRow[]>`
         SELECT * FROM slotlock.list_api_keys(${tenantRef}::text)`;
       return rows.map(apiKeyFrom);
+    },
+
+    async rotate({ tenantRef, id }) {
+      assertTenantRef(tenantRef);
+      if (typeof id !== 'string' || !UUID_PATTERN.test(id)) return null;
+      const { key, prefix, digest } = generateSlotlockApiKey();
+      const [row] = await sql<ApiKeyRow[]>`
+        SELECT * FROM slotlock.rotate_api_key(
+          ${tenantRef}::text, ${id}::uuid, ${prefix}::text, ${digest}::bytea
+        )`;
+      return row ? { key, apiKey: apiKeyFrom(row) } : null;
     },
 
     async revoke({ tenantRef, id }) {
@@ -333,23 +362,60 @@ export function createSlotlockApiKeyStore(sql: SlotlockSql): SlotlockApiKeyStore
   };
 }
 
+export interface SlotlockApiKeyAuthenticatorOptions {
+  /** Key lookups that may run at once, default 2: at most this many connections serve them. */
+  maxConcurrentLookups?: number;
+  /** Lookups that may wait for one, default 256. A request beyond that is anonymous at once. */
+  maxWaitingLookups?: number;
+}
+
 /**
  * Bearer authentication by API key: a request carrying an active key is that key's principal,
- * `api_key:<id>` in the key's own tenant with its scopes, for `authorize` to check. A value that is
- * not a well-formed key is anonymous without a lookup.
+ * `api_key:<id>` in the key's own tenant with its scopes, which the agent server enforces before
+ * `authorize`. A value that is not a well-formed key is anonymous without a lookup.
+ *
+ * Anyone can make well-formed keys, so lookups are bounded: a flood of made-up keys waits for at
+ * most `maxConcurrentLookups` connections and is refused past `maxWaitingLookups`, and the rest of
+ * the pool stays free for authenticated work. Rate-limit a public server in front of it as well.
  */
 export function createSlotlockApiKeyAuthenticator(
   keys: Pick<SlotlockApiKeyStore, 'authenticate'>,
+  options: SlotlockApiKeyAuthenticatorOptions = {},
 ): (request: Request) => Promise<SlotlockAgentPrincipal | null> {
+  const maxActive = options.maxConcurrentLookups ?? DEFAULT_MAX_CONCURRENT_LOOKUPS;
+  const maxWaiting = options.maxWaitingLookups ?? DEFAULT_MAX_WAITING_LOOKUPS;
+  if (!Number.isSafeInteger(maxActive) || maxActive < 1) {
+    throw new Error('Slotlock API key maxConcurrentLookups must be a positive integer');
+  }
+  if (!Number.isSafeInteger(maxWaiting) || maxWaiting < 0) {
+    throw new Error('Slotlock API key maxWaitingLookups must be a non-negative integer');
+  }
+  let active = 0;
+  const waiting: Array<() => void> = [];
   return async (request) => {
     const presented = slotlockBearerCredential(request);
     if (presented === undefined || !isSlotlockApiKey(presented)) return null;
-    const identity = await keys.authenticate(presented);
-    if (!identity) return null;
-    return {
-      subject: `api_key:${identity.id}`,
-      tenantRef: identity.tenantRef,
-      scopes: identity.scopes,
-    };
+    if (active < maxActive) {
+      active += 1;
+    } else if (waiting.length < maxWaiting) {
+      // A finishing lookup hands its slot straight to the next waiter, so `active` is unchanged.
+      await new Promise<void>((resolve) => waiting.push(resolve));
+    } else {
+      return null;
+    }
+    try {
+      if (request.signal.aborted) return null;
+      const identity = await keys.authenticate(presented);
+      if (!identity) return null;
+      return {
+        subject: `api_key:${identity.id}`,
+        tenantRef: identity.tenantRef,
+        scopes: identity.scopes,
+      };
+    } finally {
+      const next = waiting.shift();
+      if (next) next();
+      else active -= 1;
+    }
   };
 }

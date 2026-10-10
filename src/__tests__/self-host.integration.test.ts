@@ -371,6 +371,20 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         401,
       );
       expect(await resourcesOf(writer.key as string)).toEqual(['vehicle-42']);
+
+      // Rotating keeps the key (and what it booked) but swaps the secret at once.
+      const rotatedRun = await run(['key', 'rotate', writer.id as string]);
+      expect(rotatedRun.code).toBe(0);
+      expect(rotatedRun.stderr.text()).toMatch(/shown once/);
+      const rotated = JSON.parse(rotatedRun.stdout.text()) as Record<string, unknown>;
+      expect(rotated).toMatchObject({ id: writer.id, key: expect.stringMatching(/^slk_/) });
+      expect((await call(writer.key as string, 'slotlock_list_resources', { limit: 1 })).status).toBe(
+        401,
+      );
+      expect(await resourcesOf(rotated.key as string)).toEqual(['vehicle-42']);
+      const rotateRevoked = await run(['key', 'rotate', reader.id as string]);
+      expect(rotateRevoked.code).toBe(1);
+      expect(rotateRevoked.stderr.text()).toMatch(/no active API key with that id/);
     } finally {
       shutdown.abort();
     }

@@ -2,7 +2,6 @@
 // operation needs, and that the authenticator and the store refuse bad input before any query runs.
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { slotlockAgentTools } from '../agent-server.js';
 import {
   SLOTLOCK_API_KEY_SCOPES,
   createSlotlockApiKeyAuthenticator,
@@ -10,7 +9,6 @@ import {
   generateSlotlockApiKey,
   isSlotlockApiKey,
   slotlockApiKeyDigest,
-  slotlockApiKeyScopeFor,
 } from '../api-keys.js';
 import type { SlotlockSql } from '../store.js';
 
@@ -63,21 +61,8 @@ describe('API key format', () => {
 });
 
 describe('API key scopes', () => {
-  it('needs write for the operations that change a calendar and read for every other one', () => {
+  it('are read and write, the scopes the agent server enforces', () => {
     expect(SLOTLOCK_API_KEY_SCOPES).toEqual(['read', 'write']);
-    const scopes = Object.fromEntries(
-      slotlockAgentTools().map(({ name }) => [name, slotlockApiKeyScopeFor(name)]),
-    );
-    expect(scopes).toEqual({
-      slotlock_list_resources: 'read',
-      slotlock_get_free_busy: 'read',
-      slotlock_find_next_available: 'read',
-      slotlock_create_event: 'write',
-      slotlock_get_event: 'read',
-      slotlock_list_events: 'read',
-      slotlock_update_event: 'write',
-      slotlock_delete_event: 'write',
-    });
   });
 });
 
@@ -102,6 +87,64 @@ describe('API key authentication', () => {
     const { key } = generateSlotlockApiKey();
     const authenticate = createSlotlockApiKeyAuthenticator({ authenticate: async () => null });
     await expect(authenticate(request(`Bearer ${key}`))).resolves.toBeNull();
+  });
+
+  it('runs at most two lookups at once, queues a bounded number and refuses the rest', async () => {
+    const pending: Array<() => void> = [];
+    const authenticateKey = vi.fn(
+      () =>
+        new Promise<null>((resolve) => {
+          pending.push(() => resolve(null));
+        }),
+    );
+    const authenticate = createSlotlockApiKeyAuthenticator(
+      { authenticate: authenticateKey },
+      { maxConcurrentLookups: 2, maxWaitingLookups: 1 },
+    );
+    const key = () => request(`Bearer ${generateSlotlockApiKey().key}`);
+    const settled: Array<string> = [];
+    const outcomes = [key(), key(), key(), key()].map((each, index) =>
+      authenticate(each).then((principal) => settled.push(`${index}:${principal}`)),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Two run, one waits, the fourth is refused without a lookup.
+    expect(authenticateKey).toHaveBeenCalledTimes(2);
+    expect(settled).toEqual(['3:null']);
+    pending.shift()?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(authenticateKey).toHaveBeenCalledTimes(3);
+    for (const finish of pending.splice(0)) finish();
+    await Promise.all(outcomes);
+    expect(settled.sort()).toEqual(['0:null', '1:null', '2:null', '3:null']);
+
+    // The slots are free again.
+    authenticateKey.mockResolvedValue(null);
+    await authenticate(key());
+    expect(authenticateKey).toHaveBeenCalledTimes(4);
+  });
+
+  it('skips the lookup for a request whose client has gone while it waited', async () => {
+    let release: () => void = () => {};
+    const authenticateKey = vi.fn(
+      () => new Promise<null>((resolve) => (release = () => resolve(null))),
+    );
+    const authenticate = createSlotlockApiKeyAuthenticator(
+      { authenticate: authenticateKey },
+      { maxConcurrentLookups: 1, maxWaitingLookups: 4 },
+    );
+    const first = authenticate(request(`Bearer ${generateSlotlockApiKey().key}`));
+    const gone = new AbortController();
+    const waiting = authenticate(
+      new Request('http://localhost/mcp', {
+        headers: { authorization: `Bearer ${generateSlotlockApiKey().key}` },
+        signal: gone.signal,
+      }),
+    );
+    gone.abort();
+    release();
+    await expect(first).resolves.toBeNull();
+    await expect(waiting).resolves.toBeNull();
+    expect(authenticateKey).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -152,6 +195,7 @@ describe('API key store input', () => {
   it('answers a malformed key or key id without a query', async () => {
     await expect(keys.authenticate('not-a-key')).resolves.toBeNull();
     await expect(keys.revoke({ tenantRef: 'fleet-7', id: 'not-a-uuid' })).resolves.toBeNull();
+    await expect(keys.rotate({ tenantRef: 'fleet-7', id: 'not-a-uuid' })).resolves.toBeNull();
     await expect(keys.list({ tenantRef: '' })).rejects.toMatchObject({
       code: 'invalid_tenant_ref',
     });

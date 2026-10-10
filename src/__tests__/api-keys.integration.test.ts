@@ -9,6 +9,7 @@ import {
   SLOTLOCK_API_KEY_ACTIVE_LIMIT,
   type SlotlockApiKeyStore,
   createSlotlockApiKeyStore,
+  generateSlotlockApiKey,
 } from '../api-keys.js';
 import { createSlotlockStore } from '../store.js';
 
@@ -152,6 +153,73 @@ describe.skipIf(!url)('API keys (real Postgres)', () => {
     await expect(keys.erase({ tenantRef: tenant })).resolves.toBe(0);
   });
 
+  it('rotates a key in place: same id, a new secret, and the old one dead for good', async () => {
+    const original = await keys.create({ tenantRef: tenantA, name: 'Rotating', scopes: ['read'] });
+    const rotated = await keys.rotate({ tenantRef: tenantA, id: original.apiKey.id });
+    expect(rotated?.key).toMatch(/^slk_[0-9A-Za-z]{46}$/);
+    expect(rotated?.key).not.toBe(original.key);
+    expect(rotated?.apiKey).toMatchObject({
+      id: original.apiKey.id,
+      name: 'Rotating',
+      scopes: ['read'],
+      prefix: rotated?.key.slice(0, 12),
+      lastUsedAt: null,
+      revokedAt: null,
+    });
+    await expect(keys.authenticate(original.key)).resolves.toBeNull();
+    await expect(keys.authenticate(rotated?.key as string)).resolves.toMatchObject({
+      id: original.apiKey.id,
+    });
+
+    // Another tenant cannot rotate it, and a revoked key cannot be rotated back to life.
+    await expect(keys.rotate({ tenantRef: tenantB, id: original.apiKey.id })).resolves.toBeNull();
+    await keys.revoke({ tenantRef: tenantA, id: original.apiKey.id });
+    await expect(keys.rotate({ tenantRef: tenantA, id: original.apiKey.id })).resolves.toBeNull();
+    await expect(keys.authenticate(rotated?.key as string)).resolves.toBeNull();
+
+    // The rotated-out digest can never be registered again, as a new key or by another rotation.
+    const retired = createHash('sha256').update(original.key, 'utf8').digest();
+    await expect(
+      application`SELECT * FROM slotlock.create_api_key(
+        ${tenantA}, 'again', 'slk_aaaaaaaa', ${retired}, ARRAY['read'], NULL, NULL)`,
+    ).rejects.toMatchObject({ code: '23505' });
+    const other = await keys.create({ tenantRef: tenantA, name: 'Other', scopes: ['read'] });
+    await expect(
+      application`SELECT * FROM slotlock.rotate_api_key(
+        ${tenantA}, ${other.apiKey.id}::uuid, 'slk_aaaaaaaa', ${retired})`,
+    ).rejects.toMatchObject({ code: '23505' });
+  });
+
+  it('never brings back a key that was revoked and then erased', async () => {
+    const tenant = `keys-revive-${randomUUID()}`;
+    const revoked = await keys.create({ tenantRef: tenant, name: 'Revoked', scopes: ['read'] });
+    await keys.revoke({ tenantRef: tenant, id: revoked.apiKey.id });
+    await keys.erase({ tenantRef: tenant });
+    const digest = createHash('sha256').update(revoked.key, 'utf8').digest();
+    await expect(
+      application`SELECT * FROM slotlock.create_api_key(
+        ${tenant}, 'revived', ${revoked.key.slice(0, 12)}, ${digest}, ARRAY['read', 'write'],
+        NULL, NULL)`,
+    ).rejects.toMatchObject({ code: '23505' });
+    await expect(keys.authenticate(revoked.key)).resolves.toBeNull();
+  });
+
+  it('holds the limits the library checks in the database too', async () => {
+    const { prefix, digest } = generateSlotlockApiKey();
+    for (const [expiresAt, scopes] of [
+      ['9999-01-01T00:00:00Z', ['read']],
+      [null, ['write', 'write']],
+      [null, ['write', 'read']],
+    ] as const) {
+      await expect(
+        application`SELECT * FROM slotlock.create_api_key(
+          ${tenantB}, 'direct', ${prefix}, ${digest},
+          pg_catalog.string_to_array(${scopes.join(',')}::text, ','),
+          ${expiresAt}::timestamptz, NULL)`,
+      ).rejects.toMatchObject({ code: '23514' });
+    }
+  });
+
   it('refuses a key past the active limit, even when the requests race', async () => {
     const tenant = `keys-limit-${randomUUID()}`;
     try {
@@ -177,6 +245,46 @@ describe.skipIf(!url)('API keys (real Postgres)', () => {
       ).resolves.toMatchObject({ key: expect.any(String) });
     } finally {
       await admin`DELETE FROM slotlock.api_keys WHERE tenant_ref = ${tenant}`;
+    }
+  });
+
+  // Under REPEATABLE READ a statement's snapshot predates the lock it waits for, so the count would
+  // miss the keys created while it waited. The store creates in a READ COMMITTED transaction of its
+  // own whatever the role's default; a caller's own REPEATABLE READ transaction is refused.
+  it('holds the limit when the role defaults to REPEATABLE READ, and refuses such a transaction', async () => {
+    const tenant = `keys-isolation-${randomUUID()}`;
+    await admin.unsafe(`ALTER ROLE ${role} SET default_transaction_isolation = 'repeatable read'`);
+    const repeatable = postgres(
+      Object.assign(new URL(url as string), { username: role, password }).href,
+      { max: 6, onnotice: () => {} },
+    );
+    try {
+      const [setting] = await repeatable<{ level: string }[]>`
+        SELECT current_setting('transaction_isolation') AS level`;
+      expect(setting?.level).toBe('repeatable read');
+      const repeatableKeys = createSlotlockApiKeyStore(repeatable);
+      for (let index = 0; index < SLOTLOCK_API_KEY_ACTIVE_LIMIT - 1; index += 1) {
+        await repeatableKeys.create({ tenantRef: tenant, name: `key ${index}`, scopes: ['read'] });
+      }
+      const racing = await Promise.allSettled(
+        Array.from({ length: 6 }, (_, index) =>
+          repeatableKeys.create({ tenantRef: tenant, name: `racing ${index}`, scopes: ['read'] }),
+        ),
+      );
+      expect(racing.filter(({ status }) => status === 'fulfilled')).toHaveLength(1);
+      const [active] = await admin<{ count: string }[]>`
+        SELECT count(*) FROM slotlock.api_keys WHERE tenant_ref = ${tenant} AND revoked_at IS NULL`;
+      expect(Number(active?.count)).toBe(SLOTLOCK_API_KEY_ACTIVE_LIMIT);
+
+      await expect(
+        repeatable.begin('isolation level repeatable read', (tx) =>
+          createSlotlockApiKeyStore(tx).create({ tenantRef: `${tenant}-tx`, name: 'x', scopes: ['read'] }),
+        ),
+      ).rejects.toMatchObject({ code: '25000' });
+    } finally {
+      await repeatable.end({ timeout: 5 });
+      await admin.unsafe(`ALTER ROLE ${role} RESET default_transaction_isolation`);
+      await admin`DELETE FROM slotlock.api_keys WHERE tenant_ref LIKE ${`${tenant}%`}`;
     }
   });
 });

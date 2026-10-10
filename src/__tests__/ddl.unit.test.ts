@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   SLOTLOCK_API_KEY_FUNCTIONS,
+  SLOTLOCK_API_KEY_TABLES,
   SLOTLOCK_CORE_DDL,
   SLOTLOCK_TENANT_CONTEXT_SETTING,
   SLOTLOCK_TENANT_RLS_DDL,
@@ -152,21 +153,43 @@ describe('deployment DDL name resolution', () => {
     }
   });
 
-  it('keeps API keys in a table no role but its owner reads or writes', () => {
-    expect(SLOTLOCK_CORE_DDL).toContain('CREATE TABLE IF NOT EXISTS slotlock.api_keys');
-    expect(SLOTLOCK_CORE_DDL).toContain('ALTER TABLE slotlock.api_keys ENABLE ROW LEVEL SECURITY;');
-    expect(SLOTLOCK_CORE_DDL).toContain('REVOKE ALL ON slotlock.api_keys FROM PUBLIC;');
+  it('keeps API keys in tables no role but their owner reads or writes', () => {
+    for (const table of SLOTLOCK_API_KEY_TABLES) {
+      expect(SLOTLOCK_CORE_DDL).toContain(`CREATE TABLE IF NOT EXISTS slotlock.${table} (`);
+      expect(SLOTLOCK_CORE_DDL).toContain(`ALTER TABLE slotlock.${table} ENABLE ROW LEVEL SECURITY;`);
+      expect(SLOTLOCK_CORE_DDL).toContain(`REVOKE ALL ON slotlock.${table} FROM PUBLIC;`);
+    }
     expect(SLOTLOCK_CORE_DDL).toMatch(/secret_hash bytea NOT NULL/);
     expect(SLOTLOCK_CORE_DDL).not.toMatch(/api_keys[^;]*\bkey text\b/);
+    // The database holds the limits the library checks, not only the library.
+    expect(SLOTLOCK_CORE_DDL).toContain("expires_at <= created_at + interval '3651 days'");
+    expect(SLOTLOCK_CORE_DDL).toContain(
+      "scopes IN (ARRAY['read']::text[], ARRAY['write']::text[], ARRAY['read', 'write']::text[])",
+    );
+  });
+
+  it('creates keys only under READ COMMITTED, where its lock makes the limit count exact', () => {
+    const create = SLOTLOCK_CORE_DDL.slice(
+      SLOTLOCK_CORE_DDL.indexOf('CREATE OR REPLACE FUNCTION slotlock.create_api_key('),
+      SLOTLOCK_CORE_DDL.indexOf('$slotlock_create_api_key$;'),
+    );
+    const isolation = create.indexOf("current_setting('transaction_isolation') <> 'read committed'");
+    const lock = create.indexOf('pg_advisory_xact_lock(');
+    const count = create.indexOf('count(*)');
+    expect(isolation).toBeGreaterThan(0);
+    expect(lock).toBeGreaterThan(isolation);
+    expect(count).toBeGreaterThan(lock);
   });
 });
 
 describe('application role grants', () => {
   it('covers exactly the tables the core schema creates, each under forced RLS', () => {
-    // rls_policy_contracts is deployment-only; api_keys is reached only through its functions.
+    // rls_policy_contracts is deployment-only; the API key tables are reached only through their
+    // functions.
+    const apiKeyTables: readonly string[] = SLOTLOCK_API_KEY_TABLES;
     const created = [...SLOTLOCK_CORE_DDL.matchAll(/CREATE TABLE IF NOT EXISTS slotlock\.([a-z_]+)/g)]
-      .map((match) => match[1])
-      .filter((table) => table !== 'rls_policy_contracts' && table !== 'api_keys');
+      .map((match) => match[1] as string)
+      .filter((table) => table !== 'rls_policy_contracts' && !apiKeyTables.includes(table));
     expect([...SLOTLOCK_TENANT_TABLES].sort()).toEqual([...new Set(created)].sort());
     for (const table of SLOTLOCK_TENANT_TABLES) {
       expect(SLOTLOCK_TENANT_RLS_DDL).toContain(
@@ -181,7 +204,7 @@ describe('application role grants', () => {
       `GRANT USAGE ON SCHEMA slotlock TO "slotlock_app";\nGRANT SELECT, INSERT, UPDATE, DELETE ON ${SLOTLOCK_TENANT_TABLES.map((table) => `slotlock.${table}`).join(', ')} TO "slotlock_app";\nGRANT EXECUTE ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS.join(', ')} TO "slotlock_app";\n`,
     );
     expect(ddl).not.toContain('rls_policy_contracts');
-    expect(ddl).not.toMatch(/slotlock\.api_keys\b/);
+    for (const table of SLOTLOCK_API_KEY_TABLES) expect(ddl).not.toContain(`slotlock.${table}`);
     expect(ddl).not.toMatch(/ALL|TRUNCATE|REFERENCES|TRIGGER|CREATE|OWNER/);
   });
 
