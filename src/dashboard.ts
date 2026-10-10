@@ -7,6 +7,11 @@
 // HttpOnly, Secure, SameSite=Lax) that lasts 12 hours and is checked against the allowlist on every
 // request. Every form carries a CSRF token bound to the session, and every POST must come from this
 // server's own origin.
+//
+// Process memory, bounded and per instance, also remembers finished sign-ins (a callback works
+// once), signed-out sessions (a copied cookie stays signed out) and sent forms (a resubmitted form
+// does not run twice). Run one instance, or put the instances behind sticky sessions, for these to
+// hold everywhere; the signed cookies and CSRF tokens hold either way.
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { SlotlockApiKey, SlotlockApiKeyScope, SlotlockApiKeyStore } from './api-keys.js';
 import type { SlotlockStore } from './store.js';
@@ -17,6 +22,12 @@ export const SLOTLOCK_DASHBOARD_MAX_RESOURCES = 100;
 const SESSION_TTL_MS = 12 * 3_600_000;
 const SIGN_IN_TTL_MS = 10 * 60_000;
 const MAX_FORM_BYTES = 8_192;
+/** GitHub exchanges (token, then user) one instance runs at once; more sign-ins are told to retry. */
+const MAX_SIGN_INS_IN_FLIGHT = 8;
+/** Entries each in-memory record keeps; past this the oldest go first. */
+const MAX_REMEMBERED = 10_000;
+const FORM_NONCE = /^[A-Za-z0-9_-]{22,64}$/;
+const GITHUB_ERROR_CODE = /^[a-z0-9_]{1,64}$/;
 const MAX_COOKIE_CHARACTERS = 4_096;
 const GITHUB_TIMEOUT_MS = 10_000;
 /** The REST API version GitHub documents for GET /user (docs.github.com, read 2026-10-10). */
@@ -25,7 +36,8 @@ const USER_AGENT = 'slotlock-dashboard';
 const SESSION_COOKIE = '__Host-slotlock-session';
 const SIGN_IN_COOKIE = '__Host-slotlock-oauth';
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
-const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+/** Only shown, never used as an identity; managed accounts add `_<shortcode>` to the handle. */
+const GITHUB_LOGIN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DAY_MS = 86_400_000;
 const KEY_ACCESS: Readonly<Record<string, SlotlockApiKeyScope[]>> = Object.freeze({
@@ -148,6 +160,31 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(left, right) && a === b;
 }
 
+/** Values remembered until they expire, the oldest dropped first past MAX_REMEMBERED. */
+function remember(now: () => number) {
+  const entries = new Map<string, number>();
+  return {
+    has(value: string): boolean {
+      const expires = entries.get(value);
+      if (expires === undefined) return false;
+      if (expires > now()) return true;
+      entries.delete(value);
+      return false;
+    },
+    add(value: string, expires: number): void {
+      entries.set(value, expires);
+      if (entries.size <= MAX_REMEMBERED) return;
+      for (const [key, until] of entries) {
+        if (until <= now()) entries.delete(key);
+      }
+      for (const key of entries.keys()) {
+        if (entries.size <= MAX_REMEMBERED) break;
+        entries.delete(key);
+      }
+    },
+  };
+}
+
 function readCookies(request: Request): Map<string, string> {
   const cookies = new Map<string, string>();
   for (const part of (request.headers.get('cookie') ?? '').split(';')) {
@@ -224,8 +261,41 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     throw new Error('Slotlock dashboard sessionSecret must be at least 32 bytes');
   }
   const secret = Buffer.from(options.sessionSecret, 'utf8');
+  // A list, or exactly '*': any other string would match ids by substring.
   const allowed = (uid: string) =>
-    options.allowedUsers === '*' || options.allowedUsers.includes(uid);
+    options.allowedUsers === '*' ||
+    (Array.isArray(options.allowedUsers) && options.allowedUsers.includes(uid));
+  const finishedSignIns = remember(now);
+  const signedOutSessions = remember(now);
+  const sentForms = remember(now);
+  let signInsInFlight = 0;
+  const tenantQueues = new Map<string, Promise<unknown>>();
+
+  function report(message: string): void {
+    try {
+      options.onError?.(new Error(message));
+    } catch {
+      // A failing reporter must not change the response.
+    }
+  }
+
+  /** Run `task` after every earlier task for the same tenant in this instance has finished. */
+  async function oneAtATime<T>(tenantRef: string, task: () => Promise<T>): Promise<T> {
+    const previous = tenantQueues.get(tenantRef) ?? Promise.resolve();
+    const run = previous.then(task, task);
+    const settled = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    tenantQueues.set(tenantRef, settled);
+    try {
+      return await run;
+    } finally {
+      if (tenantQueues.get(tenantRef) === settled) tenantQueues.delete(tenantRef);
+    }
+  }
+
+  const formNonce = () => randomBytes(18).toString('base64url');
 
   function seal(context: string, payload: Record<string, unknown>): string {
     const body = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
@@ -239,8 +309,12 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     if (!body || !mac || rest.length > 0 || !BASE64URL.test(body) || !BASE64URL.test(mac)) {
       return null;
     }
-    const expected = createHmac('sha256', secret).update(`${context}.${body}`).digest();
-    const given = Buffer.from(mac, 'base64url');
+    // Compared as text: decoding would drop the two spare bits of the last character, so three
+    // other spellings of the same MAC would pass.
+    const expected = Buffer.from(
+      createHmac('sha256', secret).update(`${context}.${body}`).digest('base64url'),
+    );
+    const given = Buffer.from(mac);
     if (given.length !== expected.length || !timingSafeEqual(given, expected)) return null;
     let payload: unknown;
     try {
@@ -259,7 +333,8 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       typeof payload.uid !== 'string' ||
       typeof payload.login !== 'string' ||
       typeof payload.sid !== 'string' ||
-      !allowed(payload.uid)
+      !allowed(payload.uid) ||
+      signedOutSessions.has(payload.sid)
     ) {
       return null;
     }
@@ -336,9 +411,9 @@ ${notice ? html`<p class="notice" role="alert">${notice}</p>` : html``}
       const actions =
         status === 'Active'
           ? html`<details class="act"><summary>Rotate</summary><p>A new secret replaces this one at once. The key keeps its name, access and bookings.</p>
-<form method="post" action="${root}/keys/rotate"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="id" value="${key.id}"><button type="submit">Rotate key</button></form></details>
+<form method="post" action="${root}/keys/rotate"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce()}"><input type="hidden" name="id" value="${key.id}"><button type="submit">Rotate key</button></form></details>
 <details class="act danger"><summary>Revoke</summary><p>Requests with this key fail at once. What it booked stays on the calendar.</p>
-<form method="post" action="${root}/keys/revoke"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="id" value="${key.id}"><button class="danger" type="submit">Revoke key</button></form></details>`
+<form method="post" action="${root}/keys/revoke"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce()}"><input type="hidden" name="id" value="${key.id}"><button class="danger" type="submit">Revoke key</button></form></details>`
           : html``;
       return html`<tr>
 <td data-label="Name">${key.name}</td>
@@ -376,6 +451,7 @@ ${notice ? html`<p class="notice" role="alert">${notice}</p>` : html``}
 <div class="head"><div><h2>API keys</h2><p>Each key acts in your calendar only. Give every agent its own, with the least access it needs.</p></div></div>
 <form class="create" method="post" action="${root}/keys">
 <input type="hidden" name="csrf" value="${token}">
+<input type="hidden" name="once" value="${formNonce()}">
 <label>Name<input name="name" required maxlength="100" placeholder="Booking agent"></label>
 <label>Access<select name="access"><option value="read_write">Read and write</option><option value="read">Read only</option></select></label>
 <label>Expires<select name="expires"><option value="90">In 90 days</option><option value="30">In 30 days</option><option value="365">In a year</option><option value="never">Never</option></select></label>
@@ -392,6 +468,7 @@ ${
 <div class="head"><div><h2>Resources</h2><p>What your agents book: a car, a room, a person, a machine. Up to ${SLOTLOCK_DASHBOARD_MAX_RESOURCES}.</p></div></div>
 <form class="create" method="post" action="${root}/resources">
 <input type="hidden" name="csrf" value="${token}">
+<input type="hidden" name="once" value="${formNonce()}">
 <label>Reference<input name="reference" required maxlength="200" placeholder="vehicle-42"></label>
 <label>Time zone<input name="timezone" required maxlength="64" value="UTC" placeholder="Europe/London"></label>
 <button type="submit">Add resource</button>
@@ -472,10 +549,19 @@ ${
       redirect: 'error',
       signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
     });
-    if (!response.ok) return null;
+    if (!response.ok) {
+      report(`GitHub token exchange failed: HTTP ${response.status}`);
+      return null;
+    }
     const body: unknown = await response.json().catch(() => null);
     const token = isRecord(body) ? body.access_token : undefined;
-    return typeof token === 'string' && token.length > 0 && token.length <= 1_000 ? token : null;
+    if (typeof token === 'string' && token.length > 0 && token.length <= 1_000) return token;
+    // GitHub answers a refused exchange with 200 and an `error` code; the code alone is safe to log.
+    const refusal = isRecord(body) && typeof body.error === 'string' ? body.error : '';
+    report(
+      `GitHub token exchange failed: ${GITHUB_ERROR_CODE.test(refusal) ? refusal : 'unexpected response'}`,
+    );
+    return null;
   }
 
   async function readGitHubUser(token: string): Promise<{ uid: string; login: string } | null> {
@@ -489,7 +575,10 @@ ${
       redirect: 'error',
       signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
     });
-    if (!response.ok) return null;
+    if (!response.ok) {
+      report(`GitHub user lookup failed: HTTP ${response.status}`);
+      return null;
+    }
     const body: unknown = await response.json().catch(() => null);
     if (
       !isRecord(body) ||
@@ -517,14 +606,30 @@ ${
       code.length === 0 ||
       code.length > 512 ||
       state === null ||
-      !safeEqual(state, pending.state)
+      !safeEqual(state, pending.state) ||
+      finishedSignIns.has(pending.state)
     ) {
       return signedOutPage(400, 'That sign-in did not finish here, or took too long. Sign in again.', [
         clearSignIn,
       ]);
     }
-    const token = await exchangeCode(code, pending.verifier).catch(() => null);
-    const user = token === null ? null : await readGitHubUser(token).catch(() => null);
+    if (signInsInFlight >= MAX_SIGN_INS_IN_FLIGHT) {
+      return signedOutPage(503, 'Too many people are signing in at once. Sign in again in a moment.', [
+        clearSignIn,
+      ]);
+    }
+    finishedSignIns.add(pending.state, pending.exp as number);
+    signInsInFlight += 1;
+    let user: { uid: string; login: string } | null;
+    try {
+      const token = await exchangeCode(code, pending.verifier);
+      user = token === null ? null : await readGitHubUser(token);
+    } catch (error) {
+      report(`GitHub sign-in failed: ${error instanceof Error ? error.name : 'unknown error'}`);
+      user = null;
+    } finally {
+      signInsInFlight -= 1;
+    }
     if (!user) {
       return signedOutPage(502, 'GitHub did not complete the sign-in. Try again.', [clearSignIn]);
     }
@@ -542,12 +647,27 @@ ${
     return redirect(303, root, [clearSignIn, setCookie(SESSION_COOKIE, session, SESSION_TTL_MS / 1000)]);
   }
 
-  async function readForm(request: Request): Promise<URLSearchParams | null> {
+  /** The form, `'too_large'` past MAX_FORM_BYTES (read no further), or null for another type. */
+  async function readForm(request: Request): Promise<URLSearchParams | 'too_large' | null> {
     const type = request.headers.get('content-type')?.split(';')[0]?.trim();
     if (type !== 'application/x-www-form-urlencoded') return null;
-    const text = await request.text();
-    if (Buffer.byteLength(text, 'utf8') > MAX_FORM_BYTES) return null;
-    return new URLSearchParams(text);
+    const declared = Number(request.headers.get('content-length'));
+    if (Number.isFinite(declared) && declared > MAX_FORM_BYTES) return 'too_large';
+    if (!request.body) return new URLSearchParams();
+    const reader = request.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_FORM_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        return 'too_large';
+      }
+      chunks.push(value);
+    }
+    return new URLSearchParams(Buffer.concat(chunks).toString('utf8'));
   }
 
   async function createKey(session: Session, form: URLSearchParams): Promise<Response> {
@@ -598,19 +718,20 @@ ${
       return dashboardPage(session, 400, 'Give the resource a reference of 1 to 200 characters.');
     }
     const tenantRef = tenantOf(session);
-    const existing = await options.resources.list(tenantRef);
-    if (
-      existing.length >= SLOTLOCK_DASHBOARD_MAX_RESOURCES &&
-      !existing.some((resource) => resource.externalRef === reference)
-    ) {
-      return dashboardPage(
-        session,
-        409,
-        `You have ${SLOTLOCK_DASHBOARD_MAX_RESOURCES} resources, as many as the dashboard allows.`,
-      );
-    }
+    // The count and the add run one at a time per tenant, so racing adds cannot pass the cap.
+    let capped = false;
     try {
-      await options.resources.add(tenantRef, reference, timezone);
+      await oneAtATime(tenantRef, async () => {
+        const existing = await options.resources.list(tenantRef);
+        if (
+          existing.length >= SLOTLOCK_DASHBOARD_MAX_RESOURCES &&
+          !existing.some((resource) => resource.externalRef === reference)
+        ) {
+          capped = true;
+          return;
+        }
+        await options.resources.add(tenantRef, reference, timezone);
+      });
     } catch (error) {
       const code = (error as { code?: unknown }).code;
       if (code === 'invalid_timezone') {
@@ -620,6 +741,13 @@ ${
         return dashboardPage(session, 400, 'Give the resource a reference of 1 to 200 characters.');
       }
       throw error;
+    }
+    if (capped) {
+      return dashboardPage(
+        session,
+        409,
+        `You have ${SLOTLOCK_DASHBOARD_MAX_RESOURCES} resources, as many as the dashboard allows.`,
+      );
     }
     return redirect(303, root);
   }
@@ -632,13 +760,25 @@ ${
     const session = readSession(request);
     if (!session) return redirect(303, root);
     const form = await readForm(request);
+    if (form === 'too_large') {
+      return respond(413, layout('Refused', html`<p class="notice">That form is too large.</p>`, session));
+    }
     if (!form) return respond(400, layout('Refused', html`<p class="notice">That form could not be read.</p>`, session));
     const presented = form.get('csrf') ?? '';
     if (!safeEqual(presented, csrfToken(session))) {
       return respond(403, layout('Refused', html`<p class="notice">That form has expired. Go back and try again.</p>`, session));
     }
+    // A form sent again (a reload of its result, a double click) must not create or rotate twice.
+    const once = form.get('once');
+    if (once !== null) {
+      if (!FORM_NONCE.test(once) || sentForms.has(once)) {
+        return dashboardPage(session, 409, 'That form was already sent. Reload the page to start again.');
+      }
+      sentForms.add(once, session.exp);
+    }
     switch (route) {
       case '/sign-out':
+        signedOutSessions.add(session.sid, session.exp);
         return redirect(303, root, [setCookie(SESSION_COOKIE, '', 0)]);
       case '/keys':
         return createKey(session, form);

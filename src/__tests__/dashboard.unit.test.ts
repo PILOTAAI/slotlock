@@ -366,6 +366,25 @@ describe('sessions', () => {
     expect(signedIn(await (await get(dashboard(), '/base/dashboard', session)).text())).toBe(false);
   });
 
+  // A 32-byte MAC is 43 base64url characters carrying 258 bits, so its last character has two
+  // spare bits a decoder drops. Only the exact encoding the server made may count.
+  it('signs out a cookie whose MAC differs only in its spare bits', async () => {
+    const { session } = await signIn();
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    const last = alphabet.indexOf(session.at(-1) as string);
+    for (const flip of [1, 2, 3]) {
+      const altered = `${session.slice(0, -1)}${alphabet[last ^ flip]}`;
+      const html = await (await get(dashboard(), '/base/dashboard', altered)).text();
+      expect(html, altered.slice(-6)).not.toContain('@octocat');
+    }
+  });
+
+  it('allows nobody when the allowlist is a string other than *', async () => {
+    const { session } = await signIn();
+    const loose = dashboard({ allowedUsers: '4242' as unknown as readonly string[] });
+    expect(await (await get(loose, '/base/dashboard', session)).text()).not.toContain('@octocat');
+  });
+
   it('signs out on request', async () => {
     const target = dashboard();
     const { session } = await signIn(target);
@@ -561,5 +580,182 @@ describe('resources in the dashboard', () => {
     );
     expect(capped.status).toBe(409);
     expect(resources.store.add).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('limits found in review', () => {
+  it('refuses a form body over 8 KB, declared or streamed, before reading it', async () => {
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const token = await csrf(target, session);
+    const big = `csrf=${token}&name=${'x'.repeat(9_000)}&access=read&expires=never`;
+    const declared = await target.fetch(
+      new Request(`${ORIGIN}/base/dashboard/keys`, {
+        method: 'POST',
+        headers: { cookie: session, origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded' },
+        body: big,
+      }),
+    );
+    expect(declared.status).toBe(413);
+    // A declared length over the cap is refused before a byte is read, whatever arrives.
+    const announced = await target.fetch(
+      new Request(`${ORIGIN}/base/dashboard/keys`, {
+        method: 'POST',
+        headers: {
+          cookie: session,
+          origin: ORIGIN,
+          'content-type': 'application/x-www-form-urlencoded',
+          'content-length': '1000000',
+        },
+        body: `csrf=${token}&name=small&access=read&expires=never`,
+      }),
+    );
+    expect(announced.status).toBe(413);
+
+    let pulled = 0;
+    const endless = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += 1;
+        controller.enqueue(new TextEncoder().encode('x'.repeat(1_024)));
+      },
+    });
+    const streamed = await target.fetch(
+      new Request(`${ORIGIN}/base/dashboard/keys`, {
+        method: 'POST',
+        headers: { cookie: session, origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded' },
+        body: endless,
+        duplex: 'half',
+      } as RequestInit),
+    );
+    expect(streamed.status).toBe(413);
+    expect(pulled).toBeLessThan(20);
+    expect(keys.store.create).not.toHaveBeenCalled();
+  });
+
+  it('holds the resource cap when adds race', async () => {
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const token = await csrf(target, session);
+    for (let index = 0; index < SLOTLOCK_DASHBOARD_MAX_RESOURCES - 5; index += 1) {
+      resources.rows.push({ id: randomUUID(), externalRef: `r${index}`, tenantRef: 'github:4242', timezone: 'UTC' } as never);
+    }
+    // Interleave: each list and add yields, as a database round trip would.
+    const yieldNow = () => new Promise((resolve) => setTimeout(resolve, 1));
+    const list = resources.store.list.getMockImplementation();
+    const add = resources.store.add.getMockImplementation();
+    resources.store.list.mockImplementation(async (tenantRef: string) => {
+      await yieldNow();
+      return (list as NonNullable<typeof list>)(tenantRef);
+    });
+    resources.store.add.mockImplementation(async (tenantRef: string, ref: string, zone: string) => {
+      await yieldNow();
+      return (add as NonNullable<typeof add>)(tenantRef, ref, zone);
+    });
+    const outcomes = await Promise.all(
+      Array.from({ length: 20 }, (_, index) =>
+        post(target, '/base/dashboard/resources', { csrf: token, reference: `race-${index}`, timezone: 'UTC' }, session),
+      ),
+    );
+    expect(resources.rows).toHaveLength(SLOTLOCK_DASHBOARD_MAX_RESOURCES);
+    expect(outcomes.filter(({ status }) => status === 303)).toHaveLength(5);
+    expect(outcomes.filter(({ status }) => status === 409)).toHaveLength(15);
+  });
+
+  it('finishes each sign-in once', async () => {
+    const target = dashboard();
+    const start = await get(target, '/base/dashboard/sign-in');
+    const state = new URL(start.headers.get('location') ?? '').searchParams.get('state');
+    const pending = cookie(start, '__Host-slotlock-oauth')?.pair;
+    const first = await get(target, `/base/dashboard/callback?code=c&state=${state}`, pending);
+    expect(first.status).toBe(303);
+    const replay = await get(target, `/base/dashboard/callback?code=c&state=${state}`, pending);
+    expect(replay.status).toBe(400);
+    expect(github.calls.filter(({ url }) => url.endsWith('/access_token'))).toHaveLength(1);
+  });
+
+  it('runs at most eight GitHub exchanges at once', async () => {
+    const release: Array<() => void> = [];
+    const held = vi.fn(
+      (input: string | URL | Request) =>
+        new Promise<Response>((resolve) => {
+          release.push(() =>
+            resolve(
+              String(input).endsWith('/access_token')
+                ? Response.json({ access_token: 'gho_fake' })
+                : Response.json(GITHUB_USER),
+            ),
+          );
+        }),
+    );
+    const target = dashboard({ fetch: held as unknown as typeof fetch });
+    const callbacks = [];
+    for (let index = 0; index < 9; index += 1) {
+      const start = await get(target, '/base/dashboard/sign-in');
+      const state = new URL(start.headers.get('location') ?? '').searchParams.get('state');
+      callbacks.push(
+        get(target, `/base/dashboard/callback?code=c&state=${state}`, cookie(start, '__Host-slotlock-oauth')?.pair),
+      );
+    }
+    // Without a cap the ninth would wait on GitHub too; with one it is refused at once.
+    const ninth = await Promise.race([
+      callbacks[8],
+      new Promise<string>((resolve) => setTimeout(() => resolve('still waiting'), 200)),
+    ]);
+    expect(ninth instanceof Response ? ninth.status : ninth).toBe(503);
+    expect(held).toHaveBeenCalledTimes(8);
+    for (let turn = 0; turn < 100 && (release.length > 0 || held.mock.calls.length < 16); turn += 1) {
+      release.shift()?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    const finished = await Promise.all(callbacks.slice(0, 8));
+    expect(finished.every(({ status }) => status === 303)).toBe(true);
+  });
+
+  it('keeps a signed-out session signed out, even if the cookie comes back', async () => {
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const token = await csrf(target, session);
+    await post(target, '/base/dashboard/sign-out', { csrf: token }, session);
+    expect(await (await get(target, '/base/dashboard', session)).text()).not.toContain('@octocat');
+    const reused = await post(
+      target,
+      '/base/dashboard/keys',
+      { csrf: token, name: 'x', access: 'read', expires: 'never' },
+      session,
+    );
+    expect(reused.status).toBe(303);
+    expect(keys.store.create).not.toHaveBeenCalled();
+  });
+
+  it('does not run a form twice when the browser sends it again', async () => {
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const html = await (await get(target, '/base/dashboard', session)).text();
+    const token = /name="csrf" value="([^"]+)"/.exec(html)?.[1] as string;
+    const once = /action="\/base\/dashboard\/keys">\s*<input type="hidden" name="csrf" value="[^"]+">\s*<input type="hidden" name="once" value="([^"]+)">/.exec(html)?.[1];
+    expect(once).toMatch(/^[A-Za-z0-9_-]{22,}$/);
+    const fields = { csrf: token, once: once as string, name: 'Once', access: 'read', expires: 'never' };
+    expect((await post(target, '/base/dashboard/keys', fields, session)).status).toBe(200);
+    const again = await post(target, '/base/dashboard/keys', fields, session);
+    expect(again.status).toBe(409);
+    expect(await again.text()).toContain('already sent');
+    expect(keys.store.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("logs GitHub's error code, and nothing secret, when sign-in fails there", async () => {
+    const onError = vi.fn();
+    const failing = vi.fn(async () => Response.json({ error: 'incorrect_client_credentials', error_description: 'The client_id and/or client_secret passed are incorrect.' }));
+    const { callback } = await signIn(dashboard({ fetch: failing as unknown as typeof fetch, onError }));
+    expect(callback.status).toBe(502);
+    expect(onError).toHaveBeenCalledTimes(1);
+    const message = String((onError.mock.calls[0]?.[0] as Error).message);
+    expect(message).toContain('incorrect_client_credentials');
+    expect(message).not.toMatch(/fffff|fake-code|gho_/);
+  });
+
+  it('signs in a GitHub login with an underscore, as managed accounts have', async () => {
+    github = fakeGitHub({ id: 4242, login: 'jane_acme' });
+    const { callback } = await signIn();
+    expect(callback.status).toBe(303);
   });
 });

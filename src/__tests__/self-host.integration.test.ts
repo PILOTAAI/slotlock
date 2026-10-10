@@ -79,7 +79,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
 
   afterAll(async () => {
     await admin`DELETE FROM slotlock.resources WHERE tenant_ref = ${tenantRef}`;
-    await admin`DELETE FROM slotlock.api_keys WHERE tenant_ref IN (${tenantRef}, ${otherTenantRef})`;
+    await admin`DELETE FROM slotlock.api_keys WHERE tenant_ref IN (${tenantRef}, ${otherTenantRef}, 'github:4242', 'github:999')`;
     await admin.unsafe(`DROP OWNED BY ${role}`).catch(() => undefined);
     await admin.unsafe(`DROP ROLE IF EXISTS ${role}`);
     await admin.end();
@@ -403,6 +403,20 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
   it('serves the GitHub sign-in dashboard beside MCP when configured, and keeps its secrets out of the log', async () => {
     const clientSecret = randomBytes(20).toString('hex');
     const sessionSecret = randomBytes(32).toString('hex');
+    // Keys of a person still allowed, and of one removed from the allowlist.
+    const keyFor = async (tenant: string) => {
+      const out = output();
+      const code = await runSlotlockCli(['key', 'create', 'Dashboard user', '--scope', 'read'], {
+        env: { ...env, SLOTLOCK_TENANT: tenant },
+        stdout: out,
+        stderr: output(),
+        signal: new AbortController().signal,
+      });
+      expect(code).toBe(0);
+      return (JSON.parse(out.text()) as { key: string }).key;
+    };
+    const allowedKey = await keyFor('github:4242');
+    const removedKey = await keyFor('github:999');
     const shutdown = new AbortController();
     const stdout = output();
     const stderr = output();
@@ -440,13 +454,26 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       );
       expect(signIn.headers.get('set-cookie')).toMatch(/^__Host-slotlock-oauth=/);
 
-      // MCP still answers beside it.
-      const mcp = await fetch(`${origin}/mcp`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
-      });
-      expect(mcp.status).toBe(401);
+      // MCP still answers beside it, and a person removed from the allowlist lost their keys.
+      const mcp = (bearer?: string) =>
+        fetch(`${origin}/mcp`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json, text/event-stream',
+            'MCP-Protocol-Version': SLOTLOCK_MCP_LEGACY_PROTOCOL_VERSION,
+            ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'tools/call',
+            params: { name: 'slotlock_list_resources', arguments: { limit: 1 } },
+          }),
+        });
+      expect((await mcp()).status).toBe(401);
+      expect((await mcp(allowedKey)).status).toBe(200);
+      expect((await mcp(removedKey)).status).toBe(401);
     } finally {
       shutdown.abort();
     }

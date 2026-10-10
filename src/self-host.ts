@@ -587,6 +587,17 @@ export interface SlotlockRunningServer {
   close(): Promise<SlotlockNodeServerCloseResult>;
 }
 
+/**
+ * Whether the dashboard's allowlist lets a tenant act: every tenant when there is no dashboard or it
+ * allows everyone, and a `github:<id>` tenant only while that id is listed.
+ */
+function dashboardAllows(config: SlotlockServeConfig, tenantRef: string): boolean {
+  const users = config.dashboard?.allowedUsers;
+  if (users === undefined || users === '*') return true;
+  const githubId = /^github:(\d+)$/.exec(tenantRef)?.[1];
+  return githubId === undefined || users.includes(githubId);
+}
+
 /** Serve MCP and A2A over HTTP from the Postgres store, as one token-authenticated tenant. */
 export async function startSlotlockServer(
   config: SlotlockServeConfig,
@@ -622,9 +633,12 @@ export async function startSlotlockServer(
       backend: createSlotlockStoreAgentBackend(store, {
         availabilityRules: async () => config.availability.map((rule) => ({ ...rule })),
       }),
-      // The token is compared in constant time first; only then is a key looked up.
-      authenticate: async (request) =>
-        (await authenticateToken?.(request)) ?? (await authenticateKey(request)),
+      // The token is compared in constant time first; only then is a key looked up. A person the
+      // dashboard no longer allows loses their keys with their session.
+      authenticate: async (request) => {
+        const principal = (await authenticateToken?.(request)) ?? (await authenticateKey(request));
+        return principal && dashboardAllows(config, principal.tenantRef) ? principal : null;
+      },
       authorize: async ({ principal, operation }) =>
         authorizeSlotlockServeOperation({ principal, operation }),
       health: async () =>
