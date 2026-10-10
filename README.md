@@ -44,9 +44,15 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
 
 - The server runs as a role that owns nothing and cannot bypass row-level security; a one-off
   `migrate` service applies the schema as the owner.
-- `SLOTLOCK_AVAILABILITY` sets the bookable hours; without it no slot is ever offered.
+- `SLOTLOCK_AVAILABILITY` sets the default bookable hours. A resource can have its own
+  (`slotlock hours set`, or the dashboard); with neither, no slot is offered.
   `SLOTLOCK_CONFIRM_WRITES=all` (the default) makes every write wait for a person.
 - To serve beyond this machine, put a TLS proxy in front and set `SLOTLOCK_PUBLIC_URL`.
+
+```sh
+slotlock hours set '[{"rrule":"FREQ=WEEKLY;BYDAY=SA","startMinutes":600,"durationMinutes":240}]' --resource vehicle-42
+slotlock hours clear --all    # back to SLOTLOCK_AVAILABILITY
+```
 
 Without Docker: `slotlock migrate`, then `slotlock serve`. `slotlock --help` lists every setting.
 
@@ -108,8 +114,10 @@ resources, which is how the hosted Slotlock hands out keys:
   recorded at once (12 hours' worth); past that the dashboard answers 429 until the oldest expire.
   Signing out always works.
 - A person may add 100 resources. The database holds the cap, so adds racing on any number of servers
-  stop at 100; a resource they already have can still change time zone. Bookable hours come from
-  `SLOTLOCK_AVAILABILITY` and apply to every tenant's resources.
+  stop at 100; a resource they already have can still change time zone.
+- Each resource uses the server's bookable hours (`SLOTLOCK_AVAILABILITY`) until its owner sets its
+  own on the hours page: two windows a day, overnight or all day, or closed. One form sets them
+  for every resource at once.
 - Rate-limit `/dashboard/sign-in`, `/dashboard/callback` and the dashboard's POSTs at your proxy:
   each callback costs a database write and a call to GitHub (an instance runs at most eight at
   once), and each form a database write.
@@ -285,6 +293,11 @@ one tenant take a database lock and count under READ COMMITTED, so racing ones s
 any number of servers; inside a REPEATABLE READ or SERIALIZABLE transaction they refuse
 (`invalid_transaction_isolation`). Uncapped creates take no lock.
 
+`setResourceAvailability({ tenantRef, id, rules })` gives a resource its own bookable hours (`null`
+uses the default, `[]` closes it); `setTenantAvailability({ tenantRef, rules })` sets every resource
+of a tenant. `createSlotlockStoreAgentBackend` answers from a resource's own hours and calls
+`availabilityRules` only for resources without them.
+
 Writing rules:
 
 - Create with `expectedRevision: 0`; update with the revision you last read and a new idempotency
@@ -412,7 +425,8 @@ export async function startCalendarServer(config: CalendarServerConfig) {
 
 - `authorize` runs on every call with the current tool name, even when a client used an old alias.
   Prefer an allow-list, so a tool added in a later release stays off until you allow it.
-- `availabilityRules` returns a resource's bookable hours. No rules means never bookable.
+- `availabilityRules` returns the default bookable hours, for resources without their own. No
+  rules means never bookable.
 - `confirmation` makes the listed writes wait for a person ([Confirm before writing](#confirm-before-writing)).
 - `publicBaseUrl` must be HTTPS (`allowInsecureLocalhost` permits `http://localhost` for
   development). Run the Node listener behind a TLS proxy, or mount `server.fetch` in any Fetch

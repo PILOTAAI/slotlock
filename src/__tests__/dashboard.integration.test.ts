@@ -66,8 +66,15 @@ describe.skipIf(!url)('dashboard (real Postgres)', () => {
     });
     const get = (path: string, cookie?: string) =>
       dashboard.fetch(new Request(`${ORIGIN}${path}`, cookie ? { headers: { cookie } } : {}));
-    const post = (path: string, fields: Record<string, string>, cookie: string) =>
-      dashboard.fetch(
+    // Every form but sign-out carries a single-use value: take a fresh one from the page.
+    const post = async (path: string, fields: Record<string, string>, cookie: string) => {
+      const sent = { ...fields };
+      if (!('once' in sent) && !path.endsWith('/sign-out')) {
+        const page = await (await get('/dashboard', cookie)).text();
+        const once = /name="once" value="([^"]+)"/.exec(page)?.[1];
+        if (once !== undefined) sent.once = once;
+      }
+      return dashboard.fetch(
         new Request(`${ORIGIN}${path}`, {
           method: 'POST',
           headers: {
@@ -75,9 +82,10 @@ describe.skipIf(!url)('dashboard (real Postgres)', () => {
             origin: ORIGIN,
             'content-type': 'application/x-www-form-urlencoded',
           },
-          body: new URLSearchParams(fields).toString(),
+          body: new URLSearchParams(sent).toString(),
         }),
       );
+    };
 
     const start = await get('/dashboard/sign-in');
     const state = new URL(start.headers.get('location') ?? '').searchParams.get('state');
@@ -123,6 +131,32 @@ describe.skipIf(!url)('dashboard (real Postgres)', () => {
         tenant.listResources({ tenantRef: someoneElse, limit: 10 }),
       ),
     ).resolves.toEqual([]);
+
+    // Bookable hours: one resource's own, then every resource closed, then the server's again.
+    const van = mine[0]?.id as string;
+    const editor = await get(`/dashboard/hours?resource=${van}`, session);
+    expect(editor.status).toBe(200);
+    const hours = await post(
+      '/dashboard/hours',
+      { csrf, resource: van, mode: 'custom', mo_from_1: '08:00', mo_to_1: '12:00', fr_from_1: '22:00', fr_to_1: '06:00' },
+      session,
+    );
+    expect(hours.status).toBe(303);
+    const read = () =>
+      store.withTenant(tenantRef, (tenant) => tenant.getResource({ tenantRef, id: van }));
+    expect((await read())?.availabilityRules).toEqual([
+      { rrule: 'FREQ=WEEKLY;BYDAY=MO', startMinutes: 480, durationMinutes: 240 },
+      { rrule: 'FREQ=WEEKLY;BYDAY=FR', startMinutes: 1_320, durationMinutes: 480 },
+    ]);
+    expect(
+      (await post('/dashboard/hours', { csrf, resource: 'all', mode: 'closed' }, session)).status,
+    ).toBe(303);
+    expect((await read())?.availabilityRules).toEqual([]);
+    expect(await (await get('/dashboard', session)).text()).toContain('Closed <a href');
+    expect(
+      (await post('/dashboard/hours', { csrf, resource: van, mode: 'server' }, session)).status,
+    ).toBe(303);
+    expect(await read()).not.toHaveProperty('availabilityRules');
 
     const revoked = await post('/dashboard/keys/revoke', { csrf, id: listed?.id as string }, session);
     expect(revoked.status).toBe(303);

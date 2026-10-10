@@ -59,19 +59,27 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
 
   const get = (target: ReturnType<typeof server>, path: string, cookie?: string) =>
     target.fetch(new Request(`${ORIGIN}${path}`, cookie ? { headers: { cookie } } : {}));
-  const post = (
+  // Every form but sign-out carries a single-use value: take a fresh one from the page.
+  const post = async (
     target: ReturnType<typeof server>,
     path: string,
     fields: Record<string, string>,
     cookie: string,
-  ) =>
-    target.fetch(
+  ) => {
+    const sent = { ...fields };
+    if (!('once' in sent) && !path.endsWith('/sign-out')) {
+      const page = await (await get(target, '/dashboard', cookie)).text();
+      const once = /name="once" value="([^"]+)"/.exec(page)?.[1];
+      if (once !== undefined) sent.once = once;
+    }
+    return target.fetch(
       new Request(`${ORIGIN}${path}`, {
         method: 'POST',
         headers: { cookie, origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams(fields).toString(),
+        body: new URLSearchParams(sent).toString(),
       }),
     );
+  };
   const sessionOf = (response: Response) =>
     response.headers
       .getSetCookie()

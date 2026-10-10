@@ -39,6 +39,11 @@ request replaces "Unreleased" with the release date.
   dashboard until `migrate` has granted its functions.
 - `createResource` takes `maxTenantResources`, a per-tenant cap enforced under a database lock, and
   `withTenant` takes `{ isolation: 'read committed' }`.
+- Bookable hours per resource: `setResourceAvailability` and `setTenantAvailability` store a
+  resource's own weekly rules (`null` uses the default, `[]` closes), and the agent backend uses
+  them before `availabilityRules`. Set them on the dashboard's hours page (a week of windows, for
+  one resource or all) or with `slotlock hours show|set|clear`. `SLOTLOCK_AVAILABILITY` is now
+  the default for resources without hours of their own.
 
 ### Fixed for the standalone release
 
@@ -46,6 +51,13 @@ request replaces "Unreleased" with the release date.
   tool error (HTTP 400) instead of an internal error (HTTP 500, JSON-RPC -32603).
 - The legacy-schema upgrade test creates `btree_gist` itself, so the database suites pass on a fresh
   PostgreSQL 16 database rather than only on one that already had the extension installed.
+- Availability rules are held to the subset SPEC.md describes: `FREQ=WEEKLY`, `BYDAY`, `INTERVAL=1`
+  and a UTC `UNTIL`. Anything else, such as `BYHOUR`, a `DTSTART`, `BYDAY` twice or an ordinal
+  weekday, is refused by the store, the CLI and `SLOTLOCK_AVAILABILITY`, and `expandRules` reads it
+  as no hours. Before, rrule honoured some of these: a `DTSTART` zone moved Monday's hours to
+  Sunday, and `BYHOUR`/`BYMINUTE`/`BYSECOND` took most of a second per rule to check.
+- Every dashboard form but sign-out must carry its single-use value. A form sent without the value
+  skipped the resend check and the per-person form limit.
 
 ### Added
 

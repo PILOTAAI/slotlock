@@ -11,6 +11,8 @@
 // the caller's search_path back at the end, so a caller that keeps going in the same transaction
 // resolves its own names as before. Apply it in one transaction: under autocommit every statement
 // is a transaction of its own, and the pin ends with the statement that sets it.
+import { SLOTLOCK_MAX_AVAILABILITY_RULES } from './weekly-hours.js';
+
 const CALLER_SEARCH_PATH_SETTING = 'slotlock.caller_search_path';
 const DEPLOYMENT_SEARCH_PATH_PIN = `SELECT pg_catalog.set_config('${CALLER_SEARCH_PATH_SETTING}', pg_catalog.current_setting('search_path'), true);
 SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true);
@@ -113,7 +115,10 @@ export const SLOTLOCK_API_KEY_RETAINED_LIMIT = 1_000;
  * The tables behind API keys. No role but their owner holds a right on them; they are reached only
  * through SLOTLOCK_API_KEY_FUNCTIONS.
  */
-export const SLOTLOCK_API_KEY_TABLES = Object.freeze(['api_keys', 'api_key_retired_digests'] as const);
+export const SLOTLOCK_API_KEY_TABLES = Object.freeze([
+  'api_keys',
+  'api_key_retired_digests',
+] as const);
 
 /**
  * The SECURITY DEFINER functions through which the serving role reaches API keys, by signature.
@@ -572,6 +577,10 @@ CREATE TABLE IF NOT EXISTS slotlock.reservations (
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'confirmed';
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS expires_at timestamptz;
 ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS tenant_ref text;
+-- A resource's own bookable hours (weekly-hours.ts validates each rule); NULL uses the default.
+-- Its CHECK holds SLOTLOCK_MAX_AVAILABILITY_RULES as it was when first added: changing the cap
+-- needs a constraint under a new name.
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS availability_rules jsonb;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS tenant_ref text;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS external_ref text;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS buffer_after_ms bigint NOT NULL DEFAULT 0;
@@ -769,6 +778,19 @@ BEGIN
   ) THEN
     ALTER TABLE slotlock.resources
       ADD CONSTRAINT slotlock_resources_id_tenant_key UNIQUE (id, tenant_ref);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'slotlock_resources_availability_rules_valid'
+       AND conrelid = 'slotlock.resources'::regclass
+  ) THEN
+    ALTER TABLE slotlock.resources
+      ADD CONSTRAINT slotlock_resources_availability_rules_valid CHECK (
+        availability_rules IS NULL
+        OR CASE WHEN jsonb_typeof(availability_rules) = 'array'
+                THEN jsonb_array_length(availability_rules) <= ${SLOTLOCK_MAX_AVAILABILITY_RULES}
+                ELSE false END
+      );
   END IF;
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint

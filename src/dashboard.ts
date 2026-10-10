@@ -18,6 +18,14 @@ import type { SlotlockApiKey, SlotlockApiKeyScope, SlotlockApiKeyStore } from '.
 import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from './ddl.js';
 import type { SlotlockSql, SlotlockStore } from './store.js';
 import type { SlotlockResource, WeeklyAvailabilityRule } from './types.js';
+import {
+  WEEKDAYS,
+  WEEKDAY_NAMES as DAY_NAMES,
+  type Weekday,
+  type WeeklyHours,
+  rulesToWeeklyHours,
+  weeklyHoursToRules,
+} from './weekly-hours.js';
 
 /** Resources one dashboard tenant may hold. */
 export const SLOTLOCK_DASHBOARD_MAX_RESOURCES = 100;
@@ -39,6 +47,7 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/keys/rotate',
   '/keys/revoke',
   '/resources',
+  '/hours',
 ]);
 const SIGN_IN_AGAIN = 'That sign-in did not finish here, or took too long. Sign in again.';
 const GITHUB_ERROR_CODE = /^[a-z0-9_]{1,64}$/;
@@ -82,6 +91,16 @@ export interface SlotlockDashboardResources {
    * SLOTLOCK_DASHBOARD_MAX_RESOURCES, however many adds race, on however many servers.
    */
   add(tenantRef: string, externalRef: string, timezone: string): Promise<SlotlockResource>;
+  /**
+   * Set the bookable hours of one of the tenant's resources (`{ id }`) or of all of them; `null`
+   * hands them back to the server's and `[]` closes. Returns how many resources changed: 0 for an
+   * id that is not the tenant's.
+   */
+  setHours(
+    tenantRef: string,
+    target: { id: string } | 'all',
+    rules: WeeklyAvailabilityRule[] | null,
+  ): Promise<number>;
 }
 
 /**
@@ -130,7 +149,7 @@ export interface SlotlockDashboardOptions {
   resources: SlotlockDashboardResources;
   /** Shared by every server behind this origin: see SlotlockDashboardState. */
   state: SlotlockDashboardState;
-  /** The server's bookable hours, shown read-only. */
+  /** The server's bookable hours: shown, not edited, and used by resources without their own. */
   availability?: readonly WeeklyAvailabilityRule[];
   fetch?: typeof fetch;
   now?: () => number;
@@ -166,17 +185,26 @@ export function createSlotlockDashboardResources(store: SlotlockStore): Slotlock
           }),
         { isolation: 'read committed' },
       ),
+    setHours: (tenantRef, target, rules) =>
+      store.withTenant(tenantRef, async (tenant) => {
+        if (target === 'all') return tenant.setTenantAvailability({ tenantRef, rules });
+        const updated = await tenant.setResourceAvailability({ tenantRef, id: target.id, rules });
+        return updated ? 1 : 0;
+      }),
   };
 }
 
 function assertExpiry(expiresAt: number): Date {
-  if (!Number.isFinite(expiresAt)) throw new Error('Slotlock dashboard record needs a finite expiry');
+  if (!Number.isFinite(expiresAt))
+    throw new Error('Slotlock dashboard record needs a finite expiry');
   return new Date(expiresAt);
 }
 
 function formLimitError(): Error & { code: 'dashboard_form_limit' } {
   return Object.assign(
-    new Error(`Slotlock dashboard: ${SLOTLOCK_DASHBOARD_FORM_LIMIT} forms are live for this person`),
+    new Error(
+      `Slotlock dashboard: ${SLOTLOCK_DASHBOARD_FORM_LIMIT} forms are live for this person`,
+    ),
     { code: 'dashboard_form_limit' as const },
   );
 }
@@ -257,7 +285,8 @@ export function createSlotlockMemoryDashboardState(
       const record = records[kind];
       if (record.has(value)) return false;
       if (kind === 'form') {
-        if (owner === undefined) throw new Error('Slotlock dashboard form records name their owner');
+        if (owner === undefined)
+          throw new Error('Slotlock dashboard form records name their owner');
         const forms = (formsByOwner.get(owner) ?? []).filter((until) => until > now());
         if (forms.length >= SLOTLOCK_DASHBOARD_FORM_LIMIT) throw formLimitError();
         formsByOwner.set(owner, [...forms, expiresAt]);
@@ -398,12 +427,120 @@ function formatMinutes(minutes: number): string {
   return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
 }
 
-/** `09:00–17:00`, or `from 22:00 for 10 h` when the window runs past midnight. */
+/** `09:00–17:00`, `22:00–06:00 next day`, `all day`, or `from 09:00 for 2 d 2 h` beyond that. */
 function hoursOf(startMinutes: number, durationMinutes: number): string {
+  if (startMinutes === 0 && durationMinutes === 1_440) return 'all day';
   const end = startMinutes + durationMinutes;
-  return end <= 1_440
-    ? `${formatMinutes(startMinutes)}–${formatMinutes(end)}`
-    : `from ${formatMinutes(startMinutes)} for ${String(durationMinutes / 60)} h`;
+  if (end <= 1_440) return `${formatMinutes(startMinutes)}–${formatMinutes(end)}`;
+  if (end <= 2_880) return `${formatMinutes(startMinutes)}–${formatMinutes(end - 1_440)} next day`;
+  const parts: Array<[number, string]> = [
+    [Math.floor(durationMinutes / 1_440), 'd'],
+    [Math.floor((durationMinutes % 1_440) / 60), 'h'],
+    [durationMinutes % 60, 'min'],
+  ];
+  const length = parts.filter(([count]) => count > 0).map(([count, unit]) => `${count} ${unit}`);
+  return `from ${formatMinutes(startMinutes)} for ${length.join(' ')}`;
+}
+
+/** `Mon–Fri`, `Sat, Sun`, `Mon, Wed`: three or more days in a row as a range. */
+function dayNames(days: readonly string[]): string {
+  const runs: string[][] = [];
+  for (const day of days) {
+    const run = runs.at(-1);
+    const previous = WEEKDAYS.indexOf(run?.at(-1) as Weekday);
+    if (run && previous >= 0 && WEEKDAYS.indexOf(day as Weekday) === previous + 1) run.push(day);
+    else runs.push([day]);
+  }
+  const name = (day: string | undefined) => WEEKDAY_NAMES[day ?? ''] ?? day ?? '';
+  return runs
+    .map((run) =>
+      run.length >= 3 ? `${name(run[0])}–${name(run.at(-1))}` : run.map(name).join(', '),
+    )
+    .join(', ');
+}
+
+const daysOf = (rrule: string) => dayNames((/BYDAY=([A-Z,]+)/.exec(rrule)?.[1] ?? '').split(','));
+
+/**
+ * One line for a resource's hours: the server's, closed, or its own. Days with the same windows
+ * share a line; rules a week of windows cannot express are listed one by one.
+ */
+function hoursSummary(rules: readonly WeeklyAvailabilityRule[] | undefined): string {
+  if (rules === undefined) return "Server's hours";
+  if (rules.length === 0) return 'Closed';
+  const week = rulesToWeeklyHours(rules);
+  if (week === null) {
+    return rules
+      .map((rule) => `${daysOf(rule.rrule)} ${hoursOf(rule.startMinutes, rule.durationMinutes)}`)
+      .join('; ');
+  }
+  const days = new Map<string, Weekday[]>();
+  for (const day of WEEKDAYS) {
+    if (week[day].length === 0) continue;
+    const windows = week[day]
+      .map(({ from, to }) => hoursOf(from, to > from ? to - from : to + 1_440 - from))
+      .join(', ');
+    days.set(windows, [...(days.get(windows) ?? []), day]);
+  }
+  return [...days].map(([windows, byDay]) => `${dayNames(byDay)} ${windows}`).join('; ');
+}
+
+type HoursMode = 'server' | 'closed' | 'custom';
+/** The editor's fields as typed: two windows a day, each an opening and a closing `HH:MM`. */
+type WeekForm = Record<Weekday, { from: string; to: string }[]>;
+const TIME = /^([01]\d|2[0-3]):([0-5]\d)$/;
+const WINDOW_NAMES = ['first', 'second'] as const;
+
+function emptyWeekForm(): WeekForm {
+  const form = {} as WeekForm;
+  for (const day of WEEKDAYS) form[day] = WINDOW_NAMES.map(() => ({ from: '', to: '' }));
+  return form;
+}
+
+function weekFormOf(week: WeeklyHours | null): WeekForm {
+  const form = emptyWeekForm();
+  if (!week) return form;
+  for (const day of WEEKDAYS) {
+    week[day].forEach((window, index) => {
+      form[day][index] = { from: formatMinutes(window.from), to: formatMinutes(window.to) };
+    });
+  }
+  return form;
+}
+
+function readWeekForm(form: URLSearchParams): WeekForm {
+  const week = emptyWeekForm();
+  for (const day of WEEKDAYS) {
+    WINDOW_NAMES.forEach((_name, index) => {
+      const field = (end: string) =>
+        (form.get(`${day.toLowerCase()}_${end}_${index + 1}`) ?? '').trim().slice(0, 16);
+      week[day][index] = { from: field('from'), to: field('to') };
+    });
+  }
+  return week;
+}
+
+/** The week typed, or `invalid_availability` naming the day and window that cannot be read. */
+function weekFromForm(form: WeekForm): WeeklyHours {
+  const invalid = (message: string) =>
+    Object.assign(new Error(message), { code: 'invalid_availability' });
+  const week: WeeklyHours = { MO: [], TU: [], WE: [], TH: [], FR: [], SA: [], SU: [] };
+  for (const day of WEEKDAYS) {
+    form[day].forEach(({ from, to }, index) => {
+      if (from === '' && to === '') return;
+      const name = `${DAY_NAMES[day]}'s ${WINDOW_NAMES[index]} window`;
+      if (from === '' || to === '') {
+        throw invalid(`Give ${name} both an opening and a closing time.`);
+      }
+      const [opens, closes] = [TIME.exec(from), TIME.exec(to)];
+      if (!opens || !closes) throw invalid(`${name} needs times like 09:30.`);
+      week[day].push({
+        from: Number(opens[1]) * 60 + Number(opens[2]),
+        to: Number(closes[1]) * 60 + Number(closes[2]),
+      });
+    });
+  }
+  return week;
 }
 
 export function createSlotlockDashboard(options: SlotlockDashboardOptions): SlotlockDashboard {
@@ -482,7 +619,10 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   }
 
   async function readSession(request: Request): Promise<Session | null> {
-    const payload = unseal('slotlock-dashboard-session-v1', readCookies(request).get(SESSION_COOKIE));
+    const payload = unseal(
+      'slotlock-dashboard-session-v1',
+      readCookies(request).get(SESSION_COOKIE),
+    );
     if (
       !payload ||
       typeof payload.uid !== 'string' ||
@@ -497,7 +637,9 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   }
 
   const csrfToken = (session: Session) =>
-    createHmac('sha256', secret).update(`slotlock-dashboard-csrf-v1.${session.sid}`).digest('base64url');
+    createHmac('sha256', secret)
+      .update(`slotlock-dashboard-csrf-v1.${session.sid}`)
+      .digest('base64url');
   const tenantOf = (session: Session) => `github:${session.uid}`;
 
   function respond(
@@ -591,11 +733,6 @@ ${notice ? html`<p class="notice" role="alert">${notice}</p>` : html``}
     ]);
     const token = csrfToken(session);
     const rules = options.availability ?? [];
-    const days = (rrule: string) =>
-      (/BYDAY=([A-Z,]+)/.exec(rrule)?.[1] ?? '')
-        .split(',')
-        .map((day) => WEEKDAY_NAMES[day] ?? day)
-        .join(', ');
     const content = html`${notice ? html`<p class="notice" role="alert">${notice}</p>` : html``}
 <section class="card">
 <h2>Connect an agent</h2>
@@ -631,9 +768,9 @@ ${
 ${
   resources.length === 0
     ? html`<p class="empty">No resources yet. Agents can only book what is listed here.</p>`
-    : html`<div class="table"><table><thead><tr><th>Reference</th><th>Time zone</th><th>Resource id</th></tr></thead><tbody>${resources.map(
+    : html`<div class="table"><table><thead><tr><th>Reference</th><th>Time zone</th><th>Bookable hours</th><th>Resource id</th></tr></thead><tbody>${resources.map(
         (resource) =>
-          html`<tr><td data-label="Reference">${resource.externalRef ?? ''}</td><td data-label="Time zone">${resource.timezone}</td><td data-label="Resource id"><code>${resource.id}</code></td></tr>`,
+          html`<tr><td data-label="Reference">${resource.externalRef ?? ''}</td><td data-label="Time zone">${resource.timezone}</td><td data-label="Bookable hours">${hoursSummary(resource.availabilityRules)} <a href="${root}/hours?resource=${resource.id}">Set hours</a></td><td data-label="Resource id"><code>${resource.id}</code></td></tr>`,
       )}</tbody></table></div>`
 }
 </section>
@@ -641,18 +778,173 @@ ${
 <h2>Bookable hours</h2>
 ${
   rules.length === 0
-    ? html`<p class="empty">This server offers no bookable hours, so agents will find no free slot.</p>`
+    ? html`<p class="empty">This server offers no bookable hours: agents find a free slot only on resources with hours of their own.</p>`
     : html`<ul class="hours">${rules.map(
         (rule) =>
-          html`<li>${days(rule.rrule)}: ${hoursOf(rule.startMinutes, rule.durationMinutes)}</li>`,
+          html`<li>${daysOf(rule.rrule)}: ${hoursOf(rule.startMinutes, rule.durationMinutes)}</li>`,
       )}</ul>`
 }
-<p class="fine">Set by the server for every resource, in each resource's own time zone.</p>
+<p class="fine">The server's hours, for resources without hours of their own, in each resource's own time zone.</p>
+${resources.length > 0 ? html`<p><a href="${root}/hours">Set hours for every resource</a></p>` : html``}
 </section>`;
     return respond(status, layout('Dashboard', content, session));
   }
 
-  function shownOncePage(session: Session, key: string, apiKey: SlotlockApiKey, rotated: boolean): Response {
+  function hoursPage(
+    session: Session,
+    state: {
+      target: SlotlockResource | 'all';
+      mode: HoursMode;
+      week: WeekForm;
+      unshown?: readonly WeeklyAvailabilityRule[];
+      status?: number;
+      notice?: string;
+    },
+  ): Response {
+    const { target, mode } = state;
+    const checked = (value: HoursMode) => (mode === value ? html` checked` : html``);
+    const server = options.availability ?? [];
+    const title =
+      target === 'all'
+        ? 'Hours for every resource'
+        : `Hours for ${target.externalRef ?? target.id}`;
+    const rows = WEEKDAYS.map((day) => {
+      const cells = state.week[day].flatMap(({ from, to }, index) => {
+        const which = index + 1;
+        const lower = day.toLowerCase();
+        return [
+          html`<td data-label="Opens"><input type="time" name="${lower}_from_${which}" value="${from}" aria-label="${DAY_NAMES[day]} opens (${WINDOW_NAMES[index]} window)"></td>`,
+          html`<td data-label="Closes"><input type="time" name="${lower}_to_${which}" value="${to}" aria-label="${DAY_NAMES[day]} closes (${WINDOW_NAMES[index]} window)"></td>`,
+        ];
+      });
+      return html`<tr><th scope="row">${DAY_NAMES[day]}</th>${cells}</tr>`;
+    });
+    const content = html`${state.notice ? html`<p class="notice" role="alert">${state.notice}</p>` : html``}
+<section>
+<p><a href="${root}">Back to the dashboard</a></p>
+<h1>${title}</h1>
+<p>${
+      target === 'all'
+        ? 'The same hours for every resource, each in its own time zone. Saving replaces their hours.'
+        : `When agents may book it, in its time zone: ${target.timezone}.`
+    }</p>
+${
+  state.unshown
+    ? html`<div class="notice warn" role="alert"><p>These hours were set outside the dashboard, so the week below cannot show them. Saving replaces them.</p><ul class="hours">${state.unshown.map(
+        (rule) =>
+          html`<li><code>${rule.rrule}</code> from ${formatMinutes(rule.startMinutes)} for ${String(rule.durationMinutes)} min</li>`,
+      )}</ul></div>`
+    : html``
+}
+<form method="post" action="${root}/hours">
+<input type="hidden" name="csrf" value="${csrfToken(session)}">
+<input type="hidden" name="once" value="${formNonce(session)}">
+<input type="hidden" name="resource" value="${target === 'all' ? 'all' : target.id}">
+<fieldset class="modes"><legend>Bookable hours</legend>
+<label class="choice"><input type="radio" name="mode" value="server"${checked('server')}> The server's hours (${server.length === 0 ? 'none' : hoursSummary(server)})</label>
+<label class="choice"><input type="radio" name="mode" value="closed"${checked('closed')}> Closed: agents find no free slot</label>
+<label class="choice"><input type="radio" name="mode" value="custom"${checked('custom')}> These hours</label>
+</fieldset>
+<div class="table"><table class="week"><thead><tr><th>Day</th><th>Opens</th><th>Closes</th><th>Opens</th><th>Closes</th></tr></thead><tbody>${rows}</tbody></table></div>
+<p class="fine">A closing time at or before the opening time closes the next day; 00:00 to 00:00 is the whole day. Leave a window empty for none.</p>
+<button class="primary" type="submit">Save hours</button>
+</form>
+</section>`;
+    return respond(state.status ?? 200, layout('Bookable hours', content, session));
+  }
+
+  /** The tenant's resource with that id, or null for anything else. */
+  async function ownResource(session: Session, id: string): Promise<SlotlockResource | null> {
+    if (!UUID_PATTERN.test(id)) return null;
+    const resources = await options.resources.list(tenantOf(session));
+    return resources.find((resource) => resource.id === id) ?? null;
+  }
+
+  const notFound = (session: Session) =>
+    respond(
+      404,
+      layout('Not found', html`<p class="notice">That resource is not one of yours.</p>`, session),
+    );
+
+  async function hoursEditor(session: Session, url: URL): Promise<Response> {
+    const id = url.searchParams.get('resource');
+    if (id === null) {
+      const server = rulesToWeeklyHours(options.availability ?? []);
+      return hoursPage(session, { target: 'all', mode: 'server', week: weekFormOf(server) });
+    }
+    const resource = await ownResource(session, id);
+    if (!resource) return notFound(session);
+    const rules = resource.availabilityRules;
+    if (rules === undefined) {
+      const server = rulesToWeeklyHours(options.availability ?? []);
+      return hoursPage(session, { target: resource, mode: 'server', week: weekFormOf(server) });
+    }
+    if (rules.length === 0) {
+      return hoursPage(session, { target: resource, mode: 'closed', week: emptyWeekForm() });
+    }
+    const week = rulesToWeeklyHours(rules);
+    return hoursPage(session, {
+      target: resource,
+      mode: 'custom',
+      week: weekFormOf(week),
+      ...(week === null ? { unshown: rules } : {}),
+    });
+  }
+
+  async function saveHours(session: Session, form: URLSearchParams): Promise<Response> {
+    const id = form.get('resource') ?? '';
+    const target = id === 'all' ? 'all' : await ownResource(session, id);
+    if (!target) return notFound(session);
+    const mode = form.get('mode');
+    const week = readWeekForm(form);
+    if (mode !== 'server' && mode !== 'closed' && mode !== 'custom') {
+      return hoursPage(session, {
+        target,
+        mode: 'custom',
+        week,
+        status: 400,
+        notice: 'Choose which hours to use.',
+      });
+    }
+    let rules: WeeklyAvailabilityRule[] | null = mode === 'server' ? null : [];
+    if (mode === 'custom') {
+      try {
+        rules = weeklyHoursToRules(weekFromForm(week));
+        if (rules.length === 0) {
+          throw Object.assign(new Error('Add a window to at least one day, or choose Closed.'), {
+            code: 'invalid_availability',
+          });
+        }
+      } catch (error) {
+        if ((error as { code?: unknown }).code !== 'invalid_availability') throw error;
+        return hoursPage(session, {
+          target,
+          mode,
+          week,
+          status: 400,
+          notice: (error as Error).message,
+        });
+      }
+    }
+    const changed = await options.resources.setHours(
+      tenantOf(session),
+      target === 'all' ? 'all' : { id: target.id },
+      rules,
+    );
+    if (changed === 0) {
+      return target === 'all'
+        ? dashboardPage(session, 409, 'Add a resource first, then set its hours.')
+        : notFound(session);
+    }
+    return redirect(303, root);
+  }
+
+  function shownOncePage(
+    session: Session,
+    key: string,
+    apiKey: SlotlockApiKey,
+    rotated: boolean,
+  ): Response {
     const content = html`<section class="card once">
 <h1>${rotated ? 'Key rotated' : 'Key created'}: ${apiKey.name}</h1>
 <p class="notice warn" role="alert">Copy this key now. Slotlock keeps only its fingerprint, so it will not be shown again.${rotated ? ' The old key no longer works.' : ''}</p>
@@ -747,7 +1039,10 @@ ${
     return { uid: String(body.id), login: body.login };
   }
 
-  async function askGitHub(code: string, verifier: string): Promise<{ uid: string; login: string } | null> {
+  async function askGitHub(
+    code: string,
+    verifier: string,
+  ): Promise<{ uid: string; login: string } | null> {
     try {
       const token = await exchangeCode(code, verifier);
       return token === null ? null : await readGitHubUser(token);
@@ -759,7 +1054,10 @@ ${
 
   async function finishSignIn(request: Request, url: URL): Promise<Response> {
     const clearSignIn = setCookie(SIGN_IN_COOKIE, '', 0);
-    const pending = unseal('slotlock-dashboard-sign-in-v1', readCookies(request).get(SIGN_IN_COOKIE));
+    const pending = unseal(
+      'slotlock-dashboard-sign-in-v1',
+      readCookies(request).get(SIGN_IN_COOKIE),
+    );
     const code = url.searchParams.get('code');
     const state = url.searchParams.get('state');
     if (
@@ -776,9 +1074,11 @@ ${
       return signedOutPage(400, SIGN_IN_AGAIN, [clearSignIn]);
     }
     if (signInsInFlight >= MAX_SIGN_INS_IN_FLIGHT) {
-      return signedOutPage(503, 'Too many people are signing in at once. Sign in again in a moment.', [
-        clearSignIn,
-      ]);
+      return signedOutPage(
+        503,
+        'Too many people are signing in at once. Sign in again in a moment.',
+        [clearSignIn],
+      );
     }
     const verifier = pending.verifier;
     signInsInFlight += 1;
@@ -806,7 +1106,10 @@ ${
       sid: randomBytes(24).toString('base64url'),
       exp: now() + SESSION_TTL_MS,
     });
-    return redirect(303, root, [clearSignIn, setCookie(SESSION_COOKIE, session, SESSION_TTL_MS / 1000)]);
+    return redirect(303, root, [
+      clearSignIn,
+      setCookie(SESSION_COOKIE, session, SESSION_TTL_MS / 1000),
+    ]);
   }
 
   /** The form, `'too_large'` past MAX_FORM_BYTES (read no further), or null for another type. */
@@ -854,7 +1157,11 @@ ${
         return dashboardPage(session, 400, 'Give the key a name of 1 to 100 characters.');
       }
       if (code === 'api_key_limit_reached') {
-        return dashboardPage(session, 409, 'You have as many keys as Slotlock allows. Revoke one first.');
+        return dashboardPage(
+          session,
+          409,
+          'You have as many keys as Slotlock allows. Revoke one first.',
+        );
       }
       throw error;
     }
@@ -891,7 +1198,11 @@ ${
         );
       }
       if (code === 'invalid_timezone') {
-        return dashboardPage(session, 400, `${timezone} is not a time zone Slotlock knows, such as Europe/London.`);
+        return dashboardPage(
+          session,
+          400,
+          `${timezone} is not a time zone Slotlock knows, such as Europe/London.`,
+        );
       }
       if (code === 'invalid_external_ref') {
         return dashboardPage(session, 400, 'Give the resource a reference of 1 to 200 characters.');
@@ -904,25 +1215,57 @@ ${
   async function handlePost(request: Request, route: string): Promise<Response> {
     // A browser sends Origin with every form POST; anything else did not come from these pages.
     if (request.headers.get('origin') !== origin) {
-      return respond(403, layout('Refused', html`<p class="notice">That request did not come from this dashboard.</p>`, null));
+      return respond(
+        403,
+        layout(
+          'Refused',
+          html`<p class="notice">That request did not come from this dashboard.</p>`,
+          null,
+        ),
+      );
     }
     const session = await readSession(request);
     if (!session) return redirect(303, root);
     const form = await readForm(request);
     if (form === 'too_large') {
-      return respond(413, layout('Refused', html`<p class="notice">That form is too large.</p>`, session));
+      return respond(
+        413,
+        layout('Refused', html`<p class="notice">That form is too large.</p>`, session),
+      );
     }
-    if (!form) return respond(400, layout('Refused', html`<p class="notice">That form could not be read.</p>`, session));
+    if (!form)
+      return respond(
+        400,
+        layout('Refused', html`<p class="notice">That form could not be read.</p>`, session),
+      );
     const presented = form.get('csrf') ?? '';
     if (!safeEqual(presented, csrfToken(session))) {
-      return respond(403, layout('Refused', html`<p class="notice">That form has expired. Go back and try again.</p>`, session));
+      return respond(
+        403,
+        layout(
+          'Refused',
+          html`<p class="notice">That form has expired. Go back and try again.</p>`,
+          session,
+        ),
+      );
     }
     // Nothing is recorded for a route that does not exist.
     if (!POST_ROUTES.has(route)) {
-      return respond(404, layout('Not found', html`<p class="notice">Nothing is here.</p>`, session));
+      return respond(
+        404,
+        layout('Not found', html`<p class="notice">Nothing is here.</p>`, session),
+      );
     }
     // A form sent again (a reload of its result, a double click) must not create or rotate twice.
+    // Every form but sign-out carries a single-use value, so leaving it out cannot skip this check
+    // or the per-person form limit.
     const once = form.get('once');
+    if (once === null && route !== '/sign-out') {
+      return respond(
+        400,
+        layout('Refused', html`<p class="notice">That form could not be read.</p>`, session),
+      );
+    }
     if (once !== null) {
       let first: boolean;
       try {
@@ -938,7 +1281,11 @@ ${
         );
       }
       if (!first) {
-        return dashboardPage(session, 409, 'That form was already sent. Reload the page to start again.');
+        return dashboardPage(
+          session,
+          409,
+          'That form was already sent. Reload the page to start again.',
+        );
       }
     }
     switch (route) {
@@ -953,8 +1300,13 @@ ${
         return changeKey(session, form, 'revoke');
       case '/resources':
         return addResource(session, form);
+      case '/hours':
+        return saveHours(session, form);
       default:
-        return respond(404, layout('Not found', html`<p class="notice">Nothing is here.</p>`, session));
+        return respond(
+          404,
+          layout('Not found', html`<p class="notice">Nothing is here.</p>`, session),
+        );
     }
   }
 
@@ -982,21 +1334,43 @@ ${
               return await startSignIn();
             case '/callback':
               return await finishSignIn(request, url);
+            case '/hours': {
+              const session = await readSession(request);
+              return session ? await hoursEditor(session, url) : redirect(303, root);
+            }
             default:
-              return respond(404, layout('Not found', html`<p class="notice">Nothing is here.</p>`, null));
+              return respond(
+                404,
+                layout('Not found', html`<p class="notice">Nothing is here.</p>`, null),
+              );
           }
         }
         if (request.method === 'POST') return await handlePost(request, route);
-        return respond(405, layout('Not allowed', html`<p class="notice">Use the dashboard's pages and forms.</p>`, null), {
-          Allow: 'GET, POST',
-        });
+        return respond(
+          405,
+          layout(
+            'Not allowed',
+            html`<p class="notice">Use the dashboard's pages and forms.</p>`,
+            null,
+          ),
+          {
+            Allow: 'GET, POST',
+          },
+        );
       } catch (error) {
         try {
           options.onError?.(error);
         } catch {
           // A failing reporter must not change the response.
         }
-        return respond(500, layout('Error', html`<p class="notice">Something went wrong. Try again in a moment.</p>`, null));
+        return respond(
+          500,
+          layout(
+            'Error',
+            html`<p class="notice">Something went wrong. Try again in a moment.</p>`,
+            null,
+          ),
+        );
       }
     },
   };
@@ -1079,6 +1453,13 @@ tr:last-child td { border-bottom: 0; }
 .copy input { flex: 1; }
 pre { background: var(--wash); border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .hours { margin: 0 0 8px; padding-left: 20px; color: var(--ink-2); }
+.modes { border: 0; padding: 0; margin: 0 0 16px; display: grid; gap: 8px; }
+.modes legend { font-weight: 600; color: var(--ink); padding: 0; margin-bottom: 4px; }
+.choice { display: flex; align-items: center; gap: 8px; font-size: 15px; color: var(--ink); }
+.choice input { height: auto; }
+.week input { width: 100%; }
+.week th[scope="row"] { text-transform: none; letter-spacing: 0; font-size: 14px; color: var(--ink); background: none; }
+form > .table { margin-bottom: 12px; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 @media (max-width: 720px) {
   .bar { padding: 12px 16px; }
