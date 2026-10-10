@@ -5,6 +5,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { SLOTLOCK_MCP_LEGACY_PROTOCOL_VERSION } from '../agent-server.js';
+import { SLOTLOCK_DASHBOARD_FUNCTIONS } from '../ddl.js';
 import { type SlotlockEnv, runSlotlockCli } from '../self-host.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
@@ -400,6 +401,34 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     expect(foreign.stdout.text()).toBe('');
     expect(foreign.stderr.text()).toMatch(/no API key with that id/);
   });
+  it('refuses to serve the dashboard until migrate has granted its functions', async () => {
+    await admin.unsafe(
+      `REVOKE EXECUTE ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS.join(', ')} FROM ${role}`,
+    );
+    try {
+      const stdout = output();
+      const stderr = output();
+      // A server that does start is stopped after 3 seconds, so the check fails on its exit code.
+      const code = await runSlotlockCli(['serve'], {
+        env: {
+          ...env,
+          SLOTLOCK_GITHUB_CLIENT_ID: 'Ov23liIntegrationTest',
+          SLOTLOCK_GITHUB_CLIENT_SECRET: randomBytes(20).toString('hex'),
+          SLOTLOCK_SESSION_SECRET: randomBytes(32).toString('hex'),
+          SLOTLOCK_DASHBOARD_USERS: '4242',
+        },
+        stdout,
+        stderr,
+        signal: AbortSignal.timeout(3_000),
+      });
+      expect(code).not.toBe(0);
+      expect(stderr.text()).toMatch(/dashboard.*slotlock migrate/);
+      expect(stdout.events().find(({ event }) => event === 'listening')).toBeUndefined();
+    } finally {
+      expect((await run(['migrate'])).code).toBe(0);
+    }
+  });
+
   it('serves the GitHub sign-in dashboard beside MCP when configured, and keeps its secrets out of the log', async () => {
     const clientSecret = randomBytes(20).toString('hex');
     const sessionSecret = randomBytes(32).toString('hex');

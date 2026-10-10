@@ -8,13 +8,15 @@
 // request. Every form carries a CSRF token bound to the session, and every POST must come from this
 // server's own origin.
 //
-// Process memory, bounded and per instance, also remembers finished sign-ins (a callback works
-// once), signed-out sessions (a copied cookie stays signed out) and sent forms (a resubmitted form
-// does not run twice). Run one instance, or put the instances behind sticky sessions, for these to
-// hold everywhere; the signed cookies and CSRF tokens hold either way.
+// The dashboard also records finished sign-ins (a callback works once), sent forms (a form runs
+// once) and signed-out sessions (a copied cookie stays signed out). `createSlotlockDashboardState`
+// keeps these in Postgres, so they hold on every server that shares the database; the resource cap
+// is held in the database too.
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import type { Sql } from 'postgres';
 import type { SlotlockApiKey, SlotlockApiKeyScope, SlotlockApiKeyStore } from './api-keys.js';
-import type { SlotlockStore } from './store.js';
+import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from './ddl.js';
+import type { SlotlockSql, SlotlockStore } from './store.js';
 import type { SlotlockResource, WeeklyAvailabilityRule } from './types.js';
 
 /** Resources one dashboard tenant may hold. */
@@ -22,11 +24,23 @@ export const SLOTLOCK_DASHBOARD_MAX_RESOURCES = 100;
 const SESSION_TTL_MS = 12 * 3_600_000;
 const SIGN_IN_TTL_MS = 10 * 60_000;
 const MAX_FORM_BYTES = 8_192;
-/** GitHub exchanges (token, then user) one instance runs at once; more sign-ins are told to retry. */
+/**
+ * Sign-ins (record, then GitHub's token and user) one instance runs at once; more are told to retry.
+ * This also bounds how fast unauthenticated callbacks can write sign-in records.
+ */
 const MAX_SIGN_INS_IN_FLIGHT = 8;
-/** Entries each in-memory record keeps; past this the oldest go first. */
+/** Entries each in-memory record keeps (createSlotlockMemoryDashboardState); past this the oldest go first. */
 const MAX_REMEMBERED = 10_000;
-const FORM_NONCE = /^[A-Za-z0-9_-]{22,64}$/;
+/** A form's single-use value: 18 random bytes, then a MAC binding them to the session. */
+const FORM_NONCE = /^([A-Za-z0-9_-]{24})\.([A-Za-z0-9_-]{43})$/;
+const POST_ROUTES: ReadonlySet<string> = new Set([
+  '/sign-out',
+  '/keys',
+  '/keys/rotate',
+  '/keys/revoke',
+  '/resources',
+]);
+const SIGN_IN_AGAIN = 'That sign-in did not finish here, or took too long. Sign in again.';
 const GITHUB_ERROR_CODE = /^[a-z0-9_]{1,64}$/;
 const MAX_COOKIE_CHARACTERS = 4_096;
 const GITHUB_TIMEOUT_MS = 10_000;
@@ -62,8 +76,36 @@ const CONTENT_SECURITY_POLICY =
 /** A tenant's calendar resources, as the dashboard lists and adds them. */
 export interface SlotlockDashboardResources {
   list(tenantRef: string): Promise<SlotlockResource[]>;
-  /** Create the resource, or re-zone the tenant's resource with that reference. */
+  /**
+   * Create the resource, or re-zone the tenant's resource with that reference. Refuse a new one
+   * (an error with `code: 'resource_limit_reached'`) once the tenant has
+   * SLOTLOCK_DASHBOARD_MAX_RESOURCES, however many adds race, on however many servers.
+   */
   add(tenantRef: string, externalRef: string, timezone: string): Promise<SlotlockResource>;
+}
+
+/**
+ * What the dashboard records so a sign-in callback works once, a sent form runs once and a
+ * signed-out session stays out. Every server behind one dashboard origin must share it:
+ * `createSlotlockDashboardState` keeps it in Postgres. `createSlotlockMemoryDashboardState` keeps it
+ * in one process, for tests or a server that will only ever run as one process.
+ */
+export interface SlotlockDashboardState {
+  /**
+   * Record a sign-in or form `value` until `expiresAt` (ms since the epoch). True only the first
+   * time, and never for a value whose expiry has passed or that claims to outlive a day, by the
+   * state's own clock (the database's, for createSlotlockDashboardState). A form names its `owner`,
+   * the GitHub user id: past SLOTLOCK_DASHBOARD_FORM_LIMIT live forms of one owner, `use` throws an
+   * error with `code: 'dashboard_form_limit'`.
+   */
+  use(kind: 'sign_in' | 'form', value: string, expiresAt: number, owner?: string): Promise<boolean>;
+  /** Record that the session `sid` signed out, until `expiresAt`. */
+  endSession(sid: string, expiresAt: number): Promise<void>;
+  /**
+   * Whether the session `sid`, sealed to expire at `expiresAt`, signed out or is over by the
+   * state's clock (past its expiry, or claiming to outlive a day).
+   */
+  sessionEnded(sid: string, expiresAt: number): Promise<boolean>;
 }
 
 export interface SlotlockDashboardOptions {
@@ -86,6 +128,8 @@ export interface SlotlockDashboardOptions {
   allowedUsers: '*' | readonly string[];
   keys: SlotlockApiKeyStore;
   resources: SlotlockDashboardResources;
+  /** Shared by every server behind this origin: see SlotlockDashboardState. */
+  state: SlotlockDashboardState;
   /** The server's bookable hours, shown read-only. */
   availability?: readonly WeeklyAvailabilityRule[];
   fetch?: typeof fetch;
@@ -100,7 +144,10 @@ export interface SlotlockDashboard {
   fetch(request: Request): Promise<Response>;
 }
 
-/** The dashboard's resources, in the store under each tenant's row-level security. */
+/**
+ * The dashboard's resources, in the store under each tenant's row-level security. Adds hold the cap
+ * in the database (a READ COMMITTED transaction, under a per-tenant lock).
+ */
 export function createSlotlockDashboardResources(store: SlotlockStore): SlotlockDashboardResources {
   return {
     list: (tenantRef) =>
@@ -108,9 +155,124 @@ export function createSlotlockDashboardResources(store: SlotlockStore): Slotlock
         tenant.listResources({ tenantRef, limit: SLOTLOCK_DASHBOARD_MAX_RESOURCES + 1 }),
       ),
     add: (tenantRef, externalRef, timezone) =>
-      store.withTenant(tenantRef, (tenant) =>
-        tenant.createResource({ tenantRef, externalRef, timezone }),
+      store.withTenant(
+        tenantRef,
+        (tenant) =>
+          tenant.createResource({
+            tenantRef,
+            externalRef,
+            timezone,
+            maxTenantResources: SLOTLOCK_DASHBOARD_MAX_RESOURCES,
+          }),
+        { isolation: 'read committed' },
       ),
+  };
+}
+
+function assertExpiry(expiresAt: number): Date {
+  if (!Number.isFinite(expiresAt)) throw new Error('Slotlock dashboard record needs a finite expiry');
+  return new Date(expiresAt);
+}
+
+function formLimitError(): Error & { code: 'dashboard_form_limit' } {
+  return Object.assign(
+    new Error(`Slotlock dashboard: ${SLOTLOCK_DASHBOARD_FORM_LIMIT} forms are live for this person`),
+    { code: 'dashboard_form_limit' as const },
+  );
+}
+
+const ownerDigest = (owner: string) =>
+  createHash('sha256').update(`slotlock-dashboard-owner.${owner}`).digest();
+
+/**
+ * The dashboard's records in Postgres, shared by every server on the database. Run `applySchema()`
+ * and `grantApplicationRole()` first: the serving role reaches the records only through
+ * SLOTLOCK_DASHBOARD_FUNCTIONS. Only SHA-256 digests of the values are stored.
+ *
+ * Each record is written in a READ COMMITTED transaction of its own, whatever the role's default:
+ * under REPEATABLE READ, a use racing another of the same value, or two prunes of the same expired
+ * rows, would fail with a serialization error instead of answering, and the per-person form count
+ * would not be exact. Pass a client, not a transaction: a caller's rollback would undo a record.
+ */
+export function createSlotlockDashboardState(sql: SlotlockSql): SlotlockDashboardState {
+  if (!('begin' in sql)) {
+    throw new Error(
+      'createSlotlockDashboardState needs a client, not a transaction: a rollback would undo its records',
+    );
+  }
+  const client = sql as Sql;
+  const digest = (kind: string, value: string) =>
+    createHash('sha256').update(`slotlock-dashboard-${kind}.${value}`).digest();
+  const record = async (
+    kind: 'sign_in' | 'form' | 'ended_session',
+    value: string,
+    expiresAt: number,
+    owner?: string,
+  ): Promise<boolean> => {
+    const expires = assertExpiry(expiresAt);
+    if (kind === 'form' && owner === undefined) {
+      throw new Error('Slotlock dashboard form records name their owner');
+    }
+    const ownerHash = owner === undefined ? null : ownerDigest(owner);
+    try {
+      return (await client.begin('isolation level read committed', async (tx) => {
+        const [row] = await tx<{ used: boolean }[]>`
+          SELECT slotlock.use_dashboard_token(
+            ${kind}, ${digest(kind, value)}, ${expires}, ${ownerHash}::bytea) AS used`;
+        return row?.used === true;
+      })) as boolean;
+    } catch (error) {
+      if ((error as { code?: unknown }).code === '54000') throw formLimitError();
+      throw error;
+    }
+  };
+  return {
+    use: (kind, value, expiresAt, owner) => record(kind, value, expiresAt, owner),
+    async endSession(sid, expiresAt) {
+      await record('ended_session', sid, expiresAt);
+    },
+    async sessionEnded(sid, expiresAt) {
+      const [row] = await client<{ ended: boolean }[]>`
+        SELECT slotlock.dashboard_session_ended(
+          ${digest('ended_session', sid)}, ${assertExpiry(expiresAt)}) AS ended`;
+      return row?.ended === true;
+    },
+  };
+}
+
+/**
+ * The dashboard's records in this process: bounded (the oldest go first past 10,000 of a kind) and
+ * seen by no other process. For tests, or a server that only ever runs as one process.
+ */
+export function createSlotlockMemoryDashboardState(
+  now: () => number = Date.now,
+): SlotlockDashboardState {
+  const records = { sign_in: remember(now), form: remember(now), ended_session: remember(now) };
+  const formsByOwner = new Map<string, number[]>();
+  const live = (expiresAt: number) => expiresAt > now() && expiresAt <= now() + DAY_MS;
+  return {
+    async use(kind, value, expiresAt, owner) {
+      assertExpiry(expiresAt);
+      if (!live(expiresAt)) return false;
+      const record = records[kind];
+      if (record.has(value)) return false;
+      if (kind === 'form') {
+        if (owner === undefined) throw new Error('Slotlock dashboard form records name their owner');
+        const forms = (formsByOwner.get(owner) ?? []).filter((until) => until > now());
+        if (forms.length >= SLOTLOCK_DASHBOARD_FORM_LIMIT) throw formLimitError();
+        formsByOwner.set(owner, [...forms, expiresAt]);
+      }
+      record.add(value, expiresAt);
+      return true;
+    },
+    async endSession(sid, expiresAt) {
+      assertExpiry(expiresAt);
+      if (live(expiresAt)) records.ended_session.add(sid, expiresAt);
+    },
+    async sessionEnded(sid, expiresAt) {
+      assertExpiry(expiresAt);
+      return !live(expiresAt) || records.ended_session.has(sid);
+    },
   };
 }
 
@@ -265,11 +427,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const allowed = (uid: string) =>
     options.allowedUsers === '*' ||
     (Array.isArray(options.allowedUsers) && options.allowedUsers.includes(uid));
-  const finishedSignIns = remember(now);
-  const signedOutSessions = remember(now);
-  const sentForms = remember(now);
   let signInsInFlight = 0;
-  const tenantQueues = new Map<string, Promise<unknown>>();
 
   function report(message: string): void {
     try {
@@ -279,23 +437,20 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     }
   }
 
-  /** Run `task` after every earlier task for the same tenant in this instance has finished. */
-  async function oneAtATime<T>(tenantRef: string, task: () => Promise<T>): Promise<T> {
-    const previous = tenantQueues.get(tenantRef) ?? Promise.resolve();
-    const run = previous.then(task, task);
-    const settled = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    tenantQueues.set(tenantRef, settled);
-    try {
-      return await run;
-    } finally {
-      if (tenantQueues.get(tenantRef) === settled) tenantQueues.delete(tenantRef);
-    }
-  }
-
-  const formNonce = () => randomBytes(18).toString('base64url');
+  const formMac = (session: Session, nonce: string) =>
+    createHmac('sha256', secret)
+      .update(`slotlock-dashboard-form-v1.${session.sid}.${nonce}`)
+      .digest('base64url');
+  /** Random, and bound to the session by a MAC: a made-up or another session's value is refused unwritten. */
+  const formNonce = (session: Session) => {
+    const nonce = randomBytes(18).toString('base64url');
+    return `${nonce}.${formMac(session, nonce)}`;
+  };
+  const isFormNonce = (session: Session, once: string) => {
+    const match = FORM_NONCE.exec(once);
+    // Compared as text, like the cookie MACs: decoding would drop the last character's spare bits.
+    return match !== null && safeEqual(match[2] as string, formMac(session, match[1] as string));
+  };
 
   function seal(context: string, payload: Record<string, unknown>): string {
     const body = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
@@ -326,7 +481,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     return payload;
   }
 
-  function readSession(request: Request): Session | null {
+  async function readSession(request: Request): Promise<Session | null> {
     const payload = unseal('slotlock-dashboard-session-v1', readCookies(request).get(SESSION_COOKIE));
     if (
       !payload ||
@@ -334,7 +489,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       typeof payload.login !== 'string' ||
       typeof payload.sid !== 'string' ||
       !allowed(payload.uid) ||
-      signedOutSessions.has(payload.sid)
+      (await options.state.sessionEnded(payload.sid, payload.exp as number))
     ) {
       return null;
     }
@@ -404,16 +559,16 @@ ${notice ? html`<p class="notice" role="alert">${notice}</p>` : html``}
     return respond(status, layout('Sign in', content, null), {}, cookies);
   }
 
-  function keyRows(keys: SlotlockApiKey[], token: string): Html[] {
+  function keyRows(keys: SlotlockApiKey[], token: string, session: Session): Html[] {
     return keys.map((key) => {
       const expired = key.expiresAt !== null && key.expiresAt.getTime() <= now();
       const status = key.revokedAt ? 'Revoked' : expired ? 'Expired' : 'Active';
       const actions =
         status === 'Active'
           ? html`<details class="act"><summary>Rotate</summary><p>A new secret replaces this one at once. The key keeps its name, access and bookings.</p>
-<form method="post" action="${root}/keys/rotate"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce()}"><input type="hidden" name="id" value="${key.id}"><button type="submit">Rotate key</button></form></details>
+<form method="post" action="${root}/keys/rotate"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${key.id}"><button type="submit">Rotate key</button></form></details>
 <details class="act danger"><summary>Revoke</summary><p>Requests with this key fail at once. What it booked stays on the calendar.</p>
-<form method="post" action="${root}/keys/revoke"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce()}"><input type="hidden" name="id" value="${key.id}"><button class="danger" type="submit">Revoke key</button></form></details>`
+<form method="post" action="${root}/keys/revoke"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${key.id}"><button class="danger" type="submit">Revoke key</button></form></details>`
           : html``;
       return html`<tr>
 <td data-label="Name">${key.name}</td>
@@ -451,7 +606,7 @@ ${notice ? html`<p class="notice" role="alert">${notice}</p>` : html``}
 <div class="head"><div><h2>API keys</h2><p>Each key acts in your calendar only. Give every agent its own, with the least access it needs.</p></div></div>
 <form class="create" method="post" action="${root}/keys">
 <input type="hidden" name="csrf" value="${token}">
-<input type="hidden" name="once" value="${formNonce()}">
+<input type="hidden" name="once" value="${formNonce(session)}">
 <label>Name<input name="name" required maxlength="100" placeholder="Booking agent"></label>
 <label>Access<select name="access"><option value="read_write">Read and write</option><option value="read">Read only</option></select></label>
 <label>Expires<select name="expires"><option value="90">In 90 days</option><option value="30">In 30 days</option><option value="365">In a year</option><option value="never">Never</option></select></label>
@@ -461,14 +616,14 @@ ${
   keys.length === 0
     ? html`<p class="empty">No keys yet. Create one to connect an agent.</p>`
     : html`<div class="table"><table><thead><tr><th>Name</th><th>Key</th><th>Access</th><th>Created</th><th>Last used</th><th>Expires</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
-<tbody>${keyRows(keys, token)}</tbody></table></div>`
+<tbody>${keyRows(keys, token, session)}</tbody></table></div>`
 }
 </section>
 <section>
 <div class="head"><div><h2>Resources</h2><p>What your agents book: a car, a room, a person, a machine. Up to ${SLOTLOCK_DASHBOARD_MAX_RESOURCES}.</p></div></div>
 <form class="create" method="post" action="${root}/resources">
 <input type="hidden" name="csrf" value="${token}">
-<input type="hidden" name="once" value="${formNonce()}">
+<input type="hidden" name="once" value="${formNonce(session)}">
 <label>Reference<input name="reference" required maxlength="200" placeholder="vehicle-42"></label>
 <label>Time zone<input name="timezone" required maxlength="64" value="UTC" placeholder="Europe/London"></label>
 <button type="submit">Add resource</button>
@@ -592,6 +747,16 @@ ${
     return { uid: String(body.id), login: body.login };
   }
 
+  async function askGitHub(code: string, verifier: string): Promise<{ uid: string; login: string } | null> {
+    try {
+      const token = await exchangeCode(code, verifier);
+      return token === null ? null : await readGitHubUser(token);
+    } catch (error) {
+      report(`GitHub sign-in failed: ${error instanceof Error ? error.name : 'unknown error'}`);
+      return null;
+    }
+  }
+
   async function finishSignIn(request: Request, url: URL): Promise<Response> {
     const clearSignIn = setCookie(SIGN_IN_COOKIE, '', 0);
     const pending = unseal('slotlock-dashboard-sign-in-v1', readCookies(request).get(SIGN_IN_COOKIE));
@@ -606,27 +771,24 @@ ${
       code.length === 0 ||
       code.length > 512 ||
       state === null ||
-      !safeEqual(state, pending.state) ||
-      finishedSignIns.has(pending.state)
+      !safeEqual(state, pending.state)
     ) {
-      return signedOutPage(400, 'That sign-in did not finish here, or took too long. Sign in again.', [
-        clearSignIn,
-      ]);
+      return signedOutPage(400, SIGN_IN_AGAIN, [clearSignIn]);
     }
     if (signInsInFlight >= MAX_SIGN_INS_IN_FLIGHT) {
       return signedOutPage(503, 'Too many people are signing in at once. Sign in again in a moment.', [
         clearSignIn,
       ]);
     }
-    finishedSignIns.add(pending.state, pending.exp as number);
+    const verifier = pending.verifier;
     signInsInFlight += 1;
     let user: { uid: string; login: string } | null;
     try {
-      const token = await exchangeCode(code, pending.verifier);
-      user = token === null ? null : await readGitHubUser(token);
-    } catch (error) {
-      report(`GitHub sign-in failed: ${error instanceof Error ? error.name : 'unknown error'}`);
-      user = null;
+      // Recorded before GitHub is asked, so a replayed callback is refused on every server unasked.
+      if (!(await options.state.use('sign_in', pending.state, pending.exp as number))) {
+        return signedOutPage(400, SIGN_IN_AGAIN, [clearSignIn]);
+      }
+      user = await askGitHub(code, verifier);
     } finally {
       signInsInFlight -= 1;
     }
@@ -717,23 +879,17 @@ ${
     if (reference.length === 0 || reference.length > 200) {
       return dashboardPage(session, 400, 'Give the resource a reference of 1 to 200 characters.');
     }
-    const tenantRef = tenantOf(session);
-    // The count and the add run one at a time per tenant, so racing adds cannot pass the cap.
-    let capped = false;
     try {
-      await oneAtATime(tenantRef, async () => {
-        const existing = await options.resources.list(tenantRef);
-        if (
-          existing.length >= SLOTLOCK_DASHBOARD_MAX_RESOURCES &&
-          !existing.some((resource) => resource.externalRef === reference)
-        ) {
-          capped = true;
-          return;
-        }
-        await options.resources.add(tenantRef, reference, timezone);
-      });
+      await options.resources.add(tenantOf(session), reference, timezone);
     } catch (error) {
       const code = (error as { code?: unknown }).code;
+      if (code === 'resource_limit_reached') {
+        return dashboardPage(
+          session,
+          409,
+          `You have ${SLOTLOCK_DASHBOARD_MAX_RESOURCES} resources, as many as the dashboard allows.`,
+        );
+      }
       if (code === 'invalid_timezone') {
         return dashboardPage(session, 400, `${timezone} is not a time zone Slotlock knows, such as Europe/London.`);
       }
@@ -741,13 +897,6 @@ ${
         return dashboardPage(session, 400, 'Give the resource a reference of 1 to 200 characters.');
       }
       throw error;
-    }
-    if (capped) {
-      return dashboardPage(
-        session,
-        409,
-        `You have ${SLOTLOCK_DASHBOARD_MAX_RESOURCES} resources, as many as the dashboard allows.`,
-      );
     }
     return redirect(303, root);
   }
@@ -757,7 +906,7 @@ ${
     if (request.headers.get('origin') !== origin) {
       return respond(403, layout('Refused', html`<p class="notice">That request did not come from this dashboard.</p>`, null));
     }
-    const session = readSession(request);
+    const session = await readSession(request);
     if (!session) return redirect(303, root);
     const form = await readForm(request);
     if (form === 'too_large') {
@@ -768,17 +917,33 @@ ${
     if (!safeEqual(presented, csrfToken(session))) {
       return respond(403, layout('Refused', html`<p class="notice">That form has expired. Go back and try again.</p>`, session));
     }
+    // Nothing is recorded for a route that does not exist.
+    if (!POST_ROUTES.has(route)) {
+      return respond(404, layout('Not found', html`<p class="notice">Nothing is here.</p>`, session));
+    }
     // A form sent again (a reload of its result, a double click) must not create or rotate twice.
     const once = form.get('once');
     if (once !== null) {
-      if (!FORM_NONCE.test(once) || sentForms.has(once)) {
+      let first: boolean;
+      try {
+        first =
+          isFormNonce(session, once) &&
+          (await options.state.use('form', once, session.exp, session.uid));
+      } catch (error) {
+        if ((error as { code?: unknown }).code !== 'dashboard_form_limit') throw error;
+        return dashboardPage(
+          session,
+          429,
+          'Too many forms sent from this account in the last 12 hours. Try again later.',
+        );
+      }
+      if (!first) {
         return dashboardPage(session, 409, 'That form was already sent. Reload the page to start again.');
       }
-      sentForms.add(once, session.exp);
     }
     switch (route) {
       case '/sign-out':
-        signedOutSessions.add(session.sid, session.exp);
+        await options.state.endSession(session.sid, session.exp);
         return redirect(303, root, [setCookie(SESSION_COOKIE, '', 0)]);
       case '/keys':
         return createKey(session, form);
@@ -806,7 +971,7 @@ ${
         if (request.method === 'GET') {
           switch (route) {
             case '/': {
-              const session = readSession(request);
+              const session = await readSession(request);
               return session ? await dashboardPage(session) : signedOutPage(200);
             }
             case '/style.css':

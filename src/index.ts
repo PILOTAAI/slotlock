@@ -89,12 +89,15 @@ export {
 export {
   createSlotlockDashboard,
   createSlotlockDashboardResources,
+  createSlotlockDashboardState,
+  createSlotlockMemoryDashboardState,
   SLOTLOCK_DASHBOARD_MAX_RESOURCES,
 } from './dashboard.js';
 export type {
   SlotlockDashboard,
   SlotlockDashboardOptions,
   SlotlockDashboardResources,
+  SlotlockDashboardState,
 } from './dashboard.js';
 export type {
   CreateSlotlockApiKeyInput,
@@ -128,6 +131,10 @@ export {
   SLOTLOCK_API_KEY_FUNCTIONS,
   SLOTLOCK_API_KEY_TABLES,
   SLOTLOCK_CORE_DDL,
+  SLOTLOCK_DASHBOARD_FUNCTIONS,
+  SLOTLOCK_DASHBOARD_TABLES,
+  SLOTLOCK_DEFINER_FUNCTIONS,
+  SLOTLOCK_DEFINER_TABLES,
   SLOTLOCK_TENANT_CONTEXT_SETTING,
   SLOTLOCK_TENANT_RLS_DDL,
   SLOTLOCK_TENANT_TABLES,

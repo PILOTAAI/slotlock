@@ -3,6 +3,11 @@ import {
   SLOTLOCK_API_KEY_FUNCTIONS,
   SLOTLOCK_API_KEY_TABLES,
   SLOTLOCK_CORE_DDL,
+  SLOTLOCK_DASHBOARD_FORM_LIMIT,
+  SLOTLOCK_DASHBOARD_FUNCTIONS,
+  SLOTLOCK_DASHBOARD_TABLES,
+  SLOTLOCK_DEFINER_FUNCTIONS,
+  SLOTLOCK_DEFINER_TABLES,
   SLOTLOCK_TENANT_CONTEXT_SETTING,
   SLOTLOCK_TENANT_RLS_DDL,
   SLOTLOCK_TENANT_TABLES,
@@ -133,12 +138,16 @@ describe('deployment DDL name resolution', () => {
   });
 
   // A function is executable by PUBLIC unless revoked, and a SECURITY DEFINER one runs as the owner.
-  it('defines the API key functions as SECURITY DEFINER, executable by no one by default', () => {
+  it('defines the API key and dashboard functions as SECURITY DEFINER, executable by no one by default', () => {
+    expect([...SLOTLOCK_DEFINER_FUNCTIONS]).toEqual([
+      ...SLOTLOCK_API_KEY_FUNCTIONS,
+      ...SLOTLOCK_DASHBOARD_FUNCTIONS,
+    ]);
     const definers = functions.filter(([, , , header]) => header?.includes('SECURITY DEFINER'));
     expect(definers.map(([, name]) => name).sort()).toEqual(
-      SLOTLOCK_API_KEY_FUNCTIONS.map((signature) => signature.slice(0, signature.indexOf('('))).sort(),
+      SLOTLOCK_DEFINER_FUNCTIONS.map((signature) => signature.slice(0, signature.indexOf('('))).sort(),
     );
-    for (const signature of SLOTLOCK_API_KEY_FUNCTIONS) {
+    for (const signature of SLOTLOCK_DEFINER_FUNCTIONS) {
       expect(SLOTLOCK_CORE_DDL).toContain(`REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`);
     }
     for (const [, name, parameters] of functions) {
@@ -147,14 +156,15 @@ describe('deployment DDL name resolution', () => {
         .map((parameter) => parameter.trim().split(/\s+/).slice(1).join(' '))
         .filter(Boolean)
         .join(', ');
-      if (SLOTLOCK_API_KEY_FUNCTIONS.some((signature) => signature.startsWith(`${name}(`))) {
-        expect(SLOTLOCK_API_KEY_FUNCTIONS).toContain(`${name}(${types})`);
+      if (SLOTLOCK_DEFINER_FUNCTIONS.some((signature) => signature.startsWith(`${name}(`))) {
+        expect(SLOTLOCK_DEFINER_FUNCTIONS).toContain(`${name}(${types})`);
       }
     }
   });
 
-  it('keeps API keys in tables no role but their owner reads or writes', () => {
-    for (const table of SLOTLOCK_API_KEY_TABLES) {
+  it('keeps API keys and dashboard records in tables no role but their owner reads or writes', () => {
+    expect([...SLOTLOCK_DEFINER_TABLES]).toEqual([...SLOTLOCK_API_KEY_TABLES, ...SLOTLOCK_DASHBOARD_TABLES]);
+    for (const table of SLOTLOCK_DEFINER_TABLES) {
       expect(SLOTLOCK_CORE_DDL).toContain(`CREATE TABLE IF NOT EXISTS slotlock.${table} (`);
       expect(SLOTLOCK_CORE_DDL).toContain(`ALTER TABLE slotlock.${table} ENABLE ROW LEVEL SECURITY;`);
       expect(SLOTLOCK_CORE_DDL).toContain(`REVOKE ALL ON slotlock.${table} FROM PUBLIC;`);
@@ -166,6 +176,48 @@ describe('deployment DDL name resolution', () => {
     expect(SLOTLOCK_CORE_DDL).toContain(
       "scopes IN (ARRAY['read']::text[], ARRAY['write']::text[], ARRAY['read', 'write']::text[])",
     );
+  });
+
+  it("records a dashboard token once, as a digest, by the database's clock", () => {
+    const use = SLOTLOCK_CORE_DDL.slice(
+      SLOTLOCK_CORE_DDL.indexOf('CREATE OR REPLACE FUNCTION slotlock.use_dashboard_token('),
+      SLOTLOCK_CORE_DDL.indexOf('$slotlock_use_dashboard_token$;'),
+    );
+    expect(SLOTLOCK_CORE_DDL).toContain('CHECK (octet_length(token_hash) = 32)');
+    expect(SLOTLOCK_CORE_DDL).toContain("CHECK (kind IN ('sign_in', 'form', 'ended_session'))");
+    expect(SLOTLOCK_CORE_DDL).toContain("CHECK (kind <> 'form' OR owner_hash IS NOT NULL)");
+    // The database's clock refuses an expired token, or one claiming to outlive a day, before
+    // anything is written; a live token's record lasts exactly as long as the token.
+    const refused = use.indexOf("OR requested_expires_at > now() + interval '1 day' THEN\n    RETURN false;");
+    const written = use.indexOf('INSERT INTO slotlock.dashboard_tokens');
+    expect(refused).toBeGreaterThan(0);
+    expect(written).toBeGreaterThan(refused);
+    expect(use).toContain('VALUES (requested_kind, requested_hash, requested_owner_hash, requested_expires_at)');
+    // A recorded token is never replaced, so its second use comes back false.
+    expect(use).toContain('ON CONFLICT (kind, token_hash) DO NOTHING');
+    expect(use).not.toContain('DO UPDATE');
+    expect(use).toContain('RETURN coalesce(recorded, false);');
+    // Pruning is bounded per call and never waits on a row another call holds.
+    expect(use).toMatch(/LIMIT 100\s+FOR UPDATE SKIP LOCKED/);
+    // One person's live forms are counted under a lock on that person, in READ COMMITTED.
+    const isolation = use.indexOf("current_setting('transaction_isolation') <> 'read committed'");
+    const lock = use.indexOf('pg_advisory_xact_lock(');
+    const count = use.indexOf('count(*)');
+    expect(isolation).toBeGreaterThan(refused);
+    expect(lock).toBeGreaterThan(isolation);
+    expect(count).toBeGreaterThan(lock);
+    expect(written).toBeGreaterThan(count);
+    expect(use).toContain(`>= ${SLOTLOCK_DASHBOARD_FORM_LIMIT} THEN`);
+  });
+
+  it('ends a session past its expiry by the database clock, whatever the asking server reads', () => {
+    const ended = SLOTLOCK_CORE_DDL.slice(
+      SLOTLOCK_CORE_DDL.indexOf('CREATE OR REPLACE FUNCTION slotlock.dashboard_session_ended('),
+      SLOTLOCK_CORE_DDL.indexOf('$slotlock_dashboard_session_ended$;'),
+    );
+    expect(ended).toContain('requested_expires_at <= now()');
+    expect(ended).toContain("requested_expires_at > now() + interval '1 day'");
+    expect(ended).toContain("ended.kind = 'ended_session'");
   });
 
   it('creates keys only under READ COMMITTED, where its lock makes the limit count exact', () => {
@@ -184,12 +236,12 @@ describe('deployment DDL name resolution', () => {
 
 describe('application role grants', () => {
   it('covers exactly the tables the core schema creates, each under forced RLS', () => {
-    // rls_policy_contracts is deployment-only; the API key tables are reached only through their
-    // functions.
-    const apiKeyTables: readonly string[] = SLOTLOCK_API_KEY_TABLES;
+    // rls_policy_contracts is deployment-only; the API key and dashboard tables are reached only
+    // through their functions.
+    const definerTables: readonly string[] = SLOTLOCK_DEFINER_TABLES;
     const created = [...SLOTLOCK_CORE_DDL.matchAll(/CREATE TABLE IF NOT EXISTS slotlock\.([a-z_]+)/g)]
       .map((match) => match[1] as string)
-      .filter((table) => table !== 'rls_policy_contracts' && !apiKeyTables.includes(table));
+      .filter((table) => table !== 'rls_policy_contracts' && !definerTables.includes(table));
     expect([...SLOTLOCK_TENANT_TABLES].sort()).toEqual([...new Set(created)].sort());
     for (const table of SLOTLOCK_TENANT_TABLES) {
       expect(SLOTLOCK_TENANT_RLS_DDL).toContain(
@@ -198,13 +250,15 @@ describe('application role grants', () => {
     }
   });
 
-  it('grants schema usage, DML on those tables and EXECUTE on the API key functions only', () => {
+  it('grants schema usage, DML on those tables and EXECUTE on the definer functions only', () => {
     const ddl = createSlotlockApplicationRoleGrantsDdl('slotlock_app');
     expect(ddl).toBe(
-      `GRANT USAGE ON SCHEMA slotlock TO "slotlock_app";\nGRANT SELECT, INSERT, UPDATE, DELETE ON ${SLOTLOCK_TENANT_TABLES.map((table) => `slotlock.${table}`).join(', ')} TO "slotlock_app";\nGRANT EXECUTE ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS.join(', ')} TO "slotlock_app";\n`,
+      `GRANT USAGE ON SCHEMA slotlock TO "slotlock_app";\nGRANT SELECT, INSERT, UPDATE, DELETE ON ${SLOTLOCK_TENANT_TABLES.map((table) => `slotlock.${table}`).join(', ')} TO "slotlock_app";\nGRANT EXECUTE ON FUNCTION ${SLOTLOCK_DEFINER_FUNCTIONS.join(', ')} TO "slotlock_app";\n`,
     );
+    for (const signature of SLOTLOCK_DASHBOARD_FUNCTIONS) expect(ddl).toContain(signature);
     expect(ddl).not.toContain('rls_policy_contracts');
-    for (const table of SLOTLOCK_API_KEY_TABLES) expect(ddl).not.toContain(`slotlock.${table}`);
+    for (const table of SLOTLOCK_DEFINER_TABLES) expect(ddl).not.toContain(`slotlock.${table} `);
+    for (const table of SLOTLOCK_DEFINER_TABLES) expect(ddl).not.toContain(`slotlock.${table},`);
     expect(ddl).not.toMatch(/ALL|TRUNCATE|REFERENCES|TRIGGER|CREATE|OWNER/);
   });
 

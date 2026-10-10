@@ -128,6 +128,33 @@ export const SLOTLOCK_API_KEY_FUNCTIONS = Object.freeze([
   'slotlock.erase_api_keys(text)',
 ] as const);
 
+/**
+ * The table behind the dashboard's shared records (dashboard.ts). No role but its owner holds a
+ * right on it; it is reached only through SLOTLOCK_DASHBOARD_FUNCTIONS.
+ */
+export const SLOTLOCK_DASHBOARD_TABLES = Object.freeze(['dashboard_tokens'] as const);
+
+/** The SECURITY DEFINER functions through which the serving role reaches the dashboard's records. */
+export const SLOTLOCK_DASHBOARD_FUNCTIONS = Object.freeze([
+  'slotlock.use_dashboard_token(text, bytea, timestamptz, bytea)',
+  'slotlock.dashboard_session_ended(bytea, timestamptz)',
+] as const);
+
+/** Live form records one person may leave in the dashboard's records (12 hours of forms). */
+export const SLOTLOCK_DASHBOARD_FORM_LIMIT = 1_000;
+
+/** Every SECURITY DEFINER function the serving role may execute, by signature. */
+export const SLOTLOCK_DEFINER_FUNCTIONS = Object.freeze([
+  ...SLOTLOCK_API_KEY_FUNCTIONS,
+  ...SLOTLOCK_DASHBOARD_FUNCTIONS,
+]);
+
+/** Tables no role but their owner reads or writes, reached only through SLOTLOCK_DEFINER_FUNCTIONS. */
+export const SLOTLOCK_DEFINER_TABLES = Object.freeze([
+  ...SLOTLOCK_API_KEY_TABLES,
+  ...SLOTLOCK_DASHBOARD_TABLES,
+]);
+
 const API_KEY_COLUMNS = `key_id uuid,
   key_tenant_ref text,
   key_name text,
@@ -358,6 +385,122 @@ AS $slotlock_erase_api_keys$
   SELECT count(*) FROM erased;
 $slotlock_erase_api_keys$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[5]} FROM PUBLIC;
+`;
+
+// The dashboard's records (dashboard.ts), shared by every server on this database: a finished sign-in
+// (its callback works once), a sent form (it runs once) and a signed-out session (a copied cookie
+// stays out). Each is a SHA-256 digest of a value only the dashboard's sealed cookies and pages
+// carry. Form records also carry a digest of the person who sent them, so the database can cap them;
+// nothing here names a tenant. Row-level security is enabled with no policy and no role is granted
+// anything, so the serving role reaches the table only through the two functions below.
+//
+// The database's clock decides. Servers seal an expiry into each cookie and form by their own
+// clocks, which may run apart from each other and from the database's; a record judged by the
+// database while its token was judged by a server could lapse while some server still took the
+// token. So the functions refuse a token whose expiry the database's clock has passed, or that
+// claims to outlive a day (no dashboard token lives longer than 12 hours), and keep each record
+// until exactly that expiry: while the database would accept the token, its record is there.
+const SLOTLOCK_DASHBOARD_DDL = `
+CREATE TABLE IF NOT EXISTS slotlock.dashboard_tokens (
+  kind text NOT NULL,
+  token_hash bytea NOT NULL,
+  owner_hash bytea,
+  expires_at timestamptz NOT NULL,
+  CONSTRAINT slotlock_dashboard_tokens_pkey PRIMARY KEY (kind, token_hash),
+  CONSTRAINT slotlock_dashboard_tokens_kind_valid CHECK (kind IN ('sign_in', 'form', 'ended_session')),
+  CONSTRAINT slotlock_dashboard_tokens_hash_valid CHECK (octet_length(token_hash) = 32),
+  CONSTRAINT slotlock_dashboard_tokens_owner_valid
+    CHECK (owner_hash IS NULL OR octet_length(owner_hash) = 32),
+  CONSTRAINT slotlock_dashboard_tokens_form_owner CHECK (kind <> 'form' OR owner_hash IS NOT NULL)
+);
+CREATE INDEX IF NOT EXISTS slotlock_dashboard_tokens_expiry_idx
+  ON slotlock.dashboard_tokens (expires_at);
+CREATE INDEX IF NOT EXISTS slotlock_dashboard_tokens_owner_idx
+  ON slotlock.dashboard_tokens (owner_hash, expires_at) WHERE owner_hash IS NOT NULL;
+ALTER TABLE slotlock.dashboard_tokens ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.dashboard_tokens FROM PUBLIC;
+
+-- True the first time a live token is recorded; false while it stays recorded, and for a token the
+-- database's clock holds expired or that claims to outlive a day (nothing is stored then). Racing
+-- calls for one token meet at the primary key: the second waits for the first to commit, then finds
+-- its row. A person's form records are counted under a lock on that person, so racing forms on any
+-- number of servers stop at ${SLOTLOCK_DASHBOARD_FORM_LIMIT} live ones; past that the call fails
+-- with program_limit_exceeded. The count is exact only under READ COMMITTED (each statement after
+-- the lock sees every record committed before it), so the function refuses to run under anything
+-- else. Each call deletes up to 100 expired rows, so the table holds what is live and little more.
+CREATE OR REPLACE FUNCTION slotlock.use_dashboard_token(
+  requested_kind text,
+  requested_hash bytea,
+  requested_expires_at timestamptz,
+  requested_owner_hash bytea
+)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_use_dashboard_token$
+DECLARE
+  recorded boolean;
+BEGIN
+  IF requested_expires_at IS NULL
+     OR requested_expires_at <= now()
+     OR requested_expires_at > now() + interval '1 day' THEN
+    RETURN false;
+  END IF;
+  IF current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION 'Slotlock records dashboard tokens only in a READ COMMITTED transaction'
+      USING ERRCODE = 'invalid_transaction_state';
+  END IF;
+  DELETE FROM slotlock.dashboard_tokens stale
+   WHERE (stale.kind, stale.token_hash) IN (
+     SELECT expired.kind, expired.token_hash
+       FROM slotlock.dashboard_tokens expired
+      WHERE expired.expires_at <= now()
+      LIMIT 100
+        FOR UPDATE SKIP LOCKED);
+  IF requested_kind = 'form' AND requested_owner_hash IS NOT NULL THEN
+    PERFORM pg_advisory_xact_lock(
+      hashtextextended('slotlock:dashboard-forms:' || encode(requested_owner_hash, 'hex'), 0));
+    IF (SELECT count(*) FROM slotlock.dashboard_tokens live
+         WHERE live.owner_hash = requested_owner_hash
+           AND live.kind = 'form'
+           AND live.expires_at > now()) >= ${SLOTLOCK_DASHBOARD_FORM_LIMIT} THEN
+      RAISE EXCEPTION 'Slotlock dashboard form limit reached'
+        USING ERRCODE = 'program_limit_exceeded';
+    END IF;
+  END IF;
+  INSERT INTO slotlock.dashboard_tokens (kind, token_hash, owner_hash, expires_at)
+  VALUES (requested_kind, requested_hash, requested_owner_hash, requested_expires_at)
+  ON CONFLICT (kind, token_hash) DO NOTHING
+  RETURNING true INTO recorded;
+  RETURN coalesce(recorded, false);
+END
+$slotlock_use_dashboard_token$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[0]} FROM PUBLIC;
+
+-- Whether a session is over: signed out, or past its expiry by the database's clock (or claiming to
+-- outlive a day), whatever the clock of the server asking.
+CREATE OR REPLACE FUNCTION slotlock.dashboard_session_ended(
+  requested_hash bytea,
+  requested_expires_at timestamptz
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_dashboard_session_ended$
+  SELECT requested_expires_at IS NULL
+      OR requested_expires_at <= now()
+      OR requested_expires_at > now() + interval '1 day'
+      OR EXISTS (
+           SELECT 1 FROM slotlock.dashboard_tokens ended
+            WHERE ended.kind = 'ended_session'
+              AND ended.token_hash = requested_hash
+              AND ended.expires_at > now());
+$slotlock_dashboard_session_ended$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[1]} FROM PUBLIC;
 `;
 
 // btree_gist is created in slotlock when it is missing; one installed elsewhere stays where it is.
@@ -1276,7 +1419,7 @@ CREATE INDEX IF NOT EXISTS slotlock_calendar_event_occurrences_resource_time_idx
   ON slotlock.calendar_event_occurrences (tenant_ref, starts_at, ends_at);
 CREATE INDEX IF NOT EXISTS slotlock_reservations_calendar_event_idx
   ON slotlock.reservations (calendar_event_id) WHERE calendar_event_id IS NOT NULL;
-${SLOTLOCK_API_KEYS_DDL}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
+${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_DASHBOARD_DDL}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
 
 export const SLOTLOCK_TENANT_CONTEXT_SETTING = 'slotlock.tenant_ref';
 
@@ -1306,8 +1449,8 @@ const RESERVED_ROLE_NAMES = new Set(['public', 'current_role', 'current_user', '
 
 /**
  * Build the grants for the application role: USAGE on the `slotlock` schema, DML on the store's
- * tables and EXECUTE on the API key functions. Nothing else: no ownership, DDL, sequence,
- * RLS-contract or API key table access. The role must not be
+ * tables and EXECUTE on the API key and dashboard functions. Nothing else: no ownership, DDL,
+ * sequence, RLS-contract, API key or dashboard table access. The role must not be
  * able to leave forced RLS, itself or through a role it belongs to (`grantApplicationRole` refuses
  * the known ways out; these statements check nothing). Rerun after every `applySchema()`, since a
  * release may add a table.
@@ -1322,7 +1465,7 @@ export function createSlotlockApplicationRoleGrantsDdl(role: string): string {
   const tables = SLOTLOCK_TENANT_TABLES.map((table) => `slotlock.${table}`).join(', ');
   return `GRANT USAGE ON SCHEMA slotlock TO "${role}";
 GRANT SELECT, INSERT, UPDATE, DELETE ON ${tables} TO "${role}";
-GRANT EXECUTE ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS.join(', ')} TO "${role}";
+GRANT EXECUTE ON FUNCTION ${SLOTLOCK_DEFINER_FUNCTIONS.join(', ')} TO "${role}";
 `;
 }
 
