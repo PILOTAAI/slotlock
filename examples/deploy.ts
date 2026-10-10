@@ -10,9 +10,9 @@ export async function deploySlotlock(deployUrl: string, applicationRole: string)
   const sql = postgres(deployUrl, { max: 1, onnotice: () => {} });
   try {
     const store = createSlotlockStore(sql);
-    await store.applySchema(); // idempotent; serialized across instances
-    await store.applyTenantRls(); // forced row-level security on every Slotlock table
-    await store.grantApplicationRole(applicationRole); // schema usage + DML, nothing else
+    await store.applySchema();
+    await store.applyTenantRls();
+    await store.grantApplicationRole(applicationRole);
   } finally {
     await sql.end();
   }

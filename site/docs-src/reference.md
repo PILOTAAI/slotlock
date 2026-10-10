@@ -5,11 +5,9 @@ sidebar:
   label: MCP and A2A server
 ---
 
-`createSlotlockAgentServer` serves Slotlock's {{toolCount}} tools over MCP ({{mcpModern}} stateless,
-{{mcpLegacy}} and {{mcpOlder}}) and A2A {{a2a}} from one HTTP handler. The `slotlock serve` command
-in the [Quickstart](/docs/quickstart/) is this server with configuration from environment
-variables; embed it yourself when your application owns authentication, tenancy and the resources'
-bookable hours. What each tool takes and returns is in the [tools reference](/docs/tools/).
+`createSlotlockAgentServer` serves the {{toolCount}} tools over MCP ({{mcpModern}}, {{mcpLegacy}},
+{{mcpOlder}}) and A2A {{a2a}} from one HTTP handler. `slotlock serve` is this server configured from
+environment variables; embed it when your application owns authentication and tenancy.
 
 <!-- include README.md#expose-slotlock-to-agents lead -->
 
@@ -17,8 +15,8 @@ bookable hours. What each tool takes and returns is in the [tools reference](/do
 
 ## Errors
 
-Tool results carry the [error codes](/docs/tools/#error-codes) an agent acts on. These are the
-other two kinds.
+Tools return [error codes](/docs/tools/#error-codes) the agent acts on. These are the other two
+kinds.
 
 <!-- include README.md#errors-from-your-own-backend promote -->
 
@@ -28,9 +26,8 @@ other two kinds.
 
 ## Confirmation before writes
 
-Set `confirmation` to make the listed writes wait for a person; the
-[security model](/docs/security/#confirmation-before-writes) covers how the question is sealed,
-asked and answered, and what clients that cannot ask get.
+`confirmation` makes the listed writes wait for a person; see the
+[security model](/docs/security/#confirmation-before-writes).
 
 <!-- include README.md#calendar-resources-and-live-updates promote -->
 

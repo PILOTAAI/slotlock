@@ -5,20 +5,16 @@ sidebar:
   label: TypeScript library
 ---
 
-The library is what the server runs on: availability maths that needs no database, and a store
-that keeps resources, holds, reservations and events in your PostgreSQL 16. Use it when your
-application books time itself, or when you want holds, which only the library offers.
+The library is what the server runs on. Use it when your application books time itself, or for
+holds, which only the library offers.
 
 :::note[Not on npm yet]
-Slotlock {{version}} is a pre-release. Until the first release is tagged, build the package from
-the repository and install the build:
+Slotlock {{version}} is a pre-release. Build it and install the build:
 
 ```sh
 git clone https://github.com/PILOTAAI/slotlock.git
-cd slotlock
-npm ci && npm run build
-# then, in your project:
-npm install <path-to>/slotlock/dist postgres
+cd slotlock && npm ci && npm run build
+cd <your-project> && npm install <path-to>/slotlock/dist postgres
 ```
 :::
 

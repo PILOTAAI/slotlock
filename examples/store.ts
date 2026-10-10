@@ -11,8 +11,6 @@ export function openSlotlock(applicationUrl: string) {
 
 // #region book
 export async function bookHandover(store: SlotlockStore, tenantRef: string) {
-  // withTenant pins one connection and sets the tenant for everything inside the callback. Under
-  // forced RLS, a call made outside it sees no rows at all.
   return store.withTenant(tenantRef, async (tenant) => {
     const vehicle = await tenant.createResource({
       tenantRef,
@@ -23,7 +21,7 @@ export async function bookHandover(store: SlotlockStore, tenantRef: string) {
       tenantRef,
       externalRef: 'handover-BK-42',
       idempotencyKey: 'booking-BK-42-create',
-      expectedRevision: 0, // 0 creates; later writes pass the revision they last read
+      expectedRevision: 0,
       resourceId: vehicle.id,
       start: new Date('2027-03-29T09:00:00Z'),
       end: new Date('2027-03-29T10:00:00Z'),
@@ -40,7 +38,6 @@ export async function bookHandover(store: SlotlockStore, tenantRef: string) {
       resourceId: vehicle.id,
       window: { start: new Date('2027-03-29T00:00:00Z'), end: new Date('2027-03-30T00:00:00Z') },
     });
-    // freeBusy.busy is [09:00, 10:00); freeBusy.coverage.state is 'complete'.
     return { vehicle, handover, freeBusy };
   });
 }
@@ -64,7 +61,6 @@ export async function scheduleWeeklyInspection(
       timezone: 'Europe/London',
       summary: 'Weekly inspection',
       recurrence: { rrule: 'FREQ=WEEKLY;COUNT=8' },
-      // Occurrences are materialized into this window; the horizon worker rolls it forward.
       materializationWindow: {
         start: new Date('2027-03-30T00:00:00Z'),
         end: new Date('2027-05-30T00:00:00Z'),
