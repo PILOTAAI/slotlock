@@ -71,10 +71,55 @@ describe('availability rule validation', () => {
     ['a COUNT', 'FREQ=WEEKLY;BYDAY=MO;COUNT=3'],
     ['every other week', 'FREQ=WEEKLY;INTERVAL=2;BYDAY=MO'],
     ['nonsense', 'FREQ=WEEKLY;BYDAY=XX'],
+    // Outside SPEC.md's subset: each of these evaluates on another day or at another cost.
+    [
+      'a DTSTART with a zone',
+      'DTSTART;TZID=Pacific/Kiritimati:20260105T000000\nRRULE:FREQ=WEEKLY;BYDAY=MO',
+    ],
+    ['an RRULE: prefix', 'RRULE:FREQ=WEEKLY;BYDAY=MO'],
+    ['BYDAY twice', 'FREQ=WEEKLY;BYDAY=MO;BYDAY=TU'],
+    ['BYWEEKDAY', 'FREQ=WEEKLY;BYWEEKDAY=MO'],
+    ['an ordinal weekday', 'FREQ=WEEKLY;BYDAY=+1MO'],
+    ['a last weekday', 'FREQ=WEEKLY;BYDAY=-1FR'],
+    ['an unsigned ordinal', 'FREQ=WEEKLY;BYDAY=1MO'],
+    ['a TZID part', 'FREQ=WEEKLY;BYDAY=MO;TZID=Pacific/Kiritimati'],
+    ['BYHOUR', 'FREQ=WEEKLY;BYDAY=MO;BYHOUR=9,10'],
+    ['BYSETPOS', 'FREQ=WEEKLY;BYDAY=MO,TU;BYSETPOS=1'],
+    ['BYMONTH', 'FREQ=WEEKLY;BYDAY=MO;BYMONTH=1,2,3,4,5,6,7,8,9,10,11,12'],
+    ['WKST', 'FREQ=WEEKLY;BYDAY=MO;WKST=SU'],
+    ['a floating UNTIL', 'FREQ=WEEKLY;BYDAY=MO;UNTIL=20271231T000000'],
+    ['a trailing separator', 'FREQ=WEEKLY;BYDAY=MO;'],
+    ['a space', 'FREQ=WEEKLY; BYDAY=MO'],
+    ['lower case', 'freq=weekly;byday=mo'],
   ])('refuses %s, which Slotlock cannot evaluate', (_name, rrule) => {
     expect(availabilityRuleProblem({ rrule, startMinutes: 540, durationMinutes: 60 })).toBe(
       'unsupported',
     );
+  });
+
+  it('accepts the subset in any order, with INTERVAL=1 and an absolute UNTIL', () => {
+    for (const rrule of [
+      'BYDAY=MO;FREQ=WEEKLY',
+      'FREQ=WEEKLY;INTERVAL=1;BYDAY=MO,WE',
+      'FREQ=WEEKLY;BYDAY=MO;UNTIL=20271231T000000Z',
+    ]) {
+      expect(
+        availabilityRuleProblem({ rrule, startMinutes: 540, durationMinutes: 60 }),
+        rrule,
+      ).toBeNull();
+    }
+  });
+
+  it('refuses a rule that would expand to every second of the day without expanding it', () => {
+    const list = (n: number) => Array.from({ length: n }, (_, i) => i).join(',');
+    const rrule = `FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR,SA,SU;BYHOUR=${list(24)};BYMINUTE=${list(60)};BYSECOND=${list(60)}`;
+    expect(rrule.length).toBeLessThanOrEqual(500);
+    const started = performance.now();
+    expect(availabilityRuleProblem({ rrule, startMinutes: 0, durationMinutes: 60 })).toBe(
+      'unsupported',
+    );
+    // Expanding it took 714 ms (security review of #26); refusing it takes microseconds.
+    expect(performance.now() - started).toBeLessThan(100);
   });
 
   it('parses a list of at most 50 rules into fresh objects, and refuses anything else', () => {

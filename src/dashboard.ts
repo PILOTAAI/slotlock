@@ -149,7 +149,7 @@ export interface SlotlockDashboardOptions {
   resources: SlotlockDashboardResources;
   /** Shared by every server behind this origin: see SlotlockDashboardState. */
   state: SlotlockDashboardState;
-  /** The server's bookable hours, shown read-only. */
+  /** The server's bookable hours: shown, not edited, and used by resources without their own. */
   availability?: readonly WeeklyAvailabilityRule[];
   fetch?: typeof fetch;
   now?: () => number;
@@ -195,13 +195,16 @@ export function createSlotlockDashboardResources(store: SlotlockStore): Slotlock
 }
 
 function assertExpiry(expiresAt: number): Date {
-  if (!Number.isFinite(expiresAt)) throw new Error('Slotlock dashboard record needs a finite expiry');
+  if (!Number.isFinite(expiresAt))
+    throw new Error('Slotlock dashboard record needs a finite expiry');
   return new Date(expiresAt);
 }
 
 function formLimitError(): Error & { code: 'dashboard_form_limit' } {
   return Object.assign(
-    new Error(`Slotlock dashboard: ${SLOTLOCK_DASHBOARD_FORM_LIMIT} forms are live for this person`),
+    new Error(
+      `Slotlock dashboard: ${SLOTLOCK_DASHBOARD_FORM_LIMIT} forms are live for this person`,
+    ),
     { code: 'dashboard_form_limit' as const },
   );
 }
@@ -282,7 +285,8 @@ export function createSlotlockMemoryDashboardState(
       const record = records[kind];
       if (record.has(value)) return false;
       if (kind === 'form') {
-        if (owner === undefined) throw new Error('Slotlock dashboard form records name their owner');
+        if (owner === undefined)
+          throw new Error('Slotlock dashboard form records name their owner');
         const forms = (formsByOwner.get(owner) ?? []).filter((until) => until > now());
         if (forms.length >= SLOTLOCK_DASHBOARD_FORM_LIMIT) throw formLimitError();
         formsByOwner.set(owner, [...forms, expiresAt]);
@@ -423,27 +427,62 @@ function formatMinutes(minutes: number): string {
   return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
 }
 
-/** `09:00–17:00`, or `from 22:00 for 10 h` when the window runs past midnight. */
+/** `09:00–17:00`, `22:00–06:00 next day`, `all day`, or `from 09:00 for 2 d 2 h` beyond that. */
 function hoursOf(startMinutes: number, durationMinutes: number): string {
+  if (startMinutes === 0 && durationMinutes === 1_440) return 'all day';
   const end = startMinutes + durationMinutes;
-  return end <= 1_440
-    ? `${formatMinutes(startMinutes)}–${formatMinutes(end)}`
-    : `from ${formatMinutes(startMinutes)} for ${String(durationMinutes / 60)} h`;
+  if (end <= 1_440) return `${formatMinutes(startMinutes)}–${formatMinutes(end)}`;
+  if (end <= 2_880) return `${formatMinutes(startMinutes)}–${formatMinutes(end - 1_440)} next day`;
+  const parts: Array<[number, string]> = [
+    [Math.floor(durationMinutes / 1_440), 'd'],
+    [Math.floor((durationMinutes % 1_440) / 60), 'h'],
+    [durationMinutes % 60, 'min'],
+  ];
+  const length = parts.filter(([count]) => count > 0).map(([count, unit]) => `${count} ${unit}`);
+  return `from ${formatMinutes(startMinutes)} for ${length.join(' ')}`;
 }
 
-const daysOf = (rrule: string) =>
-  (/BYDAY=([A-Z,]+)/.exec(rrule)?.[1] ?? '')
-    .split(',')
-    .map((day) => WEEKDAY_NAMES[day] ?? day)
+/** `Mon–Fri`, `Sat, Sun`, `Mon, Wed`: three or more days in a row as a range. */
+function dayNames(days: readonly string[]): string {
+  const runs: string[][] = [];
+  for (const day of days) {
+    const run = runs.at(-1);
+    const previous = WEEKDAYS.indexOf(run?.at(-1) as Weekday);
+    if (run && previous >= 0 && WEEKDAYS.indexOf(day as Weekday) === previous + 1) run.push(day);
+    else runs.push([day]);
+  }
+  const name = (day: string | undefined) => WEEKDAY_NAMES[day ?? ''] ?? day ?? '';
+  return runs
+    .map((run) =>
+      run.length >= 3 ? `${name(run[0])}–${name(run.at(-1))}` : run.map(name).join(', '),
+    )
     .join(', ');
+}
 
-/** One line for a resource's hours: the server's, closed, or its own rules. */
+const daysOf = (rrule: string) => dayNames((/BYDAY=([A-Z,]+)/.exec(rrule)?.[1] ?? '').split(','));
+
+/**
+ * One line for a resource's hours: the server's, closed, or its own. Days with the same windows
+ * share a line; rules a week of windows cannot express are listed one by one.
+ */
 function hoursSummary(rules: readonly WeeklyAvailabilityRule[] | undefined): string {
   if (rules === undefined) return "Server's hours";
   if (rules.length === 0) return 'Closed';
-  return rules
-    .map((rule) => `${daysOf(rule.rrule)} ${hoursOf(rule.startMinutes, rule.durationMinutes)}`)
-    .join('; ');
+  const week = rulesToWeeklyHours(rules);
+  if (week === null) {
+    return rules
+      .map((rule) => `${daysOf(rule.rrule)} ${hoursOf(rule.startMinutes, rule.durationMinutes)}`)
+      .join('; ');
+  }
+  const days = new Map<string, Weekday[]>();
+  for (const day of WEEKDAYS) {
+    if (week[day].length === 0) continue;
+    const windows = week[day]
+      .map(({ from, to }) => hoursOf(from, to > from ? to - from : to + 1_440 - from))
+      .join(', ');
+    days.set(windows, [...(days.get(windows) ?? []), day]);
+  }
+  return [...days].map(([windows, byDay]) => `${dayNames(byDay)} ${windows}`).join('; ');
 }
 
 type HoursMode = 'server' | 'closed' | 'custom';
@@ -483,7 +522,8 @@ function readWeekForm(form: URLSearchParams): WeekForm {
 
 /** The week typed, or `invalid_availability` naming the day and window that cannot be read. */
 function weekFromForm(form: WeekForm): WeeklyHours {
-  const invalid = (message: string) => Object.assign(new Error(message), { code: 'invalid_availability' });
+  const invalid = (message: string) =>
+    Object.assign(new Error(message), { code: 'invalid_availability' });
   const week: WeeklyHours = { MO: [], TU: [], WE: [], TH: [], FR: [], SA: [], SU: [] };
   for (const day of WEEKDAYS) {
     form[day].forEach(({ from, to }, index) => {
@@ -579,7 +619,10 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   }
 
   async function readSession(request: Request): Promise<Session | null> {
-    const payload = unseal('slotlock-dashboard-session-v1', readCookies(request).get(SESSION_COOKIE));
+    const payload = unseal(
+      'slotlock-dashboard-session-v1',
+      readCookies(request).get(SESSION_COOKIE),
+    );
     if (
       !payload ||
       typeof payload.uid !== 'string' ||
@@ -594,7 +637,9 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   }
 
   const csrfToken = (session: Session) =>
-    createHmac('sha256', secret).update(`slotlock-dashboard-csrf-v1.${session.sid}`).digest('base64url');
+    createHmac('sha256', secret)
+      .update(`slotlock-dashboard-csrf-v1.${session.sid}`)
+      .digest('base64url');
   const tenantOf = (session: Session) => `github:${session.uid}`;
 
   function respond(
@@ -760,7 +805,9 @@ ${resources.length > 0 ? html`<p><a href="${root}/hours">Set hours for every res
     const checked = (value: HoursMode) => (mode === value ? html` checked` : html``);
     const server = options.availability ?? [];
     const title =
-      target === 'all' ? 'Hours for every resource' : `Hours for ${target.externalRef ?? target.id}`;
+      target === 'all'
+        ? 'Hours for every resource'
+        : `Hours for ${target.externalRef ?? target.id}`;
     const rows = WEEKDAYS.map((day) => {
       const cells = state.week[day].flatMap(({ from, to }, index) => {
         const which = index + 1;
@@ -814,7 +861,10 @@ ${
   }
 
   const notFound = (session: Session) =>
-    respond(404, layout('Not found', html`<p class="notice">That resource is not one of yours.</p>`, session));
+    respond(
+      404,
+      layout('Not found', html`<p class="notice">That resource is not one of yours.</p>`, session),
+    );
 
   async function hoursEditor(session: Session, url: URL): Promise<Response> {
     const id = url.searchParams.get('resource');
@@ -848,7 +898,13 @@ ${
     const mode = form.get('mode');
     const week = readWeekForm(form);
     if (mode !== 'server' && mode !== 'closed' && mode !== 'custom') {
-      return hoursPage(session, { target, mode: 'custom', week, status: 400, notice: 'Choose which hours to use.' });
+      return hoursPage(session, {
+        target,
+        mode: 'custom',
+        week,
+        status: 400,
+        notice: 'Choose which hours to use.',
+      });
     }
     let rules: WeeklyAvailabilityRule[] | null = mode === 'server' ? null : [];
     if (mode === 'custom') {
@@ -883,7 +939,12 @@ ${
     return redirect(303, root);
   }
 
-  function shownOncePage(session: Session, key: string, apiKey: SlotlockApiKey, rotated: boolean): Response {
+  function shownOncePage(
+    session: Session,
+    key: string,
+    apiKey: SlotlockApiKey,
+    rotated: boolean,
+  ): Response {
     const content = html`<section class="card once">
 <h1>${rotated ? 'Key rotated' : 'Key created'}: ${apiKey.name}</h1>
 <p class="notice warn" role="alert">Copy this key now. Slotlock keeps only its fingerprint, so it will not be shown again.${rotated ? ' The old key no longer works.' : ''}</p>
@@ -978,7 +1039,10 @@ ${
     return { uid: String(body.id), login: body.login };
   }
 
-  async function askGitHub(code: string, verifier: string): Promise<{ uid: string; login: string } | null> {
+  async function askGitHub(
+    code: string,
+    verifier: string,
+  ): Promise<{ uid: string; login: string } | null> {
     try {
       const token = await exchangeCode(code, verifier);
       return token === null ? null : await readGitHubUser(token);
@@ -990,7 +1054,10 @@ ${
 
   async function finishSignIn(request: Request, url: URL): Promise<Response> {
     const clearSignIn = setCookie(SIGN_IN_COOKIE, '', 0);
-    const pending = unseal('slotlock-dashboard-sign-in-v1', readCookies(request).get(SIGN_IN_COOKIE));
+    const pending = unseal(
+      'slotlock-dashboard-sign-in-v1',
+      readCookies(request).get(SIGN_IN_COOKIE),
+    );
     const code = url.searchParams.get('code');
     const state = url.searchParams.get('state');
     if (
@@ -1007,9 +1074,11 @@ ${
       return signedOutPage(400, SIGN_IN_AGAIN, [clearSignIn]);
     }
     if (signInsInFlight >= MAX_SIGN_INS_IN_FLIGHT) {
-      return signedOutPage(503, 'Too many people are signing in at once. Sign in again in a moment.', [
-        clearSignIn,
-      ]);
+      return signedOutPage(
+        503,
+        'Too many people are signing in at once. Sign in again in a moment.',
+        [clearSignIn],
+      );
     }
     const verifier = pending.verifier;
     signInsInFlight += 1;
@@ -1037,7 +1106,10 @@ ${
       sid: randomBytes(24).toString('base64url'),
       exp: now() + SESSION_TTL_MS,
     });
-    return redirect(303, root, [clearSignIn, setCookie(SESSION_COOKIE, session, SESSION_TTL_MS / 1000)]);
+    return redirect(303, root, [
+      clearSignIn,
+      setCookie(SESSION_COOKIE, session, SESSION_TTL_MS / 1000),
+    ]);
   }
 
   /** The form, `'too_large'` past MAX_FORM_BYTES (read no further), or null for another type. */
@@ -1085,7 +1157,11 @@ ${
         return dashboardPage(session, 400, 'Give the key a name of 1 to 100 characters.');
       }
       if (code === 'api_key_limit_reached') {
-        return dashboardPage(session, 409, 'You have as many keys as Slotlock allows. Revoke one first.');
+        return dashboardPage(
+          session,
+          409,
+          'You have as many keys as Slotlock allows. Revoke one first.',
+        );
       }
       throw error;
     }
@@ -1122,7 +1198,11 @@ ${
         );
       }
       if (code === 'invalid_timezone') {
-        return dashboardPage(session, 400, `${timezone} is not a time zone Slotlock knows, such as Europe/London.`);
+        return dashboardPage(
+          session,
+          400,
+          `${timezone} is not a time zone Slotlock knows, such as Europe/London.`,
+        );
       }
       if (code === 'invalid_external_ref') {
         return dashboardPage(session, 400, 'Give the resource a reference of 1 to 200 characters.');
@@ -1135,25 +1215,57 @@ ${
   async function handlePost(request: Request, route: string): Promise<Response> {
     // A browser sends Origin with every form POST; anything else did not come from these pages.
     if (request.headers.get('origin') !== origin) {
-      return respond(403, layout('Refused', html`<p class="notice">That request did not come from this dashboard.</p>`, null));
+      return respond(
+        403,
+        layout(
+          'Refused',
+          html`<p class="notice">That request did not come from this dashboard.</p>`,
+          null,
+        ),
+      );
     }
     const session = await readSession(request);
     if (!session) return redirect(303, root);
     const form = await readForm(request);
     if (form === 'too_large') {
-      return respond(413, layout('Refused', html`<p class="notice">That form is too large.</p>`, session));
+      return respond(
+        413,
+        layout('Refused', html`<p class="notice">That form is too large.</p>`, session),
+      );
     }
-    if (!form) return respond(400, layout('Refused', html`<p class="notice">That form could not be read.</p>`, session));
+    if (!form)
+      return respond(
+        400,
+        layout('Refused', html`<p class="notice">That form could not be read.</p>`, session),
+      );
     const presented = form.get('csrf') ?? '';
     if (!safeEqual(presented, csrfToken(session))) {
-      return respond(403, layout('Refused', html`<p class="notice">That form has expired. Go back and try again.</p>`, session));
+      return respond(
+        403,
+        layout(
+          'Refused',
+          html`<p class="notice">That form has expired. Go back and try again.</p>`,
+          session,
+        ),
+      );
     }
     // Nothing is recorded for a route that does not exist.
     if (!POST_ROUTES.has(route)) {
-      return respond(404, layout('Not found', html`<p class="notice">Nothing is here.</p>`, session));
+      return respond(
+        404,
+        layout('Not found', html`<p class="notice">Nothing is here.</p>`, session),
+      );
     }
     // A form sent again (a reload of its result, a double click) must not create or rotate twice.
+    // Every form but sign-out carries a single-use value, so leaving it out cannot skip this check
+    // or the per-person form limit.
     const once = form.get('once');
+    if (once === null && route !== '/sign-out') {
+      return respond(
+        400,
+        layout('Refused', html`<p class="notice">That form could not be read.</p>`, session),
+      );
+    }
     if (once !== null) {
       let first: boolean;
       try {
@@ -1169,7 +1281,11 @@ ${
         );
       }
       if (!first) {
-        return dashboardPage(session, 409, 'That form was already sent. Reload the page to start again.');
+        return dashboardPage(
+          session,
+          409,
+          'That form was already sent. Reload the page to start again.',
+        );
       }
     }
     switch (route) {
@@ -1187,7 +1303,10 @@ ${
       case '/hours':
         return saveHours(session, form);
       default:
-        return respond(404, layout('Not found', html`<p class="notice">Nothing is here.</p>`, session));
+        return respond(
+          404,
+          layout('Not found', html`<p class="notice">Nothing is here.</p>`, session),
+        );
     }
   }
 
@@ -1220,20 +1339,38 @@ ${
               return session ? await hoursEditor(session, url) : redirect(303, root);
             }
             default:
-              return respond(404, layout('Not found', html`<p class="notice">Nothing is here.</p>`, null));
+              return respond(
+                404,
+                layout('Not found', html`<p class="notice">Nothing is here.</p>`, null),
+              );
           }
         }
         if (request.method === 'POST') return await handlePost(request, route);
-        return respond(405, layout('Not allowed', html`<p class="notice">Use the dashboard's pages and forms.</p>`, null), {
-          Allow: 'GET, POST',
-        });
+        return respond(
+          405,
+          layout(
+            'Not allowed',
+            html`<p class="notice">Use the dashboard's pages and forms.</p>`,
+            null,
+          ),
+          {
+            Allow: 'GET, POST',
+          },
+        );
       } catch (error) {
         try {
           options.onError?.(error);
         } catch {
           // A failing reporter must not change the response.
         }
-        return respond(500, layout('Error', html`<p class="notice">Something went wrong. Try again in a moment.</p>`, null));
+        return respond(
+          500,
+          layout(
+            'Error',
+            html`<p class="notice">Something went wrong. Try again in a moment.</p>`,
+            null,
+          ),
+        );
       }
     },
   };

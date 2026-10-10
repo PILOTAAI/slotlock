@@ -578,6 +578,8 @@ ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS status text NOT NULL 
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS expires_at timestamptz;
 ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS tenant_ref text;
 -- A resource's own bookable hours (weekly-hours.ts validates each rule); NULL uses the default.
+-- Its CHECK holds SLOTLOCK_MAX_AVAILABILITY_RULES as it was when first added: changing the cap
+-- needs a constraint under a new name.
 ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS availability_rules jsonb;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS tenant_ref text;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS external_ref text;

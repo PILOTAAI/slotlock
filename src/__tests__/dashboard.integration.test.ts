@@ -66,8 +66,15 @@ describe.skipIf(!url)('dashboard (real Postgres)', () => {
     });
     const get = (path: string, cookie?: string) =>
       dashboard.fetch(new Request(`${ORIGIN}${path}`, cookie ? { headers: { cookie } } : {}));
-    const post = (path: string, fields: Record<string, string>, cookie: string) =>
-      dashboard.fetch(
+    // Every form but sign-out carries a single-use value: take a fresh one from the page.
+    const post = async (path: string, fields: Record<string, string>, cookie: string) => {
+      const sent = { ...fields };
+      if (!('once' in sent) && !path.endsWith('/sign-out')) {
+        const page = await (await get('/dashboard', cookie)).text();
+        const once = /name="once" value="([^"]+)"/.exec(page)?.[1];
+        if (once !== undefined) sent.once = once;
+      }
+      return dashboard.fetch(
         new Request(`${ORIGIN}${path}`, {
           method: 'POST',
           headers: {
@@ -75,9 +82,10 @@ describe.skipIf(!url)('dashboard (real Postgres)', () => {
             origin: ORIGIN,
             'content-type': 'application/x-www-form-urlencoded',
           },
-          body: new URLSearchParams(fields).toString(),
+          body: new URLSearchParams(sent).toString(),
         }),
       );
+    };
 
     const start = await get('/dashboard/sign-in');
     const state = new URL(start.headers.get('location') ?? '').searchParams.get('state');

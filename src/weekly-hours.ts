@@ -50,8 +50,8 @@ function invalidAvailability(message: string): Error & { code: 'invalid_availabi
 
 /**
  * Why `candidate` cannot be an availability rule: `'shape'` (not exactly rrule, startMinutes 0-1439
- * and durationMinutes 1-10080), `'unsupported'` (a rule `expandRules` would skip: not weekly,
- * COUNT, INTERVAL above 1, no BYDAY), or null when it can.
+ * and durationMinutes 1-10080), `'unsupported'` (a rule `expandRules` would skip: anything but
+ * FREQ=WEEKLY, BYDAY, INTERVAL=1 and an absolute UNTIL, or no window at all), or null when it can.
  */
 export function availabilityRuleProblem(candidate: unknown): 'shape' | 'unsupported' | null {
   if (

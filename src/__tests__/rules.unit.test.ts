@@ -104,6 +104,32 @@ describe('expandRules', () => {
     ).toEqual([]);
   });
 
+  it('refuses rrule parts outside the weekly subset, which move the weekday or multiply the cost', () => {
+    const week = { start: d('2027-01-04T00:00:00Z'), end: d('2027-01-11T00:00:00Z') };
+    const list = (n: number) => Array.from({ length: n }, (_, i) => i).join(',');
+    for (const rrule of [
+      // rrule honours this DTSTART's zone: Monday came out as Sunday.
+      'DTSTART;TZID=Pacific/Kiritimati:20260105T000000\nRRULE:FREQ=WEEKLY;BYDAY=MO',
+      'FREQ=WEEKLY;BYDAY=MO;BYDAY=TU',
+      'FREQ=WEEKLY;BYWEEKDAY=MO',
+      'FREQ=WEEKLY;BYDAY=MO;BYHOUR=9',
+      `FREQ=WEEKLY;BYDAY=MO;BYHOUR=${list(24)};BYMINUTE=${list(60)};BYSECOND=${list(60)}`,
+    ]) {
+      const started = performance.now();
+      expect(expandRules([{ rrule, startMinutes: 540, durationMinutes: 60 }], week), rrule).toEqual(
+        [],
+      );
+      expect(performance.now() - started, rrule).toBeLessThan(100);
+    }
+    expect(
+      expandRules(
+        [{ rrule: 'BYDAY=MO;INTERVAL=1;FREQ=WEEKLY', startMinutes: 540, durationMinutes: 60 }],
+        week,
+        'Europe/London',
+      ),
+    ).toEqual([{ start: d('2027-01-04T09:00:00Z'), end: d('2027-01-04T10:00:00Z') }]);
+  });
+
   it('UNTIL stays supported (absolute anchor — expands correctly, stops after)', () => {
     const until = [
       {

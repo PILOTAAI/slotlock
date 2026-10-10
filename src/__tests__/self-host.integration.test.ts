@@ -118,53 +118,67 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     const rules = [{ rrule: 'FREQ=WEEKLY;BYDAY=MO,TU', startMinutes: 540, durationMinutes: 480 }];
     expect((await run(['resource', 'add', 'hours-van'])).code).toBe(0);
     try {
-    const lines = (text: string) =>
-      text
-        .trim()
-        .split('\n')
-        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const lines = (text: string) =>
+        text
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line) as Record<string, unknown>);
 
-    const set = await run(['hours', 'set', JSON.stringify(rules), '--resource', 'hours-van']);
-    expect(set.code).toBe(0);
-    expect(lines(set.stdout.text())).toEqual([
-      expect.objectContaining({ external_ref: 'hours-van', hours: rules }),
-    ]);
-    const shown = await run(['hours', 'show']);
-    expect(lines(shown.stdout.text())).toEqual(
-      expect.arrayContaining([
+      const set = await run(['hours', 'set', JSON.stringify(rules), '--resource', 'hours-van']);
+      expect(set.code).toBe(0);
+      expect(lines(set.stdout.text())).toEqual([
         expect.objectContaining({ external_ref: 'hours-van', hours: rules }),
-        expect.objectContaining({ external_ref: 'vehicle-42', hours: null }),
-      ]),
-    );
-    // By id as well as by reference.
-    const id = lines(set.stdout.text())[0]?.id as string;
-    expect(lines((await run(['hours', 'show', '--resource', id])).stdout.text())).toEqual([
-      expect.objectContaining({ id, hours: rules }),
-    ]);
+      ]);
+      const shown = await run(['hours', 'show']);
+      expect(lines(shown.stdout.text())).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ external_ref: 'hours-van', hours: rules }),
+          expect.objectContaining({ external_ref: 'vehicle-42', hours: null }),
+        ]),
+      );
+      // By id as well as by reference.
+      const id = lines(set.stdout.text())[0]?.id as string;
+      expect(lines((await run(['hours', 'show', '--resource', id])).stdout.text())).toEqual([
+        expect.objectContaining({ id, hours: rules }),
+      ]);
+      // An id wins over a reference that spells it: the decoy sorts first and must be left alone.
+      const decoy = `00000000-0000-4000-8000-${randomBytes(6).toString('hex')}`;
+      const named = `ffffffff-ffff-4fff-bfff-${randomBytes(6).toString('hex')}`;
+      await admin`
+        INSERT INTO slotlock.resources (id, tenant_ref, external_ref, timezone)
+        VALUES (${decoy}, ${tenantRef}, ${named}, 'UTC'), (${named}, ${tenantRef}, 'hours-named', 'UTC')`;
+      expect(lines((await run(['hours', 'set', '[]', '--resource', named])).stdout.text())).toEqual([
+        expect.objectContaining({ id: named, hours: [] }),
+      ]);
+      expect(lines((await run(['hours', 'show', '--resource', decoy])).stdout.text())).toEqual([
+        expect.objectContaining({ id: decoy, hours: null }),
+      ]);
 
-    const closedAll = await run(['hours', 'set', '[]', '--all']);
-    expect(closedAll.code).toBe(0);
-    const updated = lines(closedAll.stdout.text())[0]?.updated as number;
-    expect(updated).toBeGreaterThanOrEqual(2);
-    for (const line of lines((await run(['hours', 'show'])).stdout.text())) {
-      expect(line.hours).toEqual([]);
-    }
+      const closedAll = await run(['hours', 'set', '[]', '--all']);
+      expect(closedAll.code).toBe(0);
+      const updated = lines(closedAll.stdout.text())[0]?.updated as number;
+      expect(updated).toBeGreaterThanOrEqual(2);
+      for (const line of lines((await run(['hours', 'show'])).stdout.text())) {
+        expect(line.hours).toEqual([]);
+      }
 
-    expect((await run(['hours', 'clear', '--resource', 'hours-van'])).code).toBe(0);
-    expect(lines((await run(['hours', 'show', '--resource', 'hours-van'])).stdout.text())).toEqual([
-      expect.objectContaining({ hours: null }),
-    ]);
-    expect((await run(['hours', 'clear', '--all'])).code).toBe(0);
-    for (const line of lines((await run(['hours', 'show'])).stdout.text())) {
-      expect(line.hours).toBeNull();
-    }
+      expect((await run(['hours', 'clear', '--resource', 'hours-van'])).code).toBe(0);
+      expect(
+        lines((await run(['hours', 'show', '--resource', 'hours-van'])).stdout.text()),
+      ).toEqual([expect.objectContaining({ hours: null })]);
+      expect((await run(['hours', 'clear', '--all'])).code).toBe(0);
+      for (const line of lines((await run(['hours', 'show'])).stdout.text())) {
+        expect(line.hours).toBeNull();
+      }
 
-    const missing = await run(['hours', 'set', '[]', '--resource', 'no-such-van']);
-    expect(missing.code).toBe(1);
-    expect(missing.stderr.text()).toMatch(/no resource with that reference or id/);
+      const missing = await run(['hours', 'set', '[]', '--resource', 'no-such-van']);
+      expect(missing.code).toBe(1);
+      expect(missing.stderr.text()).toMatch(/no resource with that reference or id/);
     } finally {
       // Later tests list exactly the tenant's vehicle-42, with the server's hours.
-      await admin`DELETE FROM slotlock.resources WHERE tenant_ref = ${tenantRef} AND external_ref = 'hours-van'`;
+      await admin`
+        DELETE FROM slotlock.resources
+         WHERE tenant_ref = ${tenantRef} AND external_ref IS DISTINCT FROM 'vehicle-42'`;
       await admin`UPDATE slotlock.resources SET availability_rules = NULL WHERE tenant_ref = ${tenantRef}`;
     }
   });

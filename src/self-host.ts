@@ -262,8 +262,8 @@ function readConfirmWrites(env: SlotlockEnv): SlotlockAgentWriteOperation[] {
 
 /**
  * `SLOTLOCK_AVAILABILITY`: a JSON array of weekly rules. Each must produce a window in a two-week
- * sample, so a rule `expandRules` cannot evaluate (not weekly, COUNT, INTERVAL>1, no BYDAY) is a
- * startup error instead of silently making every resource unbookable.
+ * sample, so a rule `expandRules` cannot evaluate (anything but FREQ=WEEKLY, BYDAY, INTERVAL=1 and
+ * an absolute UNTIL) is a startup error instead of silently making every resource unbookable.
  */
 function readAvailability(env: SlotlockEnv): WeeklyAvailabilityRule[] {
   const value = optional(env, 'SLOTLOCK_AVAILABILITY');
@@ -824,9 +824,10 @@ async function runHours(
       for (const resource of resources) out.write(hoursLine(resource));
       return true;
     }
-    const named = resources.find(
-      (resource) => resource.id === target.resource || resource.externalRef === target.resource,
-    );
+    // An id first: another resource's reference may spell it.
+    const named =
+      resources.find((resource) => resource.id === target.resource) ??
+      resources.find((resource) => resource.externalRef === target.resource);
     if (!named) return false;
     if (rules === undefined) {
       out.write(hoursLine(named));

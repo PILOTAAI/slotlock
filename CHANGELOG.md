@@ -51,6 +51,13 @@ request replaces "Unreleased" with the release date.
   tool error (HTTP 400) instead of an internal error (HTTP 500, JSON-RPC -32603).
 - The legacy-schema upgrade test creates `btree_gist` itself, so the database suites pass on a fresh
   PostgreSQL 16 database rather than only on one that already had the extension installed.
+- Availability rules are held to the subset SPEC.md describes: `FREQ=WEEKLY`, `BYDAY`, `INTERVAL=1`
+  and a UTC `UNTIL`. Anything else, such as `BYHOUR`, a `DTSTART`, `BYDAY` twice or an ordinal
+  weekday, is refused by the store, the CLI and `SLOTLOCK_AVAILABILITY`, and `expandRules` reads it
+  as no hours. Before, rrule honoured some of these: a `DTSTART` zone moved Monday's hours to
+  Sunday, and `BYHOUR`/`BYMINUTE`/`BYSECOND` took most of a second per rule to check.
+- Every dashboard form but sign-out must carry its single-use value. A form sent without the value
+  skipped the resend check and the per-person form limit.
 
 ### Added
 

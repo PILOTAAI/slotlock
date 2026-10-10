@@ -177,11 +177,15 @@ describe.skipIf(!url)('per-resource bookable hours (real Postgres)', () => {
 
   it('reads stored hours it cannot evaluate as closed, never as open', async () => {
     const car = await add(tenantA, 'car-tampered');
-    await admin`
-      UPDATE slotlock.resources
-         SET availability_rules = '[{"rrule":"FREQ=DAILY","startMinutes":0,"durationMinutes":1440}]'::jsonb
-       WHERE id = ${car.id}`;
-    expect(await get(tenantA, car.id)).toMatchObject({ availabilityRules: [] });
+    for (const rrule of [
+      'FREQ=DAILY',
+      // rrule would honour this zone and open Sunday, not Monday.
+      'DTSTART;TZID=Pacific/Kiritimati:20260105T000000\nRRULE:FREQ=WEEKLY;BYDAY=MO',
+    ]) {
+      const stored = JSON.stringify([{ rrule, startMinutes: 0, durationMinutes: 1_440 }]);
+      await admin`UPDATE slotlock.resources SET availability_rules = ${stored}::text::jsonb WHERE id = ${car.id}`;
+      expect(await get(tenantA, car.id), rrule).toMatchObject({ availabilityRules: [] });
+    }
   });
 
   it("answers slotlock_find_next_available from a resource's own hours, else the default", async () => {
