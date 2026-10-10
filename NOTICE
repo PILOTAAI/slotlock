@@ -10,8 +10,7 @@ each retains its own license:
 - ical.js 2.2.1, Mozilla Public License 2.0, https://github.com/kewisch/ical.js
 - rrule 2.8.1, BSD 3-Clause License, https://github.com/jakubroztocil/rrule
   - tslib (via rrule), BSD Zero Clause License (0BSD), https://github.com/microsoft/tslib
-- zod 3.25.76, MIT License, https://github.com/colinhacks/zod
-- zod-to-json-schema 3.25.2, ISC License, https://github.com/StefanTerdell/zod-to-json-schema
+- zod 4.6.5, MIT License, https://github.com/colinhacks/zod
 
 Peer dependency, installed and versioned by the application that embeds Slotlock:
 
