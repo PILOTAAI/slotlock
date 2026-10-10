@@ -31,18 +31,18 @@ jobs:
       postgres:
         image: postgres:16.15@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
         env:
-          POSTGRES_USER: slotlock
-          POSTGRES_PASSWORD: slotlock
+          POSTGRES_USER: slotlock_ci
+          POSTGRES_PASSWORD: ci-only-password
           POSTGRES_DB: slotlock
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready --username=slotlock --dbname=slotlock"
+          --health-cmd "pg_isready --username=slotlock_ci --dbname=slotlock"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
     env:
-      DATABASE_URL: postgresql://slotlock:slotlock@localhost:5432/slotlock
+      DATABASE_URL: postgresql://slotlock_ci:ci-only-password@localhost:5432/slotlock
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -63,13 +63,13 @@ jobs:
       postgres:
         image: postgres:16.15@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
         env:
-          POSTGRES_USER: slotlock
-          POSTGRES_PASSWORD: slotlock
+          POSTGRES_USER: slotlock_ci
+          POSTGRES_PASSWORD: ci-only-password
           POSTGRES_DB: slotlock
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready --username=slotlock --dbname=slotlock"
+          --health-cmd "pg_isready --username=slotlock_ci --dbname=slotlock"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
@@ -97,7 +97,7 @@ jobs:
         run: |
           docker run --detach --name slotlock --network host \
             --read-only --cap-drop ALL --security-opt no-new-privileges:true \
-            --env DATABASE_URL=postgresql://slotlock:slotlock@127.0.0.1:5432/slotlock \
+            --env DATABASE_URL=postgresql://slotlock_ci:ci-only-password@127.0.0.1:5432/slotlock \
             --env SLOTLOCK_AUTH_TOKEN="$(openssl rand -hex 32)" \
             --env SLOTLOCK_CONFIRMATION_SECRET="$(openssl rand -hex 32)" \
             --env HOST=127.0.0.1 \
