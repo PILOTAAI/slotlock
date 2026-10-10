@@ -172,6 +172,11 @@ svg {
   stroke-linejoin: round;
 }
 
+.icon--filled {
+  fill: currentColor;
+  stroke: none;
+}
+
 /* ---------- Header ---------- */
 
 .site-header {
@@ -192,23 +197,10 @@ svg {
   min-height: 60px;
 }
 
+/* "Slotlock by Pylota": layout and motion in lockup.css. */
 .brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 9px;
   color: var(--ink);
   text-decoration: none;
-  font: 600 16px/1 var(--font-sans);
-  letter-spacing: -0.01em;
-}
-
-.brand svg {
-  width: 22px;
-  height: 22px;
-}
-
-.brand__slot {
-  fill: var(--accent);
 }
 
 .site-nav {

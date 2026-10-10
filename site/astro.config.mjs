@@ -73,10 +73,9 @@ export default defineConfig({
       title: 'Slotlock',
       description:
         'A calendar engine for AI agents: resource calendars, expiring holds and a PostgreSQL exclusion constraint that refuses double bookings.',
-      logo: { light: './src/assets/mark-light.svg', dark: './src/assets/mark-dark.svg' },
       favicon: '/favicon.svg',
       social: [{ icon: 'github', label: 'GitHub', href: REPO }],
-      customCss: ['./src/styles/fonts.css', './src/styles/docs.css'],
+      customCss: ['./src/styles/fonts.css', './src/styles/docs.css', './src/styles/lockup.css'],
       // Seven pages do not need a search index; leaving Pagefind out keeps WebAssembly out of the CSP.
       pagefind: false,
       // src/pages/404.astro renders the not-found page with Starlight's layout.
@@ -110,6 +109,8 @@ export default defineConfig({
       routeMiddleware: './src/routeData.ts',
       components: {
         Footer: './src/components/docs/Footer.astro',
+        // "Slotlock by Pylota", as in the landing page header.
+        SiteTitle: './src/components/docs/SiteTitle.astro',
       },
       plugins: [
         starlightLlmsTxt({
