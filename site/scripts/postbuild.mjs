@@ -6,6 +6,7 @@
 //    (Starlight sets CSS custom properties such as --sl-icon-size that way).
 // 2. Fail if the landing page (dist/index.html) has an inline script, style block or style attribute.
 // 3. Write the hashes into dist/_headers and check every line fits Cloudflare's 2,000 characters.
+// 4. Fail if a built stylesheet ships -webkit-backdrop-filter without backdrop-filter beside it.
 import { createHash } from 'node:crypto';
 import { readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
@@ -13,13 +14,14 @@ import { fileURLToPath } from 'node:url';
 
 const DIST = fileURLToPath(new URL('../dist/', import.meta.url));
 
-async function* htmlFiles(dir) {
+async function* filesEndingWith(dir, suffix) {
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name);
-    if (entry.isDirectory()) yield* htmlFiles(path);
-    else if (entry.name.endsWith('.html')) yield path;
+    if (entry.isDirectory()) yield* filesEndingWith(path, suffix);
+    else if (entry.name.endsWith(suffix)) yield path;
   }
 }
+const htmlFiles = (dir) => filesEndingWith(dir, '.html');
 
 const decode = (text) =>
   text
@@ -103,6 +105,38 @@ for (const { page, href } of links) {
 if (broken.length > 0) {
   console.error(
     `postbuild: ${broken.length} broken internal link(s):\n  ${[...new Set(broken)].join('\n  ')}`,
+  );
+  process.exit(1);
+}
+
+// Lightning CSS, Vite's CSS minifier, keeps only the last of a property's prefixed and unprefixed
+// declarations. The header once declared backdrop-filter before -webkit-backdrop-filter, shipped
+// only the prefixed one, and lost its blur in Chrome and Firefox (the live page computed
+// backdrop-filter: none in Chrome, 2026-10-10). Listed here: properties whose -webkit- form only
+// Safari reads, so it must ship beside the unprefixed one. (Chrome reads -webkit-user-select, so a
+// lone one in a dependency's stylesheet is not this defect.)
+const STANDARD_PROPERTIES = ['backdrop-filter'];
+const unpaired = [];
+let rules = 0;
+for await (const file of filesEndingWith(DIST, '.css')) {
+  const css = await readFile(file, 'utf8');
+  for (const [, block] of css.matchAll(/\{([^{}]*)\}/g)) {
+    rules += 1;
+    for (const property of STANDARD_PROPERTIES) {
+      const declares = (name) => new RegExp(`(?:^|;)\\s*${name}\\s*:`).test(block);
+      if (declares(`-webkit-${property}`) && !declares(property)) {
+        unpaired.push(`${relative(DIST, file)}: -webkit-${property} without ${property} in {${block.slice(0, 100)}}`);
+      }
+    }
+  }
+}
+if (rules === 0) {
+  console.error('postbuild: found no CSS rules in dist, so the prefix check checked nothing');
+  process.exit(1);
+}
+if (unpaired.length > 0) {
+  console.error(
+    `postbuild: ${unpaired.length} prefixed declaration(s) without the standard one, which Chrome and Firefox ignore (declare only the unprefixed property):\n  ${unpaired.join('\n  ')}`,
   );
   process.exit(1);
 }
