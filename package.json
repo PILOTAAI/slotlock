@@ -62,8 +62,7 @@
   "dependencies": {
     "ical.js": "2.2.1",
     "rrule": "2.8.1",
-    "zod": "4.6.5",
-    "zod-to-json-schema": "3.25.2"
+    "zod": "4.6.5"
   },
   "peerDependencies": {
     "postgres": "^3.4.5"

@@ -1,0 +1,2194 @@
+[
+  {
+    "name": "slotlock_list_resources",
+    "title": "List calendar resources",
+    "description": "List resources visible to the authenticated tenant principal.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "limit": {
+          "default": 50,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      },
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "resources": {
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "external_ref": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 500
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "timezone": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              }
+            },
+            "required": [
+              "id",
+              "external_ref",
+              "timezone"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 500
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "resources",
+        "next_cursor"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "List calendar resources",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "ui": {
+        "resourceUri": "ui://slotlock/calendar",
+        "visibility": [
+          "model",
+          "app"
+        ]
+      }
+    }
+  },
+  {
+    "name": "slotlock_get_free_busy",
+    "title": "Get free-busy",
+    "description": "Return privacy-minimized busy intervals and explicit coverage certainty.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "resource_ids": {
+          "minItems": 1,
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "resource_ids",
+        "start",
+        "end"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "resources": {
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "resource_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "busy": {
+                "maxItems": 10000,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "start": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "end": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "required": [
+                    "start",
+                    "end"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "coverage": {
+                "type": "object",
+                "properties": {
+                  "start": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "end": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "certainty": {
+                    "type": "string",
+                    "enum": [
+                      "certain",
+                      "uncertain"
+                    ]
+                  },
+                  "reason": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 100
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "start",
+                  "end",
+                  "certainty",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "resource_id",
+              "busy",
+              "coverage"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "resources"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "Get free-busy",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "ui": {
+        "resourceUri": "ui://slotlock/calendar",
+        "visibility": [
+          "model",
+          "app"
+        ]
+      }
+    }
+  },
+  {
+    "name": "slotlock_find_next_available",
+    "title": "Find next available interval",
+    "description": "Find the earliest certain interval that satisfies the requested duration (up to the 367-day search window, so a multi-month rental slot can be found).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "resource_ids": {
+          "minItems": 1,
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "duration_minutes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 528480
+        }
+      },
+      "required": [
+        "resource_ids",
+        "start",
+        "end",
+        "duration_minutes"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "resource_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "start": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "end": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "coverage": {
+          "type": "object",
+          "properties": {
+            "start": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "end": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "certainty": {
+              "type": "string",
+              "enum": [
+                "certain",
+                "uncertain"
+              ]
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 100
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "start",
+            "end",
+            "certainty",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "resource_id",
+        "start",
+        "end",
+        "coverage"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "Find next available interval",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "ui": {
+        "resourceUri": "ui://slotlock/calendar",
+        "visibility": [
+          "model",
+          "app"
+        ]
+      }
+    }
+  },
+  {
+    "name": "slotlock_create_event",
+    "title": "Create resource event",
+    "description": "Create an event of up to 3,660 days (a booking, lease or long rental); opaque occurrences use the database overlap arbiter.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "resource_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "starts_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "ends_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 10000
+        },
+        "location": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "organizer": {
+          "type": "object",
+          "properties": {
+            "address": {
+              "type": "string",
+              "maxLength": 320,
+              "format": "email"
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          "required": [
+            "address"
+          ],
+          "additionalProperties": false
+        },
+        "transparency": {
+          "default": "opaque",
+          "type": "string",
+          "enum": [
+            "opaque",
+            "transparent"
+          ]
+        },
+        "status": {
+          "default": "confirmed",
+          "type": "string",
+          "enum": [
+            "tentative",
+            "confirmed"
+          ]
+        },
+        "recurrence_rule": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "attendees": {
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "address": {
+                "type": "string",
+                "maxLength": 320,
+                "format": "email"
+              },
+              "name": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "role": {
+                "type": "string",
+                "enum": [
+                  "chair",
+                  "required",
+                  "optional",
+                  "non_participant"
+                ]
+              },
+              "participation_status": {
+                "type": "string",
+                "enum": [
+                  "needs_action",
+                  "accepted",
+                  "declined",
+                  "tentative",
+                  "delegated"
+                ]
+              },
+              "rsvp": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "address",
+              "role",
+              "participation_status"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "reminders": {
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "minutes_before": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 525600
+              },
+              "channel": {
+                "type": "string",
+                "enum": [
+                  "display",
+                  "email"
+                ]
+              }
+            },
+            "required": [
+              "minutes_before",
+              "channel"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "recurrence_exceptions": {
+          "maxItems": 500,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "recurrence_id": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "cancelled": {
+                "default": false,
+                "type": "boolean"
+              },
+              "starts_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "ends_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "recurrence_id"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "resource_id",
+        "starts_at",
+        "ends_at",
+        "timezone",
+        "idempotency_key"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "event": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            "resource_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "starts_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "ends_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "timezone": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "description": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 16384
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "location": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 16384
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "organizer": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "address": {
+                      "type": "string",
+                      "maxLength": 320,
+                      "format": "email"
+                    },
+                    "name": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 1024
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "address",
+                    "name"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "attendees": {
+              "maxItems": 100,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "address": {
+                    "type": "string",
+                    "maxLength": 320,
+                    "format": "email"
+                  },
+                  "name": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 1024
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "chair",
+                      "required",
+                      "optional",
+                      "non_participant"
+                    ]
+                  },
+                  "participation_status": {
+                    "type": "string",
+                    "enum": [
+                      "needs_action",
+                      "accepted",
+                      "declined",
+                      "tentative",
+                      "delegated"
+                    ]
+                  },
+                  "rsvp": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "address",
+                  "name",
+                  "role",
+                  "participation_status",
+                  "rsvp"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "reminders": {
+              "maxItems": 20,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "minutes_before": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 527040
+                  },
+                  "channel": {
+                    "type": "string",
+                    "enum": [
+                      "display",
+                      "email"
+                    ]
+                  }
+                },
+                "required": [
+                  "minutes_before",
+                  "channel"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "tentative",
+                "confirmed",
+                "cancelled"
+              ]
+            },
+            "transparency": {
+              "type": "string",
+              "enum": [
+                "opaque",
+                "transparent"
+              ]
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "revision": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "recurrence_rule": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "recurrence_exceptions": {
+              "maxItems": 1000,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "recurrence_id": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "cancelled": {
+                    "type": "boolean"
+                  },
+                  "starts_at": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "ends_at": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "recurrence_id",
+                  "cancelled",
+                  "starts_at",
+                  "ends_at"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "recurrence_id": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "resource_id",
+            "starts_at",
+            "ends_at",
+            "timezone",
+            "title",
+            "description",
+            "location",
+            "organizer",
+            "attendees",
+            "reminders",
+            "status",
+            "transparency",
+            "sequence",
+            "revision",
+            "recurrence_rule",
+            "recurrence_exceptions",
+            "recurrence_id"
+          ],
+          "additionalProperties": false
+        },
+        "replayed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "event",
+        "replayed"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "Create resource event",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "slotlock_get_event",
+    "title": "Get resource event",
+    "description": "Read one tenant-scoped event by stable identifier.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "event_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        }
+      },
+      "required": [
+        "event_id"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "event": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            "resource_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "starts_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "ends_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "timezone": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "description": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 16384
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "location": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 16384
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "organizer": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "address": {
+                      "type": "string",
+                      "maxLength": 320,
+                      "format": "email"
+                    },
+                    "name": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 1024
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "address",
+                    "name"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "attendees": {
+              "maxItems": 100,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "address": {
+                    "type": "string",
+                    "maxLength": 320,
+                    "format": "email"
+                  },
+                  "name": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 1024
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "chair",
+                      "required",
+                      "optional",
+                      "non_participant"
+                    ]
+                  },
+                  "participation_status": {
+                    "type": "string",
+                    "enum": [
+                      "needs_action",
+                      "accepted",
+                      "declined",
+                      "tentative",
+                      "delegated"
+                    ]
+                  },
+                  "rsvp": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "address",
+                  "name",
+                  "role",
+                  "participation_status",
+                  "rsvp"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "reminders": {
+              "maxItems": 20,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "minutes_before": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 527040
+                  },
+                  "channel": {
+                    "type": "string",
+                    "enum": [
+                      "display",
+                      "email"
+                    ]
+                  }
+                },
+                "required": [
+                  "minutes_before",
+                  "channel"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "tentative",
+                "confirmed",
+                "cancelled"
+              ]
+            },
+            "transparency": {
+              "type": "string",
+              "enum": [
+                "opaque",
+                "transparent"
+              ]
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "revision": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "recurrence_rule": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "recurrence_exceptions": {
+              "maxItems": 1000,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "recurrence_id": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "cancelled": {
+                    "type": "boolean"
+                  },
+                  "starts_at": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "ends_at": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "recurrence_id",
+                  "cancelled",
+                  "starts_at",
+                  "ends_at"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "recurrence_id": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "resource_id",
+            "starts_at",
+            "ends_at",
+            "timezone",
+            "title",
+            "description",
+            "location",
+            "organizer",
+            "attendees",
+            "reminders",
+            "status",
+            "transparency",
+            "sequence",
+            "revision",
+            "recurrence_rule",
+            "recurrence_exceptions",
+            "recurrence_id"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "event"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "Get resource event",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "ui": {
+        "resourceUri": "ui://slotlock/calendar",
+        "visibility": [
+          "model",
+          "app"
+        ]
+      }
+    }
+  },
+  {
+    "name": "slotlock_list_events",
+    "title": "List resource events",
+    "description": "List bounded events intersecting a time window.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "resource_ids": {
+          "minItems": 1,
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "cursor": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "limit": {
+          "default": 50,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      },
+      "required": [
+        "resource_ids",
+        "start",
+        "end"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "events": {
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "resource_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "starts_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "ends_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "timezone": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              },
+              "title": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 4096
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "description": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 16384
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "location": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 16384
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "organizer": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "address": {
+                        "type": "string",
+                        "maxLength": 320,
+                        "format": "email"
+                      },
+                      "name": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 1024
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "address",
+                      "name"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "attendees": {
+                "maxItems": 100,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "address": {
+                      "type": "string",
+                      "maxLength": 320,
+                      "format": "email"
+                    },
+                    "name": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 1024
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "role": {
+                      "type": "string",
+                      "enum": [
+                        "chair",
+                        "required",
+                        "optional",
+                        "non_participant"
+                      ]
+                    },
+                    "participation_status": {
+                      "type": "string",
+                      "enum": [
+                        "needs_action",
+                        "accepted",
+                        "declined",
+                        "tentative",
+                        "delegated"
+                      ]
+                    },
+                    "rsvp": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "address",
+                    "name",
+                    "role",
+                    "participation_status",
+                    "rsvp"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "reminders": {
+                "maxItems": 20,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "minutes_before": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 527040
+                    },
+                    "channel": {
+                      "type": "string",
+                      "enum": [
+                        "display",
+                        "email"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "minutes_before",
+                    "channel"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "tentative",
+                  "confirmed",
+                  "cancelled"
+                ]
+              },
+              "transparency": {
+                "type": "string",
+                "enum": [
+                  "opaque",
+                  "transparent"
+                ]
+              },
+              "sequence": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "revision": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "recurrence_rule": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 4096
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "recurrence_exceptions": {
+                "maxItems": 1000,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "recurrence_id": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "cancelled": {
+                      "type": "boolean"
+                    },
+                    "starts_at": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "ends_at": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "recurrence_id",
+                    "cancelled",
+                    "starts_at",
+                    "ends_at"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "recurrence_id": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "resource_id",
+              "starts_at",
+              "ends_at",
+              "timezone",
+              "title",
+              "description",
+              "location",
+              "organizer",
+              "attendees",
+              "reminders",
+              "status",
+              "transparency",
+              "sequence",
+              "revision",
+              "recurrence_rule",
+              "recurrence_exceptions",
+              "recurrence_id"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 500
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "events",
+        "next_cursor"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "List resource events",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "ui": {
+        "resourceUri": "ui://slotlock/calendar",
+        "visibility": [
+          "model",
+          "app"
+        ]
+      }
+    }
+  },
+  {
+    "name": "slotlock_update_event",
+    "title": "Update resource event",
+    "description": "Apply an expected-revision event patch and rematerialize occupancy atomically.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "event_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "expected_revision": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "resource_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "starts_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "ends_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 10000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "location": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 1000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "organizer": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "address": {
+                  "type": "string",
+                  "maxLength": 320,
+                  "format": "email"
+                },
+                "name": {
+                  "type": "string",
+                  "maxLength": 200
+                }
+              },
+              "required": [
+                "address"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attendees": {
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "address": {
+                "type": "string",
+                "maxLength": 320,
+                "format": "email"
+              },
+              "name": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "role": {
+                "type": "string",
+                "enum": [
+                  "chair",
+                  "required",
+                  "optional",
+                  "non_participant"
+                ]
+              },
+              "participation_status": {
+                "type": "string",
+                "enum": [
+                  "needs_action",
+                  "accepted",
+                  "declined",
+                  "tentative",
+                  "delegated"
+                ]
+              },
+              "rsvp": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "address",
+              "role",
+              "participation_status"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "reminders": {
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "minutes_before": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 525600
+              },
+              "channel": {
+                "type": "string",
+                "enum": [
+                  "display",
+                  "email"
+                ]
+              }
+            },
+            "required": [
+              "minutes_before",
+              "channel"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "transparency": {
+          "type": "string",
+          "enum": [
+            "opaque",
+            "transparent"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "tentative",
+            "confirmed"
+          ]
+        },
+        "recurrence_rule": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recurrence_exceptions": {
+          "maxItems": 500,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "recurrence_id": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "cancelled": {
+                "default": false,
+                "type": "boolean"
+              },
+              "starts_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "ends_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "recurrence_id"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "event_id",
+        "expected_revision",
+        "idempotency_key"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "event": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            "resource_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "starts_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "ends_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "timezone": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "description": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 16384
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "location": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 16384
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "organizer": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "address": {
+                      "type": "string",
+                      "maxLength": 320,
+                      "format": "email"
+                    },
+                    "name": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 1024
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "address",
+                    "name"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "attendees": {
+              "maxItems": 100,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "address": {
+                    "type": "string",
+                    "maxLength": 320,
+                    "format": "email"
+                  },
+                  "name": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 1024
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "chair",
+                      "required",
+                      "optional",
+                      "non_participant"
+                    ]
+                  },
+                  "participation_status": {
+                    "type": "string",
+                    "enum": [
+                      "needs_action",
+                      "accepted",
+                      "declined",
+                      "tentative",
+                      "delegated"
+                    ]
+                  },
+                  "rsvp": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "address",
+                  "name",
+                  "role",
+                  "participation_status",
+                  "rsvp"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "reminders": {
+              "maxItems": 20,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "minutes_before": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 527040
+                  },
+                  "channel": {
+                    "type": "string",
+                    "enum": [
+                      "display",
+                      "email"
+                    ]
+                  }
+                },
+                "required": [
+                  "minutes_before",
+                  "channel"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "tentative",
+                "confirmed",
+                "cancelled"
+              ]
+            },
+            "transparency": {
+              "type": "string",
+              "enum": [
+                "opaque",
+                "transparent"
+              ]
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "revision": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "recurrence_rule": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "recurrence_exceptions": {
+              "maxItems": 1000,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "recurrence_id": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "cancelled": {
+                    "type": "boolean"
+                  },
+                  "starts_at": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "ends_at": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "recurrence_id",
+                  "cancelled",
+                  "starts_at",
+                  "ends_at"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "recurrence_id": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "resource_id",
+            "starts_at",
+            "ends_at",
+            "timezone",
+            "title",
+            "description",
+            "location",
+            "organizer",
+            "attendees",
+            "reminders",
+            "status",
+            "transparency",
+            "sequence",
+            "revision",
+            "recurrence_rule",
+            "recurrence_exceptions",
+            "recurrence_id"
+          ],
+          "additionalProperties": false
+        },
+        "replayed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "event",
+        "replayed"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "Update resource event",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "slotlock_delete_event",
+    "title": "Delete resource event",
+    "description": "Tombstone an event at an expected revision so stale sync cannot resurrect it.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "event_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "expected_revision": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "event_id",
+        "expected_revision",
+        "idempotency_key"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "event_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "revision": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "deleted": {
+          "type": "boolean",
+          "const": true
+        },
+        "replayed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "event_id",
+        "revision",
+        "deleted",
+        "replayed"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "Delete resource event",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  }
+]
