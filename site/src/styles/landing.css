@@ -180,8 +180,9 @@ svg {
   z-index: 50;
   background: color-mix(in srgb, var(--canvas) 92%, transparent);
   border-bottom: 1px solid var(--line-2);
+  /* Unprefixed only: the minifier adds -webkit- for Safari. Written as a pair, it keeps just the
+     last one, and a lone -webkit-backdrop-filter is ignored by Chrome and Firefox. */
   backdrop-filter: saturate(1.4) blur(10px);
-  -webkit-backdrop-filter: saturate(1.4) blur(10px);
 }
 
 .site-header__row {
