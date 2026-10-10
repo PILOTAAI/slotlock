@@ -56,6 +56,10 @@ request replaces "Unreleased" with the release date.
   weekday, is refused by the store, the CLI and `SLOTLOCK_AVAILABILITY`, and `expandRules` reads it
   as no hours. Before, rrule honoured some of these: a `DTSTART` zone moved Monday's hours to
   Sunday, and `BYHOUR`/`BYMINUTE`/`BYSECOND` took most of a second per rule to check.
+- An availability rule whose `UNTIL` is not a real date, such as `UNTIL=20270231T000000Z`
+  (31 February), is refused. Before, rrule read it with `Date.UTC`, which carries the overflow
+  into the next unit, so the rule stayed bookable until 3 March, after the date it was written to
+  end.
 - Every dashboard form but sign-out must carry its single-use value. A form sent without the value
   skipped the resend check and the per-person form limit.
 
