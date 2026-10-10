@@ -106,6 +106,23 @@ describe('Slotlock store-backed agent server adapter', () => {
     vi.useRealTimers();
   });
 
+  it("names a resource for a confirmation question by its reference, inside the caller's tenant", async () => {
+    const backend = createSlotlockStoreAgentBackend(store, { availabilityRules });
+    expect(await backend.describeResource?.(context, resource.id)).toEqual({
+      name: 'vehicle-1',
+      timezone: 'Europe/London',
+    });
+    expect(getResource).toHaveBeenCalledWith({ tenantRef, id: resource.id });
+    expect(withTenant).toHaveBeenCalledWith(tenantRef, expect.any(Function));
+
+    getResource.mockResolvedValueOnce(null);
+    expect(await backend.describeResource?.(context, resource.id)).toBeNull();
+
+    getResource.mockClear();
+    expect(await backend.describeResource?.(context, 'vehicle-1')).toBeNull();
+    expect(getResource).not.toHaveBeenCalled();
+  });
+
   // A resource cursor is a resource id. The store refuses anything else with a plain error, which
   // the dispatcher reports as internal_error (HTTP 500) unless the backend refuses it first.
   it('refuses a resource cursor that is not a resource id as invalid_cursor, without a query', async () => {

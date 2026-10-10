@@ -504,9 +504,16 @@ publishes it: `authenticate` must still validate each token, including its audie
 ### Confirm before writing
 
 With `confirmation`, a listed write first asks the person a yes/no question that says exactly what
-will change, such as `Book "Vehicle handover" on resource vehicle-42: 2027-03-29 10:00–11:00
-(Europe/London).` Only an explicit yes runs the write.
+will change, such as `Book vehicle-42 for 2027-03-29 10:00–11:00 (Europe/London): "Vehicle
+handover".` Only an explicit yes runs the write.
 
+- Facts come first: the resource by its own reference, times in its own zone, and an event as it
+  stands now, read through your backend's `describeResource` and `getEvent` when the caller may
+  read them (within 2 seconds in all). Otherwise things are named by id, and each time carries its
+  UTC offset. The agent's own text comes last, quoted.
+- A repeating booking says how many times it books, the first and the last, and each moved
+  occurrence, from the same expansion the store books with; a change to one says it covers every
+  repeat. Agents may send RFC 5545 rules that repeat daily or less often and can occur.
 - The pending question is sealed (HMAC-SHA256) to the caller, the tool and the exact arguments, and
   expires after `ttlSeconds` (600).
 - Clients that cannot ask (MCP 2025 revisions, A2A) get `confirmation_required`; nothing is written.

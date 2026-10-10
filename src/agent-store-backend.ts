@@ -304,6 +304,19 @@ export function createSlotlockStoreAgentBackend(
   options: SlotlockStoreAgentBackendOptions,
 ): SlotlockAgentCalendarBackend {
   return {
+    async describeResource(context, resourceId) {
+      if (!STORE_ID_PATTERN.test(resourceId)) return null;
+      return withTenant(store, context, async (tenantStore) => {
+        const resource = await tenantStore.getResource({
+          tenantRef: context.principal.tenantRef,
+          id: resourceId,
+        });
+        return resource
+          ? { name: resource.externalRef ?? null, timezone: resource.timezone }
+          : null;
+      });
+    },
+
     async listResources(context, input) {
       const cursor = parseResourceCursor(input.cursor);
       return withTenant(store, context, async (tenantStore) => {
