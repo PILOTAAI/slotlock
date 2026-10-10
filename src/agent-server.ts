@@ -25,8 +25,18 @@ import {
   stateSecrets,
   traceContextFrom,
 } from './mcp-modern.js';
-import { SLOTLOCK_CALENDAR_HORIZON_DAYS, SLOTLOCK_MAX_EVENT_DURATION_DAYS } from './store.js';
-import { zonedWallTime } from './timezone.js';
+import {
+  SLOTLOCK_CALENDAR_HORIZON_DAYS,
+  SLOTLOCK_MAX_EVENT_DURATION_DAYS,
+  calendarEventRollingHorizon,
+} from './store.js';
+import {
+  canonicalRecurrenceRule,
+  expandCalendarEventOccurrences,
+  isBookableRecurrenceRule,
+} from './sync.js';
+import { zonedOffsetMinutes, zonedWallTime } from './timezone.js';
+import type { CalendarEventContent, CalendarRecurrenceException } from './types.js';
 
 export type { SlotlockTraceContext } from './mcp-modern.js';
 
@@ -183,6 +193,12 @@ const REMINDER_INPUT = z
     channel: z.enum(['display', 'email']),
   })
   .strict();
+/**
+ * A rule as RFC 5545 writes it, daily or less often, that can occur: ical.js reads looser ones as
+ * something other than they say, and searches forever for one that cannot occur.
+ */
+const RECURRENCE_RULE = z.string().trim().min(1).max(2_000).refine(isBookableRecurrenceRule);
+
 const RECURRENCE_EXCEPTION_INPUT = z
   .object({
     recurrence_id: DATE_TIME,
@@ -382,6 +398,17 @@ export interface SlotlockAgentCalendarBackend {
     context: SlotlockAgentInvocationContext,
     input: Record<string, unknown>,
   ): Promise<Record<string, unknown>>;
+  /**
+   * Optional. How a person knows a resource, for the question a confirmation asks: its own
+   * reference (`vehicle-42`) and time zone, in which the question shows times; `null` when the
+   * caller cannot see it. Called as the read `slotlock_list_resources`, only when the caller's
+   * scopes and `authorize` allow that read. Without it, or when it fails or is slow, the question
+   * names the resource by id and shows times in the zone the agent gave, with its UTC offset.
+   */
+  describeResource?(
+    context: SlotlockAgentInvocationContext,
+    resourceId: string,
+  ): Promise<{ name: string | null; timezone: string | null } | null>;
 }
 
 /**
@@ -568,7 +595,7 @@ const EVENT_CREATE_INPUT = z
     organizer: ORGANIZER_INPUT.optional(),
     transparency: z.enum(['opaque', 'transparent']).default('opaque'),
     status: z.enum(['tentative', 'confirmed']).default('confirmed'),
-    recurrence_rule: z.string().trim().min(1).max(2_000).optional(),
+    recurrence_rule: RECURRENCE_RULE.optional(),
     attendees: z.array(ATTENDEE_INPUT).max(100).optional(),
     reminders: z.array(REMINDER_INPUT).max(20).optional(),
     idempotency_key: IDEMPOTENCY_KEY,
@@ -734,7 +761,7 @@ const OPERATION_DEFINITIONS = [
         reminders: z.array(REMINDER_INPUT).max(20).optional(),
         transparency: z.enum(['opaque', 'transparent']).optional(),
         status: z.enum(['tentative', 'confirmed']).optional(),
-        recurrence_rule: z.string().trim().min(1).max(2_000).nullable().optional(),
+        recurrence_rule: RECURRENCE_RULE.nullable().optional(),
         recurrence_exceptions: z.array(RECURRENCE_EXCEPTION_INPUT).max(500).optional(),
         idempotency_key: IDEMPOTENCY_KEY,
       })
@@ -1169,6 +1196,14 @@ export async function invokeSlotlockAgentOperation(args: {
     ) {
       return { ok: false, status: 403, code: 'forbidden' };
     }
+    // Charged before a confirmation is asked for, so every round of a guarded write counts and a
+    // call that could not run is never put to a person.
+    if (
+      args.options.consumeRateLimit &&
+      !(await args.options.consumeRateLimit({ principal, operation: operation.name }))
+    ) {
+      return { ok: false, status: 429, code: 'rate_limited' };
+    }
     if (args.options.confirm) {
       const halt = await args.options.confirm({
         principal,
@@ -1176,12 +1211,6 @@ export async function invokeSlotlockAgentOperation(args: {
         input: parsed.data,
       });
       if (halt) return { ok: false, status: halt.status, code: halt.code };
-    }
-    if (
-      args.options.consumeRateLimit &&
-      !(await args.options.consumeRateLimit({ principal, operation: operation.name }))
-    ) {
-      return { ok: false, status: 429, code: 'rate_limited' };
     }
     const method = args.options.backend[operation.invoke] as (
       context: SlotlockAgentInvocationContext,
@@ -1619,101 +1648,465 @@ function promptText(value: unknown, max = 120): string {
   return characters.length > max ? `${characters.slice(0, max - 1).join('')}…` : text;
 }
 
-/** A local wall-clock rendering, independent of the server's locale data. */
-function promptWall(instant: unknown, timezone: string): { date: string; time: string } {
-  return zonedWallTime(new Date(String(instant)), timezone);
+/** Every character that reads as a double quote: curly, full-width, primes and the rest. */
+const QUOTE_LIKE = /["\p{Pi}\p{Pf}ʺ˝ˮ״‚„″‶❝❞⹂〃〝-〟＂\u{1F676}-\u{1F678}]/gu;
+
+/**
+ * Text the agent chose (a title), shown inside double quotes: anything that reads as a double quote
+ * becomes a single one, so it cannot close the quotes and pass itself off as part of the sentence.
+ */
+function promptQuoted(value: unknown, max = 120): string {
+  return `"${promptText(value, max).replace(QUOTE_LIKE, "'")}"`;
 }
 
-function promptRange(startsAt: unknown, endsAt: unknown, timezone: unknown): string {
-  let zone = typeof timezone === 'string' ? timezone : 'UTC';
-  let start: { date: string; time: string };
-  let end: { date: string; time: string };
-  try {
-    start = promptWall(startsAt, zone);
-    end = promptWall(endsAt, zone);
-  } catch {
-    zone = 'UTC';
-    start = promptWall(startsAt, zone);
-    end = promptWall(endsAt, zone);
+/** The zone a question shows times in. Only the resource's own is named alone. */
+interface PromptZone {
+  zone: string;
+  own: boolean;
+}
+
+/** The first candidate that is a real zone; `own` marks the resource's. */
+function promptZone(candidates: readonly (readonly [unknown, boolean])[]): PromptZone {
+  for (const [zone, own] of candidates) {
+    if (typeof zone !== 'string') continue;
+    try {
+      zonedWallTime(new Date(0), zone);
+    } catch {
+      continue;
+    }
+    return { zone, own };
   }
-  const until = end.date === start.date ? `–${end.time}` : ` – ${end.date} ${end.time}`;
-  return `${start.date} ${start.time}${until} (${promptText(zone, 64)})`;
+  return { zone: 'UTC', own: false };
 }
 
-function promptInstant(instant: unknown, timezone: unknown): string {
-  let zone = typeof timezone === 'string' ? timezone : 'UTC';
-  let wall: { date: string; time: string };
-  try {
-    wall = promptWall(instant, zone);
-  } catch {
-    zone = 'UTC';
-    wall = promptWall(instant, zone);
+function promptInstantOf(value: unknown): Date {
+  return value instanceof Date ? value : new Date(String(value));
+}
+
+/** A wall-clock date and time, independent of the server's locale data, with seconds if any. */
+function promptClock(instant: Date, zone: string): { date: string; time: string } {
+  const wall = zonedWallTime(instant, zone);
+  const seconds = instant.getUTCSeconds();
+  const millis = instant.getUTCMilliseconds();
+  if (seconds === 0 && millis === 0) return wall;
+  const fraction = millis === 0 ? '' : `.${String(millis).padStart(3, '0')}`;
+  return { date: wall.date, time: `${wall.time}:${String(seconds).padStart(2, '0')}${fraction}` };
+}
+
+/** `UTC-05:00`: how far `zone` is from UTC at `instant`. */
+function promptOffset(instant: Date, zone: string): string {
+  const offset = zonedOffsetMinutes(instant, zone);
+  const hours = String(Math.floor(Math.abs(offset) / 60)).padStart(2, '0');
+  const minutes = String(Math.abs(offset) % 60).padStart(2, '0');
+  return `UTC${offset < 0 ? '-' : '+'}${hours}:${minutes}`;
+}
+
+/**
+ * One moment. In a zone the agent chose rather than the resource's own, every time carries its own
+ * UTC offset: a name such as `Etc/GMT+5` (five hours behind UTC) can hide it, and daylight saving
+ * changes it from one date to the next.
+ */
+function promptMoment(instant: Date, zone: PromptZone): string {
+  const clock = promptClock(instant, zone.zone);
+  return `${clock.date} ${clock.time}${zone.own ? '' : ` ${promptOffset(instant, zone.zone)}`}`;
+}
+
+function promptSpan(start: Date, end: Date, zone: PromptZone): string {
+  const from = promptClock(start, zone.zone);
+  const to = promptClock(end, zone.zone);
+  const toOffset = zone.own ? '' : ` ${promptOffset(end, zone.zone)}`;
+  const sameOffset = zone.own || promptOffset(start, zone.zone) === promptOffset(end, zone.zone);
+  if (to.date === from.date && sameOffset) return `${from.date} ${from.time}–${to.time}${toOffset}`;
+  return `${promptMoment(start, zone)} – ${to.date} ${to.time}${toOffset}`;
+}
+
+function promptZoneName(zone: PromptZone): string {
+  return `(${promptText(zone.zone, 64)})`;
+}
+
+function promptRange(start: Date, end: Date, zone: PromptZone): string {
+  return `${promptSpan(start, end, zone)} ${promptZoneName(zone)}`;
+}
+
+function promptInstant(instant: Date, zone: PromptZone): string {
+  return `${promptMoment(instant, zone)} ${promptZoneName(zone)}`;
+}
+
+/** A recurrence rule as the question shows it: its RFC 5545 form, in full. */
+function promptRule(rule: string): string {
+  return canonicalRecurrenceRule(rule) ?? 'a repeat rule Slotlock cannot show';
+}
+
+/** Agent-shaped exceptions as the store reads them (`exceptionsFromInput`), unreadable ones left out. */
+function promptExceptionList(value: unknown): CalendarRecurrenceException[] {
+  if (!Array.isArray(value)) return [];
+  const exceptions: CalendarRecurrenceException[] = [];
+  for (const exception of value) {
+    if (!isRecord(exception)) continue;
+    const recurrenceId = promptInstantOf(exception.recurrence_id);
+    if (!Number.isFinite(recurrenceId.getTime())) continue;
+    const start = promptInstantOf(exception.starts_at);
+    const end = promptInstantOf(exception.ends_at);
+    const moved = Number.isFinite(start.getTime()) && Number.isFinite(end.getTime());
+    // Neither cancelled nor moved to a readable time: the store would refuse it, so skip it.
+    if (exception.cancelled !== true && !moved) continue;
+    exceptions.push({
+      recurrenceId,
+      ...(exception.cancelled === true ? { cancelled: true } : {}),
+      ...(moved ? { start, end } : {}),
+    });
   }
-  return `${wall.date} ${wall.time} (${promptText(zone, 64)})`;
+  return exceptions;
 }
 
-/** The sentence a person confirms: what changes, where and when, from validated arguments. */
-function confirmationMessage(
+/** How many moved occurrences a question names one by one; it says how many more it does not. */
+const PROMPT_MOVED_SHOWN = 10;
+
+/** Moved occurrences, from where each was to where it is. */
+function promptMoved(
+  moved: readonly { from: Date; start: Date; end: Date }[],
+  zone: PromptZone,
+): string {
+  if (moved.length === 0) return '';
+  const shown = moved
+    .slice(0, PROMPT_MOVED_SHOWN)
+    .map(
+      ({ from, start, end }) => `${promptMoment(from, zone)} to ${promptSpan(start, end, zone)}`,
+    );
+  const rest =
+    moved.length > PROMPT_MOVED_SHOWN
+      ? ` and ${moved.length - PROMPT_MOVED_SHOWN} more not listed`
+      : '';
+  return `${moved.length} moved (${shown.join('; ')}${rest})`;
+}
+
+/** Exceptions an update asks for, when the series they apply to cannot be read. */
+function promptRequestedExceptions(value: unknown, zone: PromptZone): string {
+  const exceptions = promptExceptionList(value);
+  const moved = exceptions.flatMap((exception) =>
+    exception.cancelled || !exception.start || !exception.end
+      ? []
+      : [{ from: exception.recurrenceId, start: exception.start, end: exception.end }],
+  );
+  const cancelled = exceptions.filter((exception) => exception.cancelled).length;
+  const parts = [promptMoved(moved, zone), cancelled > 0 ? `${cancelled} cancelled` : ''];
+  return parts.filter(Boolean).join(', ') || 'none';
+}
+
+/** What a rule says about the dates past the window the store keeps booked; `null` if nothing. */
+function promptSeriesEnd(rule: string, booked: number, windowEnd: Date): string | null {
+  const canonical = canonicalRecurrenceRule(rule);
+  if (canonical === null) return null;
+  const parts = new Map(canonical.split(';').map((part) => part.split('=') as [string, string]));
+  const until = parts.get('UNTIL');
+  const count = parts.get('COUNT');
+  if (until === undefined && count === undefined) return 'with no end';
+  if (until !== undefined) {
+    const day = `${until.slice(0, 4)}-${until.slice(4, 6)}-${until.slice(6, 8)}`;
+    return Date.parse(`${day}T00:00:00Z`) >= windowEnd.getTime() ? `until ${day}` : null;
+  }
+  // The rule's own total whenever the window shows another number: the rest are cancelled, or
+  // outside the window, before it or after.
+  return Number(count) === booked ? null : `${count} counted by its rule, cancelled ones included`;
+}
+
+/**
+ * When a repeating booking books, worked out as the store books it: the same expansion over the
+ * same rolling window, so neither the rule's spelling nor an exception can hide a date, and every
+ * occurrence that is not where the rule puts it is named from the expansion itself. Only a rule an
+ * agent may send is expanded (`isBookableRecurrenceRule`): ical.js can search forever for others.
+ */
+function promptSeries(
+  series: { start: unknown; end: unknown; timezone: unknown; rule: string; exceptions: unknown },
+  zone: PromptZone,
+): string {
+  const start = promptInstantOf(series.start);
+  const end = promptInstantOf(series.end);
+  const exceptions = promptExceptionList(series.exceptions);
+  let when: string;
+  let beyond: string | null = null;
+  let moved = '';
+  try {
+    if (!isBookableRecurrenceRule(series.rule)) throw new Error('not_bookable');
+    const content: CalendarEventContent = {
+      start,
+      end,
+      timezone: String(series.timezone),
+      summary: 'Busy',
+      recurrence: { rrule: series.rule, ...(exceptions.length > 0 ? { exceptions } : {}) },
+    };
+    const horizon = calendarEventRollingHorizon();
+    const booked = expandCalendarEventOccurrences(content, horizon);
+    beyond = promptSeriesEnd(series.rule, booked.length, horizon.end);
+    const length = end.getTime() - start.getTime();
+    moved = promptMoved(
+      booked.flatMap((occurrence) => {
+        const from = new Date(occurrence.recurrenceId);
+        const shifted =
+          occurrence.start.getTime() !== from.getTime() ||
+          occurrence.end.getTime() - occurrence.start.getTime() !== length;
+        return shifted && Number.isFinite(from.getTime())
+          ? [{ from, start: occurrence.start, end: occurrence.end }]
+          : [];
+      }),
+      zone,
+    );
+    const first = booked[0];
+    const last = booked[booked.length - 1];
+    const until = promptClock(horizon.end, zone.zone).date;
+    if (!first || !last) {
+      when = `with no booking before ${until} ${promptZoneName(zone)}`;
+    } else if (booked.length === 1 && beyond === null) {
+      when = `for ${promptRange(first.start, first.end, zone)}`;
+    } else {
+      const times = `${booked.length} ${booked.length === 1 ? 'time' : 'times'}`;
+      const count = beyond === null ? times : `${times} before ${until}`;
+      when = `${count}, from ${promptSpan(first.start, first.end, zone)} to ${promptSpan(last.start, last.end, zone)} ${promptZoneName(zone)}`;
+    }
+  } catch {
+    when = `from ${promptRange(start, end, zone)}, on dates Slotlock could not work out`;
+  }
+  const rest = [beyond, moved].filter((part): part is string => Boolean(part));
+  return `${when}, repeating ${promptRule(series.rule)}${rest.map((part) => `, ${part}`).join('')}`;
+}
+/** A resource as the question names it: its own reference, or its id. */
+interface ConfirmationResource {
+  label: string;
+  timezone: string | null;
+}
+
+/** An event as it stands now. */
+interface ConfirmationEvent {
+  title: string | null;
+  resourceId: string;
+  start: Date;
+  end: Date;
+  timezone: string;
+  rule: string | null;
+  exceptions: unknown;
+}
+
+/** What the question may read for the calling principal; every lookup falls back to an id. */
+interface ConfirmationLookup {
+  resource(id: unknown): Promise<ConfirmationResource>;
+  event(id: unknown): Promise<ConfirmationEvent | null>;
+  /** Stop the deadline's timer once the question is written. */
+  close(): void;
+}
+
+/** How long one question's lookups may take, all of them together, before it names things by id. */
+const CONFIRMATION_LOOKUP_MS = 2_000;
+
+/**
+ * The question shows only what the caller could read itself: each lookup runs as the read it is
+ * (`slotlock_list_resources`, `slotlock_get_event`), only when the caller's scopes and `authorize`
+ * allow that read. A write-only key's question names everything by id. Every lookup races one
+ * deadline, so a backend that never answers delays the question, never withholds it.
+ */
+function confirmationLookup(
+  options: Pick<SlotlockAgentServerOptions, 'backend' | 'authorize'>,
+  context: Omit<SlotlockAgentInvocationContext, 'operation'>,
+): ConfirmationLookup {
+  const { backend } = options;
+  const { principal } = context;
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), CONFIRMATION_LOOKUP_MS);
+  const signal = AbortSignal.any([context.signal, deadline.signal]);
+  // A request already gone has no lookups to wait for; the event never fires for it.
+  const lapsed = signal.aborted
+    ? Promise.reject(new Error('confirmation_lookup_lapsed'))
+    : new Promise<never>((_, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('confirmation_lookup_lapsed')), {
+          once: true,
+        });
+      });
+  lapsed.catch(() => undefined);
+  const within = <T>(work: () => Promise<T>): Promise<T> =>
+    signal.aborted ? lapsed : Promise.race([work(), lapsed]);
+  const lookupContext = { ...context, signal };
+  const decisions = new Map<string, Promise<boolean>>();
+  const mayRead = (operation: SlotlockAgentOperation, input: Record<string, unknown>) => {
+    const key = `${operation}\0${canonicalJson(input)}`;
+    let decision = decisions.get(key);
+    if (!decision) {
+      decision = within(
+        async () =>
+          principalScopesCover(principal, operation) &&
+          (await options.authorize({ principal, operation, input })),
+      );
+      decisions.set(key, decision);
+    }
+    return decision;
+  };
+  return {
+    async resource(id) {
+      const fallback = { label: `resource ${promptText(id, 80)}`, timezone: null };
+      const describe = backend.describeResource;
+      if (typeof id !== 'string' || !describe) return fallback;
+      try {
+        const list = OPERATIONS.get('slotlock_list_resources') as OperationDefinition;
+        if (!(await mayRead(list.name, list.input.parse({}) as Record<string, unknown>))) {
+          return fallback;
+        }
+        const found: unknown = await within(() =>
+          describe.call(backend, { ...lookupContext, operation: list.name }, id),
+        );
+        if (!isRecord(found)) return fallback;
+        const name = typeof found.name === 'string' ? promptText(found.name, 80) : '';
+        return {
+          label: name.length > 0 ? name : fallback.label,
+          timezone: typeof found.timezone === 'string' ? found.timezone : null,
+        };
+      } catch {
+        return fallback;
+      }
+    },
+    async event(id) {
+      if (typeof id !== 'string') return null;
+      try {
+        if (!(await mayRead('slotlock_get_event', { event_id: id }))) return null;
+        const found: unknown = await within(() =>
+          backend.getEvent({ ...lookupContext, operation: 'slotlock_get_event' }, { event_id: id }),
+        );
+        const event = isRecord(found) && isRecord(found.event) ? found.event : null;
+        if (!event || typeof event.resource_id !== 'string') return null;
+        const start = promptInstantOf(event.starts_at);
+        const end = promptInstantOf(event.ends_at);
+        if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime())) return null;
+        return {
+          title: typeof event.title === 'string' && event.title.length > 0 ? event.title : null,
+          resourceId: event.resource_id,
+          start,
+          end,
+          timezone: typeof event.timezone === 'string' ? event.timezone : 'UTC',
+          rule:
+            typeof event.recurrence_rule === 'string' && event.recurrence_rule.length > 0
+              ? event.recurrence_rule
+              : null,
+          exceptions: event.recurrence_exceptions,
+        };
+      } catch {
+        return null;
+      }
+    },
+    close() {
+      clearTimeout(timer);
+    },
+  };
+}
+
+/**
+ * The sentence a person confirms: what changes, where and when. The facts the server establishes
+ * (the resource, the times in its own zone, every date a repeat books, the event as it stands) come
+ * first; text the agent chose comes last, quoted, so it cannot pass itself off as any of them. Each
+ * part has its own bound, so nothing is cut from the end.
+ */
+async function confirmationMessage(
   operation: SlotlockAgentOperation,
   input: Record<string, unknown>,
-): string {
-  let message: string;
+  lookup: ConfirmationLookup,
+): Promise<string> {
   if (operation === 'slotlock_create_event') {
-    const title = typeof input.title === 'string' ? promptText(input.title) : '';
-    const resource = promptText(input.resource_id, 200);
-    message = `${title ? `Book "${title}" on resource ${resource}` : `Book resource ${resource}`}: ${promptRange(input.starts_at, input.ends_at, input.timezone)}.`;
-    if (typeof input.recurrence_rule === 'string') {
-      message += ` Repeats: ${promptText(input.recurrence_rule, 200)}.`;
-    }
-    if (input.status === 'tentative') message += ' Tentative.';
+    const resource = await lookup.resource(input.resource_id);
+    const zone = promptZone([
+      [resource.timezone, true],
+      [input.timezone, false],
+    ]);
+    const when =
+      typeof input.recurrence_rule === 'string'
+        ? promptSeries(
+            {
+              start: input.starts_at,
+              end: input.ends_at,
+              timezone: input.timezone,
+              rule: input.recurrence_rule,
+              exceptions: input.recurrence_exceptions,
+            },
+            zone,
+          )
+        : `for ${promptRange(promptInstantOf(input.starts_at), promptInstantOf(input.ends_at), zone)}`;
+    const tentative = input.status === 'tentative' ? ', tentatively' : '';
+    const title =
+      typeof input.title === 'string' && input.title.length > 0
+        ? `: ${promptQuoted(input.title)}`
+        : '';
+    return `Book ${resource.label} ${when}${tentative}${title}.`;
+  }
+
+  const event = await lookup.event(input.event_id);
+  const current = event ? await lookup.resource(event.resourceId) : null;
+  const moving =
+    typeof input.resource_id === 'string' ? await lookup.resource(input.resource_id) : null;
+  const zone = promptZone([
+    [moving?.timezone, true],
+    [current?.timezone, true],
+    [input.timezone, false],
+    [event?.timezone, false],
+  ]);
+  const target =
+    event && current
+      ? `the booking on ${current.label}, ${promptRange(event.start, event.end, zone)}${event.rule ? ' and every time it repeats' : ''}`
+      : // Unread, it may be a series: say so rather than describe one booking.
+        `event ${promptText(input.event_id, 120)} and every time it repeats, if it does`;
+  // The event's own title, which an earlier write chose, comes after everything else.
+  const titled = event?.title ? ` It is titled ${promptQuoted(event.title)}.` : '';
+  if (operation === 'slotlock_delete_event') {
+    return `Delete ${target}.${titled}`;
+  }
+
+  const changes: string[] = [];
+  const startsAt = typeof input.starts_at === 'string' ? promptInstantOf(input.starts_at) : null;
+  const endsAt = typeof input.ends_at === 'string' ? promptInstantOf(input.ends_at) : null;
+  if (startsAt && endsAt) changes.push(`time to ${promptRange(startsAt, endsAt, zone)}`);
+  else if (startsAt) changes.push(`start to ${promptInstant(startsAt, zone)}`);
+  else if (endsAt) changes.push(`end to ${promptInstant(endsAt, zone)}`);
+  else if (typeof input.timezone === 'string') {
+    changes.push(`timezone to ${promptText(input.timezone, 64)}`);
+  }
+  if (moving) changes.push(`resource to ${moving.label}`);
+  for (const field of ['status', 'transparency'] as const) {
+    if (input[field] !== undefined) changes.push(`${field} to ${promptText(input[field], 20)}`);
+  }
+  // The series after the change, merged as the store merges it.
+  const rule = input.recurrence_rule !== undefined ? input.recurrence_rule : event?.rule;
+  const exceptions =
+    input.recurrence_rule !== undefined
+      ? input.recurrence_exceptions
+      : (input.recurrence_exceptions ?? event?.exceptions);
+  // A new zone moves the series' dates too: the store expands it again in that zone.
+  const reshaped =
+    input.recurrence_rule !== undefined ||
+    input.recurrence_exceptions !== undefined ||
+    input.timezone !== undefined ||
+    startsAt !== null ||
+    endsAt !== null;
+  const seriesStart = startsAt ?? event?.start;
+  const seriesEnd = endsAt ?? event?.end;
+  if (input.recurrence_rule === null) {
+    changes.push('no longer repeats');
+  } else if (typeof rule === 'string' && reshaped && seriesStart && seriesEnd) {
+    const seriesZone = input.timezone ?? event?.timezone ?? 'UTC';
+    changes.push(
+      `so it books ${promptSeries({ start: seriesStart, end: seriesEnd, timezone: seriesZone, rule, exceptions }, zone)}`,
+    );
   } else {
-    const target = `event ${promptText(input.event_id, 500)} (revision ${String(input.expected_revision)})`;
-    if (operation === 'slotlock_delete_event') {
-      message = `Delete ${target}.`;
-    } else {
-      const changes: string[] = [];
-      if (typeof input.starts_at === 'string' && typeof input.ends_at === 'string') {
-        changes.push(`time to ${promptRange(input.starts_at, input.ends_at, input.timezone)}`);
-      } else if (typeof input.starts_at === 'string') {
-        changes.push(`start to ${promptInstant(input.starts_at, input.timezone)}`);
-      } else if (typeof input.ends_at === 'string') {
-        changes.push(`end to ${promptInstant(input.ends_at, input.timezone)}`);
-      } else if (typeof input.timezone === 'string') {
-        changes.push(`timezone to ${promptText(input.timezone, 64)}`);
-      }
-      if (typeof input.resource_id === 'string') {
-        changes.push(`resource to ${promptText(input.resource_id, 200)}`);
-      }
-      if (input.title !== undefined) {
-        changes.push(
-          input.title === null ? 'title removed' : `title to "${promptText(input.title)}"`,
-        );
-      }
-      for (const field of ['status', 'transparency'] as const) {
-        if (input[field] !== undefined) changes.push(`${field} to ${promptText(input[field], 20)}`);
-      }
-      if (input.recurrence_rule !== undefined) {
-        changes.push(
-          input.recurrence_rule === null
-            ? 'no longer repeats'
-            : `repeats: ${promptText(input.recurrence_rule, 200)}`,
-        );
-      }
-      const details = [
-        'description',
-        'location',
-        'organizer',
-        'attendees',
-        'reminders',
-        'recurrence_exceptions',
-      ].filter((field) => input[field] !== undefined);
-      if (details.length > 0) changes.push(`also ${details.join(', ')}`);
-      message = `Change ${target}: ${changes.join('; ')}.`;
+    if (typeof input.recurrence_rule === 'string') {
+      changes.push(`repeats ${promptRule(input.recurrence_rule)}`);
+    }
+    if (input.recurrence_exceptions !== undefined) {
+      changes.push(`exceptions to ${promptRequestedExceptions(input.recurrence_exceptions, zone)}`);
     }
   }
-  return promptText(message, 1_000);
+  const details = ['description', 'location', 'organizer', 'attendees', 'reminders'].filter(
+    (field) => input[field] !== undefined,
+  );
+  if (details.length > 0) changes.push(`also ${details.join(', ')}`);
+  // The agent's own text goes last.
+  if (input.title !== undefined) {
+    changes.push(input.title === null ? 'title removed' : `title to ${promptQuoted(input.title)}`);
+  }
+  return `Change ${target}${changes.length > 0 ? `: ${changes.join('; ')}` : ''}.${titled}`;
 }
-
 type ConfirmationDecision =
   | 'accepted'
   | 'declined'
@@ -2019,6 +2412,17 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       gate.argsDigest
     ) {
       const key = confirmation.keys[0] as Buffer;
+      const lookup = confirmationLookup(options, {
+        principal,
+        signal: call.request.signal,
+        ...(call.trace ? { trace: call.trace } : {}),
+      });
+      let message: string;
+      try {
+        message = await confirmationMessage(operation, gate.input, lookup);
+      } finally {
+        lookup.close();
+      }
       return json(
         200,
         rpcResult(id, {
@@ -2028,7 +2432,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
               method: 'elicitation/create',
               params: {
                 mode: 'form',
-                message: confirmationMessage(operation, gate.input),
+                message,
                 requestedSchema: CONFIRMATION_SCHEMA,
               },
             },

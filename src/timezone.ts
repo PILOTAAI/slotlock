@@ -134,6 +134,11 @@ export function zonedWallTime(instant: Date, timezone: string): ZonedWallTime {
   return { date: civilDate(wall), time: `${hour}:${minute}` };
 }
 
+/** How far `timezone` is ahead of UTC at `instant`, in whole minutes (negative west of UTC). */
+export function zonedOffsetMinutes(instant: Date, timezone: string): number {
+  return Math.round((wallFrame(instant, timezone).getTime() - instant.getTime()) / 60_000);
+}
+
 /** The instant shifted so its UTC fields read as the wall clock in `timezone`. */
 function wallFrame(instant: Date, timezone: string): Date {
   const ms = instant.getTime();
