@@ -20,14 +20,14 @@ export interface Heading {
 export const meta = {
   title: 'Slotlock: the calendar AI agents cannot double-book',
   description:
-    'An open-source calendar engine for AI agents. Each resource is its own calendar, holds expire on their own, and PostgreSQL refuses any overlapping write and returns the conflict as data.',
+    'Slotlock is an open-source calendar for AI agents. Each resource is its own calendar, holds expire on their own, and PostgreSQL refuses any overlapping write and returns the conflict as data.',
 };
 
 export const hero = {
   pill: { label: `${facts.version} pre-release`, link: 'Release notes', href: '/docs/changelog/' },
   eyebrow: `Open source · ${facts.license} · PostgreSQL 16`,
   heading: {
-    soft: 'A calendar engine for AI agents.',
+    soft: 'Slotlock is a calendar for AI agents.',
     strong: 'Two agents, one slot, one booking.',
   } satisfies Heading,
   lede: 'Each car, room, person and machine is its own calendar: agents find and book time over MCP or A2A, or hold it from TypeScript, and PostgreSQL refuses every overlapping write with the conflict returned as data.',
@@ -288,7 +288,7 @@ export const steps = {
     {
       n: '02',
       title: 'Find a slot and hold it',
-      body: `\`slotlock_find_next_available\` returns the earliest certain slot; \`acquireHold\` keeps it for up to ${facts.maxHoldDays} days on the database clock.`,
+      body: `Agents ask \`slotlock_find_next_available\` for the earliest certain slot. From TypeScript, \`acquireHold\` keeps it for up to ${facts.maxHoldDays} days on the database clock.`,
       link: { label: 'Holds', href: '/docs/concepts/#holds' },
     },
     {
@@ -418,8 +418,9 @@ export const developers = {
   heading: { soft: 'One registry, three ways in.', strong: 'MCP, A2A or a TypeScript import.' },
   lede: `The ${facts.toolCount} tools and their JSON Schemas come from one registry, so a refusal reads the same on every transport.`,
   links: [
-    { label: 'Tools and schemas', href: '/docs/reference/#tools' },
-    { label: 'Error codes', href: '/docs/reference/#errors' },
+    { label: 'Every tool, field by field', href: '/docs/tools/' },
+    { label: 'Error codes', href: '/docs/tools/#error-codes' },
+    { label: 'Connect Claude Code, Cursor or VS Code', href: '/docs/connect/' },
     { label: 'Confirmation before writes', href: '/docs/security/#confirmation-before-writes' },
     {
       label: 'Live calendar updates',
@@ -568,7 +569,8 @@ export const footer = {
       title: 'Developers',
       links: [
         { label: 'Quickstart', href: '/docs/quickstart/' },
-        { label: 'MCP and A2A reference', href: '/docs/reference/' },
+        { label: 'Tools reference', href: '/docs/tools/' },
+        { label: 'MCP and A2A server', href: '/docs/reference/' },
         { label: 'Specification', href: '/docs/specification/' },
         { label: 'Manifest schema', href: '/schema/manifest.schema.json' },
       ],

@@ -23,6 +23,8 @@ over MCP or A2A, or you call it as a TypeScript library.
 
 ## Install
 
+From npm, once the first release is published (until then, build it as the status note says):
+
 ```sh
 npm install slotlock postgres
 ```
@@ -119,6 +121,39 @@ docker compose exec slotlock slotlock key revoke <id>
   with up to 256 waiting, and a request past that is refused as unauthenticated: a flood of made-up
   keys cannot take the connections authenticated requests use. Rate-limit a public server in front
   of Slotlock as well.
+
+### Dashboard
+
+The server can also serve a dashboard where people sign in with GitHub and manage their own keys and
+resources, which is how the hosted Slotlock hands out keys:
+
+1. On GitHub, open Settings, Developer settings, OAuth apps, New OAuth App, and set the
+   "Authorization callback URL" to `<SLOTLOCK_PUBLIC_URL>/dashboard/callback`. Then generate a
+   client secret on the app's page.
+2. Set `SLOTLOCK_GITHUB_CLIENT_ID` and `SLOTLOCK_GITHUB_CLIENT_SECRET` from the app,
+   `SLOTLOCK_SESSION_SECRET` to 32+ random characters (`openssl rand -hex 32`), and
+   `SLOTLOCK_DASHBOARD_USERS` to the GitHub user ids that may sign in (`gh api users/<login> --jq .id`),
+   or to `*` for every GitHub account.
+3. Run `slotlock serve` and open `<SLOTLOCK_PUBLIC_URL>/dashboard`.
+
+- Each person gets a tenant of their own, `github:<user id>`: the keys, resources and bookings in it
+  are theirs alone. Keys made with `slotlock key create` act in `SLOTLOCK_TENANT` instead.
+- Sign-in asks GitHub for no scope, uses `state` and PKCE, and keeps nothing from GitHub but the user
+  id and login: the GitHub token is used once and dropped.
+- A session is a signed, HttpOnly cookie that lasts 12 hours. The allowlist is checked on every
+  request, dashboard and API alike: removing an id and restarting the server signs that person out
+  and stops every key in their tenant at once.
+- Every form carries a token bound to the session and must come from the server's own origin; the
+  pages run no inline script, under a Content-Security-Policy that allows only their own files.
+- Give the dashboard an origin of its own (`https://slotlock.example.com`, not a path beside other
+  apps): its cookies are host-wide, so any other app on the same origin could read them.
+- Each instance remembers, in bounded memory, sign-ins it finished (a callback works once), sessions
+  signed out (a copied cookie stays out) and forms sent (a reload does not create or rotate a key
+  twice). Run one instance, or route each person to one, for these to hold across instances; the
+  signed cookies, the allowlist and CSRF hold everywhere.
+- A person may add 100 resources. Bookable hours come from `SLOTLOCK_AVAILABILITY` and apply to every
+  tenant's resources. Rate-limit `/dashboard/sign-in` and `/dashboard/callback` at your proxy: each
+  callback costs a call to GitHub, and an instance runs at most eight at once.
 
 ## Connect an MCP client
 
@@ -519,8 +554,11 @@ export async function startCalendarServer(config: CalendarServerConfig) {
 
 A query window (free/busy, slot search, event lists) is at most 367 days, and a slot search can look
 for a slot that long; an event itself may last up to 3,660 days, so a lease or a year-long rental is
-one event. The input and output JSON Schemas are in `tools/list` and in `manifest.json`. Earlier builds used dotted names (`calendar.list_resources`), which some tool-calling
-APIs reject; those names still work on every entry point but are no longer advertised.
+one event. The input and output JSON Schemas are in `tools/list` and in `manifest.json`, and
+[slotlock.pylota.io/docs/tools](https://slotlock.pylota.io/docs/tools/) lists every field. Earlier
+builds used dotted names (`calendar.list_resources`), which some tool-calling APIs reject, and then
+`calendar_<verb>` names (`calendar_list_resources`); both still work on every entry point but are no
+longer advertised.
 `resolveSlotlockAgentOperation` maps either spelling to the current name; `isSlotlockAgentOperation`
 accepts current names only.
 
@@ -545,11 +583,13 @@ A refused or failed operation is data the model can act on, not a protocol failu
 | `not_found`, `resource_not_found`, `event_not_found` | Not visible to this principal |
 | `overlap` | The time is taken by an opaque event or reservation |
 | `revision_conflict`, `idempotency_conflict`, `event_cancelled` | Re-read, then retry with the current revision or a new key |
-| `owner_event_quota_exceeded`, `owner_command_quota_exceeded` | Per-principal quota reached (see Operations) |
+| `owner_event_quota_exceeded`, `owner_command_quota_exceeded` | Per-principal quota reached (see [Operations](#operations)) |
 | `confirmation_required` | The write needs a person's confirmation, which this client cannot collect (2025 MCP, A2A) |
 | `confirmation_declined`, `confirmation_cancelled` | The person said no, or dismissed the question |
 | `invalid_cursor`, `invalid_event`, `invalid_window`, … | A bounded input the store rejected |
 | `request_aborted`, `store_inconsistent` | Transient; retry |
+
+#### Errors from your own backend
 
 A backend of your own reports a failure the agent should see by throwing
 `new SlotlockAgentOperationError(code, status)` with a `snake_case` code (anything else becomes
@@ -558,6 +598,8 @@ failed downstream call as a tool execution error. Two codes are reserved for ser
 `internal_error` and `invalid_backend_result` never reach the agent, whichever throws them. Any
 other exception, and output that fails the tool's schema, is a server fault whose message never
 leaves the server.
+
+#### Protocol errors
 
 Protocol failures use the transport's own errors: `401` with `WWW-Authenticate`, `403` for a
 disallowed origin, `413`/`415` for body problems, `429` for the protocol-level limit. MCP answers an
@@ -762,6 +804,8 @@ export async function openLiveCalendar(options: LiveCalendarOptions) {
 ```
 
 `openLiveCalendar` works against the server example started with a `confirmationSecret`.
+
+### Claude Code and the Claude API
 
 **Claude Code** (a static bearer token; keep it out of a committed project-scope `.mcp.json`):
 

@@ -96,6 +96,8 @@ const expectedFiles = new Set([
   'api-keys.d.ts',
   'cli.js',
   'cli.d.ts',
+  'dashboard.js',
+  'dashboard.d.ts',
   'ddl.js',
   'ddl.d.ts',
   'engine.js',

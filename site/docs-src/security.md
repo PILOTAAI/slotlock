@@ -1,6 +1,6 @@
 ---
 title: Security model
-description: Confirmation before writes, tenant isolation with forced row-level security, quotas and retention.
+description: How Slotlock keeps agent writes safe. A person can confirm each one, PostgreSQL decides every overlap, and forced row-level security keeps tenants apart.
 ---
 
 Three rules hold everywhere. The database decides overlaps; no model holds a lock or judges

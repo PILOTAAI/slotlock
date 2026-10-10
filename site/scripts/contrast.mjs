@@ -81,6 +81,14 @@ const PAIRS = [
   ['ink-3', ['paper'], 3, 'unproven dotted border'],
   ['ink-3', ['canvas-2'], 3, 'closed dotted border'],
   ['accent', ['paper'], 3, 'focus ring and "now" marker'],
+  // Docs (src/styles/docs.css): inline code, table headers and quotes sit on a chip; the current
+  // sidebar page is accent-ink on accent-soft over the page.
+  ['ink', ['chip'], 4.5, 'docs: inline code on a chip'],
+  ['ink-2', ['chip'], 4.5, 'docs: table header and quote text on a chip'],
+  ['ink-3', ['chip'], 4.5, 'docs: muted text on a chip'],
+  ['accent-ink', ['accent-soft', 'canvas'], 4.5, 'docs: current page in the sidebar, note asides'],
+  ['hold', ['hold-soft', 'canvas'], 4.5, 'docs: caution aside title'],
+  ['accent', ['chip'], 4.5, 'docs: linked types and links in quotes'],
   // Code panels (dark in both themes)
   ['code-ink', ['code-bg'], 4.5, 'code text'],
   ['code-muted', ['code-bg'], 4.5, 'code comments'],

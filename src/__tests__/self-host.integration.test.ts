@@ -79,7 +79,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
 
   afterAll(async () => {
     await admin`DELETE FROM slotlock.resources WHERE tenant_ref = ${tenantRef}`;
-    await admin`DELETE FROM slotlock.api_keys WHERE tenant_ref IN (${tenantRef}, ${otherTenantRef})`;
+    await admin`DELETE FROM slotlock.api_keys WHERE tenant_ref IN (${tenantRef}, ${otherTenantRef}, 'github:4242', 'github:999')`;
     await admin.unsafe(`DROP OWNED BY ${role}`).catch(() => undefined);
     await admin.unsafe(`DROP ROLE IF EXISTS ${role}`);
     await admin.end();
@@ -399,5 +399,88 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     expect(foreign.code).toBe(1);
     expect(foreign.stdout.text()).toBe('');
     expect(foreign.stderr.text()).toMatch(/no API key with that id/);
+  });
+  it('serves the GitHub sign-in dashboard beside MCP when configured, and keeps its secrets out of the log', async () => {
+    const clientSecret = randomBytes(20).toString('hex');
+    const sessionSecret = randomBytes(32).toString('hex');
+    // Keys of a person still allowed, and of one removed from the allowlist.
+    const keyFor = async (tenant: string) => {
+      const out = output();
+      const code = await runSlotlockCli(['key', 'create', 'Dashboard user', '--scope', 'read'], {
+        env: { ...env, SLOTLOCK_TENANT: tenant },
+        stdout: out,
+        stderr: output(),
+        signal: new AbortController().signal,
+      });
+      expect(code).toBe(0);
+      return (JSON.parse(out.text()) as { key: string }).key;
+    };
+    const allowedKey = await keyFor('github:4242');
+    const removedKey = await keyFor('github:999');
+    const shutdown = new AbortController();
+    const stdout = output();
+    const stderr = output();
+    const serving = runSlotlockCli(['serve'], {
+      env: {
+        ...env,
+        SLOTLOCK_GITHUB_CLIENT_ID: 'Ov23liIntegrationTest',
+        SLOTLOCK_GITHUB_CLIENT_SECRET: clientSecret,
+        SLOTLOCK_SESSION_SECRET: sessionSecret,
+        SLOTLOCK_DASHBOARD_USERS: '4242',
+      },
+      stdout,
+      stderr,
+      signal: shutdown.signal,
+    });
+    try {
+      const listening = await eventually(() =>
+        stdout.events().find(({ event }) => event === 'listening'),
+      );
+      expect(listening).toMatchObject({ dashboard: 'http://localhost:8080/dashboard' });
+      const origin = listening.address as string;
+
+      const page = await fetch(`${origin}/dashboard`);
+      expect(page.status).toBe(200);
+      expect(page.headers.get('content-security-policy')).toContain("default-src 'none'");
+      expect(await page.text()).toContain('href="/dashboard/sign-in"');
+
+      const signIn = await fetch(`${origin}/dashboard/sign-in`, { redirect: 'manual' });
+      expect(signIn.status).toBe(302);
+      const location = new URL(signIn.headers.get('location') ?? '');
+      expect(location.origin + location.pathname).toBe('https://github.com/login/oauth/authorize');
+      expect(location.searchParams.get('client_id')).toBe('Ov23liIntegrationTest');
+      expect(location.searchParams.get('redirect_uri')).toBe(
+        'http://localhost:8080/dashboard/callback',
+      );
+      expect(signIn.headers.get('set-cookie')).toMatch(/^__Host-slotlock-oauth=/);
+
+      // MCP still answers beside it, and a person removed from the allowlist lost their keys.
+      const mcp = (bearer?: string) =>
+        fetch(`${origin}/mcp`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json, text/event-stream',
+            'MCP-Protocol-Version': SLOTLOCK_MCP_LEGACY_PROTOCOL_VERSION,
+            ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'tools/call',
+            params: { name: 'slotlock_list_resources', arguments: { limit: 1 } },
+          }),
+        });
+      expect((await mcp()).status).toBe(401);
+      expect((await mcp(allowedKey)).status).toBe(200);
+      expect((await mcp(removedKey)).status).toBe(401);
+    } finally {
+      shutdown.abort();
+    }
+    expect(await serving).toBe(0);
+    expect(stderr.text()).toBe('');
+    for (const secretValue of [clientSecret, sessionSecret]) {
+      expect(stdout.text()).not.toContain(secretValue);
+    }
   });
 });
