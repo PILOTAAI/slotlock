@@ -2259,6 +2259,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
       const due = candidates.slice(0, limit);
       let extended = 0;
       let conflicts = 0;
+      let refused = 0;
 
       for (const candidate of due) {
         for (let attempt = 1; attempt <= 2; attempt++) {
@@ -2301,6 +2302,13 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
             if (changed) extended += 1;
             break;
           } catch (error) {
+            if (error instanceof CalendarContractError) {
+              // Its rule now takes more than the expansion budget (it is expanded from its start
+              // each time, so the search grows as the window moves). Nothing was written; its old
+              // coverage stays, and the masters after it still roll.
+              refused += 1;
+              break;
+            }
             const code = pgCode(error);
             if ((code === DEADLOCK_DETECTED || code === SERIALIZATION_FAILURE) && attempt === 1) {
               continue;
@@ -2323,6 +2331,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
         examined: due.length,
         extended,
         conflicts,
+        refused,
         hasMore: candidates.length > limit,
       };
     },

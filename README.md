@@ -342,6 +342,12 @@ export async function scheduleWeeklyInspection(
 Occurrences are stored for a window of at most 367 days and 2,000 occurrences; maintenance rolls
 the window forward. Past it, free/busy reports the time as unproven.
 
+A rule is expanded from its start, within a budget: 50,000 steps, and a quarter of a second for one
+event or a second for a feed. A SECONDLY to WEEKLY step may move a century at most. A rule that
+needs more, such as one that never occurs (`FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30`), is refused:
+`invalid_event` on a write, `invalid_icalendar` from a feed. During maintenance, a stored series that
+outgrows the budget is counted as `refused` and keeps its old coverage.
+
 ### External calendars
 
 Provider adapters (Google, Microsoft, CalDAV) stay in your application, with their credentials.
@@ -722,6 +728,7 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
   const window = calendarEventRollingHorizon();
   let extended = 0;
   let conflicts = 0;
+  let refused = 0;
   let horizonCapped = true;
   for (let batch = 0; batch < MAX_BATCHES; batch++) {
     const roll = await store.withTenant(tenantRef, (tenant) =>
@@ -729,6 +736,7 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
     );
     extended += roll.extended;
     conflicts += roll.conflicts;
+    refused += roll.refused;
     if (!roll.hasMore) {
       horizonCapped = false;
       break;
@@ -747,7 +755,7 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
       break;
     }
   }
-  return { extended, conflicts, pruned, capped: horizonCapped || retentionCapped };
+  return { extended, conflicts, refused, pruned, capped: horizonCapped || retentionCapped };
 }
 ```
 
@@ -778,7 +786,7 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
 4. Verify provider webhooks before normalizing them; keep provider credentials out of Slotlock.
 5. Bound retries on serialization failures; never blindly retry an unknown write.
 6. Reconcile external calendars with durable cursors and coverage windows.
-7. Monitor conflicts, sync lag, capped maintenance runs, quota errors and confirmation outcomes.
+7. Monitor conflicts, refused rules, sync lag, capped maintenance runs, quota errors and confirmation outcomes.
 8. Keep writes confirmation-gated wherever your policy needs a person.
 9. Size live updates: at most `maxTotal` backend reads per `pollIntervalMs`.
 10. Give each agent its own API key with the narrowest scope and an expiry.

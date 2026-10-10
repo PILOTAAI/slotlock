@@ -58,6 +58,21 @@ request replaces "Unreleased" with the release date.
   Sunday, and `BYHOUR`/`BYMINUTE`/`BYSECOND` took most of a second per rule to check.
 - Every dashboard form but sign-out must carry its single-use value. A form sent without the value
   skipped the resend check and the per-person form limit.
+- A recurrence rule that never occurs, such as `FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30` or
+  `FREQ=DAILY;INTERVAL=7;BYDAY=TU` from a Monday, no longer freezes the process. Before, ical.js
+  2.2.1 searched for its next occurrence without limit, whether the rule came from a feed
+  (`parseICalendarChanges`), a write (`putCalendarEvent`), a library call
+  (`expandCalendarEventOccurrences`) or a stored series being rolled. Each expansion now has these
+  limits, and a rule that needs more is refused as `invalid_icalendar` (`invalid_event` on a
+  write):
+  - 50,000 search steps per feed or event;
+  - one second of searching per feed, a quarter of a second per event;
+  - for SECONDLY to WEEKLY rules, a step may move about a century at most (36,600 days), because
+    ical.js walks each step a day at a time.
+
+  `rollCalendarEventHorizon` skips a stored series refused this way and counts it in the new
+  `refused` field. Its old coverage stays, and the series after it still roll. The maintenance
+  example sums `refused`.
 
 ### Added
 

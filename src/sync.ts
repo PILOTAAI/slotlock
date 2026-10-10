@@ -59,6 +59,46 @@ const MAX_ICAL_COMPONENTS = 2_000;
 const MAX_ICAL_EXCEPTIONS_PER_SERIES = 1_000;
 const MAX_ICAL_WORK = 4_000;
 const MAX_ICAL_WINDOW_MS = 367 * 24 * 60 * 60 * 1000;
+/**
+ * Steps ical.js may take, in one parse, looking for occurrences. RecurIterator.next() searches for a
+ * SECONDLY to WEEKLY rule's next occurrence one step (second, minute, hour, day or week) at a time
+ * with no limit, and gives up on a MONTHLY or YEARLY one only when whole months or years fail (not
+ * when one matches a part the rule then rules out), so a rule that never occurs
+ * (`FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30`, `FREQ=DAILY;INTERVAL=7;BYDAY=TU` from a Monday, or
+ * `FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30;BYDAY=MO`) held the whole process, and one that almost never
+ * does held it for minutes. A real rule takes one to five steps an occurrence (a yearly date written
+ * as a daily rule, 365), and MAX_ICAL_WORK bounds the occurrences.
+ */
+const MAX_ICAL_STEPS = 50_000;
+/**
+ * And the time those steps may take: a step costs from a microsecond (a daily rule) to a
+ * millisecond (a WEEKLY rule with a huge INTERVAL, which ical.js walks a day at a time), so a count
+ * alone does not bound it. A busy feed within MAX_ICAL_WORK takes up to about half a second (thirty
+ * fifth-Monday series since 2000); one stored series, expanded from its start, a few milliseconds.
+ */
+const MAX_ICAL_EXPANSION_MS = 1_000;
+const MAX_EVENT_EXPANSION_MS = 250;
+/**
+ * The furthest one step of a SECONDLY to WEEKLY rule may move, in days: about a century. ical.js
+ * moves it a day at a time (RecurIterator#increment_monthday) inside one step, which is charged
+ * once: `FREQ=DAILY;INTERVAL=1000000000` spent 97 seconds in its second step. A century is 36,600
+ * days, about 4 ms.
+ */
+const MAX_ICAL_STEP_DAYS = 36_600;
+const MAX_ICAL_INTERVAL: Readonly<Record<string, number>> = {
+  SECONDLY: MAX_ICAL_STEP_DAYS * 86_400,
+  MINUTELY: MAX_ICAL_STEP_DAYS * 1_440,
+  HOURLY: MAX_ICAL_STEP_DAYS * 24,
+  DAILY: MAX_ICAL_STEP_DAYS,
+  WEEKLY: Math.floor(MAX_ICAL_STEP_DAYS / 7),
+};
+/**
+ * The RecurIterator methods a step is charged on. Every step of a search, whatever the frequency,
+ * ends in exactly one `next_second` (`next_year`, `next_month`, `next_week` and `next_day` each call
+ * `next_hour`, which calls `next_minute`, which calls `next_second`); `expand_year_days` is a YEARLY
+ * rule's scan of one year for matching days, which the constructor repeats as far as the year 20000.
+ */
+const ICAL_STEP_METHODS = ['next_second', 'expand_year_days'] as const;
 const MAX_EXCEPTION_BACKWARD_SHIFT_MS = MAX_ICAL_WINDOW_MS;
 const MAX_TRUSTED_TEXT_BYTES = 16_384;
 const MAX_TRUSTED_SUMMARY_BYTES = 4_096;
@@ -395,11 +435,100 @@ function calendarTimeValue(
   throw new CalendarContractError('invalid_icalendar');
 }
 
+/** What one parse may spend searching for occurrences: MAX_ICAL_STEPS steps, and `maxMs`. */
+class RecurrenceBudget {
+  private steps = MAX_ICAL_STEPS;
+  private searchedMs = 0;
+  private searchStarted: number | undefined;
+
+  constructor(private readonly maxMs: number) {}
+
+  /** Run one search (building an event's expansion, or its next occurrence), its time charged. */
+  search<T>(work: () => T): T {
+    const started = performance.now();
+    this.searchStarted = started;
+    try {
+      return work();
+    } finally {
+      this.searchedMs += performance.now() - started;
+      this.searchStarted = undefined;
+    }
+  }
+
+  /** Charge one step, throwing past either limit. */
+  charge(): void {
+    this.steps -= 1;
+    const searchingMs =
+      this.searchStarted === undefined ? 0 : performance.now() - this.searchStarted;
+    if (this.steps < 0 || this.searchedMs + searchingMs > this.maxMs) {
+      throw new CalendarContractError('invalid_icalendar');
+    }
+  }
+}
+
+/**
+ * A RecurIterator subclass, made for one parse, whose every step is charged to `budget` and throws
+ * past it. The constructor's own scans (for a YEARLY rule, a year with a matching day, as far as the
+ * year 20000) run through these methods on the instance being built, so they are charged too.
+ * ical.js itself is not changed for anything else in the process; and if a new ical.js no longer
+ * has a method this charges, every recurring event is refused rather than expanded without a limit.
+ */
+function budgetedRecurIterator(budget: RecurrenceBudget): typeof ICAL.RecurIterator {
+  class BudgetedRecurIterator extends ICAL.RecurIterator {}
+  const inherited = ICAL.RecurIterator.prototype as unknown as Record<string, unknown>;
+  const own = BudgetedRecurIterator.prototype as unknown as Record<string, unknown>;
+  for (const name of ICAL_STEP_METHODS) {
+    const step = inherited[name];
+    if (typeof step !== 'function') throw new CalendarContractError('invalid_icalendar');
+    own[name] = function (this: unknown, ...args: unknown[]) {
+      budget.charge();
+      return step.apply(this, args);
+    };
+  }
+  return BudgetedRecurIterator;
+}
+
+/**
+ * `event.iterator()`, with every rule iterator built as `Budgeted`. RecurExpansion builds them from
+ * the event's own RRULE values (`rule.iterator(dtstart)`) and takes the first step at once, so the
+ * values are changed before it is called: wrapping its iterators afterwards left that step, the
+ * one most rules that never occur stop in, unbounded.
+ */
+function budgetedExpansion(
+  event: ICAL.Event,
+  Budgeted: typeof ICAL.RecurIterator,
+): ICAL.RecurExpansion {
+  for (const property of event.component.getAllProperties('rrule')) {
+    const rule = property.getFirstValue();
+    if (!(rule instanceof ICAL.Recur)) throw new CalendarContractError('invalid_icalendar');
+    const maxInterval = MAX_ICAL_INTERVAL[rule.freq];
+    if (maxInterval !== undefined && rule.interval > maxInterval) {
+      throw new CalendarContractError('invalid_icalendar');
+    }
+    rule.iterator = (start) => new Budgeted({ rule, dtstart: start });
+  }
+  const expansion = event.iterator();
+  const iterators = (expansion as unknown as { ruleIterators?: unknown }).ruleIterators;
+  if (!Array.isArray(iterators) || !iterators.every((iterator) => iterator instanceof Budgeted)) {
+    throw new CalendarContractError('invalid_icalendar');
+  }
+  return expansion;
+}
+
 /** Parse VEVENTs with the standards library; event content is deliberately discarded. */
 export function parseICalendarChanges(
   input: string,
   calendarTimezone?: string,
   expansionWindow?: ICalendarExpansionWindow,
+): ExternalCalendarChange[] {
+  return parseCalendarChanges(input, calendarTimezone, expansionWindow, MAX_ICAL_EXPANSION_MS);
+}
+
+function parseCalendarChanges(
+  input: string,
+  calendarTimezone: string | undefined,
+  expansionWindow: ICalendarExpansionWindow | undefined,
+  maxExpansionMs: number,
 ): ExternalCalendarChange[] {
   try {
     // Bound work before ical.js allocates and normalizes the full component tree. The parsed-tree
@@ -479,6 +608,8 @@ export function parseICalendarChanges(
 
     const changes: ExternalCalendarChange[] = [];
     let remainingWork = MAX_ICAL_WORK;
+    const budget = new RecurrenceBudget(maxExpansionMs);
+    let Budgeted: typeof ICAL.RecurIterator | undefined;
     for (const event of events) {
       if (event.isRecurrenceException() && masters.has(event.uid)) continue;
       if (!event.isRecurring()) {
@@ -519,11 +650,12 @@ export function parseICalendarChanges(
         maxBackwardExceptionShiftMs = Math.max(maxBackwardExceptionShiftMs, backwardShiftMs);
       }
       const recurrenceScanEndMs = expansionWindow.end.getTime() + maxBackwardExceptionShiftMs;
-      const iterator = event.iterator();
+      const RuleIterator = (Budgeted ??= budgetedRecurIterator(budget));
+      const iterator = budget.search(() => budgetedExpansion(event, RuleIterator));
       while (true) {
         remainingWork -= 1;
         if (remainingWork < 0) throw new CalendarContractError('invalid_icalendar');
-        const occurrence = iterator.next();
+        const occurrence = budget.search(() => iterator.next());
         if (!occurrence) break;
         const occurrenceStart = calendarTimeValue(
           occurrence,
@@ -1171,10 +1303,11 @@ export function expandCalendarEventOccurrences(
   const uid = `event-${createHash('sha256')
     .update(`${event.start.toISOString()}|${event.summary}`)
     .digest('hex')}@slotlock.local`;
-  const parsed = parseICalendarChanges(
+  const parsed = parseCalendarChanges(
     emitITipCalendar({ ...event, uid, sequence: 0 }, 'PUBLISH'),
     event.timezone,
     window,
+    MAX_EVENT_EXPANSION_MS,
   );
   return parsed
     .filter((change) => !change.deleted && change.start && change.end)
