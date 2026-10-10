@@ -291,7 +291,7 @@ describe('calendar resources (MCP 2026-07-28 server/resources)', () => {
     expect(getFreeBusy.mock.calls[0]?.[1]).toEqual({ resource_ids: ['Van 7/α'], ...WINDOW });
     expect(authorize).toHaveBeenCalledWith({
       principal: PRINCIPALS['Bearer valid'],
-      operation: 'calendar_get_free_busy',
+      operation: 'slotlock_get_free_busy',
       input: { resource_ids: ['Van 7/α'], ...WINDOW },
     });
   });
@@ -454,7 +454,7 @@ describe('live calendar updates (MCP 2026-07-28 subscriptions/listen)', () => {
     // Re-reads skip the rate limiter but not authorization.
     expect(authorize).toHaveBeenLastCalledWith({
       principal: PRINCIPALS['Bearer valid'],
-      operation: 'calendar_get_free_busy',
+      operation: 'slotlock_get_free_busy',
       input: { resource_ids: ['vehicle-a', 'vehicle-b'], ...WATCHED },
     });
     await stream.cancel();

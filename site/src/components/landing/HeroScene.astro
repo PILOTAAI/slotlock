@@ -116,7 +116,7 @@ const tickClass = (hour: number) => `tick-${hour}`;
               <span>
                 <span class="log__time">{line.time}</span>
                 <span class="log__surface">
-                  {line.call.startsWith('calendar_') ? 'mcp' : 'ts'}
+                  {line.call.startsWith('slotlock_') ? 'mcp' : 'ts'}
                 </span>
                 <br />
                 <span class="log__call">{line.call}</span>{' '}

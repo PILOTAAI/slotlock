@@ -60,7 +60,7 @@ describe('slotlock serve configuration', () => {
       port: 8080,
       publicUrl: 'http://localhost:8080',
       authToken: env.SLOTLOCK_AUTH_TOKEN,
-      confirmWrites: ['calendar_create_event', 'calendar_update_event', 'calendar_delete_event'],
+      confirmWrites: ['slotlock_create_event', 'slotlock_update_event', 'slotlock_delete_event'],
       confirmationSecret: env.SLOTLOCK_CONFIRMATION_SECRET,
       availability: [],
     });
@@ -74,7 +74,7 @@ describe('slotlock serve configuration', () => {
         PORT: '3000',
         SLOTLOCK_PUBLIC_URL: 'https://calendar.example.com/slotlock/',
         SLOTLOCK_TENANT: ' fleet-7 ',
-        SLOTLOCK_CONFIRM_WRITES: 'calendar_delete_event, calendar_create_event',
+        SLOTLOCK_CONFIRM_WRITES: 'slotlock_delete_event, slotlock_create_event',
         SLOTLOCK_AVAILABILITY: WEEKDAYS,
       }),
     );
@@ -84,7 +84,7 @@ describe('slotlock serve configuration', () => {
       port: 3000,
       publicUrl: 'https://calendar.example.com/slotlock',
       tenantRef: 'fleet-7',
-      confirmWrites: ['calendar_delete_event', 'calendar_create_event'],
+      confirmWrites: ['slotlock_delete_event', 'slotlock_create_event'],
       availability: [
         { rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR', startMinutes: 540, durationMinutes: 480 },
       ],
@@ -143,7 +143,7 @@ describe('slotlock serve configuration', () => {
     ],
     [
       'a confirmed write is not a write tool',
-      { SLOTLOCK_CONFIRM_WRITES: 'calendar_list_events' },
+      { SLOTLOCK_CONFIRM_WRITES: 'slotlock_list_events' },
       /SLOTLOCK_CONFIRM_WRITES must be all, none/,
     ],
     ['PORT is not a number', { PORT: 'http' }, /PORT must be an integer/],

@@ -160,11 +160,11 @@ describe('consumer-neutral Slotlock agent server', () => {
   });
 
   it('exports one bounded operation dispatcher with the same schemas as the protocol server', async () => {
-    expect(isSlotlockAgentOperation('calendar_list_resources')).toBe(true);
-    expect(isSlotlockAgentOperation('calendar_list_resources.extra')).toBe(false);
+    expect(isSlotlockAgentOperation('slotlock_list_resources')).toBe(true);
+    expect(isSlotlockAgentOperation('slotlock_list_resources.extra')).toBe(false);
     const request = rpcRequest({});
     const direct = await invokeSlotlockAgentOperation({
-      operation: 'calendar_list_resources',
+      operation: 'slotlock_list_resources',
       input: {},
       request,
       options: buildDispatchOptions(),
@@ -178,7 +178,7 @@ describe('consumer-neutral Slotlock agent server', () => {
     });
     expect(listResources).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        operation: 'calendar_list_resources',
+        operation: 'slotlock_list_resources',
         principal: { subject: 'principal-1', tenantRef: 'tenant-a' },
       }),
       { limit: 50 },
@@ -189,7 +189,7 @@ describe('consumer-neutral Slotlock agent server', () => {
         jsonrpc: '2.0',
         id: 'dispatcher-parity',
         method: 'tools/call',
-        params: { name: 'calendar_list_resources', arguments: {} },
+        params: { name: 'slotlock_list_resources', arguments: {} },
       }),
     );
     expect(await protocol.json()).toMatchObject({
@@ -197,7 +197,7 @@ describe('consumer-neutral Slotlock agent server', () => {
     });
     expect(listResources).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        operation: 'calendar_list_resources',
+        operation: 'slotlock_list_resources',
         principal: { subject: 'principal-1', tenantRef: 'tenant-a' },
       }),
       { limit: 50 },
@@ -207,7 +207,7 @@ describe('consumer-neutral Slotlock agent server', () => {
   it('dispatches only after authentication, bounded validation, authorization and rate limiting', async () => {
     const request = rpcRequest({});
     const unauthenticated = await invokeSlotlockAgentOperation({
-      operation: 'calendar_list_resources',
+      operation: 'slotlock_list_resources',
       input: {},
       request,
       options: buildDispatchOptions({ authenticate: async () => null }),
@@ -221,7 +221,7 @@ describe('consumer-neutral Slotlock agent server', () => {
     expect(listResources).not.toHaveBeenCalled();
 
     const oversized = await invokeSlotlockAgentOperation({
-      operation: 'calendar_get_free_busy',
+      operation: 'slotlock_get_free_busy',
       input: {
         resource_ids: ['vehicle-1'],
         start: '2027-01-01T00:00:00.000Z',
@@ -236,7 +236,7 @@ describe('consumer-neutral Slotlock agent server', () => {
 
     const consumeRateLimit = vi.fn().mockResolvedValue(false);
     const limited = await invokeSlotlockAgentOperation({
-      operation: 'calendar_list_resources',
+      operation: 'slotlock_list_resources',
       input: {},
       request,
       options: buildDispatchOptions({ consumeRateLimit }),
@@ -244,7 +244,7 @@ describe('consumer-neutral Slotlock agent server', () => {
     expect(limited).toEqual({ ok: false, status: 429, code: 'rate_limited' });
     expect(consumeRateLimit).toHaveBeenCalledWith({
       principal: { subject: 'principal-1', tenantRef: 'tenant-a' },
-      operation: 'calendar_list_resources',
+      operation: 'slotlock_list_resources',
     });
     expect(listResources).not.toHaveBeenCalled();
   });
@@ -258,19 +258,19 @@ describe('consumer-neutral Slotlock agent server', () => {
     const plusDays = (days: number) => new Date(Date.parse(start) + days * DAY_MS).toISOString();
 
     // A 90-day slot inside a year-long window: the search reaches the backend.
-    await dispatch('calendar_find_next_available', {
+    await dispatch('slotlock_find_next_available', {
       resource_ids: ['vehicle-1'],
       start,
       end: plusDays(365),
       duration_minutes: 90 * 24 * 60,
     });
     expect(findNextAvailable).toHaveBeenCalledWith(
-      expect.objectContaining({ operation: 'calendar_find_next_available' }),
+      expect.objectContaining({ operation: 'slotlock_find_next_available' }),
       expect.objectContaining({ duration_minutes: 129_600 }),
     );
     // No slot can be longer than the 367-day search window.
     await expect(
-      dispatch('calendar_find_next_available', {
+      dispatch('slotlock_find_next_available', {
         resource_ids: ['vehicle-1'],
         start,
         end: plusDays(367),
@@ -278,7 +278,7 @@ describe('consumer-neutral Slotlock agent server', () => {
       }),
     ).resolves.toEqual({ ok: false, status: 400, code: 'invalid_arguments' });
 
-    await dispatch('calendar_create_event', {
+    await dispatch('slotlock_create_event', {
       ...CREATE_EVENT_ARGUMENTS,
       starts_at: start,
       ends_at: plusDays(3_660),
@@ -286,11 +286,11 @@ describe('consumer-neutral Slotlock agent server', () => {
     expect(createEvent).toHaveBeenCalledTimes(1);
     for (const [operation, input] of [
       [
-        'calendar_create_event',
+        'slotlock_create_event',
         { ...CREATE_EVENT_ARGUMENTS, starts_at: start, ends_at: plusDays(3_661) },
       ],
       [
-        'calendar_update_event',
+        'slotlock_update_event',
         {
           event_id: 'event-1',
           expected_revision: 1,
@@ -300,7 +300,7 @@ describe('consumer-neutral Slotlock agent server', () => {
         },
       ],
       [
-        'calendar_update_event',
+        'slotlock_update_event',
         {
           event_id: 'event-1',
           expected_revision: 1,
@@ -328,7 +328,7 @@ describe('consumer-neutral Slotlock agent server', () => {
       { subject: 'principal-1', tenantRef: 'tenant-a\nshadow' },
     ]) {
       const outcome = await invokeSlotlockAgentOperation({
-        operation: 'calendar_list_resources',
+        operation: 'slotlock_list_resources',
         input: {},
         request,
         options: buildDispatchOptions({ authenticate: async () => principal }),
@@ -366,8 +366,8 @@ describe('consumer-neutral Slotlock agent server', () => {
       },
       securityRequirements: [{ schemes: { bearer: { list: [] } } }],
       skills: expect.arrayContaining([
-        expect.objectContaining({ id: 'calendar_create_event' }),
-        expect.objectContaining({ id: 'calendar_get_free_busy' }),
+        expect.objectContaining({ id: 'slotlock_create_event' }),
+        expect.objectContaining({ id: 'slotlock_get_free_busy' }),
       ]),
     });
   });
@@ -511,7 +511,7 @@ describe('consumer-neutral Slotlock agent server', () => {
     const tools = (await listed.json()) as {
       result: { tools: Array<{ name: string; _meta?: Record<string, unknown> }> };
     };
-    expect(tools.result.tools.find((tool) => tool.name === 'calendar_get_free_busy')).toMatchObject(
+    expect(tools.result.tools.find((tool) => tool.name === 'slotlock_get_free_busy')).toMatchObject(
       {
         _meta: {
           ui: {
@@ -522,7 +522,7 @@ describe('consumer-neutral Slotlock agent server', () => {
       },
     );
     expect(
-      tools.result.tools.find((tool) => tool.name === 'calendar_create_event'),
+      tools.result.tools.find((tool) => tool.name === 'slotlock_create_event'),
     ).not.toHaveProperty('_meta');
   });
 
@@ -605,7 +605,7 @@ describe('consumer-neutral Slotlock agent server', () => {
         id: 2,
         method: 'tools/call',
         params: {
-          name: 'calendar_list_resources',
+          name: 'slotlock_list_resources',
           arguments: { limit: 5, tenantRef: 'tenant-b' },
         },
       }),
@@ -623,13 +623,13 @@ describe('consumer-neutral Slotlock agent server', () => {
         jsonrpc: '2.0',
         id: 3,
         method: 'tools/call',
-        params: { name: 'calendar_list_resources', arguments: { limit: 5 } },
+        params: { name: 'slotlock_list_resources', arguments: { limit: 5 } },
       }),
     );
     expect(good.status).toBe(200);
     expect(listResources).toHaveBeenCalledWith(
       expect.objectContaining({
-        operation: 'calendar_list_resources',
+        operation: 'slotlock_list_resources',
         principal: { subject: 'principal-1', tenantRef: 'tenant-a' },
       }),
       { limit: 5 },
@@ -644,7 +644,7 @@ describe('consumer-neutral Slotlock agent server', () => {
         jsonrpc: '2.0',
         id: 4,
         method: 'tools/call',
-        params: { name: 'calendar_list_resources', arguments: {} },
+        params: { name: 'slotlock_list_resources', arguments: {} },
       }),
     );
     expect(invalid.status).toBe(500);
@@ -697,7 +697,7 @@ describe('consumer-neutral Slotlock agent server', () => {
     });
 
     const outcome = await invokeSlotlockAgentOperation({
-      operation: 'calendar_get_event',
+      operation: 'slotlock_get_event',
       input: { event_id: 'provider-event' },
       request: rpcRequest({}),
       options: buildDispatchOptions(),
@@ -718,7 +718,7 @@ describe('consumer-neutral Slotlock agent server', () => {
         jsonrpc: '2.0',
         id: 41,
         method: 'tools/call',
-        params: { name: 'calendar_list_resources', arguments: {} },
+        params: { name: 'slotlock_list_resources', arguments: {} },
       }),
     );
 
@@ -735,7 +735,7 @@ describe('consumer-neutral Slotlock agent server', () => {
         id: 42,
         method: 'tools/call',
         params: {
-          name: 'calendar_update_event',
+          name: 'slotlock_update_event',
           arguments: {
             event_id: 'event-1',
             expected_revision: 1,
@@ -753,7 +753,7 @@ describe('consumer-neutral Slotlock agent server', () => {
 
   it.each([
     {
-      operation: 'calendar_get_free_busy',
+      operation: 'slotlock_get_free_busy',
       invoke: getFreeBusy,
       arguments: {
         resource_ids: ['vehicle-1'],
@@ -762,7 +762,7 @@ describe('consumer-neutral Slotlock agent server', () => {
       },
     },
     {
-      operation: 'calendar_find_next_available',
+      operation: 'slotlock_find_next_available',
       invoke: findNextAvailable,
       arguments: {
         resource_ids: ['vehicle-1'],
@@ -772,7 +772,7 @@ describe('consumer-neutral Slotlock agent server', () => {
       },
     },
     {
-      operation: 'calendar_list_events',
+      operation: 'slotlock_list_events',
       invoke: listEvents,
       arguments: {
         resource_ids: ['vehicle-1'],
@@ -829,7 +829,7 @@ describe('consumer-neutral Slotlock agent server', () => {
         id: 43,
         method: 'tools/call',
         params: {
-          name: 'calendar_update_event',
+          name: 'slotlock_update_event',
           arguments: {
             event_id: 'event-1',
             expected_revision: 1,
@@ -842,7 +842,7 @@ describe('consumer-neutral Slotlock agent server', () => {
 
     expect(response.status).toBe(200);
     expect(updateEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ operation: 'calendar_update_event' }),
+      expect.objectContaining({ operation: 'slotlock_update_event' }),
       expect.objectContaining({ resource_id: 'resource-2' }),
     );
   });
@@ -865,7 +865,7 @@ describe('consumer-neutral Slotlock agent server', () => {
         jsonrpc: '2.0',
         id: 7,
         method: 'tools/call',
-        params: { name: 'calendar_list_resources', arguments: { padding: 'x'.repeat(2_000) } },
+        params: { name: 'slotlock_list_resources', arguments: { padding: 'x'.repeat(2_000) } },
       }),
     );
     expect(oversized.status).toBe(413);
@@ -887,7 +887,7 @@ describe('consumer-neutral Slotlock agent server', () => {
               role: 'ROLE_USER',
               parts: [
                 {
-                  data: { skill: 'calendar_list_resources', arguments: { limit: 10 } },
+                  data: { skill: 'slotlock_list_resources', arguments: { limit: 10 } },
                   mediaType: 'application/json',
                 },
               ],
@@ -918,7 +918,7 @@ describe('consumer-neutral Slotlock agent server', () => {
       role: 'ROLE_USER',
       parts: [
         {
-          data: { skill: 'calendar_list_resources', arguments: {} },
+          data: { skill: 'slotlock_list_resources', arguments: {} },
           mediaType: 'application/json',
         },
       ],
@@ -982,7 +982,7 @@ describe('consumer-neutral Slotlock agent server', () => {
               role: 'ROLE_USER',
               parts: [
                 {
-                  data: { skill: 'calendar_list_resources', arguments: {} },
+                  data: { skill: 'slotlock_list_resources', arguments: {} },
                   mediaType: 'application/json',
                 },
               ],
@@ -1027,7 +1027,7 @@ describe('consumer-neutral Slotlock agent server', () => {
               role: 'ROLE_USER',
               parts: [
                 {
-                  data: { skill: 'calendar_list_resources', arguments: {} },
+                  data: { skill: 'slotlock_list_resources', arguments: {} },
                   mediaType: 'application/json',
                 },
               ],
@@ -1056,9 +1056,13 @@ describe('consumer-neutral Slotlock agent server', () => {
       expect(new Set(Object.values(SLOTLOCK_AGENT_OPERATION_LEGACY_NAMES))).toEqual(new Set(names));
     });
 
-    it('resolves each legacy dotted name to its current operation and nothing else', () => {
+    it('resolves each legacy name to its current operation and nothing else', () => {
+      const legacyNames = Object.keys(SLOTLOCK_AGENT_OPERATION_LEGACY_NAMES);
+      // Both earlier spellings of all eight operations: calendar.<verb> and calendar_<verb>.
+      expect(legacyNames).toHaveLength(16);
       for (const [legacy, current] of Object.entries(SLOTLOCK_AGENT_OPERATION_LEGACY_NAMES)) {
-        expect(legacy).toBe(current.replace('_', '.'));
+        const verb = current.slice('slotlock_'.length);
+        expect([`calendar.${verb}`, `calendar_${verb}`]).toContain(legacy);
         expect(isSlotlockAgentOperation(legacy)).toBe(false);
         expect(resolveSlotlockAgentOperation(legacy)).toBe(current);
         expect(resolveSlotlockAgentOperation(current)).toBe(current);
@@ -1075,7 +1079,7 @@ describe('consumer-neutral Slotlock agent server', () => {
         42,
         null,
         undefined,
-        { name: 'calendar_list_resources' },
+        { name: 'slotlock_list_resources' },
       ]) {
         expect(resolveSlotlockAgentOperation(name)).toBeNull();
       }
@@ -1090,7 +1094,7 @@ describe('consumer-neutral Slotlock agent server', () => {
       });
       expect(direct).toMatchObject({ ok: true });
       expect(authorize).toHaveBeenLastCalledWith(
-        expect.objectContaining({ operation: 'calendar_list_resources' }),
+        expect.objectContaining({ operation: 'slotlock_list_resources' }),
       );
 
       const server = buildServer();
@@ -1109,13 +1113,26 @@ describe('consumer-neutral Slotlock agent server', () => {
         a2aSendMessage({ skill: 'calendar.list_resources', arguments: { limit: 4 } }),
       );
       expect(await a2aReplyData(a2a)).toMatchObject({ next_cursor: null });
+      // The name agents of Pylota's Kairos endpoint call today.
+      const kairosName = await server.fetch(
+        rpcRequest({
+          jsonrpc: '2.0',
+          id: 'kairos-name',
+          method: 'tools/call',
+          params: { name: 'calendar_list_resources', arguments: { limit: 5 } },
+        }),
+      );
+      expect(await kairosName.json()).toMatchObject({
+        result: { structuredContent: { next_cursor: null } },
+      });
 
       expect(
         listResources.mock.calls.map(([context, input]) => [context.operation, input]),
       ).toEqual([
-        ['calendar_list_resources', { limit: 2 }],
-        ['calendar_list_resources', { limit: 3 }],
-        ['calendar_list_resources', { limit: 4 }],
+        ['slotlock_list_resources', { limit: 2 }],
+        ['slotlock_list_resources', { limit: 3 }],
+        ['slotlock_list_resources', { limit: 4 }],
+        ['slotlock_list_resources', { limit: 5 }],
       ]);
       expect(
         await invokeSlotlockAgentOperation({
@@ -1159,7 +1176,7 @@ describe('consumer-neutral Slotlock agent server', () => {
           jsonrpc: '2.0',
           id: 'conflict',
           method: 'tools/call',
-          params: { name: 'calendar_create_event', arguments: CREATE_EVENT_ARGUMENTS },
+          params: { name: 'slotlock_create_event', arguments: CREATE_EVENT_ARGUMENTS },
         }),
       );
       expect(conflict.status).toBe(200);
@@ -1171,7 +1188,7 @@ describe('consumer-neutral Slotlock agent server', () => {
           jsonrpc: '2.0',
           id: 'forbidden',
           method: 'tools/call',
-          params: { name: 'calendar_list_resources', arguments: {} },
+          params: { name: 'slotlock_list_resources', arguments: {} },
         }),
       );
       expect(forbidden.status).toBe(200);
@@ -1204,7 +1221,7 @@ describe('consumer-neutral Slotlock agent server', () => {
           jsonrpc: '2.0',
           id: 'crash',
           method: 'tools/call',
-          params: { name: 'calendar_list_resources', arguments: {} },
+          params: { name: 'slotlock_list_resources', arguments: {} },
         }),
       );
       expect(response.status).toBe(500);
@@ -1225,7 +1242,7 @@ describe('consumer-neutral Slotlock agent server', () => {
             jsonrpc: '2.0',
             id: code,
             method: 'tools/call',
-            params: { name: 'calendar_list_resources', arguments: {} },
+            params: { name: 'slotlock_list_resources', arguments: {} },
           }),
         );
         expect(mcp.status).toBe(500);
@@ -1236,7 +1253,7 @@ describe('consumer-neutral Slotlock agent server', () => {
         });
         listResources.mockRejectedValueOnce(new SlotlockAgentOperationError(code, 503));
         const a2a = await server.fetch(
-          a2aSendMessage({ skill: 'calendar_list_resources', arguments: {} }),
+          a2aSendMessage({ skill: 'slotlock_list_resources', arguments: {} }),
         );
         expect(a2a.status).toBe(200);
         expect(await a2a.json()).toMatchObject({
@@ -1362,7 +1379,7 @@ describe('consumer-neutral Slotlock agent server', () => {
       const server = buildServer();
       for (const headers of [{}, { 'A2A-Version': '0.3' }, { 'A2A-Version': '1.1' }]) {
         const response = await server.fetch(
-          a2aSendMessage({ skill: 'calendar_list_resources', arguments: {} }, { headers }),
+          a2aSendMessage({ skill: 'slotlock_list_resources', arguments: {} }, { headers }),
         );
         expect(response.status).toBe(200);
         expect(await response.json()).toEqual({
@@ -1558,7 +1575,7 @@ describe('consumer-neutral Slotlock agent server', () => {
       createEvent.mockRejectedValueOnce(new SlotlockAgentOperationError('reservation_conflict', 409));
       const conflict = await server.fetch(
         a2aSendMessage(
-          { skill: 'calendar_create_event', arguments: CREATE_EVENT_ARGUMENTS },
+          { skill: 'slotlock_create_event', arguments: CREATE_EVENT_ARGUMENTS },
           { id: 'conflict' },
         ),
       );
@@ -1568,7 +1585,7 @@ describe('consumer-neutral Slotlock agent server', () => {
       const invalid = await server.fetch(
         a2aSendMessage(
           {
-            skill: 'calendar_list_events',
+            skill: 'slotlock_list_events',
             arguments: { resource_ids: [], start: 'soon', end: 'later' },
           },
           { id: 'invalid' },
@@ -1578,7 +1595,7 @@ describe('consumer-neutral Slotlock agent server', () => {
 
       authorize.mockResolvedValueOnce(false);
       const forbidden = await server.fetch(
-        a2aSendMessage({ skill: 'calendar_list_resources', arguments: {} }, { id: 'forbidden' }),
+        a2aSendMessage({ skill: 'slotlock_list_resources', arguments: {} }, { id: 'forbidden' }),
       );
       expect(await a2aReplyData(forbidden)).toEqual({ error: { code: 'forbidden' } });
       expect(listResources).not.toHaveBeenCalled();
@@ -1589,7 +1606,7 @@ describe('consumer-neutral Slotlock agent server', () => {
       for (const data of [
         { skill: 'calendar_drop_tables', arguments: {} },
         { arguments: { limit: 1 } },
-        'calendar_list_resources',
+        'slotlock_list_resources',
       ]) {
         const response = await server.fetch(a2aSendMessage(data, { id: 'bad-message' }));
         expect(response.status).toBe(200);
@@ -1615,7 +1632,7 @@ describe('consumer-neutral Slotlock agent server', () => {
       const server = buildServer();
       listResources.mockRejectedValueOnce(new Error('postgres://slotlock:hunter2@db refused'));
       const crash = await server.fetch(
-        a2aSendMessage({ skill: 'calendar_list_resources', arguments: {} }, { id: 'crash' }),
+        a2aSendMessage({ skill: 'slotlock_list_resources', arguments: {} }, { id: 'crash' }),
       );
       expect(crash.status).toBe(200);
       expect(await crash.json()).toEqual({
@@ -1746,7 +1763,7 @@ describe('consumer-neutral Slotlock agent server', () => {
       );
 
       const a2a = await server.fetch(
-        unauthenticated(a2aSendMessage({ skill: 'calendar_list_resources', arguments: {} })),
+        unauthenticated(a2aSendMessage({ skill: 'slotlock_list_resources', arguments: {} })),
       );
       expect(a2a.status).toBe(401);
       expect(a2a.headers.get('www-authenticate')).toBe('Bearer realm="slotlock"');

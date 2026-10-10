@@ -86,9 +86,9 @@ function buildServer(
       ? {
           confirmation: {
             operations: [
-              'calendar_create_event',
-              'calendar_update_event',
-              'calendar_delete_event',
+              'slotlock_create_event',
+              'slotlock_update_event',
+              'slotlock_delete_event',
             ] as const,
             secrets: [SECRET],
           },
@@ -142,7 +142,7 @@ interface InputRequired {
 
 async function prompt(
   server: ReturnType<typeof buildServer>,
-  name = 'calendar_create_event',
+  name = 'slotlock_create_event',
   args: Record<string, unknown> = BOOKING,
 ): Promise<InputRequired> {
   const response = await server.fetch(toolCall(name, args));
@@ -217,7 +217,7 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
     expect(result.requestState).toMatch(/^v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
     expect(onEvent).toHaveBeenCalledWith({
       type: 'confirmation',
-      operation: 'calendar_create_event',
+      operation: 'slotlock_create_event',
       outcome: 'requested',
     });
   });
@@ -226,7 +226,7 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
     const server = buildServer();
     const { requestState } = await prompt(server);
     const response = await server.fetch(
-      toolCall('calendar_create_event', BOOKING, answer(requestState, 'accept', { confirm: true })),
+      toolCall('slotlock_create_event', BOOKING, answer(requestState, 'accept', { confirm: true })),
     );
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
@@ -234,12 +234,12 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
     });
     expect(createEvent).toHaveBeenCalledTimes(1);
     expect(createEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ operation: 'calendar_create_event' }),
+      expect.objectContaining({ operation: 'slotlock_create_event' }),
       expect.objectContaining({ idempotency_key: 'handover-2027-03-02' }),
     );
     expect(onEvent).toHaveBeenCalledWith({
       type: 'confirmation',
-      operation: 'calendar_create_event',
+      operation: 'slotlock_create_event',
       outcome: 'accepted',
     });
   });
@@ -253,7 +253,7 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
       [answer(requestState, 'accept', { confirm: false }), 'confirmation_declined'],
       [answer(requestState, 'accept'), 'confirmation_declined'],
     ] as const) {
-      const reply = await server.fetch(toolCall('calendar_create_event', BOOKING, response));
+      const reply = await server.fetch(toolCall('slotlock_create_event', BOOKING, response));
       expect(await toolError(reply)).toBe(code);
     }
     expect(createEvent).not.toHaveBeenCalled();
@@ -271,7 +271,7 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
     const refusals: Array<[Request, string]> = [
       [
         toolCall(
-          'calendar_create_event',
+          'slotlock_create_event',
           BOOKING,
           answer(`${version}.${payload}.${flipped}`, 'accept', accept),
         ),
@@ -279,7 +279,7 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
       ],
       [
         toolCall(
-          'calendar_create_event',
+          'slotlock_create_event',
           { ...BOOKING, title: 'Something else' },
           answer(requestState, 'accept', accept),
         ),
@@ -287,19 +287,19 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
       ],
       [
         toolCall(
-          'calendar_delete_event',
+          'slotlock_delete_event',
           { event_id: EVENT.id, expected_revision: 1, idempotency_key: 'delete-1' },
           answer(requestState, 'accept', accept),
         ),
         'other operation',
       ],
       [
-        toolCall('calendar_create_event', BOOKING, answer('not-a-state', 'accept', accept)),
+        toolCall('slotlock_create_event', BOOKING, answer('not-a-state', 'accept', accept)),
         'garbage',
       ],
       [
         toolCall(
-          'calendar_create_event',
+          'slotlock_create_event',
           BOOKING,
           answer(`${requestState}${'x'.repeat(2_100)}`, 'accept', accept),
         ),
@@ -314,13 +314,13 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
 
     subject = 'principal-2';
     const stolen = await server.fetch(
-      toolCall('calendar_create_event', BOOKING, answer(requestState, 'accept', accept)),
+      toolCall('slotlock_create_event', BOOKING, answer(requestState, 'accept', accept)),
     );
     expect(stolen.status).toBe(400);
     expect(createEvent).not.toHaveBeenCalled();
     expect(onEvent).toHaveBeenCalledWith({
       type: 'confirmation',
-      operation: 'calendar_create_event',
+      operation: 'slotlock_create_event',
       outcome: 'refused',
     });
   });
@@ -328,12 +328,12 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
   it('asks again when the confirmation expired or the answer is missing', async () => {
     vi.useFakeTimers({ now: new Date('2027-01-01T00:00:00Z'), toFake: ['Date'] });
     const server = buildServer({
-      confirmation: { operations: ['calendar_create_event'], secrets: [SECRET], ttlSeconds: 60 },
+      confirmation: { operations: ['slotlock_create_event'], secrets: [SECRET], ttlSeconds: 60 },
     });
     const { requestState } = await prompt(server);
     vi.setSystemTime(new Date('2027-01-01T00:01:01Z'));
     const expired = await server.fetch(
-      toolCall('calendar_create_event', BOOKING, answer(requestState, 'accept', { confirm: true })),
+      toolCall('slotlock_create_event', BOOKING, answer(requestState, 'accept', { confirm: true })),
     );
     const renewed = (await expired.json()) as { result: InputRequired };
     expect(renewed.result.resultType).toBe('input_required');
@@ -343,7 +343,7 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
       { requestState: renewed.result.requestState },
       { inputResponses: { slotlock_confirm: { action: 'accept', content: { confirm: true } } } },
     ]) {
-      const again = await server.fetch(toolCall('calendar_create_event', BOOKING, extra));
+      const again = await server.fetch(toolCall('slotlock_create_event', BOOKING, extra));
       expect(((await again.json()) as { result: InputRequired }).result.resultType).toBe(
         'input_required',
       );
@@ -351,7 +351,7 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
     expect(createEvent).not.toHaveBeenCalled();
     expect(onEvent).toHaveBeenCalledWith({
       type: 'confirmation',
-      operation: 'calendar_create_event',
+      operation: 'slotlock_create_event',
       outcome: 'expired',
     });
   });
@@ -365,7 +365,7 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
       { slotlock_confirm: { action: 'accept', content: ['confirm'] } },
     ]) {
       const response = await server.fetch(
-        toolCall('calendar_create_event', BOOKING, { requestState, inputResponses }),
+        toolCall('slotlock_create_event', BOOKING, { requestState, inputResponses }),
       );
       expect(response.status).toBe(400);
       expect(await response.json()).toMatchObject({ error: { code: -32602 } });
@@ -377,7 +377,7 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
     const server = buildServer();
     for (const capabilities of [{}, { elicitation: { url: {} } }, { elicitation: [] }]) {
       const response = await server.fetch(
-        toolCall('calendar_create_event', BOOKING, {}, capabilities),
+        toolCall('slotlock_create_event', BOOKING, {}, capabilities),
       );
       expect(response.status).toBe(400);
       expect(await response.json()).toMatchObject({
@@ -389,7 +389,7 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
     }
     // `elicitation: {}` declares form mode (client/elicitation §Capabilities).
     const empty = await server.fetch(
-      toolCall('calendar_create_event', BOOKING, {}, { elicitation: {} }),
+      toolCall('slotlock_create_event', BOOKING, {}, { elicitation: {} }),
     );
     expect(((await empty.json()) as { result: InputRequired }).result.resultType).toBe(
       'input_required',
@@ -400,23 +400,23 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
   it('answers authorization and argument failures before asking anyone', async () => {
     const server = buildServer();
     authorize.mockResolvedValueOnce(false);
-    expect(await toolError(await server.fetch(toolCall('calendar_create_event', BOOKING)))).toBe(
+    expect(await toolError(await server.fetch(toolCall('slotlock_create_event', BOOKING)))).toBe(
       'forbidden',
     );
     expect(
       await toolError(
-        await server.fetch(toolCall('calendar_create_event', { ...BOOKING, ends_at: 'soon' })),
+        await server.fetch(toolCall('slotlock_create_event', { ...BOOKING, ends_at: 'soon' })),
       ),
     ).toBe('invalid_arguments');
     expect(onEvent).not.toHaveBeenCalled();
   });
 
   it('runs unlisted operations and unconfigured servers without asking', async () => {
-    const reads = await buildServer().fetch(toolCall('calendar_list_resources', {}, {}, {}));
+    const reads = await buildServer().fetch(toolCall('slotlock_list_resources', {}, {}, {}));
     expect(await reads.json()).toMatchObject({ result: { resultType: 'complete' } });
 
     const unconfigured = await buildServer({}, { confirm: false }).fetch(
-      toolCall('calendar_create_event', BOOKING, {}, {}),
+      toolCall('slotlock_create_event', BOOKING, {}, {}),
     );
     expect(await unconfigured.json()).toMatchObject({ result: { resultType: 'complete' } });
     expect(createEvent).toHaveBeenCalledTimes(1);
@@ -436,7 +436,7 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
           jsonrpc: '2.0',
           id: 'legacy',
           method: 'tools/call',
-          params: { name: 'calendar_create_event', arguments: BOOKING },
+          params: { name: 'slotlock_create_event', arguments: BOOKING },
         }),
       }),
     );
@@ -460,7 +460,7 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
               role: 'ROLE_USER',
               parts: [
                 {
-                  data: { skill: 'calendar_create_event', arguments: BOOKING },
+                  data: { skill: 'slotlock_create_event', arguments: BOOKING },
                   mediaType: 'application/json',
                 },
               ],
@@ -479,18 +479,18 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
     const before = buildServer();
     const { requestState } = await prompt(before);
     const rotated = buildServer({
-      confirmation: { operations: ['calendar_create_event'], secrets: [ROTATED, SECRET] },
+      confirmation: { operations: ['slotlock_create_event'], secrets: [ROTATED, SECRET] },
     });
     const accepted = await rotated.fetch(
-      toolCall('calendar_create_event', BOOKING, answer(requestState, 'accept', { confirm: true })),
+      toolCall('slotlock_create_event', BOOKING, answer(requestState, 'accept', { confirm: true })),
     );
     expect(await accepted.json()).toMatchObject({ result: { resultType: 'complete' } });
 
     const retired = buildServer({
-      confirmation: { operations: ['calendar_create_event'], secrets: [ROTATED] },
+      confirmation: { operations: ['slotlock_create_event'], secrets: [ROTATED] },
     });
     const refused = await retired.fetch(
-      toolCall('calendar_create_event', BOOKING, answer(requestState, 'accept', { confirm: true })),
+      toolCall('slotlock_create_event', BOOKING, answer(requestState, 'accept', { confirm: true })),
     );
     expect(refused.status).toBe(400);
     expect(createEvent).toHaveBeenCalledTimes(1);
@@ -498,7 +498,7 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
 
   it('describes updates and deletions by event and revision', async () => {
     const server = buildServer();
-    const update = await prompt(server, 'calendar_update_event', {
+    const update = await prompt(server, 'slotlock_update_event', {
       event_id: EVENT.id,
       expected_revision: 3,
       starts_at: '2027-03-02T10:00:00Z',
@@ -510,7 +510,7 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
     expect(update.inputRequests.slotlock_confirm?.params.message).toBe(
       `Change event ${EVENT.id} (revision 3): time to 2027-03-02 10:00–11:00 (Europe/London); title to "Movedhandover".`,
     );
-    const removal = await prompt(server, 'calendar_delete_event', {
+    const removal = await prompt(server, 'slotlock_delete_event', {
       event_id: EVENT.id,
       expected_revision: 3,
       idempotency_key: 'delete-1',
@@ -522,12 +522,12 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
 
   it('refuses unusable confirmation settings when the server is built', () => {
     for (const confirmation of [
-      { operations: ['calendar_create_event'], secrets: ['too-short'] },
-      { operations: ['calendar_create_event'], secrets: [] },
-      { operations: ['calendar_list_resources'], secrets: [SECRET] },
+      { operations: ['slotlock_create_event'], secrets: ['too-short'] },
+      { operations: ['slotlock_create_event'], secrets: [] },
+      { operations: ['slotlock_list_resources'], secrets: [SECRET] },
       { operations: [], secrets: [SECRET] },
-      { operations: ['calendar_create_event'], secrets: [SECRET], ttlSeconds: 10 },
-      { operations: ['calendar_create_event'], secrets: [SECRET], ttlSeconds: 3_601 },
+      { operations: ['slotlock_create_event'], secrets: [SECRET], ttlSeconds: 10 },
+      { operations: ['slotlock_create_event'], secrets: [SECRET], ttlSeconds: 3_601 },
     ]) {
       expect(() => buildServer({ confirmation: confirmation as never })).toThrowError(
         /confirmation/,

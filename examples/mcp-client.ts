@@ -11,7 +11,7 @@ export async function findSlotOverMcp(mcpUrl: string, token: string, resourceId:
   await client.connect(transport);
   try {
     const result = await client.callTool({
-      name: 'calendar_find_next_available',
+      name: 'slotlock_find_next_available',
       arguments: {
         resource_ids: [resourceId],
         start: '2027-03-29T00:00:00Z',

@@ -49,23 +49,23 @@ const MIN_DISTINCT_SECRET_CHARACTERS = 10;
 const PLACEHOLDER_SECRET = /change.?me|replace.?me|example|placeholder/i;
 const SECRET_HINT = 'generate one with `openssl rand -hex 32`';
 const WRITE_OPERATIONS: readonly SlotlockAgentWriteOperation[] = [
-  'calendar_create_event',
-  'calendar_update_event',
-  'calendar_delete_event',
+  'slotlock_create_event',
+  'slotlock_update_event',
+  'slotlock_delete_event',
 ];
 /**
  * What `serve` lets the token holder call. An allow-list, so an operation a later release adds stays
  * refused until it is listed here and reviewed.
  */
 const SERVED_OPERATIONS: ReadonlySet<SlotlockAgentOperation> = new Set([
-  'calendar_list_resources',
-  'calendar_get_free_busy',
-  'calendar_find_next_available',
-  'calendar_create_event',
-  'calendar_get_event',
-  'calendar_list_events',
-  'calendar_update_event',
-  'calendar_delete_event',
+  'slotlock_list_resources',
+  'slotlock_get_free_busy',
+  'slotlock_find_next_available',
+  'slotlock_create_event',
+  'slotlock_get_event',
+  'slotlock_list_events',
+  'slotlock_update_event',
+  'slotlock_delete_event',
 ]);
 const AVAILABILITY_RULE_KEYS = new Set(['rrule', 'startMinutes', 'durationMinutes']);
 const MAX_AVAILABILITY_RULES = 50;

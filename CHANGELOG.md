@@ -87,15 +87,17 @@ request replaces "Unreleased" with the release date.
 - All-day (`VALUE=DATE`) iCalendar events, series included, imported as whole local days of the
   calendar's timezone (the `calendarTimezone` argument, else `X-WR-TIMEZONE`).
 - One-off events of up to 3,660 days (`SLOTLOCK_MAX_EVENT_DURATION_DAYS`), so a lease or a long
-  rental is one event; `calendar_find_next_available` can look for a slot as long as its 367-day
+  rental is one event; `slotlock_find_next_available` can look for a slot as long as its 367-day
   window.
 
 ### Changed during pre-release
 
-- Operations are named `calendar_<verb>` (portable across Claude, OpenAI and MCP hosts); the dotted
-  `calendar.<verb>` names of earlier builds still resolve on every entry point. `authorize`,
-  `consumeRateLimit` and the backend always receive the current name, and `isSlotlockAgentOperation`
-  accepts current names only (`resolveSlotlockAgentOperation` maps either).
+- Operations are named `slotlock_<verb>`: portable across Claude, OpenAI and MCP hosts, and
+  namespaced by service so an agent that sees tools from many servers can tell which calendar it is
+  calling. The names of earlier builds, the dotted `calendar.<verb>` and the `calendar_<verb>` names
+  Pylota's Kairos endpoint advertised, still resolve on every entry point and are never advertised.
+  `authorize`, `consumeRateLimit` and the backend always receive the current name, and
+  `isSlotlockAgentOperation` accepts current names only (`resolveSlotlockAgentOperation` maps any).
 - The bundled MCP App reads a refused call's error code from its text content, since failures no
   longer carry `structuredContent`.
 - OAuth issuer identifiers are published exactly as configured (RFC 8414 compares them as strings)

@@ -94,7 +94,7 @@
         },
         {
           "name": "SLOTLOCK_CONFIRM_WRITES",
-          "description": "Writes that wait for a person to confirm them: all, none, or a comma-separated list of calendar_create_event, calendar_update_event, calendar_delete_event. Clients without MCP 2026-07-28 form elicitation have guarded writes refused.",
+          "description": "Writes that wait for a person to confirm them: all, none, or a comma-separated list of slotlock_create_event, slotlock_update_event, slotlock_delete_event. Clients without MCP 2026-07-28 form elicitation have guarded writes refused.",
           "default": "all"
         },
         {

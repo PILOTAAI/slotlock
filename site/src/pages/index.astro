@@ -51,7 +51,7 @@ const a2aBody = JSON.stringify(
           {
             mediaType: 'application/json',
             data: {
-              skill: 'calendar_find_next_available',
+              skill: 'slotlock_find_next_available',
               arguments: {
                 resource_ids: [facts.exampleResourceId],
                 start: facts.exampleWindow.start,
@@ -266,7 +266,7 @@ const canonical = new URL('/', Astro.site).toString();
                 aria-label="A two-hour hold from 10:00 to 12:00 drawn as a dashed amber bar, after the slot search answered 10:00 to 12:00, certain."
               >
                 <div class="mini-line" aria-hidden="true">
-                  <span>calendar_find_next_available</span><span class="ok">10:00–12:00 · certain</span>
+                  <span>slotlock_find_next_available</span><span class="ok">10:00–12:00 · certain</span>
                 </div>
                 <div class="mini-track" aria-hidden="true">
                   <span class="block block--hold s-10 e-12"><span class="block__label">hold · to 09:51</span></span>

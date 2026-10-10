@@ -97,7 +97,7 @@ const TRUSTED_PERSON_NAME_OUTPUT_MAX = 1_024;
 const TRUSTED_RECURRENCE_EXCEPTION_OUTPUT_MAX = 1_000;
 const TRUSTED_REMINDER_MINUTES_OUTPUT_MAX = 366 * 24 * 60;
 const MAX_AGENT_WINDOW_MS = SLOTLOCK_CALENDAR_HORIZON_DAYS * 24 * 60 * 60 * 1_000;
-/** The longest slot `calendar_find_next_available` can look for: the whole search window. */
+/** The longest slot `slotlock_find_next_available` can look for: the whole search window. */
 const MAX_SLOT_MINUTES = SLOTLOCK_CALENDAR_HORIZON_DAYS * 24 * 60;
 const MAX_EVENT_DURATION_MS = SLOTLOCK_MAX_EVENT_DURATION_DAYS * 24 * 60 * 60 * 1_000;
 /** Ordered and no longer than the store's one-off event ceiling (a lease, a long rental). */
@@ -245,29 +245,39 @@ type ObjectSchema = z.ZodType<Record<string, unknown>>;
  * Claude Messages API (`^[a-zA-Z0-9_-]{1,128}$`), OpenAI function calling and every MCP host.
  */
 export type SlotlockAgentOperation =
-  | 'calendar_list_resources'
-  | 'calendar_get_free_busy'
-  | 'calendar_find_next_available'
-  | 'calendar_create_event'
-  | 'calendar_get_event'
-  | 'calendar_list_events'
-  | 'calendar_update_event'
-  | 'calendar_delete_event';
+  | 'slotlock_list_resources'
+  | 'slotlock_get_free_busy'
+  | 'slotlock_find_next_available'
+  | 'slotlock_create_event'
+  | 'slotlock_get_event'
+  | 'slotlock_list_events'
+  | 'slotlock_update_event'
+  | 'slotlock_delete_event';
 
 /**
- * The dotted names Slotlock published before tool names had to be portable. Every entry point still
- * accepts them and dispatches the same operation; nothing advertises them any more.
+ * Names earlier builds published, which every entry point still accepts and dispatches as the same
+ * operation; nothing advertises them. The dotted names came first, before tool names had to be
+ * portable; the `calendar_` names are the ones agents of Pylota's Kairos endpoint call today, kept so
+ * they keep working when Pylota serves these tools.
  */
 export const SLOTLOCK_AGENT_OPERATION_LEGACY_NAMES: Readonly<Record<string, SlotlockAgentOperation>> =
   Object.freeze({
-    'calendar.list_resources': 'calendar_list_resources',
-    'calendar.get_free_busy': 'calendar_get_free_busy',
-    'calendar.find_next_available': 'calendar_find_next_available',
-    'calendar.create_event': 'calendar_create_event',
-    'calendar.get_event': 'calendar_get_event',
-    'calendar.list_events': 'calendar_list_events',
-    'calendar.update_event': 'calendar_update_event',
-    'calendar.delete_event': 'calendar_delete_event',
+    'calendar.list_resources': 'slotlock_list_resources',
+    'calendar.get_free_busy': 'slotlock_get_free_busy',
+    'calendar.find_next_available': 'slotlock_find_next_available',
+    'calendar.create_event': 'slotlock_create_event',
+    'calendar.get_event': 'slotlock_get_event',
+    'calendar.list_events': 'slotlock_list_events',
+    'calendar.update_event': 'slotlock_update_event',
+    'calendar.delete_event': 'slotlock_delete_event',
+    calendar_list_resources: 'slotlock_list_resources',
+    calendar_get_free_busy: 'slotlock_get_free_busy',
+    calendar_find_next_available: 'slotlock_find_next_available',
+    calendar_create_event: 'slotlock_create_event',
+    calendar_get_event: 'slotlock_get_event',
+    calendar_list_events: 'slotlock_list_events',
+    calendar_update_event: 'slotlock_update_event',
+    calendar_delete_event: 'slotlock_delete_event',
   });
 
 export interface SlotlockAgentPrincipal {
@@ -357,7 +367,7 @@ export interface SlotlockAgentServerOAuthOptions {
 /** The operations that change a calendar; the only ones a confirmation can guard. */
 export type SlotlockAgentWriteOperation = Extract<
   SlotlockAgentOperation,
-  'calendar_create_event' | 'calendar_update_event' | 'calendar_delete_event'
+  'slotlock_create_event' | 'slotlock_update_event' | 'slotlock_delete_event'
 >;
 
 /**
@@ -531,7 +541,7 @@ const EVENT_CREATE_INPUT = z
 
 const OPERATION_DEFINITIONS = [
   {
-    name: 'calendar_list_resources',
+    name: 'slotlock_list_resources',
     title: 'List calendar resources',
     description: 'List resources visible to the authenticated tenant principal.',
     input: z
@@ -561,7 +571,7 @@ const OPERATION_DEFINITIONS = [
     example: { limit: 10 },
   },
   {
-    name: 'calendar_get_free_busy',
+    name: 'slotlock_get_free_busy',
     title: 'Get free-busy',
     description: 'Return privacy-minimized busy intervals and explicit coverage certainty.',
     input: z
@@ -592,7 +602,7 @@ const OPERATION_DEFINITIONS = [
     example: { resource_ids: [EXAMPLE_RESOURCE_ID], ...EXAMPLE_WINDOW },
   },
   {
-    name: 'calendar_find_next_available',
+    name: 'slotlock_find_next_available',
     title: 'Find next available interval',
     description:
       'Find the earliest certain interval that satisfies the requested duration (up to the 367-day search window, so a multi-month rental slot can be found).',
@@ -618,7 +628,7 @@ const OPERATION_DEFINITIONS = [
     example: { resource_ids: [EXAMPLE_RESOURCE_ID], ...EXAMPLE_WINDOW, duration_minutes: 120 },
   },
   {
-    name: 'calendar_create_event',
+    name: 'slotlock_create_event',
     title: 'Create resource event',
     description:
       'Create an event of up to 3,660 days (a booking, lease or long rental); opaque occurrences use the database overlap arbiter.',
@@ -636,7 +646,7 @@ const OPERATION_DEFINITIONS = [
     },
   },
   {
-    name: 'calendar_get_event',
+    name: 'slotlock_get_event',
     title: 'Get resource event',
     description: 'Read one tenant-scoped event by stable identifier.',
     input: z.object({ event_id: EVENT_ID }).strict(),
@@ -646,7 +656,7 @@ const OPERATION_DEFINITIONS = [
     example: { event_id: EXAMPLE_EVENT_ID },
   },
   {
-    name: 'calendar_list_events',
+    name: 'slotlock_list_events',
     title: 'List resource events',
     description: 'List bounded events intersecting a time window.',
     input: z
@@ -667,7 +677,7 @@ const OPERATION_DEFINITIONS = [
     example: { resource_ids: [EXAMPLE_RESOURCE_ID], ...EXAMPLE_WINDOW, limit: 50 },
   },
   {
-    name: 'calendar_update_event',
+    name: 'slotlock_update_event',
     title: 'Update resource event',
     description: 'Apply an expected-revision event patch and rematerialize occupancy atomically.',
     input: z
@@ -726,7 +736,7 @@ const OPERATION_DEFINITIONS = [
     },
   },
   {
-    name: 'calendar_delete_event',
+    name: 'slotlock_delete_event',
     title: 'Delete resource event',
     description: 'Tombstone an event at an expected revision so stale sync cannot resurrect it.',
     input: z
@@ -1483,16 +1493,16 @@ function unref<T>(timer: T): T {
 /** Natural-language guidance `server/discover` gives the model on how to use these tools well. */
 const SLOTLOCK_MCP_INSTRUCTIONS = [
   'Slotlock is a tenant-isolated resource calendar (vehicles, rooms, equipment).',
-  'Check availability before booking: calendar_get_free_busy returns busy intervals and calendar_find_next_available the earliest free slot of a given length; an answer is certain only when coverage.certainty is "certain".',
-  'calendar_create_event needs an idempotency_key: retry with the same key and arguments, never a new key for the same booking. calendar_update_event and calendar_delete_event need the event revision you last read as expected_revision.',
+  'Check availability before booking: slotlock_get_free_busy returns busy intervals and slotlock_find_next_available the earliest free slot of a given length; an answer is certain only when coverage.certainty is "certain".',
+  'slotlock_create_event needs an idempotency_key: retry with the same key and arguments, never a new key for the same booking. slotlock_update_event and slotlock_delete_event need the event revision you last read as expected_revision.',
   'Times are RFC 3339 with an offset; intervals are half-open [start, end).',
   'A failed call returns {"error":{"code":"…"}}; read the code before retrying (overlap means the slot is taken).',
 ].join(' ');
 
 const WRITE_OPERATIONS: ReadonlySet<SlotlockAgentOperation> = new Set([
-  'calendar_create_event',
-  'calendar_update_event',
-  'calendar_delete_event',
+  'slotlock_create_event',
+  'slotlock_update_event',
+  'slotlock_delete_event',
 ]);
 /** The key of the one input request a confirmation prompt carries. */
 const CONFIRMATION_INPUT_KEY = 'slotlock_confirm';
@@ -1597,7 +1607,7 @@ function confirmationMessage(
   input: Record<string, unknown>,
 ): string {
   let message: string;
-  if (operation === 'calendar_create_event') {
+  if (operation === 'slotlock_create_event') {
     const title = typeof input.title === 'string' ? promptText(input.title) : '';
     const resource = promptText(input.resource_id, 200);
     message = `${title ? `Book "${title}" on resource ${resource}` : `Book resource ${resource}`}: ${promptRange(input.starts_at, input.ends_at, input.timezone)}.`;
@@ -1607,7 +1617,7 @@ function confirmationMessage(
     if (input.status === 'tentative') message += ' Tentative.';
   } else {
     const target = `event ${promptText(input.event_id, 500)} (revision ${String(input.expected_revision)})`;
-    if (operation === 'calendar_delete_event') {
+    if (operation === 'slotlock_delete_event') {
       message = `Delete ${target}.`;
     } else {
       const changes: string[] = [];
@@ -2022,7 +2032,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     window: { start: string; end: string },
   ) =>
     invokeSlotlockAgentOperation({
-      operation: 'calendar_get_free_busy',
+      operation: 'slotlock_get_free_busy',
       input: { resource_ids: resourceIds, start: window.start, end: window.end },
       request: call.request,
       options: dispatch,
@@ -2042,7 +2052,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     const resources: Record<string, unknown>[] =
       cursor === undefined ? [{ ...SLOTLOCK_MCP_APP_RESOURCE }] : [];
     const outcome = await invokeSlotlockAgentOperation({
-      operation: 'calendar_list_resources',
+      operation: 'slotlock_list_resources',
       input: cursor === undefined ? {} : { cursor },
       request: call.request,
       options: dispatchOptions(call.principal),

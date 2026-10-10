@@ -6,7 +6,7 @@ import type { SlotlockStore, SlotlockTenantStore } from '../store.js';
 const tenantRef = 'tenant-a';
 const context: SlotlockAgentInvocationContext = {
   principal: { subject: 'principal-a', tenantRef },
-  operation: 'calendar_create_event',
+  operation: 'slotlock_create_event',
   signal: new AbortController().signal,
 };
 
@@ -224,10 +224,10 @@ describe('Slotlock store-backed agent server adapter', () => {
 
   it('threads one opaque principal owner through every event lookup and mutation', async () => {
     const backend = createSlotlockStoreAgentBackend(store, { availabilityRules });
-    const readContext = { ...context, operation: 'calendar_get_event' as const };
-    const listContext = { ...context, operation: 'calendar_list_events' as const };
-    const updateContext = { ...context, operation: 'calendar_update_event' as const };
-    const deleteContext = { ...context, operation: 'calendar_delete_event' as const };
+    const readContext = { ...context, operation: 'slotlock_get_event' as const };
+    const listContext = { ...context, operation: 'slotlock_list_events' as const };
+    const updateContext = { ...context, operation: 'slotlock_update_event' as const };
+    const deleteContext = { ...context, operation: 'slotlock_delete_event' as const };
 
     await backend.getEvent(readContext, { event_id: event().externalRef });
     await backend.listEvents(listContext, {
@@ -328,7 +328,7 @@ describe('Slotlock store-backed agent server adapter', () => {
     const backend = createSlotlockStoreAgentBackend(store, { availabilityRules });
 
     await backend.updateEvent(
-      { ...context, operation: 'calendar_update_event' },
+      { ...context, operation: 'slotlock_update_event' },
       {
         event_id: event().externalRef,
         expected_revision: 1,
@@ -357,7 +357,7 @@ describe('Slotlock store-backed agent server adapter', () => {
       requiredCoverageSources: async () => ['provider:primary'],
     });
     const result = await backend.findNextAvailable(
-      { ...context, operation: 'calendar_find_next_available' },
+      { ...context, operation: 'slotlock_find_next_available' },
       {
         resource_ids: [resource.id],
         start: '2027-01-10T00:00:00.000Z',
@@ -407,7 +407,7 @@ describe('Slotlock store-backed agent server adapter', () => {
     });
 
     const result = await backend.findNextAvailable(
-      { ...context, operation: 'calendar_find_next_available' },
+      { ...context, operation: 'slotlock_find_next_available' },
       {
         resource_ids: [resource.id, secondResource.id],
         start: '2027-01-10T00:00:00.000Z',
@@ -435,7 +435,7 @@ describe('Slotlock store-backed agent server adapter', () => {
     getCalendarEvent.mockResolvedValueOnce(null);
     await expect(
       backend.getEvent(
-        { ...context, operation: 'calendar_get_event' },
+        { ...context, operation: 'slotlock_get_event' },
         { event_id: 'unknown-event' },
       ),
     ).rejects.toMatchObject({ code: 'event_not_found', status: 404 });
@@ -447,7 +447,7 @@ describe('Slotlock store-backed agent server adapter', () => {
     });
     await expect(
       backend.updateEvent(
-        { ...context, operation: 'calendar_update_event' },
+        { ...context, operation: 'slotlock_update_event' },
         {
           event_id: event().externalRef,
           expected_revision: 1,

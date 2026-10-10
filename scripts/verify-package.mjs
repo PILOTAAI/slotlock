@@ -367,7 +367,7 @@ try {
   );
   assert.equal(listed.status, 200);
   const listedBody = await listed.json();
-  assert.ok(listedBody.result.tools.some((tool) => tool.name === 'calendar_list_resources'));
+  assert.ok(listedBody.result.tools.some((tool) => tool.name === 'slotlock_list_resources'));
   for (const tool of listedBody.result.tools) assert.match(tool.name, /^[a-zA-Z0-9_-]{1,64}$/);
 
   const called = await rpc(
@@ -376,7 +376,7 @@ try {
       jsonrpc: '2.0',
       id: 'call',
       method: 'tools/call',
-      params: { name: 'calendar_list_resources', arguments: { limit: 2 } },
+      params: { name: 'slotlock_list_resources', arguments: { limit: 2 } },
     },
     legacyHeaders,
   );
@@ -403,7 +403,7 @@ try {
       jsonrpc: '2.0',
       id: 'invalid',
       method: 'tools/call',
-      params: { name: 'calendar_get_event', arguments: {} },
+      params: { name: 'slotlock_get_event', arguments: {} },
     },
     legacyHeaders,
   );
@@ -439,7 +439,7 @@ try {
       id: 'modern-call',
       method: 'tools/call',
       params: {
-        name: 'calendar_list_resources',
+        name: 'slotlock_list_resources',
         arguments: { limit: 2 },
         _meta: modernMeta,
       },
@@ -447,7 +447,7 @@ try {
     {
       'MCP-Protocol-Version': SLOTLOCK_MCP_PROTOCOL_VERSION,
       'Mcp-Method': 'tools/call',
-      'Mcp-Name': 'calendar_list_resources',
+      'Mcp-Name': 'slotlock_list_resources',
     },
   );
   assert.equal(modernCall.status, 200);
@@ -477,7 +477,7 @@ try {
           role: 'ROLE_USER',
           parts: [
             {
-              data: { skill: 'calendar_list_resources', arguments: { limit: 2 } },
+              data: { skill: 'slotlock_list_resources', arguments: { limit: 2 } },
               mediaType: 'application/json',
             },
           ],
@@ -649,7 +649,7 @@ const server = createSlotlockAgentServer({
     request.headers.get('authorization') === 'Bearer token'
       ? { subject: 'agent-1', tenantRef: 'tenant-a' }
       : null,
-  authorize: async ({ operation }) => operation === 'calendar_list_resources',
+  authorize: async ({ operation }) => operation === 'slotlock_list_resources',
   health: async () => ({ ready: true, checks: ['database'] }),
   oauth: { authorizationServers: ['https://auth.example.com'], requiredScopes: ['calendar'] },
 });

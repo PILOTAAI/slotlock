@@ -112,7 +112,7 @@ the sources that are missing.
   time past its materialized horizon is unproven until maintenance rolls it forward.
 
 Over MCP the same answer is `coverage.certainty`: `certain` or `uncertain` (reason
-`coverage_incomplete`). `calendar_find_next_available` returns no slot unless every resource it
+`coverage_incomplete`). `slotlock_find_next_available` returns no slot unless every resource it
 was asked about is certain.
 
 ## Tenancy and row-level security

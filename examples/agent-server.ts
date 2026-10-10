@@ -12,13 +12,13 @@ import { createSlotlockNodeServer } from 'slotlock/node-server';
 // An allow-list, so an operation added in a later release stays refused until you add it. This one
 // permits everything except deleting events; a real policy also looks at the principal and input.
 const ALLOWED_OPERATIONS: ReadonlySet<SlotlockAgentOperation> = new Set([
-  'calendar_list_resources',
-  'calendar_get_free_busy',
-  'calendar_find_next_available',
-  'calendar_create_event',
-  'calendar_get_event',
-  'calendar_list_events',
-  'calendar_update_event',
+  'slotlock_list_resources',
+  'slotlock_get_free_busy',
+  'slotlock_find_next_available',
+  'slotlock_create_event',
+  'slotlock_get_event',
+  'slotlock_list_events',
+  'slotlock_update_event',
 ]);
 
 export interface CalendarServerConfig {
@@ -43,7 +43,7 @@ export async function startCalendarServer(config: CalendarServerConfig) {
     ...(config.confirmationSecret
       ? {
           confirmation: {
-            operations: ['calendar_create_event', 'calendar_update_event'] as const,
+            operations: ['slotlock_create_event', 'slotlock_update_event'] as const,
             secrets: [config.confirmationSecret],
           },
         }

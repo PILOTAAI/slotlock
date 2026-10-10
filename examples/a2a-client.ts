@@ -15,7 +15,7 @@ export async function listResourcesOverA2a(baseUrl: string, token: string) {
         // One application/json data part: the skill id and its arguments (see the agent card).
         parts: [
           {
-            data: { skill: 'calendar_list_resources', arguments: { limit: 10 } },
+            data: { skill: 'slotlock_list_resources', arguments: { limit: 10 } },
             mediaType: 'application/json',
           },
         ],
