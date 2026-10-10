@@ -14,8 +14,9 @@ import {
 } from './tool-notes.mjs';
 
 const format = (n) => n.toLocaleString('en-GB');
-/** A table cell: pipes escaped (GFM requires it inside code spans too), no line breaks. */
-const cell = (text) => text.replace(/\|/g, '\\|').replace(/\s*\n\s*/g, ' ');
+/** A table cell: backslashes and pipes escaped (GFM requires it inside code spans too), no line breaks. */
+const cell = (text) =>
+  text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\s*\n\s*/g, ' ');
 const code = (text) => `\`${text}\``;
 
 /** GitHub's heading slug, as Starlight builds heading ids. */
