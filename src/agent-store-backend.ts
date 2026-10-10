@@ -245,6 +245,18 @@ function operationError(code: string): SlotlockAgentOperationError {
   return new SlotlockAgentOperationError(code, 409);
 }
 
+/** Resource and event ids: the UUIDs the store issues and validates. */
+const STORE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** A resource page's cursor is the last resource id of the previous page. */
+function parseResourceCursor(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !STORE_ID_PATTERN.test(value)) {
+    throw new SlotlockAgentOperationError('invalid_cursor', 400);
+  }
+  return value;
+}
+
 function parseEventCursor(value: unknown): { start: Date; id: string } | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== 'string' || value.length === 0 || value.length > 500) {
@@ -259,7 +271,7 @@ function parseEventCursor(value: unknown): { start: Date; id: string } | undefin
     if (
       !Number.isFinite(start.getTime()) ||
       typeof parsed.id !== 'string' ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(parsed.id)
+      !STORE_ID_PATTERN.test(parsed.id)
     ) {
       throw new Error('invalid');
     }
@@ -293,9 +305,9 @@ export function createSlotlockStoreAgentBackend(
 ): SlotlockAgentCalendarBackend {
   return {
     async listResources(context, input) {
+      const cursor = parseResourceCursor(input.cursor);
       return withTenant(store, context, async (tenantStore) => {
         const limit = input.limit as number;
-        const cursor = input.cursor as string | undefined;
         const resources = await tenantStore.listResources({
           tenantRef: context.principal.tenantRef,
           limit: limit + 1,

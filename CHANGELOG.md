@@ -16,9 +16,21 @@ request replaces "Unreleased" with the release date.
   Node.js 22 and 24.
 - Developer Certificate of Origin sign-off, a licence commitment in GOVERNANCE.md, and a trade mark
   policy in TRADEMARKS.md.
+- API keys: `slotlock key create|list|rotate|revoke` and `createSlotlockApiKeyStore`. A key is
+  `slk_` plus 46 base62 characters with a checksum, is shown once and stored only as its SHA-256,
+  belongs to one tenant, and carries the `read` and/or `write` scope. Keys can expire, rotate in
+  place (keeping their id and the events they booked), are revoked at once, record their last use
+  to the minute, and are capped at 100 active and 1,000 kept per tenant. A revoked, rotated-out or
+  erased key is never accepted again. The serving role reaches keys only through SECURITY DEFINER
+  functions and holds no right on their tables. Key lookups are bounded so made-up keys cannot take
+  the database pool. `SLOTLOCK_AUTH_TOKEN` is now optional for `serve`.
+- A principal may carry `scopes`; the agent server then refuses, before `authorize`, every
+  operation whose scope (`slotlockAgentOperationScope`: `read` or `write`) it lacks.
 
 ### Fixed for the standalone release
 
+- `slotlock_list_resources` with a `cursor` that is not a resource id answers the `invalid_cursor`
+  tool error (HTTP 400) instead of an internal error (HTTP 500, JSON-RPC -32603).
 - The legacy-schema upgrade test creates `btree_gist` itself, so the database suites pass on a fresh
   PostgreSQL 16 database rather than only on one that already had the extension installed.
 

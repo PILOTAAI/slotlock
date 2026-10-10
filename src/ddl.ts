@@ -104,6 +104,262 @@ END
 $slotlock_schema_control$;
 `;
 
+/** Active (unrevoked, unexpired) API keys one tenant may hold. */
+export const SLOTLOCK_API_KEY_ACTIVE_LIMIT = 100;
+/** API keys one tenant may hold in all, revoked and expired ones included, so lists stay bounded. */
+export const SLOTLOCK_API_KEY_RETAINED_LIMIT = 1_000;
+
+/**
+ * The tables behind API keys. No role but their owner holds a right on them; they are reached only
+ * through SLOTLOCK_API_KEY_FUNCTIONS.
+ */
+export const SLOTLOCK_API_KEY_TABLES = Object.freeze(['api_keys', 'api_key_retired_digests'] as const);
+
+/**
+ * The SECURITY DEFINER functions through which the serving role reaches API keys, by signature.
+ * They run as the deployment role, which owns the tables.
+ */
+export const SLOTLOCK_API_KEY_FUNCTIONS = Object.freeze([
+  'slotlock.create_api_key(text, text, text, bytea, text[], timestamptz, text)',
+  'slotlock.list_api_keys(text)',
+  'slotlock.rotate_api_key(text, uuid, text, bytea)',
+  'slotlock.revoke_api_key(text, uuid)',
+  'slotlock.authenticate_api_key(bytea)',
+  'slotlock.erase_api_keys(text)',
+] as const);
+
+const API_KEY_COLUMNS = `key_id uuid,
+  key_tenant_ref text,
+  key_name text,
+  key_prefix text,
+  key_scopes text[],
+  key_created_by text,
+  key_created_at timestamptz,
+  key_expires_at timestamptz,
+  key_last_used_at timestamptz,
+  key_revoked_at timestamptz`;
+const apiKeySelect = (alias: string) =>
+  ['id', 'tenant_ref', 'name', 'prefix', 'scopes', 'created_by', 'created_at', 'expires_at']
+    .concat(['last_used_at', 'revoked_at'])
+    .map((column) => `${alias}.${column}`)
+    .join(', ');
+
+// API keys (api-keys.ts). The tables hold a SHA-256 digest per key, never the key. Row-level security
+// is enabled with no policy and no role is granted anything on them, so only their owner reads or
+// writes them, through the functions below; the serving role may execute those and nothing else here.
+//
+// Each function takes its tenant as an argument, as every store method does: the serving role
+// already names the tenant of every query it makes. Within a call it cannot reach another tenant's
+// keys, read a digest, or use a digest again once its key was rotated out or erased: those digests
+// stay in api_key_retired_digests (digests only, nothing about the tenant), and a revoked key's row
+// stays in api_keys until erasure, so the unique digest refuses it too.
+const SLOTLOCK_API_KEYS_DDL = `
+CREATE TABLE IF NOT EXISTS slotlock.api_keys (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_ref text NOT NULL,
+  name text NOT NULL,
+  prefix text NOT NULL,
+  secret_hash bytea NOT NULL,
+  scopes text[] NOT NULL,
+  created_by text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz,
+  last_used_at timestamptz,
+  revoked_at timestamptz,
+  CONSTRAINT slotlock_api_keys_secret_hash_key UNIQUE (secret_hash),
+  CONSTRAINT slotlock_api_keys_secret_hash_valid CHECK (octet_length(secret_hash) = 32),
+  CONSTRAINT slotlock_api_keys_tenant_ref_valid
+    CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500 AND tenant_ref !~ '[[:cntrl:]]'),
+  CONSTRAINT slotlock_api_keys_name_valid
+    CHECK (char_length(name) BETWEEN 1 AND 100 AND name !~ '[[:cntrl:]]'),
+  CONSTRAINT slotlock_api_keys_prefix_valid CHECK (prefix ~ '^slk_[0-9A-Za-z]{8}$'),
+  CONSTRAINT slotlock_api_keys_scopes_valid
+    CHECK (scopes IN (ARRAY['read']::text[], ARRAY['write']::text[], ARRAY['read', 'write']::text[])),
+  CONSTRAINT slotlock_api_keys_created_by_valid
+    CHECK (created_by IS NULL OR (octet_length(created_by) BETWEEN 1 AND 200
+                                  AND created_by !~ '[[:cntrl:]]')),
+  -- Ten years, plus a day for clock skew between the application and the database.
+  CONSTRAINT slotlock_api_keys_expiry_valid
+    CHECK (expires_at IS NULL
+           OR (expires_at > created_at AND expires_at <= created_at + interval '3651 days'))
+);
+CREATE INDEX IF NOT EXISTS slotlock_api_keys_tenant_idx
+  ON slotlock.api_keys (tenant_ref, created_at DESC, id DESC);
+ALTER TABLE slotlock.api_keys ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.api_keys FROM PUBLIC;
+
+CREATE TABLE IF NOT EXISTS slotlock.api_key_retired_digests (
+  secret_hash bytea PRIMARY KEY CHECK (octet_length(secret_hash) = 32),
+  retired_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE slotlock.api_key_retired_digests ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.api_key_retired_digests FROM PUBLIC;
+
+-- The per-tenant lock serializes creations. Under READ COMMITTED each statement after it takes a new
+-- snapshot, so the limit counts see every key created before the lock was granted; under REPEATABLE
+-- READ or SERIALIZABLE the snapshot predates the lock, so the function refuses to run there (the
+-- store runs it in a READ COMMITTED transaction of its own). No row comes back at a limit.
+CREATE OR REPLACE FUNCTION slotlock.create_api_key(
+  requested_tenant_ref text,
+  requested_name text,
+  requested_prefix text,
+  requested_secret_hash bytea,
+  requested_scopes text[],
+  requested_expires_at timestamptz,
+  requested_created_by text
+)
+RETURNS TABLE (${API_KEY_COLUMNS})
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_create_api_key$
+BEGIN
+  IF current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION 'Slotlock creates API keys only in a READ COMMITTED transaction'
+      USING ERRCODE = 'invalid_transaction_state';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || requested_tenant_ref, 0));
+  IF EXISTS (SELECT 1 FROM slotlock.api_key_retired_digests retired
+              WHERE retired.secret_hash = requested_secret_hash) THEN
+    RAISE EXCEPTION 'Slotlock never uses a retired API key digest again'
+      USING ERRCODE = 'unique_violation';
+  END IF;
+  RETURN QUERY
+  INSERT INTO slotlock.api_keys AS created (
+    tenant_ref, name, prefix, secret_hash, scopes, expires_at, created_by
+  )
+  SELECT requested_tenant_ref, requested_name, requested_prefix, requested_secret_hash,
+         requested_scopes, requested_expires_at, requested_created_by
+   WHERE (SELECT count(*) FROM slotlock.api_keys active
+           WHERE active.tenant_ref = requested_tenant_ref
+             AND active.revoked_at IS NULL
+             AND (active.expires_at IS NULL OR active.expires_at > now())
+         ) < ${SLOTLOCK_API_KEY_ACTIVE_LIMIT}
+     AND (SELECT count(*) FROM slotlock.api_keys kept
+           WHERE kept.tenant_ref = requested_tenant_ref
+         ) < ${SLOTLOCK_API_KEY_RETAINED_LIMIT}
+  RETURNING ${apiKeySelect('created')};
+END
+$slotlock_create_api_key$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[0]} FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION slotlock.list_api_keys(requested_tenant_ref text)
+RETURNS TABLE (${API_KEY_COLUMNS})
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_list_api_keys$
+  SELECT ${apiKeySelect('listed')}
+    FROM slotlock.api_keys listed
+   WHERE listed.tenant_ref = requested_tenant_ref
+   ORDER BY listed.created_at DESC, listed.id DESC;
+$slotlock_list_api_keys$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[1]} FROM PUBLIC;
+
+-- A new secret for an active key: same id, scopes and expiry. The old digest is retired for good.
+CREATE OR REPLACE FUNCTION slotlock.rotate_api_key(
+  requested_tenant_ref text,
+  requested_id uuid,
+  requested_prefix text,
+  requested_secret_hash bytea
+)
+RETURNS TABLE (${API_KEY_COLUMNS})
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_rotate_api_key$
+DECLARE
+  retiring bytea;
+BEGIN
+  IF EXISTS (SELECT 1 FROM slotlock.api_key_retired_digests retired
+              WHERE retired.secret_hash = requested_secret_hash) THEN
+    RAISE EXCEPTION 'Slotlock never uses a retired API key digest again'
+      USING ERRCODE = 'unique_violation';
+  END IF;
+  SELECT rotating.secret_hash INTO retiring
+    FROM slotlock.api_keys rotating
+   WHERE rotating.tenant_ref = requested_tenant_ref
+     AND rotating.id = requested_id
+     AND rotating.revoked_at IS NULL
+     AND (rotating.expires_at IS NULL OR rotating.expires_at > now())
+   FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+  INSERT INTO slotlock.api_key_retired_digests (secret_hash) VALUES (retiring)
+    ON CONFLICT DO NOTHING;
+  RETURN QUERY
+  UPDATE slotlock.api_keys rotated
+     SET secret_hash = requested_secret_hash, prefix = requested_prefix, last_used_at = NULL
+   WHERE rotated.id = requested_id
+  RETURNING ${apiKeySelect('rotated')};
+END
+$slotlock_rotate_api_key$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[2]} FROM PUBLIC;
+
+-- Idempotent: a revoked key keeps its first revocation time. Another tenant's id matches no row.
+CREATE OR REPLACE FUNCTION slotlock.revoke_api_key(requested_tenant_ref text, requested_id uuid)
+RETURNS TABLE (${API_KEY_COLUMNS})
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_revoke_api_key$
+  UPDATE slotlock.api_keys
+     SET revoked_at = now()
+   WHERE tenant_ref = requested_tenant_ref AND id = requested_id AND revoked_at IS NULL;
+  SELECT ${apiKeySelect('revoked')}
+    FROM slotlock.api_keys revoked
+   WHERE revoked.tenant_ref = requested_tenant_ref AND revoked.id = requested_id;
+$slotlock_revoke_api_key$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[3]} FROM PUBLIC;
+
+-- last_used_at moves at most once a minute, so a busy key does not write on every request.
+CREATE OR REPLACE FUNCTION slotlock.authenticate_api_key(presented_secret_hash bytea)
+RETURNS TABLE (key_id uuid, key_tenant_ref text, key_scopes text[])
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_authenticate_api_key$
+  UPDATE slotlock.api_keys
+     SET last_used_at = now()
+   WHERE secret_hash = presented_secret_hash
+     AND revoked_at IS NULL
+     AND (expires_at IS NULL OR expires_at > now())
+     AND (last_used_at IS NULL OR last_used_at < now() - interval '1 minute');
+  SELECT id, tenant_ref, scopes
+    FROM slotlock.api_keys
+   WHERE secret_hash = presented_secret_hash
+     AND revoked_at IS NULL
+     AND (expires_at IS NULL OR expires_at > now());
+$slotlock_authenticate_api_key$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[4]} FROM PUBLIC;
+
+-- Tenant erasure: every key the tenant holds, revoked and expired ones included. Their digests are
+-- retired, so no erased key can be created again.
+CREATE OR REPLACE FUNCTION slotlock.erase_api_keys(requested_tenant_ref text)
+RETURNS bigint
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_erase_api_keys$
+  WITH erased AS (
+    DELETE FROM slotlock.api_keys WHERE tenant_ref = requested_tenant_ref RETURNING secret_hash
+  ), retired AS (
+    INSERT INTO slotlock.api_key_retired_digests (secret_hash)
+    SELECT secret_hash FROM erased
+    ON CONFLICT DO NOTHING
+  )
+  SELECT count(*) FROM erased;
+$slotlock_erase_api_keys$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[5]} FROM PUBLIC;
+`;
+
 // btree_gist is created in slotlock when it is missing; one installed elsewhere stays where it is.
 export const SLOTLOCK_CORE_DDL: string = `
 ${DEPLOYMENT_SEARCH_PATH_PIN}CREATE SCHEMA IF NOT EXISTS slotlock;
@@ -1020,7 +1276,7 @@ CREATE INDEX IF NOT EXISTS slotlock_calendar_event_occurrences_resource_time_idx
   ON slotlock.calendar_event_occurrences (tenant_ref, starts_at, ends_at);
 CREATE INDEX IF NOT EXISTS slotlock_reservations_calendar_event_idx
   ON slotlock.reservations (calendar_event_id) WHERE calendar_event_id IS NOT NULL;
-${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
+${SLOTLOCK_API_KEYS_DDL}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
 
 export const SLOTLOCK_TENANT_CONTEXT_SETTING = 'slotlock.tenant_ref';
 
@@ -1049,8 +1305,9 @@ const POSTGRES_ROLE_NAME = /^[a-z_][a-z0-9_]{0,62}$/;
 const RESERVED_ROLE_NAMES = new Set(['public', 'current_role', 'current_user', 'session_user']);
 
 /**
- * Build the grants for the application role: USAGE on the `slotlock` schema and DML on the store's
- * tables. Nothing else: no ownership, DDL, sequence or RLS-contract access. The role must not be
+ * Build the grants for the application role: USAGE on the `slotlock` schema, DML on the store's
+ * tables and EXECUTE on the API key functions. Nothing else: no ownership, DDL, sequence,
+ * RLS-contract or API key table access. The role must not be
  * able to leave forced RLS, itself or through a role it belongs to (`grantApplicationRole` refuses
  * the known ways out; these statements check nothing). Rerun after every `applySchema()`, since a
  * release may add a table.
@@ -1065,6 +1322,7 @@ export function createSlotlockApplicationRoleGrantsDdl(role: string): string {
   const tables = SLOTLOCK_TENANT_TABLES.map((table) => `slotlock.${table}`).join(', ');
   return `GRANT USAGE ON SCHEMA slotlock TO "${role}";
 GRANT SELECT, INSERT, UPDATE, DELETE ON ${tables} TO "${role}";
+GRANT EXECUTE ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS.join(', ')} TO "${role}";
 `;
 }
 

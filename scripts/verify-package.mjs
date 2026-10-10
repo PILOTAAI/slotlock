@@ -92,6 +92,8 @@ const expectedFiles = new Set([
   'agent-server.d.ts',
   'agent-store-backend.js',
   'agent-store-backend.d.ts',
+  'api-keys.js',
+  'api-keys.d.ts',
   'cli.js',
   'cli.d.ts',
   'ddl.js',

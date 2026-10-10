@@ -27,6 +27,7 @@ export {
   slotlockMcpToolResult,
   parseSlotlockA2ATimestamp,
   resolveSlotlockAgentOperation,
+  slotlockAgentOperationScope,
   SLOTLOCK_A2A_PROTOCOL_VERSION,
   SLOTLOCK_A2A_TASK_PAGE_SIZE,
   SLOTLOCK_A2A_TASK_STATES,
@@ -52,6 +53,7 @@ export type {
   SlotlockAgentOperationDispatchOptions,
   SlotlockAgentOperationDispatchResult,
   SlotlockAgentPrincipal,
+  SlotlockAgentScope,
   SlotlockAgentServerEvent,
   SlotlockAgentServerOAuthOptions,
   SlotlockAgentServerOptions,
@@ -73,6 +75,26 @@ export type {
 export { createSlotlockStoreAgentBackend } from './agent-store-backend.js';
 export type { SlotlockStoreAgentBackendOptions } from './agent-store-backend.js';
 export {
+  createSlotlockApiKeyAuthenticator,
+  createSlotlockApiKeyStore,
+  generateSlotlockApiKey,
+  isSlotlockApiKey,
+  slotlockApiKeyDigest,
+  SLOTLOCK_API_KEY_ACTIVE_LIMIT,
+  SLOTLOCK_API_KEY_MAX_LIFETIME_DAYS,
+  SLOTLOCK_API_KEY_PREFIX,
+  SLOTLOCK_API_KEY_RETAINED_LIMIT,
+  SLOTLOCK_API_KEY_SCOPES,
+} from './api-keys.js';
+export type {
+  CreateSlotlockApiKeyInput,
+  SlotlockApiKey,
+  SlotlockApiKeyAuthenticatorOptions,
+  SlotlockApiKeyIdentity,
+  SlotlockApiKeyScope,
+  SlotlockApiKeyStore,
+} from './api-keys.js';
+export {
   CalendarContractError,
   emitICalendar,
   emitITipCalendar,
@@ -93,6 +115,8 @@ export type {
 export {
   createSlotlockApplicationRoleGrantsDdl,
   createSlotlockTenantRlsDdl,
+  SLOTLOCK_API_KEY_FUNCTIONS,
+  SLOTLOCK_API_KEY_TABLES,
   SLOTLOCK_CORE_DDL,
   SLOTLOCK_TENANT_CONTEXT_SETTING,
   SLOTLOCK_TENANT_RLS_DDL,

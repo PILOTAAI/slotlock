@@ -117,8 +117,6 @@ describe('slotlock serve configuration', () => {
       { SLOTLOCK_MIGRATE_DATABASE_URL: 'https://db' },
       /SLOTLOCK_MIGRATE_DATABASE_URL must be/,
     ],
-    ['the token is missing', { SLOTLOCK_AUTH_TOKEN: undefined }, /SLOTLOCK_AUTH_TOKEN is required/],
-    ['the token is blank', { SLOTLOCK_AUTH_TOKEN: '   ' }, /SLOTLOCK_AUTH_TOKEN is required/],
     ['the token is short', { SLOTLOCK_AUTH_TOKEN: 'abcdef0123456789' }, /too weak/],
     ['the token repeats', { SLOTLOCK_AUTH_TOKEN: 'ab'.repeat(32) }, /too weak/],
     [
@@ -194,6 +192,13 @@ describe('slotlock serve configuration', () => {
     ],
   ])('refuses to start when %s', (_case, overrides, message) => {
     expect(refusal(serveEnv(overrides)).message).toMatch(message);
+  });
+
+  it('serves API keys alone when no token is set', () => {
+    for (const token of [undefined, '', '   ']) {
+      const config = readSlotlockServeConfig(serveEnv({ SLOTLOCK_AUTH_TOKEN: token }));
+      expect('authToken' in config).toBe(false);
+    }
   });
 
   it('refuses one value as both the token and the confirmation secret', () => {
@@ -290,6 +295,19 @@ describe('slotlock command line', () => {
     [['migrate', '--migrate'], /--migrate applies only to serve/],
     [['serve', '--timezone', 'UTC'], /--timezone applies only to resource add/],
     [['serve', '--port', '1'], /Unknown option '--port'/],
+    [['key'], /unknown command "key"/],
+    [['key', 'delete'], /unknown command "key delete"/],
+    [['key', 'rotate'], /wrong number of arguments for "key rotate"/],
+    [['key', 'create'], /wrong number of arguments for "key create"/],
+    [['key', 'revoke'], /wrong number of arguments for "key revoke"/],
+    [['key', 'list', 'all'], /wrong number of arguments for "key list"/],
+    [['serve', '--scope', 'read'], /--scope applies only to key create/],
+    [['key', 'list', '--expires-in-days', '30'], /--expires-in-days applies only to key create/],
+    [['key', 'create', 'agent', '--scope', 'admin'], /--scope must be read, write or read,write/],
+    [['key', 'create', 'agent', '--scope', ''], /--scope must be read, write or read,write/],
+    [['key', 'create', 'agent', '--expires-in-days', '0'], /--expires-in-days must be/],
+    [['key', 'create', 'agent', '--expires-in-days', '3651'], /--expires-in-days must be/],
+    [['key', 'create', 'agent', '--expires-in-days', '7.5'], /--expires-in-days must be/],
   ])('refuses %j as a usage error', async (argv, message) => {
     const result = await run(argv, serveEnv());
     expect(result.code).toBe(2);
