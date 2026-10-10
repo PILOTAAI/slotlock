@@ -1,6 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import { zodToJsonSchema } from 'zod-to-json-schema';
 import {
   SLOTLOCK_MCP_APPS_EXTENSION,
   SLOTLOCK_MCP_APP_HTML,
@@ -202,14 +201,14 @@ const RECURRENCE_EXCEPTION_INPUT = z
 const MCP_INITIALIZE_PARAMS = z
   .object({
     protocolVersion: z.string().trim().min(1).max(50),
-    capabilities: z.record(z.unknown()),
+    capabilities: z.record(z.string(), z.unknown()),
     clientInfo: z
       .object({
         name: z.string().trim().min(1).max(200),
         version: z.string().trim().min(1).max(100),
       })
       .passthrough(),
-    _meta: z.record(z.unknown()).optional(),
+    _meta: z.record(z.string(), z.unknown()).optional(),
   })
   .passthrough();
 const EVENT = z
@@ -803,11 +802,21 @@ const OPERATION_DEFINITIONS = [
   },
 ] as const satisfies readonly OperationDefinition[];
 
-function toJsonSchema(schema: ObjectSchema): JsonSchema {
-  const value = zodToJsonSchema(schema, { $refStrategy: 'none', target: 'jsonSchema7' }) as Record<
-    string,
-    unknown
-  >;
+const FORMATS_WITHOUT_PATTERN = new Set(['date-time', 'email']);
+
+function toJsonSchema(schema: ObjectSchema, io: 'input' | 'output'): JsonSchema {
+  // Zod's own converter: zod-to-json-schema reads only Zod 3 schemas (for a Zod 4 one it returns {})
+  // and its repository is archived. A type JSON Schema cannot express throws rather than vanishing.
+  const value = z.toJSONSchema(schema, {
+    target: 'draft-2020-12',
+    io,
+    unrepresentable: 'throw',
+    override: ({ jsonSchema }) => {
+      // Zod 4.6 writes its validation regex beside `format` for dates and emails (288 and 102
+      // characters, on 60 fields): the format already says it, and every agent reads the list.
+      if (FORMATS_WITHOUT_PATTERN.has(String(jsonSchema.format))) delete jsonSchema.pattern;
+    },
+  }) as Record<string, unknown>;
   delete value.$schema;
   return value;
 }
@@ -877,8 +886,8 @@ export function slotlockAgentTools() {
     name: operation.name,
     title: operation.title,
     description: operation.description,
-    inputSchema: toJsonSchema(operation.input),
-    outputSchema: toJsonSchema(operation.output),
+    inputSchema: toJsonSchema(operation.input, 'input'),
+    outputSchema: toJsonSchema(operation.output, 'output'),
     annotations: {
       title: operation.title,
       readOnlyHint: operation.risk.readOnly,

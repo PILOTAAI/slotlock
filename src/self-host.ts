@@ -24,7 +24,12 @@ import {
   createSlotlockApiKeyStore,
   slotlockBearerCredential,
 } from './api-keys.js';
-import { createSlotlockDashboard, createSlotlockDashboardResources } from './dashboard.js';
+import {
+  createSlotlockDashboard,
+  createSlotlockDashboardResources,
+  createSlotlockDashboardState,
+} from './dashboard.js';
+import { SLOTLOCK_DASHBOARD_FUNCTIONS } from './ddl.js';
 import {
   type SlotlockNodeServerAddress,
   type SlotlockNodeServerCloseResult,
@@ -615,6 +620,21 @@ export async function startSlotlockServer(
         { code: 'schema_missing' },
       );
     }
+    if (config.dashboard) {
+      for (const signature of SLOTLOCK_DASHBOARD_FUNCTIONS) {
+        const [granted] = await sql<{ ready: boolean }[]>`
+          SELECT CASE WHEN to_regprocedure(${signature}) IS NULL THEN false
+                      ELSE has_function_privilege(to_regprocedure(${signature}), 'EXECUTE') END AS ready`;
+        if (!granted?.ready) {
+          throw Object.assign(
+            new Error(
+              `The dashboard needs ${signature}, which this database role cannot run: run \`slotlock migrate\` (or \`slotlock serve --migrate\`) with this release`,
+            ),
+            { code: 'schema_outdated' },
+          );
+        }
+      }
+    }
     const store = createSlotlockStore(sql);
     const publicUrl = new URL(config.publicUrl);
     const authenticateKey = createSlotlockApiKeyAuthenticator(createSlotlockApiKeyStore(sql));
@@ -669,6 +689,7 @@ export async function startSlotlockServer(
             allowedUsers: config.dashboard.allowedUsers,
             keys: createSlotlockApiKeyStore(sql),
             resources: createSlotlockDashboardResources(store),
+            state: createSlotlockDashboardState(sql),
             availability: config.availability,
             onError: (error) => log.error('dashboard_error', describeError(error)),
           });

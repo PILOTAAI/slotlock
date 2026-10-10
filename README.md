@@ -95,13 +95,24 @@ resources, which is how the hosted Slotlock hands out keys:
   pages run no inline script, under a Content-Security-Policy that allows only their own files.
 - Give the dashboard an origin of its own (`https://slotlock.example.com`, not a path beside other
   apps): its cookies are host-wide, so any other app on the same origin could read them.
-- Each instance remembers, in bounded memory, sign-ins it finished (a callback works once), sessions
-  signed out (a copied cookie stays out) and forms sent (a reload does not create or rotate a key
-  twice). Run one instance, or route each person to one, for these to hold across instances; the
-  signed cookies, the allowlist and CSRF hold everywhere.
-- A person may add 100 resources. Bookable hours come from `SLOTLOCK_AVAILABILITY` and apply to every
-  tenant's resources. Rate-limit `/dashboard/sign-in` and `/dashboard/callback` at your proxy: each
-  callback costs a call to GitHub, and an instance runs at most eight at once.
+- Finished sign-ins (a callback works once), signed-out sessions (a copied cookie stays out) and sent
+  forms (a reload does not create or rotate a key twice) are recorded in Postgres, so they hold on
+  every server that shares the database, behind any load balancer. Each is a SHA-256 digest, kept
+  until its cookie or form expires (12 hours at most); a form record also carries a digest of the
+  GitHub user id that sent it. The server role reaches them only through two SECURITY DEFINER
+  functions, and `serve` refuses to start the dashboard until `migrate` has granted them.
+- The database's clock decides when a sign-in or session has expired, so servers whose clocks drift
+  from it or from each other cannot let a replay or a signed-out session through. Keep clocks in
+  sync all the same: a server more than 12 hours ahead of the database cannot sign anyone in.
+- Each form carries a single-use value bound to its session. A person may have 1,000 forms
+  recorded at once (12 hours' worth); past that the dashboard answers 429 until the oldest expire.
+  Signing out always works.
+- A person may add 100 resources. The database holds the cap, so adds racing on any number of servers
+  stop at 100; a resource they already have can still change time zone. Bookable hours come from
+  `SLOTLOCK_AVAILABILITY` and apply to every tenant's resources.
+- Rate-limit `/dashboard/sign-in`, `/dashboard/callback` and the dashboard's POSTs at your proxy:
+  each callback costs a database write and a call to GitHub (an instance runs at most eight at
+  once), and each form a database write.
 
 ## Connect an MCP client
 
@@ -261,13 +272,29 @@ export async function bookHandover(store: SlotlockStore, tenantRef: string) {
 }
 ```
 
-- `withTenant` sets the tenant for every call in the callback, on one connection. Outside it, forced
-  row-level security shows no rows.
-- `expectedRevision: 0` creates; an update passes the revision it last read and a new idempotency
-  key. Replaying a command returns its first result.
-- An overlap comes back as `{ ok: false, code: 'overlap' }`. Transparent events never block.
-- Cancelling leaves a tombstone, so a late retry cannot bring the event back.
-- Lists return at most 1,000 rows and page with cursors.
+`withTenant` validates the tenant, sets the context transaction-locally on the one connection every
+callback call uses, supports nested savepoints, and restores the previous context. Do not issue a
+standalone `set_config(..., true)` through a pool: its transaction ends before the next call.
+`withTenant(tenantRef, callback, { isolation: 'read committed' })` runs the callback in a READ
+COMMITTED transaction whatever the role's default, and refuses inside a caller's transaction of
+another level.
+
+`createResource({ ..., maxTenantResources })` refuses a new resource (`resource_limit_reached`) once
+the tenant has that many (1-100,000); an existing `externalRef` is still updated. Capped creates for
+one tenant take a database lock and count under READ COMMITTED, so racing ones stop at the cap on
+any number of servers; inside a REPEATABLE READ or SERIALIZABLE transaction they refuse
+(`invalid_transaction_isolation`). Uncapped creates take no lock.
+
+Writing rules:
+
+- Create with `expectedRevision: 0`; update with the revision you last read and a new idempotency
+  key. Replaying the same command and key returns the original result (`idempotent: true`); reusing
+  a key with a different payload returns `idempotency_conflict`.
+- A conflicting opaque occurrence returns `{ ok: false, code: 'overlap' }`. Transparent events
+  never block.
+- Cancelling leaves a tombstone, so a delayed create cannot resurrect the event; use a new external
+  reference for a genuinely new event.
+- `listCalendarEvents` and `listResources` return at most 1,000 rows and page with keyset cursors.
 
 ### Recurring events
 
@@ -710,12 +737,24 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
 }
 ```
 
-- It keeps recurring events stored across the 367-day horizon and frees quota by pruning
-  idempotency records older than the 30-day replay window (`retentionDays`).
-- Each agent may keep 1,000 events and 10,000 idempotency records (`agentOwnerEventQuota`,
-  `agentOwnerCommandQuota` on `createSlotlockStore`).
-- Erasure: delete the tenant's resources, reservations, events and coverage, and its API keys with
-  `createSlotlockApiKeyStore(sql).erase({ tenantRef })`.
+- **Run maintenance at least daily for every tenant.** Forced RLS hides other tenants from the
+  application role, so iterate your own tenant list.
+- **Quotas.** Each agent principal may retain 1,000 event identities (active plus cancelled) and
+  10,000 idempotency commands, of which 9,000 can be creates or updates, so a cancel always has
+  room. Adjust with `agentOwnerEventQuota` and `agentOwnerCommandQuota` on `createSlotlockStore`.
+  `pruneCalendarEventRetention` is what returns quota.
+- **Retention.** Commands are exact-replay evidence for the replay window, by default
+  `SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS` (30) days: pruning deletes older commands for every owner,
+  then agent-owned tombstones older than the window with no command left. `internal` tombstones
+  (provider and sync authority) are kept until you erase the tenant. After the window a retried
+  command is evaluated afresh under its expected revision, and a pruned agent identity can be
+  created again. `retentionDays` (1-3650) changes the window; keep it longer than any client retries.
+- **Erasure.** Include Slotlock resources, reservations, tombstones, archives, event content,
+  occurrences, commands and coverage rows in your tenant-erasure workflow and delete order, and
+  delete the tenant's API keys with `createSlotlockApiKeyStore(sql).erase({ tenantRef })`. Only
+  their SHA-256 digests stay, with nothing about the tenant, so an erased key is never accepted
+  again. The dashboard's records hold no tenant and expire within 12 hours; a form record carries a
+  SHA-256 digest of the GitHub user id that sent it.
 
 ### Production checklist
 

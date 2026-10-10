@@ -12,8 +12,11 @@ import {
 import {
   SLOTLOCK_DASHBOARD_MAX_RESOURCES,
   type SlotlockDashboardResources,
+  type SlotlockDashboardState,
   createSlotlockDashboard,
+  createSlotlockMemoryDashboardState,
 } from '../dashboard.js';
+import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from '../ddl.js';
 import type { SlotlockResource } from '../types.js';
 
 const PUBLIC_URL = 'https://slotlock.example.com/base';
@@ -80,6 +83,16 @@ function memoryResources() {
         if (timezone === 'Mars/Olympus') {
           throw Object.assign(new Error('bad zone'), { code: 'invalid_timezone' });
         }
+        const owned = rows.filter((row) => row.tenantRef === tenantRef);
+        const existing = owned.find((row) => row.externalRef === externalRef);
+        if (existing) {
+          existing.timezone = timezone;
+          return existing as unknown as SlotlockResource;
+        }
+        // The real adapter holds the cap in the database (dashboard-state.integration.test.ts).
+        if (owned.length >= SLOTLOCK_DASHBOARD_MAX_RESOURCES) {
+          throw Object.assign(new Error('cap'), { code: 'resource_limit_reached' });
+        }
         const resource = { id: randomUUID(), externalRef, tenantRef, timezone, createdAt: new Date() };
         rows.push(resource as SlotlockResource & { tenantRef: string });
         return resource as unknown as SlotlockResource;
@@ -117,6 +130,7 @@ function dashboard(overrides: Partial<Parameters<typeof createSlotlockDashboard>
     keys: keys.store,
     resources: resources.store,
     availability: [{ rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR', startMinutes: 540, durationMinutes: 480 }],
+    state: createSlotlockMemoryDashboardState(() => now),
     fetch: github.fetch,
     now: () => now,
     ...overrides,
@@ -579,7 +593,47 @@ describe('resources in the dashboard', () => {
       session,
     );
     expect(capped.status).toBe(409);
-    expect(resources.store.add).toHaveBeenCalledTimes(2);
+    expect(await capped.text()).toContain('as many as the dashboard allows');
+    expect(resources.rows.filter((row) => row.tenantRef === 'github:4242')).toHaveLength(
+      SLOTLOCK_DASHBOARD_MAX_RESOURCES,
+    );
+
+    // At the cap, a reference the person already has is re-zoned, not refused.
+    const rezoned = await post(
+      target,
+      '/base/dashboard/resources',
+      { csrf: token, reference: 'vehicle-42', timezone: 'Europe/Paris' },
+      session,
+    );
+    expect(rezoned.status).toBe(303);
+    expect(resources.rows.find((row) => row.externalRef === 'vehicle-42')?.timezone).toBe('Europe/Paris');
+  });
+});
+
+describe('the in-memory dashboard state', () => {
+  it('follows the shared rules by its own clock: expiry, a day at most, an owner and a cap per form', async () => {
+    let clock = Date.UTC(2026, 9, 10, 12);
+    const state = createSlotlockMemoryDashboardState(() => clock);
+    expect(await state.use('sign_in', 'a', clock + 60_000)).toBe(true);
+    expect(await state.use('sign_in', 'a', clock + 60_000)).toBe(false);
+    expect(await state.use('sign_in', 'b', clock)).toBe(false);
+    expect(await state.use('sign_in', 'c', clock + 25 * 3_600_000)).toBe(false);
+    await expect(state.use('form', 'd', clock + 60_000)).rejects.toThrow('name their owner');
+    for (let index = 0; index < SLOTLOCK_DASHBOARD_FORM_LIMIT; index += 1) {
+      expect(await state.use('form', `f${index}`, clock + 60_000, '4242')).toBe(true);
+    }
+    await expect(state.use('form', 'over', clock + 60_000, '4242')).rejects.toMatchObject({
+      code: 'dashboard_form_limit',
+    });
+    expect(await state.use('form', 'other-person', clock + 60_000, '7')).toBe(true);
+    clock += 61_000;
+    expect(await state.use('form', 'after-expiry', clock + 60_000, '4242')).toBe(true);
+
+    expect(await state.sessionEnded('s', clock + 60_000)).toBe(false);
+    expect(await state.sessionEnded('s', clock)).toBe(true);
+    expect(await state.sessionEnded('s', clock + 25 * 3_600_000)).toBe(true);
+    await state.endSession('s', clock + 60_000);
+    expect(await state.sessionEnded('s', clock + 60_000)).toBe(true);
   });
 });
 
@@ -632,33 +686,47 @@ describe('limits found in review', () => {
     expect(keys.store.create).not.toHaveBeenCalled();
   });
 
-  it('holds the resource cap when adds race', async () => {
-    const target = dashboard();
-    const { session } = await signIn(target);
-    const token = await csrf(target, session);
-    for (let index = 0; index < SLOTLOCK_DASHBOARD_MAX_RESOURCES - 5; index += 1) {
-      resources.rows.push({ id: randomUUID(), externalRef: `r${index}`, tenantRef: 'github:4242', timezone: 'UTC' } as never);
+  it('asks the shared state before GitHub, and stops a sign-in it has seen', async () => {
+    const seen: SlotlockDashboardState = {
+      use: vi.fn(async () => false),
+      endSession: vi.fn(async () => undefined),
+      sessionEnded: vi.fn(async () => false),
+    };
+    const target = dashboard({ state: seen });
+    const start = await get(target, '/base/dashboard/sign-in');
+    const state = new URL(start.headers.get('location') ?? '').searchParams.get('state') as string;
+    const pending = start.headers.getSetCookie()[0]?.split('; ')[0] as string;
+    const callback = await get(target, `/base/dashboard/callback?code=c&state=${state}`, pending);
+    expect(callback.status).toBe(400);
+    expect(seen.use).toHaveBeenCalledWith('sign_in', state, expect.any(Number));
+    expect(github.fetch).not.toHaveBeenCalled();
+  });
+
+  it('frees the sign-in slot when the shared state fails', async () => {
+    let failures = 9;
+    const flaky: SlotlockDashboardState = {
+      ...createSlotlockMemoryDashboardState(() => now),
+      use: vi.fn(async () => {
+        if (failures > 0) {
+          failures -= 1;
+          throw new Error('database unavailable');
+        }
+        return true;
+      }),
+    };
+    const errors: unknown[] = [];
+    const target = dashboard({ state: flaky, onError: (error) => errors.push(error) });
+    for (let attempt = 0; attempt < 9; attempt += 1) {
+      const start = await get(target, '/base/dashboard/sign-in');
+      const state = new URL(start.headers.get('location') ?? '').searchParams.get('state') as string;
+      const pending = start.headers.getSetCookie()[0]?.split('; ')[0] as string;
+      expect((await get(target, `/base/dashboard/callback?code=c&state=${state}`, pending)).status).toBe(500);
     }
-    // Interleave: each list and add yields, as a database round trip would.
-    const yieldNow = () => new Promise((resolve) => setTimeout(resolve, 1));
-    const list = resources.store.list.getMockImplementation();
-    const add = resources.store.add.getMockImplementation();
-    resources.store.list.mockImplementation(async (tenantRef: string) => {
-      await yieldNow();
-      return (list as NonNullable<typeof list>)(tenantRef);
-    });
-    resources.store.add.mockImplementation(async (tenantRef: string, ref: string, zone: string) => {
-      await yieldNow();
-      return (add as NonNullable<typeof add>)(tenantRef, ref, zone);
-    });
-    const outcomes = await Promise.all(
-      Array.from({ length: 20 }, (_, index) =>
-        post(target, '/base/dashboard/resources', { csrf: token, reference: `race-${index}`, timezone: 'UTC' }, session),
-      ),
-    );
-    expect(resources.rows).toHaveLength(SLOTLOCK_DASHBOARD_MAX_RESOURCES);
-    expect(outcomes.filter(({ status }) => status === 303)).toHaveLength(5);
-    expect(outcomes.filter(({ status }) => status === 409)).toHaveLength(15);
+    expect(errors).toHaveLength(9);
+    expect(github.fetch).not.toHaveBeenCalled();
+    // More failures than the 8 slots, and the next sign-in still gets one.
+    const { session } = await signIn(target);
+    expect(session).toMatch(/^__Host-slotlock-session=/);
   });
 
   it('finishes each sign-in once', async () => {
@@ -733,7 +801,7 @@ describe('limits found in review', () => {
     const html = await (await get(target, '/base/dashboard', session)).text();
     const token = /name="csrf" value="([^"]+)"/.exec(html)?.[1] as string;
     const once = /action="\/base\/dashboard\/keys">\s*<input type="hidden" name="csrf" value="[^"]+">\s*<input type="hidden" name="once" value="([^"]+)">/.exec(html)?.[1];
-    expect(once).toMatch(/^[A-Za-z0-9_-]{22,}$/);
+    expect(once).toMatch(/^[A-Za-z0-9_-]{24}\.[A-Za-z0-9_-]{43}$/);
     const fields = { csrf: token, once: once as string, name: 'Once', access: 'read', expires: 'never' };
     expect((await post(target, '/base/dashboard/keys', fields, session)).status).toBe(200);
     const again = await post(target, '/base/dashboard/keys', fields, session);
