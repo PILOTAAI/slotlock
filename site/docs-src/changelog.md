@@ -1,6 +1,6 @@
 ---
 title: Changelog
-description: Release notes, rendered from CHANGELOG.md.
+description: What changed in each Slotlock release, rendered from CHANGELOG.md.
 ---
 
 <!-- include CHANGELOG.md -->

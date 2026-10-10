@@ -94,8 +94,9 @@ request replaces "Unreleased" with the release date.
 
 - Operations are named `slotlock_<verb>`: portable across Claude, OpenAI and MCP hosts, and
   namespaced by service so an agent that sees tools from many servers can tell which calendar it is
-  calling. The names of earlier builds, the dotted `calendar.<verb>` and the `calendar_<verb>` names
-  Pylota's Kairos endpoint advertised, still resolve on every entry point and are never advertised.
+  calling. The names of earlier builds, the dotted `calendar.<verb>` and the underscored
+  `calendar_<verb>`, still resolve on every entry point and are never advertised, so agents written
+  against either keep working.
   `authorize`, `consumeRateLimit` and the backend always receive the current name, and
   `isSlotlockAgentOperation` accepts current names only (`resolveSlotlockAgentOperation` maps any).
 - The bundled MCP App reads a refused call's error code from its text content, since failures no

@@ -10,8 +10,11 @@ const REPO = 'https://github.com/PILOTAAI/slotlock';
 const SIDEBAR_ORDER = [
   'index',
   'quickstart',
+  'connect',
+  'library',
   'concepts',
   'security',
+  'tools',
   'reference',
   'specification',
   'changelog',
@@ -44,7 +47,7 @@ const llmsDetails = `Slotlock is a pre-release (0.1) TypeScript library and MCP/
 Instructions for AI agents:
 
 - Append \`.md\` to a docs page URL for its Markdown source, for example https://slotlock.pylota.io/docs/quickstart.md. The landing page is https://slotlock.pylota.io/index.md.
-- Tool names are \`slotlock_<verb>\` (for example \`slotlock_find_next_available\`). A refused or conflicting call is a tool result \`{"error":{"code":"…"}}\`, not a protocol error: read the code, then act. \`overlap\` means the time is already taken.
+- Tool names are \`slotlock_<verb>\` (for example \`slotlock_find_next_available\`). Every tool's input and output fields and error codes are at https://slotlock.pylota.io/docs/tools.md. A refused or conflicting call is a tool result \`{"error":{"code":"…"}}\`, not a protocol error: read the code, then act. \`overlap\` means the time is already taken.
 - A slot is free only when its coverage is certain. Treat \`uncertain\` (reason \`coverage_incomplete\`) as unknown, never as free.
 - Writes need an \`idempotency_key\`; retry with the same key and arguments. Updates and deletes need the \`expected_revision\` you last read.
 - Slotlock does not sync Google or Microsoft calendars by itself; adapters live in the embedding application.
@@ -72,7 +75,7 @@ export default defineConfig({
     starlight({
       title: 'Slotlock',
       description:
-        'A calendar engine for AI agents: resource calendars, expiring holds and a PostgreSQL exclusion constraint that refuses double bookings.',
+        'Slotlock is a calendar for AI agents: resource calendars, expiring holds and a PostgreSQL exclusion constraint that refuses double bookings.',
       favicon: '/favicon.svg',
       social: [{ icon: 'github', label: 'GitHub', href: REPO }],
       customCss: ['./src/styles/fonts.css', './src/styles/docs.css', './src/styles/lockup.css'],
@@ -81,10 +84,36 @@ export default defineConfig({
       // src/pages/404.astro renders the not-found page with Starlight's layout.
       disable404Route: true,
       expressiveCode: {
-        // Code panels are dark in both themes, as on the landing page.
+        // Code panels are dark in both themes, as on the landing page, in its code-bg and code-bar
+        // tokens (src/styles/tokens.mjs). Literal colours: Expressive Code derives other colours
+        // from these, which it cannot do from a CSS variable.
         themes: ['github-dark-default'],
         useStarlightUiThemeColors: false,
         useStarlightDarkModeSwitch: false,
+        // A shell block is a plain panel like any other, with no empty window bar above it.
+        defaultProps: { frame: 'code' },
+        styleOverrides: {
+          borderRadius: '0.625rem',
+          borderColor: '#26262A',
+          codeBackground: '#0E0E10',
+          codeFontFamily: "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace",
+          codeFontSize: '0.8125rem',
+          codeLineHeight: '1.7',
+          codePaddingBlock: '0.875rem',
+          codePaddingInline: '1.125rem',
+          uiFontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif",
+          frames: {
+            shadowColor: 'transparent',
+            editorTabBarBackground: '#18181B',
+            editorActiveTabBackground: '#0E0E10',
+            editorActiveTabIndicatorTopColor: 'transparent',
+            editorActiveTabIndicatorBottomColor: '#AAC0FF',
+            editorTabBarBorderBottomColor: '#26262A',
+            terminalTitlebarBackground: '#18181B',
+            terminalBackground: '#0E0E10',
+            terminalTitlebarBorderBottomColor: '#26262A',
+          },
+        },
       },
       head: [
         {
@@ -99,16 +128,21 @@ export default defineConfig({
         },
       ],
       sidebar: [
-        { label: 'Start here', items: ['docs', 'docs/quickstart'] },
+        {
+          label: 'Get started',
+          items: ['docs', 'docs/quickstart', 'docs/connect', 'docs/library'],
+        },
         { label: 'Learn', items: ['docs/concepts', 'docs/security'] },
         {
           label: 'Reference',
-          items: ['docs/reference', 'docs/specification', 'docs/changelog'],
+          items: ['docs/tools', 'docs/reference', 'docs/specification', 'docs/changelog'],
         },
       ],
       routeMiddleware: './src/routeData.ts',
       components: {
         Footer: './src/components/docs/Footer.astro',
+        // Section eyebrow, title and the page's description as a lede.
+        PageTitle: './src/components/docs/PageTitle.astro',
         // "Slotlock by Pylota", as in the landing page header.
         SiteTitle: './src/components/docs/SiteTitle.astro',
       },
@@ -118,7 +152,7 @@ export default defineConfig({
           description:
             'The calendar AI agents cannot double-book: each car, room, person or machine is its own calendar, holds expire on their own, and a PostgreSQL exclusion constraint refuses any overlapping write and returns the conflict as data. Agents use it over MCP (2026-07-28, 2025-11-25) or A2A 1.0, or call it as a TypeScript library.',
           details: llmsDetails,
-          promote: ['docs', 'docs/quickstart', 'docs/concepts'],
+          promote: ['docs', 'docs/quickstart', 'docs/tools', 'docs/concepts'],
           demote: ['docs/changelog', '404'],
           optionalLinks: [
             {

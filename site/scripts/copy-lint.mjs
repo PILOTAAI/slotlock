@@ -149,15 +149,19 @@ function attributeCopy(html) {
 }
 
 const DIST = new URL('../dist/', import.meta.url);
-// Pages written for this site. Introduction and Quickstart mix site copy with README sections;
-// the README is held to the same rules in its own repository review.
+// Pages written for this site. Several mix site copy with README sections, and the tools
+// reference adds the registry's descriptions; the README is held to the same rules in its own
+// repository review.
 const PAGES = [
   'index.html',
   'index.md',
   'docs/index.html',
   'docs/quickstart/index.html',
+  'docs/connect/index.html',
+  'docs/library/index.html',
   'docs/concepts/index.html',
   'docs/security/index.html',
+  'docs/tools/index.html',
   'docs/reference/index.html',
   '404.html',
   'llms.txt',
