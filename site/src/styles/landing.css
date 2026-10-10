@@ -172,6 +172,11 @@ svg {
   stroke-linejoin: round;
 }
 
+.icon--filled {
+  fill: currentColor;
+  stroke: none;
+}
+
 /* ---------- Header ---------- */
 
 .site-header {
@@ -180,8 +185,9 @@ svg {
   z-index: 50;
   background: color-mix(in srgb, var(--canvas) 92%, transparent);
   border-bottom: 1px solid var(--line-2);
+  /* Unprefixed only: the minifier adds -webkit- for Safari. Written as a pair, it keeps just the
+     last one, and a lone -webkit-backdrop-filter is ignored by Chrome and Firefox. */
   backdrop-filter: saturate(1.4) blur(10px);
-  -webkit-backdrop-filter: saturate(1.4) blur(10px);
 }
 
 .site-header__row {
@@ -191,23 +197,10 @@ svg {
   min-height: 60px;
 }
 
+/* "Slotlock by Pylota": layout and motion in lockup.css. */
 .brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 9px;
   color: var(--ink);
   text-decoration: none;
-  font: 600 16px/1 var(--font-sans);
-  letter-spacing: -0.01em;
-}
-
-.brand svg {
-  width: 22px;
-  height: 22px;
-}
-
-.brand__slot {
-  fill: var(--accent);
 }
 
 .site-nav {

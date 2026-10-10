@@ -4,10 +4,12 @@
 # owner runs it once the repository exists. It is safe to run again: every step sets the same
 # end state, and rulesets are updated by name instead of created twice.
 #
-#   scripts/configure-github.sh --dry-run   print every request, send nothing
-#   scripts/configure-github.sh             apply
+#   scripts/configure-github.sh --dry-run        print every request, send nothing
+#   scripts/configure-github.sh                  apply
+#   scripts/configure-github.sh --site-secrets   only replace the Cloudflare secrets, after
+#                                                checking them with Cloudflare
 #
-# Needs bash 3.2 or newer, jq, and gh logged in as an admin of the repository.
+# Needs bash 3.2 or newer, curl, jq, and gh logged in as an admin of the repository.
 # Environment:
 #   SKIP_SITE_SECRETS=1     do not ask for the Cloudflare secrets now (add them later)
 #   REPLACE_SITE_SECRETS=1  ask for them again even when they are already set
@@ -75,13 +77,15 @@ BRANCH_RULESET='Protect main'
 TAG_RULESET='Release tags'
 
 usage() {
-  sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 DRY_RUN=0
+SITE_SECRETS_ONLY=0
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
+    --site-secrets) SITE_SECRETS_ONLY=1 ;;
     -h | --help)
       usage
       exit 0
@@ -317,11 +321,21 @@ configure_environment() {
   done
 }
 
-# The Cloudflare token and account id site.yml's deploy job reads. Values are read with echo off
-# and passed to gh on stdin through printf (a shell builtin), so they never reach a command line,
-# a file or the process list.
+# trim VALUE: VALUE without leading or trailing whitespace, which a paste often carries.
+trim() {
+  local value=$1
+  value=${value#"${value%%[![:space:]]*}"}
+  printf '%s' "${value%"${value##*[![:space:]]}"}"
+}
+
+# The Cloudflare account ID and API token site.yml's deploy job reads. Both are checked with
+# Cloudflare by scripts/check-cloudflare-credentials.sh, the check site.yml runs before every
+# deploy, and only then stored, together: the environment never receives a value Cloudflare refuses
+# or a token from another account. The token is read with echo off. Each value reaches the checker
+# in its environment, as site.yml passes it, and gh on stdin through printf (a shell builtin), so
+# neither is ever on a command line or in a file.
 configure_site_secrets() {
-  local existing name value
+  local existing account token attempt checker
   if [ "${SKIP_SITE_SECRETS:-0}" = 1 ]; then
     SITE_SECRETS_SKIPPED=1
     result 'site secrets: skipped (SKIP_SITE_SECRETS=1)'
@@ -329,30 +343,41 @@ configure_site_secrets() {
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
     printf '\n> GET /repos/%s/%s/environments/site/secrets\n  (dry run: not sent)\n' "$OWNER" "$REPO" >&3
-    printf '> for CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID, unless already set: read the\n' >&3
-    printf '  value with echo off, then gh secret set <NAME> --env site --repo %s/%s\n' "$OWNER" "$REPO" >&3
-    printf '  with the value on stdin (not prompted for in a dry run)\n' >&3
+    printf '> unless both are set: read CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN (echo off),\n' >&3
+    printf '  check them with scripts/check-cloudflare-credentials.sh, and only if Cloudflare accepts\n' >&3
+    printf '  them, gh secret set <NAME> --env site --repo %s/%s with each value on stdin\n' "$OWNER" "$REPO" >&3
+    printf '  (not prompted for in a dry run)\n' >&3
     return 0
   fi
   existing=$(gh_get "repos/$OWNER/$REPO/environments/site/secrets?per_page=100" '{"secrets":[]}')
-  for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
-    if [ "${REPLACE_SITE_SECRETS:-0}" != 1 ] &&
-      printf '%s' "$existing" | jq -e --arg n "$name" 'any(.secrets[]; .name == $n)' >/dev/null; then
-      result "site: $name already set (REPLACE_SITE_SECRETS=1 to replace it)"
-      continue
-    fi
-    value=''
-    IFS= read -r -s -p "site: $name (hidden; empty to skip): " value || true
+  if [ "${REPLACE_SITE_SECRETS:-0}" != 1 ] && printf '%s' "$existing" | jq -e '
+      any(.secrets[]; .name == "CLOUDFLARE_API_TOKEN")
+      and any(.secrets[]; .name == "CLOUDFLARE_ACCOUNT_ID")' >/dev/null; then
+    result 'site: CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN already set (--site-secrets replaces them)'
+    return 0
+  fi
+  checker="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check-cloudflare-credentials.sh"
+  for attempt in 1 2 3; do
+    account=''
+    token=''
+    IFS= read -r -p 'site: CLOUDFLARE_ACCOUNT_ID (Cloudflare dashboard, Account home; empty to skip): ' account || true
+    account=$(trim "$account")
+    [ -n "$account" ] || break
+    IFS= read -r -s -p 'site: CLOUDFLARE_API_TOKEN (hidden): ' token || true
     printf '\n' >&2
-    if [ -z "$value" ]; then
-      SITE_SECRETS_SKIPPED=1
-      warn "site: $name left unset"
-      continue
+    token=$(trim "$token")
+    if CLOUDFLARE_ACCOUNT_ID=$account CLOUDFLARE_API_TOKEN=$token GITHUB_ACTIONS='' bash "$checker"; then
+      printf '%s' "$account" | gh secret set CLOUDFLARE_ACCOUNT_ID --env site --repo "$OWNER/$REPO"
+      printf '%s' "$token" | gh secret set CLOUDFLARE_API_TOKEN --env site --repo "$OWNER/$REPO"
+      token=''
+      result 'site: CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN accepted by Cloudflare and stored'
+      return 0
     fi
-    printf '%s' "$value" | gh secret set "$name" --env site --repo "$OWNER/$REPO"
-    value=''
+    warn "site: nothing stored. Fix what the error names and try again ($attempt of 3)."
   done
-  unset value
+  token=''
+  SITE_SECRETS_SKIPPED=1
+  warn 'site: CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN left as they were'
 }
 
 # 2. Deployment environments. Each one is limited to the refs its workflow runs on.
@@ -580,10 +605,9 @@ EOF
   if [ "${SITE_SECRETS_SKIPPED:-0}" = 1 ]; then
     cat <<EOF
 
-[ ] Add the site secrets (site/README.md lists the token permissions). Run this script again
-    without SKIP_SITE_SECRETS, or run each of these and paste the value at gh's hidden prompt:
-      gh secret set CLOUDFLARE_API_TOKEN --env site --repo $OWNER/$REPO
-      gh secret set CLOUDFLARE_ACCOUNT_ID --env site --repo $OWNER/$REPO
+[ ] Add the site secrets (site/README.md says how to create the token). This checks them with
+    Cloudflare before it stores them:
+      scripts/configure-github.sh --site-secrets
 EOF
   fi
   if [ "${CODEQL_SKIPPED:-0}" = 1 ]; then
@@ -614,6 +638,14 @@ RULESET_ID=''
 RULESET_ERROR=''
 
 preflight
+if [ "$SITE_SECRETS_ONLY" -eq 1 ]; then
+  step 'Site secrets'
+  REPLACE_SITE_SECRETS=1
+  SKIP_SITE_SECRETS=0
+  configure_site_secrets
+  [ "$SITE_SECRETS_SKIPPED" = 0 ] || exit 1
+  exit 0
+fi
 check_workflow_names
 configure_security
 configure_environments

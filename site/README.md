@@ -51,14 +51,26 @@ Before the first deploy, the repository owner has to:
    that bypass the zone's `*.pylota.io/*` route (the Pylota booking Worker) answers instead. The
    bypass is managed in `infra/tofu/booking.tf` in PILOTAAI/pylota, beside the ones for `admin` and
    `booking-canary`. Cloudflare creates the DNS record and certificate on the first deploy.
-2. Create a GitHub environment named `site` (Settings, Environments), limited to the `main` branch.
-3. Add two secrets to it:
+2. Create a Cloudflare API token. In the Cloudflare dashboard, go to **Manage account › Account API
+   tokens › Create Token** and use the **Edit Cloudflare Workers** template. Limit it to the account
+   that holds `pylota.io`, and to the `pylota.io` zone. Copy the token Cloudflare shows once, after
+   **Create Token**. The token is 40 characters or more, and new ones start with `cfat_`. Do not copy
+   the token's ID or name from the token list, the account ID, or the Global API Key from your
+   profile: Cloudflare refuses all of them with "Invalid format for Authorization header".
+3. Store it, with the account ID from **Account home**, in the `site` environment. The command
+   checks both with Cloudflare first, and stores nothing it refuses:
 
-| Secret | Value |
-| --- | --- |
-| `CLOUDFLARE_API_TOKEN` | A token with **Account › Workers Scripts › Edit**, and **Zone (pylota.io only) › Workers Routes › Edit** and **DNS › Edit** |
-| `CLOUDFLARE_ACCOUNT_ID` | The Cloudflare account that holds the `pylota.io` zone |
+   ```sh
+   scripts/configure-github.sh --site-secrets
+   ```
 
 Then run the workflow on `main` and check https://slotlock.pylota.io.
+
+Every deploy runs `scripts/check-cloudflare-credentials.sh` first, and names the problem when the
+secrets stop working: the account ID or a Global API Key in the token secret, a cut-off paste, an
+expired or deleted token, or a token that cannot reach Workers in the account. To fix any of them,
+create a token as in step 2 and run step 3 again. A first deploy creates the Worker and its Custom
+Domain. That needs the template's account-wide Workers permissions and **Zone › Workers Routes**
+on `pylota.io`; later deploys need less.
 
 By hand, from this directory: `npm ci && npm run build && npm run deploy`.

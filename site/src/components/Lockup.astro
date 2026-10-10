@@ -1,0 +1,15 @@
+---
+// "Slotlock by Pylota": Pylota's apex mark, the product name, and a small endorsement set inline
+// after it, as "affinity by Canva" sets its parent brand (Mobbin, 2026-10-10). The mark draws
+// itself on load and again on hover; src/styles/lockup.css holds the motion. The parent element
+// is the link, so this renders only its contents. The mark is decorative: the words name it, and
+// the explicit space keeps them two words once the build strips whitespace between tags.
+---
+
+<svg class="lockup__mark" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
+  <path class="lockup__apex" d="M8 46 L26 14 L56 44" pathLength="1"></path>
+</svg>
+<span class="lockup__words" translate="no">
+  <span class="lockup__name">Slotlock</span>{' '}
+  <span class="lockup__by">by <span class="lockup__parent">Pylota</span></span>
+</span>

@@ -1,0 +1,10 @@
+---
+// Starlight's site title as the "Slotlock by Pylota" lockup the landing page uses.
+import Lockup from '../Lockup.astro';
+
+const { siteTitleHref } = Astro.locals.starlightRoute;
+---
+
+<a href={siteTitleHref} class="site-title lockup">
+  <Lockup />
+</a>
