@@ -130,7 +130,7 @@ export default defineConfig({
       sidebar: [
         {
           label: 'Get started',
-          items: ['docs', 'docs/quickstart', 'docs/connect', 'docs/library'],
+          items: ['docs', 'docs/quickstart', 'docs/connect', 'docs/keys', 'docs/library'],
         },
         { label: 'Learn', items: ['docs/concepts', 'docs/security'] },
         {
