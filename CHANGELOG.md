@@ -43,13 +43,50 @@ request replaces "Unreleased" with the release date.
   dashboard until `migrate` has granted its functions.
 - `createResource` takes `maxTenantResources`, a per-tenant cap enforced under a database lock, and
   `withTenant` takes `{ isolation: 'read committed' }`.
+- Bookable hours per resource: `setResourceAvailability` and `setTenantAvailability` store a
+  resource's own weekly rules (`null` uses the default, `[]` closes), and the agent backend uses
+  them before `availabilityRules`. Set them on the dashboard's hours page (a week of windows, for
+  one resource or all) or with `slotlock hours show|set|clear`. `SLOTLOCK_AVAILABILITY` is now
+  the default for resources without hours of their own.
 
 ### Fixed for the standalone release
 
+- A write's confirmation question could show a different time, resource or number of bookings from
+  the ones the write makes. It now:
+  - names the resource by its own reference and shows times in the resource's zone (through the
+    new optional backend method `describeResource`, which the store backend has), and names an
+    event by its current time; in any other zone each time carries its own UTC offset;
+  - puts the agent's own text, and an event's stored title, after every fact, with anything that
+    reads as a double quote (curly, full-width, primes) turned into a single one;
+  - describes a repeating booking from the store's own expansion: how many times it books, the
+    first and the last, every moved occurrence, and what the rule says past the window the store
+    keeps booked (a moved or padded rule could book dates the question never named); a change to a
+    series says it covers every repeat;
+  - shows seconds when a time has them, and bounds each part, so no change is cut off the end;
+  - reads only what the caller's scopes and `authorize` allow, and gives up on lookups after 2
+    seconds, so a slow backend delays the question but cannot withhold it.
+- Agents may only send recurrence rules RFC 5545 allows (known parts, each once, with valid values,
+  and none it forbids for the frequency) that repeat daily or less often and can occur. ical.js read
+  `COUNT=0` as no end, `COUNT=3X` as 3 and a repeated `FREQ` as the last one, and searched forever
+  for a daily rule that cannot occur (`BYMONTH=2;BYMONTHDAY=30`), holding the whole process.
+- A rate limit is charged before a write's confirmation is asked for, not only when it runs.
+- The sealed confirmation state compares its MAC as text: three other spellings of the same MAC
+  (the last base64url character's two spare bits) were accepted.
 - `slotlock_list_resources` with a `cursor` that is not a resource id answers the `invalid_cursor`
   tool error (HTTP 400) instead of an internal error (HTTP 500, JSON-RPC -32603).
 - The legacy-schema upgrade test creates `btree_gist` itself, so the database suites pass on a fresh
   PostgreSQL 16 database rather than only on one that already had the extension installed.
+- Availability rules are held to the subset SPEC.md describes: `FREQ=WEEKLY`, `BYDAY`, `INTERVAL=1`
+  and a UTC `UNTIL`. Anything else, such as `BYHOUR`, a `DTSTART`, `BYDAY` twice or an ordinal
+  weekday, is refused by the store, the CLI and `SLOTLOCK_AVAILABILITY`, and `expandRules` reads it
+  as no hours. Before, rrule honoured some of these: a `DTSTART` zone moved Monday's hours to
+  Sunday, and `BYHOUR`/`BYMINUTE`/`BYSECOND` took most of a second per rule to check.
+- An availability rule whose `UNTIL` is not a real date, such as `UNTIL=20270231T000000Z`
+  (31 February), is refused. Before, rrule read it with `Date.UTC`, which carries the overflow
+  into the next unit, so the rule stayed bookable until 3 March, after the date it was written to
+  end.
+- Every dashboard form but sign-out must carry its single-use value. A form sent without the value
+  skipped the resend check and the per-person form limit.
 
 ### Added
 

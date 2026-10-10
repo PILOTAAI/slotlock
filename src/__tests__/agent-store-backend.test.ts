@@ -106,6 +106,23 @@ describe('Slotlock store-backed agent server adapter', () => {
     vi.useRealTimers();
   });
 
+  it("names a resource for a confirmation question by its reference, inside the caller's tenant", async () => {
+    const backend = createSlotlockStoreAgentBackend(store, { availabilityRules });
+    expect(await backend.describeResource?.(context, resource.id)).toEqual({
+      name: 'vehicle-1',
+      timezone: 'Europe/London',
+    });
+    expect(getResource).toHaveBeenCalledWith({ tenantRef, id: resource.id });
+    expect(withTenant).toHaveBeenCalledWith(tenantRef, expect.any(Function));
+
+    getResource.mockResolvedValueOnce(null);
+    expect(await backend.describeResource?.(context, resource.id)).toBeNull();
+
+    getResource.mockClear();
+    expect(await backend.describeResource?.(context, 'vehicle-1')).toBeNull();
+    expect(getResource).not.toHaveBeenCalled();
+  });
+
   // A resource cursor is a resource id. The store refuses anything else with a plain error, which
   // the dispatcher reports as internal_error (HTTP 500) unless the backend refuses it first.
   it('refuses a resource cursor that is not a resource id as invalid_cursor, without a query', async () => {
@@ -384,6 +401,36 @@ describe('Slotlock store-backed agent server adapter', () => {
         expectedRevision: 1,
       }),
     );
+  });
+
+  it("answers from a resource's own hours before the default, and its [] as closed", async () => {
+    const backend = createSlotlockStoreAgentBackend(store, { availabilityRules });
+    const find = () =>
+      backend.findNextAvailable(
+        { ...context, operation: 'slotlock_find_next_available' },
+        {
+          resource_ids: [resource.id],
+          start: '2027-01-10T00:00:00.000Z',
+          end: '2027-01-11T00:00:00.000Z',
+          duration_minutes: 60,
+        },
+      ) as Promise<{ start: string | null }>;
+    // 10 January 2027 is a Sunday; the default (all day Sunday) would answer midnight.
+    getResource.mockResolvedValueOnce({
+      ...resource,
+      timezone: 'UTC',
+      availabilityRules: [{ rrule: 'FREQ=WEEKLY;BYDAY=SU', startMinutes: 600, durationMinutes: 60 }],
+    });
+    expect((await find()).start).toBe('2027-01-10T10:00:00.000Z');
+    expect(availabilityRules).not.toHaveBeenCalled();
+
+    getResource.mockResolvedValueOnce({ ...resource, timezone: 'UTC', availabilityRules: [] });
+    expect((await find()).start).toBeNull();
+    expect(availabilityRules).not.toHaveBeenCalled();
+
+    getResource.mockResolvedValueOnce({ ...resource, timezone: 'UTC' });
+    expect((await find()).start).toBe('2027-01-10T00:00:00.000Z');
+    expect(availabilityRules).toHaveBeenCalledOnce();
   });
 
   it('never manufactures availability beyond complete required provider coverage', async () => {

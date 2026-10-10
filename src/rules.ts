@@ -34,6 +34,53 @@ function utcDayFloor(d: Date): Date {
   return new Date(Math.floor(d.getTime() / DAY_MS) * DAY_MS);
 }
 
+const RRULE_PART = /^([A-Z]+)=([0-9A-Z,]+)$/;
+const WEEKDAY = /^(?:MO|TU|WE|TH|FR|SA|SU)$/;
+const ABSOLUTE_UNTIL = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/;
+
+/**
+ * Whether `until` is an absolute UNTIL naming a real instant. rrule reads it with Date.UTC, which
+ * carries an overflowing field into the next unit: 31 February became 3 March, and the rule stayed
+ * bookable after the day it was written to end. A leap second (60) is real (RFC 5545 3.3.12).
+ */
+function isRealUntil(until: string): boolean {
+  const match = ABSOLUTE_UNTIL.exec(until);
+  if (!match) return false;
+  const [, year, month, day, hour, minute, second] = match as unknown as string[];
+  // Set without overflow checks, the date reads back differently when any part overflowed.
+  const date = new Date(0);
+  date.setUTCFullYear(Number(year), Number(month) - 1, Number(day));
+  return (
+    date.toISOString().startsWith(`${year}-${month}-${day}T`) &&
+    Number(hour) <= 23 &&
+    Number(minute) <= 59 &&
+    Number(second) <= 60
+  );
+}
+
+/**
+ * Whether `rrule` is written in SPEC.md's subset: `FREQ=WEEKLY`, a `BYDAY` of plain weekdays,
+ * optionally `INTERVAL=1` and an absolute `UNTIL`, each once, in any order, and nothing else.
+ * Checked before rrule parses it: rrule honours a DTSTART's TZID (Monday came out as Sunday) and
+ * the first BYDAY of two, and BYHOUR/BYMINUTE/BYSECOND multiply occurrences (one rule took 0.7 s).
+ */
+function isWeeklySubset(rrule: string): boolean {
+  const parts = new Map<string, string>();
+  for (const part of rrule.split(';')) {
+    const match = RRULE_PART.exec(part);
+    if (!match || parts.has(match[1] as string)) return false;
+    parts.set(match[1] as string, match[2] as string);
+  }
+  const until = parts.get('UNTIL');
+  return (
+    [...parts.keys()].every((key) => ['FREQ', 'BYDAY', 'INTERVAL', 'UNTIL'].includes(key)) &&
+    parts.get('FREQ') === 'WEEKLY' &&
+    (parts.get('BYDAY')?.split(',') ?? ['']).every((day) => WEEKDAY.test(day)) &&
+    (parts.get('INTERVAL') ?? '1') === '1' &&
+    (until === undefined || isRealUntil(until))
+  );
+}
+
 /**
  * The spike honours exactly the weekly-cadence subset it can answer DETERMINISTICALLY. Anything
  * else is refused (skipped = fails closed to "not bookable"), never guessed:
@@ -88,6 +135,7 @@ export function expandRules(
     // windows like "Mon 00:00 + 3 days" are legal; a fixed one-day margin silently lost them).
     const backScanDays = Math.ceil((rule.startMinutes + rule.durationMinutes) / (24 * 60));
     const scanStart = utcDayFloor(new Date(searchWindow.start.getTime() - backScanDays * DAY_MS));
+    if (typeof rule.rrule !== 'string' || !isWeeklySubset(rule.rrule)) continue;
     try {
       const parsed = RRule.parseString(rule.rrule);
       if (!isSupportedRule(parsed)) continue;

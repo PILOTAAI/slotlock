@@ -25,8 +25,9 @@ for name in POSTGRES_PASSWORD SLOTLOCK_APP_DB_PASSWORD \
 done && rm .env.bak
 ```
 
-The defaults make every resource bookable on weekdays 09:00 to 17:00 (`SLOTLOCK_AVAILABILITY`) and
-make every write wait for a person (`SLOTLOCK_CONFIRM_WRITES=all`).
+The defaults make every resource bookable on weekdays 09:00 to 17:00 (`SLOTLOCK_AVAILABILITY`,
+unless the resource has hours of its own: `slotlock hours set`) and make every write wait for a
+person (`SLOTLOCK_CONFIRM_WRITES=all`).
 
 ## 3. Start Slotlock
 
@@ -81,8 +82,8 @@ The agent lists resources, then calls `slotlock_find_next_available`, which answ
 }
 ```
 
-Before `slotlock_create_event` runs, Claude Code asks you: Book "Vehicle handover" on resource …:
-2027-03-01 09:00–11:00 (Europe/London). Accept, and it is booked. Book the same time again and the
+Before `slotlock_create_event` runs, Claude Code asks you: Book vehicle-42 for 2027-03-01
+09:00–11:00 (Europe/London): "Vehicle handover". Accept, and it is booked. Book the same time again and the
 agent gets `{"error":{"code":"overlap"}}`.
 
 :::note[Trying it on your own?]

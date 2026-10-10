@@ -124,6 +124,8 @@ const expectedFiles = new Set([
   'timezone.d.ts',
   'types.js',
   'types.d.ts',
+  'weekly-hours.js',
+  'weekly-hours.d.ts',
 ]);
 assert.deepEqual(
   [...files].sort(),

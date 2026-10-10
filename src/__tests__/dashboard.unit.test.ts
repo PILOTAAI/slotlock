@@ -17,7 +17,7 @@ import {
   createSlotlockMemoryDashboardState,
 } from '../dashboard.js';
 import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from '../ddl.js';
-import type { SlotlockResource } from '../types.js';
+import type { SlotlockResource, WeeklyAvailabilityRule } from '../types.js';
 
 const PUBLIC_URL = 'https://slotlock.example.com/base';
 const ORIGIN = 'https://slotlock.example.com';
@@ -93,10 +93,33 @@ function memoryResources() {
         if (owned.length >= SLOTLOCK_DASHBOARD_MAX_RESOURCES) {
           throw Object.assign(new Error('cap'), { code: 'resource_limit_reached' });
         }
-        const resource = { id: randomUUID(), externalRef, tenantRef, timezone, createdAt: new Date() };
+        const resource = {
+          id: randomUUID(),
+          externalRef,
+          tenantRef,
+          timezone,
+          createdAt: new Date(),
+        };
         rows.push(resource as SlotlockResource & { tenantRef: string });
         return resource as unknown as SlotlockResource;
       }),
+      // Like the store: only the tenant's own resources change, and the count says how many did.
+      setHours: vi.fn(
+        async (
+          tenantRef: string,
+          target: { id: string } | 'all',
+          rules: WeeklyAvailabilityRule[] | null,
+        ) => {
+          const changed = rows.filter(
+            (row) => row.tenantRef === tenantRef && (target === 'all' || row.id === target.id),
+          );
+          for (const row of changed) {
+            if (rules === null) delete row.availabilityRules;
+            else row.availabilityRules = rules.map((rule) => ({ ...rule }));
+          }
+          return changed.length;
+        },
+      ),
     } satisfies SlotlockDashboardResources,
   };
 }
@@ -124,12 +147,17 @@ let github: ReturnType<typeof fakeGitHub>;
 function dashboard(overrides: Partial<Parameters<typeof createSlotlockDashboard>[0]> = {}) {
   return createSlotlockDashboard({
     publicUrl: PUBLIC_URL,
-    github: { clientId: 'Ov23liFakeClientId00', clientSecret: 'f'.repeat(20) + '0123456789abcdef0123' },
+    github: {
+      clientId: 'Ov23liFakeClientId00',
+      clientSecret: 'f'.repeat(20) + '0123456789abcdef0123',
+    },
     sessionSecret: SESSION_SECRET,
     allowedUsers: [String(GITHUB_USER.id)],
     keys: keys.store,
     resources: resources.store,
-    availability: [{ rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR', startMinutes: 540, durationMinutes: 480 }],
+    availability: [
+      { rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR', startMinutes: 540, durationMinutes: 480 },
+    ],
     state: createSlotlockMemoryDashboardState(() => now),
     fetch: github.fetch,
     now: () => now,
@@ -140,13 +168,24 @@ function dashboard(overrides: Partial<Parameters<typeof createSlotlockDashboard>
 const get = (target: ReturnType<typeof dashboard>, path: string, cookie?: string) =>
   target.fetch(new Request(`${ORIGIN}${path}`, cookie ? { headers: { cookie } } : {}));
 
-function post(
+/**
+ * Every form but sign-out carries a single-use value: one is taken from a fresh dashboard page
+ * unless the fields give their own, or `once` is 'none' to send the form without it.
+ */
+async function post(
   target: ReturnType<typeof dashboard>,
   path: string,
   fields: Record<string, string>,
   cookie: string,
   origin: string | null = ORIGIN,
+  once: 'fresh' | 'none' = 'fresh',
 ) {
+  const sent = { ...fields };
+  if (once === 'fresh' && !('once' in sent) && !path.endsWith('/sign-out') && cookie) {
+    const page = await (await get(target, '/base/dashboard', cookie)).text();
+    const value = /name="once" value="([^"]+)"/.exec(page)?.[1];
+    if (value !== undefined) sent.once = value;
+  }
   const headers: Record<string, string> = {
     cookie,
     'content-type': 'application/x-www-form-urlencoded',
@@ -156,7 +195,7 @@ function post(
     new Request(`${ORIGIN}${path}`, {
       method: 'POST',
       headers,
-      body: new URLSearchParams(fields).toString(),
+      body: new URLSearchParams(sent).toString(),
     }),
   );
 }
@@ -236,9 +275,9 @@ describe('dashboard routes and headers', () => {
     expect(script.headers.get('content-type')).toBe('text/javascript; charset=utf-8');
     expect(script.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
     // An unversioned or stale URL is revalidated rather than cached.
-    expect((await get(dashboard(), '/base/dashboard/style.css?v=old')).headers.get('cache-control')).toBe(
-      'no-cache',
-    );
+    expect(
+      (await get(dashboard(), '/base/dashboard/style.css?v=old')).headers.get('cache-control'),
+    ).toBe('no-cache');
     expect((await get(dashboard(), '/base/dashboard/nothing')).status).toBe(404);
   });
 });
@@ -256,7 +295,13 @@ describe('GitHub sign-in', () => {
       code_challenge: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
       code_challenge_method: 'S256',
     });
-    expect(oauth?.attributes).toEqual(['Path=/', 'Max-Age=600', 'Secure', 'HttpOnly', 'SameSite=Lax']);
+    expect(oauth?.attributes).toEqual([
+      'Path=/',
+      'Max-Age=600',
+      'Secure',
+      'HttpOnly',
+      'SameSite=Lax',
+    ]);
     expect(oauth?.pair).not.toContain(params.state);
   });
 
@@ -283,9 +328,11 @@ describe('GitHub sign-in', () => {
       code: 'fake-code',
       redirect_uri: `${DASHBOARD}/callback`,
     });
-    expect(createHash('sha256').update(sent.code_verifier as string).digest('base64url')).toBe(
-      location.searchParams.get('code_challenge'),
-    );
+    expect(
+      createHash('sha256')
+        .update(sent.code_verifier as string)
+        .digest('base64url'),
+    ).toBe(location.searchParams.get('code_challenge'));
     expect(user?.url).toBe('https://api.github.com/user');
     expect(Object.fromEntries(new Headers(user?.init.headers))).toMatchObject({
       authorization: 'Bearer gho_fake',
@@ -296,7 +343,7 @@ describe('GitHub sign-in', () => {
 
     const page = await (await get(dashboard(), '/base/dashboard', session)).text();
     expect(page).toContain('@octocat');
-    expect(page).toContain('Mon, Tue, Wed, Thu, Fri: 09:00–17:00');
+    expect(page).toContain('Mon–Fri: 09:00–17:00');
     expect(page).toContain('https://slotlock.example.com/base/mcp');
     expect(page).not.toContain('gho_fake');
   });
@@ -368,7 +415,9 @@ describe('sessions', () => {
     expect(signedIn(await (await get(dashboard(), '/base/dashboard', session)).text())).toBe(true);
 
     const tampered = session.replace(/.$/, (last) => (last === 'A' ? 'B' : 'A'));
-    expect(signedIn(await (await get(dashboard(), '/base/dashboard', tampered)).text())).toBe(false);
+    expect(signedIn(await (await get(dashboard(), '/base/dashboard', tampered)).text())).toBe(
+      false,
+    );
 
     const otherSecret = dashboard({ sessionSecret: SESSION_SECRET.replace(/^7/, '8') });
     expect(signedIn(await (await get(otherSecret, '/base/dashboard', session)).text())).toBe(false);
@@ -402,7 +451,12 @@ describe('sessions', () => {
   it('signs out on request', async () => {
     const target = dashboard();
     const { session } = await signIn(target);
-    const response = await post(target, '/base/dashboard/sign-out', { csrf: await csrf(target, session) }, session);
+    const response = await post(
+      target,
+      '/base/dashboard/sign-out',
+      { csrf: await csrf(target, session) },
+      session,
+    );
     expect(response.status).toBe(303);
     expect(cookie(response, '__Host-slotlock-session')?.attributes).toContain('Max-Age=0');
   });
@@ -454,9 +508,21 @@ describe('API keys in the dashboard', () => {
 
   it.each([
     ['no CSRF token', (token: string) => ({ name: 'x', access: 'read', expires: 'never' }), ORIGIN],
-    ['another token', () => ({ csrf: 'x'.repeat(43), name: 'x', access: 'read', expires: 'never' }), ORIGIN],
-    ['another origin', (token: string) => ({ csrf: token, name: 'x', access: 'read', expires: 'never' }), 'https://evil.example'],
-    ['no origin', (token: string) => ({ csrf: token, name: 'x', access: 'read', expires: 'never' }), null],
+    [
+      'another token',
+      () => ({ csrf: 'x'.repeat(43), name: 'x', access: 'read', expires: 'never' }),
+      ORIGIN,
+    ],
+    [
+      'another origin',
+      (token: string) => ({ csrf: token, name: 'x', access: 'read', expires: 'never' }),
+      'https://evil.example',
+    ],
+    [
+      'no origin',
+      (token: string) => ({ csrf: token, name: 'x', access: 'read', expires: 'never' }),
+      null,
+    ],
   ] as const)('refuses a POST with %s', async (_case, fields, origin) => {
     const target = dashboard();
     const { session } = await signIn(target);
@@ -475,9 +541,7 @@ describe('API keys in the dashboard', () => {
     const target = dashboard({ allowedUsers: '*' });
     const first = await signIn(target);
     github = fakeGitHub({ id: 7, login: 'other' });
-    const second = await signIn(
-      dashboard({ allowedUsers: '*' }),
-    );
+    const second = await signIn(dashboard({ allowedUsers: '*' }));
     const response = await post(
       dashboard({ allowedUsers: '*' }),
       '/base/dashboard/keys',
@@ -535,19 +599,39 @@ describe('API keys in the dashboard', () => {
     const target = dashboard();
     const { session } = await signIn(target);
     const token = await csrf(target, session);
-    await post(target, '/base/dashboard/keys', { csrf: token, name: 'A', access: 'read', expires: 'never' }, session);
+    await post(
+      target,
+      '/base/dashboard/keys',
+      { csrf: token, name: 'A', access: 'read', expires: 'never' },
+      session,
+    );
     const [row] = [...keys.rows.values()];
 
-    const rotated = await post(target, '/base/dashboard/keys/rotate', { csrf: token, id: row?.id as string }, session);
+    const rotated = await post(
+      target,
+      '/base/dashboard/keys/rotate',
+      { csrf: token, id: row?.id as string },
+      session,
+    );
     expect(rotated.status).toBe(200);
     expect(keys.store.rotate).toHaveBeenCalledWith({ tenantRef: 'github:4242', id: row?.id });
     expect(await rotated.text()).toContain(keys.rows.get(row?.id as string)?.key as string);
 
-    const revoked = await post(target, '/base/dashboard/keys/revoke', { csrf: token, id: row?.id as string }, session);
+    const revoked = await post(
+      target,
+      '/base/dashboard/keys/revoke',
+      { csrf: token, id: row?.id as string },
+      session,
+    );
     expect(revoked.status).toBe(303);
     expect(keys.store.revoke).toHaveBeenCalledWith({ tenantRef: 'github:4242', id: row?.id });
 
-    const missing = await post(target, '/base/dashboard/keys/revoke', { csrf: token, id: randomUUID() }, session);
+    const missing = await post(
+      target,
+      '/base/dashboard/keys/revoke',
+      { csrf: token, id: randomUUID() },
+      session,
+    );
     expect(missing.status).toBe(404);
   });
 
@@ -584,7 +668,12 @@ describe('resources in the dashboard', () => {
     expect(await zone.text()).toContain('not a time zone');
 
     for (let index = resources.rows.length; index < SLOTLOCK_DASHBOARD_MAX_RESOURCES; index += 1) {
-      resources.rows.push({ id: randomUUID(), externalRef: `r${index}`, tenantRef: 'github:4242', timezone: 'UTC' } as never);
+      resources.rows.push({
+        id: randomUUID(),
+        externalRef: `r${index}`,
+        tenantRef: 'github:4242',
+        timezone: 'UTC',
+      } as never);
     }
     const capped = await post(
       target,
@@ -606,7 +695,324 @@ describe('resources in the dashboard', () => {
       session,
     );
     expect(rezoned.status).toBe(303);
-    expect(resources.rows.find((row) => row.externalRef === 'vehicle-42')?.timezone).toBe('Europe/Paris');
+    expect(resources.rows.find((row) => row.externalRef === 'vehicle-42')?.timezone).toBe(
+      'Europe/Paris',
+    );
+  });
+});
+
+describe('bookable hours in the dashboard', () => {
+  const OTHER = '99999999-9999-4999-8999-999999999999';
+  const weekdays = {
+    rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR',
+    startMinutes: 540,
+    durationMinutes: 480,
+  };
+
+  function own(externalRef: string, availabilityRules?: WeeklyAvailabilityRule[]) {
+    const row = {
+      id: randomUUID(),
+      externalRef,
+      tenantRef: 'github:4242',
+      timezone: 'Europe/London',
+      ...(availabilityRules ? { availabilityRules } : {}),
+    };
+    resources.rows.push(row);
+    return row;
+  }
+
+  /** The editor's fields: every window empty unless given, e.g. { mo_from_1: '09:00' }. */
+  function weekFields(fields: Record<string, string>) {
+    const all: Record<string, string> = {};
+    for (const day of ['mo', 'tu', 'we', 'th', 'fr', 'sa', 'su']) {
+      for (const n of [1, 2]) {
+        all[`${day}_from_${n}`] = '';
+        all[`${day}_to_${n}`] = '';
+      }
+    }
+    return { ...all, ...fields };
+  }
+
+  it("shows each resource's hours and links to its editor", async () => {
+    const plain = own('car-plain');
+    const closed = own('car-closed', []);
+    const custom = own('car-custom', [weekdays]);
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const html = await (await get(target, '/base/dashboard', session)).text();
+    expect(html).toContain('Server&#39;s hours');
+    expect(html).toContain('Closed');
+    expect(html).toContain('Mon–Fri 09:00–17:00');
+    for (const resource of [plain, closed, custom]) {
+      expect(html).toContain(`href="/base/dashboard/hours?resource=${resource.id}"`);
+    }
+    expect(html).toContain('href="/base/dashboard/hours"');
+  });
+
+  it('summarises hours by day, overnight as next day, never in fractions of an hour', async () => {
+    own('car-shift', [
+      { rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR', startMinutes: 480, durationMinutes: 240 },
+      { rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR', startMinutes: 780, durationMinutes: 300 },
+      { rrule: 'FREQ=WEEKLY;BYDAY=SA', startMinutes: 1_320, durationMinutes: 600 },
+      { rrule: 'FREQ=WEEKLY;BYDAY=SU', startMinutes: 0, durationMinutes: 1_440 },
+    ]);
+    // Not a week of windows (INTERVAL), so each rule is summarised on its own.
+    own('car-odd', [
+      { rrule: 'FREQ=WEEKLY;INTERVAL=1;BYDAY=MO,WE', startMinutes: 1_380, durationMinutes: 80 },
+      { rrule: 'FREQ=WEEKLY;INTERVAL=1;BYDAY=FR', startMinutes: 540, durationMinutes: 3_030 },
+    ]);
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const html = await (await get(target, '/base/dashboard', session)).text();
+    expect(html).toContain(
+      'Mon–Fri 08:00–12:00, 13:00–18:00; Sat 22:00–08:00 next day; Sun all day',
+    );
+    expect(html).toContain('Mon, Wed 23:00–00:20 next day; Fri from 09:00 for 2 d 2 h 30 min');
+    expect(html).toContain('Mon–Fri: 09:00–17:00');
+    expect(html).not.toMatch(/\d\.\d+ h/);
+  });
+
+  it("edits one resource's hours as a week of windows, overnight included", async () => {
+    const car = own('car-1', [weekdays]);
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const page = await get(target, `/base/dashboard/hours?resource=${car.id}`, session);
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain('car-1');
+    expect(html).toContain('Europe/London');
+    expect(html).toMatch(/name="mo_from_1" value="09:00"/);
+    expect(html).toMatch(/name="fr_to_1" value="17:00"/);
+    expect(html).toMatch(/name="sa_from_1" value=""/);
+    expect(html).toMatch(/value="custom" checked/);
+    expect(html).toMatch(/name="once" value="[^"]+"/);
+
+    const token = await csrf(target, session);
+    const saved = await post(
+      target,
+      '/base/dashboard/hours',
+      {
+        csrf: token,
+        resource: car.id,
+        mode: 'custom',
+        ...weekFields({
+          mo_from_1: '08:00',
+          mo_to_1: '12:00',
+          mo_from_2: '13:00',
+          mo_to_2: '17:30',
+          fr_from_1: '22:00',
+          fr_to_1: '06:00',
+          su_from_1: '00:00',
+          su_to_1: '00:00',
+        }),
+      },
+      session,
+    );
+    expect(saved.status).toBe(303);
+    expect(resources.store.setHours).toHaveBeenCalledWith('github:4242', { id: car.id }, [
+      { rrule: 'FREQ=WEEKLY;BYDAY=SU', startMinutes: 0, durationMinutes: 1_440 },
+      { rrule: 'FREQ=WEEKLY;BYDAY=MO', startMinutes: 480, durationMinutes: 240 },
+      { rrule: 'FREQ=WEEKLY;BYDAY=MO', startMinutes: 780, durationMinutes: 270 },
+      { rrule: 'FREQ=WEEKLY;BYDAY=FR', startMinutes: 1_320, durationMinutes: 480 },
+    ]);
+  });
+
+  it("hands a resource back to the server's hours, or closes it", async () => {
+    const car = own('car-2', [weekdays]);
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const token = await csrf(target, session);
+    for (const [mode, rules] of [
+      ['server', null],
+      ['closed', []],
+    ] as const) {
+      const saved = await post(
+        target,
+        '/base/dashboard/hours',
+        {
+          csrf: token,
+          resource: car.id,
+          mode,
+          ...weekFields({ mo_from_1: '09:00', mo_to_1: '17:00' }),
+        },
+        session,
+      );
+      expect(saved.status).toBe(303);
+      expect(resources.store.setHours).toHaveBeenLastCalledWith(
+        'github:4242',
+        { id: car.id },
+        rules,
+      );
+    }
+    const html = await (
+      await get(target, `/base/dashboard/hours?resource=${car.id}`, session)
+    ).text();
+    expect(html).toMatch(/value="closed" checked/);
+  });
+
+  it('sets the same hours on every resource at once', async () => {
+    own('car-a');
+    own('car-b');
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const page = await (await get(target, '/base/dashboard/hours', session)).text();
+    expect(page).toContain('every resource');
+    expect(page).toMatch(/name="resource" value="all"/);
+    const token = await csrf(target, session);
+    const saved = await post(
+      target,
+      '/base/dashboard/hours',
+      {
+        csrf: token,
+        resource: 'all',
+        mode: 'custom',
+        ...weekFields({ sa_from_1: '10:00', sa_to_1: '14:00' }),
+      },
+      session,
+    );
+    expect(saved.status).toBe(303);
+    expect(resources.store.setHours).toHaveBeenCalledWith('github:4242', 'all', [
+      { rrule: 'FREQ=WEEKLY;BYDAY=SA', startMinutes: 600, durationMinutes: 240 },
+    ]);
+  });
+
+  it.each([
+    [
+      'overlapping windows',
+      { tu_from_1: '09:00', tu_to_1: '13:00', tu_from_2: '12:00', tu_to_2: '17:00' },
+      "Tuesday's two windows overlap",
+    ],
+    ['half a window', { we_from_1: '09:00' }, 'Give Wednesday'],
+    ['a time that is not one', { th_from_1: '25:00', th_to_1: '26:00' }, 'Thursday'],
+    ['custom hours with no window', {}, 'Add a window'],
+  ])('refuses %s, says why, and keeps what was typed', async (_case, fields, message) => {
+    const car = own('car-3');
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const token = await csrf(target, session);
+    const refused = await post(
+      target,
+      '/base/dashboard/hours',
+      { csrf: token, resource: car.id, mode: 'custom', ...weekFields(fields) },
+      session,
+    );
+    expect(refused.status).toBe(400);
+    const html = await refused.text();
+    expect(html).toContain(message.replaceAll("'", '&#39;'));
+    for (const [name, value] of Object.entries(fields)) {
+      expect(html).toContain(`name="${name}" value="${value}"`);
+    }
+    expect(resources.store.setHours).not.toHaveBeenCalled();
+  });
+
+  it("does not show or change another tenant's resource, or an id that is not one", async () => {
+    resources.rows.push({
+      id: OTHER,
+      externalRef: 'theirs',
+      tenantRef: 'github:7',
+      timezone: 'UTC',
+      availabilityRules: [weekdays],
+    });
+    const target = dashboard();
+    const { session } = await signIn(target);
+    for (const id of [OTHER, 'not-a-uuid']) {
+      expect((await get(target, `/base/dashboard/hours?resource=${id}`, session)).status).toBe(404);
+    }
+    const token = await csrf(target, session);
+    for (const id of [OTHER, 'not-a-uuid']) {
+      const sent = await post(
+        target,
+        '/base/dashboard/hours',
+        { csrf: token, resource: id, mode: 'closed', ...weekFields({}) },
+        session,
+      );
+      expect(sent.status).toBe(404);
+    }
+    expect(resources.rows.find(({ id }) => id === OTHER)?.availabilityRules).toEqual([weekdays]);
+  });
+
+  it('shows hours the week cannot express as they are, and replaces them only when saved', async () => {
+    const until = {
+      rrule: 'FREQ=WEEKLY;BYDAY=MO;UNTIL=20271231T000000Z',
+      startMinutes: 540,
+      durationMinutes: 60,
+    };
+    const car = own('car-4', [until]);
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const html = await (
+      await get(target, `/base/dashboard/hours?resource=${car.id}`, session)
+    ).text();
+    expect(html).toContain('set outside the dashboard');
+    expect(html).toContain('FREQ=WEEKLY;BYDAY=MO;UNTIL=20271231T000000Z');
+    expect(html).toMatch(/name="mo_from_1" value=""/);
+    expect(resources.store.setHours).not.toHaveBeenCalled();
+  });
+
+  it('needs a signed-in session, a CSRF token, and runs a sent form once', async () => {
+    const car = own('car-5');
+    const target = dashboard();
+    expect((await get(target, '/base/dashboard/hours')).headers.get('location')).toBe(
+      '/base/dashboard',
+    );
+    const { session } = await signIn(target);
+    const forged = await post(
+      target,
+      '/base/dashboard/hours',
+      { csrf: 'x', resource: car.id, mode: 'closed' },
+      session,
+    );
+    expect(forged.status).toBe(403);
+    const html = await (
+      await get(target, `/base/dashboard/hours?resource=${car.id}`, session)
+    ).text();
+    const token = /name="csrf" value="([^"]+)"/.exec(html)?.[1] as string;
+    const once = /name="once" value="([^"]+)"/.exec(html)?.[1] as string;
+    const fields = { csrf: token, once, resource: car.id, mode: 'closed', ...weekFields({}) };
+    expect((await post(target, '/base/dashboard/hours', fields, session)).status).toBe(303);
+    expect((await post(target, '/base/dashboard/hours', fields, session)).status).toBe(409);
+    expect(resources.store.setHours).toHaveBeenCalledOnce();
+  });
+
+  it('refuses a form sent without its single-use value, on every route but sign-out', async () => {
+    const car = own('car-6');
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const token = await csrf(target, session);
+    const forms: Array<[string, Record<string, string>]> = [
+      ['/keys', { name: 'Bare', access: 'read', expires: 'never' }],
+      ['/keys/rotate', { id: randomUUID() }],
+      ['/keys/revoke', { id: randomUUID() }],
+      ['/resources', { reference: 'bare-van', timezone: 'UTC' }],
+      ['/hours', { resource: car.id, mode: 'closed', ...weekFields({}) }],
+      ['/hours', { resource: 'all', mode: 'closed', ...weekFields({}) }],
+    ];
+    for (const [route, fields] of forms) {
+      const sent = await post(
+        target,
+        `/base/dashboard${route}`,
+        { csrf: token, ...fields },
+        session,
+        ORIGIN,
+        'none',
+      );
+      expect(sent.status, route).toBe(400);
+    }
+    expect(keys.store.create).not.toHaveBeenCalled();
+    expect(keys.store.rotate).not.toHaveBeenCalled();
+    expect(keys.store.revoke).not.toHaveBeenCalled();
+    expect(resources.store.add).not.toHaveBeenCalled();
+    expect(resources.store.setHours).not.toHaveBeenCalled();
+    // Signing out always works, single-use value or not.
+    const out = await post(
+      target,
+      '/base/dashboard/sign-out',
+      { csrf: token },
+      session,
+      ORIGIN,
+      'none',
+    );
+    expect(out.status).toBe(303);
   });
 });
 
@@ -646,7 +1052,11 @@ describe('limits found in review', () => {
     const declared = await target.fetch(
       new Request(`${ORIGIN}/base/dashboard/keys`, {
         method: 'POST',
-        headers: { cookie: session, origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded' },
+        headers: {
+          cookie: session,
+          origin: ORIGIN,
+          'content-type': 'application/x-www-form-urlencoded',
+        },
         body: big,
       }),
     );
@@ -676,7 +1086,11 @@ describe('limits found in review', () => {
     const streamed = await target.fetch(
       new Request(`${ORIGIN}/base/dashboard/keys`, {
         method: 'POST',
-        headers: { cookie: session, origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded' },
+        headers: {
+          cookie: session,
+          origin: ORIGIN,
+          'content-type': 'application/x-www-form-urlencoded',
+        },
         body: endless,
         duplex: 'half',
       } as RequestInit),
@@ -718,9 +1132,13 @@ describe('limits found in review', () => {
     const target = dashboard({ state: flaky, onError: (error) => errors.push(error) });
     for (let attempt = 0; attempt < 9; attempt += 1) {
       const start = await get(target, '/base/dashboard/sign-in');
-      const state = new URL(start.headers.get('location') ?? '').searchParams.get('state') as string;
+      const state = new URL(start.headers.get('location') ?? '').searchParams.get(
+        'state',
+      ) as string;
       const pending = start.headers.getSetCookie()[0]?.split('; ')[0] as string;
-      expect((await get(target, `/base/dashboard/callback?code=c&state=${state}`, pending)).status).toBe(500);
+      expect(
+        (await get(target, `/base/dashboard/callback?code=c&state=${state}`, pending)).status,
+      ).toBe(500);
     }
     expect(errors).toHaveLength(9);
     expect(github.fetch).not.toHaveBeenCalled();
@@ -761,7 +1179,11 @@ describe('limits found in review', () => {
       const start = await get(target, '/base/dashboard/sign-in');
       const state = new URL(start.headers.get('location') ?? '').searchParams.get('state');
       callbacks.push(
-        get(target, `/base/dashboard/callback?code=c&state=${state}`, cookie(start, '__Host-slotlock-oauth')?.pair),
+        get(
+          target,
+          `/base/dashboard/callback?code=c&state=${state}`,
+          cookie(start, '__Host-slotlock-oauth')?.pair,
+        ),
       );
     }
     // Without a cap the ninth would wait on GitHub too; with one it is refused at once.
@@ -771,7 +1193,11 @@ describe('limits found in review', () => {
     ]);
     expect(ninth instanceof Response ? ninth.status : ninth).toBe(503);
     expect(held).toHaveBeenCalledTimes(8);
-    for (let turn = 0; turn < 100 && (release.length > 0 || held.mock.calls.length < 16); turn += 1) {
+    for (
+      let turn = 0;
+      turn < 100 && (release.length > 0 || held.mock.calls.length < 16);
+      turn += 1
+    ) {
       release.shift()?.();
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
@@ -800,9 +1226,18 @@ describe('limits found in review', () => {
     const { session } = await signIn(target);
     const html = await (await get(target, '/base/dashboard', session)).text();
     const token = /name="csrf" value="([^"]+)"/.exec(html)?.[1] as string;
-    const once = /action="\/base\/dashboard\/keys">\s*<input type="hidden" name="csrf" value="[^"]+">\s*<input type="hidden" name="once" value="([^"]+)">/.exec(html)?.[1];
+    const once =
+      /action="\/base\/dashboard\/keys">\s*<input type="hidden" name="csrf" value="[^"]+">\s*<input type="hidden" name="once" value="([^"]+)">/.exec(
+        html,
+      )?.[1];
     expect(once).toMatch(/^[A-Za-z0-9_-]{24}\.[A-Za-z0-9_-]{43}$/);
-    const fields = { csrf: token, once: once as string, name: 'Once', access: 'read', expires: 'never' };
+    const fields = {
+      csrf: token,
+      once: once as string,
+      name: 'Once',
+      access: 'read',
+      expires: 'never',
+    };
     expect((await post(target, '/base/dashboard/keys', fields, session)).status).toBe(200);
     const again = await post(target, '/base/dashboard/keys', fields, session);
     expect(again.status).toBe(409);
@@ -812,8 +1247,15 @@ describe('limits found in review', () => {
 
   it("logs GitHub's error code, and nothing secret, when sign-in fails there", async () => {
     const onError = vi.fn();
-    const failing = vi.fn(async () => Response.json({ error: 'incorrect_client_credentials', error_description: 'The client_id and/or client_secret passed are incorrect.' }));
-    const { callback } = await signIn(dashboard({ fetch: failing as unknown as typeof fetch, onError }));
+    const failing = vi.fn(async () =>
+      Response.json({
+        error: 'incorrect_client_credentials',
+        error_description: 'The client_id and/or client_secret passed are incorrect.',
+      }),
+    );
+    const { callback } = await signIn(
+      dashboard({ fetch: failing as unknown as typeof fetch, onError }),
+    );
     expect(callback.status).toBe(502);
     expect(onError).toHaveBeenCalledTimes(1);
     const message = String((onError.mock.calls[0]?.[0] as Error).message);

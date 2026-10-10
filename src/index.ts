@@ -6,6 +6,14 @@
 export { findNextAvailable, mergeIntervals, subtractBusy } from './engine.js';
 export { expandRules } from './rules.js';
 export {
+  availabilityRuleProblem,
+  parseAvailabilityRules,
+  rulesToWeeklyHours,
+  SLOTLOCK_MAX_AVAILABILITY_RULES,
+  weeklyHoursToRules,
+} from './weekly-hours.js';
+export type { HoursWindow, Weekday, WeeklyHours } from './weekly-hours.js';
+export {
   createTimeZoneConverter,
   zonedCalendarDate,
   zonedDateTimeToUtc,

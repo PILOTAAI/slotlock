@@ -20,6 +20,11 @@ export interface SlotlockResource {
    * Rules remain stable across daylight-saving changes because wall time is resolved in this zone.
    */
   timezone: string;
+  /**
+   * The resource's own weekly bookable hours, in `timezone`; `[]` is never bookable. Absent when it
+   * uses the default (`SLOTLOCK_AVAILABILITY`, or the backend's `availabilityRules`).
+   */
+  availabilityRules?: WeeklyAvailabilityRule[];
 }
 
 /** A confirmed occupation of a resource. The DB EXCLUDE constraint is the overlap arbiter. */
