@@ -102,6 +102,10 @@ const expectedFiles = new Set([
   'ddl.d.ts',
   'engine.js',
   'engine.d.ts',
+  'ical-worker.js',
+  'ical-worker.d.ts',
+  'ical-worker-thread.js',
+  'ical-worker-thread.d.ts',
   'index.js',
   'index.d.ts',
   'mcp-app.js',
@@ -513,6 +517,89 @@ execFileSync(process.execPath, ['smoke.mjs'], {
   timeout: 15_000,
 });
 
+// Untrusted iCalendar on worker threads, as the installed package runs it: the pool's worker is
+// built JavaScript, which Slotlock's TypeScript tests can only stand in for.
+const workerSmoke = `
+import { strict as assert } from 'node:assert';
+import {
+  CalendarExpansionLimitError,
+  createICalendarWorkerPool,
+  parseICalendarChanges,
+  parseTrustedICalendarEvents,
+} from 'slotlock';
+
+const window = { start: new Date('2026-10-01T00:00:00Z'), end: new Date('2027-10-01T00:00:00Z') };
+const ordinary = [
+  'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Slotlock verify//EN',
+  'BEGIN:VTIMEZONE', 'TZID:Europe/London',
+  'BEGIN:DAYLIGHT', 'DTSTART:19810329T010000', 'TZOFFSETFROM:+0000', 'TZOFFSETTO:+0100',
+  'RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU', 'END:DAYLIGHT',
+  'BEGIN:STANDARD', 'DTSTART:19961027T020000', 'TZOFFSETFROM:+0100', 'TZOFFSETTO:+0000',
+  'RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU', 'END:STANDARD',
+  'END:VTIMEZONE',
+  'BEGIN:VEVENT', 'UID:handover', 'DTSTAMP:20261010T000000Z', 'SUMMARY:Handover',
+  'DTSTART;TZID=Europe/London:20261103T090000', 'DTEND;TZID=Europe/London:20261103T100000',
+  'RRULE:FREQ=WEEKLY;BYDAY=TU,TH;COUNT=20', 'EXDATE;TZID=Europe/London:20261110T090000',
+  'END:VEVENT',
+  'BEGIN:VEVENT', 'UID:handover', 'DTSTAMP:20261010T000000Z', 'SUMMARY:Handover',
+  'RECURRENCE-ID;TZID=Europe/London:20261112T090000',
+  'DTSTART;TZID=Europe/London:20261112T150000', 'DTEND;TZID=Europe/London:20261112T160000',
+  'END:VEVENT',
+  'END:VCALENDAR',
+].join('\\r\\n');
+// Refused by the parser's own one-second limit: a zone whose rule never occurs, read slowly.
+const slow = [
+  'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Slotlock verify//EN',
+  'BEGIN:VTIMEZONE', 'TZID:Custom/Slow', 'BEGIN:STANDARD', 'DTSTART:19700101T000000',
+  'TZOFFSETFROM:+0100', 'TZOFFSETTO:+0100',
+  'RRULE:FREQ=DAILY;INTERVAL=36600;BYMONTH=2;BYMONTHDAY=30', 'END:STANDARD', 'END:VTIMEZONE',
+  'BEGIN:VEVENT', 'UID:slow', 'DTSTAMP:20261010T000000Z', 'SUMMARY:Slow',
+  'DTSTART;TZID=Custom/Slow:20261102T090000', 'DTEND;TZID=Custom/Slow:20261102T100000',
+  'END:VEVENT', 'END:VCALENDAR',
+].join('\\r\\n');
+
+const pool = createICalendarWorkerPool();
+try {
+  let started = performance.now();
+  const changes = await pool.parseICalendarChanges(ordinary, 'Europe/London', window);
+  const coldMs = performance.now() - started;
+  assert.deepStrictEqual(changes, parseICalendarChanges(ordinary, 'Europe/London', window));
+  assert.ok(changes.length >= 19, 'the ordinary feed reads in full');
+  assert.deepStrictEqual(
+    await pool.parseTrustedICalendarEvents(ordinary, 'Europe/London'),
+    parseTrustedICalendarEvents(ordinary, 'Europe/London'),
+  );
+  started = performance.now();
+  await pool.parseICalendarChanges(ordinary, 'Europe/London', window);
+  const warmMs = performance.now() - started;
+  const inlineStarted = performance.now();
+  parseICalendarChanges(ordinary, 'Europe/London', window);
+  const inlineMs = performance.now() - inlineStarted;
+
+  let ticks = 0;
+  const timer = setInterval(() => {
+    ticks += 1;
+  }, 10);
+  const refused = await pool.parseICalendarChanges(slow, 'UTC').catch((error) => error);
+  clearInterval(timer);
+  assert.ok(refused instanceof CalendarExpansionLimitError, String(refused));
+  assert.ok(ticks >= 30, 'this thread ran ' + ticks + ' timer ticks while the worker read the slow feed');
+  process.stdout.write(
+    JSON.stringify({ coldMs: Math.round(coldMs), warmMs: Math.round(warmMs), inlineMs: Math.round(inlineMs), ticks }),
+  );
+} finally {
+  await pool.close();
+}
+`;
+writeFileSync(join(consumerRoot, 'icalendar-worker-smoke.mjs'), workerSmoke);
+const workerTimings = JSON.parse(
+  execFileSync(process.execPath, ['icalendar-worker-smoke.mjs'], {
+    cwd: consumerRoot,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 30_000,
+  }).toString(),
+);
+
 // The installed `slotlock` executable, run through the link npm created, against the consumer's
 // lowest-admitted postgres. A minimal environment keeps a developer's own variables out of it.
 const slotlockBin = join(consumerRoot, 'node_modules', '.bin', 'slotlock');
@@ -728,5 +815,5 @@ try {
 }
 
 process.stdout.write(
-  `slotlock package smoke: ${files.size} clean files, clean consumer HTTP health/discovery/MCP/A2A passed, slotlock bin (live serve: ${liveServe}), strict TypeScript consumer (postgres ${consumerPostgres}, "types": []) compiled\n`,
+  `slotlock package smoke: ${files.size} clean files, clean consumer HTTP health/discovery/MCP/A2A passed, iCalendar worker pool (same results as the parsers; first parse ${workerTimings.coldMs} ms with the worker's start, then ${workerTimings.warmMs} ms against ${workerTimings.inlineMs} ms inline; a slow feed refused while this thread ticked ${workerTimings.ticks} times), slotlock bin (live serve: ${liveServe}), strict TypeScript consumer (postgres ${consumerPostgres}, "types": []) compiled\n`,
 );

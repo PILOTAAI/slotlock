@@ -116,7 +116,14 @@ export type {
   SlotlockApiKeyStore,
 } from './api-keys.js';
 export {
+  ICalendarWorkerBusyError,
+  ICalendarWorkerPoolClosedError,
+  createICalendarWorkerPool,
+} from './ical-worker.js';
+export type { ICalendarWorkerPool, ICalendarWorkerPoolOptions } from './ical-worker.js';
+export {
   CalendarContractError,
+  CalendarExpansionLimitError,
   emitICalendar,
   emitITipCalendar,
   expandCalendarEventOccurrences,
