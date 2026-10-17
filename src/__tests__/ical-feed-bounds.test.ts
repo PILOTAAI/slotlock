@@ -416,7 +416,7 @@ describe('a feed that would hold the process inside one call (round 3)', () => {
     expect(ms).toBeLessThan(1_000);
   }, 600_000);
 
-  it('still reads a feed\'s own zone across far years as Intl reads the same zone', () => {
+  it("still reads a feed's own zone across far years as Intl reads the same zone", () => {
     const london = [
       'BEGIN:VTIMEZONE',
       'TZID:Custom/London',
@@ -482,11 +482,7 @@ describe('a feed that would hold the process inside one call (round 3)', () => {
         'TZOFFSETTO:+0100',
         'END:STANDARD',
         'END:VTIMEZONE',
-        ...event(
-          'UID:zoned',
-          'DTSTART:20261102T090000Z',
-          'DTEND:20261102T100000Z',
-        ),
+        ...event('UID:zoned', 'DTSTART:20261102T090000Z', 'DTEND:20261102T100000Z'),
       );
       expect(() => parseICalendarChanges(text, 'UTC', WINDOW)).toThrow(CalendarContractError);
     } finally {
@@ -496,20 +492,24 @@ describe('a feed that would hold the process inside one call (round 3)', () => {
 
   // ical.js reads a property's parameters by searching from each one to the end of the line for
   // its value: 490,000 of them on one line took 7.9 seconds before anything else ran.
-  it.each(parsers)('refuses %s a property with more parameters than any real one', (_name, parse) => {
-    const text = calendar(
-      ...event(
-        'UID:parameters',
-        'DTSTART:20261102T090000Z',
-        'DTEND:20261102T100000Z',
-        `X-A${';A=b'.repeat(490_000)}:v`,
-      ),
-    );
-    expect(text.length).toBeLessThan(2_000_000);
-    const { ms, error } = timed(() => parse(text));
-    expect(error).toBeInstanceOf(CalendarExpansionLimitError);
-    expect(ms).toBeLessThan(200);
-  }, 600_000);
+  it.each(parsers)(
+    'refuses %s a property with more parameters than any real one',
+    (_name, parse) => {
+      const text = calendar(
+        ...event(
+          'UID:parameters',
+          'DTSTART:20261102T090000Z',
+          'DTEND:20261102T100000Z',
+          `X-A${';A=b'.repeat(490_000)}:v`,
+        ),
+      );
+      expect(text.length).toBeLessThan(2_000_000);
+      const { ms, error } = timed(() => parse(text));
+      expect(error).toBeInstanceOf(CalendarExpansionLimitError);
+      expect(ms).toBeLessThan(200);
+    },
+    600_000,
+  );
 
   it.each(parsers)(
     'refuses %s many properties each with more parameters than any real one, within 8 KB',
@@ -544,18 +544,22 @@ describe('a feed that would hold the process inside one call (round 3)', () => {
     600_000,
   );
 
-  it.each(parsers)('counts %s the parameters of a folded line as one line', (_name, parse) => {
-    // ical.js joins the folded line before it reads the parameters.
-    const line = `X-A${';A=b'.repeat(450_000)}:v`;
-    const folded = line.match(/.{1,74}/g)?.join('\r\n ') ?? line;
-    const text = calendar(
-      ...event('UID:folded', 'DTSTART:20261102T090000Z', 'DTEND:20261102T100000Z', folded),
-    );
-    expect(text.length).toBeLessThan(2_000_000);
-    const { ms, error } = timed(() => parse(text));
-    expect(error).toBeInstanceOf(CalendarExpansionLimitError);
-    expect(ms).toBeLessThan(200);
-  }, 600_000);
+  it.each(parsers)(
+    'counts %s the parameters of a folded line as one line',
+    (_name, parse) => {
+      // ical.js joins the folded line before it reads the parameters.
+      const line = `X-A${';A=b'.repeat(450_000)}:v`;
+      const folded = line.match(/.{1,74}/g)?.join('\r\n ') ?? line;
+      const text = calendar(
+        ...event('UID:folded', 'DTSTART:20261102T090000Z', 'DTEND:20261102T100000Z', folded),
+      );
+      expect(text.length).toBeLessThan(2_000_000);
+      const { ms, error } = timed(() => parse(text));
+      expect(error).toBeInstanceOf(CalendarExpansionLimitError);
+      expect(ms).toBeLessThan(200);
+    },
+    600_000,
+  );
 
   it.each(parsers)('refuses %s a property whose parameters run past 8 KB', (_name, parse) => {
     const text = calendar(
@@ -630,9 +634,35 @@ function countingParameters<T>(work: (read: () => number) => T): T {
 }
 
 const LINE_PIECES = [
-  ';', ':', '"', '=', ',', '","', 'a', 'mailto:b', 'CN', 'MEMBER', 'DELEGATED-TO', 'X-P', 'TYPE',
-  ';CN=', ';MEMBER="', ';DELEGATED-TO="', ';X-P=', ';TYPE="', '";', '":', '=",', ';CN="',
-  'constructor', ';__proto__=', ';toString="', ';hasOwnProperty=', '\\', '^"', '^n',
+  ';',
+  ':',
+  '"',
+  '=',
+  ',',
+  '","',
+  'a',
+  'mailto:b',
+  'CN',
+  'MEMBER',
+  'DELEGATED-TO',
+  'X-P',
+  'TYPE',
+  ';CN=',
+  ';MEMBER="',
+  ';DELEGATED-TO="',
+  ';X-P=',
+  ';TYPE="',
+  '";',
+  '":',
+  '=",',
+  ';CN="',
+  'constructor',
+  ';__proto__=',
+  ';toString="',
+  ';hasOwnProperty=',
+  '\\',
+  '^"',
+  '^n',
 ];
 const LINE_NAMES = ['X-A', 'ATTENDEE', 'X-A"', 'DESCRIPTION', 'X-A;', 'VERSION:4.0', 'TYPE'];
 function randomLine(random: (below: number) => number): string {
@@ -647,34 +677,42 @@ describe('a property whose parameters ical.js reads differently from a simple sc
   // A scan that turned every `"` into an open or close quote read the quoted `:` below as the end of
   // the parameters, while ical.js read all 490,000 of them: 7.9 to 9.1 seconds.
   const flood = ';R=b'.repeat(490_000);
-  it.each(parsers)('refuses %s parameters behind a quote inside a value', (_name, parse) => {
-    const text = calendar(
-      ...event(
-        'UID:stray-quote',
-        'DTSTART:20261102T090000Z',
-        'DTEND:20261102T100000Z',
-        `X-A;P=a";Q="x:y"${flood}:v`,
-      ),
-    );
-    expect(text.length).toBeLessThan(2_000_000);
-    const { ms, error } = timed(() => parse(text));
-    expect(error).toBeInstanceOf(CalendarExpansionLimitError);
-    expect(ms).toBeLessThan(200);
-  }, 600_000);
+  it.each(parsers)(
+    'refuses %s parameters behind a quote inside a value',
+    (_name, parse) => {
+      const text = calendar(
+        ...event(
+          'UID:stray-quote',
+          'DTSTART:20261102T090000Z',
+          'DTEND:20261102T100000Z',
+          `X-A;P=a";Q="x:y"${flood}:v`,
+        ),
+      );
+      expect(text.length).toBeLessThan(2_000_000);
+      const { ms, error } = timed(() => parse(text));
+      expect(error).toBeInstanceOf(CalendarExpansionLimitError);
+      expect(ms).toBeLessThan(200);
+    },
+    600_000,
+  );
 
-  it.each(parsers)('refuses %s parameters behind a quote inside a name', (_name, parse) => {
-    const text = calendar(
-      ...event(
-        'UID:quoted-name',
-        'DTSTART:20261102T090000Z',
-        'DTEND:20261102T100000Z',
-        `X-A";Q="x:y"${flood}:v`,
-      ),
-    );
-    const { ms, error } = timed(() => parse(text));
-    expect(error).toBeInstanceOf(CalendarExpansionLimitError);
-    expect(ms).toBeLessThan(200);
-  }, 600_000);
+  it.each(parsers)(
+    'refuses %s parameters behind a quote inside a name',
+    (_name, parse) => {
+      const text = calendar(
+        ...event(
+          'UID:quoted-name',
+          'DTSTART:20261102T090000Z',
+          'DTEND:20261102T100000Z',
+          `X-A";Q="x:y"${flood}:v`,
+        ),
+      );
+      const { ms, error } = timed(() => parse(text));
+      expect(error).toBeInstanceOf(CalendarExpansionLimitError);
+      expect(ms).toBeLessThan(200);
+    },
+    600_000,
+  );
 
   it.each(parsers)(
     'refuses %s parameters behind a list of quoted values for a parameter that takes one',
@@ -695,18 +733,22 @@ describe('a property whose parameters ical.js reads differently from a simple sc
     600_000,
   );
 
-  it.each(parsers)('reads %s a feed whose every line is at the limits', (_name, parse) => {
-    // 100 parameters, each searched from to the line's `:` 8 KB on, is what the limits allow.
-    const line = `X-A${';A=b'.repeat(99)};A=${'b'.repeat(7_700)}:v`;
-    const lines = Array.from({ length: 230 }, () => line);
-    const text = calendar(
-      ...event('UID:at-limits', 'DTSTART:20261102T090000Z', 'DTEND:20261102T100000Z', ...lines),
-    );
-    expect(text.length).toBeGreaterThan(1_800_000);
-    const { ms, error } = timed(() => parse(text));
-    expect(error).toBeNull();
-    expect(ms).toBeLessThan(500);
-  }, 600_000);
+  it.each(parsers)(
+    'reads %s a feed whose every line is at the limits',
+    (_name, parse) => {
+      // 100 parameters, each searched from to the line's `:` 8 KB on, is what the limits allow.
+      const line = `X-A${';A=b'.repeat(99)};A=${'b'.repeat(7_700)}:v`;
+      const lines = Array.from({ length: 230 }, () => line);
+      const text = calendar(
+        ...event('UID:at-limits', 'DTSTART:20261102T090000Z', 'DTEND:20261102T100000Z', ...lines),
+      );
+      expect(text.length).toBeGreaterThan(1_800_000);
+      const { ms, error } = timed(() => parse(text));
+      expect(error).toBeNull();
+      expect(ms).toBeLessThan(500);
+    },
+    600_000,
+  );
 
   it('counts the parameters ical.js reads, on lines built from what changes its reading', () => {
     const random = seeded(20261017);
@@ -737,19 +779,46 @@ describe('a property whose parameters ical.js reads differently from a simple sc
     const handle = parser._handleContentLine;
     const random = seeded(17102026);
     const firsts = [
-      'BEGIN:VCALENDAR', 'BEGIN:VCARD', 'begin:vcalendar', 'BEGIN:', 'BEGIN', 'X;A=1',
-      'BEGIN;X=1:VCALENDAR', '  BEGIN:VCALENDAR', '\r\n\r\nBEGIN:VEVENT', 'VERSION:2.0',
+      'BEGIN:VCALENDAR',
+      'BEGIN:VCARD',
+      'begin:vcalendar',
+      'BEGIN:',
+      'BEGIN',
+      'X;A=1',
+      'BEGIN;X=1:VCALENDAR',
+      '  BEGIN:VCALENDAR',
+      '\r\n\r\nBEGIN:VEVENT',
+      'VERSION:2.0',
+      'BEGIN:VCARD3',
+      'BEGIN:constructor',
+    ];
+    // Components that change ical.js's reading mid-feed, or look as if they might.
+    const components = [
+      'BEGIN:VCARD',
+      'begin:vcard',
+      'BEGIN:VCARD3',
+      'BEGIN;X=1:VCARD',
+      'BEGIN:VCARD;X',
+      'VERSION:4.0',
+      'FN:x',
+      'END:VCARD',
+      'BEGIN:VEVENT',
+      'END:VEVENT',
     ];
     const breaks = ['\r\n', '\n', '\r\n\r\n', '\n\n', '\r\n \r\n'];
     const folds = ['\r\n ', '\n\t', '\r\n\t', '\r', ' '];
     let feeds = 0;
     let readToTheEnd = 0;
+    let vcards = 0;
     countingParameters((read) => {
       for (let index = 0; index < 1_500; index++) {
         let text = firsts[random(firsts.length)] as string;
         const lines = 1 + random(8);
         for (let count = 0; count < lines; count++) {
-          let line = randomLine(random);
+          let line =
+            random(4) === 0
+              ? (components[random(components.length)] as string)
+              : randomLine(random);
           for (let fold = random(4); fold > 0; fold--) {
             const at = random(line.length + 1);
             line = line.slice(0, at) + folds[random(folds.length)] + line.slice(at);
@@ -775,7 +844,16 @@ describe('a property whose parameters ical.js reads differently from a simple sc
           parser._handleContentLine = handle;
         }
         const ours = [...icalendarPropertyHeads(text)];
+        // From a VCARD on, ical.js may read with vCard 3's parameters: Slotlock refuses the feed.
+        const vcard = ours.findIndex((head) => head.begins === 'vcard');
+        if (vcard !== -1) {
+          vcards += 1;
+          for (const [, parse] of parsers) {
+            expect(() => parse(text), text).toThrow(CalendarContractError);
+          }
+        }
         for (const [at, call] of calls.entries()) {
+          if (vcard !== -1 && at > vcard) break;
           const head = ours[at];
           if (head === undefined) {
             // Only a line before the first BEGIN, where ical.js throws having read nothing.
@@ -787,7 +865,7 @@ describe('a property whose parameters ical.js reads differently from a simple sc
           expect(head.line, text).toBe(call.line);
           expect(head.parameters, text).toBe(call.parameters);
         }
-        if (!threw) {
+        if (!threw && vcard === -1) {
           expect(ours.length, text).toBe(calls.length);
           readToTheEnd += 1;
         }
@@ -796,34 +874,76 @@ describe('a property whose parameters ical.js reads differently from a simple sc
     });
     expect(feeds).toBe(1_500);
     expect(readToTheEnd).toBeGreaterThan(50);
+    expect(vcards).toBeGreaterThan(50);
   });
 
-  it('reads vCard 3 parameters as vCard 4 ones, so the set ical.js moves a vCard to changes nothing', () => {
-    const several = (set: ParamSet) =>
-      Object.entries(set.param)
-        .filter(([, definition]) => definition.multiValue !== undefined)
-        .map(([name, definition]) => `${name}${definition.multiValue}`)
-        .sort();
-    const [, vcard, vcard3] = designSets() as [ParamSet, ParamSet, ParamSet];
-    expect(several(vcard3)).toEqual(several(vcard));
-    expect(several(vcard)).toEqual(['type,']);
-  });
+  // Round 6: a VCARD anywhere in a feed moves ical.js to vCard 3's parameters for the rest of it,
+  // where TYPE takes several quoted values. `TYPE="a",":"` then hid 490,000 parameters behind a
+  // quoted `:` from a count made with iCalendar's: 7.7 to 24.7 seconds.
+  const vcardFeeds = [
+    [
+      'nested in the calendar',
+      ['BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VCARD', 'FN:x', 'END:VCARD'],
+    ],
+    [
+      'between two calendars',
+      ['BEGIN:VCALENDAR', 'END:VCALENDAR', 'BEGIN:VCARD', 'FN:x', 'END:VCARD', 'BEGIN:VCALENDAR'],
+    ],
+  ] as const;
+  it.each(vcardFeeds)(
+    'refuses a feed with a VCARD %s, whose reading changes',
+    (_where, before) => {
+      const flood = `X-A;TYPE="a",":"${';P=b'.repeat(490_000)}:v`;
+      const text = [
+        ...before,
+        ...event('UID:vcard', 'DTSTART:20261102T090000Z', 'DTEND:20261102T100000Z', flood),
+        'END:VCALENDAR',
+      ].join('\r\n');
+      expect(text.length).toBeLessThan(2_000_000);
+      for (const [, parse] of parsers) {
+        const { ms, error } = timed(() => parse(text));
+        expect(error).toBeInstanceOf(CalendarContractError);
+        expect(ms).toBeLessThan(200);
+      }
+      // The refusal is what bounds it: ical.js reads all those parameters, the count only one.
+      const small = text.replace(';P=b'.repeat(490_000), ';P=b'.repeat(300));
+      const counted = [...icalendarPropertyHeads(small)].find((head) =>
+        head.line.startsWith('X-A'),
+      );
+      expect(counted?.parameters).toBe(1);
+      const read = countingParameters((parameters) => {
+        try {
+          ICAL.parse(small);
+        } catch {
+          // Only the parameters read matter here.
+        }
+        return parameters();
+      });
+      expect(read).toBeGreaterThanOrEqual(301);
+    },
+    120_000,
+  );
 
   it.each([
     ['one line folded at every character', `X-A:${'a\r\n '.repeat(500_000)}`],
     ['290,000 short lines', 'X-A:b\r\n'.repeat(290_000)],
     ['one line of quotes', `X-A:${'"'.repeat(1_900_000)}`],
     ['one line of parameters that each open a quote', `X-A${';A="'.repeat(500_000)}:v`],
-  ])('reads %s within its time, the line reading itself in a fraction of it', (_name, body) => {
-    const text = `BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\n${body}\r\nEND:VEVENT\r\nEND:VCALENDAR`;
-    expect(text.length).toBeLessThan(2_100_000);
-    const scan = timed(() => {
-      for (const _head of icalendarPropertyHeads(text)) {
-        // Read every line.
-      }
-    });
-    expect(scan.error).toBeNull();
-    expect(scan.ms).toBeLessThan(150);
-    for (const [, parse] of parsers) expect(timed(() => parse(text)).ms).toBeLessThan(1_200);
-  }, 60_000);
+  ])(
+    'reads %s within its time, the line reading itself in a fraction of it',
+    (_name, body) => {
+      const text = `BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\n${body}\r\nEND:VEVENT\r\nEND:VCALENDAR`;
+      expect(text.length).toBeLessThan(2_100_000);
+      const scan = timed(() => {
+        // The feed's own limits, as boundPropertyHeads reads each line.
+        for (const _head of icalendarPropertyHeads(text, { parameters: 100, end: 8_192 })) {
+          // Read every line.
+        }
+      });
+      expect(scan.error).toBeNull();
+      expect(scan.ms).toBeLessThan(150);
+      for (const [, parse] of parsers) expect(timed(() => parse(text)).ms).toBeLessThan(1_200);
+    },
+    60_000,
+  );
 });
