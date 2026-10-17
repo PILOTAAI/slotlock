@@ -15,8 +15,9 @@ import { expandRules } from './rules.js';
 import {
   CalendarContractError,
   CalendarExpansionLimitError,
-  expandCalendarEventOccurrences,
-  expandStoredCalendarEventOccurrences,
+  type CalendarSeriesCursor,
+  type CalendarSeriesExpansion,
+  expandCalendarEventSeries,
   normalizeCalendarEventContent,
 } from './sync.js';
 import type {
@@ -28,6 +29,7 @@ import type {
   CalendarEventOccurrence,
   CalendarEventRetentionResult,
   CalendarFreeBusy,
+  CalendarHorizonRollCursor,
   CalendarHorizonRollResult,
   CalendarOrganizer,
   CalendarRecurrenceException,
@@ -107,6 +109,48 @@ export function calendarEventRollingHorizon(now = new Date()): Interval {
   const midnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   const start = new Date(midnight - DAY_MS);
   return { start, end: new Date(start.getTime() + SLOTLOCK_CALENDAR_HORIZON_DAYS * DAY_MS) };
+}
+
+/**
+ * A stored series expanded from the cursor its last expansion left, or `null` when there is none it
+ * can use or the expansion from it is refused: the write's own search from the start was refused.
+ */
+function resumeStoredSeries(
+  event: CalendarEventContent,
+  window: Interval,
+  found: CalendarEventRow | undefined,
+): CalendarSeriesExpansion | null {
+  if (!found?.recurrence_cursor) return null;
+  try {
+    return expandCalendarEventSeries(event, window, {
+      cursor: found.recurrence_cursor,
+      stored: false,
+      resumeOnly: true,
+    });
+  } catch (error) {
+    if (error instanceof CalendarContractError) return null;
+    throw error;
+  }
+}
+
+/** A series cursor as the jsonb column takes it. */
+function seriesCursorJson(tx: TransactionSql, cursor: CalendarSeriesCursor | null) {
+  return cursor === null ? null : tx.json(cursor as unknown as Parameters<TransactionSql['json']>[0]);
+}
+
+/** The roll's `after`, checked, or `undefined` for a pass's first batch. */
+function rollCursor(after: CalendarHorizonRollCursor | undefined): CalendarHorizonRollCursor | undefined {
+  if (after === undefined) return undefined;
+  if (
+    !(after.materializedEndsAt instanceof Date) ||
+    !Number.isFinite(after.materializedEndsAt.getTime()) ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(after.eventId)
+  ) {
+    throw Object.assign(new Error('Slotlock horizon cursor must be a previous batch\'s `next`'), {
+      code: 'invalid_cursor' as const,
+    });
+  }
+  return after;
 }
 
 /** What `createSlotlockStore` accepts: a `postgres` client, or a transaction/savepoint from one. */
@@ -232,6 +276,8 @@ interface CalendarEventRow {
   }>;
   materialized_starts_at: Date;
   materialized_ends_at: Date;
+  /** Selected only where a series is expanded (the write and the roll). */
+  recurrence_cursor?: unknown;
   revision: string | number;
   source: string | null;
   created_at: Date;
@@ -1059,6 +1105,8 @@ export interface SlotlockStore {
     tenantRef: string;
     window: Interval;
     limit?: number;
+    /** The previous batch's `next`: examine only the masters after it in this pass. */
+    after?: CalendarHorizonRollCursor;
   }): Promise<CalendarHorizonRollResult>;
   /**
    * Delete one bounded batch of expired event bookkeeping for a tenant, which is what returns agent
@@ -1933,7 +1981,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
       }
       let event: CalendarEventContent;
       let materializationWindow: Interval;
-      let occurrences: CalendarEventOccurrence[];
+      let expanded: CalendarSeriesExpansion | null = null;
       try {
         event = normalizeCalendarEventContent(params);
         if (event.recurrence) {
@@ -1942,7 +1990,16 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
         } else {
           materializationWindow = oneOffEventWindow(event, params.materializationWindow);
         }
-        occurrences = expandCalendarEventOccurrences(event, materializationWindow);
+        try {
+          expanded = expandCalendarEventSeries(event, materializationWindow, {
+            cursor: null,
+            stored: false,
+          });
+        } catch (error) {
+          // A long-running series can take more than a write searches from its start. If it is
+          // stored, it is expanded again below from where its last expansion stopped.
+          if (!(error instanceof CalendarExpansionLimitError) || !event.recurrence) throw error;
+        }
       } catch (error) {
         if (error instanceof CalendarContractError) return { ok: false, code: 'invalid_event' };
         throw error;
@@ -1954,6 +2011,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
         window: materializationWindow,
       });
 
+      let attempted: CalendarEventOccurrence[] = expanded?.occurrences ?? [];
       for (let attempt = 1; ; attempt++) {
         try {
           return await inTransaction(sql, async (tx): Promise<PutCalendarEventResult> => {
@@ -2011,7 +2069,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
               SELECT id, tenant_ref, owner_ref, external_ref, resource_id, starts_at, ends_at, timezone,
                      summary, description, location, status, transparency, organizer, attendees,
                      reminders, recurrence_rule, recurrence_exceptions, materialized_starts_at,
-                     materialized_ends_at, revision, source, created_at, updated_at
+                     materialized_ends_at, recurrence_cursor, revision, source, created_at, updated_at
                 FROM slotlock.calendar_events
                WHERE tenant_ref = ${params.tenantRef}
                  AND owner_ref = ${ownerRef}
@@ -2022,6 +2080,10 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
             if (params.expectedRevision !== currentRevision) {
               return { ok: false, code: 'revision_conflict', currentRevision };
             }
+            const series = expanded ?? resumeStoredSeries(event, materializationWindow, found);
+            if (!series) return { ok: false, code: 'invalid_event' };
+            const { occurrences } = series;
+            attempted = occurrences;
             if (!found && ownerRef !== SLOTLOCK_INTERNAL_EVENT_OWNER_REF) {
               const owned = await tx<{ count: string | number }[]>`
                 SELECT (
@@ -2067,6 +2129,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
                        )},
                        materialized_starts_at = ${materializationWindow.start},
                        materialized_ends_at = ${materializationWindow.end},
+                       recurrence_cursor = ${seriesCursorJson(tx, series.cursor)},
                        revision = ${revision},
                        source = ${params.source ?? null},
                        updated_at = now()
@@ -2079,7 +2142,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
                   id, tenant_ref, owner_ref, external_ref, resource_id, starts_at, ends_at, timezone,
                   summary, description, location, status, transparency, organizer, attendees,
                   reminders, recurrence_rule, recurrence_exceptions, materialized_starts_at,
-                  materialized_ends_at, revision, source
+                  materialized_ends_at, recurrence_cursor, revision, source
                 ) VALUES (
                   ${eventId}, ${params.tenantRef}, ${ownerRef}, ${params.externalRef},
                   ${params.resourceId},
@@ -2091,7 +2154,8 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
                   ${tx.json(remindersForJson(event.reminders))},
                   ${event.recurrence?.rrule ?? null},
                   ${tx.json(eventExceptionsForJson(event.recurrence?.exceptions))},
-                  ${materializationWindow.start}, ${materializationWindow.end}, ${revision},
+                  ${materializationWindow.start}, ${materializationWindow.end},
+                  ${seriesCursorJson(tx, series.cursor)}, ${revision},
                   ${params.source ?? null}
                 )`;
             }
@@ -2138,7 +2202,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
           ) {
             throw error;
           }
-          return findCalendarOverlap(sql, params.resourceId, occurrences);
+          return findCalendarOverlap(sql, params.resourceId, attempted);
         }
       }
     },
@@ -2247,14 +2311,20 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
           code: 'invalid_limit' as const,
         });
       }
-      const candidates = await sql<{ id: string }[]>`
-        SELECT id
+      const after = rollCursor(params.after);
+      const candidates = await sql<{ id: string; materialized_ends_at: Date }[]>`
+        SELECT id, materialized_ends_at
           FROM slotlock.calendar_events
          WHERE tenant_ref = ${params.tenantRef}
            AND recurrence_rule IS NOT NULL
            AND (
              materialized_starts_at <> ${window.start}
              OR materialized_ends_at < ${window.end}
+           )
+           AND (
+             ${after?.materializedEndsAt ?? null}::timestamptz IS NULL
+             OR (materialized_ends_at, id) >
+                (${after?.materializedEndsAt ?? null}::timestamptz, ${after?.eventId ?? null}::uuid)
            )
          ORDER BY materialized_ends_at, id
          LIMIT ${limit + 1}`;
@@ -2272,7 +2342,8 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
                 SELECT id, tenant_ref, owner_ref, external_ref, resource_id, starts_at, ends_at, timezone,
                        summary, description, location, status, transparency, organizer, attendees,
                        reminders, recurrence_rule, recurrence_exceptions, materialized_starts_at,
-                       materialized_ends_at, revision, source, created_at, updated_at
+                       materialized_ends_at, recurrence_cursor, revision, source, created_at,
+                       updated_at
                   FROM slotlock.calendar_events
                  WHERE id = ${candidate.id} AND tenant_ref = ${params.tenantRef}
                  FOR UPDATE`;
@@ -2286,7 +2357,11 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
               }
               const childMap = await loadCalendarEventChildren(tx, [row.id]);
               const event = toCalendarEvent(row, childMap.get(row.id));
-              const occurrences = expandStoredCalendarEventOccurrences(event, window);
+              // From where its last expansion stopped, when that can be trusted; else its start.
+              const { occurrences, cursor } = expandCalendarEventSeries(event, window, {
+                cursor: row.recurrence_cursor ?? null,
+                stored: true,
+              });
               await replaceCalendarEventOccurrences(tx, {
                 tenantRef: params.tenantRef,
                 eventId: row.id,
@@ -2298,7 +2373,8 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
               await tx`
                 UPDATE slotlock.calendar_events
                    SET materialized_starts_at = ${window.start},
-                       materialized_ends_at = ${window.end}
+                       materialized_ends_at = ${window.end},
+                       recurrence_cursor = ${seriesCursorJson(tx, cursor)}
                  WHERE id = ${row.id} AND tenant_ref = ${params.tenantRef}`;
               return true;
             });
@@ -2306,9 +2382,9 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
             break;
           } catch (error) {
             if (error instanceof CalendarExpansionLimitError) {
-              // It now takes more than Slotlock expands (it is expanded from its start each time,
-              // so the search grows as the window moves). Nothing was written; its old coverage
-              // stays, and the masters after it still roll.
+              // It takes more than Slotlock expands: a rule that never occurs again, or one with no
+              // cursor to resume from whose search from its start has outgrown the budget. Nothing
+              // was written; its old coverage stays, and the masters after it still roll.
               refused += 1;
               refusedEventIds.push(candidate.id);
               break;
@@ -2331,13 +2407,17 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
           }
         }
       }
+      const last = due.at(-1);
+      const hasMore = candidates.length > limit;
       return {
         examined: due.length,
         extended,
         conflicts,
         refused,
         refusedEventIds,
-        hasMore: candidates.length > limit,
+        hasMore,
+        next:
+          hasMore && last ? { materializedEndsAt: last.materialized_ends_at, eventId: last.id } : null,
       };
     },
 

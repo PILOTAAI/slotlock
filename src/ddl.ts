@@ -1032,6 +1032,31 @@ $slotlock_calendar_event_window_bounds$;
 ALTER TABLE slotlock.calendar_events
   DROP CONSTRAINT IF EXISTS slotlock_calendar_events_materialization_window_valid;
 
+-- Where a recurring series' last expansion stopped (ical.js's iterator state as JSON), so the next
+-- one resumes there instead of searching again from the series' start. Only Slotlock writes it, and
+-- a cursor it cannot use is ignored: NULL is always correct. Every existing row is NULL, so the
+-- bound is added NOT VALID (no table scan under the lock).
+ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS recurrence_cursor jsonb;
+DO $slotlock_calendar_event_recurrence_cursor$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'slotlock_calendar_events_recurrence_cursor_bounded'
+       AND conrelid = 'slotlock.calendar_events'::regclass
+  ) THEN
+    ALTER TABLE slotlock.calendar_events
+      ADD CONSTRAINT slotlock_calendar_events_recurrence_cursor_bounded CHECK (
+        recurrence_cursor IS NULL
+        OR (
+          recurrence_rule IS NOT NULL
+          AND jsonb_typeof(recurrence_cursor) = 'object'
+          AND octet_length(recurrence_cursor::text) <= 32768
+        )
+      ) NOT VALID;
+  END IF;
+END
+$slotlock_calendar_event_recurrence_cursor$;
+
 CREATE OR REPLACE FUNCTION slotlock.prevent_calendar_event_owner_change()
 RETURNS trigger
 LANGUAGE plpgsql
