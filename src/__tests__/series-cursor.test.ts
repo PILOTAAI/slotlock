@@ -143,6 +143,31 @@ describe('expanding a stored series from where the last expansion left off', () 
     expect(lastStart).toEqual(london('2024-11-06', '09:00'));
   });
 
+  it('counts a COUNT series with several times a day to its end, resuming among its times', () => {
+    // ical.js keeps its place in BYHOUR as an index: resumed elsewhere in the list, it would
+    // revisit a time it has passed and count it again, ending the series early.
+    const event: CalendarEventContent = {
+      start: d('2027-01-04T09:00:00Z'),
+      end: d('2027-01-04T09:30:00Z'),
+      timezone: 'UTC',
+      summary: 'Inspection',
+      recurrence: { rrule: 'FREQ=DAILY;BYHOUR=9,13,17;COUNT=300' },
+    };
+    const windows = Array.from({ length: 12 }, (_, step) =>
+      windowFrom(new Date(d('2027-01-03T14:00:00Z').getTime() + step * 10 * DAY), 10),
+    );
+    const { results } = roll(event, windows, null);
+    expect(results.slice(1).some((result) => result?.resumed)).toBe(true);
+    const all = new Map<string, Date>();
+    for (const [index, window] of windows.entries()) {
+      expect(results[index]?.occurrences, `window ${index}`).toEqual(fromStart(event, window));
+      for (const occurrence of results[index]?.occurrences ?? []) {
+        all.set(occurrence.recurrenceId, occurrence.start);
+      }
+    }
+    expect(all.size).toBe(300);
+  });
+
   it('resumes a yearly rule within its year, where ical.js keeps its place among the days', () => {
     const event: CalendarEventContent = {
       ...dailySince2011,
@@ -286,6 +311,10 @@ describe('expanding a stored series from where the last expansion left off', () 
         (c) => ({ ...c, iterator: { ...(c.iterator as object), days_index: -1 } }),
       ],
       [
+        'its place among the days is past them',
+        (c) => ({ ...c, iterator: { ...(c.iterator as object), days_index: 5 } }),
+      ],
+      [
         'a time in it is malformed',
         (c) => ({
           ...c,
@@ -332,6 +361,9 @@ function random(seed: number) {
 }
 
 const RULES = [
+  'FREQ=DAILY;BYHOUR=1,2,3;COUNT=1500',
+  'FREQ=WEEKLY;BYDAY=MO,WE,FR;COUNT=400',
+  'FREQ=MONTHLY;BYMONTHDAY=1,10,20;COUNT=200',
   'FREQ=DAILY',
   'FREQ=DAILY;INTERVAL=3',
   'FREQ=DAILY;BYDAY=MO,WE,FR',
