@@ -87,6 +87,51 @@ request replaces "Unreleased" with the release date.
   end.
 - Every dashboard form but sign-out must carry its single-use value. A form sent without the value
   skipped the resend check and the per-person form limit.
+- A feed's series no longer take each other's exceptions. ical.js relates every VEVENT with a
+  RECURRENCE-ID in a calendar to every series, whatever its UID, by local time, so one series'
+  cancelled or moved 09:00 cancelled or moved every other series' 09:00 that day, and
+  `parseICalendarChanges` reported that time as free.
+- Converting a wall-clock time builds one Intl formatter per zone rather than one per conversion. A
+  feed of 20,000 dates now reads in about 0.3 seconds instead of 0.95 of its one-second limit, and a
+  stored daily series' window in about 50 milliseconds instead of 160.
+- A recurrence rule that never occurs, such as `FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30` or
+  `FREQ=DAILY;INTERVAL=7;BYDAY=TU` from a Monday, no longer freezes the process. Before, ical.js
+  2.2.1 searched for its next occurrence without limit, whether the rule came from a feed
+  (`parseICalendarChanges`), a write (`putCalendarEvent`), a library call
+  (`expandCalendarEventOccurrences`) or a stored series being rolled. The same held for a feed's own
+  time zone: ical.js expands a VTIMEZONE's rule to read a time in a zone Intl does not know, so one
+  such rule froze `parseICalendarChanges` or `parseTrustedICalendarEvents` on the first event,
+  repeating or not. A huge `DURATION` did the same with no rule at all, since ical.js adds a span to
+  a time a month at a time. Reading or expanding a calendar now has these limits, and one that
+  needs more is refused as `invalid_icalendar` (`invalid_event` on a write):
+  - a feed, and a stored series as maintenance rolls it: 50,000 search steps (its time zones
+    included) and one second for the whole read, from the text on;
+  - one event as it is written or asked about (`putCalendarEvent`,
+    `expandCalendarEventOccurrences`): half of that, so a daily or rarer series written today keeps
+    rolling for decades as its search grows;
+  - a SECONDLY to WEEKLY step, a `DURATION`, a DTEND after its DTSTART, or an occurrence moved by an
+    exception: about a century at most (36,600 days);
+  - 1,000 RDATE and EXDATE values per event;
+  - per feed: 100 VTIMEZONEs (counted in the text before ical.js parses it, and again after),
+    1,000 observances and 2,000 RDATE values in them, and 20,000 RDATE and EXDATE values in its
+    events. Before, a zone of 40,000 RDATE values (expanded again for each later year read) ran a
+    feed out of memory, an exception for every later occurrence (`RANGE=THISANDFUTURE`) read a slow
+    zone for minutes outside the search limit, and a TZID none of 20,000 zones defined held a read
+    for 31 seconds;
+  - per property: 8 KB of name and parameters, and 100 parameters, before its value. ical.js reads
+    each parameter by searching to the end of the line, and 490,000 of them on one line held a read
+    for 7.9 seconds before any other limit applied.
+
+  ical.js also expands a feed's own zone again, from its start, each time it reads a later year,
+  appending every change to those it had. A zone at those limits, read for 1,000 later years inside
+  one call, took up to 35 seconds and 650 MB. Each expansion now keeps one copy, and the time limit
+  is checked before each.
+
+  `rollCalendarEventHorizon` skips a stored series that goes past these limits, which includes a
+  daily series about 11 years after its start (4,000 occurrences). It counts the series in the new
+  `refused` field and lists it in `refusedEventIds`, keeps its old coverage, and still rolls the
+  series after it. Before, such a series made every roll for its tenant throw. A series Slotlock
+  cannot read at all still fails the roll. The maintenance example sums `refused`.
 
 ### Added
 

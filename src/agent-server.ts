@@ -31,6 +31,7 @@ import {
   restQueryInput,
   slotlockOpenApiDocument,
 } from './rest-api.js';
+import {
   SLOTLOCK_CALENDAR_HORIZON_DAYS,
   SLOTLOCK_MAX_EVENT_DURATION_DAYS,
   calendarEventRollingHorizon,
