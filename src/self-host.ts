@@ -29,6 +29,17 @@ import {
   createSlotlockDashboardResources,
   createSlotlockDashboardState,
 } from './dashboard.js';
+import {
+  SECRET_HINT,
+  SlotlockConfigError,
+  type SlotlockEnv,
+  type SlotlockServeDashboardConfig,
+  optional,
+  readAvailability,
+  readDashboardConfig,
+  readSecret,
+  readServerUrl,
+} from './config.js';
 import { SLOTLOCK_DASHBOARD_FUNCTIONS } from './ddl.js';
 import {
   type SlotlockNodeServerAddress,
@@ -37,13 +48,9 @@ import {
 } from './node-server.js';
 import { type SlotlockSql, createSlotlockStore } from './store.js';
 import type { SlotlockResource, WeeklyAvailabilityRule } from './types.js';
-import {
-  SLOTLOCK_MAX_AVAILABILITY_RULES,
-  availabilityRuleProblem,
-  parseAvailabilityRules,
-} from './weekly-hours.js';
+import { parseAvailabilityRules } from './weekly-hours.js';
 
-export type SlotlockEnv = Readonly<Record<string, string | undefined>>;
+export { SlotlockConfigError, type SlotlockEnv, type SlotlockServeDashboardConfig };
 
 /** Every variable the commands read. The README, `.env.example` and `server.json` document these. */
 export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
@@ -72,11 +79,6 @@ const SELF_HOST_SUBJECT = 'self-host';
 /** Who `key create` records as a key's creator. */
 const CLI_KEY_CREATOR = 'cli';
 const DAY_MS = 86_400_000;
-const MIN_SECRET_CHARACTERS = 32;
-/** Rejects repeated or patterned values (`aaaa…`, `abcabc…`); random hex has about 16. */
-const MIN_DISTINCT_SECRET_CHARACTERS = 10;
-const PLACEHOLDER_SECRET = /change.?me|replace.?me|example|placeholder/i;
-const SECRET_HINT = 'generate one with `openssl rand -hex 32`';
 const WRITE_OPERATIONS: readonly SlotlockAgentWriteOperation[] = [
   'slotlock_create_event',
   'slotlock_update_event',
@@ -101,14 +103,6 @@ const HEALTHCHECK_TIMEOUT_MS = 5_000;
 const POOL_SIZE = 10;
 const RESOURCE_PAGE_SIZE = 1_000;
 
-/** A configuration a command refuses to run with. The message names the variable, never its value. */
-export class SlotlockConfigError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'SlotlockConfigError';
-  }
-}
-
 export interface SlotlockDatabaseConfig {
   /** The role `serve` and `resource` connect as. */
   databaseUrl: string;
@@ -118,15 +112,6 @@ export interface SlotlockDatabaseConfig {
    */
   migrateDatabaseUrl?: string;
   tenantRef: string;
-}
-
-/** The GitHub sign-in dashboard (dashboard.ts), served at `<publicUrl>/dashboard` when configured. */
-export interface SlotlockServeDashboardConfig {
-  githubClientId: string;
-  githubClientSecret: string;
-  sessionSecret: string;
-  /** GitHub user ids that may sign in, or `'*'` for every GitHub account. */
-  allowedUsers: '*' | string[];
 }
 
 export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
@@ -149,33 +134,6 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
   dashboard?: SlotlockServeDashboardConfig;
   /** Serve the REST API under /v1 and its OpenAPI document (SLOTLOCK_REST_API=on). */
   restApi: boolean;
-}
-
-/** An unset variable and an empty one (`FOO=` in an env file) both mean "not configured". */
-function optional(env: SlotlockEnv, name: string): string | undefined {
-  const value = env[name]?.trim();
-  return value === undefined || value === '' ? undefined : value;
-}
-
-function readSecret(env: SlotlockEnv, name: string): string | undefined {
-  const value = env[name];
-  if (value === undefined || value.trim() === '') return undefined;
-  // Not trimmed: a stray newline from `$(cat file)` would make the server and its clients disagree.
-  if (!/^[\x21-\x7e]+$/.test(value)) {
-    throw new SlotlockConfigError(
-      `${name} must be printable ASCII without spaces or line breaks; ${SECRET_HINT}`,
-    );
-  }
-  if (
-    value.length < MIN_SECRET_CHARACTERS ||
-    new Set(value).size < MIN_DISTINCT_SECRET_CHARACTERS ||
-    PLACEHOLDER_SECRET.test(value)
-  ) {
-    throw new SlotlockConfigError(
-      `${name} is too weak: use at least ${MIN_SECRET_CHARACTERS} random characters; ${SECRET_HINT}`,
-    );
-  }
-  return value;
 }
 
 function readDatabaseUrl(env: SlotlockEnv, name: string): string | undefined {
@@ -212,28 +170,6 @@ function readHost(env: SlotlockEnv): string {
   return value;
 }
 
-function readPublicUrl(env: SlotlockEnv, port: number): string {
-  const value = optional(env, 'SLOTLOCK_PUBLIC_URL') ?? `http://localhost:${port}`;
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    throw new SlotlockConfigError('SLOTLOCK_PUBLIC_URL must be an absolute URL');
-  }
-  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname);
-  if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && loopback)) {
-    throw new SlotlockConfigError(
-      'SLOTLOCK_PUBLIC_URL must use https://, or http:// on localhost, 127.0.0.1 or [::1]; terminate TLS at a reverse proxy for anything else',
-    );
-  }
-  if (parsed.username || parsed.password || value.includes('?') || value.includes('#')) {
-    throw new SlotlockConfigError(
-      'SLOTLOCK_PUBLIC_URL must be an origin with an optional path, without credentials, query or fragment',
-    );
-  }
-  return parsed.href.replace(/\/$/, '');
-}
-
 function readTenant(env: SlotlockEnv): string {
   const value = optional(env, 'SLOTLOCK_TENANT') ?? DEFAULT_TENANT;
   const control = Array.from(value).some((character) => {
@@ -261,99 +197,6 @@ function readConfirmWrites(env: SlotlockEnv): SlotlockAgentWriteOperation[] {
     if (!operations.includes(operation)) operations.push(operation);
   }
   return operations;
-}
-
-/**
- * `SLOTLOCK_AVAILABILITY`: a JSON array of weekly rules. Each must produce a window in a two-week
- * sample, so a rule `expandRules` cannot evaluate (anything but FREQ=WEEKLY, BYDAY, INTERVAL=1 and
- * an absolute UNTIL) is a startup error instead of silently making every resource unbookable.
- */
-function readAvailability(env: SlotlockEnv): WeeklyAvailabilityRule[] {
-  const value = optional(env, 'SLOTLOCK_AVAILABILITY');
-  if (value === undefined) return [];
-  const invalid = (detail: string) =>
-    new SlotlockConfigError(
-      `SLOTLOCK_AVAILABILITY must be a JSON array of at most ${SLOTLOCK_MAX_AVAILABILITY_RULES} weekly rules like {"rrule":"FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR","startMinutes":540,"durationMinutes":480}: ${detail}`,
-    );
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(value);
-  } catch {
-    throw invalid('it is not valid JSON');
-  }
-  if (!Array.isArray(parsed) || parsed.length > SLOTLOCK_MAX_AVAILABILITY_RULES) {
-    throw invalid('it is not an array of rules');
-  }
-  return parsed.map((candidate: unknown, index) => {
-    const problem = availabilityRuleProblem(candidate);
-    if (problem === 'shape') {
-      throw invalid(
-        `rule ${index} needs rrule (string), startMinutes (0-1439) and durationMinutes (1-10080)`,
-      );
-    }
-    if (problem === 'unsupported') {
-      throw invalid(`rule ${index} is not a weekly rule with BYDAY that Slotlock can evaluate`);
-    }
-    const rule = candidate as WeeklyAvailabilityRule;
-    return {
-      rrule: rule.rrule,
-      startMinutes: rule.startMinutes,
-      durationMinutes: rule.durationMinutes,
-    };
-  });
-}
-
-const DASHBOARD_VARIABLES = [
-  'SLOTLOCK_GITHUB_CLIENT_ID',
-  'SLOTLOCK_GITHUB_CLIENT_SECRET',
-  'SLOTLOCK_SESSION_SECRET',
-  'SLOTLOCK_DASHBOARD_USERS',
-] as const;
-
-/**
- * The dashboard's settings, or undefined when none is set. Setting any of them means serving the
- * dashboard, so the rest are then required: a half-configured sign-in is a startup error.
- */
-function readDashboard(env: SlotlockEnv): SlotlockServeDashboardConfig | undefined {
-  if (DASHBOARD_VARIABLES.every((name) => optional(env, name) === undefined)) return undefined;
-  const githubClientId = optional(env, 'SLOTLOCK_GITHUB_CLIENT_ID');
-  if (githubClientId === undefined || !/^[A-Za-z0-9._-]{1,100}$/.test(githubClientId)) {
-    throw new SlotlockConfigError(
-      'SLOTLOCK_GITHUB_CLIENT_ID is required to serve the dashboard: the Client ID of a GitHub OAuth app whose callback URL is <SLOTLOCK_PUBLIC_URL>/dashboard/callback',
-    );
-  }
-  const githubClientSecret = readSecret(env, 'SLOTLOCK_GITHUB_CLIENT_SECRET');
-  if (githubClientSecret === undefined) {
-    throw new SlotlockConfigError(
-      'SLOTLOCK_GITHUB_CLIENT_SECRET is required to serve the dashboard: a client secret of that GitHub OAuth app',
-    );
-  }
-  const sessionSecret = readSecret(env, 'SLOTLOCK_SESSION_SECRET');
-  if (sessionSecret === undefined) {
-    throw new SlotlockConfigError(
-      `SLOTLOCK_SESSION_SECRET is required to serve the dashboard: it signs sign-in sessions; ${SECRET_HINT}`,
-    );
-  }
-  const others = [
-    env.SLOTLOCK_GITHUB_CLIENT_SECRET,
-    env.SLOTLOCK_AUTH_TOKEN,
-    env.SLOTLOCK_CONFIRMATION_SECRET,
-  ];
-  if (others.includes(sessionSecret)) {
-    throw new SlotlockConfigError('SLOTLOCK_SESSION_SECRET must differ from every other secret');
-  }
-  const users = optional(env, 'SLOTLOCK_DASHBOARD_USERS')?.replaceAll(' ', '');
-  if (users === undefined || (users !== '*' && !/^[1-9]\d{0,19}(,[1-9]\d{0,19})*$/.test(users))) {
-    throw new SlotlockConfigError(
-      'SLOTLOCK_DASHBOARD_USERS is required to serve the dashboard: * for every GitHub account, or a comma-separated list of GitHub user ids (gh api users/<login> --jq .id)',
-    );
-  }
-  return {
-    githubClientId,
-    githubClientSecret,
-    sessionSecret,
-    allowedUsers: users === '*' ? '*' : [...new Set(users.split(','))],
-  };
 }
 
 export function readSlotlockDatabaseConfig(env: SlotlockEnv): SlotlockDatabaseConfig {
@@ -401,13 +244,13 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
     ...database,
     host: readHost(env),
     port,
-    publicUrl: readPublicUrl(env, port),
+    publicUrl: readServerUrl(env, 'SLOTLOCK_PUBLIC_URL', `http://localhost:${port}`),
     confirmWrites,
     availability: readAvailability(env),
     restApi: readRestApi(env),
   };
   if (authToken !== undefined) config.authToken = authToken;
-  const dashboard = readDashboard(env);
+  const dashboard = readDashboardConfig(env);
   if (dashboard !== undefined) config.dashboard = dashboard;
   if (confirmWrites.length > 0 && confirmationSecret !== undefined) {
     config.confirmationSecret = confirmationSecret;
@@ -425,7 +268,8 @@ export function slotlockHealthcheckUrl(env: SlotlockEnv): string {
     throw new SlotlockConfigError('PORT must name the listening port to check health');
   const host = readHost(env);
   const target = host === '0.0.0.0' ? '127.0.0.1' : host === '::' ? '::1' : host;
-  const basePath = new URL(readPublicUrl(env, port)).pathname.replace(/\/$/, '');
+  const publicUrl = readServerUrl(env, 'SLOTLOCK_PUBLIC_URL', `http://localhost:${port}`);
+  const basePath = new URL(publicUrl).pathname.replace(/\/$/, '');
   return `http://${target.includes(':') ? `[${target}]` : target}:${port}${basePath}/healthz`;
 }
 

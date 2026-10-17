@@ -1,0 +1,40 @@
+// app.slotlock.pylota.io: the Slotlock dashboard (src/dashboard.ts) as a Worker. Agents use the
+// server at SLOTLOCK_SERVICE_URL; this Worker reaches the same Postgres through Hyperdrive.
+// Config reference: https://developers.cloudflare.com/workers/wrangler/configuration/ (read 2026-10-17).
+//
+// Before the first deploy (README "Dashboard on Cloudflare Workers"):
+//   - a Hyperdrive configuration with caching disabled, whose id goes in `hyperdrive` below;
+//   - the secrets, with `npx wrangler secret put <NAME>` from this directory:
+//       SLOTLOCK_GITHUB_CLIENT_ID      the GitHub OAuth app's Client ID
+//       SLOTLOCK_GITHUB_CLIENT_SECRET  a client secret of that app
+//       SLOTLOCK_SESSION_SECRET        32+ random characters (openssl rand -hex 32)
+//
+// Local development: CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE=postgres://… and a
+// .dev.vars file with the three secrets and SLOTLOCK_PUBLIC_URL=http://localhost:8788.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "slotlock-dashboard",
+  "main": "worker.ts",
+  // From 2026-08-04 the Node.js APIs the dashboard uses (node:crypto, node:async_hooks, Buffer) are
+  // on by default.
+  "compatibility_date": "2026-10-01",
+  // A Custom Domain gets its own certificate, two levels below pylota.io included. No Worker route
+  // in the zone may match the hostname: a route runs before a Custom Domain.
+  "routes": [{ "pattern": "app.slotlock.pylota.io", "custom_domain": true }],
+  "workers_dev": false,
+  "preview_urls": false,
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      // Not a secret. Set from the Hyperdrive configuration the infrastructure creates.
+      "id": "set-this-to-the-hyperdrive-configuration-id"
+    }
+  ],
+  "vars": {
+    "SLOTLOCK_PUBLIC_URL": "https://app.slotlock.pylota.io",
+    "SLOTLOCK_SERVICE_URL": "https://slotlock-api.pylota.io",
+    // Every GitHub account may sign in, each to its own tenant.
+    "SLOTLOCK_DASHBOARD_USERS": "*"
+  },
+  "observability": { "enabled": true }
+}
