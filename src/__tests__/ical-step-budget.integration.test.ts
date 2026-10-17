@@ -96,6 +96,7 @@ describe.skipIf(!url)('the expansion budget in the store (real Postgres)', () =>
       refused: 1,
       refusedEventIds: [stuckId],
       hasMore: false,
+      next: null,
     });
 
     await expect(

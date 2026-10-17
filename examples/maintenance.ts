@@ -1,6 +1,11 @@
 // Scheduled maintenance: run at least daily for every tenant, as the application role.
 // #region maintenance
-import { type SlotlockStore, calendarEventRollingHorizon } from 'slotlock';
+import {
+  type CalendarHorizonRollCursor,
+  type CalendarHorizonRollResult,
+  type SlotlockStore,
+  calendarEventRollingHorizon,
+} from 'slotlock';
 
 const MAX_BATCHES = 10;
 
@@ -10,14 +15,17 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
   let conflicts = 0;
   let refused = 0;
   let horizonCapped = true;
+  let after: CalendarHorizonRollCursor | null = null;
   for (let batch = 0; batch < MAX_BATCHES; batch++) {
-    const roll = await store.withTenant(tenantRef, (tenant) =>
-      tenant.rollCalendarEventHorizon({ tenantRef, window }),
+    const from = after;
+    const roll: CalendarHorizonRollResult = await store.withTenant(tenantRef, (tenant) =>
+      tenant.rollCalendarEventHorizon({ tenantRef, window, ...(from ? { after: from } : {}) }),
     );
     extended += roll.extended;
     conflicts += roll.conflicts;
     refused += roll.refused;
-    if (!roll.hasMore) {
+    after = roll.next;
+    if (!after) {
       horizonCapped = false;
       break;
     }

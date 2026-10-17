@@ -256,6 +256,12 @@ export type CancelCalendarEventResult =
   | { ok: false; code: 'owner_command_quota_exceeded'; limit: number }
   | { ok: false; code: 'revision_conflict'; currentRevision: number };
 
+/** A place in the roll's order of due masters: the last one a batch examined. */
+export interface CalendarHorizonRollCursor {
+  materializedEndsAt: Date;
+  eventId: string;
+}
+
 /** Content-minimized outcome of one bounded recurring-event horizon maintenance batch. */
 export interface CalendarHorizonRollResult {
   /** Due recurring masters examined in deterministic order. */
@@ -273,6 +279,12 @@ export interface CalendarHorizonRollResult {
   refusedEventIds: string[];
   /** True when more due masters remain beyond this bounded batch. */
   hasMore: boolean;
+  /**
+   * Pass as `after` for the next batch of this pass, so the masters this batch left behind (in
+   * conflict or refused, which keep their place at the front of the order) are not examined again
+   * by every later batch. `null` when none remain.
+   */
+  next: CalendarHorizonRollCursor | null;
 }
 
 export interface CalendarEventRetentionResult {
