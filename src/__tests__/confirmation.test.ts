@@ -797,6 +797,20 @@ describe('a confirmation question a person can trust', () => {
     expect(isBookableRecurrenceRule(rule)).toBe(false);
   });
 
+  it("gives a time its offset in the resource's own zone when its clocks change that day", async () => {
+    // London's clocks go back at 02:00 BST on 31 October 2027, so 01:15 happens twice that night.
+    expect(
+      await asked({ ...BOOKING, starts_at: '2027-10-31T00:15:00Z', ends_at: '2027-10-31T00:45:00Z' }),
+    ).toBe(
+      'Book vehicle-42 for 2027-10-31 01:15–01:45 UTC+01:00 (Europe/London): "Vehicle handover".',
+    );
+    expect(
+      await asked({ ...BOOKING, starts_at: '2027-10-31T01:15:00Z', ends_at: '2027-10-31T01:45:00Z' }),
+    ).toBe(
+      'Book vehicle-42 for 2027-10-31 01:15–01:45 UTC+00:00 (Europe/London): "Vehicle handover".',
+    );
+  });
+
   it('books the rules agents need, rare ones included', () => {
     for (const rule of [
       'FREQ=DAILY;BYMONTH=2;BYMONTHDAY=29',
@@ -840,7 +854,7 @@ describe('a confirmation question a person can trust', () => {
         'Book vehicle-42 8 times before 2027-10-11, from 2027-03-02 09:00–10:00 to 2027-10-02 09:00–10:00 (Europe/London), repeating FREQ=MONTHLY;UNTIL=20281231T000000Z, until 2028-12-31: "Vehicle handover".',
       );
       expect(await asked({ ...BOOKING, recurrence_rule: 'FREQ=WEEKLY;BYDAY=TU;COUNT=40' })).toBe(
-        'Book vehicle-42 32 times before 2027-10-11, from 2027-03-02 09:00–10:00 to 2027-10-05 09:00–10:00 (Europe/London), repeating FREQ=WEEKLY;COUNT=40;BYDAY=TU, 40 counted by its rule, cancelled ones included: "Vehicle handover".',
+        'Book vehicle-42 32 times before 2027-10-11, from 2027-03-02 09:00–10:00 to 2027-10-05 09:00–10:00 (Europe/London), repeating FREQ=WEEKLY;COUNT=40;BYDAY=TU, 40 counted by its rule, moved and cancelled ones included: "Vehicle handover".',
       );
     });
 
@@ -882,7 +896,34 @@ describe('a confirmation question a person can trust', () => {
           ],
         }),
       ).toBe(
-        'Book vehicle-42 2 times before 2027-10-11, from 2027-03-02 09:00–10:00 to 2027-03-13 03:00–04:00 (Europe/London), repeating FREQ=WEEKLY;COUNT=3;BYDAY=TU, 3 counted by its rule, cancelled ones included, 1 moved (2027-03-16 09:00 to 2027-03-13 03:00–04:00): "Vehicle handover".',
+        'Book vehicle-42 2 times before 2027-10-11, from 2027-03-02 09:00–10:00 to 2027-03-13 03:00–04:00 (Europe/London), repeating FREQ=WEEKLY;COUNT=3;BYDAY=TU, 3 counted by its rule, moved and cancelled ones included, 1 moved (2027-03-16 09:00 to 2027-03-13 03:00–04:00): "Vehicle handover".',
+      );
+    });
+
+    it('names an occurrence moved past the window the store keeps booked, which it books later', async () => {
+      const moved = {
+        recurrence_id: '2027-03-03T09:00:00Z',
+        starts_at: '2027-10-31T13:00:00Z',
+        ends_at: '2027-10-31T18:00:00Z',
+      };
+      expect(
+        await asked({
+          ...BOOKING,
+          recurrence_rule: 'FREQ=DAILY;COUNT=2',
+          recurrence_exceptions: [moved],
+        }),
+      ).toBe(
+        'Book vehicle-42 1 time before 2027-10-11, from 2027-03-02 09:00–10:00 to 2027-03-02 09:00–10:00 (Europe/London), repeating FREQ=DAILY;COUNT=2, 2 counted by its rule, moved and cancelled ones included, 1 moved past 2027-10-11 (2027-03-03 09:00 to 2027-10-31 13:00–18:00 UTC+00:00): "Vehicle handover".',
+      );
+      // An exception for an occurrence the rule never makes moves nothing, there or here.
+      expect(
+        await asked({
+          ...BOOKING,
+          recurrence_rule: 'FREQ=DAILY;COUNT=2',
+          recurrence_exceptions: [{ ...moved, recurrence_id: '2027-03-05T09:00:00Z' }],
+        }),
+      ).toBe(
+        'Book vehicle-42 2 times, from 2027-03-02 09:00–10:00 to 2027-03-03 09:00–10:00 (Europe/London), repeating FREQ=DAILY;COUNT=2: "Vehicle handover".',
       );
     });
 
