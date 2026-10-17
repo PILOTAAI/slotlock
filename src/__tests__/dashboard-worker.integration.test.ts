@@ -10,12 +10,28 @@ import { createSlotlockApiKeyStore } from '../api-keys.js';
 import { createSlotlockStore } from '../store.js';
 import {
   type SlotlockDashboardWorkerEnv,
+  type SlotlockRateLimit,
   createSlotlockDashboardWorker,
 } from '../../workers/dashboard/worker.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
 const APP = 'https://app.slotlock.example.com';
 const SERVICE = 'https://slotlock-api.example.com';
+
+/** A rate limiting binding that allows `allowed` calls per key, and records every key it is asked. */
+function limiter(allowed = Number.POSITIVE_INFINITY): SlotlockRateLimit & { asked: string[] } {
+  const counts = new Map<string, number>();
+  const asked: string[] = [];
+  return {
+    asked,
+    async limit({ key }) {
+      asked.push(key);
+      const count = (counts.get(key) ?? 0) + 1;
+      counts.set(key, count);
+      return { success: count <= allowed };
+    },
+  };
+}
 
 describe.skipIf(!url)('the dashboard Worker (real Postgres)', () => {
   const role = `slotlock_worker_${randomUUID().replaceAll('-', '').slice(0, 16)}`;
@@ -46,6 +62,8 @@ describe.skipIf(!url)('the dashboard Worker (real Postgres)', () => {
       SLOTLOCK_GITHUB_CLIENT_SECRET: randomBytes(20).toString('hex'),
       SLOTLOCK_SESSION_SECRET: randomBytes(32).toString('hex'),
       SLOTLOCK_DASHBOARD_USERS: '*',
+      SLOTLOCK_CLIENT_RATE_LIMIT: limiter(),
+      SLOTLOCK_SIGN_IN_RATE_LIMIT: limiter(),
     };
   });
 
@@ -132,7 +150,10 @@ describe.skipIf(!url)('the dashboard Worker (real Postgres)', () => {
     const redirecting: typeof fetch = async (input, init) => {
       asked.push(String(input));
       expect(init?.redirect).toBe('manual');
-      return new Response(null, { status: 302, headers: { location: 'https://elsewhere.example' } });
+      return new Response(null, {
+        status: 302,
+        headers: { location: 'https://elsewhere.example' },
+      });
     };
     const worker = createSlotlockDashboardWorker({ fetch: redirecting });
     const start = await worker.fetch(new Request(`${APP}/dashboard/sign-in`), env, ctx);
@@ -144,9 +165,9 @@ describe.skipIf(!url)('the dashboard Worker (real Postgres)', () => {
       ctx,
     );
     expect(callback.status).toBe(502);
-    expect(callback.headers.getSetCookie().some((value) => value.includes('slotlock-session'))).toBe(
-      false,
-    );
+    expect(
+      callback.headers.getSetCookie().some((value) => value.includes('slotlock-session')),
+    ).toBe(false);
     expect(asked).toEqual(['https://github.com/login/oauth/access_token']);
   });
 
@@ -185,6 +206,73 @@ describe.skipIf(!url)('the dashboard Worker (real Postgres)', () => {
     release();
     const finished = await Promise.all(inFlight);
     expect(finished.map((response) => response.status)).toEqual(Array(8).fill(303));
+  });
+
+  it('refuses a client over its limit before it opens a database client or asks GitHub', async () => {
+    const asked: string[] = [];
+    const counting: typeof fetch = async (input, init) => {
+      asked.push(String(input));
+      return github(input, init);
+    };
+    const client = limiter(2);
+    // No database answers at this address: a request that reached one would fail, not answer 429.
+    const unreachable = {
+      ...env,
+      HYPERDRIVE: { connectionString: 'postgres://nobody:nothing@127.0.0.1:9/none' },
+      SLOTLOCK_CLIENT_RATE_LIMIT: client,
+    };
+    const worker = createSlotlockDashboardWorker({ fetch: counting });
+    const from = (address: string, path: string) =>
+      worker.fetch(
+        new Request(`${APP}${path}`, { headers: { 'cf-connecting-ip': address } }),
+        unreachable,
+        ctx,
+      );
+    expect((await from('203.0.113.7', '/dashboard/sign-in')).status).toBe(302);
+    expect((await from('203.0.113.7', '/dashboard/sign-in')).status).toBe(302);
+    const refused = await from('203.0.113.7', '/dashboard/callback?code=c&state=s');
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get('retry-after')).toBe('60');
+    expect(asked).toEqual([]);
+    // Another address has its own count.
+    expect((await from('198.51.100.4', '/dashboard/sign-in')).status).toBe(302);
+    expect(client.asked).toEqual([
+      'client:203.0.113.7',
+      'client:203.0.113.7',
+      'client:203.0.113.7',
+      'client:198.51.100.4',
+    ]);
+  });
+
+  it('bounds sign-ins from every client together, wherever they come from', async () => {
+    const signIn = limiter(2);
+    const worker = createSlotlockDashboardWorker({ fetch: github });
+    const limited = { ...env, SLOTLOCK_SIGN_IN_RATE_LIMIT: signIn };
+    const statuses: number[] = [];
+    for (const address of ['192.0.2.1', '192.0.2.2', '192.0.2.3']) {
+      const response = await worker.fetch(
+        new Request(`${APP}/dashboard/sign-in`, { headers: { 'cf-connecting-ip': address } }),
+        limited,
+        ctx,
+      );
+      statuses.push(response.status);
+    }
+    expect(statuses).toEqual([302, 302, 429]);
+    // The dashboard's other pages are not sign-ins.
+    const page = await worker.fetch(new Request(`${APP}/dashboard`), limited, ctx);
+    expect(page.status).toBe(200);
+    expect(signIn.asked).toEqual(['sign-in', 'sign-in', 'sign-in']);
+  });
+
+  it('does not serve without its rate limits', async () => {
+    const { SLOTLOCK_SIGN_IN_RATE_LIMIT: _, ...unlimited } = env;
+    const worker = createSlotlockDashboardWorker({ fetch: github });
+    const response = await worker.fetch(
+      new Request(`${APP}/dashboard/sign-in`),
+      unlimited as SlotlockDashboardWorkerEnv,
+      ctx,
+    );
+    expect(response.status).toBe(503);
   });
 
   it('closes every client it opens', async () => {

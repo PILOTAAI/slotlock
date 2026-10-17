@@ -30,10 +30,11 @@ request replaces "Unreleased" with the release date.
   described by an OpenAPI 3.1 document at `/openapi.json` built from the tools' own schemas, behind
   the same authentication, scopes, `authorize` and rate limit. A write that waits for a person
   answers 428 `confirmation_required`. `onEvent` reports each call's operation and status.
-- The dashboard as a Cloudflare Worker (`workers/dashboard`, deployed by the Dashboard workflow): the
-  same pages at an origin of their own, over Hyperdrive with caching off, one database client per
-  request. `createSlotlockDashboard` takes `serviceUrl`, the server whose MCP and A2A URLs it shows
-  when it is served from elsewhere.
+- The dashboard as a Cloudflare Worker (`workers/dashboard`): the same pages at an origin of their
+  own, over Hyperdrive with caching off, one database client per request, and two required rate
+  limiting bindings that bound sign-ins across every isolate. The Dashboard workflow only bundles
+  it; deployments use their own configuration and token. `createSlotlockDashboard` takes
+  `serviceUrl`, the server whose MCP and A2A URLs it shows when it is served from elsewhere.
 - The image carries the label `service="slotlock"`, which Kamal requires of an image it pulls rather
   than builds, so a release image can be deployed with Kamal as the service `slotlock`.
 - A dashboard at `<SLOTLOCK_PUBLIC_URL>/dashboard` (`createSlotlockDashboard`), served by `serve`

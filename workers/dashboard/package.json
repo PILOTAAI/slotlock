@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "app.slotlock.pylota.io: the Slotlock dashboard as a Cloudflare Worker.",
+  "description": "The Slotlock dashboard as a Cloudflare Worker.",
   "license": "Apache-2.0",
   "engines": {
     "node": ">=22.12.0"

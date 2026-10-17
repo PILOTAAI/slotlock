@@ -6,7 +6,8 @@
 // A Worker may not use a database client from another request, so each request opens its own
 // (Hyperdrive keeps the connections). The dashboard is built once per isolate, like one
 // `slotlock serve` process, and reaches the request's client through AsyncLocalStorage, so its
-// limit on sign-ins in flight holds across the requests the isolate serves.
+// limit on sign-ins in flight holds across the requests that isolate serves. Workers run many
+// isolates, so two rate limiting bindings bound the requests of all of them together.
 import { AsyncLocalStorage } from 'node:async_hooks';
 import postgres from 'postgres';
 import { type SlotlockApiKeyStore, createSlotlockApiKeyStore } from '../../src/api-keys.js';
@@ -27,9 +28,22 @@ import {
 } from '../../src/dashboard.js';
 import { createSlotlockStore } from '../../src/store.js';
 
+/**
+ * A Workers rate limiting binding (developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit,
+ * read 2026-10-18). Its counts are per Cloudflare location and eventually consistent: it bounds a
+ * flood, it is not an exact quota.
+ */
+export interface SlotlockRateLimit {
+  limit(options: { key: string }): Promise<{ success: boolean }>;
+}
+
 /** What wrangler.jsonc and `wrangler secret put` give the Worker. */
 export interface SlotlockDashboardWorkerEnv {
   HYPERDRIVE: { connectionString: string };
+  /** Every dashboard request, counted per client address (CF-Connecting-IP). */
+  SLOTLOCK_CLIENT_RATE_LIMIT?: SlotlockRateLimit;
+  /** GitHub sign-ins and their callbacks, counted for every client together. */
+  SLOTLOCK_SIGN_IN_RATE_LIMIT?: SlotlockRateLimit;
   [name: string]: unknown;
 }
 
@@ -63,6 +77,17 @@ function perRequest<T extends object>(current: () => T): T {
   });
 }
 
+function isRateLimit(value: unknown): value is SlotlockRateLimit {
+  return typeof (value as SlotlockRateLimit | undefined)?.limit === 'function';
+}
+
+function tooManyRequests(): Response {
+  return new Response('Too many requests. Try again in a minute.', {
+    status: 429,
+    headers: { 'content-type': 'text/plain; charset=utf-8', 'retry-after': '60' },
+  });
+}
+
 /** The Worker's variables and secrets, the text ones only, as the configuration readers take them. */
 function variables(env: SlotlockDashboardWorkerEnv): SlotlockEnv {
   return Object.fromEntries(
@@ -77,9 +102,26 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
     if (!found) throw new Error('The Slotlock dashboard was used outside a request');
     return found;
   };
-  let built: { dashboard: SlotlockDashboard; root: string } | undefined;
+  let built:
+    | {
+        dashboard: SlotlockDashboard;
+        root: string;
+        signInPaths: Set<string>;
+        limits: { client: SlotlockRateLimit; signIn: SlotlockRateLimit };
+      }
+    | undefined;
 
   function build(env: SlotlockDashboardWorkerEnv) {
+    // A sign-in costs a database write and a request to GitHub under the app's client secret, and
+    // anyone may start one, while the limit on sign-ins in flight is one isolate's and Workers run
+    // many: without these bindings nothing bounds them all together, so the Worker does not serve.
+    const client = env.SLOTLOCK_CLIENT_RATE_LIMIT;
+    const signIn = env.SLOTLOCK_SIGN_IN_RATE_LIMIT;
+    if (!isRateLimit(client) || !isRateLimit(signIn)) {
+      throw new SlotlockConfigError(
+        'the SLOTLOCK_CLIENT_RATE_LIMIT and SLOTLOCK_SIGN_IN_RATE_LIMIT rate limiting bindings are required',
+      );
+    }
     const vars = variables(env);
     const publicUrl = readServerUrl(vars, 'SLOTLOCK_PUBLIC_URL');
     const serviceUrl = readServerUrl(vars, 'SLOTLOCK_SERVICE_URL');
@@ -111,7 +153,14 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
         ),
       ...(options.fetch ? { fetch: options.fetch } : {}),
     });
-    return { dashboard, root: `${publicUrl}/dashboard` };
+    const root = `${publicUrl}/dashboard`;
+    const base = new URL(root).pathname;
+    return {
+      dashboard,
+      root,
+      signInPaths: new Set([`${base}/sign-in`, `${base}/callback`]),
+      limits: { client, signIn },
+    };
   }
 
   return {
@@ -133,13 +182,22 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
           headers: { 'content-type': 'text/plain; charset=utf-8' },
         });
       }
-      const { dashboard, root } = built;
-      if (new URL(request.url).pathname === '/') return Response.redirect(root, 302);
+      const { dashboard, root, signInPaths, limits } = built;
+      const path = new URL(request.url).pathname;
+      if (path === '/') return Response.redirect(root, 302);
       if (!dashboard.handles(request)) {
         return new Response('Not found', {
           status: 404,
           headers: { 'content-type': 'text/plain; charset=utf-8' },
         });
+      }
+      // Before any database client or GitHub request. Cloudflare sets CF-Connecting-IP itself.
+      const address = request.headers.get('cf-connecting-ip') ?? 'unknown';
+      if (!(await limits.client.limit({ key: `client:${address}` })).success) {
+        return tooManyRequests();
+      }
+      if (signInPaths.has(path) && !(await limits.signIn.limit({ key: 'sign-in' })).success) {
+        return tooManyRequests();
       }
       const sql = postgres(env.HYPERDRIVE.connectionString, {
         max: MAX_CONNECTIONS,
