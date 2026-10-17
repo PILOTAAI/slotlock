@@ -4,7 +4,8 @@
 // A cursor is only a shortcut: whatever it resumes must be exactly what a search from the start
 // finds, and anything it cannot vouch for is searched from the start.
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import ICAL from 'ical.js';
+import { describe, expect, it, vi } from 'vitest';
 import {
   CalendarContractError,
   CalendarExpansionLimitError,
@@ -80,6 +81,11 @@ const dailySince2011: CalendarEventContent = {
   timezone: 'Europe/London',
   summary: 'Morning handover',
   recurrence: { rrule: 'FREQ=DAILY' },
+};
+/** A cursor's iterator state with some of its BY lists replaced. */
+const withByData = (cursor: Record<string, unknown>, parts: Record<string, unknown[]>) => {
+  const iterator = cursor.iterator as { by_data: Record<string, unknown[]> };
+  return { ...iterator, by_data: { ...iterator.by_data, ...parts } };
 };
 const yearly = (from: Date, years: number) =>
   Array.from({ length: years + 1 }, (_, year) =>
@@ -321,6 +327,49 @@ describe('expanding a stored series from where the last expansion left off', () 
           iterator: { ...(c.iterator as object), last: [2013, 13, 1, 9, 0, 0, false] },
         }),
       ],
+      // Shapes no expansion of this rule leaves (round 1 of this PR's review).
+      [
+        'it holds an hour no rule gives',
+        (c) => ({ ...c, iterator: withByData(c, { BYHOUR: [7_300_000_000] }) }),
+      ],
+      [
+        'it holds a month the rule does not',
+        (c) => ({ ...c, iterator: withByData(c, { BYMONTH: [12] }) }),
+      ],
+      [
+        'it holds a day of the month that does not exist',
+        (c) => ({ ...c, iterator: withByData(c, { BYMONTHDAY: [40] }) }),
+      ],
+      [
+        'its place in a list is past the list',
+        (c) => ({
+          ...c,
+          iterator: {
+            ...(c.iterator as object),
+            by_indices: { ...(c.iterator as { by_indices: object }).by_indices, BYHOUR: 3 },
+          },
+        }),
+      ],
+      [
+        'it holds a day of the year that does not exist',
+        (c) => ({ ...c, iterator: { ...(c.iterator as object), days: [9e12], days_index: 0 } }),
+      ],
+      [
+        'it holds a day of the year counted back past the year',
+        (c) => ({ ...c, iterator: { ...(c.iterator as object), days: [-9e12], days_index: 0 } }),
+      ],
+      [
+        'it holds day zero of the year',
+        (c) => ({ ...c, iterator: { ...(c.iterator as object), days: [0], days_index: 0 } }),
+      ],
+      [
+        'it has ended though the rule never ends',
+        (c) => ({ ...c, iterator: { ...(c.iterator as object), completed: true } }),
+      ],
+      [
+        'it stands somewhere other than the occurrence it names',
+        (c) => ({ ...c, position: (c.position as number) - DAY }),
+      ],
     ])('%s', (_name, corrupt) => {
       const expanded = expandCalendarEventSeries(dailySince2011, third, {
         cursor: corrupt(cursor() as Record<string, unknown>),
@@ -329,6 +378,68 @@ describe('expanding a stored series from where the last expansion left off', () 
       expect(expanded.resumed).toBe(false);
       expect(expanded.occurrences).toEqual(fromStart(dailySince2011, third));
     });
+  });
+
+  it('refuses an hour no rule gives before ical.js walks it, within the time of a search', () => {
+    const windows = yearly(d('2011-02-28T00:00:00Z'), 2);
+    const kept = roll(dailySince2011, windows.slice(0, 2), null).cursor as Record<string, unknown>;
+    const third = windows[2] as { start: Date; end: Date };
+    // ical.js would walk an hour of 10^9 a month at a time inside one step: 10.8 s for 3 x 10^8.
+    const started = performance.now();
+    const expanded = expandCalendarEventSeries(dailySince2011, third, {
+      cursor: { ...kept, iterator: withByData(kept, { BYHOUR: [9_007_199_254_740_991] }) },
+      stored: true,
+    });
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(expanded.resumed).toBe(false);
+    expect(expanded.occurrences).toEqual(fromStart(dailySince2011, third));
+  });
+
+  it('counts a COUNT series from the start when its cursor has counted past the rule', () => {
+    const counted: CalendarEventContent = {
+      ...dailySince2011,
+      recurrence: { rrule: 'FREQ=DAILY;COUNT=2000' },
+    };
+    const windows = yearly(d('2011-02-28T00:00:00Z'), 2);
+    const kept = roll(counted, windows.slice(0, 2), null).cursor as Record<string, unknown>;
+    const third = windows[2] as { start: Date; end: Date };
+    const expanded = expandCalendarEventSeries(counted, third, {
+      cursor: { ...kept, iterator: { ...(kept.iterator as object), occurrence_number: 2_001 } },
+      stored: true,
+    });
+    expect(expanded.resumed).toBe(false);
+    expect(expanded.occurrences).toEqual(fromStart(counted, third));
+    expect(expanded.occurrences).toHaveLength(367);
+  });
+
+  it('searches from the start when ical.js cannot go on from a cursor, instead of failing', () => {
+    const windows = yearly(d('2011-02-28T00:00:00Z'), 2);
+    const kept = roll(dailySince2011, windows.slice(0, 2), null).cursor;
+    const third = windows[2] as { start: Date; end: Date };
+    // A resumed iterator's first step carries the cursor's count; a fresh one's starts at 0.
+    const next = ICAL.RecurIterator.prototype.next;
+    let failed = 0;
+    const spy = vi.spyOn(ICAL.RecurIterator.prototype, 'next').mockImplementation(function (
+      this: { occurrence_number: number },
+      ...args: unknown[]
+    ) {
+      if (failed === 0 && this.occurrence_number > 100) {
+        failed += 1;
+        throw new TypeError('ical.js cannot go on from here');
+      }
+      return (next as (...values: unknown[]) => ICAL.Time).apply(this, args);
+    });
+    try {
+      const expanded = expandCalendarEventSeries(dailySince2011, third, {
+        cursor: kept,
+        stored: true,
+      });
+      expect(failed).toBe(1);
+      expect(expanded.resumed).toBe(false);
+      expect(expanded.occurrences).toEqual(fromStart(dailySince2011, third));
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('leaves a cursor that a fresh expansion would leave, so either can be stored', () => {

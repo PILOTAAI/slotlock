@@ -155,6 +155,24 @@ describe.skipIf(!url)('a stored series resumed from its cursor (real Postgres)',
     expect((await stored(longRunning))?.recurrence_cursor).toEqual(cursor);
   });
 
+  it('lets a release from before cursors make a series a one-off, and never reads what it leaves', async () => {
+    const series = `rolled-back-${crypto.randomUUID()}`;
+    const recent = handover(series, {
+      start: london('2026-03-01', '09:00'),
+      end: london('2026-03-01', '10:00'),
+      materializationWindow: yearWindow(15),
+    });
+    expect(await store.putCalendarEvent(recent)).toMatchObject({ ok: true });
+    const row = await stored(series);
+    expect(row?.recurrence_cursor).not.toBeNull();
+    // What putCalendarEvent before cursors wrote for a one-off: no rule, and the column untouched.
+    await sql`UPDATE slotlock.calendar_events SET recurrence_rule = NULL WHERE id = ${row?.id as string}`;
+    // The next roll leaves the one-off alone, and its cursor with it.
+    await expect(
+      store.rollCalendarEventHorizon({ tenantRef, window: yearWindow(16) }),
+    ).resolves.toMatchObject({ refused: 0 });
+  });
+
   it('keeps no cursor for a one-off event', async () => {
     const oneOff = `one-off-${crypto.randomUUID()}`;
     const result = await store.putCalendarEvent({

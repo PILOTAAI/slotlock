@@ -1120,7 +1120,11 @@ function readSeriesCursor(value: unknown, key: string): CalendarSeriesCursor | n
     return null;
   }
   const iterator = value.iterator;
-  if (!isRecord(iterator) || !isCursorTime(iterator.last) || typeof iterator.completed !== 'boolean') {
+  if (
+    !isRecord(iterator) ||
+    !isCursorTime(iterator.last) ||
+    typeof iterator.completed !== 'boolean'
+  ) {
     return null;
   }
   const { days, days_index: daysIndex, occurrence_number: occurrence } = iterator;
@@ -1153,7 +1157,8 @@ function readSeriesCursor(value: unknown, key: string): CalendarSeriesCursor | n
   if (
     !isRecord(byIndices) ||
     !Object.entries(byIndices).every(
-      ([part, index]) => BY_PARTS.has(part) && Number.isSafeInteger(index) && (index as number) >= 0,
+      ([part, index]) =>
+        BY_PARTS.has(part) && Number.isSafeInteger(index) && (index as number) >= 0,
     )
   ) {
     return null;
@@ -1229,10 +1234,13 @@ function resumedExpansion(
   event: ICAL.Event,
   Budgeted: typeof ICAL.RecurIterator,
   cursor: CalendarSeriesCursor,
-): ICAL.RecurExpansion {
-  const rule = event.component.getFirstPropertyValue('rrule');
+): ICAL.RecurExpansion | null {
+  const rule = event.component.getFirstPropertyValue('rrule') as ICAL.Recur;
   budgetRule(rule, Budgeted);
   const dtstart = event.startDate;
+  // What a search from the start begins with, built as ical.js builds it (its steps charged too).
+  const reference = new Budgeted({ rule, dtstart }) as unknown as IteratorState;
+  if (!cursorFitsRule(cursor.iterator, reference, rule)) return null;
   const time = ([year, month, day, hour, minute, second, isDate]: CursorTime) =>
     new ICAL.Time({ year, month, day, hour, minute, second, isDate }, dtstart.zone);
   const state = cursor.iterator;
@@ -1260,6 +1268,52 @@ function resumedExpansion(
     throw new CalendarContractError('invalid_icalendar');
   }
   return expansion;
+}
+
+/**
+ * Whether a cursor's iterator state agrees with `reference`, an iterator ical.js built for the same
+ * rule and start: the same BY lists (the rule's, and the start's defaults; BYMONTHDAY holds the
+ * current month's days, which ical.js sets as it goes, so only its days are checked), an index
+ * within each list, days of the year, and a count and an end the rule allows. Anything else is a
+ * cursor no expansion of this rule left, and it is not resumed: an hour of 10^9, say, would have
+ * ical.js walk it a month at a time inside one step.
+ */
+function cursorFitsRule(
+  state: CalendarSeriesCursor['iterator'],
+  reference: IteratorState,
+  rule: ICAL.Recur,
+): boolean {
+  const expected = reference.by_data as Record<string, unknown>;
+  for (const part of new Set([...Object.keys(state.by_data), ...Object.keys(expected)])) {
+    const kept = state.by_data[part];
+    if (part !== 'BYMONTHDAY') {
+      if (JSON.stringify(kept) !== JSON.stringify(expected[part])) return false;
+    } else if ((kept === undefined) !== (expected[part] === undefined)) {
+      return false;
+    } else if (
+      kept !== undefined &&
+      (kept.length > 31 ||
+        new Set(kept).size !== kept.length ||
+        !kept.every(
+          (day) => Number.isInteger(day) && (day as number) >= 1 && (day as number) <= 31,
+        ))
+    ) {
+      return false;
+    }
+  }
+  for (const [part, index] of Object.entries(state.by_indices)) {
+    const values = state.by_data[part];
+    if (values === undefined ? index !== 0 : index >= Math.max(values.length, 1)) return false;
+  }
+  // Days of the year, 1-366, except that a rule with BYYEARDAY alone keeps its values as written,
+  // so -366 to -1 count from the end of the year (ical.js expand_year_days).
+  if (!state.days.every((day) => Number.isInteger(day) && day !== 0 && Math.abs(day) <= 366)) {
+    return false;
+  }
+  if (rule.count != null && state.occurrence_number > rule.count) return false;
+  // Only a rule that ends can have ended.
+  if (state.completed && rule.count == null && rule.until == null) return false;
+  return true;
 }
 
 /** Parse VEVENTs with the standards library; event content is deliberately discarded. */
@@ -1412,55 +1466,91 @@ function parseCalendarChanges(
       // and stands where the window needs nothing before it, and leaves one for the next window.
       const key = series && masters.size === 1 ? seriesKey(event.component) : null;
       const kept = key === null ? null : readSeriesCursor(series?.cursor, key);
-      const resume =
-        kept !== null && series !== undefined && kept.position <= series.resumeLimitMs ? kept : null;
-      if (series?.resumeOnly && resume === null) expansionLimit();
-      const iterator = budget.search(() =>
-        resume ? resumedExpansion(event, budgeted(), resume) : budgetedExpansion(event, budgeted()),
-      );
-      let position = resume?.position;
-      let snapshot = resume;
-      let leaving = key !== null;
-      while (true) {
-        remainingWork -= 1;
-        if (remainingWork < 0) expansionLimit();
-        // Before the next step, everything the iterator has passed may end before the window: then
-        // this is where the next expansion can start.
-        if (leaving && key !== null && series && position !== undefined) {
-          if (position <= series.resumeLimitMs) snapshot = snapshotSeries(iterator, key, position);
-          else leaving = false;
+      const usable =
+        kept !== null && series !== undefined && kept.position <= series.resumeLimitMs
+          ? kept
+          : null;
+      const startZone = event.component.getFirstProperty('dtstart')?.getParameter('tzid');
+      // The occurrences in the window from `resume` (or the start), and the cursor to keep; null
+      // when `resume` does not fit this series.
+      const expand = (resume: CalendarSeriesCursor | null) => {
+        const iterator = budget.search(() =>
+          resume
+            ? resumedExpansion(event, budgeted(), resume)
+            : budgetedExpansion(event, budgeted()),
+        );
+        if (iterator === null) return null;
+        // The cursor stands on the occurrence it last passed: the same time, read the same way.
+        if (
+          resume &&
+          timeValue(
+            (iterator as unknown as ExpansionState).last,
+            startZone,
+            defaultTimezone,
+          ).getTime() !== resume.position
+        ) {
+          return null;
         }
-        const occurrence = budget.search(() => iterator.next());
-        if (!occurrence) break;
-        const occurrenceStart = timeValue(
-          occurrence,
-          event.component.getFirstProperty('dtstart')?.getParameter('tzid'),
-          defaultTimezone,
-        );
-        position = occurrenceStart.getTime();
-        if (occurrenceStart.getTime() >= recurrenceScanEndMs) break;
-        const details = event.getOccurrenceDetails(occurrence);
-        const start = timeValue(
-          details.startDate,
-          details.item.component.getFirstProperty('dtstart')?.getParameter('tzid'),
-          defaultTimezone,
-        );
-        const end = timeValue(
-          details.endDate,
-          details.item.component.getFirstProperty('dtend')?.getParameter('tzid') ??
+        const found: ExternalCalendarChange[] = [];
+        let position = resume?.position;
+        let snapshot = resume;
+        let leaving = key !== null;
+        while (true) {
+          remainingWork -= 1;
+          if (remainingWork < 0) expansionLimit();
+          // Before the next step, everything the iterator has passed may end before the window:
+          // then this is where the next expansion can start.
+          if (leaving && key !== null && series && position !== undefined) {
+            if (position <= series.resumeLimitMs)
+              snapshot = snapshotSeries(iterator, key, position);
+            else leaving = false;
+          }
+          const occurrence = budget.search(() => iterator.next());
+          if (!occurrence) break;
+          const occurrenceStart = timeValue(occurrence, startZone, defaultTimezone);
+          position = occurrenceStart.getTime();
+          if (occurrenceStart.getTime() >= recurrenceScanEndMs) break;
+          const details = event.getOccurrenceDetails(occurrence);
+          const start = timeValue(
+            details.startDate,
             details.item.component.getFirstProperty('dtstart')?.getParameter('tzid'),
-          defaultTimezone,
-        );
-        if (end > expansionWindow.start && start < expansionWindow.end) {
-          changes.push(
-            normalizeEvent(details.item, details.startDate, details.endDate, occurrence),
+            defaultTimezone,
           );
-          if (changes.length > MAX_ICAL_OCCURRENCES) expansionLimit();
+          const end = timeValue(
+            details.endDate,
+            details.item.component.getFirstProperty('dtend')?.getParameter('tzid') ??
+              details.item.component.getFirstProperty('dtstart')?.getParameter('tzid'),
+            defaultTimezone,
+          );
+          if (end > expansionWindow.start && start < expansionWindow.end) {
+            found.push(
+              normalizeEvent(details.item, details.startDate, details.endDate, occurrence),
+            );
+            if (changes.length + found.length > MAX_ICAL_OCCURRENCES) expansionLimit();
+          }
+        }
+        return { found, snapshot };
+      };
+      let expanded: ReturnType<typeof expand> = null;
+      if (usable !== null) {
+        try {
+          expanded = expand(usable);
+        } catch (error) {
+          // A cursor ical.js cannot go on from is not this series' to use, like one that does not
+          // fit it: search from the start. Running out of budget is the series' own doing.
+          if (error instanceof CalendarExpansionLimitError) throw error;
         }
       }
+      const resumed = expanded !== null;
+      if (expanded === null) {
+        if (series?.resumeOnly) expansionLimit();
+        expanded = expand(null);
+      }
+      if (expanded === null) throw new CalendarContractError('invalid_icalendar');
+      changes.push(...expanded.found);
       if (series && key !== null) {
-        series.resumed = resume !== null;
-        series.left = keptSeriesCursor(snapshot);
+        series.resumed = resumed;
+        series.left = keptSeriesCursor(expanded.snapshot);
       }
     }
     return changes;
@@ -1937,11 +2027,7 @@ export function parseTrustedICalendarEvents(
         throw new CalendarContractError('invalid_icalendar');
       }
       const contentInput: CalendarEventContent = {
-        start: timeValue(
-          event.startDate,
-          startProperty?.getParameter('tzid'),
-          defaultTimezone,
-        ),
+        start: timeValue(event.startDate, startProperty?.getParameter('tzid'), defaultTimezone),
         end: timeValue(
           event.endDate,
           endProperty?.getParameter('tzid') ?? startProperty?.getParameter('tzid'),
@@ -2139,7 +2225,9 @@ function expandOccurrences(
   // A cursor may stand after an occurrence only if that occurrence ends before the window: unmoved,
   // within the series' length (and a clock change) of its start; moved, where its exception says.
   let resumeLimitMs =
-    window.start.getTime() - (event.end.getTime() - event.start.getTime()) - OCCURRENCE_END_SLACK_MS;
+    window.start.getTime() -
+    (event.end.getTime() - event.start.getTime()) -
+    OCCURRENCE_END_SLACK_MS;
   for (const exception of event.recurrence.exceptions ?? []) {
     if (!exception.cancelled && exception.end && exception.end > window.start) {
       resumeLimitMs = Math.min(resumeLimitMs, exception.recurrenceId.getTime() - 1000);
