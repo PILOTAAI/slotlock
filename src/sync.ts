@@ -743,37 +743,132 @@ function boundInput(input: string): void {
 
 /**
  * Refuse a property whose name and parameters run past MAX_ICAL_PROPERTY_HEAD_BYTES or list more
- * than MAX_ICAL_PROPERTY_PARAMETERS, in one pass over the text: a line continues past a line break
- * followed by a space or tab (folding), and a quoted parameter value may hold `;` and `:`.
+ * than MAX_ICAL_PROPERTY_PARAMETERS, as ical.js will read them. ical.js searches again from every
+ * parameter for the next `;`, `:` and `"`, so the parameters on a line cost it their number times
+ * their length; this finds them the same way, reading each character once.
  */
 function boundPropertyHeads(input: string): void {
-  let head = 0;
-  let parameters = 0;
-  let quoted = false;
-  let inValue = false;
-  for (let at = 0; at < input.length; at++) {
-    const char = input.charCodeAt(at);
-    if (char === 10) {
-      const next = input.charCodeAt(at + 1);
-      if (next === 32 || next === 9) {
-        at += 1;
-        continue;
-      }
-      head = 0;
-      parameters = 0;
-      quoted = false;
-      inValue = false;
-      continue;
+  let params: Record<string, { multiValue?: string } | undefined> | undefined;
+  eachUnfoldedLine(input, (line) => {
+    if (params === undefined) {
+      // ical.js picks its design set at the first BEGIN, and throws on any other line before it.
+      const begin = /^begin:(.*)$/is.exec(line);
+      if (begin === null) return false;
+      params = ICAL.design.getDesignSet((begin[1] as string).toLowerCase()).param;
     }
-    if (inValue || char === 13) continue;
-    head += 1;
-    if (char === 34) quoted = !quoted;
-    else if (!quoted && char === 59) parameters += 1;
-    else if (!quoted && char === 58) inValue = true;
-    if (head > MAX_ICAL_PROPERTY_HEAD_BYTES || parameters > MAX_ICAL_PROPERTY_PARAMETERS) {
+    const head = icalendarPropertyHead(line, params as Record<string, { multiValue?: string }>);
+    if (head.end > MAX_ICAL_PROPERTY_HEAD_BYTES || head.parameters > MAX_ICAL_PROPERTY_PARAMETERS) {
       expansionLimit();
     }
+    return true;
+  });
+}
+
+/**
+ * Each line as ical.js 2.2.1 unfolds it (parse._eachLine): a line break, or CR LF, followed by a
+ * space or tab continues the line before it; empty lines are dropped and the last is trimmed. Stops
+ * when `visit` returns false.
+ */
+function eachUnfoldedLine(input: string, visit: (line: string) => boolean): void {
+  let lastPos = input.search(/[^ \t]/);
+  if (lastPos === -1) return;
+  let line = '';
+  let pos: number;
+  do {
+    pos = input.indexOf('\n', lastPos) + 1;
+    let newline = pos > 1 && input[pos - 2] === '\r' ? 2 : 1;
+    if (pos === 0) {
+      pos = input.length;
+      newline = 0;
+    }
+    const first = input[lastPos];
+    if (first === ' ' || first === '\t') {
+      line += input.slice(lastPos + 1, pos - newline);
+    } else {
+      if (line && !visit(line)) return;
+      line = input.slice(lastPos, pos - newline);
+    }
+    lastPos = pos;
+  } while (pos !== input.length);
+  line = line.trim();
+  if (line.length > 0) visit(line);
+}
+
+/** `text.indexOf(char, from)`, reading each character once while `from` never moves back. */
+function forwardSearch(text: string, char: string): (from: number) => number {
+  let asked = -1;
+  let found = -1;
+  return (from) => {
+    if (asked === -1 || from < asked || (found !== -1 && found < from)) {
+      found = text.indexOf(char, from);
+    }
+    asked = Math.max(from, 0);
+    return found;
+  };
+}
+
+/**
+ * How many parameters ical.js 2.2.1 reads on one unfolded line and where it stops reading them
+ * (parse._handleContentLine, then parse._parseParameters, step for step): a `"` opens a quoted value
+ * only straight after `=`, a quoted value of a parameter that takes several (MEMBER, DELEGATED-TO)
+ * goes on past `","`, and a `:` ends the parameters only where ical.js looks for one. ical.js throws
+ * where this stops early (an empty name, an unclosed quote). Exported for the tests, which hold it to
+ * ical.js's own count.
+ */
+export function icalendarPropertyHead(
+  line: string,
+  params: Record<string, { multiValue?: string } | undefined>,
+): { parameters: number; end: number } {
+  const paramPos = line.indexOf(';');
+  const valuePos = line.indexOf(':');
+  if (paramPos === -1 || (valuePos !== -1 && paramPos > valuePos)) {
+    return { parameters: 0, end: valuePos === -1 ? line.length : valuePos };
   }
+  const text = line.slice(paramPos);
+  const equals = forwardSearch(text, '=');
+  const semicolon = forwardSearch(text, ';');
+  const colon = forwardSearch(text, ':');
+  const quote = forwardSearch(text, '"');
+  let lastParam = 0;
+  let pos = 0;
+  let parameters = 0;
+  let end = 0;
+  for (;;) {
+    pos = equals(pos + 1);
+    if (pos === -1 || pos <= lastParam + 1) break;
+    const name = text.slice(lastParam + 1, pos).toLowerCase();
+    parameters += 1;
+    const multiValue = name in params ? params[name]?.multiValue : undefined;
+    if (text[pos + 1] === '"') {
+      pos = quote(pos + 2);
+      if (multiValue && pos !== -1) {
+        while (text[pos + 1] === multiValue && text[pos + 2] === '"') pos = quote(pos + 3);
+      }
+      if (pos === -1) {
+        end = text.length;
+        break;
+      }
+      end = pos;
+      lastParam = semicolon(pos);
+      const propValuePos = colon(pos);
+      if (lastParam === -1 || (propValuePos !== -1 && lastParam > propValuePos)) break;
+    } else {
+      const nextPos = semicolon(pos + 1);
+      const propValuePos = colon(pos + 1);
+      if (propValuePos !== -1 && nextPos > propValuePos) {
+        end = propValuePos;
+        break;
+      }
+      if (nextPos === -1) {
+        end = propValuePos === -1 ? text.length : propValuePos;
+        break;
+      }
+      lastParam = nextPos;
+      pos = nextPos;
+      end = nextPos;
+    }
+  }
+  return { parameters, end: paramPos + end };
 }
 
 /**

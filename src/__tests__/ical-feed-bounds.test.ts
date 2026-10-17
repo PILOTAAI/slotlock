@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CalendarContractError,
   CalendarExpansionLimitError,
+  icalendarPropertyHead,
   parseICalendarChanges,
   parseTrustedICalendarEvents,
 } from '../sync.js';
@@ -587,5 +588,122 @@ describe('a feed that would hold the process inside one call (round 3)', () => {
       ),
     );
     expect(() => parse(text)).not.toThrow();
+  });
+});
+
+describe('a property whose parameters ical.js reads differently from a simple scan (round 4)', () => {
+  // ical.js opens a quoted parameter value only straight after `=`; any other `"` is a character.
+  // A scan that turned every `"` into an open or close quote read the quoted `:` below as the end of
+  // the parameters, while ical.js read all 490,000 of them: 7.9 to 9.1 seconds.
+  const flood = ';R=b'.repeat(490_000);
+  it.each(parsers)('refuses %s parameters behind a quote inside a value', (_name, parse) => {
+    const text = calendar(
+      ...event(
+        'UID:stray-quote',
+        'DTSTART:20261102T090000Z',
+        'DTEND:20261102T100000Z',
+        `X-A;P=a";Q="x:y"${flood}:v`,
+      ),
+    );
+    expect(text.length).toBeLessThan(2_000_000);
+    const { ms, error } = timed(() => parse(text));
+    expect(error).toBeInstanceOf(CalendarExpansionLimitError);
+    expect(ms).toBeLessThan(200);
+  }, 600_000);
+
+  it.each(parsers)('refuses %s parameters behind a quote inside a name', (_name, parse) => {
+    const text = calendar(
+      ...event(
+        'UID:quoted-name',
+        'DTSTART:20261102T090000Z',
+        'DTEND:20261102T100000Z',
+        `X-A";Q="x:y"${flood}:v`,
+      ),
+    );
+    const { ms, error } = timed(() => parse(text));
+    expect(error).toBeInstanceOf(CalendarExpansionLimitError);
+    expect(ms).toBeLessThan(200);
+  }, 600_000);
+
+  it.each(parsers)(
+    'refuses %s parameters behind a list of quoted values for a parameter that takes one',
+    (_name, parse) => {
+      // MEMBER takes several quoted values ("a","b"); CN takes one, so ical.js ends it at `"a"`.
+      const text = calendar(
+        ...event(
+          'UID:one-value',
+          'DTSTART:20261102T090000Z',
+          'DTEND:20261102T100000Z',
+          `X-A;CN="a","b${flood}":v`,
+        ),
+      );
+      const { ms, error } = timed(() => parse(text));
+      expect(error).toBeInstanceOf(CalendarExpansionLimitError);
+      expect(ms).toBeLessThan(200);
+    },
+    600_000,
+  );
+
+  it.each(parsers)('reads %s a feed whose every line is at the limits', (_name, parse) => {
+    // 100 parameters, each searched from to the line's `:` 8 KB on, is what the limits allow.
+    const line = `X-A${';A=b'.repeat(99)};A=${'b'.repeat(7_700)}:v`;
+    const lines = Array.from({ length: 230 }, () => line);
+    const text = calendar(
+      ...event('UID:at-limits', 'DTSTART:20261102T090000Z', 'DTEND:20261102T100000Z', ...lines),
+    );
+    expect(text.length).toBeGreaterThan(1_800_000);
+    const { ms, error } = timed(() => parse(text));
+    expect(error).toBeNull();
+    expect(ms).toBeLessThan(500);
+  }, 600_000);
+
+  it('counts the parameters ical.js reads, on lines built from what changes its reading', () => {
+    // ical.js asks its design set about each parameter twice (`name in param`): a proxy counts them.
+    const design = ICAL.design.icalendar as unknown as { param: Record<string, { multiValue?: string }> };
+    const params = design.param;
+    let asked = 0;
+    design.param = new Proxy(params, {
+      has(target, key) {
+        asked += 1;
+        return Reflect.has(target, key);
+      },
+    });
+    const pieces = [
+      ';', ':', '"', '=', ',', '","', 'a', 'mailto:b', 'CN', 'MEMBER', 'DELEGATED-TO', 'X-P',
+      ';CN=', ';MEMBER="', ';DELEGATED-TO="', ';X-P=', '";', '":', '=",', ';CN="', 'constructor',
+    ];
+    const names = ['X-A', 'ATTENDEE', 'X-A"', 'DESCRIPTION', 'X-A;'];
+    let seed = 20261017;
+    const random = (below: number) => {
+      // mulberry32: the same lines on every run.
+      seed = (seed + 0x6d2b79f5) | 0;
+      let value = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      value = (value + Math.imul(value ^ (value >>> 7), 61 | value)) ^ value;
+      return (((value ^ (value >>> 14)) >>> 0) % below) as number;
+    };
+    let lines = 0;
+    let withParameters = 0;
+    try {
+      for (let index = 0; index < 4_000; index++) {
+        let line = names[random(names.length)] as string;
+        const length = 1 + random(30);
+        for (let piece = 0; piece < length; piece++) line += pieces[random(pieces.length)];
+        if (line.includes('\n') || line.includes('\r')) continue;
+        asked = 0;
+        try {
+          ICAL.parse(`BEGIN:VCALENDAR\r\n${line}\r\nEND:VCALENDAR`);
+        } catch {
+          // ical.js refuses most of these lines; what it read before refusing is what is counted.
+        }
+        const read = asked / 2;
+        expect(icalendarPropertyHead(line, params).parameters, line).toBe(read);
+        lines += 1;
+        if (read > 1) withParameters += 1;
+      }
+    } finally {
+      design.param = params;
+    }
+    expect(lines).toBe(4_000);
+    expect(withParameters).toBeGreaterThan(500);
   });
 });
