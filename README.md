@@ -363,6 +363,46 @@ Slotlock gives them neutral boundaries:
 - `recordCalendarCoverage` marks how much of a feed is read. Pass the sources a resource depends on as
   `requiredSources`, and any coverage short of `complete` means the time is not proven free.
 
+Read a feed someone else controls with `createICalendarWorkerPool`, which runs the same parsers on
+worker threads. However costly the feed, the thread that serves requests never runs ical.js on it: a
+worker past its deadline (3 seconds by default) or its heap (128 MB) is stopped, and the feed is
+refused with `CalendarExpansionLimitError`. When every worker is busy and the queue is full, the
+pool answers `ICalendarWorkerBusyError` at once. A worker starts in about 40 ms and is reused; idle
+workers do not keep the process alive. The pool runs from the built package (the worker is
+`ical-worker-thread.js`), not from Slotlock's TypeScript sources.
+
+<!-- example: examples/feeds.ts#feeds -->
+```ts
+import {
+  CalendarExpansionLimitError,
+  ICalendarWorkerBusyError,
+  createICalendarWorkerPool,
+} from 'slotlock';
+
+// One pool for the process. Each feed is read on a worker thread; one that runs past its deadline
+// or its heap is stopped, and the feed refused, while this thread carries on.
+const feeds = createICalendarWorkerPool({ size: 2, deadlineMs: 3_000 });
+
+export async function readFeed(text: string, window: { start: Date; end: Date }) {
+  try {
+    return {
+      ok: true as const,
+      changes: await feeds.parseICalendarChanges(text, undefined, window),
+    };
+  } catch (error) {
+    // Every worker is busy and the queue is full: read this feed on the next sync.
+    if (error instanceof ICalendarWorkerBusyError) return { ok: false as const, retry: true };
+    // The feed takes more than Slotlock will spend reading one: tell its owner, do not retry.
+    if (error instanceof CalendarExpansionLimitError) return { ok: false as const, retry: false };
+    throw error;
+  }
+}
+
+export function closeFeeds() {
+  return feeds.close();
+}
+```
+
 ## Expose Slotlock to agents
 
 One HTTP handler serves the tools over MCP and A2A. The tenant comes from your `authenticate`, never
