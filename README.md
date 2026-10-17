@@ -118,6 +118,39 @@ resources, which is how the hosted Slotlock hands out keys:
 - Each resource uses the server's bookable hours (`SLOTLOCK_AVAILABILITY`) until its owner sets its
   own on the hours page: two windows a day, overnight or all day, or closed. One form sets them
   for every resource at once.
+
+### Dashboard on Cloudflare Workers
+
+The same dashboard can run as a Cloudflare Worker at an origin of its own (`workers/dashboard`),
+while agents keep using the server. It shows the server's MCP and A2A URLs (`SLOTLOCK_SERVICE_URL`),
+and reaches the server's database through Hyperdrive, as the role the server serves as.
+
+1. Create a Hyperdrive configuration for that role, with caching off: the dashboard reads back a
+   sign-in or a form it has just recorded. For a database on a private network, connect it through
+   Workers VPC, on the Cloudflare Tunnel that reaches the database:
+   ```sh
+   cd workers/dashboard && npm ci
+   npx wrangler vpc service create slotlock-postgres --type tcp --tunnel-id <tunnel id> \
+     --ipv4 <database host> --tcp-port 5432 --app-protocol postgresql
+   npx wrangler hyperdrive create slotlock-dashboard --service-id <vpc service id> \
+     --database <database> --user <server role> --password <its password> --caching-disabled
+   ```
+2. Put the configuration's id, your hostname (`routes`) and `SLOTLOCK_PUBLIC_URL`,
+   `SLOTLOCK_SERVICE_URL` and `SLOTLOCK_DASHBOARD_USERS` (`vars`) in `workers/dashboard/wrangler.jsonc`.
+3. Create the GitHub OAuth app as above, with the callback URL
+   `<SLOTLOCK_PUBLIC_URL>/dashboard/callback` on the Worker's origin.
+4. Store the secrets on the Worker, from `workers/dashboard`: `npx wrangler secret put` for
+   `SLOTLOCK_GITHUB_CLIENT_ID`, `SLOTLOCK_GITHUB_CLIENT_SECRET` and `SLOTLOCK_SESSION_SECRET`.
+5. Deploy: `npm ci --omit=dev` at the repository root (the Worker bundles Slotlock's sources), then
+   `npm run deploy` in `workers/dashboard`. The Dashboard workflow does this on every push to main.
+
+- Each request opens its own database client, at most five connections, and closes it when the
+  response is sent; Hyperdrive keeps the pool. One dashboard serves every request an isolate
+  receives, so the limit on sign-ins in flight holds as on one server.
+- The server checks a dashboard tenant against `SLOTLOCK_DASHBOARD_USERS` only when it serves the
+  dashboard itself. With the dashboard on Workers, removing a person from the Worker's list signs
+  them out of the dashboard; to stop their keys, revoke them or erase the tenant.
+- A missing or weak secret makes the Worker answer 503 and log which variable, never its value.
 - Rate-limit `/dashboard/sign-in`, `/dashboard/callback` and the dashboard's POSTs at your proxy:
   each callback costs a database write and a call to GitHub (an instance runs at most eight at
   once), and each form a database write.
