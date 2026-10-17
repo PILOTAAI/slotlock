@@ -11,6 +11,7 @@ import {
   CalendarContractError,
   CalendarExpansionLimitError,
   icalendarPropertyHead,
+  icalendarPropertyHeads,
   parseICalendarChanges,
   parseTrustedICalendarEvents,
 } from '../sync.js';
@@ -591,6 +592,56 @@ describe('a feed that would hold the process inside one call (round 3)', () => {
   });
 });
 
+/** mulberry32: the same sequence on every run. */
+function seeded(seed: number): (below: number) => number {
+  let state = seed;
+  return (below) => {
+    state = (state + 0x6d2b79f5) | 0;
+    let value = Math.imul(state ^ (state >>> 15), 1 | state);
+    value = (value + Math.imul(value ^ (value >>> 7), 61 | value)) ^ value;
+    return ((value ^ (value >>> 14)) >>> 0) % below;
+  };
+}
+
+type ParamSet = { param: Record<string, { multiValue?: string }> };
+const designSets = () =>
+  [ICAL.design.icalendar, ICAL.design.vcard, ICAL.design.vcard3] as unknown as ParamSet[];
+
+/** Count the parameters ical.js reads: it asks its design set about each one twice (`name in param`). */
+function countingParameters<T>(work: (read: () => number) => T): T {
+  let asked = 0;
+  const sets = designSets();
+  const originals = sets.map((set) => set.param);
+  for (const set of sets) {
+    set.param = new Proxy(set.param, {
+      has(target, key) {
+        asked += 1;
+        return Reflect.has(target, key);
+      },
+    });
+  }
+  try {
+    return work(() => asked / 2);
+  } finally {
+    sets.forEach((set, index) => {
+      set.param = originals[index] as ParamSet['param'];
+    });
+  }
+}
+
+const LINE_PIECES = [
+  ';', ':', '"', '=', ',', '","', 'a', 'mailto:b', 'CN', 'MEMBER', 'DELEGATED-TO', 'X-P', 'TYPE',
+  ';CN=', ';MEMBER="', ';DELEGATED-TO="', ';X-P=', ';TYPE="', '";', '":', '=",', ';CN="',
+  'constructor', ';__proto__=', ';toString="', ';hasOwnProperty=', '\\', '^"', '^n',
+];
+const LINE_NAMES = ['X-A', 'ATTENDEE', 'X-A"', 'DESCRIPTION', 'X-A;', 'VERSION:4.0', 'TYPE'];
+function randomLine(random: (below: number) => number): string {
+  let line = LINE_NAMES[random(LINE_NAMES.length)] as string;
+  const length = 1 + random(30);
+  for (let piece = 0; piece < length; piece++) line += LINE_PIECES[random(LINE_PIECES.length)];
+  return line;
+}
+
 describe('a property whose parameters ical.js reads differently from a simple scan (round 4)', () => {
   // ical.js opens a quoted parameter value only straight after `=`; any other `"` is a character.
   // A scan that turned every `"` into an open or close quote read the quoted `:` below as the end of
@@ -658,52 +709,121 @@ describe('a property whose parameters ical.js reads differently from a simple sc
   }, 600_000);
 
   it('counts the parameters ical.js reads, on lines built from what changes its reading', () => {
-    // ical.js asks its design set about each parameter twice (`name in param`): a proxy counts them.
-    const design = ICAL.design.icalendar as unknown as { param: Record<string, { multiValue?: string }> };
-    const params = design.param;
-    let asked = 0;
-    design.param = new Proxy(params, {
-      has(target, key) {
-        asked += 1;
-        return Reflect.has(target, key);
-      },
-    });
-    const pieces = [
-      ';', ':', '"', '=', ',', '","', 'a', 'mailto:b', 'CN', 'MEMBER', 'DELEGATED-TO', 'X-P',
-      ';CN=', ';MEMBER="', ';DELEGATED-TO="', ';X-P=', '";', '":', '=",', ';CN="', 'constructor',
-    ];
-    const names = ['X-A', 'ATTENDEE', 'X-A"', 'DESCRIPTION', 'X-A;'];
-    let seed = 20261017;
-    const random = (below: number) => {
-      // mulberry32: the same lines on every run.
-      seed = (seed + 0x6d2b79f5) | 0;
-      let value = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-      value = (value + Math.imul(value ^ (value >>> 7), 61 | value)) ^ value;
-      return (((value ^ (value >>> 14)) >>> 0) % below) as number;
-    };
-    let lines = 0;
+    const random = seeded(20261017);
+    const params = (ICAL.design.icalendar as unknown as ParamSet).param;
     let withParameters = 0;
-    try {
+    countingParameters((read) => {
       for (let index = 0; index < 4_000; index++) {
-        let line = names[random(names.length)] as string;
-        const length = 1 + random(30);
-        for (let piece = 0; piece < length; piece++) line += pieces[random(pieces.length)];
-        if (line.includes('\n') || line.includes('\r')) continue;
-        asked = 0;
+        const line = randomLine(random);
+        const before = read();
         try {
           ICAL.parse(`BEGIN:VCALENDAR\r\n${line}\r\nEND:VCALENDAR`);
         } catch {
           // ical.js refuses most of these lines; what it read before refusing is what is counted.
         }
-        const read = asked / 2;
-        expect(icalendarPropertyHead(line, params).parameters, line).toBe(read);
-        lines += 1;
-        if (read > 1) withParameters += 1;
+        const parameters = read() - before;
+        expect(icalendarPropertyHead(line, params).parameters, line).toBe(parameters);
+        if (parameters > 1) withParameters += 1;
       }
-    } finally {
-      design.param = params;
-    }
-    expect(lines).toBe(4_000);
+    });
     expect(withParameters).toBeGreaterThan(500);
   });
+
+  it('reads a whole feed line by line as ical.js does: its folds, breaks, roots and first BEGIN', () => {
+    // ical.js's own lines and counts, as it hands each unfolded line to _handleContentLine.
+    const parser = ICAL.parse as unknown as {
+      _handleContentLine: (line: string, state: unknown) => void;
+    };
+    const handle = parser._handleContentLine;
+    const random = seeded(17102026);
+    const firsts = [
+      'BEGIN:VCALENDAR', 'BEGIN:VCARD', 'begin:vcalendar', 'BEGIN:', 'BEGIN', 'X;A=1',
+      'BEGIN;X=1:VCALENDAR', '  BEGIN:VCALENDAR', '\r\n\r\nBEGIN:VEVENT', 'VERSION:2.0',
+    ];
+    const breaks = ['\r\n', '\n', '\r\n\r\n', '\n\n', '\r\n \r\n'];
+    const folds = ['\r\n ', '\n\t', '\r\n\t', '\r', ' '];
+    let feeds = 0;
+    let readToTheEnd = 0;
+    countingParameters((read) => {
+      for (let index = 0; index < 1_500; index++) {
+        let text = firsts[random(firsts.length)] as string;
+        const lines = 1 + random(8);
+        for (let count = 0; count < lines; count++) {
+          let line = randomLine(random);
+          for (let fold = random(4); fold > 0; fold--) {
+            const at = random(line.length + 1);
+            line = line.slice(0, at) + folds[random(folds.length)] + line.slice(at);
+          }
+          text += (breaks[random(breaks.length)] as string) + line;
+        }
+        if (random(2) === 0) text += '\r\nEND:VCALENDAR';
+        const calls: { line: string; parameters: number }[] = [];
+        parser._handleContentLine = (line, state) => {
+          const before = read();
+          try {
+            handle(line, state);
+          } finally {
+            calls.push({ line, parameters: read() - before });
+          }
+        };
+        let threw = false;
+        try {
+          ICAL.parse(text);
+        } catch {
+          threw = true;
+        } finally {
+          parser._handleContentLine = handle;
+        }
+        const ours = [...icalendarPropertyHeads(text)];
+        for (const [at, call] of calls.entries()) {
+          const head = ours[at];
+          if (head === undefined) {
+            // Only a line before the first BEGIN, where ical.js throws having read nothing.
+            expect(at, text).toBe(calls.length - 1);
+            expect(ours.length, text).toBe(at);
+            expect(call.parameters, text).toBe(0);
+            continue;
+          }
+          expect(head.line, text).toBe(call.line);
+          expect(head.parameters, text).toBe(call.parameters);
+        }
+        if (!threw) {
+          expect(ours.length, text).toBe(calls.length);
+          readToTheEnd += 1;
+        }
+        feeds += 1;
+      }
+    });
+    expect(feeds).toBe(1_500);
+    expect(readToTheEnd).toBeGreaterThan(50);
+  });
+
+  it('reads vCard 3 parameters as vCard 4 ones, so the set ical.js moves a vCard to changes nothing', () => {
+    const several = (set: ParamSet) =>
+      Object.entries(set.param)
+        .filter(([, definition]) => definition.multiValue !== undefined)
+        .map(([name, definition]) => `${name}${definition.multiValue}`)
+        .sort();
+    const [, vcard, vcard3] = designSets() as [ParamSet, ParamSet, ParamSet];
+    expect(several(vcard3)).toEqual(several(vcard));
+    expect(several(vcard)).toEqual(['type,']);
+  });
+
+  it.each([
+    ['one line folded at every character', `X-A:${'a\r\n '.repeat(500_000)}`],
+    ['290,000 short lines', 'X-A:b\r\n'.repeat(290_000)],
+    ['one line of quotes', `X-A:${'"'.repeat(1_900_000)}`],
+    ['one line of parameters that each open a quote', `X-A${';A="'.repeat(500_000)}:v`],
+  ])('reads %s within its time, the line reading itself in a fraction of it', (_name, body) => {
+    const text = `BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\n${body}\r\nEND:VEVENT\r\nEND:VCALENDAR`;
+    expect(text.length).toBeLessThan(2_100_000);
+    const scan = timed(() => {
+      for (const _head of icalendarPropertyHeads(text)) {
+        // Read every line.
+      }
+    });
+    expect(scan.error).toBeNull();
+    expect(scan.ms).toBeLessThan(150);
+    for (const [, parse] of parsers) expect(timed(() => parse(text)).ms).toBeLessThan(1_200);
+  }, 60_000);
 });

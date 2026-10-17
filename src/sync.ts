@@ -748,28 +748,42 @@ function boundInput(input: string): void {
  * their length; this finds them the same way, reading each character once.
  */
 function boundPropertyHeads(input: string): void {
-  let params: Record<string, { multiValue?: string } | undefined> | undefined;
-  eachUnfoldedLine(input, (line) => {
-    if (params === undefined) {
-      // ical.js picks its design set at the first BEGIN, and throws on any other line before it.
-      const begin = /^begin:(.*)$/is.exec(line);
-      if (begin === null) return false;
-      params = ICAL.design.getDesignSet((begin[1] as string).toLowerCase()).param;
-    }
-    const head = icalendarPropertyHead(line, params as Record<string, { multiValue?: string }>);
+  for (const head of icalendarPropertyHeads(input)) {
     if (head.end > MAX_ICAL_PROPERTY_HEAD_BYTES || head.parameters > MAX_ICAL_PROPERTY_PARAMETERS) {
       expansionLimit();
     }
-    return true;
-  });
+  }
+}
+
+/**
+ * Each line of `input` as ical.js 2.2.1's parser takes it, with the parameters it reads there: the
+ * lines as parse._eachLine unfolds them, read with the design set ical.js picks at the first BEGIN.
+ * Ends at a line before that BEGIN, where ical.js throws. (A vCard moves to the vCard 3 set after
+ * its first property; both sets let only TYPE take several values, which a test holds.) Exported for
+ * the tests, which hold it to ical.js's own reading.
+ */
+export function* icalendarPropertyHeads(
+  input: string,
+): Generator<{ line: string; parameters: number; end: number }> {
+  let params: Record<string, { multiValue?: string } | undefined> | undefined;
+  for (const line of unfoldedLines(input)) {
+    if (params === undefined) {
+      const begin = /^begin:(.*)$/is.exec(line);
+      if (begin === null) return;
+      params = ICAL.design.getDesignSet((begin[1] as string).toLowerCase()).param as Record<
+        string,
+        { multiValue?: string } | undefined
+      >;
+    }
+    yield { line, ...icalendarPropertyHead(line, params) };
+  }
 }
 
 /**
  * Each line as ical.js 2.2.1 unfolds it (parse._eachLine): a line break, or CR LF, followed by a
- * space or tab continues the line before it; empty lines are dropped and the last is trimmed. Stops
- * when `visit` returns false.
+ * space or tab continues the line before it; empty lines are dropped and the last is trimmed.
  */
-function eachUnfoldedLine(input: string, visit: (line: string) => boolean): void {
+function* unfoldedLines(input: string): Generator<string> {
   let lastPos = input.search(/[^ \t]/);
   if (lastPos === -1) return;
   let line = '';
@@ -785,13 +799,13 @@ function eachUnfoldedLine(input: string, visit: (line: string) => boolean): void
     if (first === ' ' || first === '\t') {
       line += input.slice(lastPos + 1, pos - newline);
     } else {
-      if (line && !visit(line)) return;
+      if (line) yield line;
       line = input.slice(lastPos, pos - newline);
     }
     lastPos = pos;
   } while (pos !== input.length);
   line = line.trim();
-  if (line.length > 0) visit(line);
+  if (line.length > 0) yield line;
 }
 
 /** `text.indexOf(char, from)`, reading each character once while `from` never moves back. */
