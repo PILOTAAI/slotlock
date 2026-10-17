@@ -43,4 +43,5 @@ LABEL org.opencontainers.image.title="Slotlock" \
       org.opencontainers.image.url="https://slotlock.pylota.io" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.vendor="TREFT LTD" \
-      io.modelcontextprotocol.server.name="io.github.PILOTAAI/slotlock"
+      io.modelcontextprotocol.server.name="io.github.PILOTAAI/slotlock" \
+      service="slotlock"
