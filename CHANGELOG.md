@@ -117,7 +117,15 @@ request replaces "Unreleased" with the release date.
     events. Before, a zone of 40,000 RDATE values (expanded again for each later year read) ran a
     feed out of memory, an exception for every later occurrence (`RANGE=THISANDFUTURE`) read a slow
     zone for minutes outside the search limit, and a TZID none of 20,000 zones defined held a read
-    for 31 seconds.
+    for 31 seconds;
+  - per property: 8 KB of name and parameters, and 100 parameters, before its value. ical.js reads
+    each parameter by searching to the end of the line, and 490,000 of them on one line held a read
+    for 7.9 seconds before any other limit applied.
+
+  ical.js also expands a feed's own zone again, from its start, each time it reads a later year,
+  appending every change to those it had. A zone at those limits, read for 1,000 later years inside
+  one call, took up to 35 seconds and 650 MB. Each expansion now keeps one copy, and the time limit
+  is checked before each.
 
   `rollCalendarEventHorizon` skips a stored series that goes past these limits, which includes a
   daily series about 11 years after its start (4,000 occurrences). It counts the series in the new

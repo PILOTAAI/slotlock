@@ -68,6 +68,14 @@ const MAX_ICAL_WINDOW_MS = 367 * 24 * 60 * 60 * 1000;
  * zones held one for 31 seconds.
  */
 const MAX_ICAL_TIMEZONES = 100;
+/**
+ * The name and parameters of one property, before its value: ical.js reads each parameter by
+ * searching from it to the end of the line for the value, so 490,000 parameters on one line held a
+ * parse for 7.9 seconds before anything else ran. A real property has a few parameters; a group
+ * attendee listing its members, a few thousand characters.
+ */
+const MAX_ICAL_PROPERTY_HEAD_BYTES = 8_192;
+const MAX_ICAL_PROPERTY_PARAMETERS = 100;
 const MAX_ICAL_TIMEZONE_OBSERVANCES = 1_000;
 const MAX_ICAL_TIMEZONE_DATES = 2_000;
 /**
@@ -730,6 +738,42 @@ function boundInput(input: string): void {
     throw new CalendarContractError('invalid_icalendar');
   }
   if ((input.match(/^BEGIN:VTIMEZONE\r?$/gim)?.length ?? 0) > MAX_ICAL_TIMEZONES) expansionLimit();
+  boundPropertyHeads(input);
+}
+
+/**
+ * Refuse a property whose name and parameters run past MAX_ICAL_PROPERTY_HEAD_BYTES or list more
+ * than MAX_ICAL_PROPERTY_PARAMETERS, in one pass over the text: a line continues past a line break
+ * followed by a space or tab (folding), and a quoted parameter value may hold `;` and `:`.
+ */
+function boundPropertyHeads(input: string): void {
+  let head = 0;
+  let parameters = 0;
+  let quoted = false;
+  let inValue = false;
+  for (let at = 0; at < input.length; at++) {
+    const char = input.charCodeAt(at);
+    if (char === 10) {
+      const next = input.charCodeAt(at + 1);
+      if (next === 32 || next === 9) {
+        at += 1;
+        continue;
+      }
+      head = 0;
+      parameters = 0;
+      quoted = false;
+      inValue = false;
+      continue;
+    }
+    if (inValue || char === 13) continue;
+    head += 1;
+    if (char === 34) quoted = !quoted;
+    else if (!quoted && char === 59) parameters += 1;
+    else if (!quoted && char === 58) inValue = true;
+    if (head > MAX_ICAL_PROPERTY_HEAD_BYTES || parameters > MAX_ICAL_PROPERTY_PARAMETERS) {
+      expansionLimit();
+    }
+  }
 }
 
 /**
@@ -764,6 +808,38 @@ function budgetTimezoneRules(
   }
 }
 
+/** The parts of ical.js's Timezone the bound below reads and replaces. */
+interface TimezoneCoverage {
+  changes: unknown[];
+  expandedUntilYear: number;
+  _ensureCoverage: (year: number) => void;
+}
+
+/**
+ * Charge the time of each expansion of the feed's own zones, and keep one copy of their changes.
+ * Whenever ical.js reads a year past what it has expanded a zone to, it expands every observance
+ * again from its start and appends all of them to what it already had: 1,000 date values in years
+ * six apart, sorted inside one call, expanded a zone of 3,000 changes 1,000 times into 3 million
+ * (26 to 35 seconds, 650 MB). Each expansion starts again from DTSTART, so emptying the list first
+ * leaves the same changes, once. If ical.js no longer expands zones this way, the feed is refused.
+ */
+function budgetTimezoneCoverage(root: ICAL.Component, budget: RecurrenceBudget): void {
+  for (const component of root.getAllSubcomponents('vtimezone')) {
+    const tzid = component.getFirstPropertyValue('tzid');
+    if (typeof tzid !== 'string') continue;
+    const zone = root.getTimeZoneByID(tzid) as unknown as TimezoneCoverage | null;
+    if (!zone) continue;
+    const ensure = zone._ensureCoverage;
+    if (typeof ensure !== 'function') throw new CalendarContractError('invalid_icalendar');
+    zone._ensureCoverage = function (this: TimezoneCoverage, year: number) {
+      if (this.changes.length > 0 && this.expandedUntilYear >= year) return;
+      budget.check();
+      this.changes = [];
+      ensure.call(this, year);
+    };
+  }
+}
+
 /** Parse VEVENTs with the standards library; event content is deliberately discarded. */
 export function parseICalendarChanges(
   input: string,
@@ -789,6 +865,7 @@ function parseCalendarChanges(
     let Budgeted: typeof ICAL.RecurIterator | undefined;
     const budgeted = () => (Budgeted ??= budgetedRecurIterator(budget));
     budgetTimezoneRules(root, budgeted);
+    budgetTimezoneCoverage(root, budget);
     const timeValue = (value: unknown, zone: unknown, fallback: string | undefined) =>
       budget.search(() => calendarTimeValue(value, zone, fallback));
     const embeddedTimezone = root.getFirstPropertyValue('x-wr-timezone');
@@ -1346,6 +1423,7 @@ export function parseTrustedICalendarEvents(
     budget.check();
     let Budgeted: typeof ICAL.RecurIterator | undefined;
     budgetTimezoneRules(root, () => (Budgeted ??= budgetedRecurIterator(budget)));
+    budgetTimezoneCoverage(root, budget);
     const timeValue = (value: unknown, zone: unknown, fallback: string | undefined) =>
       budget.search(() => calendarTimeValue(value, zone, fallback));
     const embeddedTimezone = root.getFirstPropertyValue('x-wr-timezone');

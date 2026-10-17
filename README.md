@@ -346,7 +346,7 @@ A rule is expanded from its start, within a budget: 50,000 steps and a second fo
 whole read, from its text), or for a stored series as maintenance rolls it; half of that for one
 event as it is written. A feed's own time zones (VTIMEZONE) count against the same budget. A feed may
 carry 100 time zones, 1,000 of their observances and 2,000 RDATE values in them, and 20,000 RDATE
-and EXDATE values in its events. A SECONDLY to WEEKLY step, a `DURATION`, or an event's length may
+and EXDATE values in its events; a property's name and parameters may take 8 KB and list 100. A SECONDLY to WEEKLY step, a `DURATION`, or an event's length may
 be a century at most. A calendar that needs more, such as a rule that never
 occurs (`FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30`), is refused: `invalid_event` on a write,
 `invalid_icalendar` from a feed. During maintenance, a stored series that outgrows the budget is

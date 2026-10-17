@@ -5,6 +5,7 @@
 //   slow zone while the event was built, where only steps were counted, not time: 150 seconds.
 // - A TZID no VTIMEZONE defines made ical.js scan every VTIMEZONE for every date value: 31 seconds.
 // And ical.js gave every series in a feed the exceptions of every other series (by local time).
+import ICAL from 'ical.js';
 import { describe, expect, it } from 'vitest';
 import {
   CalendarContractError,
@@ -324,5 +325,267 @@ describe('converting a wall-clock time in a zone', () => {
         zonedDateTimeToUtc({ year: 2026, month: 7, day: 1, hour: 9, minute: 0, second: 0 }, zone),
       ).toEqual(new Date('2026-07-01T08:00:00Z'));
     }
+  });
+});
+
+describe('a feed that would hold the process inside one call (round 3)', () => {
+  // One zone at every cap: 2,000 RDATE values in one observance and 999 more observances. ical.js
+  // expands all of them again for each later year it reads, appending them each time, and sorting
+  // 1,000 EXDATE values in years six apart read 1,000 later years inside one call: 26 to 35 seconds
+  // and 650 MB from a 181 KB feed.
+  const crowdedZone = [
+    'BEGIN:VTIMEZONE',
+    'TZID:Custom/Crowded',
+    'BEGIN:STANDARD',
+    'DTSTART:19700101T000000',
+    'TZOFFSETFROM:+0100',
+    'TZOFFSETTO:+0000',
+    ...Array.from(
+      { length: 2_000 },
+      (_, index) =>
+        `RDATE:${1971 + Math.floor(index / 300)}${String(1 + (index % 12)).padStart(2, '0')}${String(1 + (Math.floor(index / 12) % 25)).padStart(2, '0')}T020000`,
+    ),
+    'END:STANDARD',
+    ...Array.from({ length: 999 }, () => [
+      'BEGIN:STANDARD',
+      'DTSTART:19700101T000000',
+      'TZOFFSETFROM:+0000',
+      'TZOFFSETTO:+0000',
+      'END:STANDARD',
+    ]).flat(),
+    'END:VTIMEZONE',
+  ];
+  const laterYears = (count: number) =>
+    Array.from({ length: count }, (_, index) => `${2032 + index * 6}0101T090000`).join(',');
+
+  it.each(parsers)(
+    'bounds %s a zone re-read for 1,000 later years within one call',
+    (_name, parse) => {
+      const text = calendar(
+        ...crowdedZone,
+        ...event(
+          'UID:years',
+          'DTSTART;TZID=Custom/Crowded:20261102T090000',
+          'DTEND;TZID=Custom/Crowded:20261102T100000',
+          'RRULE:FREQ=YEARLY;COUNT=2',
+          `EXDATE;TZID=Custom/Crowded:${laterYears(1_000)}`,
+        ),
+      );
+      const { ms, error } = timed(() => parse(text));
+      if (error !== null) expect(error).toBeInstanceOf(CalendarContractError);
+      expect(ms).toBeLessThan(1_500);
+    },
+    // Without a bound on each re-expansion this runs for half a minute or more.
+    600_000,
+  );
+
+  it('reads a zone re-read for 300 later years in full, keeping one copy of its changes', () => {
+    // Expanded again for each later year, the zone keeps one copy of its 3,000 changes: appending
+    // them each time, the sorts alone pass the time limit.
+    const text = calendar(
+      ...crowdedZone,
+      ...event(
+        'UID:years',
+        'DTSTART;TZID=Custom/Crowded:20261102T090000',
+        'DTEND;TZID=Custom/Crowded:20261102T100000',
+        'RRULE:FREQ=YEARLY;COUNT=2',
+        `EXDATE;TZID=Custom/Crowded:${laterYears(300)}`,
+      ),
+    );
+    const { ms, error } = timed(() => parseICalendarChanges(text, 'UTC', WINDOW));
+    expect(error).toBeNull();
+    expect(ms).toBeLessThan(1_000);
+  }, 600_000);
+
+  it('reads 1,500 events in one crowded zone with one expansion of it', () => {
+    // Every time read in the zone asks ical.js for its coverage; only a later year expands it again.
+    const text = calendar(
+      ...crowdedZone,
+      ...Array.from({ length: 1_500 }, (_, index) =>
+        event(
+          `UID:shift-${index}`,
+          `DTSTART;TZID=Custom/Crowded:2026${String(1 + (index % 12)).padStart(2, '0')}${String(1 + (index % 28)).padStart(2, '0')}T090000`,
+          `DTEND;TZID=Custom/Crowded:2026${String(1 + (index % 12)).padStart(2, '0')}${String(1 + (index % 28)).padStart(2, '0')}T100000`,
+        ),
+      ).flat(),
+    );
+    const { ms, error } = timed(() => parseICalendarChanges(text, 'UTC', WINDOW));
+    expect(error).toBeNull();
+    expect(ms).toBeLessThan(1_000);
+  }, 600_000);
+
+  it('still reads a feed\'s own zone across far years as Intl reads the same zone', () => {
+    const london = [
+      'BEGIN:VTIMEZONE',
+      'TZID:Custom/London',
+      'BEGIN:DAYLIGHT',
+      'DTSTART:19810329T010000',
+      'TZOFFSETFROM:+0000',
+      'TZOFFSETTO:+0100',
+      'RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU',
+      'END:DAYLIGHT',
+      'BEGIN:STANDARD',
+      'DTSTART:19961027T020000',
+      'TZOFFSETFROM:+0100',
+      'TZOFFSETTO:+0000',
+      'RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU',
+      'END:STANDARD',
+      'END:VTIMEZONE',
+    ];
+    // Each year past the last one read makes ical.js expand the zone again.
+    const days = ['20270115', '20270715', '20400115', '20400715', '20600715', '20901101'];
+    const text = calendar(
+      ...london,
+      ...days.flatMap((day) =>
+        event(
+          `UID:day-${day}`,
+          `DTSTART;TZID=Custom/London:${day}T093000`,
+          `DTEND;TZID=Custom/London:${day}T103000`,
+        ),
+      ),
+    );
+    const starts = parseICalendarChanges(text, 'UTC', {
+      start: new Date('2026-01-01T00:00:00Z'),
+      end: new Date('2027-01-01T00:00:00Z'),
+    }).map((change) => change.start?.toISOString());
+    expect(starts).toEqual(
+      days.map((day) =>
+        zonedDateTimeToUtc(
+          {
+            year: Number(day.slice(0, 4)),
+            month: Number(day.slice(4, 6)),
+            day: Number(day.slice(6, 8)),
+            hour: 9,
+            minute: 30,
+            second: 0,
+          },
+          'Europe/London',
+        ).toISOString(),
+      ),
+    );
+  });
+
+  it('refuses a feed with its own zone if ical.js no longer expands zones as it is bounded', () => {
+    const prototype = ICAL.Timezone.prototype as unknown as Record<string, unknown>;
+    const ensure = prototype._ensureCoverage;
+    prototype._ensureCoverage = undefined;
+    try {
+      // The event's times are UTC, so ical.js never reads the zone: only the bound refuses it.
+      const text = calendar(
+        'BEGIN:VTIMEZONE',
+        'TZID:Custom/Plain',
+        'BEGIN:STANDARD',
+        'DTSTART:19700101T000000',
+        'TZOFFSETFROM:+0100',
+        'TZOFFSETTO:+0100',
+        'END:STANDARD',
+        'END:VTIMEZONE',
+        ...event(
+          'UID:zoned',
+          'DTSTART:20261102T090000Z',
+          'DTEND:20261102T100000Z',
+        ),
+      );
+      expect(() => parseICalendarChanges(text, 'UTC', WINDOW)).toThrow(CalendarContractError);
+    } finally {
+      prototype._ensureCoverage = ensure;
+    }
+  });
+
+  // ical.js reads a property's parameters by searching from each one to the end of the line for
+  // its value: 490,000 of them on one line took 7.9 seconds before anything else ran.
+  it.each(parsers)('refuses %s a property with more parameters than any real one', (_name, parse) => {
+    const text = calendar(
+      ...event(
+        'UID:parameters',
+        'DTSTART:20261102T090000Z',
+        'DTEND:20261102T100000Z',
+        `X-A${';A=b'.repeat(490_000)}:v`,
+      ),
+    );
+    expect(text.length).toBeLessThan(2_000_000);
+    const { ms, error } = timed(() => parse(text));
+    expect(error).toBeInstanceOf(CalendarExpansionLimitError);
+    expect(ms).toBeLessThan(200);
+  }, 600_000);
+
+  it.each(parsers)(
+    'refuses %s many properties each with more parameters than any real one, within 8 KB',
+    (_name, parse) => {
+      // Each line is short enough, but its cost is its parameters times its length.
+      const crowded = Array.from({ length: 240 }, () => `X-A${';A=b'.repeat(1_000)}:v`);
+      const text = calendar(
+        ...event('UID:crowded', 'DTSTART:20261102T090000Z', 'DTEND:20261102T100000Z', ...crowded),
+      );
+      const { ms, error } = timed(() => parse(text));
+      expect(error).toBeInstanceOf(CalendarExpansionLimitError);
+      expect(ms).toBeLessThan(200);
+    },
+    600_000,
+  );
+
+  it.each(parsers)(
+    'counts %s the parameters past a quoted `:`, which does not end them',
+    (_name, parse) => {
+      const text = calendar(
+        ...event(
+          'UID:quoted',
+          'DTSTART:20261102T090000Z',
+          'DTEND:20261102T100000Z',
+          `X-A;B="x:y"${';A=b'.repeat(450_000)}:v`,
+        ),
+      );
+      const { ms, error } = timed(() => parse(text));
+      expect(error).toBeInstanceOf(CalendarExpansionLimitError);
+      expect(ms).toBeLessThan(200);
+    },
+    600_000,
+  );
+
+  it.each(parsers)('counts %s the parameters of a folded line as one line', (_name, parse) => {
+    // ical.js joins the folded line before it reads the parameters.
+    const line = `X-A${';A=b'.repeat(450_000)}:v`;
+    const folded = line.match(/.{1,74}/g)?.join('\r\n ') ?? line;
+    const text = calendar(
+      ...event('UID:folded', 'DTSTART:20261102T090000Z', 'DTEND:20261102T100000Z', folded),
+    );
+    expect(text.length).toBeLessThan(2_000_000);
+    const { ms, error } = timed(() => parse(text));
+    expect(error).toBeInstanceOf(CalendarExpansionLimitError);
+    expect(ms).toBeLessThan(200);
+  }, 600_000);
+
+  it.each(parsers)('refuses %s a property whose parameters run past 8 KB', (_name, parse) => {
+    const text = calendar(
+      ...event(
+        'UID:long',
+        'DTSTART:20261102T090000Z',
+        'DTEND:20261102T100000Z',
+        `X-A;A="${'b'.repeat(9_000)}":v`,
+      ),
+    );
+    const { error } = timed(() => parse(text));
+    expect(error).toBeInstanceOf(CalendarExpansionLimitError);
+  });
+
+  it.each(parsers)('still reads %s an attendee with many parameters, folded', (_name, parse) => {
+    const members = Array.from({ length: 60 }, (_, index) => `"mailto:crew${index}@example.com"`);
+    const attendee =
+      'ATTENDEE;CN="Depot crew";CUTYPE=GROUP;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED;RSVP=FALSE;LANGUAGE=en;X-NUM-GUESTS=0:mailto:crew@example.com';
+    // Quoted values hold `:` and `;`, which do not end the parameters.
+    const group = `X-DEPOT-GROUP;X-NOTE="crew; all shifts";MEMBER=${members.join(',')}:crew`;
+    // Folded every 74 characters, as calendar servers write long lines.
+    const fold = (line: string) => line.match(/.{1,74}/g)?.join('\r\n ') ?? line;
+    const text = calendar(
+      ...event(
+        'UID:attendees',
+        'DTSTART:20261102T090000Z',
+        'DTEND:20261102T100000Z',
+        'ORGANIZER;CN=Depot:mailto:depot@example.com',
+        fold(attendee),
+        fold(group),
+      ),
+    );
+    expect(() => parse(text)).not.toThrow();
   });
 });
