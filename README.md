@@ -342,15 +342,24 @@ export async function scheduleWeeklyInspection(
 Occurrences are stored for a window of at most 367 days and 2,000 occurrences; maintenance rolls
 the window forward. Past it, free/busy reports the time as unproven.
 
-A rule is expanded from its start, within a budget: 50,000 steps and a second for a feed (the
-whole read, from its text), or for a stored series as maintenance rolls it; half of that for one
-event as it is written. A feed's own time zones (VTIMEZONE) count against the same budget. A feed may
-carry 100 time zones, 1,000 of their observances and 2,000 RDATE values in them, and 20,000 RDATE
-and EXDATE values in its events; a property's name and parameters may take 8 KB and list 100. A SECONDLY to WEEKLY step, a `DURATION`, or an event's length may
-be a century at most. A calendar that needs more, such as a rule that never
-occurs (`FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30`), is refused: `invalid_event` on a write,
-`invalid_icalendar` from a feed. During maintenance, a stored series that outgrows the budget is
-counted as `refused` (its ids in `refusedEventIds`) and keeps its old coverage.
+A rule is expanded within a budget: 50,000 steps and a second for a feed (the whole read, from its
+text), or for a stored series as maintenance rolls it; half of that for one event as it is written.
+A feed's own time zones (VTIMEZONE) count against the same budget. A feed may carry 100 time zones,
+1,000 of their observances and 2,000 RDATE values in them, and 20,000 RDATE and EXDATE values in
+its events; a property's name and parameters may take 8 KB and list 100. A SECONDLY to WEEKLY step,
+a `DURATION`, or an event's length may be a century at most. A calendar that needs more, such as a
+rule that never occurs (`FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30`), is refused: `invalid_event` on a
+write, `invalid_icalendar` from a feed.
+
+A feed's rules are expanded from their start. A stored series keeps where its last expansion
+stopped, and the next one resumes there, so a daily series keeps rolling for as long as it runs:
+its budget goes on the window, not on the years before it. A write that changes a series searches
+from its start, and resumes from where it stopped only if that search is over the budget. A place
+serves only the rule, start and time zone it was kept for, read by the same version of ical.js, and
+never lies past an occurrence that could still reach the window (one within the event's length and
+a day of it, or one an exception moves into it). Otherwise the series is searched from its start,
+within the same budget. During maintenance, a stored series that outgrows the budget is counted as
+`refused` (its ids in `refusedEventIds`) and keeps its old coverage.
 
 ### External calendars
 
@@ -808,6 +817,9 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
 
 - **Run maintenance at least daily for every tenant.** Forced RLS hides other tenants from the
   application role, so iterate your own tenant list.
+- **Page the roll with `next`.** Pass each batch's `next` as `after` to the next batch of the same
+  pass. A series left in conflict or refused keeps its place at the front of the order, so without
+  `after` every later batch would examine it again.
 - **Quotas.** Each agent principal may retain 1,000 event identities (active plus cancelled) and
   10,000 idempotency commands, of which 9,000 can be creates or updates, so a cancel always has
   room. Adjust with `agentOwnerEventQuota` and `agentOwnerCommandQuota` on `createSlotlockStore`.

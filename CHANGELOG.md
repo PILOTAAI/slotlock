@@ -127,11 +127,22 @@ request replaces "Unreleased" with the release date.
   one call, took up to 35 seconds and 650 MB. Each expansion now keeps one copy, and the time limit
   is checked before each.
 
-  `rollCalendarEventHorizon` skips a stored series that goes past these limits, which includes a
-  daily series about 11 years after its start (4,000 occurrences). It counts the series in the new
-  `refused` field and lists it in `refusedEventIds`, keeps its old coverage, and still rolls the
-  series after it. Before, such a series made every roll for its tenant throw. A series Slotlock
-  cannot read at all still fails the roll. The maintenance example sums `refused`.
+  A stored series keeps where its last expansion stopped (the new `recurrence_cursor` column), and
+  `rollCalendarEventHorizon` resumes there instead of searching again from its start, so a daily
+  series keeps rolling for as long as it runs. Before, that search grew with the series until a
+  daily series about 11 years old (4,000 occurrences) went past the limits for good. A write to a
+  series whose search from its start is over the limits resumes the same way. A kept place serves
+  only the rule, start and time zone it was kept for, read by the same ical.js version, and never
+  lies past an occurrence that could still reach the window; otherwise the series is searched from
+  its start.
+
+  `rollCalendarEventHorizon` skips a stored series that still goes past these limits. It counts the
+  series in the new `refused` field and lists it in `refusedEventIds`, keeps its old coverage, and
+  still rolls the series after it. Before, such a series made every roll for its tenant throw. A
+  series Slotlock cannot read at all still fails the roll. Each batch returns `next`; passed back as
+  `after`, it starts the next batch after the series this one left in conflict or refused, which
+  keep their place at the front of the order and were otherwise examined again by every later
+  batch. The maintenance example sums `refused` and pages with `next`.
 
 ### Added
 
