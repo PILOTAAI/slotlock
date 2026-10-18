@@ -157,9 +157,12 @@ describe.skipIf(!url)('a stored series resumed from its cursor (real Postgres)',
 
   it('lets a release from before cursors make a series a one-off, and never reads what it leaves', async () => {
     const series = `rolled-back-${crypto.randomUUID()}`;
+    // At an hour the resource has free (the long-running series holds 09:00 every day, the one-off
+    // below 13:00 on 2 November), and starting before its window: a series that starts inside its
+    // window has no occurrence before it for a cursor to stand on, and is written without one.
     const recent = handover(series, {
-      start: london('2026-03-01', '09:00'),
-      end: london('2026-03-01', '10:00'),
+      start: london('2026-02-01', '11:00'),
+      end: london('2026-02-01', '12:00'),
       materializationWindow: yearWindow(15),
     });
     expect(await store.putCalendarEvent(recent)).toMatchObject({ ok: true });
@@ -171,6 +174,7 @@ describe.skipIf(!url)('a stored series resumed from its cursor (real Postgres)',
     await expect(
       store.rollCalendarEventHorizon({ tenantRef, window: yearWindow(16) }),
     ).resolves.toMatchObject({ refused: 0 });
+    expect((await stored(series))?.recurrence_cursor).toEqual(row?.recurrence_cursor);
   });
 
   it('keeps no cursor for a one-off event', async () => {
