@@ -56,6 +56,7 @@ export {
 export type {
   SlotlockAgentCalendarBackend,
   SlotlockAgentConfirmationOptions,
+  SlotlockAgentErrorContext,
   SlotlockAgentInvocationContext,
   SlotlockAgentOperation,
   SlotlockAgentOperationDispatchOptions,

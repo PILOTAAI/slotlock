@@ -25,6 +25,7 @@ import {
   stateSecrets,
   traceContextFrom,
 } from './mcp-modern.js';
+import { slotlockPackageVersion } from './package-version.js';
 import {
   matchSlotlockRestRoute,
   restInputFromBody,
@@ -55,7 +56,11 @@ export {
   SLOTLOCK_MCP_APPS_EXTENSION,
 } from './mcp-app.js';
 
-export const SLOTLOCK_AGENT_SERVER_VERSION = '1.0.0';
+/**
+ * The package version, from package.json: what `/healthz`, MCP `serverInfo`, the A2A card, the
+ * manifest and the OpenAPI document report.
+ */
+export const SLOTLOCK_AGENT_SERVER_VERSION: string = slotlockPackageVersion();
 /**
  * The newest MCP revision Slotlock implements: stateless, with the protocol version, client
  * capabilities and client identity carried in every request's `_meta` (no `initialize`, no sessions).
@@ -553,6 +558,20 @@ export interface SlotlockAgentServerOptions {
    * metrics or audit. It runs synchronously and whatever it throws is ignored.
    */
   onEvent?: (event: SlotlockAgentServerEvent) => void;
+  /**
+   * Called with a failure no client is told about: an operation's backend threw something other
+   * than a `SlotlockAgentOperationError`, or returned a result outside the operation's schema. The
+   * client gets `internal_error` and nothing more, so log it here to find out why. It receives the
+   * error and the operation, never the arguments or the request; it runs synchronously and whatever
+   * it throws is ignored.
+   */
+  onError?: (error: unknown, context: SlotlockAgentErrorContext) => void;
+}
+
+/** What `onError` is told about an unexpected failure besides the error itself. */
+export interface SlotlockAgentErrorContext {
+  /** The operation that failed; `null` when the failure came before one was resolved. */
+  operation: SlotlockAgentOperation | null;
 }
 
 export interface SlotlockAgentOperationDispatchOptions {
@@ -576,6 +595,8 @@ export interface SlotlockAgentOperationDispatchOptions {
     operation: SlotlockAgentOperation;
     input: Record<string, unknown>;
   }) => Promise<{ status: number; code: string } | null>;
+  /** As `SlotlockAgentServerOptions.onError`: a failure the result reports only as internal. */
+  onError?: (error: unknown, context: SlotlockAgentErrorContext) => void;
 }
 
 export type SlotlockAgentOperationDispatchResult =
@@ -1185,6 +1206,7 @@ export async function invokeSlotlockAgentOperation(args: {
   /** Validated W3C trace context to hand the backend (see `SlotlockAgentInvocationContext.trace`). */
   trace?: SlotlockTraceContext;
 }): Promise<SlotlockAgentOperationDispatchResult> {
+  let resolvedOperation: SlotlockAgentOperation | null = null;
   try {
     const principal = await args.options.authenticate(args.request);
     if (
@@ -1197,6 +1219,7 @@ export async function invokeSlotlockAgentOperation(args: {
     const resolved = resolveSlotlockAgentOperation(args.operation);
     const operation = resolved ? OPERATIONS.get(resolved) : undefined;
     if (!operation) return { ok: false, status: 404, code: 'operation_not_found' };
+    resolvedOperation = operation.name;
     if (!principalScopesCover(principal, operation.name)) {
       return { ok: false, status: 403, code: 'forbidden' };
     }
@@ -1243,6 +1266,17 @@ export async function invokeSlotlockAgentOperation(args: {
     if (args.trace) context.trace = args.trace;
     const data = await method.call(args.options.backend, context, parsed.data);
     if (!operation.output.safeParse(data).success) {
+      // Neither the result nor the schema's complaint about it: either may hold tenant data.
+      reportUnexpected(
+        args.options.onError,
+        Object.assign(
+          new Error(
+            `The backend's ${operation.name} result does not match the operation's output schema`,
+          ),
+          { code: 'invalid_backend_result' },
+        ),
+        resolvedOperation,
+      );
       return { ok: false, status: 500, code: 'invalid_backend_result' };
     }
     return { ok: true, data };
@@ -1250,7 +1284,21 @@ export async function invokeSlotlockAgentOperation(args: {
     if (error instanceof SlotlockAgentOperationError) {
       return { ok: false, status: error.status, code: error.code };
     }
+    reportUnexpected(args.options.onError, error, resolvedOperation);
     return { ok: false, status: 500, code: 'internal_error' };
+  }
+}
+
+/** Hand an unexpected failure to `onError`; nothing it does can change the protocol answer. */
+function reportUnexpected(
+  onError: SlotlockAgentOperationDispatchOptions['onError'],
+  error: unknown,
+  operation: SlotlockAgentOperation | null,
+): void {
+  try {
+    onError?.(error, { operation });
+  } catch {
+    // Observability must never change what a protocol client receives.
   }
 }
 
@@ -2311,6 +2359,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     authenticate: async () => principal,
     authorize: options.authorize,
     ...(options.consumeRateLimit ? { consumeRateLimit: options.consumeRateLimit } : {}),
+    ...(options.onError ? { onError: options.onError } : {}),
   });
   /**
    * The 2025 revisions and A2A cannot carry a confirmation round, so a guarded write there fails
@@ -2784,6 +2833,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
           : null;
       },
       authorize: options.authorize,
+      ...(options.onError ? { onError: options.onError } : {}),
     };
     let failures = 0;
     const poll = async (): Promise<void> => {

@@ -291,11 +291,21 @@ function encodeEventCursor(event: SlotlockCalendarEvent): string {
   ).toString('base64url');
 }
 
+/**
+ * The caller's resource with this id, or `resource_not_found`. The tools accept any id an agent may
+ * send (an external reference such as `vehicle-42`, the nil UUID, a version 7 UUID). The store
+ * issues version 4 UUIDs (gen_random_uuid) and refuses an id that is not a version 1 to 5 UUID as an
+ * invalid identity, so such an id names no resource: it is not found, like a well-formed id that
+ * names nothing or another tenant's resource.
+ */
 async function requireResource(
   tenantStore: SlotlockTenantStore,
   tenantRef: string,
   resourceId: string,
 ): Promise<SlotlockResource> {
+  if (!STORE_ID_PATTERN.test(resourceId)) {
+    throw new SlotlockAgentOperationError('resource_not_found', 404);
+  }
   const resource = await tenantStore.getResource({ tenantRef, id: resourceId });
   if (!resource) throw new SlotlockAgentOperationError('resource_not_found', 404);
   return resource;

@@ -2,6 +2,7 @@
 // schema owner migrates and grants a LOGIN role without BYPASSRLS, which then adds a resource and
 // serves MCP on a real socket until its signal aborts. Skipped without DATABASE_URL.
 import { randomBytes, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { SLOTLOCK_MCP_LEGACY_PROTOCOL_VERSION } from '../agent-server.js';
@@ -9,6 +10,11 @@ import { SLOTLOCK_DASHBOARD_FUNCTIONS } from '../ddl.js';
 import { type SlotlockEnv, runSlotlockCli } from '../self-host.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
+const packageVersion = (
+  JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as {
+    version: string;
+  }
+).version;
 
 function output() {
   const chunks: string[] = [];
@@ -211,7 +217,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       expect(health.status).toBe(200);
       expect(await health.json()).toEqual({
         status: 'ready',
-        version: '1.0.0',
+        version: packageVersion,
         checks: ['database'],
       });
 
@@ -470,6 +476,99 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     expect(foreign.stdout.text()).toBe('');
     expect(foreign.stderr.text()).toMatch(/no API key with that id/);
   });
+  it('refuses to serve as a role that bypasses row-level security, and says how to fix it', async (context) => {
+    const [connecting] = await admin<{ rolsuper: boolean }[]>`
+      SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user`;
+    if (!connecting?.rolsuper) context.skip('needs a superuser DATABASE_URL to create a BYPASSRLS role');
+    const bypassRole = `${role}_bypass`;
+    const bypassPassword = randomBytes(24).toString('hex');
+    await admin.unsafe(
+      `CREATE ROLE ${bypassRole} LOGIN PASSWORD '${bypassPassword}' NOSUPERUSER BYPASSRLS`,
+    );
+    try {
+      const bypassUrl = new URL(url as string);
+      bypassUrl.username = bypassRole;
+      bypassUrl.password = bypassPassword;
+      for (const [databaseUrl, attribute, secret] of [
+        [url as string, 'superuser', new URL(url as string).password],
+        [bypassUrl.href, 'BYPASSRLS', bypassPassword],
+      ] as const) {
+        const stdout = output();
+        const stderr = output();
+        // A server that does start is stopped after 3 seconds, so the check fails on its exit code.
+        const code = await runSlotlockCli(['serve'], {
+          env: { ...env, DATABASE_URL: databaseUrl, SLOTLOCK_MIGRATE_DATABASE_URL: undefined },
+          stdout,
+          stderr,
+          signal: AbortSignal.timeout(3_000),
+        });
+        expect(code, attribute).toBe(1);
+        expect(stdout.events().find(({ event }) => event === 'listening'), attribute).toBeUndefined();
+        const [failure] = stderr.events();
+        expect(failure, attribute).toMatchObject({
+          event: 'serve_failed',
+          code: 'unsafe_serving_role',
+        });
+        expect(failure?.error, attribute).toContain(attribute);
+        expect(failure?.error, attribute).toContain('SLOTLOCK_MIGRATE_DATABASE_URL');
+        if (secret) expect(stderr.text() + stdout.text(), attribute).not.toContain(secret);
+      }
+    } finally {
+      await admin.unsafe(`DROP ROLE IF EXISTS ${bypassRole}`);
+    }
+  });
+
+  it('logs an operation that fails unexpectedly, while the agent learns only that it failed', async () => {
+    // The serving role loses a grant migrate gave it: every resource read now fails in Postgres.
+    await admin.unsafe(`REVOKE SELECT ON slotlock.resources FROM ${role}`);
+    const shutdown = new AbortController();
+    const stdout = output();
+    const stderr = output();
+    const serving = runSlotlockCli(['serve'], { env, stdout, stderr, signal: shutdown.signal });
+    try {
+      const listening = await eventually(() =>
+        stdout.events().find(({ event }) => event === 'listening'),
+      );
+      const response = await fetch(`${listening.address as string}/mcp`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          'MCP-Protocol-Version': SLOTLOCK_MCP_LEGACY_PROTOCOL_VERSION,
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'slotlock_list_resources', arguments: {} },
+        }),
+      });
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({
+        jsonrpc: '2.0',
+        id: 1,
+        error: { code: -32603, message: 'Internal error' },
+      });
+    } finally {
+      shutdown.abort();
+      expect(await serving).toBe(0);
+      expect((await run(['migrate'])).code).toBe(0);
+    }
+    expect(stderr.events()).toEqual([
+      expect.objectContaining({
+        level: 'error',
+        event: 'agent_error',
+        operation: 'slotlock_list_resources',
+        code: '42501',
+        error: expect.stringContaining('permission denied'),
+      }),
+    ]);
+    for (const secret of [token, confirmationSecret, password]) {
+      expect(stderr.text()).not.toContain(secret);
+    }
+  });
+
   it('refuses to serve the dashboard until migrate has granted its functions', async () => {
     await admin.unsafe(
       `REVOKE EXECUTE ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS.join(', ')} FROM ${role}`,
