@@ -669,8 +669,8 @@ print_checklist() {
     - second release: creates the npm trusted publisher (release.yml, environment npm, stage
       only). npm expires one that has not published within 2 days, so it is created when a
       version is waiting, and the re-run publishes it.
-    Run this script before the first release merges: it creates the deploy key tag-release.yml
-    pushes v* tags with. Without it, that job fails and says so; run this, then re-run the job.
+    The deploy key tag-release.yml pushes v* tags with is created here. scripts/bootstrap-release.sh
+    runs this script when it is missing, re-runs the failed job and finishes the release.
 EOF
   if [ "${SITE_SECRETS_SKIPPED:-0}" = 1 ]; then
     cat <<EOF

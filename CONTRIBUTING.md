@@ -73,4 +73,6 @@ dates the version's `CHANGELOG.md` heading. Once it is on `main`, `tag-release.y
 `image.yml` (the image, then the MCP Registry). npm holds each staged version until a maintainer
 approves it with two-factor authentication; the Release run's summary gives the command. When a run
 needs a step npm or GitHub keeps for a person (the first npm version, the npm trusted publisher, the
-image's visibility), the failing job names `scripts/bootstrap-release.sh <tag>`.
+image's visibility, and the deploy key `tag-release.yml` pushes tags with), the failing job names
+`scripts/bootstrap-release.sh`. One run of it does that step, re-runs the failed jobs and waits for
+them.

@@ -773,12 +773,24 @@ describe.skipIf(!hasJq)('release bootstrap', () => {
   *) echo "unexpected: npm $*" >&2; exit 99 ;;
 esac`,
     gh: `case "$*" in
-  'api repos/PILOTAAI/slotlock/commits/tags/v1.2.3 --jq .sha') echo "$STUB_TAG_COMMIT" ;;
+  'api -H Accept: application/vnd.github.raw+json repos/PILOTAAI/slotlock/contents/package.json?ref=main')
+    echo '{"version":"1.2.3"}' ;;
+  'api repos/PILOTAAI/slotlock/environments/release-tag/secrets '*)
+    if [ "$STUB_CONFIGURED" = 1 ] || [ -f "$STUB_LOG/configured" ]; then echo '["TAG_RELEASE_DEPLOY_KEY"]'; else echo '[]'; fi ;;
+  'api repos/PILOTAAI/slotlock/rulesets?'*) echo 7 ;;
+  'api repos/PILOTAAI/slotlock/rulesets/7 '*) echo true ;;
+  'api repos/PILOTAAI/slotlock/commits/main --jq .sha') echo "$STUB_MAIN_COMMIT" ;;
+  'api repos/PILOTAAI/slotlock/commits/tags/v1.2.3 --jq .sha')
+    if [ "$STUB_TAG_PUSHED" = 1 ] || [ -f "$STUB_LOG/tagged" ]; then echo "$STUB_TAG_COMMIT"; else exit 1; fi ;;
+  'run list '*'--workflow tag-release.yml '*) echo "$STUB_TAG_RUNS" ;;
   'run list '*'--workflow release.yml '*) [ "$STUB_GH_FAILS" = 1 ] && exit 1; echo "$STUB_RELEASE_RUNS" ;;
   'run list '*'--workflow image.yml '*) echo "$STUB_IMAGE_RUNS" ;;
   'run download '*) for last; do :; done; cp "$STUB_ARTIFACT"/* "$last" ;;
   'run view 22 '*) echo "$STUB_IMAGE_JOB" ;;
+  'run rerun 5 '*) [ "$STUB_RERUN_TAGS" = 1 ] && touch "$STUB_LOG/tagged"; exit 0 ;;
   'run rerun '*) ;;
+  'run watch '*) ;;
+  'workflow run '*) ;;
   *) echo "unexpected: gh $*" >&2; exit 99 ;;
 esac`,
     curl: `case "$*" in
@@ -788,7 +800,7 @@ esac`,
 esac`,
   };
 
-  function bootstrap(scenario: Record<string, string>, checksum?: string) {
+  function bootstrap(scenario: Record<string, string>, checksum?: string, args = ['v1.2.3']) {
     const dir = mkdtempSync(join(tmpdir(), 'slotlock-bootstrap-'));
     scratch.push(dir);
     const bin = join(dir, 'bin');
@@ -802,6 +814,13 @@ esac`,
         { mode: 0o755 },
       );
     }
+    // A stand-in for configure-github.sh: it records how it was run, and sets GitHub up when asked.
+    const configure = join(bin, 'configure-github.sh');
+    writeFileSync(
+      configure,
+      `#!/bin/sh\necho "SKIP_SITE_SECRETS=$SKIP_SITE_SECRETS" >> "$STUB_LOG/configure.log"\n[ "$STUB_CONFIGURE_WORKS" = 1 ] && touch "$STUB_LOG/configured"\nexit 0\n`,
+      { mode: 0o755 },
+    );
     // The npm-package artifact a Release run uploads: the tarball and its SHA256SUMS.
     writeFileSync(
       join(dir, 'package', 'package.json'),
@@ -813,12 +832,19 @@ esac`,
     });
     const sum = checksum ?? createHash('sha256').update(readFileSync(tarball)).digest('hex');
     writeFileSync(join(artifact, 'SHA256SUMS'), `${sum}  slotlock-1.2.3.tgz\n`);
-    const result = spawnSync('bash', [join(root, 'scripts', 'bootstrap-release.sh'), 'v1.2.3'], {
+    const result = spawnSync('bash', [join(root, 'scripts', 'bootstrap-release.sh'), ...args], {
       encoding: 'utf8',
       input: '',
       env: {
         PATH: `${bin}:${process.env.PATH ?? ''}`,
+        SLOTLOCK_CONFIGURE_GITHUB: configure,
+        SLOTLOCK_POLL_SECONDS: '0',
         STUB_LOG: log,
+        STUB_CONFIGURED: '1',
+        STUB_CONFIGURE_WORKS: '1',
+        STUB_TAG_PUSHED: '1',
+        STUB_MAIN_COMMIT: 'c'.repeat(40),
+        STUB_TAG_RUNS: '[]',
         STUB_ARTIFACT: artifact,
         STUB_NPM_VERSION: '11.19.0',
         STUB_TAG_COMMIT: tagCommit,
@@ -837,8 +863,69 @@ esac`,
             .trim()
             .split('\n')
         : [];
-    return { ...result, npm: calls('npm'), gh: calls('gh') };
+    return { ...result, npm: calls('npm'), gh: calls('gh'), configure: calls('configure') };
   }
+  const tagRun = (conclusion: string) =>
+    JSON.stringify([{ databaseId: 5, status: 'completed', conclusion, headSha: 'c'.repeat(40) }]);
+
+  it('sets GitHub up first when tag-release.yml has no deploy key, without asking for site secrets', () => {
+    const result = bootstrap({ STUB_CONFIGURED: '0' });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.configure).toEqual(['SKIP_SITE_SECRETS=1']);
+    expect(result.npm).toContain('stage approve stage-1');
+  });
+
+  it('leaves GitHub alone when tag-release.yml is already set up', () => {
+    const result = bootstrap({});
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.configure).toEqual([]);
+  });
+
+  it('stops when configure-github.sh leaves the deploy key missing', () => {
+    const result = bootstrap({ STUB_CONFIGURED: '0', STUB_CONFIGURE_WORKS: '0' });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('the deploy key or the ruleset bypass is still missing');
+    expect(result.npm.filter((call) => /^(?:stage|trust) /.test(call))).toEqual([]);
+  });
+
+  it("pushes the tag by re-running main's failed Tag release run, then finishes the release", () => {
+    const result = bootstrap({
+      STUB_TAG_PUSHED: '0',
+      STUB_TAG_RUNS: tagRun('failure'),
+      STUB_RERUN_TAGS: '1',
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const rerunAt = result.gh.indexOf(rerun(5));
+    const watchAt = result.gh.findIndex((call) => call.startsWith('run watch 5 '));
+    expect(rerunAt).toBeGreaterThanOrEqual(0);
+    expect(watchAt).toBeGreaterThan(rerunAt);
+    expect(result.gh).toContainEqual(download(11));
+    expect(result.npm).toContain('stage approve stage-1');
+  });
+
+  it('starts Tag release when main has no run of it yet', () => {
+    const result = bootstrap({ STUB_TAG_PUSHED: '0' });
+    expect(result.gh).toContain('workflow run tag-release.yml --repo PILOTAAI/slotlock --ref main');
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('no Tag release run started for main');
+  });
+
+  it('stops when Tag release passed without pushing the tag', () => {
+    const result = bootstrap({ STUB_TAG_PUSHED: '0', STUB_TAG_RUNS: tagRun('success') });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('passed without pushing v1.2.3');
+    expect(result.npm.filter((call) => /^(?:stage|trust) /.test(call))).toEqual([]);
+  });
+
+  it("releases main's version when no tag is given", () => {
+    const result = bootstrap({}, undefined, []);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.gh[0]).toBe(
+      'api -H Accept: application/vnd.github.raw+json repos/PILOTAAI/slotlock/contents/package.json?ref=main',
+    );
+    expect(result.stdout).toContain('Release v1.2.3');
+    expect(result.npm).toContain('stage approve stage-1');
+  });
   const rerun = (id: number) => `run rerun ${id} --failed --repo PILOTAAI/slotlock`;
   const download = (id: number) =>
     expect.stringMatching(
