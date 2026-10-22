@@ -466,7 +466,8 @@ configure_tag_key() {
     result "release-tag: deploy key and $TAG_KEY_SECRET already set (--rotate-tag-key replaces them)"
     return 0
   fi
-  TAG_KEY_DIR=$(mktemp -d)
+  # A template, so TMPDIR is honoured on macOS too (its mktemp -d alone ignores it).
+  TAG_KEY_DIR=$(mktemp -d "${TMPDIR:-/tmp}/slotlock-tag-key.XXXXXX")
   chmod 700 "$TAG_KEY_DIR"
   ssh-keygen -q -t ed25519 -N '' -C "$TAG_KEY_TITLE" -f "$TAG_KEY_DIR/key"
   gh_api POST "repos/$OWNER/$REPO/keys" "$(jq -n --arg title "$TAG_KEY_TITLE" --rawfile key "$TAG_KEY_DIR/key.pub" \

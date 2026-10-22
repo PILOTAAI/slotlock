@@ -635,7 +635,7 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
     const gh = `#!/bin/sh
 printf '%s\\n' "$*" >> "$STUB_LOG/gh.log"
 case "$1 $2" in
-  'secret set') cat > "$STUB_LOG/secret-$3"; exit 0 ;;
+  'secret set') cat > "$STUB_LOG/secret-$3"; ls "$TMPDIR" > "$STUB_LOG/tmpdir-while-storing"; exit 0 ;;
 esac
 case "$*" in
   *'--jq .id') echo 42; exit 0 ;;
@@ -712,8 +712,11 @@ esac
       chmodSync(secret, 0o600);
       const derived = execFileSync('ssh-keygen', ['-y', '-f', secret], { encoding: 'utf8' });
       expect(sent.key.split(' ').slice(0, 2)).toEqual(derived.trim().split(' ').slice(0, 2));
-      // Nothing of it is printed or left behind.
+      // Nothing of it is printed or left behind. Canary: the key was made in this TMPDIR.
       expect(run.stdout + run.stderr).not.toContain('PRIVATE KEY');
+      expect(readFileSync(join(run.log, 'tmpdir-while-storing'), 'utf8')).toMatch(
+        /^slotlock-tag-key\.\w+\n$/,
+      );
       expect(readdirSync(run.temp)).toEqual([]);
     });
 

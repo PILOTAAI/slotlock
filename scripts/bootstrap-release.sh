@@ -177,7 +177,7 @@ first_publish() {
   [ -n "$id" ] || die "the push of $TAG ($TAG_COMMIT) started no Release run yet"
   [ "$status" = completed ] || die "Release run $id is $status: run this again when it has finished"
 
-  WORK_DIR=$(mktemp -d)
+  WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/slotlock-bootstrap.XXXXXX")
   gh run download "$id" --repo "$REPO" --name npm-package --dir "$WORK_DIR" ||
     die "Release run $id has no npm-package artifact: its build job must pass first (re-run it)"
   (cd "$WORK_DIR" && sha256_check >/dev/null) ||
