@@ -971,7 +971,7 @@ esac`,
     expect(result.gh).toContainEqual(download(11));
     expect(result.npm).toContainEqual(
       expect.stringMatching(
-        /^stage publish \S+\/slotlock-1\.2\.3\.tgz --access public --tag latest$/,
+        /^stage publish \S+\/slotlock-1\.2\.3\.tgz --access public --tag latest --provenance=false$/,
       ),
     );
     expect(result.npm).toContain('stage approve stage-1');
@@ -1093,10 +1093,12 @@ esac`,
     expect(result.gh).toContain(rerun(22));
   });
 
-  it('refuses an npm without npm stage and npm trust', () => {
-    const result = bootstrap({ STUB_NPM_VERSION: '11.14.2' });
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain('npm 11.14.2 has no npm stage or npm trust');
-    expect(result.gh).toEqual([]);
+  it('refuses an npm older than the one it was run with', () => {
+    for (const version of ['11.14.2', '11.16.0']) {
+      const result = bootstrap({ STUB_NPM_VERSION: version });
+      expect(result.status, version).toBe(1);
+      expect(result.stderr).toContain(`npm ${version} is older than 11.17.0`);
+      expect(result.gh).toEqual([]);
+    }
   });
 });

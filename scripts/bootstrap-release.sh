@@ -41,7 +41,9 @@ set -euo pipefail
 REPO=PILOTAAI/slotlock
 PACKAGE=slotlock
 IMAGE_PATH=pilotaai/slotlock
-NPM_MINIMUM=11.15.0
+# npm stage and npm trust arrived in 11.15.0; 11.17.0 is the version this script was run with,
+# whose publish lets a command-line flag override package.json's publishConfig (below).
+NPM_MINIMUM=11.17.0
 # image.yml's job that pushes the image.
 IMAGE_JOB='Build, push and attest'
 TAG_KEY_SECRET=TAG_RELEASE_DEPLOY_KEY
@@ -334,9 +336,14 @@ first_publish() {
     say "  $PACKAGE@$VERSION is already staged:"
     npm stage list "$PACKAGE"
   elif [ "$DRY_RUN" -eq 1 ]; then
-    act npm stage publish "$WORK_DIR/$tarball" --access public --tag "$dist_tag"
+    act npm stage publish "$WORK_DIR/$tarball" --access public --tag "$dist_tag" --provenance=false
   else
-    npm stage publish "$WORK_DIR/$tarball" --access public --tag "$dist_tag" | tee "$WORK_DIR/stage.log"
+    # package.json's publishConfig asks for provenance, which needs CI's OIDC identity: npm stops with
+    # "Automatic provenance generation not supported for provider: null" on a laptop. A flag on the
+    # command line wins over publishConfig (npm 11.17 lib/commands/publish.js), and the tarball stays
+    # the one the Release run tested.
+    npm stage publish "$WORK_DIR/$tarball" --access public --tag "$dist_tag" --provenance=false |
+      tee "$WORK_DIR/stage.log"
     # npm prints "+ slotlock@<version> (staged with id <stage-id>)".
     stage_id=$(sed -n 's/^+ .* (staged with id \([^)]*\))$/\1/p' "$WORK_DIR/stage.log")
   fi
@@ -429,7 +436,7 @@ command -v jq >/dev/null 2>&1 || die 'jq is required (https://jqlang.org)'
 command -v curl >/dev/null 2>&1 || die 'curl is required'
 command -v npm >/dev/null 2>&1 || die "npm $NPM_MINIMUM or newer is required"
 version_at_least "$(npm --version)" "$NPM_MINIMUM" ||
-  die "npm $(npm --version) has no npm stage or npm trust: install npm $NPM_MINIMUM or newer"
+  die "npm $(npm --version) is older than $NPM_MINIMUM, which this script needs (npm stage, npm trust): install npm $NPM_MINIMUM or newer"
 [ "$DRY_RUN" -eq 0 ] || say "Dry run: nothing is changed."
 if [ -z "$TAG" ]; then
   TAG=v$(gh api -H 'Accept: application/vnd.github.raw+json' "repos/$REPO/contents/package.json?ref=main" |
