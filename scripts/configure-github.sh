@@ -674,9 +674,10 @@ print_checklist() {
     (gh repo edit $OWNER/$REPO --enable-discussions does it through a has_discussions field
     that gh 2.83.2 sends to the same endpoint, outside the documented body.)
 
-[ ] Releases: run Actions > Release a version with the version. It prepares the release, merges
-    it once CI passes, and tag-release.yml tags it, which starts Release (npm, then the GitHub
-    release) and Image (GHCR, then the MCP Registry). Each staged npm version waits for your two-factor approval
+[ ] Releases: run Actions > Release a version with the version. It prepares the release and
+    opens its pull request; approve its checks there ("Approve workflows to run": GitHub holds them
+    on a pull request a workflow opens). It merges once CI passes, and tag-release.yml tags it,
+    which starts Release (npm, then the GitHub release) and Image (GHCR, then the MCP Registry). Each staged npm version waits for your two-factor approval
     (GOVERNANCE.md, Releases); the Release run's summary gives the npm stage approve command.
     npm and GitHub keep three first-time steps for a person, and the run that needs one says so:
       scripts/bootstrap-release.sh <tag>

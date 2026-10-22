@@ -6,8 +6,6 @@ on:
   pull_request:
   push:
     branches: [main]
-  # release-version.yml starts it on a release branch: its GITHUB_TOKEN pull request starts nothing.
-  workflow_dispatch:
 
 permissions:
   contents: read

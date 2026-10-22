@@ -1294,15 +1294,12 @@ describe('release button', () => {
     expect(text).toContain('scripts/prepare-release.sh "$VERSION"');
   });
 
-  it('runs CI and DCO on the release branch, merges only after both, then starts Tag release', () => {
+  it('waits for CI and DCO on the pull request, merges only after both, then starts Tag release', () => {
     const text = workflow('release-version.yml');
     const order = [
       'scripts/prepare-release.sh "$VERSION"',
       'scripts/open-release-pr.sh "$VERSION" >> "$GITHUB_ENV"',
-      'gh workflow run ci.yml --ref "$BRANCH"',
-      'gh workflow run dco.yml --ref "$BRANCH"',
-      'wait_for ci.yml "$BRANCH"',
-      'wait_for dco.yml "$BRANCH"',
+      'scripts/wait-for-pr-checks.sh "$SHA" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/pull/$PR" ci.yml dco.yml',
       'gh pr merge "$PR" --squash --delete-branch',
       'gh workflow run tag-release.yml --ref main',
       // The merge starts no push workflow, and the site shows the version.
@@ -1310,20 +1307,21 @@ describe('release button', () => {
     ].map((line) => text.indexOf(line));
     expect(order.every((index) => index > 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
-    // Only the runs at this release commit: an earlier run's runs on the branch are at another one.
-    expect(text).toContain('--event workflow_dispatch --commit "$SHA"');
-    expect(text).toContain('gh run watch "$id" --exit-status');
     for (const permission of ['contents: write', 'pull-requests: write', 'actions: write']) {
       expect(text).toContain(permission);
     }
   });
 
-  it('lets CI and DCO run on a release branch the workflow starts them on', () => {
+  it('leaves CI and DCO to the pull request, whose own runs are the checks its merge needs', () => {
+    // On the first real release (0.1.1, 2026-10-22), CI and DCO started with workflow_dispatch passed
+    // at the release commit, and the pull request still had none of its required checks.
+    const text = workflow('release-version.yml');
+    expect(text).not.toMatch(/gh workflow run (?:ci|dco)\.yml/);
     for (const file of ['ci.yml', 'dco.yml']) {
-      expect(workflow(file), file).toMatch(/^on:\n(?: {2}.*\n)* {2}workflow_dispatch:\n/m);
+      expect(workflow(file), file).toMatch(/^on:\n {2}pull_request:\n/m);
     }
-    // A manual DCO run has no pull request: it checks the branch's commits since it left main.
-    expect(workflow('dco.yml')).toContain('base=${BASE_SHA:-$(git merge-base origin/main HEAD)}');
+    // The wait outlasts a person: GitHub-hosted runners stop a job at 360 minutes.
+    expect(text).toContain('timeout-minutes: 360');
   });
 });
 
@@ -1418,7 +1416,14 @@ esac
           STUB_CREATE_ERROR: scenario.createError ?? '',
         },
       });
-    return { cwd, origin, bin, git, write, remote, calls, run };
+    /** Another run: a fresh checkout of main, with the release prepared again. */
+    const again = () => {
+      git('switch', '--quiet', 'main');
+      git('branch', '--quiet', '-D', branch);
+      git('fetch', '--quiet', 'origin');
+      write('1.2.4');
+    };
+    return { cwd, origin, bin, git, write, remote, calls, run, again };
   }
 
   it('commits the prepared release on its branch, pushes it and opens its pull request', () => {
@@ -1505,7 +1510,7 @@ esac
     expect(repo.calls()).toBe('');
   });
 
-  it('names the setting when Actions may not open pull requests, and recovers once it is on', () => {
+  it('names the setting when Actions may not open pull requests, and the next run uses its branch', () => {
     const repo = checkout();
     // The message the first real run got, on 2026-10-22.
     const refusal =
@@ -1522,13 +1527,51 @@ esac
     const left = repo.remote();
     expect(left).not.toBe('');
     // Another run, from a fresh checkout of main, once an admin has allowed it.
-    repo.git('switch', '--quiet', 'main');
-    repo.git('branch', '--quiet', '-D', branch);
-    repo.write('1.2.4');
+    repo.again();
     const allowed = repo.run();
     expect(allowed.status, allowed.stderr).toBe(0);
-    expect(allowed.stderr).toContain(`::notice::Replacing ${branch}`);
-    expect(allowed.stdout).toBe(`SHA=${repo.remote()}\nPR=52\n`);
+    expect(allowed.stderr).toContain(`::notice::Keeping ${branch} at ${left}`);
+    expect(allowed.stdout).toBe(`SHA=${left}\nPR=52\n`);
+  });
+
+  it('keeps a branch that holds this same release, pushing nothing, so its checks still count', () => {
+    const repo = checkout();
+    expect(repo.run().status).toBe(0);
+    const left = repo.remote();
+    repo.again();
+    // A git that refuses to push: keeping the branch must not need one.
+    writeFileSync(
+      join(repo.bin, 'git'),
+      ['#!/bin/sh', '[ "$1" != push ] || exit 99', `exec "${realGit}" "$@"`, ''].join('\n'),
+      { mode: 0o755 },
+    );
+    const result = repo.run();
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe(`SHA=${left}\nPR=52\n`);
+    expect(result.stderr).toContain(
+      `::notice::Keeping ${branch} at ${left}: it already holds this release.`,
+    );
+    expect(repo.remote()).toBe(left);
+    expect(repo.calls().match(/^pr create /gm)).toHaveLength(1);
+  });
+
+  it('replaces a branch with this release once main has moved on, even by an empty commit', () => {
+    const repo = checkout();
+    expect(repo.run().status).toBe(0);
+    const left = repo.remote();
+    // main moves on without changing a file: the release tree is the same, its parent is not.
+    repo.git('switch', '--quiet', 'main');
+    repo.git('commit', '--quiet', '--allow-empty', '--author=Ada <ada@example.com>', '-m', 'Docs');
+    repo.git('push', '--quiet', 'origin', 'main');
+    repo.again();
+    const result = repo.run();
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).toContain(
+      `::notice::Replacing ${branch}, which an earlier run left at ${left}.`,
+    );
+    const tip = repo.remote();
+    expect(tip).not.toBe(left);
+    expect(repo.git('rev-parse', `${tip}^`)).toBe(repo.git('rev-parse', 'origin/main'));
   });
 
   it('stops without that hint when opening the pull request fails for another reason', () => {
@@ -1536,5 +1579,121 @@ esac
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('::error::Could not open the pull request for release/v1.2.4.');
     expect(result.stderr).not.toContain('settings/actions');
+  });
+});
+
+describe.skipIf(!hasJq)('release checks wait', () => {
+  const commit = 'c'.repeat(40);
+  const url = 'https://github.com/PILOTAAI/slotlock/pull/53';
+  // A stand-in for gh run list: each call answers with the next run JSON queued for its workflow (the
+  // last one repeats), through the --jq filter the script passes, as gh does.
+  const gh = `#!/bin/sh
+printf '%s\\n' "$*" >> "$STUB_LOG/gh.log"
+workflow=''
+filter=''
+previous=''
+for arg; do
+  [ "$previous" = --workflow ] && workflow=$arg
+  [ "$previous" = --jq ] && filter=$arg
+  previous=$arg
+done
+queue="$STUB_LOG/runs-$workflow"
+answer='[]'
+if [ -s "$queue" ]; then
+  answer=$(head -n 1 "$queue")
+  if [ "$(wc -l < "$queue")" -gt 1 ]; then
+    tail -n +2 "$queue" > "$queue.next"
+    mv "$queue.next" "$queue"
+  fi
+fi
+printf '%s' "$answer" | jq -r "$filter"
+`;
+  // Runs as gh run list --json databaseId,status,conclusion shows them. A run waiting for approval
+  // reads completed / action_required, as GitHub showed the 0.1.1 release's on 2026-10-22.
+  const run = (id: number, status: string, conclusion = '') =>
+    JSON.stringify([{ databaseId: id, status, conclusion }]);
+  const held = (id: number) => run(id, 'completed', 'action_required');
+  const none = '[]';
+
+  function wait(queues: Record<string, string[]>, minutes = '5') {
+    const dir = mkdtempSync(join(tmpdir(), 'slotlock-wait-'));
+    scratch.push(dir);
+    const bin = join(dir, 'bin');
+    const log = join(dir, 'log');
+    for (const path of [bin, log]) mkdirSync(path);
+    writeFileSync(join(bin, 'gh'), gh, { mode: 0o755 });
+    for (const [workflow, answers] of Object.entries(queues)) {
+      writeFileSync(join(log, `runs-${workflow}`), `${answers.join('\n')}\n`);
+    }
+    const result = spawnSync(
+      'sh',
+      [join(root, 'scripts', 'wait-for-pr-checks.sh'), commit, url, ...Object.keys(queues)],
+      {
+        encoding: 'utf8',
+        env: {
+          PATH: `${bin}:${process.env.PATH ?? ''}`,
+          STUB_LOG: log,
+          SLOTLOCK_POLL_SECONDS: '0',
+          SLOTLOCK_WAIT_MINUTES: minutes,
+          GITHUB_SERVER_URL: 'https://github.com',
+          GITHUB_REPOSITORY: 'PILOTAAI/slotlock',
+        },
+      },
+    );
+    const calls = readFileSync(join(log, 'gh.log'), 'utf8').trim().split('\n');
+    return { ...result, calls };
+  }
+
+  it('waits through the approval and both runs, asking for the approval once', () => {
+    const result = wait({
+      'ci.yml': [
+        held(1),
+        held(1),
+        run(1, 'queued'),
+        run(1, 'in_progress'),
+        run(1, 'completed', 'success'),
+      ],
+      'dco.yml': [none, held(2), run(3, 'completed', 'success')],
+    });
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+    const asks = result.stdout.match(/^::notice::.*$/gm) ?? [];
+    expect(asks).toHaveLength(1);
+    expect(asks[0]).toContain(`Open ${url} and click "Approve workflows to run"`);
+    expect(result.stdout).toContain('ci.yml: waiting for approval. dco.yml: not started.');
+    expect(result.stdout).toContain('ci.yml: in_progress. dco.yml: passed.');
+    expect(result.stdout.trim().split('\n').at(-1)).toBe('ci.yml: passed. dco.yml: passed.');
+  });
+
+  it("looks only at the pull request's runs at the release commit", () => {
+    const result = wait({ 'ci.yml': [run(1, 'completed', 'success')] });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.calls).toEqual([
+      expect.stringContaining(`run list --workflow ci.yml --commit ${commit} --event pull_request`),
+    ]);
+  });
+
+  it('fails on a run that did not pass, naming it', () => {
+    const result = wait({
+      'ci.yml': [run(5, 'completed', 'failure')],
+      'dco.yml': [run(6, 'completed', 'success')],
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      '::error::ci.yml did not pass on the pull request (failure): https://github.com/PILOTAAI/slotlock/actions/runs/5',
+    );
+  });
+
+  it('stops when the approval never comes, saying how to carry on', () => {
+    const result = wait({ 'ci.yml': [held(1)], 'dco.yml': [held(2)] }, '0');
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`::error::Still waiting for approval of the checks on ${url}.`);
+    expect(result.stderr).toContain('run Release a version again with the same version');
+  });
+
+  it('stops when a run never starts', () => {
+    const result = wait({ 'ci.yml': [run(1, 'completed', 'success')], 'dco.yml': [none] }, '0');
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`::error::Still waiting for dco.yml on ${url}.`);
   });
 });

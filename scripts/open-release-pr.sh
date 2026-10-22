@@ -4,10 +4,11 @@
 # opens its pull request into main. It prints SHA=<the release commit> and PR=<its number>, for
 # GITHUB_ENV, and nothing else on stdout.
 #
-# A run that stops before its merge leaves its branch, and perhaps its pull request, behind. The
-# next run replaces that branch when it holds nothing but one such release commit, and only as it was
-# read here (a lease), so a push made since is never lost; an open pull request is reused. A branch
-# holding anything else stops the run.
+# A run that stops before its merge leaves its branch, and perhaps its pull request, behind. When
+# that branch holds nothing but one such release commit, the next run keeps it if it is this same
+# release on the same main, so the checks approved and run on it still count, and otherwise replaces
+# it, only as it was read here (a lease), so a push made since is never lost. An open pull request is
+# reused. A branch holding anything else stops the run.
 #   scripts/open-release-pr.sh <version>
 # Needs git with an origin it can push to and origin/main fetched, and gh logged in (GH_TOKEN).
 set -eu
@@ -33,6 +34,7 @@ git -c user.name="$bot" -c user.email="$bot_email" commit -q -m "Release $versio
 commit=$(git rev-parse HEAD)
 
 lease=''
+keep=''
 if [ -n "$(git ls-remote origin "refs/heads/$branch")" ]; then
   git fetch -q origin "refs/heads/$branch" >&2
   lease=$(git rev-parse FETCH_HEAD)
@@ -40,10 +42,20 @@ if [ -n "$(git ls-remote origin "refs/heads/$branch")" ]; then
     [ "$(git log -1 --format='%an %s' "$lease")" != "$bot Release $version" ]; then
     fail "$branch holds commits this workflow did not make. Delete the branch, or release another version."
   fi
-  echo "::notice::Replacing $branch, which an earlier run left at $lease." >&2
+  if [ "$(git rev-parse "$lease^{tree}")" = "$(git rev-parse "$commit^{tree}")" ] &&
+    [ "$(git rev-parse "$lease^")" = "$(git rev-parse origin/main)" ]; then
+    keep=1
+  fi
 fi
-# With an empty lease the branch must still not exist when the push lands.
-git push -q --force-with-lease="refs/heads/$branch:$lease" origin "refs/heads/$branch" >&2
+if [ -n "$keep" ]; then
+  git reset -q --hard "$lease" >&2
+  commit=$lease
+  echo "::notice::Keeping $branch at $lease: it already holds this release." >&2
+else
+  [ -z "$lease" ] || echo "::notice::Replacing $branch, which an earlier run left at $lease." >&2
+  # With an empty lease the branch must still not exist when the push lands.
+  git push -q --force-with-lease="refs/heads/$branch:$lease" origin "refs/heads/$branch" >&2
+fi
 
 # open_pr: the number of the open pull request from the branch into main, or nothing.
 open_pr() {
@@ -53,7 +65,7 @@ open_pr() {
 pr=$(open_pr)
 if [ -z "$pr" ]; then
   run_url="$server/$repository/actions/runs/${GITHUB_RUN_ID:-}"
-  body="Prepared by the \"Release a version\" workflow ([run]($run_url)): $version in package.json, package-lock.json, server.json and slotlock.manifest.json, and its CHANGELOG.md section dated. The workflow merges it once CI and DCO pass, then starts Tag release."
+  body="Prepared by the \"Release a version\" workflow ([run]($run_url)): $version in package.json, package-lock.json, server.json and slotlock.manifest.json, and its CHANGELOG.md section dated. GitHub holds its checks until someone with write access approves them: click \"Approve workflows to run\" here. The workflow merges it once CI and DCO pass, then starts Tag release."
   if ! out=$(gh pr create --repo "$repository" --base main --head "$branch" \
     --title "Release $version" --body "$body" 2>&1); then
     printf '%s\n' "$out" >&2
