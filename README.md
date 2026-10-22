@@ -143,9 +143,57 @@ resources, so you can give each person API keys without running `slotlock key cr
 - Each resource uses the server's bookable hours (`SLOTLOCK_AVAILABILITY`) until its owner sets its
   own on the hours page: two windows a day, overnight or all day, or closed. One form sets them
   for every resource at once.
-- Rate-limit `/dashboard/sign-in`, `/dashboard/callback` and the dashboard's POSTs at your proxy:
-  each callback costs a database write and a call to GitHub (an instance runs at most eight at
-  once), and each form a database write.
+
+### Dashboard on Cloudflare Workers
+
+The same dashboard can run as a Cloudflare Worker at an origin of its own (`workers/dashboard`),
+while agents keep using the server. It shows the server's MCP and A2A URLs (`SLOTLOCK_SERVICE_URL`),
+and reaches the server's database through Hyperdrive, as the role the server serves as.
+
+`workers/dashboard/wrangler.jsonc` is an example: copy it into your own deployment and replace what
+it marks as yours. This repository's Dashboard workflow only checks that the Worker bundles. Deploy
+from your own pipeline with your own Cloudflare token: a token that can deploy Workers can replace
+this one and read its session secret, which signs in as any tenant.
+
+1. Create a Hyperdrive configuration for that role, with caching off: the dashboard reads back a
+   sign-in or a form it has just recorded, and a cached sign-out check would keep a copied session
+   working. Check it before each deploy (`wrangler hyperdrive get <id>`). For a database on a private
+   network, connect it through Workers VPC, on the Cloudflare Tunnel that reaches it. Point the VPC
+   service at a listener that serves only Slotlock's database, such as a PgBouncer with TLS and only
+   that database and role, rather than at the whole Postgres:
+   ```sh
+   cd workers/dashboard && npm ci
+   npx wrangler vpc service create slotlock-postgres --type tcp --tunnel-id <tunnel id> \
+     --ipv4 <listener host> --tcp-port <listener port> --app-protocol postgresql
+   read -rs SLOTLOCK_DB_PASSWORD   # not on the command line, so not in your shell history
+   npx wrangler hyperdrive create slotlock-dashboard --service-id <vpc service id> \
+     --database <database> --user <server role> --password "$SLOTLOCK_DB_PASSWORD" --caching-disabled
+   ```
+2. In your copy of the configuration, set:
+   - the configuration's id;
+   - your hostname (`routes`);
+   - `SLOTLOCK_PUBLIC_URL`, `SLOTLOCK_SERVICE_URL` and `SLOTLOCK_DASHBOARD_USERS` (`vars`);
+   - the two rate limiting bindings, each with a `namespace_id` unique in your account.
+3. Create the GitHub OAuth app as above, with the callback URL
+   `<SLOTLOCK_PUBLIC_URL>/dashboard/callback` on the Worker's origin.
+4. Store the secrets on the Worker: `npx wrangler secret put` for `SLOTLOCK_GITHUB_CLIENT_ID`,
+   `SLOTLOCK_GITHUB_CLIENT_SECRET` and `SLOTLOCK_SESSION_SECRET`.
+5. Deploy: `npm ci --omit=dev` at the repository root (the Worker bundles Slotlock's sources), then
+   `npx wrangler deploy --config <your configuration>` in `workers/dashboard`.
+
+- Each request opens its own database client, at most five connections, and closes it when the
+  response is sent; Hyperdrive keeps the pool.
+- Anyone may start a sign-in, and each callback costs a database write and a request to GitHub
+  with the app's client secret. An isolate runs at most eight at once, but Workers run many
+  isolates, so two rate limiting bindings bound them all:
+  - `SLOTLOCK_CLIENT_RATE_LIMIT` counts every dashboard request per client address;
+  - `SLOTLOCK_SIGN_IN_RATE_LIMIT` counts sign-ins and callbacks from every client together.
+
+  Their counts are per Cloudflare location. Without either binding the Worker answers 503.
+- The server checks a dashboard tenant against `SLOTLOCK_DASHBOARD_USERS` only when it serves the
+  dashboard itself. With the dashboard on Workers, removing a person from the Worker's list signs
+  them out of the dashboard; to stop their keys, revoke them or erase the tenant.
+- A missing or weak secret makes the Worker answer 503 and log which variable, never its value.
 
 ## Connect an MCP client
 

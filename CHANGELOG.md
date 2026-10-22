@@ -35,6 +35,13 @@ request replaces "Unreleased" with the release date.
   described by an OpenAPI 3.1 document at `/openapi.json` built from the tools' own schemas, behind
   the same authentication, scopes, `authorize` and rate limit. A write that waits for a person
   answers 428 `confirmation_required`. `onEvent` reports each call's operation and status.
+- The dashboard as a Cloudflare Worker (`workers/dashboard`): the same pages at an origin of their
+  own, over Hyperdrive with caching off, one database client per request, and two required rate
+  limiting bindings that bound sign-ins across every isolate. The Dashboard workflow only bundles
+  it; deployments use their own configuration and token. `createSlotlockDashboard` takes
+  `serviceUrl`, the server whose MCP and A2A URLs it shows when it is served from elsewhere.
+- The image carries the label `service="slotlock"`, which Kamal requires of an image it pulls rather
+  than builds, so a release image can be deployed with Kamal as the service `slotlock`.
 - A dashboard at `<SLOTLOCK_PUBLIC_URL>/dashboard` (`createSlotlockDashboard`), served by `serve`
   when `SLOTLOCK_GITHUB_CLIENT_ID` is set: GitHub sign-in (OAuth with state and PKCE, no scope), a
   personal tenant per GitHub user, and pages to create, rotate and revoke API keys (each shown
@@ -90,6 +97,9 @@ request replaces "Unreleased" with the release date.
   (31 February), is refused. Before, rrule read it with `Date.UTC`, which carries the overflow
   into the next unit, so the rule stayed bookable until 3 March, after the date it was written to
   end.
+- The dashboard's GitHub requests ask for redirects to be returned rather than refused outright
+  (`redirect: 'manual'`, still refused as not `ok`). Cloudflare Workers reject `redirect: 'error'`
+  with a TypeError, so no one could sign in to a dashboard running there.
 - Every dashboard form but sign-out must carry its single-use value. A form sent without the value
   skipped the resend check and the per-person form limit.
 - A feed's series no longer take each other's exceptions. ical.js relates every VEVENT with a

@@ -131,6 +131,12 @@ export interface SlotlockDashboardOptions {
   /** Where people reach the server; the dashboard lives at `<publicUrl>/dashboard`. */
   publicUrl: string;
   /**
+   * Where agents reach the server's MCP and A2A endpoints, which the dashboard shows, when it is
+   * served from another origin (on Cloudflare Workers, with the server elsewhere). Defaults to
+   * `publicUrl`.
+   */
+  serviceUrl?: string;
+  /**
    * A GitHub OAuth app whose callback URL is `<publicUrl>/dashboard/callback`. The endpoint URLs
    * default to GitHub's and exist for tests.
    */
@@ -549,8 +555,10 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const base = publicUrl.pathname.replace(/\/$/, '');
   const root = `${base}/dashboard`;
   const callbackUrl = `${origin}${root}/callback`;
-  const mcpUrl = `${origin}${base}/mcp`;
-  const a2aUrl = `${origin}${base}/a2a`;
+  const service = new URL(options.serviceUrl ?? options.publicUrl);
+  const serviceRoot = `${service.origin}${service.pathname.replace(/\/$/, '')}`;
+  const mcpUrl = `${serviceRoot}/mcp`;
+  const a2aUrl = `${serviceRoot}/a2a`;
   const authorizeUrl = options.github.authorizeUrl ?? 'https://github.com/login/oauth/authorize';
   const tokenUrl = options.github.tokenUrl ?? 'https://github.com/login/oauth/access_token';
   const userUrl = options.github.userUrl ?? 'https://api.github.com/user';
@@ -993,7 +1001,9 @@ ${
         redirect_uri: callbackUrl,
         code_verifier: verifier,
       }).toString(),
-      redirect: 'error',
+      // A redirect is returned, not followed, and is not `ok`, so it is refused below. ('error'
+      // would do the same in Node.js, but Cloudflare Workers refuse it as a TypeError.)
+      redirect: 'manual',
       signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
     });
     if (!response.ok) {
@@ -1019,7 +1029,7 @@ ${
         'X-GitHub-Api-Version': GITHUB_API_VERSION,
         'User-Agent': USER_AGENT,
       },
-      redirect: 'error',
+      redirect: 'manual',
       signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
     });
     if (!response.ok) {

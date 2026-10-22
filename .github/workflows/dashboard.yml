@@ -1,0 +1,55 @@
+# Bundles the dashboard Worker (workers/dashboard) to check it builds. It never deploys and holds no
+# Cloudflare credentials: whoever runs the dashboard deploys it from their own pipeline, with their own
+# wrangler configuration and token (README "Dashboard on Cloudflare Workers"). A Workers deploy token
+# can replace the Worker and so read its session secret, which signs in as any tenant, so it belongs
+# with the deployment, not in this repository.
+#
+# Every action is pinned to the commit SHA site.yml uses (resolved on 2026-10-09). Wrangler is
+# pinned exactly in workers/dashboard/package-lock.json.
+name: Dashboard
+
+on:
+  pull_request:
+    paths:
+      - "workers/dashboard/**"
+      - "src/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/dashboard.yml"
+  push:
+    branches: [main]
+    paths:
+      - "workers/dashboard/**"
+      - "src/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/dashboard.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dashboard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22" # wrangler 4.149.0 needs >= 22.0.0
+      # The Worker bundles Slotlock's own sources and its runtime dependencies.
+      - name: Install Slotlock's dependencies
+        run: npm ci --omit=dev --no-audit --no-fund
+      - name: Install Wrangler from the lockfile
+        working-directory: workers/dashboard
+        run: npm ci --no-audit --no-fund
+      - name: Bundle the Worker
+        working-directory: workers/dashboard
+        run: npm run check

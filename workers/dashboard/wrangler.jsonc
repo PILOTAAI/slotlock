@@ -1,0 +1,64 @@
+// The Slotlock dashboard (src/dashboard.ts) as a Worker: an example configuration to copy, and the
+// one this repository's Dashboard workflow bundles to check the Worker builds. Deploy it from your own
+// pipeline with your own Cloudflare credentials and your own values for everything marked below
+// (README "Dashboard on Cloudflare Workers"); this repository never holds a deploy token.
+// Config reference: https://developers.cloudflare.com/workers/wrangler/configuration/ (read 2026-10-18).
+//
+// Before the first deploy:
+//   - a Hyperdrive configuration with caching disabled, whose id goes in `hyperdrive` below;
+//   - the secrets, with `npx wrangler secret put <NAME>`:
+//       SLOTLOCK_GITHUB_CLIENT_ID      the GitHub OAuth app's Client ID
+//       SLOTLOCK_GITHUB_CLIENT_SECRET  a client secret of that app
+//       SLOTLOCK_SESSION_SECRET        32+ random characters (openssl rand -hex 32)
+//
+// Local development: CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE=postgres://… and a
+// .dev.vars file with the three secrets and SLOTLOCK_PUBLIC_URL=http://localhost:8788.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "slotlock-dashboard",
+  "main": "worker.ts",
+  // From 2026-08-04 the Node.js APIs the dashboard uses (node:crypto, node:async_hooks, Buffer) are
+  // on by default.
+  "compatibility_date": "2026-10-01",
+  // Yours: the dashboard's hostname. A Custom Domain gets its own certificate at any depth; no Worker
+  // route in the zone may match it, because a route runs before a Custom Domain.
+  "routes": [{ "pattern": "dashboard.example.com", "custom_domain": true }],
+  "workers_dev": false,
+  "preview_urls": false,
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      // Yours: the Hyperdrive configuration's id (not a secret).
+      "id": "set-this-to-the-hyperdrive-configuration-id"
+    }
+  ],
+  // Required: the Worker answers 503 without them. A sign-in writes to the database and asks GitHub
+  // with the app's client secret, and the limit on sign-ins in flight is per isolate, so these bound
+  // the requests of every isolate. Counts are per Cloudflare location. namespace_id must be unique in
+  // the account (two bindings with the same one share their counts).
+  "ratelimits": [
+    {
+      // Every dashboard request, per client address.
+      "name": "SLOTLOCK_CLIENT_RATE_LIMIT",
+      "namespace_id": "41001",
+      "simple": { "limit": 60, "period": 60 }
+    },
+    {
+      // GitHub sign-ins and their callbacks, from every client together.
+      "name": "SLOTLOCK_SIGN_IN_RATE_LIMIT",
+      "namespace_id": "41002",
+      "simple": { "limit": 120, "period": 60 }
+    }
+  ],
+  // A page takes several queries; run the Worker near the database rather than near each visitor.
+  // With a known database region, `"region": "<cloud>:<region>"` instead.
+  "placement": { "mode": "smart" },
+  "vars": {
+    // Yours: this Worker's origin, and the server agents use.
+    "SLOTLOCK_PUBLIC_URL": "https://dashboard.example.com",
+    "SLOTLOCK_SERVICE_URL": "https://slotlock.example.com",
+    // Who may sign in: "*" for every GitHub account (each gets its own tenant), or GitHub ids.
+    "SLOTLOCK_DASHBOARD_USERS": "*"
+  },
+  "observability": { "enabled": true }
+}

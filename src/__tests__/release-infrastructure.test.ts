@@ -81,6 +81,13 @@ describe('MCP Registry entry', () => {
     expect(serverPackage?.identifier).toBe(`ghcr.io/pilotaai/slotlock:${packageVersion}`);
   });
 
+  // Kamal pulls an image it did not build only when its `service` label names the service it deploys
+  // (`docker inspect -f '{{ .Config.Labels.service }}' | grep -x <service>`), so without it the
+  // published image cannot be deployed with Kamal.
+  it('labels the image with the service Kamal deploys it as', () => {
+    expect(/^\s*service="([^"]+)"/m.exec(read('Dockerfile'))?.[1]).toBe('slotlock');
+  });
+
   it('declares only variables the command reads, with the secrets required and secret', () => {
     const declared = serverPackage?.environmentVariables ?? [];
     const known: readonly string[] = SLOTLOCK_ENVIRONMENT_VARIABLES;
@@ -187,7 +194,9 @@ describe('database suite credentials', () => {
     const roles: { file: string; value: string }[] = [];
     const passwords: { file: string; value: string }[] = [];
     for (const { file, text } of sources) {
-      for (const [, user, password] of text.matchAll(/postgres(?:ql)?:\/\/([^:@/\s]+):([^@/\s]+)@/g)) {
+      for (const [, user, password] of text.matchAll(
+        /postgres(?:ql)?:\/\/([^:@/\s]+):([^@/\s]+)@/g,
+      )) {
         roles.push({ file, value: user as string });
         passwords.push({ file, value: password as string });
       }
@@ -198,12 +207,18 @@ describe('database suite credentials', () => {
         passwords.push({ file, value: password as string });
       }
     }
-    expect(roles.length, 'canary: CI, release and CONTRIBUTING name their roles').toBeGreaterThanOrEqual(10);
+    expect(
+      roles.length,
+      'canary: CI, release and CONTRIBUTING name their roles',
+    ).toBeGreaterThanOrEqual(10);
     expect(passwords.length, 'canary: and their passwords').toBeGreaterThanOrEqual(7);
     for (const { file, value } of roles) expect(value, `${file}: role`).not.toBe('slotlock');
     for (const { file, value } of passwords) {
       expect(value, `${file}: password`).not.toMatch(/slot|lock/i);
-      expect(value.length, `${file}: password ${value} is short enough to occur in output`).toBeGreaterThanOrEqual(12);
+      expect(
+        value.length,
+        `${file}: password ${value} is short enough to occur in output`,
+      ).toBeGreaterThanOrEqual(12);
     }
   });
 });

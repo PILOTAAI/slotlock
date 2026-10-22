@@ -7,3 +7,6 @@ site/dist/
 site/.astro/
 .wrangler/
 .env
+workers/dashboard/node_modules/
+workers/dashboard/.dev.vars
+workers/dashboard/dist/
