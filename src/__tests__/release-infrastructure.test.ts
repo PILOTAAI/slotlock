@@ -780,15 +780,20 @@ esac`,
   'api repos/PILOTAAI/slotlock/rulesets?'*) echo 7 ;;
   'api repos/PILOTAAI/slotlock/rulesets/7 '*) echo true ;;
   'api repos/PILOTAAI/slotlock/commits/main --jq .sha') echo "$STUB_MAIN_COMMIT" ;;
-  'api repos/PILOTAAI/slotlock/commits/tags/v1.2.3 --jq .sha')
-    if [ "$STUB_TAG_PUSHED" = 1 ] || [ -f "$STUB_LOG/tagged" ]; then echo "$STUB_TAG_COMMIT"; else exit 1; fi ;;
+  'api repos/PILOTAAI/slotlock/git/ref/tags/v1.2.3 '*)
+    if [ "$STUB_TAG_PUSHED" != 1 ] && [ ! -f "$STUB_LOG/tagged" ]; then exit 1; fi
+    if [ "$STUB_TAG_TYPE" = commit ]; then echo "commit $STUB_TAG_COMMIT"; else echo "tag 7a6"; fi ;;
+  'api repos/PILOTAAI/slotlock/git/tags/7a6 '*) echo "commit $STUB_TAG_COMMIT" ;;
   'run list '*'--workflow tag-release.yml '*) echo "$STUB_TAG_RUNS" ;;
   'run list '*'--workflow release.yml '*) [ "$STUB_GH_FAILS" = 1 ] && exit 1; echo "$STUB_RELEASE_RUNS" ;;
   'run list '*'--workflow image.yml '*) echo "$STUB_IMAGE_RUNS" ;;
   'run download '*) for last; do :; done; cp "$STUB_ARTIFACT"/* "$last" ;;
+  'run view '*'--json attempt'*)
+    if [ -f "$STUB_LOG/rerun-$3" ] && [ "$STUB_NO_NEW_ATTEMPT" != 1 ]; then echo 2; else echo 1; fi ;;
   'run view 22 '*) echo "$STUB_IMAGE_JOB" ;;
-  'run rerun 5 '*) [ "$STUB_RERUN_TAGS" = 1 ] && touch "$STUB_LOG/tagged"; exit 0 ;;
-  'run rerun '*) ;;
+  'run rerun '*)
+    touch "$STUB_LOG/rerun-$3"
+    if [ "$3" = 5 ] && [ "$STUB_RERUN_TAGS" = 1 ]; then touch "$STUB_LOG/tagged"; fi ;;
   'run watch '*) ;;
   'workflow run '*) ;;
   *) echo "unexpected: gh $*" >&2; exit 99 ;;
@@ -896,11 +901,39 @@ esac`,
     });
     expect(result.status, result.stderr).toBe(0);
     const rerunAt = result.gh.indexOf(rerun(5));
+    // Right after a re-run GitHub still shows the finished attempt: it waits for the next one first.
+    const attemptAt = result.gh.findIndex(
+      (call, index) => index > rerunAt && call.startsWith('run view 5 ') && call.includes('--json attempt'),
+    );
     const watchAt = result.gh.findIndex((call) => call.startsWith('run watch 5 '));
     expect(rerunAt).toBeGreaterThanOrEqual(0);
-    expect(watchAt).toBeGreaterThan(rerunAt);
+    expect(attemptAt).toBeGreaterThan(rerunAt);
+    expect(watchAt).toBeGreaterThan(attemptAt);
+    expect(result.stdout).toContain('Tag release run 5: attempt 2 started');
     expect(result.gh).toContainEqual(download(11));
     expect(result.npm).toContain('stage approve stage-1');
+  });
+
+  it('stops when GitHub never starts the new attempt of a re-run', () => {
+    const result = bootstrap({
+      STUB_TAG_PUSHED: '0',
+      STUB_TAG_RUNS: tagRun('failure'),
+      STUB_NO_NEW_ATTEMPT: '1',
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('GitHub did not start a new attempt of Tag release run 5');
+    expect(result.gh.filter((call) => call.startsWith('run watch'))).toEqual([]);
+  });
+
+  it('resolves an annotated tag to the commit it names, and a lightweight one too', () => {
+    for (const type of ['tag', 'commit']) {
+      const result = bootstrap({ STUB_TAG_TYPE: type });
+      expect(result.status, `${type}: ${result.stderr}`).toBe(0);
+      expect(result.stdout).toContain(`v1.2.3 names ${tagCommit}`);
+      expect(result.gh.some((call) => call.startsWith('api repos/PILOTAAI/slotlock/git/tags/'))).toBe(
+        type === 'tag',
+      );
+    }
   });
 
   it('starts Tag release when main has no run of it yet', () => {

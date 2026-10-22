@@ -136,9 +136,20 @@ github_setup() {
   github_ready || die "scripts/configure-github.sh ran, but the deploy key or the ruleset bypass is still missing"
 }
 
-# tag_sha: the commit $TAG names on GitHub (an annotated tag peeled to it); fails when there is none.
+# tag_sha: the commit $TAG names on GitHub; fails when there is none. tag-release.yml's tags are
+# annotated, so the ref names a tag object, peeled here to its commit. (The commits endpoint's
+# tags/<name> form answers 422 for an annotated tag.)
 tag_sha() {
-  gh api "repos/$REPO/commits/tags/$TAG" --jq .sha 2>/dev/null
+  local out type sha hop
+  out=$(gh api "repos/$REPO/git/ref/tags/$TAG" --jq '.object | "\(.type) \(.sha)"' 2>/dev/null) || return 1
+  read -r type sha <<<"$out"
+  for hop in 1 2 3 4 5; do
+    [ "$type" = tag ] || break
+    out=$(gh api "repos/$REPO/git/tags/$sha" --jq '.object | "\(.type) \(.sha)"' 2>/dev/null) || return 1
+    read -r type sha <<<"$out"
+  done
+  [ "$type" = commit ] || return 1
+  printf '%s\n' "$sha"
 }
 
 # tag_commit: tag_sha, checked, in TAG_COMMIT.
@@ -154,6 +165,24 @@ watch_run() {
   [ "$DRY_RUN" -eq 0 ] || return 0
   say "  waiting for $2 run $1 (https://github.com/$REPO/actions/runs/$1)"
   gh run watch "$1" --repo "$REPO" --interval 15 >/dev/null 2>&1 || true
+}
+
+# rerun_and_watch RUN_ID NAME: re-runs the run's failed jobs and waits for that new attempt. Right
+# after the request GitHub still shows the finished attempt, and gh run watch would return at once,
+# so it first waits for the attempt number to go up.
+rerun_and_watch() {
+  local before after='' check
+  before=$(gh run view "$1" --repo "$REPO" --json attempt --jq .attempt) || die "gh could not read $2 run $1"
+  act gh run rerun "$1" --failed --repo "$REPO"
+  [ "$DRY_RUN" -eq 0 ] || return 0
+  for check in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; do
+    after=$(gh run view "$1" --repo "$REPO" --json attempt --jq .attempt) || die "gh could not read $2 run $1"
+    [ "$after" -gt "$before" ] && break
+    sleep "$POLL_SECONDS"
+  done
+  [ "$after" -gt "$before" ] || die "GitHub did not start a new attempt of $2 run $1"
+  say "  $2 run $1: attempt $after started"
+  watch_run "$1" "$2"
 }
 
 # ensure_tag: the tag is on GitHub. tag-release.yml pushes it on a push to main; when it has not,
@@ -185,13 +214,13 @@ ensure_tag() {
         die "Tag release run $id passed without pushing $TAG: main's CHANGELOG.md may not date ${TAG#v} yet (see the run)"
         ;;
       *)
-        act gh run rerun "$id" --failed --repo "$REPO"
+        rerun_and_watch "$id" 'Tag release'
         [ "$DRY_RUN" -eq 0 ] || return 0
-        sleep "$POLL_SECONDS"
         ;;
     esac
+  else
+    watch_run "$id" 'Tag release'
   fi
-  watch_run "$id" 'Tag release'
   tag_sha >/dev/null || die "Tag release run $id did not push $TAG (https://github.com/$REPO/actions/runs/$id)"
   say "  $TAG pushed by Tag release run $id"
 }
@@ -240,11 +269,8 @@ rerun_failed() {
   fi
   case "$conclusion" in
     failure | cancelled | timed_out)
-      act gh run rerun "$id" --failed --repo "$REPO"
-      say "  $2 run $id: failed jobs re-run"
-      [ "$DRY_RUN" -eq 0 ] || return 0
-      sleep "$POLL_SECONDS"
-      watch_run "$id" "$2"
+      say "  $2 run $id failed: re-running its failed jobs"
+      rerun_and_watch "$id" "$2"
       ;;
     *) say "  $2 run $id: $conclusion, nothing to re-run" ;;
   esac
