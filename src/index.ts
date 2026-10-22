@@ -81,7 +81,7 @@ export type {
   SlotlockNodeServerFetchTarget,
   SlotlockNodeServerOptions,
 } from './node-server.js';
-export { createSlotlockStoreAgentBackend } from './agent-store-backend.js';
+export { createSlotlockStoreAgentBackend, projectSlotlockCalendarEvent } from './agent-store-backend.js';
 export type { SlotlockStoreAgentBackendOptions } from './agent-store-backend.js';
 export {
   createSlotlockApiKeyAuthenticator,

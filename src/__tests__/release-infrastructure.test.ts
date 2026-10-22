@@ -149,6 +149,16 @@ describe('Compose quickstart', () => {
     expect(missing).toEqual([]);
   });
 
+  it("mounts Postgres's volume where its image keeps the data", () => {
+    // From 18 the official image keeps its data in a version directory under /var/lib/postgresql,
+    // and refuses to start (exit 1, even on a new empty volume) with a mount at .../data.
+    const service = compose.slice(compose.indexOf('\n  postgres:\n'), compose.indexOf('\n  db-roles:\n'));
+    const major = Number(/image:\s*postgres:(\d+)/.exec(service)?.[1]);
+    expect(major, 'canary: the postgres service and its image were found').toBeGreaterThan(0);
+    const mounts = [...service.matchAll(/^\s+-\s*postgres-data:(\S+)\s*$/gm)].map(([, path]) => path);
+    expect(mounts).toEqual([major >= 18 ? '/var/lib/postgresql' : '/var/lib/postgresql/data']);
+  });
+
   it('publishes ports on loopback only', () => {
     const ports = [...compose.matchAll(/^\s+-\s*"([^"]*:\d+)"\s*$/gm)].map(([, port]) => port);
     expect(ports).toEqual(['127.0.0.1:${SLOTLOCK_PORT:-8080}:8080']);

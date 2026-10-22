@@ -571,8 +571,10 @@ describe.skipIf(!url)('Slotlock README examples (real Postgres)', () => {
       });
       expect(booked.isError).toBeFalsy();
       expect(asked).toHaveLength(1);
+      // Within a day of a change of London's clocks the times carry their UTC offset (two days from
+      // late October or late March is), which confirmation.test.ts pins exactly.
       expect(asked[0]).toMatch(
-        /^Book vehicle-42 for \d{4}-\d{2}-\d{2} 1[34]:00–1[45]:00 \(Europe\/London\): "Live handover"\.$/,
+        /^Book vehicle-42 for \d{4}-\d{2}-\d{2} 1[34]:00–1[45]:00( UTC\+0[01]:00)? \(Europe\/London\): "Live handover"\.$/,
       );
 
       await vi.waitFor(() => expect(changes).toEqual([uri]), { timeout: 15_000, interval: 100 });
