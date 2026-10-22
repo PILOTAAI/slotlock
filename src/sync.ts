@@ -53,7 +53,8 @@ export interface ICalendarExpansionWindow {
   end: Date;
 }
 
-const MAX_ICAL_INPUT_BYTES = 2_000_000;
+/** The most text one feed may be, in UTF-8 bytes. */
+export const MAX_ICAL_INPUT_BYTES = 2_000_000;
 const MAX_ICAL_OCCURRENCES = 2_000;
 const MAX_ICAL_COMPONENTS = 2_000;
 const MAX_ICAL_EXCEPTIONS_PER_SERIES = 1_000;

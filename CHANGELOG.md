@@ -26,6 +26,11 @@ request replaces "Unreleased" with the release date.
   the database pool. `SLOTLOCK_AUTH_TOKEN` is now optional for `serve`.
 - A principal may carry `scopes`; the agent server then refuses, before `authorize`, every
   operation whose scope (`slotlockAgentOperationScope`: `read` or `write`) it lacks.
+- `createICalendarWorkerPool`: `parseICalendarChanges` and `parseTrustedICalendarEvents` on worker
+  threads, for feeds someone else controls. The calling thread never runs ical.js on the feed; a
+  worker past its deadline (3 s by default) or heap (128 MB) is stopped and the feed refused as
+  `CalendarExpansionLimitError`; a full queue answers `ICalendarWorkerBusyError`. Results and errors
+  are the parsers' own. `CalendarExpansionLimitError` is now exported.
 - A REST API (`rest: true`, or `SLOTLOCK_REST_API=on` for `serve`): one route per tool under `/v1`,
   described by an OpenAPI 3.1 document at `/openapi.json` built from the tools' own schemas, behind
   the same authentication, scopes, `authorize` and rate limit. A write that waits for a person
