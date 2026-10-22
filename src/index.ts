@@ -175,6 +175,7 @@ export type {
   CalendarEventRetentionResult,
   CalendarEventStatus,
   CalendarFreeBusy,
+  CalendarHorizonRollCursor,
   CalendarHorizonRollResult,
   CalendarOrganizer,
   CalendarParticipationStatus,
