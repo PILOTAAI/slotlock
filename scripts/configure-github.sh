@@ -11,8 +11,11 @@
 #   scripts/configure-github.sh --require-approval
 #                                                also make you approve each run of the npm and
 #                                                mcp-registry environments
+#   scripts/configure-github.sh --rotate-tag-key replace the deploy key tag-release.yml pushes
+#                                                release tags with
 #
-# Needs bash 3.2 or newer, curl, jq, and gh logged in as an admin of the repository.
+# Needs bash 3.2 or newer, curl, jq 1.6 or newer, ssh-keygen, and gh logged in as an admin of the
+# repository.
 # Environment:
 #   SKIP_SITE_SECRETS=1     do not ask for the Cloudflare secrets now (add them later)
 #   REPLACE_SITE_SECRETS=1  ask for them again even when they are already set
@@ -42,6 +45,13 @@
 #   https://docs.github.com/en/rest/repos/rules (get all, create, get and update a ruleset)
 #   https://docs.github.com/en/rest/apps/apps#get-an-app
 #   https://docs.github.com/en/rest/packages/packages (no endpoint changes a package's visibility)
+# Read on 2026-10-22, for the release-tag deploy key:
+#   https://docs.github.com/en/rest/deploy-keys/deploy-keys (list, create, delete; a write key "can
+#     perform the same actions as an organization member with admin access")
+#   https://docs.github.com/en/rest/repos/rules#create-a-repository-ruleset (bypass actor_type
+#     DeployKey, whose actor_id is null)
+#   https://github.com/peter-evans/create-pull-request/blob/main/docs/concepts-guidelines.md (a push
+#     with a deploy key starts on: push workflows; one with GITHUB_TOKEN does not)
 # Behaviour the REST reference does not cover came from:
 #   https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository
 #   https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets
@@ -79,17 +89,24 @@ ADMIN_ROLE_ID=5
 BRANCH_RULESET='Protect main'
 TAG_RULESET='Release tags'
 
+# tag-release.yml's deploy key: its title on GitHub, and the release-tag environment secret that
+# holds its private half.
+TAG_KEY_TITLE='slotlock tag-release (GitHub Actions)'
+TAG_KEY_SECRET=TAG_RELEASE_DEPLOY_KEY
+
 usage() {
-  sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 DRY_RUN=0
 SITE_SECRETS_ONLY=0
 REQUIRE_APPROVAL=0
+ROTATE_TAG_KEY=0
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
     --require-approval) REQUIRE_APPROVAL=1 ;;
+    --rotate-tag-key) ROTATE_TAG_KEY=1 ;;
     --site-secrets) SITE_SECRETS_ONLY=1 ;;
     -h | --help)
       usage
@@ -391,10 +408,10 @@ configure_environments() {
   local reviewers='[]'
   step '2. Environments'
   # Merging a dated version to main releases it (tag-release.yml), so by default no run waits for
-  # a reviewer: the version went through a pull request into main, release.yml and image.yml refuse
-  # a tag that is not that version on main (check-release-tag.sh), and npm still holds each version
-  # until a maintainer approves it with two-factor authentication (GOVERNANCE.md, Releases).
-  # --require-approval adds you as a required reviewer of both environments anyway.
+  # a reviewer: only an admin or tag-release.yml, running on main, can create a v* tag (step 4), and
+  # npm still holds each version until a maintainer approves it with two-factor authentication
+  # (GOVERNANCE.md, Releases). --require-approval adds you as a required reviewer of the npm and
+  # mcp-registry environments anyway.
   if [ "$REQUIRE_APPROVAL" -eq 1 ]; then
     reviewers=$(jq -n --argjson id "$REVIEWER_ID" '[{type: "User", id: $id}]')
   fi
@@ -407,10 +424,61 @@ configure_environments() {
   # registry version can be published once only; it names the image this tag pushed.
   configure_environment mcp-registry "$reviewers" tag 'v*'
 
+  # release-tag: tag-release.yml's job, on a push to main or a manual run on main. It holds the
+  # deploy key that job pushes release tags with, so only runs on main can read it. No reviewer:
+  # the version already went through a pull request into main.
+  configure_environment release-tag '[]' branch main
+  configure_tag_key
+
   # site: site.yml's deploy job, on a push to main or a manual run on main. No reviewer: the
   # change already went through a pull request into main.
   configure_environment site '[]' branch main
   configure_site_secrets
+}
+
+# The deploy key tag-release.yml pushes release tags with: a tag pushed with GITHUB_TOKEN starts no
+# workflow, and one pushed with a deploy key starts release.yml and image.yml. Like every deploy key
+# with write access it can do what a repository admin can, so its private half exists only in the
+# release-tag environment secret, which GitHub hands to runs on main alone. It is generated here in
+# a private temporary directory, its public half sent to GitHub and its private half to the secret
+# on stdin, and the directory deleted: nothing prints or keeps it. A new key replaces the old one
+# before the old one is deleted, so a release in between still finds a key.
+configure_tag_key() {
+  local keys secrets old_ids id
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '\n> GET /repos/%s/%s/keys and /repos/%s/%s/environments/release-tag/secrets\n  (dry run: not sent)\n' \
+      "$OWNER" "$REPO" "$OWNER" "$REPO" >&3
+    printf '> unless both are set: ssh-keygen -t ed25519 in a private temporary directory, then\n' >&3
+    gh_api POST "repos/$OWNER/$REPO/keys" "$(jq -n --arg title "$TAG_KEY_TITLE" \
+      '{title: $title, key: "<the new public key>", read_only: false}')"
+    printf '\n> gh secret set %s --env release-tag --repo %s/%s, with the private key on stdin\n' \
+      "$TAG_KEY_SECRET" "$OWNER" "$REPO" >&3
+    printf '> then DELETE /repos/%s/%s/keys/<id> for the key it replaces, if any\n' "$OWNER" "$REPO" >&3
+    result "release-tag: deploy key and $TAG_KEY_SECRET"
+    return 0
+  fi
+  command -v ssh-keygen >/dev/null 2>&1 || die 'ssh-keygen is required for the release-tag deploy key'
+  keys=$(gh_get "repos/$OWNER/$REPO/keys?per_page=100" '[]')
+  secrets=$(gh_get "repos/$OWNER/$REPO/environments/release-tag/secrets?per_page=100" '{"secrets":[]}')
+  old_ids=$(printf '%s' "$keys" | jq -r --arg title "$TAG_KEY_TITLE" '.[] | select(.title == $title) | .id')
+  if [ "$ROTATE_TAG_KEY" -eq 0 ] && [ -n "$old_ids" ] &&
+    printf '%s' "$secrets" | jq -e --arg name "$TAG_KEY_SECRET" 'any(.secrets[]; .name == $name)' >/dev/null; then
+    result "release-tag: deploy key and $TAG_KEY_SECRET already set (--rotate-tag-key replaces them)"
+    return 0
+  fi
+  TAG_KEY_DIR=$(mktemp -d)
+  chmod 700 "$TAG_KEY_DIR"
+  ssh-keygen -q -t ed25519 -N '' -C "$TAG_KEY_TITLE" -f "$TAG_KEY_DIR/key"
+  gh_api POST "repos/$OWNER/$REPO/keys" "$(jq -n --arg title "$TAG_KEY_TITLE" --rawfile key "$TAG_KEY_DIR/key.pub" \
+    '{title: $title, key: ($key | rtrimstr("\n")), read_only: false}')" >/dev/null
+  gh secret set "$TAG_KEY_SECRET" --env release-tag --repo "$OWNER/$REPO" <"$TAG_KEY_DIR/key"
+  rm -rf "$TAG_KEY_DIR"
+  TAG_KEY_DIR=''
+  for id in $old_ids; do
+    gh_api DELETE "repos/$OWNER/$REPO/keys/$id" >/dev/null
+    result "release-tag: removed the deploy key it replaces (id $id)"
+  done
+  result "release-tag: new deploy key (write access) and $TAG_KEY_SECRET"
 }
 
 # upsert_ruleset TARGET NAME BODY
@@ -526,24 +594,22 @@ configure_branch_ruleset() {
 # 4. Release tags.
 configure_tag_ruleset() {
   step "4. Ruleset '$TAG_RULESET' (refs/tags/v*)"
-  # A v* tag starts release.yml and image.yml, which stage the npm package and push the image.
-  # GOVERNANCE.md says releases come only from a protected v<version> tag. Once a v* tag exists,
-  # only the admin role may move or delete it. Tag rulesets allow no "pull requests only" mode, so
-  # the bypass is "always".
-  #
-  # Creating one is not restricted: tag-release.yml creates the tag of a merged version with the
-  # workflow's GITHUB_TOKEN, and the REST docs list no bypass actor that names that token, so a
-  # "creation" rule would refuse it. A tag anyone with write access creates by hand starts nothing
-  # that a merged version does not: release.yml and image.yml refuse a tag that is not
-  # v<package.json version> on a commit on main with a dated CHANGELOG.md heading
-  # (scripts/check-release-tag.sh).
+  # A v* tag starts release.yml and image.yml, which stage the npm package and push the image,
+  # running the workflow files of the tagged commit. GOVERNANCE.md says releases come only from a
+  # protected v<version> tag. Only the admin role may create, move or delete one, and deploy keys
+  # may create one: tag-release.yml pushes a merged version's tag with the release-tag deploy key
+  # (step 2), the only deploy key this script adds. Tag rulesets allow no "pull requests only" mode,
+  # and a deploy key bypass only "always", so both bypasses are "always".
   upsert_ruleset tag "$TAG_RULESET" "$(jq -n --arg name "$TAG_RULESET" --argjson role "$ADMIN_ROLE_ID" '{
     name: $name,
     target: "tag",
     enforcement: "active",
-    bypass_actors: [{actor_id: $role, actor_type: "RepositoryRole", bypass_mode: "always"}],
+    bypass_actors: [
+      {actor_id: $role, actor_type: "RepositoryRole", bypass_mode: "always"},
+      {actor_id: null, actor_type: "DeployKey", bypass_mode: "always"}
+    ],
     conditions: {ref_name: {include: ["refs/tags/v*"], exclude: []}},
-    rules: [{type: "update"}, {type: "deletion"}]
+    rules: [{type: "creation"}, {type: "update"}, {type: "deletion"}]
   }')" || die "$RULESET_ERROR"
   verify_bypass "$RULESET_ID" always
 }
@@ -602,7 +668,8 @@ print_checklist() {
     - second release: creates the npm trusted publisher (release.yml, environment npm, stage
       only). npm expires one that has not published within 2 days, so it is created when a
       version is waiting, and the re-run publishes it.
-    Run this script before the first release merges: it lets tag-release.yml create v* tags.
+    Run this script before the first release merges: it creates the deploy key tag-release.yml
+    pushes v* tags with. Without it, that job fails and says so; run this, then re-run the job.
 EOF
   if [ "${SITE_SECRETS_SKIPPED:-0}" = 1 ]; then
     cat <<EOF
@@ -634,6 +701,9 @@ EOF
 
 SITE_SECRETS_SKIPPED=0
 CODEQL_SKIPPED=0
+# The temporary directory holding a new deploy key, removed however the script ends.
+TAG_KEY_DIR=''
+trap '[ -z "$TAG_KEY_DIR" ] || rm -rf "$TAG_KEY_DIR"' EXIT
 REVIEWER_ID=''
 REVIEWER_LOGIN=''
 RULESET_ID=''

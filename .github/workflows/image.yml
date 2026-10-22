@@ -3,20 +3,16 @@
 # `gh attestation verify oci://ghcr.io/pilotaai/slotlock:<version> --repo PILOTAAI/slotlock`).
 # Its second job runs mcp-registry.yml, which publishes server.json, once the image is pushed.
 #
-# tag-release.yml starts it on the tag a merged version creates (workflow_dispatch on the tag's ref); a
-# tag pushed by hand starts it too.
-#
 # One-time setup by the repository owner: after the first push, make the ghcr.io/pilotaai/slotlock
 # package public (Package settings > Change visibility; GitHub has no API for it). New GHCR packages
 # start private, and the MCP Registry only accepts images it can pull anonymously.
-# scripts/bootstrap-npm.sh checks it and re-runs this workflow's failed job once it is public.
+# scripts/bootstrap-release.sh <tag> checks it, waits while you change it, and re-runs this
+# workflow's failed job.
 name: Image
 
 on:
   push:
     tags: ['v*']
-  # tag-release.yml starts it on the tag's ref (a tag pushed with GITHUB_TOKEN starts no workflow).
-  workflow_dispatch:
 
 permissions: {}
 
@@ -62,12 +58,9 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE }}
-          # The README documents type=semver for tag pushes; v6.2.0 reads any refs/tags/ ref
-          # (src/meta.ts procSemver), and value= names the tag outright for a dispatched run too.
-          # check-release-tag.sh has already refused a ref that is not v<package.json version>.
           tags: |
-            type=semver,pattern={{version}},value=${{ github.ref_name }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ github.ref_name }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
       - id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:

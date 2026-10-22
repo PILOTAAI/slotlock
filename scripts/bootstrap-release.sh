@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Does the parts of a release that npm and GitHub keep for a person, then re-runs what waited on
 # them. A Release run's summary names this script when it needs it. It is safe to run again: it
-# skips whatever is already done.
+# skips whatever is already done. It only uses the Release and Image runs a push of the tag started
+# on the commit the tag names on GitHub.
 #
 #   scripts/bootstrap-release.sh <tag>              for example v0.1.0
 #   scripts/bootstrap-release.sh --dry-run <tag>    show what it would do; change nothing
@@ -103,20 +104,34 @@ version_at_least() {
   return 0
 }
 
-# latest_run WORKFLOW_FILE: "<id> <status> <conclusion>" of the newest run of it for $TAG, or
-# nothing. A run started by the tag push or by tag-release.yml's dispatch lists the tag as its
-# branch.
+# tag_commit: the commit $TAG names on GitHub (an annotated tag peeled to it), in TAG_COMMIT.
+TAG_COMMIT=''
+tag_commit() {
+  [ -z "$TAG_COMMIT" ] || return 0
+  TAG_COMMIT=$(gh api "repos/$REPO/commits/tags/$TAG" --jq .sha) ||
+    die "$TAG is not a tag on GitHub, or gh cannot read $REPO"
+  printf '%s' "$TAG_COMMIT" | grep -Eq '^[0-9a-f]{40}$' || die "GitHub resolved $TAG to '$TAG_COMMIT'"
+}
+
+# latest_run WORKFLOW_FILE: "<id> <status> <conclusion>" of the newest run of it that the tag's push
+# started on the tag's commit, or nothing. A run a branch named like the tag started is not one.
 latest_run() {
-  gh run list --repo "$REPO" --workflow "$1" --branch "$TAG" --limit 1 \
-    --json databaseId,status,conclusion \
-    --jq '.[0] | select(. != null) | "\(.databaseId) \(.status) \(.conclusion)"'
+  local runs
+  tag_commit
+  runs=$(gh run list --repo "$REPO" --workflow "$1" --branch "$TAG" --commit "$TAG_COMMIT" \
+    --event push --limit 20 --json databaseId,status,conclusion,headSha,event) ||
+    die "gh could not list the $1 runs for $TAG"
+  printf '%s' "$runs" | jq -r --arg sha "$TAG_COMMIT" '
+    [.[] | select(.headSha == $sha and .event == "push")][0]
+    | select(. != null) | "\(.databaseId) \(.status) \(.conclusion)"'
 }
 
 # rerun_failed WORKFLOW_FILE NAME: re-runs the failed jobs (and the jobs after them) of the newest
 # run for $TAG, when it failed.
 rerun_failed() {
-  local id='' status='' conclusion=''
-  read -r id status conclusion <<<"$(latest_run "$1")" || true
+  local id='' status='' conclusion='' run
+  run=$(latest_run "$1") || exit 1
+  read -r id status conclusion <<<"$run" || true
   if [ -z "$id" ]; then
     say "  no $2 run for $TAG yet"
     return 0
@@ -156,9 +171,10 @@ sha256_check() {
 
 # first_publish: stages the tag's tested tarball from this session and approves it.
 first_publish() {
-  local id='' status='' conclusion='' tarball spec dist_tag stage_id=''
-  read -r id status conclusion <<<"$(latest_run release.yml)" || true
-  [ -n "$id" ] || die "no Release run for $TAG yet: merge the version (tag-release.yml tags it) or push the tag"
+  local id='' status='' conclusion='' run tarball spec dist_tag stage_id='' escaped
+  run=$(latest_run release.yml) || exit 1
+  read -r id status conclusion <<<"$run" || true
+  [ -n "$id" ] || die "the push of $TAG ($TAG_COMMIT) started no Release run yet"
   [ "$status" = completed ] || die "Release run $id is $status: run this again when it has finished"
 
   WORK_DIR=$(mktemp -d)
@@ -176,8 +192,10 @@ first_publish() {
   dist_tag=latest
   case "$VERSION" in *-*) dist_tag=next ;; esac
   npm_login
-  # A version already staged cannot be staged again; approve that one instead.
-  if npm stage list "$PACKAGE" 2>/dev/null | grep -Fqw "$VERSION"; then
+  # A version already staged cannot be staged again; approve that one instead. 1.2.3 is not
+  # 1.2.3-rc.1: the version must not run on into more version characters.
+  escaped=$(printf '%s' "$VERSION" | sed 's/[.+]/\\&/g')
+  if npm stage list "$PACKAGE" 2>/dev/null | grep -Eq "(^|[^0-9A-Za-z.+-])$escaped([^0-9A-Za-z.+-]|\$)"; then
     say "  $PACKAGE@$VERSION is already staged:"
     npm stage list "$PACKAGE"
   elif [ "$DRY_RUN" -eq 1 ]; then
@@ -203,8 +221,13 @@ first_publish() {
 trusted_publisher() {
   local configs
   npm_login
-  configs=$(npm trust list "$PACKAGE" --json 2>/dev/null || true)
-  if printf '%s' "$configs" | jq -e '(type == "array" or type == "object") and length > 0' >/dev/null 2>&1; then
+  # npm prints nothing for a package with none, and {"error": ...} on stdout when it fails.
+  configs=$(npm trust list "$PACKAGE" --json 2>/dev/null) ||
+    die "npm trust list $PACKAGE failed; run it yourself to see why, then this again"
+  if printf '%s' "$configs" | jq -e 'type == "object" and has("error")' >/dev/null 2>&1; then
+    die "npm trust list $PACKAGE failed: $(printf '%s' "$configs" | jq -c .error)"
+  fi
+  if printf '%s' "$configs" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
     say "  $PACKAGE already has a trusted publisher (npm allows one per package):"
     printf '%s\n' "$configs" | jq . | sed 's/^/    /'
     say "  One that did not publish within 2 days of its creation has expired. If the publish job"
@@ -230,8 +253,9 @@ image_public() {
 }
 
 image() {
-  local id='' status='' conclusion='' pushed attempt
-  read -r id status conclusion <<<"$(latest_run image.yml)" || true
+  local id='' status='' conclusion='' run pushed attempt
+  run=$(latest_run image.yml) || exit 1
+  read -r id status conclusion <<<"$run" || true
   if image_public; then
     say "  ghcr.io/$IMAGE_PATH:$VERSION pulls anonymously"
   elif [ -z "$id" ]; then
@@ -242,7 +266,8 @@ image() {
     return 0
   else
     pushed=$(gh run view "$id" --repo "$REPO" --json jobs \
-      --jq ".jobs[] | select(.name == \"$IMAGE_JOB\") | .conclusion")
+      --jq ".jobs[] | select(.name == \"$IMAGE_JOB\") | .conclusion") ||
+      die "gh could not read Image run $id"
     if [ "$pushed" != success ]; then
       say "  Image run $id did not push the image ($IMAGE_JOB: ${pushed:-not run})"
       rerun_failed image.yml Image
@@ -271,6 +296,8 @@ command -v npm >/dev/null 2>&1 || die "npm $NPM_MINIMUM or newer is required"
 version_at_least "$(npm --version)" "$NPM_MINIMUM" ||
   die "npm $(npm --version) has no npm stage or npm trust: install npm $NPM_MINIMUM or newer"
 [ "$DRY_RUN" -eq 0 ] || say "Dry run: nothing is changed."
+tag_commit
+say "$TAG names $TAG_COMMIT"
 
 step "npm: $PACKAGE@$VERSION"
 if on_npm "$PACKAGE@$VERSION"; then

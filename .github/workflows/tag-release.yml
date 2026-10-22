@@ -1,17 +1,17 @@
 # Tag release: merging a version to main releases it. On every push to main, scripts/plan-release.sh
 # decides whether package.json's version is a release: not tagged yet, with a dated CHANGELOG
 # heading, and passing every check scripts/check-release-tag.sh makes. If it is, this job creates the
-# annotated v<version> tag on that commit and starts release.yml (npm) and image.yml (the image, then
-# the MCP Registry) on the tag.
+# annotated v<version> tag on the release commit (the first commit on main at which that version was
+# ready, so a run GitHub dropped for a later one tags the same commit) and pushes it.
 #
-# A tag pushed with GITHUB_TOKEN starts no workflow, so both are started with workflow_dispatch,
-# which a GITHUB_TOKEN may start, on the tag's ref: they run exactly as for a pushed tag, with
-# GITHUB_REF_NAME set to it. A maintainer can still push a tag by hand instead (an admin may create
-# any v* tag), which starts both through their own push trigger; this job then sees the tag exists
-# and does nothing.
+# The push uses the deploy key in the release-tag environment, not GITHUB_TOKEN: a tag pushed with
+# GITHUB_TOKEN starts no workflow, and a deploy-key push starts release.yml (npm) and image.yml (the
+# image, then the MCP Registry) through their own tag trigger, from the tagged commit. The "Release
+# tags" ruleset lets only admins and deploy keys create a v* tag, and only admins move or delete one;
+# the environment hands the key only to runs on main. A maintainer can still push a tag by hand; this
+# job then sees the tag exists and does nothing.
 #
-# One-time setup: scripts/configure-github.sh lets this workflow create v* tags (the "Release tags"
-# ruleset protects them from being moved or deleted).
+# One-time setup: scripts/configure-github.sh creates the environment, the deploy key and the ruleset.
 name: Tag release
 
 on:
@@ -31,44 +31,42 @@ defaults:
 
 jobs:
   tag:
-    name: Tag and start the release
-    # A manual run on any other ref tags nothing.
+    name: Tag a merged version
+    # A manual run on any other ref tags nothing; the environment refuses one too.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    environment: release-tag
     permissions:
-      # Push the v<version> tag.
-      contents: write
-      # Start release.yml and image.yml on the tag (workflow_dispatch).
-      actions: write
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          # Kept for the one `git push` of the tag below. The only other code this job runs is
-          # this repository's own scripts, from the main commit it is tagging.
+          # Kept in the local git config for the one tag push below. The only other code this job
+          # runs is this repository's own scripts, from the main commit that started it.
+          ssh-key: ${{ secrets.TAG_RELEASE_DEPLOY_KEY }}
           persist-credentials: true
-      - name: Decide whether this commit is a release
+      - name: Decide whether main holds an untagged release
         id: plan
         run: scripts/plan-release.sh "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
-      - name: Create the tag
+      - name: Create and push the tag
         if: steps.plan.outputs.release == 'true'
         env:
           TAG: ${{ steps.plan.outputs.tag }}
+          COMMIT: ${{ steps.plan.outputs.commit }}
+          HAS_DEPLOY_KEY: ${{ secrets.TAG_RELEASE_DEPLOY_KEY != '' }}
         run: |
+          if [ "$HAS_DEPLOY_KEY" != true ]; then
+            echo "::error::The release-tag environment has no TAG_RELEASE_DEPLOY_KEY: run scripts/configure-github.sh, then re-run this job."
+            exit 1
+          fi
           git -c user.name='github-actions[bot]' \
             -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-            tag -a "$TAG" -m "Slotlock ${TAG#v}" "$GITHUB_SHA"
-          git push origin "refs/tags/$TAG"
-      - name: Start Release and Image on the tag
-        if: steps.plan.outputs.release == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.plan.outputs.tag }}
-        run: |
-          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"
-          gh workflow run image.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"
+            tag -a "$TAG" -m "Slotlock ${TAG#v}" "$COMMIT"
+          # The SSH URL, so the push can only authenticate with the deploy key.
+          git push "git@github.com:$GITHUB_REPOSITORY.git" "refs/tags/$TAG"
           {
             echo "### Released $TAG"
-            echo "Created the tag on $GITHUB_SHA and started Release (npm) and Image (GHCR, then the MCP Registry) on it."
+            echo "Tagged $COMMIT. The push starts Release (npm, then the GitHub release) and Image (GHCR, then the MCP Registry)."
           } >> "$GITHUB_STEP_SUMMARY"

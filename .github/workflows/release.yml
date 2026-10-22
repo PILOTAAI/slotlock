@@ -1,14 +1,12 @@
 # Release: on a v* tag, verify the tag, run the suite against PostgreSQL, pack the npm artifact
 # (dist/), STAGE it on npm, and create the GitHub release with the tarball and its checksum.
-# tag-release.yml starts it on the tag a merged version creates (workflow_dispatch on the tag's
-# ref); a tag pushed by hand starts it too. Nothing in this workflow can make a version public.
+# tag-release.yml pushes the tag of a merged version; an admin can push one by hand. Nothing in this
+# workflow can make a version public on npm.
 #
 # Staging uses npm trusted publishing: npm exchanges this job's GitHub OIDC token (id-token: write)
-# for a short-lived credential, so no npm token exists anywhere. Provenance is attached. npm checks
-# the workflow filename, and it is release.yml however the run started: a dispatched run is
-# release.yml's own, not called from another workflow. The staged version stays private until a
-# maintainer approves it with two-factor authentication (GOVERNANCE.md, Releases), which an OIDC
-# token cannot do; the run's summary gives the commands:
+# for a short-lived credential, so no npm token exists anywhere. Provenance is attached. The staged
+# version stays private until a maintainer approves it with two-factor authentication
+# (GOVERNANCE.md, Releases), which an OIDC token cannot do; the run's summary gives the commands:
 #   npm stage view <stage-id>
 #   npm stage approve <stage-id>      (prompts for 2FA; also npmjs.com > Staged Packages)
 #   npm stage reject <stage-id>       (discards it instead)
@@ -24,8 +22,6 @@ name: Release
 on:
   push:
     tags: ['v*']
-  # tag-release.yml starts it on the tag's ref (a tag pushed with GITHUB_TOKEN starts no workflow).
-  workflow_dispatch:
 
 permissions: {}
 
@@ -166,10 +162,16 @@ jobs:
           dist_tag=latest
           case "$version" in *-*) dist_tag=next ;; esac
           if ! npm stage publish "./$TARBALL" --provenance --access public --tag "$dist_tag" 2>&1 | tee stage.log; then
-            if grep -Eq 'ENEEDAUTH|E401|E403|E404' stage.log; then
+            # npm answers an OIDC token it cannot match to a trusted publisher with ENEEDAUTH.
+            if grep -Eq 'ENEEDAUTH|E401' stage.log; then
               bootstrap "npm refused this job's credential" \
                 "slotlock has no trusted publisher for release.yml yet (it is created at the release after the first), or the one it has expired unused."
             fi
+            {
+              echo "### npm refused the stage"
+              echo "If this run was re-run after staging once, slotlock@$version is already staged: approve or reject that"
+              echo "stage (npm stage list slotlock). Otherwise the log above says why."
+            } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
           # npm prints "+ slotlock@<version> (staged with id <stage-id>)".
@@ -181,6 +183,8 @@ jobs:
             echo "npm stage view ${stage_id:-<stage-id from npm stage list slotlock>}"
             echo "npm stage approve ${stage_id:-<stage-id>}"
             echo '```'
+            echo "Rejecting it instead (npm stage reject) leaves the tag and the GitHub release this run creates; delete"
+            echo "the release with gh release delete $GITHUB_REF_NAME."
           } >> "$GITHUB_STEP_SUMMARY"
 
   github-release:

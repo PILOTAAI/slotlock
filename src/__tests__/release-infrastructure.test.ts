@@ -5,6 +5,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -264,10 +265,13 @@ describe('DCO check', () => {
 });
 
 const hasJq = spawnSync('jq', ['--version']).status === 0;
+const hasSshKeygen = spawnSync('ssh-keygen', ['-?']).error === undefined;
 
 describe.skipIf(!hasJq)('release tag check', () => {
   function release(changelogDate = '2026-10-09') {
     const repo = repository();
+    mkdirSync(join(repo.cwd, '.github', 'workflows'), { recursive: true });
+    writeFileSync(join(repo.cwd, '.github', 'workflows', 'tag-release.yml'), 'name: Tag release\n');
     writeFileSync(join(repo.cwd, 'package.json'), JSON.stringify({ version: '1.2.3' }));
     writeFileSync(join(repo.cwd, 'CHANGELOG.md'), `# Changelog\n\n## 1.2.3 - ${changelogDate}\n`);
     writeFileSync(
@@ -281,6 +285,17 @@ describe.skipIf(!hasJq)('release tag check', () => {
     const released = repo.commit('release 1.2.3');
     repo.git('update-ref', 'refs/remotes/origin/main', released);
     return repo;
+  }
+  /** Commits a change on main and moves origin/main to it. */
+  function merge(repo: ReturnType<typeof release>, message: string, files: Record<string, string>) {
+    for (const [path, text] of Object.entries(files)) {
+      mkdirSync(dirname(join(repo.cwd, path)), { recursive: true });
+      writeFileSync(join(repo.cwd, path), text);
+    }
+    repo.git('add', '.');
+    const commit = repo.commit(message);
+    repo.git('update-ref', 'refs/remotes/origin/main', commit);
+    return commit;
   }
 
   it('accepts a tag on main that matches every version', () => {
@@ -316,7 +331,7 @@ describe.skipIf(!hasJq)('release tag check', () => {
   });
 
   it('refuses a checkout that is not the commit the tag names', () => {
-    // A dispatch on a branch called v1.2.3 checks out the branch while the tag sits on main.
+    // A run on a branch called v1.2.3 checks out the branch while the tag sits on main.
     const repo = release();
     const tagged = repo.git('rev-parse', 'HEAD');
     repo.git('tag', 'v1.2.3');
@@ -345,23 +360,104 @@ describe.skipIf(!hasJq)('release tag check', () => {
     expect(result.stderr).toContain(`Commit ${side} is not on main`);
   });
 
+  it('reads the files of the commit it checks, not of the checkout', () => {
+    const repo = release();
+    const released = repo.git('rev-parse', 'HEAD');
+    merge(repo, 'start 1.2.4', {
+      'package.json': JSON.stringify({ version: '1.2.4' }),
+      'server.json': JSON.stringify({ version: '1.2.4', packages: [] }),
+    });
+    const result = repo.script('check-release-tag.sh', 'v1.2.3', '--commit', released);
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+  });
+
+  it('takes the commit to check from its arguments only', () => {
+    // An inherited rev must not switch it to --commit mode, which skips the tag and checkout checks.
+    const repo = release();
+    const result = spawnSync('sh', [join(root, 'scripts', 'check-release-tag.sh'), 'v1.2.3'], {
+      cwd: repo.cwd,
+      encoding: 'utf8',
+      env: {
+        PATH: process.env.PATH ?? '',
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_NOSYSTEM: '1',
+        rev: repo.git('rev-parse', 'HEAD'),
+      },
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Tag v1.2.3 does not exist');
+  });
+
   describe('release planning', () => {
     const plan = (repo: ReturnType<typeof release>) =>
       repo.script('plan-release.sh', repo.git('rev-parse', 'HEAD'));
 
-    it('releases a dated version that has no tag yet', () => {
-      const result = plan(release());
+    it('releases a dated version that has no tag yet, on the commit that dated it', () => {
+      const repo = release();
+      const result = plan(repo);
       expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toBe('tag=v1.2.3\nrelease=true\n');
+      expect(result.stdout).toBe(
+        `tag=v1.2.3\ncommit=${repo.git('rev-parse', 'HEAD')}\nrelease=true\n`,
+      );
     });
 
-    it('skips a version that is already tagged', () => {
+    it('tags the release commit, not a later merge, when the first run never ran', () => {
+      // GitHub keeps one pending run per concurrency group and drops the older one.
+      const repo = release();
+      const released = repo.git('rev-parse', 'HEAD');
+      merge(repo, 'a later fix', { 'README.md': 'later\n' });
+      const result = plan(repo);
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toBe(`tag=v1.2.3\ncommit=${released}\nrelease=true\n`);
+    });
+
+    it('tags a version dated before tag-release.yml existed where tag-release.yml arrived', () => {
+      // A tag push runs the tagged commit's workflows; an older commit would release with old ones.
+      const repo = release();
+      repo.git('rm', '--quiet', '-r', '.github');
+      const undated = repo.commit('the automation is not here yet');
+      repo.git('update-ref', 'refs/remotes/origin/main', undated);
+      const arrived = merge(repo, 'add tag-release.yml', {
+        '.github/workflows/tag-release.yml': 'name: Tag release\n',
+      });
+      merge(repo, 'a later fix', { 'README.md': 'later\n' });
+      const result = plan(repo);
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toBe(`tag=v1.2.3\ncommit=${arrived}\nrelease=true\n`);
+    });
+
+    it('starts the release where the version became ready again', () => {
+      const repo = release();
+      merge(repo, 'undate 1.2.3', { 'CHANGELOG.md': '# Changelog\n\n## 1.2.3 - Unreleased\n' });
+      const redated = merge(repo, 'date 1.2.3 again', {
+        'CHANGELOG.md': '# Changelog\n\n## 1.2.3 - 2026-10-10\n',
+      });
+      const result = plan(repo);
+      expect(result.stdout).toBe(`tag=v1.2.3\ncommit=${redated}\nrelease=true\n`);
+    });
+
+    it('skips a version that is already tagged on main', () => {
       const repo = release();
       repo.git('tag', 'v1.2.3');
       const result = plan(repo);
       expect(result.status).toBe(0);
-      expect(result.stdout).toBe('tag=v1.2.3\nrelease=false\n');
+      expect(result.stdout).toBe(
+        `tag=v1.2.3\ncommit=${repo.git('rev-parse', 'HEAD')}\nrelease=false\n`,
+      );
       expect(result.stderr).toContain('v1.2.3 already exists');
+    });
+
+    it('fails when the version is tagged on a commit that is not on main', () => {
+      const repo = release();
+      repo.git('checkout', '--quiet', '-b', 'side');
+      repo.commit('unmerged');
+      repo.git('tag', 'v1.2.3');
+      repo.git('checkout', '--quiet', 'main');
+      const result = plan(repo);
+      expect(result.status).toBe(1);
+      expect(result.stdout).not.toContain('release=');
+      expect(result.stderr).toContain('which is not on main');
     });
 
     it('skips a version whose CHANGELOG heading is not dated yet', () => {
@@ -373,6 +469,7 @@ describe.skipIf(!hasJq)('release tag check', () => {
 
     it('fails a dated version that fails a release check instead of skipping it', () => {
       const repo = release();
+      // The release commit itself leaves server.json at the previous version.
       writeFileSync(
         join(repo.cwd, 'server.json'),
         JSON.stringify({
@@ -381,8 +478,8 @@ describe.skipIf(!hasJq)('release tag check', () => {
         }),
       );
       repo.git('add', '.');
-      const stale = repo.commit('server.json left at 1.2.2');
-      repo.git('update-ref', 'refs/remotes/origin/main', stale);
+      repo.git('commit', '--quiet', '--amend', '--no-edit');
+      repo.git('update-ref', 'refs/remotes/origin/main', 'HEAD');
       const result = plan(repo);
       expect(result.status).toBe(1);
       expect(result.stdout).not.toContain('release=true');
@@ -404,35 +501,38 @@ describe.skipIf(!hasJq)('release tag check', () => {
 describe('release automation', () => {
   const workflow = (file: string) => read(join('.github', 'workflows', file));
 
-  it('tags a merged version on main and starts both release workflows on the tag', () => {
+  it('tags a merged version on main with the deploy key that only main can read', () => {
     const text = workflow('tag-release.yml');
     expect(text).toMatch(/^on:\n {2}push:\n {4}branches: \[main\]\n {2}workflow_dispatch:\n/m);
     expect(text).toContain("if: github.ref == 'refs/heads/main'");
-    expect(text).toMatch(/permissions:\n\s+# .*\n\s+contents: write\n\s+# .*\n\s+actions: write\n/);
+    expect(text).toContain('environment: release-tag');
+    // The deploy key pushes the tag; GITHUB_TOKEN gets no write permission here.
+    expect(text).toMatch(/ {4}permissions:\n {6}contents: read\n {4}steps:/);
+    expect(text).not.toMatch(/(?:contents|actions): write/);
+    expect(text).toContain('ssh-key: ${{ secrets.TAG_RELEASE_DEPLOY_KEY }}');
     expect(text).toContain('scripts/plan-release.sh "$GITHUB_SHA" >> "$GITHUB_OUTPUT"');
-    expect(text).toContain("if: steps.plan.outputs.release == 'true'");
-    const started = [
-      ...text.matchAll(/gh workflow run (\S+) --repo "\$GITHUB_REPOSITORY" --ref "\$TAG"/g),
-    ].map((match) => match[1] as string);
-    expect(started).toEqual(['release.yml', 'image.yml']);
-    for (const file of started) {
-      // A tag pushed with GITHUB_TOKEN starts no workflow, so each one is dispatched on the tag.
-      expect(workflow(file), file).toMatch(
-        /^on:\n {2}push:\n {4}tags: \['v\*'\]\n(?: {2}#.*\n)* {2}workflow_dispatch:\n/m,
-      );
-      // A dispatch on any other ref fails here: its name is not v<package.json version>.
-      expect(workflow(file), file).toContain(
-        'run: scripts/check-release-tag.sh "$GITHUB_REF_NAME"',
-      );
+    expect(text).toContain('COMMIT: ${{ steps.plan.outputs.commit }}');
+    expect(text).toContain('tag -a "$TAG" -m "Slotlock ${TAG#v}" "$COMMIT"');
+    expect(text).toContain('git push "git@github.com:$GITHUB_REPOSITORY.git" "refs/tags/$TAG"');
+    expect(text).not.toContain('gh workflow run');
+  });
+
+  it('starts the release workflows only from a pushed v* tag', () => {
+    for (const file of ['release.yml', 'image.yml']) {
+      const text = workflow(file);
+      expect(text, file).toMatch(/^on:\n {2}push:\n {4}tags: \['v\*'\]\n\n/m);
+      expect(text, file).not.toContain('workflow_dispatch');
+      expect(text, file).toContain('run: scripts/check-release-tag.sh "$GITHUB_REF_NAME"');
     }
   });
 
-  it('only stages on npm, and asks for the bootstrap when npm needs a person', () => {
+  it('only stages on npm, and asks for the bootstrap when npm refuses the credential', () => {
     const text = workflow('release.yml');
     const stage = text.slice(text.indexOf('\n  stage:\n'), text.indexOf('\n  github-release:\n'));
     expect(stage).toContain('environment: npm');
     expect(stage).toContain('id-token: write');
     expect(stage).toContain('npm stage publish "./$TARBALL" --provenance --access public');
+    expect(stage).toContain("grep -Eq 'ENEEDAUTH|E401' stage.log");
     expect(stage).toContain('scripts/bootstrap-release.sh $GITHUB_REF_NAME');
     // GOVERNANCE.md, Releases: a maintainer approves each version with two-factor authentication.
     for (const { file, text: body } of workflows) {
@@ -440,55 +540,84 @@ describe('release automation', () => {
     }
   });
 
-  it('names the image by its tag however the run started', () => {
-    const text = workflow('image.yml');
-    expect(text).toContain('type=semver,pattern={{version}},value=${{ github.ref_name }}');
-    expect(text).toContain(
-      'type=semver,pattern={{major}}.{{minor}},value=${{ github.ref_name }}',
-    );
+  it('names only scripts that exist', () => {
+    let count = 0;
+    for (const { file, text } of workflows) {
+      for (const [path] of text.matchAll(/scripts\/[\w.-]+\.(?:sh|mjs)/g)) {
+        count += 1;
+        expect(existsSync(join(root, path)), `${file}: ${path}`).toBe(true);
+      }
+    }
+    expect(count, 'canary: the workflows name their scripts').toBeGreaterThanOrEqual(8);
   });
 });
 
-interface DryRunRequest {
+interface GitHubRequest {
   method: string;
   path: string;
   body: {
     target?: string;
     reviewers?: unknown[];
     rules?: { type: string }[];
+    bypass_actors?: { actor_id: number | null; actor_type: string; bypass_mode: string }[];
     conditions?: { ref_name: { include: string[] } };
+    title?: string;
+    key?: string;
+    read_only?: boolean;
   };
 }
 
 describe.skipIf(!hasJq)('GitHub configuration', () => {
-  function dryRun(...args: string[]): DryRunRequest[] {
-    const result = spawnSync(
-      'bash',
-      [join(root, 'scripts', 'configure-github.sh'), '--dry-run', ...args],
-      { encoding: 'utf8', env: { PATH: process.env.PATH ?? '', SKIP_SITE_SECRETS: '1' } },
-    );
+  const script = join(root, 'scripts', 'configure-github.sh');
+
+  function dryRun(...args: string[]): GitHubRequest[] {
+    const result = spawnSync('bash', [script, '--dry-run', ...args], {
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH ?? '', SKIP_SITE_SECRETS: '1' },
+    });
     expect(result.status, result.stderr).toBe(0);
     return [...result.stdout.matchAll(/^> (PUT|POST) \/(\S+)\n(\{[\s\S]*?\n\})$/gm)].map(
       ([, method = '', path = '', body = '']) => ({
         method,
         path,
-        body: JSON.parse(body) as DryRunRequest['body'],
+        body: JSON.parse(body) as GitHubRequest['body'],
       }),
     );
   }
-  const environment = (requests: DryRunRequest[], name: string) =>
+  const environment = (requests: GitHubRequest[], name: string) =>
     requests.find(
       (request) =>
-        request.method === 'PUT' &&
-        request.path === `repos/PILOTAAI/slotlock/environments/${name}`,
+        request.method === 'PUT' && request.path === `repos/PILOTAAI/slotlock/environments/${name}`,
     )?.body;
 
-  it('lets tag-release.yml create release tags, which then only an admin can move or delete', () => {
+  it('lets only admins and deploy keys create release tags, and only admins move or delete them', () => {
     const tags = dryRun().find(
       (request) => request.path.endsWith('/rulesets') && request.body.target === 'tag',
     )?.body;
     expect(tags?.conditions?.ref_name.include).toEqual(['refs/tags/v*']);
-    expect(tags?.rules?.map((rule) => rule.type).sort()).toEqual(['deletion', 'update']);
+    expect(tags?.rules?.map((rule) => rule.type).sort()).toEqual([
+      'creation',
+      'deletion',
+      'update',
+    ]);
+    expect(tags?.bypass_actors).toEqual([
+      { actor_id: 5, actor_type: 'RepositoryRole', bypass_mode: 'always' },
+      { actor_id: null, actor_type: 'DeployKey', bypass_mode: 'always' },
+    ]);
+  });
+
+  it('keeps the tag deploy key in an environment only main can use', () => {
+    const requests = dryRun();
+    expect(environment(requests, 'release-tag')?.reviewers).toEqual([]);
+    const policy = requests.find(
+      (request) =>
+        request.method === 'POST' &&
+        request.path ===
+          'repos/PILOTAAI/slotlock/environments/release-tag/deployment-branch-policies',
+    )?.body;
+    expect(policy).toEqual({ name: 'main', type: 'branch' });
+    const key = requests.find((request) => request.path === 'repos/PILOTAAI/slotlock/keys')?.body;
+    expect(key).toMatchObject({ title: 'slotlock tag-release (GitHub Actions)', read_only: false });
   });
 
   it('makes a release wait for no reviewer unless asked to', () => {
@@ -499,9 +628,133 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
     expect(environment(approved, 'npm')?.reviewers).toEqual([{ type: 'User', id: 0 }]);
     expect(environment(approved, 'mcp-registry')?.reviewers).toEqual([{ type: 'User', id: 0 }]);
   });
+
+  describe.skipIf(!hasSshKeygen)('the tag deploy key', () => {
+    // A stand-in for gh that answers every request configure-github.sh sends, logs each one, and
+    // keeps the deploy key it is sent and the secret value it receives on stdin.
+    const gh = `#!/bin/sh
+printf '%s\\n' "$*" >> "$STUB_LOG/gh.log"
+case "$1 $2" in
+  'secret set') cat > "$STUB_LOG/secret-$3"; exit 0 ;;
+esac
+case "$*" in
+  *'--jq .id') echo 42; exit 0 ;;
+  *'--jq .login') echo ada; exit 0 ;;
+esac
+method=GET
+previous=''
+for arg; do
+  [ "$previous" = --method ] && method=$arg
+  previous=$arg
+  path=$arg
+done
+if [ "$method" != GET ]; then
+  case " $* " in *' --input - '*) body=$(cat) ;; *) body='' ;; esac
+  [ "$method $path" = 'POST repos/PILOTAAI/slotlock/keys' ] && printf '%s' "$body" > "$STUB_LOG/key.json"
+  echo '{"id":1}'
+  exit 0
+fi
+case "$path" in
+  repos/PILOTAAI/slotlock) echo '{"permissions":{"admin":true},"visibility":"public","default_branch":"main"}' ;;
+  */code-scanning/default-setup) echo '{"state":"configured","languages":["actions","javascript-typescript"],"query_suite":"extended"}' ;;
+  */deployment-branch-policies*) echo '{"branch_policies":[]}' ;;
+  */environments/release-tag/secrets*) echo "$STUB_SECRETS" ;;
+  repos/PILOTAAI/slotlock/keys*) echo "$STUB_KEYS" ;;
+  */rulesets\\?*) echo '[]' ;;
+  *) echo '{}' ;;
+esac
+`;
+
+    function configure(scenario: { keys: string; secrets: string }, ...args: string[]) {
+      const dir = mkdtempSync(join(tmpdir(), 'slotlock-configure-'));
+      scratch.push(dir);
+      const bin = join(dir, 'bin');
+      const log = join(dir, 'log');
+      const temp = join(dir, 'tmp');
+      for (const path of [bin, log, temp]) mkdirSync(path);
+      writeFileSync(join(bin, 'gh'), gh, { mode: 0o755 });
+      const result = spawnSync('bash', [script, ...args], {
+        encoding: 'utf8',
+        env: {
+          PATH: `${bin}:${process.env.PATH ?? ''}`,
+          TMPDIR: temp,
+          SKIP_SITE_SECRETS: '1',
+          STUB_LOG: log,
+          STUB_KEYS: scenario.keys,
+          STUB_SECRETS: scenario.secrets,
+        },
+      });
+      const calls = readFileSync(join(log, 'gh.log'), 'utf8').trim().split('\n');
+      return { ...result, dir, log, temp, calls };
+    }
+    const none = { keys: '[]', secrets: '{"secrets":[]}' };
+    const present = {
+      keys: '[{"id":7,"title":"slotlock tag-release (GitHub Actions)"}]',
+      secrets: '{"secrets":[{"name":"TAG_RELEASE_DEPLOY_KEY"}]}',
+    };
+
+    it('sends GitHub the public half and the environment the private half, and keeps neither', () => {
+      const run = configure(none);
+      expect(run.status, run.stderr).toBe(0);
+      const sent = JSON.parse(readFileSync(join(run.log, 'key.json'), 'utf8')) as {
+        title: string;
+        key: string;
+        read_only: boolean;
+      };
+      expect(sent.read_only).toBe(false);
+      expect(sent.key).toMatch(/^ssh-ed25519 \S+ slotlock tag-release \(GitHub Actions\)$/);
+      const secret = join(run.log, 'secret-TAG_RELEASE_DEPLOY_KEY');
+      expect(readFileSync(secret, 'utf8')).toMatch(/^-----BEGIN OPENSSH PRIVATE KEY-----\n/);
+      expect(run.calls).toContain(
+        'secret set TAG_RELEASE_DEPLOY_KEY --env release-tag --repo PILOTAAI/slotlock',
+      );
+      // The secret is the private half of the key GitHub was sent.
+      chmodSync(secret, 0o600);
+      const derived = execFileSync('ssh-keygen', ['-y', '-f', secret], { encoding: 'utf8' });
+      expect(sent.key.split(' ').slice(0, 2)).toEqual(derived.trim().split(' ').slice(0, 2));
+      // Nothing of it is printed or left behind.
+      expect(run.stdout + run.stderr).not.toContain('PRIVATE KEY');
+      expect(readdirSync(run.temp)).toEqual([]);
+    });
+
+    it('leaves a key and secret that are already there', () => {
+      const run = configure(present);
+      expect(run.status, run.stderr).toBe(0);
+      expect(run.calls.filter((call) => call.startsWith('secret set'))).toEqual([]);
+      expect(run.calls.some((call) => / repos\/PILOTAAI\/slotlock\/keys$/.test(call))).toBe(false);
+      expect(run.stdout).toContain('already set (--rotate-tag-key replaces them)');
+    });
+
+    it('replaces the key on --rotate-tag-key, adding the new one before deleting the old', () => {
+      const run = configure(present, '--rotate-tag-key');
+      expect(run.status, run.stderr).toBe(0);
+      const added = run.calls.findIndex(
+        (call) =>
+          call.startsWith('api --method POST') && call.endsWith(' repos/PILOTAAI/slotlock/keys'),
+      );
+      const stored = run.calls.findIndex((call) => call.startsWith('secret set'));
+      const deleted = run.calls.findIndex(
+        (call) =>
+          call.startsWith('api --method DELETE') &&
+          call.endsWith(' repos/PILOTAAI/slotlock/keys/7'),
+      );
+      expect(added).toBeGreaterThanOrEqual(0);
+      expect(stored).toBeGreaterThan(added);
+      expect(deleted).toBeGreaterThan(stored);
+      expect(readdirSync(run.temp)).toEqual([]);
+    });
+  });
 });
 
 describe.skipIf(!hasJq)('release bootstrap', () => {
+  const tagCommit = 'a'.repeat(40);
+  const run = (id: number, sha = tagCommit) => ({
+    databaseId: id,
+    status: 'completed',
+    conclusion: 'failure',
+    headSha: sha,
+    event: 'push',
+  });
   // Stand-ins for npm, gh and curl: each logs its arguments and answers as the scenario says.
   const stubs: Record<string, string> = {
     npm: `case "$*" in
@@ -509,17 +762,18 @@ describe.skipIf(!hasJq)('release bootstrap', () => {
   'view slotlock@1.2.3 version') [ "$STUB_VERSION_ON_NPM" = 1 ] && echo 1.2.3 || exit 1 ;;
   'view slotlock version') [ "$STUB_PACKAGE_ON_NPM" = 1 ] && echo 1.2.2 || exit 1 ;;
   whoami) echo ada ;;
-  'stage list slotlock') ;;
+  'stage list slotlock') printf '%s' "$STUB_STAGED" ;;
   'stage publish '*) echo '+ slotlock@1.2.3 (staged with id stage-1)' ;;
   'stage approve stage-1') ;;
-  'trust list slotlock --json') echo '[]' ;;
+  'trust list slotlock --json') printf '%s' "$STUB_TRUST"; exit "\${STUB_TRUST_STATUS:-0}" ;;
   'trust github '*) ;;
   *) echo "unexpected: npm $*" >&2; exit 99 ;;
 esac`,
     gh: `case "$*" in
-  'run list '*'--workflow release.yml '*) echo '11 completed failure' ;;
-  'run list '*'--workflow image.yml '*) echo '22 completed failure' ;;
-  'run download 11 '*) for last; do :; done; cp "$STUB_ARTIFACT"/* "$last" ;;
+  'api repos/PILOTAAI/slotlock/commits/tags/v1.2.3 --jq .sha') echo "$STUB_TAG_COMMIT" ;;
+  'run list '*'--workflow release.yml '*) [ "$STUB_GH_FAILS" = 1 ] && exit 1; echo "$STUB_RELEASE_RUNS" ;;
+  'run list '*'--workflow image.yml '*) echo "$STUB_IMAGE_RUNS" ;;
+  'run download '*) for last; do :; done; cp "$STUB_ARTIFACT"/* "$last" ;;
   'run view 22 '*) echo "$STUB_IMAGE_JOB" ;;
   'run rerun '*) ;;
   *) echo "unexpected: gh $*" >&2; exit 99 ;;
@@ -564,84 +818,162 @@ esac`,
         STUB_LOG: log,
         STUB_ARTIFACT: artifact,
         STUB_NPM_VERSION: '11.19.0',
+        STUB_TAG_COMMIT: tagCommit,
+        STUB_RELEASE_RUNS: JSON.stringify([run(11)]),
+        STUB_IMAGE_RUNS: JSON.stringify([run(22)]),
         STUB_IMAGE_PUBLIC: '1',
         STUB_IMAGE_JOB: 'success',
+        STUB_STAGED: '',
+        STUB_TRUST: '',
         ...scenario,
       },
     });
     const calls = (name: string) =>
       existsSync(join(log, `${name}.log`))
-        ? readFileSync(join(log, `${name}.log`), 'utf8').trim().split('\n')
+        ? readFileSync(join(log, `${name}.log`), 'utf8')
+            .trim()
+            .split('\n')
         : [];
     return { ...result, npm: calls('npm'), gh: calls('gh') };
   }
   const rerun = (id: number) => `run rerun ${id} --failed --repo PILOTAAI/slotlock`;
+  const download = (id: number) =>
+    expect.stringMatching(
+      new RegExp(`^run download ${id} --repo PILOTAAI/slotlock --name npm-package --dir `),
+    );
 
   it('puts the first version on npm from the tested tarball, with no trusted publisher yet', () => {
-    const run = bootstrap({});
-    expect(run.status, run.stderr).toBe(0);
-    expect(run.npm).toContainEqual(
-      expect.stringMatching(/^stage publish \S+\/slotlock-1\.2\.3\.tgz --access public --tag latest$/),
+    const result = bootstrap({});
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.gh).toContainEqual(download(11));
+    expect(result.npm).toContainEqual(
+      expect.stringMatching(
+        /^stage publish \S+\/slotlock-1\.2\.3\.tgz --access public --tag latest$/,
+      ),
     );
-    expect(run.npm).toContain('stage approve stage-1');
+    expect(result.npm).toContain('stage approve stage-1');
     // npm expires a trusted publisher that has not published within 2 days.
-    expect(run.npm.filter((call) => call.startsWith('trust '))).toEqual([]);
-    expect(run.gh).toContain(rerun(11));
-    expect(run.gh).toContain(rerun(22));
+    expect(result.npm.filter((call) => call.startsWith('trust '))).toEqual([]);
+    expect(result.gh).toContain(rerun(11));
+    expect(result.gh).toContain(rerun(22));
+  });
+
+  it("uses only the run the tag's push started on the tag's commit", () => {
+    // Newest first: a run on another commit, as a branch named v1.2.3 would start, comes first.
+    const result = bootstrap({
+      STUB_RELEASE_RUNS: JSON.stringify([run(33, 'b'.repeat(40)), run(11)]),
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.gh).toContainEqual(
+      expect.stringMatching(
+        new RegExp(
+          `^run list --repo PILOTAAI/slotlock --workflow release\\.yml --branch v1\\.2\\.3 --commit ${tagCommit} --event push `,
+        ),
+      ),
+    );
+    expect(result.gh).toContainEqual(download(11));
+    expect(result.gh).not.toContainEqual(download(33));
+    expect(result.gh).not.toContain(rerun(33));
+  });
+
+  it('stops when gh cannot list the runs instead of finding none', () => {
+    const result = bootstrap({ STUB_GH_FAILS: '1' });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('gh could not list the release.yml runs for v1.2.3');
+    expect(result.npm.filter((call) => /^(?:stage|trust) /.test(call))).toEqual([]);
+  });
+
+  it('stops when the tag is not on GitHub', () => {
+    const result = bootstrap({ STUB_TAG_COMMIT: '' });
+    expect(result.status).toBe(1);
+    expect(result.gh.filter((call) => call.startsWith('run '))).toEqual([]);
   });
 
   it('creates the stage-only trusted publisher when a later version is waiting', () => {
-    const run = bootstrap({ STUB_PACKAGE_ON_NPM: '1' });
-    expect(run.status, run.stderr).toBe(0);
-    expect(run.npm).toContain(
+    const result = bootstrap({ STUB_PACKAGE_ON_NPM: '1' });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.npm).toContain(
       'trust github slotlock --file release.yml --repository PILOTAAI/slotlock --environment npm --allow-stage-publish',
     );
-    expect(run.npm.filter((call) => call.startsWith('stage '))).toEqual([]);
-    expect(run.gh).toContain(rerun(11));
+    expect(result.npm.filter((call) => call.startsWith('stage '))).toEqual([]);
+    expect(result.gh).toContain(rerun(11));
+  });
+
+  it('leaves a trusted publisher that exists', () => {
+    const result = bootstrap({ STUB_PACKAGE_ON_NPM: '1', STUB_TRUST: '[{"id":"tp-1"}]' });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.npm.filter((call) => call.startsWith('trust github'))).toEqual([]);
+    expect(result.stdout).toContain('already has a trusted publisher');
+  });
+
+  it('stops when npm cannot list the trusted publishers instead of assuming one', () => {
+    // npm prints {"error": ...} on stdout with --json when it fails.
+    const failed = bootstrap({
+      STUB_PACKAGE_ON_NPM: '1',
+      STUB_TRUST: '{"error":{"code":"ECONNREFUSED"}}',
+      STUB_TRUST_STATUS: '1',
+    });
+    expect(failed.status).toBe(1);
+    expect(failed.stderr).toContain('npm trust list slotlock failed');
+    expect(failed.npm.filter((call) => call.startsWith('trust github'))).toEqual([]);
+    const errorOnly = bootstrap({
+      STUB_PACKAGE_ON_NPM: '1',
+      STUB_TRUST: '{"error":{"code":"EOTP"}}',
+    });
+    expect(errorOnly.status).toBe(1);
+    expect(errorOnly.stderr).toContain('EOTP');
+  });
+
+  it('stages the version when only a prerelease of it is staged', () => {
+    const result = bootstrap({ STUB_STAGED: 'stage-0  slotlock@1.2.3-rc.1\n' });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.npm).toContainEqual(expect.stringMatching(/^stage publish /));
   });
 
   it('leaves npm alone for a version already there', () => {
-    const run = bootstrap({ STUB_PACKAGE_ON_NPM: '1', STUB_VERSION_ON_NPM: '1' });
-    expect(run.status, run.stderr).toBe(0);
-    expect(run.npm.filter((call) => /^(?:stage|trust|publish) /.test(call))).toEqual([]);
+    const result = bootstrap({ STUB_PACKAGE_ON_NPM: '1', STUB_VERSION_ON_NPM: '1' });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.npm.filter((call) => /^(?:stage|trust|publish) /.test(call))).toEqual([]);
   });
 
   it("refuses a tarball that does not match its run's checksum", () => {
-    const run = bootstrap({}, '0'.repeat(64));
-    expect(run.status).toBe(1);
-    expect(run.stderr).toContain('does not match its SHA256SUMS');
-    expect(run.npm.filter((call) => call.startsWith('stage '))).toEqual([]);
-    expect(run.gh).not.toContain(rerun(11));
+    const result = bootstrap({}, '0'.repeat(64));
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('does not match its SHA256SUMS');
+    expect(result.npm.filter((call) => call.startsWith('stage '))).toEqual([]);
+    expect(result.gh).not.toContain(rerun(11));
   });
 
   it('stops at a private image, naming the page that makes it public', () => {
-    const run = bootstrap({
+    const result = bootstrap({
       STUB_PACKAGE_ON_NPM: '1',
       STUB_VERSION_ON_NPM: '1',
       STUB_IMAGE_PUBLIC: '0',
     });
-    expect(run.status).toBe(1);
-    expect(run.stdout).toContain('https://github.com/orgs/PILOTAAI/packages/container/package/slotlock');
-    expect(run.stderr).toContain('stopped before the image was public');
-    expect(run.gh).not.toContain(rerun(22));
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(
+      'https://github.com/orgs/PILOTAAI/packages/container/package/slotlock',
+    );
+    expect(result.stderr).toContain('stopped before the image was public');
+    expect(result.gh).not.toContain(rerun(22));
   });
 
   it('re-runs an Image run whose image job failed, without asking about visibility', () => {
-    const run = bootstrap({
+    const result = bootstrap({
       STUB_PACKAGE_ON_NPM: '1',
       STUB_VERSION_ON_NPM: '1',
       STUB_IMAGE_PUBLIC: '0',
       STUB_IMAGE_JOB: 'failure',
     });
-    expect(run.status, run.stderr).toBe(0);
-    expect(run.stdout).toContain('did not push the image');
-    expect(run.gh).toContain(rerun(22));
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('did not push the image');
+    expect(result.gh).toContain(rerun(22));
   });
 
   it('refuses an npm without npm stage and npm trust', () => {
-    const run = bootstrap({ STUB_NPM_VERSION: '11.14.2' });
-    expect(run.status).toBe(1);
-    expect(run.stderr).toContain('npm 11.14.2 has no npm stage or npm trust');
-    expect(run.gh).toEqual([]);
+    const result = bootstrap({ STUB_NPM_VERSION: '11.14.2' });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('npm 11.14.2 has no npm stage or npm trust');
+    expect(result.gh).toEqual([]);
   });
 });
