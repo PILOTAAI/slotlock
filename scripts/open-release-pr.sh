@@ -65,7 +65,7 @@ open_pr() {
 pr=$(open_pr)
 if [ -z "$pr" ]; then
   run_url="$server/$repository/actions/runs/${GITHUB_RUN_ID:-}"
-  body="Prepared by the \"Release a version\" workflow ([run]($run_url)): $version in package.json, package-lock.json, server.json and slotlock.manifest.json, and its CHANGELOG.md section dated. GitHub holds its checks until someone with write access approves them: click \"Approve workflows to run\" here. The workflow merges it once CI and DCO pass, then starts Tag release."
+  body="Prepared by the \"Release a version\" workflow ([run]($run_url)): $version in package.json, package-lock.json, server.json and slotlock.manifest.json, and its CHANGELOG.md section dated. If GitHub holds its checks, as it does when github-actions[bot] opened it, someone with write access approves them here: \"Approve workflows to run\". The workflow merges it once CI and DCO pass, then starts Tag release."
   if ! out=$(gh pr create --repo "$repository" --base main --head "$branch" \
     --title "Release $version" --body "$body" 2>&1); then
     printf '%s\n' "$out" >&2

@@ -1,27 +1,30 @@
 # Release a version: Actions > Release a version > Run workflow, with the version (for example
 # 0.1.1). It prepares the release on a branch (scripts/prepare-release.sh: the version in
 # package.json, package-lock.json, server.json and slotlock.manifest.json, and CHANGELOG.md's
-# "## Unreleased" heading dated) and opens its pull request (scripts/open-release-pr.sh). GitHub holds
-# that pull request's checks until someone with write access approves them: open it and click
-# "Approve workflows to run". Once CI and DCO pass on it (scripts/wait-for-pr-checks.sh), this
-# squash-merges it and starts Tag release. That tags the release commit, and the tag's push starts
-# Release (npm, then the GitHub release) and Image (GHCR, then the MCP Registry). npm then holds the
-# staged version for a maintainer's two-factor approval (GOVERNANCE.md, Releases): the Release run's
-# summary gives the command.
+# "## Unreleased" heading dated), opens its pull request (scripts/open-release-pr.sh), waits for CI
+# and DCO to pass on it (scripts/wait-for-pr-checks.sh) and squash-merges it, which leads to Tag
+# release. That tags the release commit, and the tag's push starts Release (npm, then the GitHub
+# release) and Image (GHCR, then the MCP Registry). npm then holds the staged version for a
+# maintainer's two-factor approval (GOVERNANCE.md, Releases): the Release run's summary gives the
+# command.
 #
-# Everything here uses GITHUB_TOKEN. GitHub holds the workflow runs of a pull request it opens for
-# approval (GitHub changelog, 2026-06-11), and only those runs count as the pull request's required
-# checks: CI started any other way at the same commit does not. The merge is held to the "Protect
-# main" ruleset like anyone's: the required checks must pass on the branch, up to date with main. A
-# GITHUB_TOKEN merge starts no push workflow, so Tag release and Site are started with
-# workflow_dispatch. GITHUB_TOKEN can open the pull request only once an admin allows Actions to
-# (Settings > Actions > General > Workflow permissions; scripts/configure-github.sh sets it). The
-# release notes come from CHANGELOG.md's "## Unreleased" section: add to it in the pull requests that
-# make the changes.
+# Who opens and merges the pull request:
+# - The release app, once scripts/create-release-app.mjs has stored it in the release-app
+#   environment, which only main can deploy to. The checks of a pull request an app opens run at
+#   once, and its merge is a push to main, which starts Tag release and Site like anyone's.
+# - Otherwise GITHUB_TOKEN. GitHub holds the checks of a pull request it opens until someone with
+#   write access approves them on the pull request ("Approve workflows to run"; GitHub changelog,
+#   2026-06-11), and only those runs count as its required checks. Its merge starts no push
+#   workflow, so this starts Tag release and Site with workflow_dispatch. It can open the pull
+#   request only once an admin allows Actions to (Settings > Actions > General > Workflow
+#   permissions; scripts/configure-github.sh sets it).
+# Either way the merge is held to the "Protect main" ruleset like anyone's: the required checks must
+# pass on the branch, up to date with main. The release notes come from CHANGELOG.md's
+# "## Unreleased" section: add to it in the pull requests that make the changes.
 #
 # Run it again with the same version after a failure. It keeps the release branch the failed run left
-# when that already holds this release, so checks approved there still count, replaces it otherwise,
-# and reuses its pull request (scripts/open-release-pr.sh).
+# when that already holds this release, so checks already run there still count, replaces it
+# otherwise, and reuses its pull request (scripts/open-release-pr.sh).
 name: Release a version
 
 on:
@@ -48,25 +51,42 @@ jobs:
     # A run started on any other branch releases nothing.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    # The longest GitHub-hosted runners allow: the run waits for a person to approve the checks.
+    # Holds the release app's key. Only main can deploy to it (scripts/configure-github.sh).
+    environment: release-app
+    # The longest GitHub-hosted runners allow: without the app, the run waits for a person to
+    # approve the checks.
     timeout-minutes: 360
     permissions:
-      # Push the release branch, and merge its pull request.
+      # Push the release branch, and merge its pull request, without the app.
       contents: write
-      # Open and merge the pull request.
+      # Open and merge the pull request, without the app.
       pull-requests: write
-      # Follow CI and DCO, and start Tag release and Site.
+      # Follow CI and DCO, and start Tag release and Site without the app.
       actions: write
     env:
       VERSION: ${{ inputs.version }}
       BRANCH: release/v${{ inputs.version }}
-      GH_TOKEN: ${{ github.token }}
     steps:
+      # A token of the release app for this repository only, with contents: write and
+      # pull_requests: write, revoked when the job ends. Skipped until the app is stored.
+      - name: Mint the release app's token
+        id: app
+        if: vars.RELEASE_APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Say how to repair the release app
+        if: failure() && steps.app.outcome == 'failure'
+        run: echo "::error::The release app's token could not be minted. An owner of the organization runs node scripts/create-release-app.mjs --replace, then runs this again."
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           # Kept for the one push of the release branch below. The only code this job runs is this
           # repository's own scripts, from main.
+          token: ${{ steps.app.outputs.token || github.token }}
           persist-credentials: true
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -76,20 +96,41 @@ jobs:
         run: scripts/prepare-release.sh "$VERSION"
       - name: Push the release branch and open its pull request
         # Sets SHA (the release commit) and PR.
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
         run: scripts/open-release-pr.sh "$VERSION" >> "$GITHUB_ENV"
       # The step's name is what shows while it waits.
-      - name: Wait for CI and DCO on the pull request (approve its workflows to run)
+      - name: Wait for CI and DCO on the pull request (approve its workflows to run if GitHub holds them)
+        env:
+          # Reading workflow runs needs actions: read, which only GITHUB_TOKEN has here.
+          GH_TOKEN: ${{ github.token }}
         run: scripts/wait-for-pr-checks.sh "$SHA" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/pull/$PR" ci.yml dco.yml
       - name: Merge it
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
         run: gh pr merge "$PR" --squash --delete-branch
       - name: Start Tag release and Site on main
+        # The app's merge is a push to main, which starts both itself; a GITHUB_TOKEN merge starts
+        # nothing.
+        if: steps.app.outputs.token == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh workflow run tag-release.yml --ref main
-          # The site shows the version and the changelog, and this merge starts no push workflow.
+          # The site shows the version and the changelog.
           gh workflow run site.yml --ref main
           {
             echo "### Releasing $VERSION"
             echo "Merged #$PR and started Tag release and Site on main. The tag starts Release (npm, then the GitHub"
             echo "release) and Image (GHCR, then the MCP Registry). Approve the staged npm version with the command"
             echo "in the Release run's summary."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Say what the merge starts
+        if: steps.app.outputs.token != ''
+        run: |
+          {
+            echo "### Releasing $VERSION"
+            echo "Merged #$PR as the release app: its push to main starts Tag release and Site. The tag starts"
+            echo "Release (npm, then the GitHub release) and Image (GHCR, then the MCP Registry). Approve the staged"
+            echo "npm version with the command in the Release run's summary."
           } >> "$GITHUB_STEP_SUMMARY"

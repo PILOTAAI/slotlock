@@ -432,6 +432,11 @@ configure_environments() {
   configure_environment release-tag '[]' branch main
   configure_tag_key
 
+  # release-app: release-version.yml's job, a manual run on main. It holds the release app's
+  # private key (scripts/create-release-app.mjs stores it), so only runs on main can read it. No
+  # reviewer: a person starts every run, and the release still goes through its pull request.
+  configure_environment release-app '[]' branch main
+
   # site: site.yml's deploy job, on a push to main or a manual run on main. No reviewer: the
   # change already went through a pull request into main.
   configure_environment site '[]' branch main
@@ -674,11 +679,18 @@ print_checklist() {
     (gh repo edit $OWNER/$REPO --enable-discussions does it through a has_discussions field
     that gh 2.83.2 sends to the same endpoint, outside the documented body.)
 
-[ ] Releases: run Actions > Release a version with the version. It prepares the release and
-    opens its pull request; approve its checks there ("Approve workflows to run": GitHub holds them
-    on a pull request a workflow opens). It merges once CI passes, and tag-release.yml tags it,
-    which starts Release (npm, then the GitHub release) and Image (GHCR, then the MCP Registry). Each staged npm version waits for your two-factor approval
-    (GOVERNANCE.md, Releases); the Release run's summary gives the npm stage approve command.
+[ ] Create the release app once, so release pull requests run their checks without anyone
+    approving them (GitHub holds the checks of one github-actions[bot] opens):
+      node scripts/create-release-app.mjs
+    You click "Create GitHub App", then install it on slotlock only; it checks the installation
+    and stores the app in the release-app environment.
+
+[ ] Releases: run Actions > Release a version with the version. It prepares the release, opens
+    its pull request, merges it once CI passes, and tag-release.yml tags it, which starts Release
+    (npm, then the GitHub release) and Image (GHCR, then the MCP Registry). Without the release
+    app, approve the pull request's checks on it ("Approve workflows to run"). Each staged npm
+    version waits for your two-factor approval (GOVERNANCE.md, Releases); the Release run's
+    summary gives the npm stage approve command.
     npm and GitHub keep three first-time steps for a person, and the run that needs one says so:
       scripts/bootstrap-release.sh <tag>
     - first release: puts the first version on npm from your npm session (npm accepts a trusted

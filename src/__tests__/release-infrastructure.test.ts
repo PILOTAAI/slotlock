@@ -622,6 +622,18 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
     expect(key).toMatchObject({ title: 'slotlock tag-release (GitHub Actions)', read_only: false });
   });
 
+  it('keeps the release app in an environment only main can use, with no reviewer', () => {
+    const requests = dryRun();
+    expect(environment(requests, 'release-app')?.reviewers).toEqual([]);
+    const policy = requests.find(
+      (request) =>
+        request.method === 'POST' &&
+        request.path ===
+          'repos/PILOTAAI/slotlock/environments/release-app/deployment-branch-policies',
+    )?.body;
+    expect(policy).toEqual({ name: 'main', type: 'branch' });
+  });
+
   it('makes a release wait for no reviewer unless asked to', () => {
     const plain = dryRun();
     expect(environment(plain, 'npm')?.reviewers).toEqual([]);
@@ -1310,6 +1322,48 @@ describe('release button', () => {
     for (const permission of ['contents: write', 'pull-requests: write', 'actions: write']) {
       expect(text).toContain(permission);
     }
+  });
+
+  it('opens and merges as the release app once it is stored, and as GITHUB_TOKEN until then', () => {
+    const text = workflow('release-version.yml');
+    const step = (name: string) => {
+      const start = text.indexOf(`- name: ${name}`);
+      expect(start, name).toBeGreaterThan(0);
+      const next = text.indexOf('\n      - ', start + 1);
+      return text.slice(start, next === -1 ? undefined : next);
+    };
+    expect(text).toContain('\n    environment: release-app\n');
+    const mint = step("Mint the release app's token");
+    expect(mint).toContain("if: vars.RELEASE_APP_CLIENT_ID != ''");
+    expect(mint).toContain('client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}');
+    expect(mint).toContain('private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}');
+    // Only what opening and merging the pull request needs.
+    expect(mint.match(/permission-[a-z-]+: \w+/g)).toEqual([
+      'permission-contents: write',
+      'permission-pull-requests: write',
+    ]);
+    expect(text.indexOf("- name: Mint the release app's token")).toBeLessThan(
+      text.indexOf('uses: actions/checkout@'),
+    );
+    const appOrGitHub = '${{ steps.app.outputs.token || github.token }}';
+    expect(text).toContain(`token: ${appOrGitHub}`);
+    for (const name of ['Push the release branch and open its pull request', 'Merge it']) {
+      expect(step(name)).toContain(`GH_TOKEN: ${appOrGitHub}`);
+    }
+    // Reading workflow runs needs actions: read, which the app's token does not have.
+    expect(step('Wait for CI and DCO on the pull request')).toContain(
+      'GH_TOKEN: ${{ github.token }}',
+    );
+    // The app's merge is a push, which starts Tag release and Site; a GITHUB_TOKEN merge starts none.
+    expect(step('Start Tag release and Site on main')).toContain(
+      "if: steps.app.outputs.token == ''",
+    );
+    expect(step('Say what the merge starts')).toContain("if: steps.app.outputs.token != ''");
+    expect(step('Say how to repair the release app')).toContain(
+      "if: failure() && steps.app.outcome == 'failure'",
+    );
+    // Every step names the token it uses: none comes from the job.
+    expect(text).not.toMatch(/^ {4}env:\n(?: {6}.*\n)* {6}GH_TOKEN:/m);
   });
 
   it('leaves CI and DCO to the pull request, whose own runs are the checks its merge needs', () => {
