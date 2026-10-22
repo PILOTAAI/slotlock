@@ -849,7 +849,12 @@ function boundInput(input: string): void {
  * their length; this finds them the same way, reading each character once.
  */
 function boundPropertyHeads(input: string): void {
-  for (const head of icalendarPropertyHeads(input)) {
+  const limits = { parameters: MAX_ICAL_PROPERTY_PARAMETERS, end: MAX_ICAL_PROPERTY_HEAD_BYTES };
+  for (const head of icalendarPropertyHeads(input, limits)) {
+    // A VCARD moves ical.js to the vCard 3 parameters for the rest of the feed, where TYPE takes
+    // several quoted values, so what follows would be read differently than counted here. An
+    // iCalendar feed has no place for one.
+    if (head.begins === 'vcard') throw new CalendarContractError('invalid_icalendar');
     if (head.end > MAX_ICAL_PROPERTY_HEAD_BYTES || head.parameters > MAX_ICAL_PROPERTY_PARAMETERS) {
       expansionLimit();
     }
@@ -858,26 +863,54 @@ function boundPropertyHeads(input: string): void {
 
 /**
  * Each line of `input` as ical.js 2.2.1's parser takes it, with the parameters it reads there: the
- * lines as parse._eachLine unfolds them, read with the design set ical.js picks at the first BEGIN.
- * Ends at a line before that BEGIN, where ical.js throws. (A vCard moves to the vCard 3 set after
- * its first property; both sets let only TYPE take several values, which a test holds.) Exported for
- * the tests, which hold it to ical.js's own reading.
+ * lines as parse._eachLine unfolds them, read with the design set ical.js picks at the first BEGIN,
+ * and for a BEGIN line the component it begins. Ends at a line before that BEGIN, where ical.js
+ * throws. ical.js changes its design set in one other place: a VCARD component's first property
+ * (unless it is VERSION:4.0) moves it to vCard 3's for the rest of the feed. This does not follow
+ * that move; boundPropertyHeads refuses a feed with a VCARD instead. With `limits`, a line's count
+ * stops once it is past them. Exported for the tests, which hold it to ical.js's own reading.
  */
 export function* icalendarPropertyHeads(
   input: string,
-): Generator<{ line: string; parameters: number; end: number }> {
-  let params: Record<string, { multiValue?: string } | undefined> | undefined;
+  limits?: HeadLimits,
+): Generator<{ line: string; parameters: number; end: number; begins?: string }> {
+  // undefined: no BEGIN yet. null: a design set without parameters, which ical.js picks for a first
+  // component named like an Object property (`constructor`); it throws on the next property line.
+  let params: Record<string, { multiValue?: string } | undefined> | null | undefined;
   for (const line of unfoldedLines(input)) {
+    const component = componentLine(line);
     if (params === undefined) {
-      const begin = /^begin:(.*)$/is.exec(line);
-      if (begin === null) return;
-      params = ICAL.design.getDesignSet((begin[1] as string).toLowerCase()).param as Record<
-        string,
-        { multiValue?: string } | undefined
-      >;
+      if (component?.kind !== 'begin') return;
+      const { param } = (ICAL.design.getDesignSet(component.name) ?? {}) as { param?: unknown };
+      params =
+        typeof param === 'object' && param !== null
+          ? (param as Record<string, { multiValue?: string } | undefined>)
+          : null;
     }
-    yield { line, ...icalendarPropertyHead(line, params) };
+    if (params === null) {
+      if (component === undefined) return;
+      const head = { line, parameters: 0, end: line.indexOf(':') };
+      yield component.kind === 'begin' ? { ...head, begins: component.name } : head;
+      continue;
+    }
+    const head = icalendarPropertyHead(line, params, limits);
+    yield component?.kind === 'begin'
+      ? { line, ...head, begins: component.name }
+      : { line, ...head };
   }
+}
+
+/**
+ * A BEGIN or END line as ical.js reads one (parse._handleContentLine): no parameter before the first
+ * `:`, named `begin` or `end` in any case, with the component's name lower-cased.
+ */
+function componentLine(line: string): { kind: 'begin' | 'end'; name: string } | undefined {
+  const valuePos = line.indexOf(':');
+  const paramPos = line.indexOf(';');
+  if (valuePos === -1 || (paramPos !== -1 && paramPos < valuePos)) return undefined;
+  const kind = line.slice(0, valuePos).toLowerCase();
+  if (kind !== 'begin' && kind !== 'end') return undefined;
+  return { kind, name: line.slice(valuePos + 1).toLowerCase() };
 }
 
 /**
@@ -909,6 +942,12 @@ function* unfoldedLines(input: string): Generator<string> {
   if (line.length > 0) yield line;
 }
 
+/** Where a property's head is past what a feed may hold: its parameters, and where they end. */
+interface HeadLimits {
+  parameters: number;
+  end: number;
+}
+
 /** `text.indexOf(char, from)`, reading each character once while `from` never moves back. */
 function forwardSearch(text: string, char: string): (from: number) => number {
   let asked = -1;
@@ -927,12 +966,13 @@ function forwardSearch(text: string, char: string): (from: number) => number {
  * (parse._handleContentLine, then parse._parseParameters, step for step): a `"` opens a quoted value
  * only straight after `=`, a quoted value of a parameter that takes several (MEMBER, DELEGATED-TO)
  * goes on past `","`, and a `:` ends the parameters only where ical.js looks for one. ical.js throws
- * where this stops early (an empty name, an unclosed quote). Exported for the tests, which hold it to
- * ical.js's own count.
+ * where this stops early (an empty name, an unclosed quote), and stops once past `limits` if given.
+ * Exported for the tests, which hold it to ical.js's own count.
  */
 export function icalendarPropertyHead(
   line: string,
   params: Record<string, { multiValue?: string } | undefined>,
+  limits?: HeadLimits,
 ): { parameters: number; end: number } {
   const paramPos = line.indexOf(';');
   const valuePos = line.indexOf(':');
@@ -949,6 +989,7 @@ export function icalendarPropertyHead(
   let parameters = 0;
   let end = 0;
   for (;;) {
+    if (limits && (parameters > limits.parameters || paramPos + end > limits.end)) break;
     pos = equals(pos + 1);
     if (pos === -1 || pos <= lastParam + 1) break;
     const name = text.slice(lastParam + 1, pos).toLowerCase();

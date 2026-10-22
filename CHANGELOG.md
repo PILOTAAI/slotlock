@@ -127,22 +127,41 @@ request replaces "Unreleased" with the release date.
   one call, took up to 35 seconds and 650 MB. Each expansion now keeps one copy, and the time limit
   is checked before each.
 
-  A stored series keeps where its last expansion stopped (the new `recurrence_cursor` column), and
-  `rollCalendarEventHorizon` resumes there instead of searching again from its start, so a daily
-  series keeps rolling for as long as it runs. Before, that search grew with the series until a
-  daily series about 11 years old (4,000 occurrences) went past the limits for good. A write to a
-  series whose search from its start is over the limits resumes the same way. A kept place serves
-  only the rule, start and time zone it was kept for, read by the same ical.js version, and never
-  lies past an occurrence that could still reach the window; otherwise the series is searched from
-  its start.
-
-  `rollCalendarEventHorizon` skips a stored series that still goes past these limits. It counts the
-  series in the new `refused` field and lists it in `refusedEventIds`, keeps its old coverage, and
-  still rolls the series after it. Before, such a series made every roll for its tenant throw. A
-  series Slotlock cannot read at all still fails the roll. Each batch returns `next`; passed back as
-  `after`, it starts the next batch after the series this one left in conflict or refused, which
-  keep their place at the front of the order and were otherwise examined again by every later
-  batch. The maintenance example sums `refused` and pages with `next`.
+  `rollCalendarEventHorizon` skips a stored series that goes past these limits, which includes a
+  daily series about 11 years after its start (4,000 occurrences). It counts the series in the new
+  `refused` field and lists it in `refusedEventIds`, keeps its old coverage, and still rolls the
+  series after it. Before, such a series made every roll for its tenant throw. A series Slotlock
+  cannot read at all still fails the roll. The maintenance example sums `refused`.
+- A resource id the store never issues, such as an external reference (`vehicle-42`), the nil UUID
+  or a version 7 UUID, made free/busy, next-available, list-events, create and update answer a
+  server error: HTTP 500 and JSON-RPC `-32603` over MCP (so an SDK client threw), 500
+  `internal_error` over REST, `-32603` over A2A, and 500 from `resources/read`. The store backend
+  now answers `resource_not_found` for it, as for any id that names no resource of the caller's.
+  Nothing new is accepted: the store still refuses such ids.
+- A failure an agent sees only as `internal_error` was logged nowhere. The agent server and
+  `invokeSlotlockAgentOperation` take `onError(error, { operation })`, called with an exception that
+  is not a `SlotlockAgentOperationError` and for a result outside the operation's output schema,
+  never with the arguments or the request; `serve` logs it as `agent_error`, with its message and
+  code and every configured secret redacted.
+- The server reported version 1.0.0 (`SLOTLOCK_AGENT_SERVER_VERSION`, `/healthz`, MCP `serverInfo`,
+  the agent card, the manifest and the OpenAPI document) while the package was 0.1.0. It now reads
+  the version from package.json, as `slotlock --version` does, so there is one place to change it.
+  `SLOTLOCK_AGENT_SERVER_VERSION` is typed `string`.
+- `serve` connected as whatever role `DATABASE_URL` named, so a superuser or `BYPASSRLS` role
+  served every tenant with row-level security skipped, silently. It now refuses to start as one
+  (`unsafe_serving_role`) and says how to set up a serving role; `grantApplicationRole` already
+  refused one.
+- `slotlock --help` did not list `SLOTLOCK_REST_API`. A test now checks that it lists every
+  variable the commands read.
+- The Compose stack passed none of the dashboard's settings to the server, so the dashboard could
+  not be turned on. `docker-compose.yml` passes `SLOTLOCK_GITHUB_CLIENT_ID`,
+  `SLOTLOCK_GITHUB_CLIENT_SECRET`, `SLOTLOCK_SESSION_SECRET` and `SLOTLOCK_DASHBOARD_USERS`, empty
+  (dashboard off) unless `.env` sets them, and `.env.example` documents them.
+- The README's way to run without Docker (`slotlock migrate`, then `slotlock serve`) did not work
+  from a clone, where `slotlock` is not on the `PATH`; it now gives the `node dist/cli.js` commands
+  with a serving role and the owner's URL for `migrate`. The quickstart states that the confirmation
+  in step 6 needs an MCP client on protocol 2026-07-28, and the README no longer mentions a hosted
+  Slotlock.
 
 ### Added
 

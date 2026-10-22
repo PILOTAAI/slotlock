@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   SLOTLOCK_A2A_PROTOCOL_VERSION,
@@ -342,6 +343,38 @@ describe('consumer-neutral Slotlock agent server', () => {
     }
     expect(authorize).not.toHaveBeenCalled();
     expect(listResources).not.toHaveBeenCalled();
+  });
+
+  it('reports the package version everywhere it names one', async () => {
+    const { version } = JSON.parse(
+      readFileSync(new URL('../../package.json', import.meta.url), 'utf8'),
+    ) as { version: string };
+    expect(SLOTLOCK_AGENT_SERVER_VERSION).toBe(version);
+    const server = buildServer({ rest: true });
+    const get = async (path: string) =>
+      (await (await server.fetch(new Request(`http://localhost${path}`))).json()) as {
+        version?: string;
+        info?: { version?: string };
+      };
+    expect((await get('/slotlock/healthz')).version).toBe(version);
+    expect((await get('/.well-known/agent-card.json')).version).toBe(version);
+    expect((await get('/slotlock/manifest.json')).version).toBe(version);
+    expect((await get('/slotlock/openapi.json')).info?.version).toBe(version);
+    const initialized = await server.fetch(
+      rpcRequest({
+        jsonrpc: '2.0',
+        id: 'version',
+        method: 'initialize',
+        params: {
+          protocolVersion: SLOTLOCK_MCP_LEGACY_PROTOCOL_VERSION,
+          capabilities: {},
+          clientInfo: { name: 'version-client', version: '9.9.9' },
+        },
+      }),
+    );
+    expect(await initialized.json()).toMatchObject({
+      result: { serverInfo: { name: 'slotlock', version } },
+    });
   });
 
   it('exposes bounded health and discovery without claiming unsupported streaming', async () => {
@@ -1227,6 +1260,93 @@ describe('consumer-neutral Slotlock agent server', () => {
       );
       expect(response.status).toBe(500);
       expect(await response.json()).toEqual({
+        jsonrpc: '2.0',
+        id: 'crash',
+        error: { code: -32603, message: 'Internal error' },
+      });
+    });
+
+    it('hands an unexpected failure to onError, on every protocol, and tells the agent nothing more', async () => {
+      const onError = vi.fn();
+      const server = buildServer({ onError, rest: true });
+      const crash = Object.assign(new Error('permission denied for table resources'), {
+        code: '42501',
+      });
+      const listOverMcp = () =>
+        server.fetch(
+          rpcRequest({
+            jsonrpc: '2.0',
+            id: 'crash',
+            method: 'tools/call',
+            params: { name: 'slotlock_list_resources', arguments: {} },
+          }),
+        );
+
+      listResources.mockRejectedValueOnce(crash);
+      const mcp = await listOverMcp();
+      expect(mcp.status).toBe(500);
+      expect(await mcp.json()).toEqual({
+        jsonrpc: '2.0',
+        id: 'crash',
+        error: { code: -32603, message: 'Internal error' },
+      });
+      listResources.mockRejectedValueOnce(crash);
+      const a2a = await server.fetch(
+        a2aSendMessage({ skill: 'slotlock_list_resources', arguments: {} }),
+      );
+      expect(await a2a.json()).toMatchObject({
+        error: { code: -32603, message: 'Internal error' },
+      });
+      listResources.mockRejectedValueOnce(crash);
+      const rest = await server.fetch(
+        new Request('http://localhost/slotlock/v1/resources', {
+          headers: { Authorization: 'Bearer valid' },
+        }),
+      );
+      expect(rest.status).toBe(500);
+      expect(await rest.json()).toEqual({ error: { code: 'internal_error' } });
+      expect(onError.mock.calls).toEqual([
+        [crash, { operation: 'slotlock_list_resources' }],
+        [crash, { operation: 'slotlock_list_resources' }],
+        [crash, { operation: 'slotlock_list_resources' }],
+      ]);
+
+      // A result outside the operation's schema is a server fault too, reported without the result.
+      onError.mockClear();
+      listResources.mockResolvedValueOnce({ resources: [{ id: 'unbounded' }], secret: 'leak' });
+      expect((await listOverMcp()).status).toBe(500);
+      expect(onError).toHaveBeenCalledTimes(1);
+      const [reported, details] = onError.mock.calls[0] as [Error, unknown];
+      expect(reported).toBeInstanceOf(Error);
+      expect(reported).toMatchObject({ code: 'invalid_backend_result' });
+      expect(JSON.stringify({ message: reported.message, details })).not.toContain('leak');
+      expect(details).toEqual({ operation: 'slotlock_list_resources' });
+
+      // An outcome the backend chose is not a fault.
+      onError.mockClear();
+      listResources.mockRejectedValueOnce(
+        new SlotlockAgentOperationError('resource_not_found', 404),
+      );
+      expect((await listOverMcp()).status).toBe(200);
+      expect(onError).not.toHaveBeenCalled();
+
+      // A failing onError changes nothing the agent receives.
+      const quiet = buildServer({
+        onError: () => {
+          throw new Error('the log is down');
+        },
+      });
+      listResources.mockRejectedValueOnce(crash);
+      const unchanged = await quiet.fetch(
+        rpcRequest({
+          jsonrpc: '2.0',
+          id: 'crash',
+          method: 'tools/call',
+          params: { name: 'slotlock_list_resources', arguments: {} },
+        }),
+      );
+      expect(unchanged.status).toBe(500);
+      expect(await unchanged.json()).toEqual({
         jsonrpc: '2.0',
         id: 'crash',
         error: { code: -32603, message: 'Internal error' },

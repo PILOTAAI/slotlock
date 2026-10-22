@@ -4,7 +4,17 @@ description: Run Slotlock and PostgreSQL 16 with Docker, connect Claude Code, an
 ---
 
 You need Docker with Compose v2, `git`, `openssl` and Claude Code ([other clients](/docs/connect/)).
-Slotlock {{version}} is a pre-release, so it runs from a clone.
+Slotlock {{version}} is a pre-release, so it runs from a clone. Without Docker, build it and run
+`node dist/cli.js` with two database roles, as the
+[README shows](https://github.com/PILOTAAI/slotlock#without-docker).
+
+Step 6 asks you before the agent books, which needs an MCP client that supports protocol version
+{{mcpModern}} with form elicitation. Claude Code uses that revision on its v2 MCP runtime, the
+default from v2.1.274 (from v2.1.232 in sessions that fetch feature flags; `MCP_SDK_GENERATION=v2`
+selects it): see
+[MCP client runtimes](https://code.claude.com/docs/en/mcp#mcp-client-runtimes). An older client
+gets `confirmation_required` for every booking while `SLOTLOCK_CONFIRM_WRITES=all`, the default;
+the note at the end of [step 6](#6-find-a-slot-and-book-it) turns confirmation off instead.
 
 ## 1. Get the code
 
@@ -37,7 +47,7 @@ curl http://localhost:8080/healthz
 ```
 
 ```json
-{"status":"ready","version":"1.0.0","checks":["database"]}
+{"status":"ready","version":"{{version}}","checks":["database"]}
 ```
 
 The server listens on `127.0.0.1:8080` only, as a database role that cannot bypass row-level
@@ -82,11 +92,12 @@ The agent lists resources, then calls `slotlock_find_next_available`, which answ
 }
 ```
 
-Before `slotlock_create_event` runs, Claude Code asks you: Book vehicle-42 for 2027-03-01
-09:00–11:00 (Europe/London): "Vehicle handover". Accept, and it is booked. Book the same time again and the
-agent gets `{"error":{"code":"overlap"}}`.
+Before `slotlock_create_event` runs, Claude Code asks you (the step that needs protocol
+{{mcpModern}}): Book vehicle-42 for 2027-03-01 09:00–11:00 (Europe/London): "Vehicle handover".
+Accept, and it is booked. Book the same time again and the agent gets
+`{"error":{"code":"overlap"}}`.
 
-:::note[Trying it on your own?]
+:::note[Trying it on your own, or with an older client?]
 Set `SLOTLOCK_CONFIRM_WRITES=none` in `.env` and run `docker compose up --detach` to let the agent
 book without asking. Keep confirmation on for anything real.
 :::

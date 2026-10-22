@@ -93,11 +93,36 @@ jobs:
             echo "::error::serve without configuration exited $status, expected 2"
             exit 1
           fi
+      # slotlock_ci is the service's superuser, which row-level security does not confine.
+      - name: Refuses to serve as a superuser
+        run: |
+          status=0
+          docker run --rm --network host \
+            --env DATABASE_URL=postgresql://slotlock_ci:ci-only-password@127.0.0.1:5432/slotlock \
+            --env SLOTLOCK_AUTH_TOKEN="$(openssl rand -hex 32)" \
+            --env SLOTLOCK_CONFIRMATION_SECRET="$(openssl rand -hex 32)" \
+            --env HOST=127.0.0.1 \
+            slotlock:ci serve 2> refusal.log || status=$?
+          cat refusal.log
+          if [ "$status" -ne 1 ] || ! grep -q '"code":"unsafe_serving_role"' refusal.log; then
+            echo "::error::serve as a superuser exited $status, expected 1 with unsafe_serving_role"
+            exit 1
+          fi
+      # As in docker-compose.yml: the server runs as a role without SUPERUSER or BYPASSRLS, and
+      # migrate, as the owner, grants it what it needs.
+      - name: Creates the serving role
+        run: |
+          docker run --rm --network host --env PGPASSWORD=ci-only-password \
+            postgres:16.15@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d \
+            psql --host=127.0.0.1 --username=slotlock_ci --dbname=slotlock --no-psqlrc \
+              -v ON_ERROR_STOP=1 \
+              -c "CREATE ROLE slotlock_app LOGIN PASSWORD 'ci-app-password' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE"
       - name: Migrates, serves and reports healthy
         run: |
           docker run --detach --name slotlock --network host \
             --read-only --cap-drop ALL --security-opt no-new-privileges:true \
-            --env DATABASE_URL=postgresql://slotlock_ci:ci-only-password@127.0.0.1:5432/slotlock \
+            --env DATABASE_URL=postgresql://slotlock_app:ci-app-password@127.0.0.1:5432/slotlock \
+            --env SLOTLOCK_MIGRATE_DATABASE_URL=postgresql://slotlock_ci:ci-only-password@127.0.0.1:5432/slotlock \
             --env SLOTLOCK_AUTH_TOKEN="$(openssl rand -hex 32)" \
             --env SLOTLOCK_CONFIRMATION_SECRET="$(openssl rand -hex 32)" \
             --env HOST=127.0.0.1 \

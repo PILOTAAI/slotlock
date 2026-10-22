@@ -65,7 +65,7 @@
       "environmentVariables": [
         {
           "name": "DATABASE_URL",
-          "description": "postgres:// URL of a PostgreSQL 16 database the container can reach. Without SLOTLOCK_MIGRATE_DATABASE_URL this role also applies the schema, so it must be able to create it.",
+          "description": "postgres:// URL of a PostgreSQL 16 database the container can reach, as a role that is not a superuser and has no BYPASSRLS: serve refuses one, since row-level security would not confine it. Without SLOTLOCK_MIGRATE_DATABASE_URL this role also applies the schema, so it must be able to create it.",
           "isRequired": true,
           "isSecret": true
         },

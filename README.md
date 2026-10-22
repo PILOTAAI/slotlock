@@ -54,7 +54,31 @@ slotlock hours set '[{"rrule":"FREQ=WEEKLY;BYDAY=SA","startMinutes":600,"duratio
 slotlock hours clear --all    # back to SLOTLOCK_AVAILABILITY
 ```
 
-Without Docker: `slotlock migrate`, then `slotlock serve`. `slotlock --help` lists every setting.
+`slotlock --help` lists every setting.
+
+### Without Docker
+
+From a clone, with Node.js 22.12+ and PostgreSQL 16, build once and run each command as
+`node dist/cli.js` (a clone does not put `slotlock` on your `PATH`). Use two roles, as Compose does:
+the server connects as a role that owns nothing and cannot bypass row-level security, and `migrate`
+connects as the database owner and grants that role what it needs. `serve` refuses to start as a
+superuser or a `BYPASSRLS` role, which row-level security does not confine.
+
+```sh
+npm ci && npm run build
+# Once, as a superuser:
+#   CREATE ROLE slotlock_app LOGIN PASSWORD '<app password>' NOSUPERUSER NOBYPASSRLS;
+export SLOTLOCK_MIGRATE_DATABASE_URL='postgresql://<owner>:<owner password>@localhost:5432/slotlock'
+export DATABASE_URL='postgresql://slotlock_app:<app password>@localhost:5432/slotlock'
+export SLOTLOCK_AUTH_TOKEN="$(openssl rand -hex 32)"
+export SLOTLOCK_CONFIRMATION_SECRET="$(openssl rand -hex 32)"
+node dist/cli.js migrate
+node dist/cli.js resource add vehicle-42 --timezone Europe/London
+node dist/cli.js serve
+```
+
+The `slotlock …` commands in this README run the same way as `node dist/cli.js …` (with Compose,
+`docker compose exec slotlock slotlock …`).
 
 ### API keys
 
@@ -79,7 +103,7 @@ slotlock key revoke <id>
 ### Dashboard
 
 The server can also serve a dashboard where people sign in with GitHub and manage their own keys and
-resources, which is how the hosted Slotlock hands out keys:
+resources, so you can give each person API keys without running `slotlock key create` for them:
 
 1. On GitHub, open Settings, Developer settings, OAuth apps, New OAuth App, and set the
    "Authorization callback URL" to `<SLOTLOCK_PUBLIC_URL>/dashboard/callback`. Then generate a
@@ -88,7 +112,8 @@ resources, which is how the hosted Slotlock hands out keys:
    `SLOTLOCK_SESSION_SECRET` to 32+ random characters (`openssl rand -hex 32`), and
    `SLOTLOCK_DASHBOARD_USERS` to the GitHub user ids that may sign in (`gh api users/<login> --jq .id`),
    or to `*` for every GitHub account.
-3. Run `slotlock serve` and open `<SLOTLOCK_PUBLIC_URL>/dashboard`.
+3. Run `slotlock serve` and open `<SLOTLOCK_PUBLIC_URL>/dashboard`. With Compose, set the four in
+   `.env` (empty, the default, leaves the dashboard off) and run `docker compose up --detach`.
 
 - Each person gets a tenant of their own, `github:<user id>`: the keys, resources and bookings in it
   are theirs alone. Keys made with `slotlock key create` act in `SLOTLOCK_TENANT` instead.
@@ -493,7 +518,7 @@ A refusal is a result the model can act on:
 | `invalid_arguments` | Input failed the schema, or a window is inverted or longer than 367 days |
 | `forbidden` | `authorize` refused the call |
 | `rate_limited` | `consumeRateLimit` refused the call |
-| `not_found`, `resource_not_found`, `event_not_found` | Not visible to this caller |
+| `not_found`, `resource_not_found`, `event_not_found` | Not visible to this caller, or no such id: a resource id is the `id` `slotlock_list_resources` returns, not its `external_ref` |
 | `overlap` | The time is taken |
 | `revision_conflict`, `idempotency_conflict`, `event_cancelled` | Re-read, then retry with the current revision or a new key |
 | `owner_event_quota_exceeded`, `owner_command_quota_exceeded` | Per-caller quota reached (see [Operations](#operations)) |
@@ -505,7 +530,10 @@ A refusal is a result the model can act on:
 #### Errors from your own backend
 
 Throw `new SlotlockAgentOperationError('snake_case_code', status)` and the agent receives the code.
-Any other exception is a server fault, and its message never leaves the server.
+Any other exception is a server fault, and its message never leaves the server: the agent gets
+`internal_error`, and `onError(error, { operation })` gets the error, as it does a result outside
+the operation's output schema, so you can log it. `slotlock serve` logs it as an `agent_error` line
+on stderr.
 
 #### Protocol errors
 
@@ -840,7 +868,8 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
 ### Production checklist
 
 1. PostgreSQL with TLS, backups and point-in-time recovery.
-2. Deploy as the owner; serve as a `NOBYPASSRLS` role granted by `grantApplicationRole`.
+2. Deploy as the owner; serve as a `NOBYPASSRLS` role granted by `grantApplicationRole`
+   (`slotlock serve` refuses a superuser or `BYPASSRLS` role).
 3. Run every call inside `withTenant`; test isolation with a `NOBYPASSRLS` role.
 4. Verify provider webhooks before normalizing them; keep provider credentials out of Slotlock.
 5. Bound retries on serialization failures; never blindly retry an unknown write.

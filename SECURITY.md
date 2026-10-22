@@ -55,7 +55,10 @@ mappings that carry another role's credentials. Keep the application role a plai
 login role that owns nothing and can create nothing. On a cluster upgraded from PostgreSQL 14 or
 earlier, `PUBLIC` may still hold `CREATE` on `public`; the check then refuses every role until
 `REVOKE CREATE ON SCHEMA public FROM PUBLIC`. Like any role with DML, the application role can hold
-a lock that blocks other tenants: that is availability, not isolation.
+a lock that blocks other tenants: that is availability, not isolation. `slotlock serve` checks the
+role it connects as before it serves, and refuses to start as a superuser or a `BYPASSRLS` role
+(`unsafe_serving_role`); it does not repeat the rest of this check, so that a single owning role can
+still migrate and serve (`serve --migrate` without `SLOTLOCK_MIGRATE_DATABASE_URL`).
 
 Schema changes run under a separate deployment role, which must own the `slotlock` schema and every
 object in it (`applySchema` creates the schema when it is missing). The deployment writes rows into
