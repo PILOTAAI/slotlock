@@ -225,6 +225,22 @@ describe('Slotlock store-backed agent server adapter', () => {
     });
   });
 
+  it('exports, from the package entry point, the projection the event tools return', async () => {
+    // An embedding application that writes an event through the store (not the agent tools) shows
+    // it to agents in this shape, so it must be the very function the tools use.
+    const { projectSlotlockCalendarEvent } = await import('../index.js');
+    const backend = createSlotlockStoreAgentBackend(store, { availabilityRules });
+    const result = await backend.createEvent(context, {
+      resource_id: resource.id,
+      starts_at: '2027-01-10T09:00:00.000Z',
+      ends_at: '2027-01-10T10:00:00.000Z',
+      timezone: 'Europe/London',
+      title: 'Collection',
+      idempotency_key: 'create-projection',
+    });
+    expect(result).toEqual({ event: projectSlotlockCalendarEvent(event()), replayed: false });
+  });
+
   it('namespaces command idempotency by authenticated principal while preserving same-principal retries', async () => {
     const seenCommands = new Map<string, string>();
     putCalendarEvent.mockImplementation(async (input) => {

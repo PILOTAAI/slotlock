@@ -202,7 +202,11 @@ function attendeeProjection(attendee: CalendarAttendee) {
   };
 }
 
-function eventProjection(event: SlotlockCalendarEvent): Record<string, unknown> {
+/**
+ * A stored calendar event in the shape the event tools return. Exported for an application that
+ * writes events through the store itself and shows them to agents beside the tools' own results.
+ */
+export function projectSlotlockCalendarEvent(event: SlotlockCalendarEvent): Record<string, unknown> {
   return {
     // External references are the stable tenant-visible identity. Internal UUIDs never become an
     // unscoped lookup capability at the protocol boundary.
@@ -486,7 +490,7 @@ export function createSlotlockStoreAgentBackend(
           externalRef: result.externalRef,
         });
         if (!created) throw new SlotlockAgentOperationError('store_inconsistent', 503);
-        return { event: eventProjection(created), replayed: result.idempotent };
+        return { event: projectSlotlockCalendarEvent(created), replayed: result.idempotent };
       });
     },
 
@@ -498,7 +502,7 @@ export function createSlotlockStoreAgentBackend(
           externalRef: input.event_id as string,
         });
         if (!found) throw new SlotlockAgentOperationError('event_not_found', 404);
-        return { event: eventProjection(found) };
+        return { event: projectSlotlockCalendarEvent(found) };
       });
     },
 
@@ -529,7 +533,7 @@ export function createSlotlockStoreAgentBackend(
         const page = combined.slice(0, limit);
         const last = page.at(-1);
         return {
-          events: page.map(eventProjection),
+          events: page.map(projectSlotlockCalendarEvent),
           next_cursor: combined.length > limit && last ? encodeEventCursor(last) : null,
         };
       });
@@ -625,7 +629,7 @@ export function createSlotlockStoreAgentBackend(
           externalRef: result.externalRef,
         });
         if (!updated) throw new SlotlockAgentOperationError('store_inconsistent', 503);
-        return { event: eventProjection(updated), replayed: result.idempotent };
+        return { event: projectSlotlockCalendarEvent(updated), replayed: result.idempotent };
       });
     },
 

@@ -3,7 +3,7 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
-## 0.1.0 - Unreleased
+## 0.1.0 - 2026-10-22
 
 First public release. Nothing was published before it; the entries below describe the release as
 shipped, including changes made during pre-release hardening. Slotlock was developed inside Pylota's
@@ -60,9 +60,15 @@ request replaces "Unreleased" with the release date.
   them before `availabilityRules`. Set them on the dashboard's hours page (a week of windows, for
   one resource or all) or with `slotlock hours show|set|clear`. `SLOTLOCK_AVAILABILITY` is now
   the default for resources without hours of their own.
+- `projectSlotlockCalendarEvent`: a stored event in the shape the event tools return, for an
+  application that writes events through the store and shows them to agents beside the tools'
+  own results.
 
 ### Fixed for the standalone release
 
+- The Compose quickstart did not start: with Postgres 18, the database container exited on a new,
+  empty volume, because the 18 image refuses a mount at `/var/lib/postgresql/data`. The volume is
+  now mounted at `/var/lib/postgresql`, and the 18 image keeps its data in `18/docker` under it.
 - A write's confirmation question could show a different time, resource or number of bookings from
   the ones the write makes. It now:
   - names the resource by its own reference and shows times in the resource's zone (through the

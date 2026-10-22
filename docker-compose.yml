@@ -25,7 +25,9 @@ services:
       POSTGRES_USER: slotlock_owner
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      # Postgres 18+ keeps its data in /var/lib/postgresql/18/docker and refuses to start with a
+      # mount at /var/lib/postgresql/data, so the volume is the parent directory.
+      - postgres-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready --username=slotlock_owner --dbname=slotlock"]
       interval: 5s
