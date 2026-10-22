@@ -120,10 +120,26 @@ describe('Compose quickstart', () => {
       'SLOTLOCK_APP_DB_PASSWORD',
       'SLOTLOCK_AUTH_TOKEN',
       'SLOTLOCK_CONFIRMATION_SECRET',
+      'SLOTLOCK_GITHUB_CLIENT_SECRET',
+      'SLOTLOCK_SESSION_SECRET',
     ]) {
       expect(exampleKeys.get(secret), secret).toBe('');
     }
     expect(read('.gitignore').split('\n')).toContain('.env');
+  });
+
+  it('hands the server every setting serve reads, so .env can set each one', () => {
+    const service = compose.slice(compose.indexOf('\n  slotlock:\n'), compose.indexOf('\nvolumes:'));
+    const passed = new Set(
+      [...service.matchAll(/^ {6}([A-Z][A-Z0-9_]*):/gm)].map(([, name]) => name),
+    );
+    expect(passed, 'canary: the service environment was found').toContain('DATABASE_URL');
+    // The owner's URL belongs to the one-off migrate service; HOST and PORT are the image's own.
+    const owned = new Set(['SLOTLOCK_MIGRATE_DATABASE_URL', 'HOST', 'PORT']);
+    const missing = SLOTLOCK_ENVIRONMENT_VARIABLES.filter(
+      (name) => !owned.has(name) && !passed.has(name),
+    );
+    expect(missing).toEqual([]);
   });
 
   it('publishes ports on loopback only', () => {

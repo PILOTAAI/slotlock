@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   SLOTLOCK_CLI_HELP,
+  SLOTLOCK_ENVIRONMENT_VARIABLES,
   SlotlockConfigError,
   type SlotlockEnv,
   createSlotlockTokenAuthenticator,
@@ -236,6 +237,14 @@ describe('slotlock serve configuration', () => {
 
     it('is off unless configured, and reads every setting when it is', () => {
       expect('dashboard' in readSlotlockServeConfig(serveEnv())).toBe(false);
+      // docker-compose passes each one as `${NAME:-}`, so an .env without them sets them empty.
+      const empty = serveEnv({
+        SLOTLOCK_GITHUB_CLIENT_ID: '',
+        SLOTLOCK_GITHUB_CLIENT_SECRET: '',
+        SLOTLOCK_SESSION_SECRET: '',
+        SLOTLOCK_DASHBOARD_USERS: '',
+      });
+      expect('dashboard' in readSlotlockServeConfig(empty)).toBe(false);
       const env = dashboardEnv();
       expect(readSlotlockServeConfig(env).dashboard).toEqual({
         githubClientId: 'Ov23liAbCdEfGhIjKlMn',
@@ -339,6 +348,51 @@ describe('slotlock command line', () => {
     const version = await run(['--version']);
     expect(version.code).toBe(0);
     expect(version.stdout).toMatch(/^\d+\.\d+\.\d+\n$/);
+  });
+
+  it('lists every variable the commands read in --help', () => {
+    // Every variable set, so each reader takes the branch that reads the most; the proxy records
+    // what the code asks for, including any name this test has never heard of.
+    const asked = new Set<string>();
+    const env = new Proxy<SlotlockEnv>(
+      serveEnv({
+        SLOTLOCK_MIGRATE_DATABASE_URL: 'postgresql://owner:0wner-pass-word@db.internal/slotlock',
+        SLOTLOCK_CONFIRM_WRITES: 'all',
+        SLOTLOCK_PUBLIC_URL: 'https://calendar.example.com',
+        SLOTLOCK_TENANT: 'fleet',
+        SLOTLOCK_AVAILABILITY: WEEKDAYS,
+        SLOTLOCK_REST_API: 'on',
+        SLOTLOCK_GITHUB_CLIENT_ID: 'Ov23liAbCdEfGhIjKlMn',
+        SLOTLOCK_GITHUB_CLIENT_SECRET: secret(),
+        SLOTLOCK_SESSION_SECRET: secret(),
+        SLOTLOCK_DASHBOARD_USERS: '4242',
+        HOST: '0.0.0.0',
+        PORT: '8080',
+      }),
+      {
+        get(target, name, receiver) {
+          if (typeof name === 'string') asked.add(name);
+          return Reflect.get(target, name, receiver);
+        },
+      },
+    );
+    readSlotlockServeConfig(env);
+    readSlotlockDatabaseConfig(env);
+    slotlockHealthcheckUrl(env);
+    // Canary: the proxy saw the readers at work.
+    expect(asked).toContain('DATABASE_URL');
+    expect(asked).toContain('SLOTLOCK_DASHBOARD_USERS');
+
+    const environment = SLOTLOCK_CLI_HELP.slice(SLOTLOCK_CLI_HELP.indexOf('\nEnvironment:\n'));
+    const listed = new Set(
+      [...environment.matchAll(/^ {2}([A-Z][A-Z0-9_]*) /gm)].map(([, name]) => name as string),
+    );
+    expect([...asked].filter((name) => !listed.has(name))).toEqual([]);
+    // SLOTLOCK_ENVIRONMENT_VARIABLES (which server.json is checked against) is exactly what is read.
+    const known: readonly string[] = SLOTLOCK_ENVIRONMENT_VARIABLES;
+    expect([...asked].filter((name) => !known.includes(name))).toEqual([]);
+    expect(known.filter((name) => !asked.has(name))).toEqual([]);
+    expect([...listed].filter((name) => !known.includes(name))).toEqual([]);
   });
 
   it.each([

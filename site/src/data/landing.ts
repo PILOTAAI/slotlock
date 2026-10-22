@@ -48,7 +48,7 @@ export const hero = {
       label: 'From source',
       command:
         'git clone https://github.com/PILOTAAI/slotlock && cd slotlock && npm ci && npm run build',
-      note: `${facts.version} is not on npm yet.`,
+      note: `${facts.version} is not on npm yet. Then \`node dist/cli.js migrate\` and \`node dist/cli.js serve\`, with two database roles as the README shows.`,
     },
     {
       id: 'npm',

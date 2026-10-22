@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Ajv2020 from 'ajv/dist/2020.js';
+import postgres from 'postgres';
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const artifactRoot = join(packageRoot, 'dist');
@@ -110,6 +111,8 @@ const expectedFiles = new Set([
   'mcp-modern.d.ts',
   'node-server.js',
   'node-server.d.ts',
+  'package-version.js',
+  'package-version.d.ts',
   'rest-api.js',
   'rest-api.d.ts',
   'rules.js',
@@ -324,9 +327,10 @@ async function rpc(path, body, protocolHeaders = {}) {
 try {
   const health = await fetch(address.origin + '/slotlock/healthz');
   assert.equal(health.status, 200);
+  // The installed package reads its version from its own package.json.
   assert.deepEqual(await health.json(), {
     status: 'ready',
-    version: '1.0.0',
+    version: ${JSON.stringify(manifest.version)},
     checks: ['backend'],
   });
 
@@ -544,111 +548,145 @@ assert.equal(weakRun.status, 2, 'serve with a weak token must refuse to start');
 assert.match(weakRun.stderr, /SLOTLOCK_AUTH_TOKEN is too weak/);
 assert.ok(!weakRun.stderr.includes(weakToken), 'a refusal must not print the token');
 
-// With a database, the packed executable migrates, serves MCP and stops on SIGTERM.
+// With a database, the packed executable migrates as the suite's role, serves MCP as a role it
+// granted (serve refuses one that bypasses row-level security), and stops on SIGTERM.
 const databaseUrl = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
 let liveServe = 'skipped (no DATABASE_URL)';
 if (databaseUrl) {
-  const token = randomBytes(32).toString('hex');
-  const child = spawn(slotlockBin, ['serve', '--migrate'], {
-    cwd: consumerRoot,
-    env: {
-      ...binEnv,
-      DATABASE_URL: databaseUrl,
-      SLOTLOCK_AUTH_TOKEN: token,
-      SLOTLOCK_CONFIRMATION_SECRET: randomBytes(32).toString('hex'),
-      SLOTLOCK_TENANT: 'package-verification',
-      SLOTLOCK_REST_API: 'on',
-      PORT: '0',
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  let stdout = '';
-  let stderr = '';
-  child.stderr.on('data', (chunk) => {
-    stderr += chunk;
-  });
-  const exited = new Promise((resolve) => child.once('exit', (code) => resolve(code)));
+  const admin = postgres(databaseUrl, { max: 1, onnotice: () => {} });
+  const servingRole = `slotlock_package_${randomBytes(6).toString('hex')}`;
+  const servingPassword = randomBytes(24).toString('hex');
+  const servingUrl = new URL(databaseUrl);
+  servingUrl.username = servingRole;
+  servingUrl.password = servingPassword;
+  const [suiteRole] = await admin`
+    SELECT rolsuper OR rolbypassrls AS unconfined FROM pg_catalog.pg_roles WHERE rolname = current_user`;
+  await admin.unsafe(
+    `CREATE ROLE ${servingRole} LOGIN PASSWORD '${servingPassword}' NOSUPERUSER NOBYPASSRLS`,
+  );
   try {
-    const listening = await new Promise((resolveListening, rejectListening) => {
-      const timer = setTimeout(
-        () => rejectListening(new Error(`packed serve did not start:\n${stdout}${stderr}`)),
-        20_000,
-      );
-      child.stdout.on('data', (chunk) => {
-        stdout += chunk;
-        const line = stdout.split('\n').find((entry) => entry.includes('"event":"listening"'));
-        if (line) {
-          clearTimeout(timer);
-          resolveListening(JSON.parse(line));
-        }
+    let refusedSuiteRole = false;
+    if (suiteRole?.unconfined) {
+      const unconfined = runBin(['serve'], {
+        ...binEnv,
+        DATABASE_URL: databaseUrl,
+        SLOTLOCK_AUTH_TOKEN: randomBytes(32).toString('hex'),
+        SLOTLOCK_CONFIRMATION_SECRET: randomBytes(32).toString('hex'),
+        PORT: '0',
       });
-      void exited.then((code) => {
-        clearTimeout(timer);
-        rejectListening(new Error(`packed serve exited ${code}:\n${stdout}${stderr}`));
-      });
-    });
-    const health = await fetch(`${listening.address}/healthz`);
-    assert.equal(health.status, 200, 'packed serve must report ready');
-    const mcp = (body, headers = {}) =>
-      fetch(`${listening.address}/mcp`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          ...headers,
-        },
-        body: JSON.stringify(body),
-      });
-    const initialized = await mcp({
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: {
-        protocolVersion: '2025-11-25',
-        capabilities: {},
-        clientInfo: { name: 'slotlock-package-verification', version: '1.0.0' },
+      assert.equal(unconfined.status, 1, `serve as a superuser must refuse:\n${unconfined.stdout}`);
+      assert.match(unconfined.stderr, /"code":"unsafe_serving_role"/);
+      refusedSuiteRole = true;
+    }
+    const token = randomBytes(32).toString('hex');
+    const child = spawn(slotlockBin, ['serve', '--migrate'], {
+      cwd: consumerRoot,
+      env: {
+        ...binEnv,
+        DATABASE_URL: servingUrl.href,
+        SLOTLOCK_MIGRATE_DATABASE_URL: databaseUrl,
+        SLOTLOCK_AUTH_TOKEN: token,
+        SLOTLOCK_CONFIRMATION_SECRET: randomBytes(32).toString('hex'),
+        SLOTLOCK_TENANT: 'package-verification',
+        SLOTLOCK_REST_API: 'on',
+        PORT: '0',
       },
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
-    assert.equal((await initialized.json()).result.protocolVersion, '2025-11-25');
-    const tools = await mcp(
-      { jsonrpc: '2.0', id: 2, method: 'tools/list' },
-      { 'MCP-Protocol-Version': '2025-11-25' },
-    );
-    assert.equal((await tools.json()).result.tools.length, 8);
-    // The REST API: its document is public, its routes take the same token, and a write that
-    // waits for a person (SLOTLOCK_CONFIRM_WRITES defaults to all) answers 428.
-    const openApi = await fetch(`${listening.address}/openapi.json`);
-    assert.equal(openApi.status, 200);
-    assert.equal((await openApi.json()).openapi, '3.1.0');
-    const rest = (method, path, body) =>
-      fetch(`${listening.address}${path}`, {
-        method,
-        headers: {
-          Authorization: `Bearer ${token}`,
-          ...(body ? { 'Content-Type': 'application/json' } : {}),
-        },
-        ...(body ? { body: JSON.stringify(body) } : {}),
+    let stdout = '';
+    let stderr = '';
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    const exited = new Promise((resolve) => child.once('exit', (code) => resolve(code)));
+    try {
+      const listening = await new Promise((resolveListening, rejectListening) => {
+        const timer = setTimeout(
+          () => rejectListening(new Error(`packed serve did not start:\n${stdout}${stderr}`)),
+          20_000,
+        );
+        child.stdout.on('data', (chunk) => {
+          stdout += chunk;
+          const line = stdout.split('\n').find((entry) => entry.includes('"event":"listening"'));
+          if (line) {
+            clearTimeout(timer);
+            resolveListening(JSON.parse(line));
+          }
+        });
+        void exited.then((code) => {
+          clearTimeout(timer);
+          rejectListening(new Error(`packed serve exited ${code}:\n${stdout}${stderr}`));
+        });
       });
-    const resources = await rest('GET', '/v1/resources');
-    assert.equal(resources.status, 200);
-    assert.ok(Array.isArray((await resources.json()).resources));
-    const guarded = await rest('POST', '/v1/events', {
-      resource_id: '00000000-0000-4000-8000-000000000000',
-      starts_at: '2030-01-01T09:00:00Z',
-      ends_at: '2030-01-01T10:00:00Z',
-      timezone: 'UTC',
-      idempotency_key: 'package-verification',
-    });
-    assert.equal(guarded.status, 428);
-    assert.deepEqual(await guarded.json(), { error: { code: 'confirmation_required' } });
+      const health = await fetch(`${listening.address}/healthz`);
+      assert.equal(health.status, 200, 'packed serve must report ready');
+      const mcp = (body, headers = {}) =>
+        fetch(`${listening.address}/mcp`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+            ...headers,
+          },
+          body: JSON.stringify(body),
+        });
+      const initialized = await mcp({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-11-25',
+          capabilities: {},
+          clientInfo: { name: 'slotlock-package-verification', version: '1.0.0' },
+        },
+      });
+      assert.equal((await initialized.json()).result.protocolVersion, '2025-11-25');
+      const tools = await mcp(
+        { jsonrpc: '2.0', id: 2, method: 'tools/list' },
+        { 'MCP-Protocol-Version': '2025-11-25' },
+      );
+      assert.equal((await tools.json()).result.tools.length, 8);
+      // The REST API: its document is public, its routes take the same token, and a write that
+      // waits for a person (SLOTLOCK_CONFIRM_WRITES defaults to all) answers 428.
+      const openApi = await fetch(`${listening.address}/openapi.json`);
+      assert.equal(openApi.status, 200);
+      assert.equal((await openApi.json()).openapi, '3.1.0');
+      const rest = (method, path, body) =>
+        fetch(`${listening.address}${path}`, {
+          method,
+          headers: {
+            Authorization: `Bearer ${token}`,
+            ...(body ? { 'Content-Type': 'application/json' } : {}),
+          },
+          ...(body ? { body: JSON.stringify(body) } : {}),
+        });
+      const resources = await rest('GET', '/v1/resources');
+      assert.equal(resources.status, 200);
+      assert.ok(Array.isArray((await resources.json()).resources));
+      const guarded = await rest('POST', '/v1/events', {
+        resource_id: '00000000-0000-4000-8000-000000000000',
+        starts_at: '2030-01-01T09:00:00Z',
+        ends_at: '2030-01-01T10:00:00Z',
+        timezone: 'UTC',
+        idempotency_key: 'package-verification',
+      });
+      assert.equal(guarded.status, 428);
+      assert.deepEqual(await guarded.json(), { error: { code: 'confirmation_required' } });
+    } finally {
+      child.kill('SIGTERM');
+    }
+    assert.equal(await exited, 0, `packed serve must stop cleanly on SIGTERM:\n${stderr}`);
+    assert.match(stdout, /"event":"application_role_granted"/);
+    assert.match(stdout, /"event":"stopped"/);
+    for (const secret of [token, servingPassword]) {
+      assert.ok(!stdout.includes(secret) && !stderr.includes(secret), 'serve must not log a secret');
+    }
+    liveServe = `${refusedSuiteRole ? 'refused the suite superuser, then ' : ''}migrated as the owner, served MCP initialize/tools/list and REST (/openapi.json, /v1/resources, 428 on a guarded write) as the granted role, stopped on SIGTERM`;
   } finally {
-    child.kill('SIGTERM');
+    await admin.unsafe(`DROP OWNED BY ${servingRole}`);
+    await admin.unsafe(`DROP ROLE ${servingRole}`);
+    await admin.end();
   }
-  assert.equal(await exited, 0, `packed serve must stop cleanly on SIGTERM:\n${stderr}`);
-  assert.match(stdout, /"event":"stopped"/);
-  assert.ok(!stdout.includes(token) && !stderr.includes(token), 'serve must not log the token');
-  liveServe =
-    'migrated, served MCP initialize/tools/list and REST (/openapi.json, /v1/resources, 428 on a guarded write), stopped on SIGTERM';
 }
 
 // A strict TypeScript consumer: its own postgres client (and transaction) passes into the store,

@@ -4,7 +4,6 @@
 // stops a command before it connects anywhere, and no secret is written to a log line or an error.
 // The one exception is the API key `key create` prints: that output is the key's only copy.
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import postgres from 'postgres';
 import {
@@ -35,6 +34,7 @@ import {
   type SlotlockNodeServerCloseResult,
   createSlotlockNodeServer,
 } from './node-server.js';
+import { slotlockPackageVersion } from './package-version.js';
 import { type SlotlockSql, createSlotlockStore } from './store.js';
 import type { SlotlockResource, WeeklyAvailabilityRule } from './types.js';
 import {
@@ -614,6 +614,20 @@ export async function startSlotlockServer(
 ): Promise<SlotlockRunningServer> {
   const sql = connect(config.databaseUrl, POOL_SIZE);
   try {
+    // Forced row-level security is what confines each key to its own tenant, and a superuser or a
+    // BYPASSRLS role skips it on every query: refuse to serve as one rather than serve unconfined.
+    const [serving] = await sql<{ role: string; superuser: boolean; bypassrls: boolean }[]>`
+      SELECT rolname AS role, rolsuper AS superuser, rolbypassrls AS bypassrls
+        FROM pg_catalog.pg_roles
+       WHERE rolname = current_user`;
+    if (serving?.superuser || serving?.bypassrls) {
+      throw Object.assign(
+        new Error(
+          `DATABASE_URL connects as ${serving.role}, ${serving.superuser ? 'a superuser' : 'a BYPASSRLS role'}, which row-level security does not confine: every API key could read and book every tenant's calendars. Serve as a role with NOSUPERUSER NOBYPASSRLS (CREATE ROLE slotlock_app LOGIN PASSWORD '…' NOSUPERUSER NOBYPASSRLS), and run migrate with SLOTLOCK_MIGRATE_DATABASE_URL set to the schema owner's URL so it grants that role what it needs`,
+        ),
+        { code: 'unsafe_serving_role' },
+      );
+    }
     const [schema] = await sql<{ present: boolean }[]>`
       SELECT to_regclass('slotlock.resources') IS NOT NULL AS present`;
     if (!schema?.present) {
@@ -671,6 +685,10 @@ export async function startSlotlockServer(
           : { ready: false, checks: ['database_unreachable'] },
       // Outcomes and counts only: the server never reports arguments or identities.
       onEvent: ({ type, ...fields }) => log.info(type, fields),
+      // What an agent sees only as internal_error: the operation and the error's message and code,
+      // never the arguments or the request, with every configured secret redacted.
+      onError: (error, { operation }) =>
+        log.error('agent_error', { operation, ...describeError(error) }),
       ...(config.restApi ? { rest: true } : {}),
       ...(config.confirmationSecret !== undefined
         ? {
@@ -927,24 +945,6 @@ function untilAborted(signal: AbortSignal): Promise<void> {
   );
 }
 
-/** The package version, from dist/package.json when installed and the root manifest in a checkout. */
-function packageVersion(): string {
-  for (const candidate of ['./package.json', '../package.json']) {
-    try {
-      const manifest = JSON.parse(readFileSync(new URL(candidate, import.meta.url), 'utf8')) as {
-        name?: unknown;
-        version?: unknown;
-      };
-      if (manifest.name === 'slotlock' && typeof manifest.version === 'string') {
-        return manifest.version;
-      }
-    } catch {
-      // Not this layout; try the next.
-    }
-  }
-  return 'unknown';
-}
-
 export const SLOTLOCK_CLI_HELP = `Usage: slotlock <command> [options]
 
 Commands:
@@ -974,7 +974,8 @@ Options:
   -v, --version            Print the version
 
 Environment:
-  DATABASE_URL                   postgres:// URL of the role Slotlock serves as (required)
+  DATABASE_URL                   postgres:// URL of the role Slotlock serves as (required); serve
+                                 refuses a superuser or a role with BYPASSRLS
   SLOTLOCK_MIGRATE_DATABASE_URL  postgres:// URL of the schema owner, for migrate (optional)
   SLOTLOCK_AUTH_TOKEN            Optional bearer token for SLOTLOCK_TENANT with every scope,
                                  32+ random characters (serve); API keys work with or without it
@@ -983,6 +984,8 @@ Environment:
   SLOTLOCK_PUBLIC_URL            URL clients use (default http://localhost:$PORT)
   SLOTLOCK_TENANT                Tenant of the token, resource and key commands (default "default")
   SLOTLOCK_AVAILABILITY          JSON array of weekly bookable-hours rules (default: none)
+  SLOTLOCK_REST_API              on: also serve the tools as a REST API under /v1, described at
+                                 /openapi.json, with the same keys and confirmation (default off)
   SLOTLOCK_GITHUB_CLIENT_ID      Serve the dashboard at $SLOTLOCK_PUBLIC_URL/dashboard: the Client ID
                                  of a GitHub OAuth app with callback .../dashboard/callback
   SLOTLOCK_GITHUB_CLIENT_SECRET  That app's client secret (dashboard)
@@ -1012,7 +1015,7 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
   }
   const { values, positionals } = parsed;
   if (values.version) {
-    io.stdout.write(`${packageVersion()}\n`);
+    io.stdout.write(`${slotlockPackageVersion()}\n`);
     return 0;
   }
   const [command, ...operands] = positionals;
