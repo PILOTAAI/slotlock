@@ -8,8 +8,14 @@
 #   scripts/configure-github.sh                  apply
 #   scripts/configure-github.sh --site-secrets   only replace the Cloudflare secrets, after
 #                                                checking them with Cloudflare
+#   scripts/configure-github.sh --require-approval
+#                                                also make you approve each run of the npm and
+#                                                mcp-registry environments
+#   scripts/configure-github.sh --rotate-tag-key replace the deploy key tag-release.yml pushes
+#                                                release tags with
 #
-# Needs bash 3.2 or newer, curl, jq, and gh logged in as an admin of the repository.
+# Needs bash 3.2 or newer, curl, jq 1.6 or newer, ssh-keygen, and gh logged in as an admin of the
+# repository.
 # Environment:
 #   SKIP_SITE_SECRETS=1     do not ask for the Cloudflare secrets now (add them later)
 #   REPLACE_SITE_SECRETS=1  ask for them again even when they are already set
@@ -39,6 +45,13 @@
 #   https://docs.github.com/en/rest/repos/rules (get all, create, get and update a ruleset)
 #   https://docs.github.com/en/rest/apps/apps#get-an-app
 #   https://docs.github.com/en/rest/packages/packages (no endpoint changes a package's visibility)
+# Read on 2026-10-22, for the release-tag deploy key:
+#   https://docs.github.com/en/rest/deploy-keys/deploy-keys (list, create, delete; a write key "can
+#     perform the same actions as an organization member with admin access")
+#   https://docs.github.com/en/rest/repos/rules#create-a-repository-ruleset (bypass actor_type
+#     DeployKey, whose actor_id is null)
+#   https://github.com/peter-evans/create-pull-request/blob/main/docs/concepts-guidelines.md (a push
+#     with a deploy key starts on: push workflows; one with GITHUB_TOKEN does not)
 # Behaviour the REST reference does not cover came from:
 #   https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository
 #   https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets
@@ -76,15 +89,24 @@ ADMIN_ROLE_ID=5
 BRANCH_RULESET='Protect main'
 TAG_RULESET='Release tags'
 
+# tag-release.yml's deploy key: its title on GitHub, and the release-tag environment secret that
+# holds its private half.
+TAG_KEY_TITLE='slotlock tag-release (GitHub Actions)'
+TAG_KEY_SECRET=TAG_RELEASE_DEPLOY_KEY
+
 usage() {
-  sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 DRY_RUN=0
 SITE_SECRETS_ONLY=0
+REQUIRE_APPROVAL=0
+ROTATE_TAG_KEY=0
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
+    --require-approval) REQUIRE_APPROVAL=1 ;;
+    --rotate-tag-key) ROTATE_TAG_KEY=1 ;;
     --site-secrets) SITE_SECRETS_ONLY=1 ;;
     -h | --help)
       usage
@@ -191,7 +213,8 @@ preflight() {
   fi
   command -v gh >/dev/null 2>&1 || die 'gh is required (https://cli.github.com)'
 
-  # The required reviewer on the npm and mcp-registry environments is whoever runs this.
+  # With --require-approval, the required reviewer on the npm and mcp-registry environments is
+  # whoever runs this.
   REVIEWER_ID=$(gh api user -H "X-GitHub-Api-Version: $API_VERSION" --jq .id)
   REVIEWER_LOGIN=$(gh api user -H "X-GitHub-Api-Version: $API_VERSION" --jq .login)
   case "$REVIEWER_ID" in
@@ -382,22 +405,81 @@ configure_site_secrets() {
 
 # 2. Deployment environments. Each one is limited to the refs its workflow runs on.
 configure_environments() {
-  local me
+  local reviewers='[]'
   step '2. Environments'
-  me=$(jq -n --argjson id "$REVIEWER_ID" '[{type: "User", id: $id}]')
+  # Merging a dated version to main releases it (tag-release.yml), so by default no run waits for
+  # a reviewer: only an admin or tag-release.yml, running on main, can create a v* tag (step 4), and
+  # npm still holds each version until a maintainer approves it with two-factor authentication
+  # (GOVERNANCE.md, Releases). --require-approval adds you as a required reviewer of the npm and
+  # mcp-registry environments anyway.
+  if [ "$REQUIRE_APPROVAL" -eq 1 ]; then
+    reviewers=$(jq -n --argjson id "$REVIEWER_ID" '[{type: "User", id: $id}]')
+  fi
 
   # npm: release.yml's "Stage on npm" job. It runs on v* tags and stages the package with a
-  # short-lived OIDC credential, so a person approves each run before it can stage.
-  configure_environment npm "$me" tag 'v*'
+  # short-lived OIDC credential.
+  configure_environment npm "$reviewers" tag 'v*'
 
   # mcp-registry: mcp-registry.yml's publish job, called by image.yml for the same v* tag. A
-  # registry version can be published once only, so a person approves it too.
-  configure_environment mcp-registry "$me" tag 'v*'
+  # registry version can be published once only; it names the image this tag pushed.
+  configure_environment mcp-registry "$reviewers" tag 'v*'
+
+  # release-tag: tag-release.yml's job, on a push to main or a manual run on main. It holds the
+  # deploy key that job pushes release tags with, so only runs on main can read it. No reviewer:
+  # the version already went through a pull request into main.
+  configure_environment release-tag '[]' branch main
+  configure_tag_key
 
   # site: site.yml's deploy job, on a push to main or a manual run on main. No reviewer: the
   # change already went through a pull request into main.
   configure_environment site '[]' branch main
   configure_site_secrets
+}
+
+# The deploy key tag-release.yml pushes release tags with: a tag pushed with GITHUB_TOKEN starts no
+# workflow, and one pushed with a deploy key starts release.yml and image.yml. Like every deploy key
+# with write access it can do what a repository admin can, so its private half exists only in the
+# release-tag environment secret, which GitHub hands to runs on main alone. It is generated here in
+# a private temporary directory, its public half sent to GitHub and its private half to the secret
+# on stdin, and the directory deleted: nothing prints or keeps it. A new key replaces the old one
+# before the old one is deleted, so a release in between still finds a key.
+configure_tag_key() {
+  local keys secrets old_ids id
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '\n> GET /repos/%s/%s/keys and /repos/%s/%s/environments/release-tag/secrets\n  (dry run: not sent)\n' \
+      "$OWNER" "$REPO" "$OWNER" "$REPO" >&3
+    printf '> unless both are set: ssh-keygen -t ed25519 in a private temporary directory, then\n' >&3
+    gh_api POST "repos/$OWNER/$REPO/keys" "$(jq -n --arg title "$TAG_KEY_TITLE" \
+      '{title: $title, key: "<the new public key>", read_only: false}')"
+    printf '\n> gh secret set %s --env release-tag --repo %s/%s, with the private key on stdin\n' \
+      "$TAG_KEY_SECRET" "$OWNER" "$REPO" >&3
+    printf '> then DELETE /repos/%s/%s/keys/<id> for the key it replaces, if any\n' "$OWNER" "$REPO" >&3
+    result "release-tag: deploy key and $TAG_KEY_SECRET"
+    return 0
+  fi
+  command -v ssh-keygen >/dev/null 2>&1 || die 'ssh-keygen is required for the release-tag deploy key'
+  keys=$(gh_get "repos/$OWNER/$REPO/keys?per_page=100" '[]')
+  secrets=$(gh_get "repos/$OWNER/$REPO/environments/release-tag/secrets?per_page=100" '{"secrets":[]}')
+  old_ids=$(printf '%s' "$keys" | jq -r --arg title "$TAG_KEY_TITLE" '.[] | select(.title == $title) | .id')
+  if [ "$ROTATE_TAG_KEY" -eq 0 ] && [ -n "$old_ids" ] &&
+    printf '%s' "$secrets" | jq -e --arg name "$TAG_KEY_SECRET" 'any(.secrets[]; .name == $name)' >/dev/null; then
+    result "release-tag: deploy key and $TAG_KEY_SECRET already set (--rotate-tag-key replaces them)"
+    return 0
+  fi
+  # A template, so TMPDIR is honoured on macOS too (its mktemp -d alone ignores it).
+  TAG_KEY_DIR=$(mktemp -d "${TMPDIR:-/tmp}/slotlock-tag-key.XXXXXX")
+  chmod 700 "$TAG_KEY_DIR"
+  ssh-keygen -q -t ed25519 -N '' -C "$TAG_KEY_TITLE" -f "$TAG_KEY_DIR/key"
+  gh_api POST "repos/$OWNER/$REPO/keys" "$(jq -n --arg title "$TAG_KEY_TITLE" --rawfile key "$TAG_KEY_DIR/key.pub" \
+    '{title: $title, key: ($key | rtrimstr("\n")), read_only: false}')" >/dev/null
+  gh secret set "$TAG_KEY_SECRET" --env release-tag --repo "$OWNER/$REPO" <"$TAG_KEY_DIR/key"
+  rm -rf "$TAG_KEY_DIR"
+  TAG_KEY_DIR=''
+  for id in $old_ids; do
+    gh_api DELETE "repos/$OWNER/$REPO/keys/$id" >/dev/null
+    result "release-tag: removed the deploy key it replaces (id $id)"
+  done
+  result "release-tag: new deploy key (write access) and $TAG_KEY_SECRET"
 }
 
 # upsert_ruleset TARGET NAME BODY
@@ -513,15 +595,20 @@ configure_branch_ruleset() {
 # 4. Release tags.
 configure_tag_ruleset() {
   step "4. Ruleset '$TAG_RULESET' (refs/tags/v*)"
-  # A v* tag starts release.yml and image.yml, which stage the npm package and push the image.
-  # GOVERNANCE.md says releases come only from a protected v<version> tag. Only the admin role
-  # may create, move or delete one. Tag rulesets allow no "pull requests only" mode, so the
-  # bypass is "always".
+  # A v* tag starts release.yml and image.yml, which stage the npm package and push the image,
+  # running the workflow files of the tagged commit. GOVERNANCE.md says releases come only from a
+  # protected v<version> tag. Only the admin role may create, move or delete one, and deploy keys
+  # may create one: tag-release.yml pushes a merged version's tag with the release-tag deploy key
+  # (step 2), the only deploy key this script adds. Tag rulesets allow no "pull requests only" mode,
+  # and a deploy key bypass only "always", so both bypasses are "always".
   upsert_ruleset tag "$TAG_RULESET" "$(jq -n --arg name "$TAG_RULESET" --argjson role "$ADMIN_ROLE_ID" '{
     name: $name,
     target: "tag",
     enforcement: "active",
-    bypass_actors: [{actor_id: $role, actor_type: "RepositoryRole", bypass_mode: "always"}],
+    bypass_actors: [
+      {actor_id: $role, actor_type: "RepositoryRole", bypass_mode: "always"},
+      {actor_id: null, actor_type: "DeployKey", bypass_mode: "always"}
+    ],
     conditions: {ref_name: {include: ["refs/tags/v*"], exclude: []}},
     rules: [{type: "creation"}, {type: "update"}, {type: "deletion"}]
   }')" || die "$RULESET_ERROR"
@@ -570,37 +657,20 @@ print_checklist() {
     (gh repo edit $OWNER/$REPO --enable-discussions does it through a has_discussions field
     that gh 2.83.2 sends to the same endpoint, outside the documented body.)
 
-[ ] Make the image public once the first v* tag has pushed it. New GHCR packages are private,
-    the MCP Registry pulls the image anonymously, and the REST API has no endpoint that changes
-    a package's visibility (it can only list, get, delete and restore packages). In the UI:
-      https://github.com/orgs/$OWNER/packages/container/package/$REPO
-      Package settings > Danger Zone > Change visibility > Public
-    This cannot be undone. If Public is not offered, allow public packages first: organization
-    Settings > Packages > Package creation > Public. Best done while that tag's Image run waits
-    for your mcp-registry approval: approve after the change and the "MCP Registry" job passes.
-    If it already failed on the private image, re-run that job.
-
-[ ] Stage the first npm version yourself, from your own npm session (npm login, with 2FA).
-    A trusted publisher is configured on an existing package's settings page, so the first
-    version cannot come from release.yml. From a clean checkout of the commit you will tag,
-    with npm 11.15.0 or newer (the version release.yml requires for npm stage):
-      npm ci && npm run typecheck && npm test      (builds and verifies dist/)
-      cd dist && npm pack --ignore-scripts
-      npm stage publish ./slotlock-<version>.tgz --access public
-      npm stage approve <stage-id>                 (asks for your 2FA code)
-    npm keeps one version index for staged and published versions, so the Release run for that
-    version's tag cannot stage it again; expect its "Stage on npm" job to fail that one time.
-
-[ ] Create the npm trusted publisher for the package slotlock (npm org pylotahq), shortly
-    before you push the next v* tag: npm expires a new configuration that has no successful
-    publish within 2 days.
-      npmjs.com > Packages > slotlock > Settings > Trusted publishing > GitHub Actions
-      Organization or user: $OWNER
-      Repository:           $REPO
-      Workflow filename:    release.yml
-      Environment name:     npm
-    Leave direct "npm publish" off. release.yml only stages, and npm stage publish is always
-    allowed for a trusted publisher.
+[ ] Releases: merging a version to main releases it. tag-release.yml tags a package.json version
+    with a dated CHANGELOG.md heading and starts Release (npm, then the GitHub release) and Image
+    (GHCR, then the MCP Registry). Each staged npm version waits for your two-factor approval
+    (GOVERNANCE.md, Releases); the Release run's summary gives the npm stage approve command.
+    npm and GitHub keep three first-time steps for a person, and the run that needs one says so:
+      scripts/bootstrap-release.sh <tag>
+    - first release: puts the first version on npm from your npm session (npm accepts a trusted
+      publisher only for a package that exists), and waits while you make the GHCR image public
+      (GitHub has no API for it; the MCP Registry pulls anonymously). Then it re-runs both runs.
+    - second release: creates the npm trusted publisher (release.yml, environment npm, stage
+      only). npm expires one that has not published within 2 days, so it is created when a
+      version is waiting, and the re-run publishes it.
+    Run this script before the first release merges: it creates the deploy key tag-release.yml
+    pushes v* tags with. Without it, that job fails and says so; run this, then re-run the job.
 EOF
   if [ "${SITE_SECRETS_SKIPPED:-0}" = 1 ]; then
     cat <<EOF
@@ -632,6 +702,9 @@ EOF
 
 SITE_SECRETS_SKIPPED=0
 CODEQL_SKIPPED=0
+# The temporary directory holding a new deploy key, removed however the script ends.
+TAG_KEY_DIR=''
+trap '[ -z "$TAG_KEY_DIR" ] || rm -rf "$TAG_KEY_DIR"' EXIT
 REVIEWER_ID=''
 REVIEWER_LOGIN=''
 RULESET_ID=''

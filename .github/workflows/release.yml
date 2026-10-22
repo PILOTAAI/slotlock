@@ -1,23 +1,22 @@
 # Release: on a v* tag, verify the tag, run the suite against PostgreSQL, pack the npm artifact
-# (dist/), and STAGE it on npm. Nothing in this workflow can make a version public.
+# (dist/), STAGE it on npm, and create the GitHub release with the tarball and its checksum.
+# tag-release.yml pushes the tag of a merged version; an admin can push one by hand. Nothing in this
+# workflow can make a version public on npm.
 #
 # Staging uses npm trusted publishing: npm exchanges this job's GitHub OIDC token (id-token: write)
 # for a short-lived credential, so no npm token exists anywhere. Provenance is attached. The staged
-# version stays private until a maintainer approves it with two-factor authentication, which an
-# OIDC token cannot do:
-#   npm stage list slotlock
-#   npm stage view <stage-id>         (the stage id is in this run's summary)
-#   npm stage approve <stage-id>      (prompts for 2FA; also possible in the npmjs.com
-#                                      "Staged Packages" tab)
+# version stays private until a maintainer approves it with two-factor authentication
+# (GOVERNANCE.md, Releases), which an OIDC token cannot do; the run's summary gives the commands:
+#   npm stage view <stage-id>
+#   npm stage approve <stage-id>      (prompts for 2FA; also npmjs.com > Staged Packages)
 #   npm stage reject <stage-id>       (discards it instead)
+# A version already on npm is left alone, so a re-run after a later job failed changes nothing there.
 #
-# One-time setup by the repository owner:
-#   - A GitHub environment named `npm` (Settings > Environments), with deployment tags limited
-#     to v*.
-#   - On npmjs.com, a trusted publisher for the slotlock package: GitHub Actions, organization
-#     PILOTAAI, repository slotlock, workflow filename release.yml, environment npm. npm only
-#     accepts a trusted publisher for a package that already exists, so the very first version
-#     is staged once by a maintainer (`npm stage publish` from their own session).
+# One-time setup: scripts/configure-github.sh creates the `npm` environment (deployment tags v*).
+# npm accepts a trusted publisher only for a package that exists, and expires one that has not
+# published within 2 days, so the first version comes from a maintainer's own npm session and the
+# publisher is created at the second release: each time, the job's summary asks for
+# scripts/bootstrap-release.sh <tag>, which does it and re-runs the failed jobs.
 name: Release
 
 on:
@@ -39,7 +38,7 @@ env:
   NODE_VERSION: '22.23.3'
   # Staging needs npm >= 11.15.0 (npm stage) on Node.js >= 22.14.0. Node.js 24.21.0 bundles npm
   # 11.19.0, whose engines.node is "^20.17.0 || >=22.9.0", so nothing is installed outside a
-  # lockfile; the stage job checks the version before it uses it.
+  # lockfile; the publish job checks the version before it uses it.
   STAGE_NODE_VERSION: '24.21.0'
   NPM_VERSION: '11.19.0'
 
@@ -137,11 +136,44 @@ jobs:
         env:
           TARBALL: ${{ needs.build.outputs.tarball }}
         run: |
+          # bootstrap TITLE WHY: the one-time step a maintainer runs, then this job fails.
+          bootstrap() {
+            {
+              echo "### $1"
+              echo "$2 From a checkout of main, logged in to npm (with 2FA) and gh:"
+              echo '```'
+              echo "scripts/bootstrap-release.sh $GITHUB_REF_NAME"
+              echo '```'
+              echo "It does that step and re-runs this run's failed jobs."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::$1: run scripts/bootstrap-release.sh $GITHUB_REF_NAME (see the summary)."
+            exit 1
+          }
           version=${GITHUB_REF_NAME#v}
+          if [ -n "$(npm view "slotlock@$version" version 2>/dev/null)" ]; then
+            echo "### slotlock@$version is already on npm: nothing to do" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if ! npm view slotlock name >/dev/null 2>&1; then
+            bootstrap "slotlock is not on npm yet" \
+              "npm accepts a trusted publisher only for a package that exists, so the first version comes from a maintainer's own npm session."
+          fi
           # A prerelease (1.2.0-rc.1) must not move `latest`; the tag is fixed once staged.
           dist_tag=latest
           case "$version" in *-*) dist_tag=next ;; esac
-          npm stage publish "./$TARBALL" --provenance --access public --tag "$dist_tag" | tee stage.log
+          if ! npm stage publish "./$TARBALL" --provenance --access public --tag "$dist_tag" 2>&1 | tee stage.log; then
+            # npm answers an OIDC token it cannot match to a trusted publisher with ENEEDAUTH.
+            if grep -Eq 'ENEEDAUTH|E401' stage.log; then
+              bootstrap "npm refused this job's credential" \
+                "slotlock has no trusted publisher for release.yml yet (it is created at the release after the first), or the one it has expired unused."
+            fi
+            {
+              echo "### npm refused the stage"
+              echo "If this run was re-run after staging once, slotlock@$version is already staged: approve or reject that"
+              echo "stage (npm stage list slotlock). Otherwise the log above says why."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           # npm prints "+ slotlock@<version> (staged with id <stage-id>)".
           stage_id=$(sed -n 's/^+ .* (staged with id \([^)]*\))$/\1/p' stage.log)
           {
@@ -151,4 +183,49 @@ jobs:
             echo "npm stage view ${stage_id:-<stage-id from npm stage list slotlock>}"
             echo "npm stage approve ${stage_id:-<stage-id>}"
             echo '```'
+            echo "Rejecting it instead (npm stage reject) leaves the tag and the GitHub release this run creates; delete"
+            echo "the release with gh release delete $GITHUB_REF_NAME."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  github-release:
+    name: GitHub release
+    needs: [build, stage]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      # Create the release and attach the tarball.
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: npm-package
+          path: release
+      - name: Verify the tarball checksum
+        working-directory: release
+        run: sha256sum --check SHA256SUMS
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARBALL: ${{ needs.build.outputs.tarball }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          # The notes are this version's CHANGELOG.md section, up to the next version heading.
+          awk -v heading="## $version - " '
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "::error::CHANGELOG.md has no section for $version"; exit 1; }
+          prerelease=()
+          case "$version" in *-*) prerelease=(--prerelease) ;; esac
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "release/$TARBALL" release/SHA256SUMS --clobber
+            gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "Slotlock $version" \
+              --notes-file notes.md "${prerelease[@]}" "release/$TARBALL" release/SHA256SUMS
+          fi
+          echo "### GitHub release $GITHUB_REF_NAME" >> "$GITHUB_STEP_SUMMARY"
