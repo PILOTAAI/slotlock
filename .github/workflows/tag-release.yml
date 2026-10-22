@@ -11,7 +11,8 @@
 # the environment hands the key only to runs on main. A maintainer can still push a tag by hand; this
 # job then sees the tag exists and does nothing.
 #
-# One-time setup: scripts/configure-github.sh creates the environment, the deploy key and the ruleset.
+# One-time setup: scripts/configure-github.sh creates the environment, the deploy key and the ruleset;
+# scripts/bootstrap-release.sh runs it when they are missing.
 name: Tag release
 
 on:
@@ -58,7 +59,7 @@ jobs:
           HAS_DEPLOY_KEY: ${{ secrets.TAG_RELEASE_DEPLOY_KEY != '' }}
         run: |
           if [ "$HAS_DEPLOY_KEY" != true ]; then
-            echo "::error::The release-tag environment has no TAG_RELEASE_DEPLOY_KEY: run scripts/configure-github.sh, then re-run this job."
+            echo "::error::The release-tag environment has no TAG_RELEASE_DEPLOY_KEY: run scripts/bootstrap-release.sh once (an admin); it sets it up, re-runs this job and finishes the release."
             exit 1
           fi
           git -c user.name='github-actions[bot]' \
