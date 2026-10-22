@@ -3,6 +3,19 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Changed
+
+- The README and the site install Slotlock from npm (`npm install slotlock`), now that 0.1.0 is
+  published there, instead of building it from a clone.
+
+### Added
+
+- Releases are cut from GitHub Actions: "Release a version" prepares the version on a branch, merges
+  it once CI passes, and tags it; the tag stages the package on npm for a maintainer's approval and
+  publishes the image and the MCP Registry entry.
+
 ## 0.1.0 - 2026-10-22
 
 First public release. Nothing was published before it; the entries below describe the release as

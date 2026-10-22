@@ -4,8 +4,8 @@ description: Run Slotlock and PostgreSQL 16 with Docker, connect Claude Code, an
 ---
 
 You need Docker with Compose v2, `git`, `openssl` and Claude Code ([other clients](/docs/connect/)).
-Slotlock {{version}} is a pre-release, so it runs from a clone. Without Docker, build it and run
-`node dist/cli.js` with two database roles, as the
+The quickstart runs Slotlock {{version}} from a clone with Docker Compose. Without Docker, install
+it from npm and run `npx slotlock` with two database roles, as the
 [README shows](https://github.com/PILOTAAI/slotlock#without-docker).
 
 Step 6 asks you before the agent books, which needs an MCP client that supports protocol version

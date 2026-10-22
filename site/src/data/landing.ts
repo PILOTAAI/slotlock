@@ -24,7 +24,7 @@ export const meta = {
 };
 
 export const hero = {
-  pill: { label: `${facts.version} pre-release`, link: 'Release notes', href: '/docs/changelog/' },
+  pill: { label: `${facts.version} on npm`, link: 'Release notes', href: '/docs/changelog/' },
   eyebrow: `Open source · ${facts.license} · PostgreSQL 16`,
   heading: {
     soft: 'Slotlock is a calendar for AI agents.',
@@ -46,9 +46,8 @@ export const hero = {
     {
       id: 'source',
       label: 'From source',
-      command:
-        'git clone https://github.com/PILOTAAI/slotlock && cd slotlock && npm ci && npm run build',
-      note: `${facts.version} is not on npm yet. Then \`node dist/cli.js migrate\` and \`node dist/cli.js serve\`, with two database roles as the README shows.`,
+      command: 'npm install slotlock postgres',
+      note: `Then \`npx slotlock migrate\` and \`npx slotlock serve\`, with two database roles as the README shows.`,
     },
     {
       id: 'npm',
@@ -527,7 +526,7 @@ export const faq = {
     },
     {
       q: 'Is it ready for production?',
-      a: `Not yet. ${facts.version} is a pre-release; the README keeps the production checklist.`,
+      a: `Not yet. ${facts.version} is an early 0.x release; the README keeps the production checklist.`,
     },
     {
       q: 'Does a model decide anything?',

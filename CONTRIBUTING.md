@@ -66,13 +66,19 @@ one maintainer, GOVERNANCE.md's single-maintainer rule applies.
 
 ## Releases
 
-Merging a version releases it. A release pull request sets the version with
-`npm version <version> --no-git-tag-version`, updates `server.json` (its version and image tag), and
-dates the version's `CHANGELOG.md` heading. Once it is on `main`, `tag-release.yml` creates the
-`v<version>` tag and starts `release.yml` (the suite, then npm and the GitHub release) and
-`image.yml` (the image, then the MCP Registry). npm holds each staged version until a maintainer
-approves it with two-factor authentication; the Release run's summary gives the command. When a run
-needs a step npm or GitHub keeps for a person (the first npm version, the npm trusted publisher, the
-image's visibility, and the deploy key `tag-release.yml` pushes tags with), the failing job names
-`scripts/bootstrap-release.sh`. One run of it does that step, re-runs the failed jobs and waits for
-them.
+Add each change's entry under `## Unreleased` in `CHANGELOG.md`, in the pull request that makes it:
+that section becomes the release notes.
+
+To release, run **Actions > Release a version** with the version (for example `0.1.1`). It sets the
+version in `package.json`, `package-lock.json`, `server.json` and `slotlock.manifest.json` and dates
+the `## Unreleased` heading (`scripts/prepare-release.sh`), opens the pull request, merges it once CI
+and DCO pass, and starts `tag-release.yml`, which tags the release commit. The tag starts
+`release.yml` (the suite, then npm and the GitHub release) and `image.yml` (the image, then the MCP
+Registry). npm holds each staged version until a maintainer approves it with two-factor
+authentication (GOVERNANCE.md); the Release run's summary gives the command. A version merged to
+`main` by hand, with its heading dated, is released the same way.
+
+When a run needs a step npm or GitHub keeps for a person (the first npm version, the npm trusted
+publisher, the image's visibility, and the deploy key `tag-release.yml` pushes tags with), the
+failing job names `scripts/bootstrap-release.sh`. One run of it does that step, re-runs the failed
+jobs and waits for them.

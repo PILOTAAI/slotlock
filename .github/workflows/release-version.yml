@@ -1,0 +1,114 @@
+# Release a version: Actions > Release a version > Run workflow, with the version (for example
+# 0.1.1). It prepares the release on a branch (scripts/prepare-release.sh: the version in
+# package.json, package-lock.json, server.json and slotlock.manifest.json, and CHANGELOG.md's
+# "## Unreleased" heading dated), opens the pull request, runs CI and DCO on it, squash-merges it once
+# they pass, and starts Tag release. That tags the release commit, and the tag's push starts Release
+# (npm, then the GitHub release) and Image (GHCR, then the MCP Registry). npm then holds the staged
+# version for a maintainer's two-factor approval (GOVERNANCE.md, Releases): the Release run's summary
+# gives the command.
+#
+# Everything here uses GITHUB_TOKEN, whose pushes, pull requests and merges start no workflow, so CI,
+# DCO and Tag release are started with workflow_dispatch, which it may start. The merge is held to the
+# "Protect main" ruleset like anyone's: the required checks must pass on the branch, up to date with
+# main. The release notes come from CHANGELOG.md's "## Unreleased" section: add to it in the pull
+# requests that make the changes.
+name: Release a version
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, without the v (for example 0.1.1 or 0.2.0-rc.1)
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release-version
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    name: Prepare, merge and tag
+    # A run started on any other branch releases nothing.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      # Push the release branch, and merge its pull request.
+      contents: write
+      # Open and merge the pull request.
+      pull-requests: write
+      # Start CI, DCO and Tag release, and follow their runs.
+      actions: write
+    env:
+      VERSION: ${{ inputs.version }}
+      BRANCH: release/v${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          # Kept for the one push of the release branch below. The only code this job runs is this
+          # repository's own scripts, from main.
+          persist-credentials: true
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.23.3'
+          package-manager-cache: false
+      - name: Prepare the release
+        run: scripts/prepare-release.sh "$VERSION"
+      - name: Push the release branch
+        run: |
+          git switch -c "$BRANCH"
+          git add package.json package-lock.json server.json slotlock.manifest.json CHANGELOG.md
+          git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -q -m "Release $VERSION" \
+            -m "Signed-off-by: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          git push origin "refs/heads/$BRANCH"
+      - name: Open the pull request
+        run: |
+          gh pr create --base main --head "$BRANCH" --title "Release $VERSION" --body "Prepared by the \"Release a version\" workflow ([run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)): $VERSION in package.json, package-lock.json, server.json and slotlock.manifest.json, and its CHANGELOG.md section dated. The workflow merges it once CI and DCO pass, then starts Tag release."
+          echo "PR=$(gh pr view "$BRANCH" --json number --jq .number)" >> "$GITHUB_ENV"
+      - name: Run CI and DCO on it, and wait for both
+        run: |
+          # wait WORKFLOW_FILE BRANCH: follows the newest manual run of WORKFLOW_FILE on BRANCH to its end.
+          wait_for() {
+            local id='' attempt
+            for attempt in $(seq 1 30); do
+              id=$(gh run list --workflow "$1" --branch "$2" --event workflow_dispatch --limit 1 \
+                --json databaseId --jq '.[0].databaseId // empty')
+              [ -z "$id" ] || break
+              sleep 5
+            done
+            if [ -z "$id" ]; then
+              echo "::error::$1 did not start on $2."
+              return 1
+            fi
+            echo "Waiting for $1: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$id"
+            if ! gh run watch "$id" --exit-status --interval 30 >/dev/null; then
+              echo "::error::$1 failed on $2: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$id"
+              return 1
+            fi
+          }
+          gh workflow run ci.yml --ref "$BRANCH"
+          gh workflow run dco.yml --ref "$BRANCH"
+          wait_for ci.yml "$BRANCH"
+          wait_for dco.yml "$BRANCH"
+      - name: Merge it
+        run: gh pr merge "$PR" --squash --delete-branch
+      - name: Start Tag release on main
+        run: |
+          gh workflow run tag-release.yml --ref main
+          {
+            echo "### Releasing $VERSION"
+            echo "Merged #$PR and started Tag release on main. The tag starts Release (npm, then the GitHub release)"
+            echo "and Image (GHCR, then the MCP Registry). Approve the staged npm version with the command in"
+            echo "the Release run's summary."
+          } >> "$GITHUB_STEP_SUMMARY"
