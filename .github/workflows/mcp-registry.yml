@@ -6,7 +6,8 @@
 # The registry pulls the image anonymously and compares its io.modelcontextprotocol.server.name
 # label with the server name, case-sensitively, and the io.github.<owner> part must equal the
 # token's repository_owner claim exactly (PILOTAAI). A version can be published once only. If
-# this job fails because the image is still private, make the package public and re-run it.
+# this job fails because the image is still private, scripts/bootstrap-release.sh <tag> names the
+# page that makes it public, waits for it, and re-runs this job.
 #
 # One-time setup by the repository owner:
 #   - A GitHub environment named `mcp-registry`, with deployment tags limited to v*.
@@ -51,7 +52,7 @@ jobs:
           # Anonymous, as the registry pulls it; the registry reads the linux/amd64 variant.
           if ! labels=$(docker buildx imagetools inspect "$image" \
             --format '{{ json (index .Image "linux/amd64").Config.Labels }}'); then
-            echo "::error::$image cannot be pulled anonymously. Make the GHCR package public, then re-run this job."
+            echo "::error::$image cannot be pulled anonymously. Make the GHCR package public and re-run this job: scripts/bootstrap-release.sh $GITHUB_REF_NAME does both."
             exit 1
           fi
           label=$(jq -r '."io.modelcontextprotocol.server.name"' <<< "$labels")

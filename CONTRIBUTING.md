@@ -63,3 +63,14 @@ Edit the example, not the README copy: `readme-examples.test.ts` fails when they
 Changes to exclusion constraints, RLS, identity/idempotency, retention, iCalendar trust boundaries,
 protocol error contracts, or release automation require a security review; while the project has
 one maintainer, GOVERNANCE.md's single-maintainer rule applies.
+
+## Releases
+
+Merging a version releases it. A release pull request sets the version with
+`npm version <version> --no-git-tag-version`, updates `server.json` (its version and image tag), and
+dates the version's `CHANGELOG.md` heading. Once it is on `main`, `tag-release.yml` creates the
+`v<version>` tag and starts `release.yml` (the suite, then npm and the GitHub release) and
+`image.yml` (the image, then the MCP Registry). npm holds each staged version until a maintainer
+approves it with two-factor authentication; the Release run's summary gives the command. When a run
+needs a step npm or GitHub keeps for a person (the first npm version, the npm trusted publisher, the
+image's visibility), the failing job names `scripts/bootstrap-release.sh <tag>`.

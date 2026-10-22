@@ -8,6 +8,9 @@
 #   scripts/configure-github.sh                  apply
 #   scripts/configure-github.sh --site-secrets   only replace the Cloudflare secrets, after
 #                                                checking them with Cloudflare
+#   scripts/configure-github.sh --require-approval
+#                                                also make you approve each run of the npm and
+#                                                mcp-registry environments
 #
 # Needs bash 3.2 or newer, curl, jq, and gh logged in as an admin of the repository.
 # Environment:
@@ -77,14 +80,16 @@ BRANCH_RULESET='Protect main'
 TAG_RULESET='Release tags'
 
 usage() {
-  sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 DRY_RUN=0
 SITE_SECRETS_ONLY=0
+REQUIRE_APPROVAL=0
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
+    --require-approval) REQUIRE_APPROVAL=1 ;;
     --site-secrets) SITE_SECRETS_ONLY=1 ;;
     -h | --help)
       usage
@@ -191,7 +196,8 @@ preflight() {
   fi
   command -v gh >/dev/null 2>&1 || die 'gh is required (https://cli.github.com)'
 
-  # The required reviewer on the npm and mcp-registry environments is whoever runs this.
+  # With --require-approval, the required reviewer on the npm and mcp-registry environments is
+  # whoever runs this.
   REVIEWER_ID=$(gh api user -H "X-GitHub-Api-Version: $API_VERSION" --jq .id)
   REVIEWER_LOGIN=$(gh api user -H "X-GitHub-Api-Version: $API_VERSION" --jq .login)
   case "$REVIEWER_ID" in
@@ -382,17 +388,24 @@ configure_site_secrets() {
 
 # 2. Deployment environments. Each one is limited to the refs its workflow runs on.
 configure_environments() {
-  local me
+  local reviewers='[]'
   step '2. Environments'
-  me=$(jq -n --argjson id "$REVIEWER_ID" '[{type: "User", id: $id}]')
+  # Merging a dated version to main releases it (tag-release.yml), so by default no run waits for
+  # a reviewer: the version went through a pull request into main, release.yml and image.yml refuse
+  # a tag that is not that version on main (check-release-tag.sh), and npm still holds each version
+  # until a maintainer approves it with two-factor authentication (GOVERNANCE.md, Releases).
+  # --require-approval adds you as a required reviewer of both environments anyway.
+  if [ "$REQUIRE_APPROVAL" -eq 1 ]; then
+    reviewers=$(jq -n --argjson id "$REVIEWER_ID" '[{type: "User", id: $id}]')
+  fi
 
   # npm: release.yml's "Stage on npm" job. It runs on v* tags and stages the package with a
-  # short-lived OIDC credential, so a person approves each run before it can stage.
-  configure_environment npm "$me" tag 'v*'
+  # short-lived OIDC credential.
+  configure_environment npm "$reviewers" tag 'v*'
 
   # mcp-registry: mcp-registry.yml's publish job, called by image.yml for the same v* tag. A
-  # registry version can be published once only, so a person approves it too.
-  configure_environment mcp-registry "$me" tag 'v*'
+  # registry version can be published once only; it names the image this tag pushed.
+  configure_environment mcp-registry "$reviewers" tag 'v*'
 
   # site: site.yml's deploy job, on a push to main or a manual run on main. No reviewer: the
   # change already went through a pull request into main.
@@ -514,16 +527,23 @@ configure_branch_ruleset() {
 configure_tag_ruleset() {
   step "4. Ruleset '$TAG_RULESET' (refs/tags/v*)"
   # A v* tag starts release.yml and image.yml, which stage the npm package and push the image.
-  # GOVERNANCE.md says releases come only from a protected v<version> tag. Only the admin role
-  # may create, move or delete one. Tag rulesets allow no "pull requests only" mode, so the
-  # bypass is "always".
+  # GOVERNANCE.md says releases come only from a protected v<version> tag. Once a v* tag exists,
+  # only the admin role may move or delete it. Tag rulesets allow no "pull requests only" mode, so
+  # the bypass is "always".
+  #
+  # Creating one is not restricted: tag-release.yml creates the tag of a merged version with the
+  # workflow's GITHUB_TOKEN, and the REST docs list no bypass actor that names that token, so a
+  # "creation" rule would refuse it. A tag anyone with write access creates by hand starts nothing
+  # that a merged version does not: release.yml and image.yml refuse a tag that is not
+  # v<package.json version> on a commit on main with a dated CHANGELOG.md heading
+  # (scripts/check-release-tag.sh).
   upsert_ruleset tag "$TAG_RULESET" "$(jq -n --arg name "$TAG_RULESET" --argjson role "$ADMIN_ROLE_ID" '{
     name: $name,
     target: "tag",
     enforcement: "active",
     bypass_actors: [{actor_id: $role, actor_type: "RepositoryRole", bypass_mode: "always"}],
     conditions: {ref_name: {include: ["refs/tags/v*"], exclude: []}},
-    rules: [{type: "creation"}, {type: "update"}, {type: "deletion"}]
+    rules: [{type: "update"}, {type: "deletion"}]
   }')" || die "$RULESET_ERROR"
   verify_bypass "$RULESET_ID" always
 }
@@ -570,37 +590,19 @@ print_checklist() {
     (gh repo edit $OWNER/$REPO --enable-discussions does it through a has_discussions field
     that gh 2.83.2 sends to the same endpoint, outside the documented body.)
 
-[ ] Make the image public once the first v* tag has pushed it. New GHCR packages are private,
-    the MCP Registry pulls the image anonymously, and the REST API has no endpoint that changes
-    a package's visibility (it can only list, get, delete and restore packages). In the UI:
-      https://github.com/orgs/$OWNER/packages/container/package/$REPO
-      Package settings > Danger Zone > Change visibility > Public
-    This cannot be undone. If Public is not offered, allow public packages first: organization
-    Settings > Packages > Package creation > Public. Best done while that tag's Image run waits
-    for your mcp-registry approval: approve after the change and the "MCP Registry" job passes.
-    If it already failed on the private image, re-run that job.
-
-[ ] Stage the first npm version yourself, from your own npm session (npm login, with 2FA).
-    A trusted publisher is configured on an existing package's settings page, so the first
-    version cannot come from release.yml. From a clean checkout of the commit you will tag,
-    with npm 11.15.0 or newer (the version release.yml requires for npm stage):
-      npm ci && npm run typecheck && npm test      (builds and verifies dist/)
-      cd dist && npm pack --ignore-scripts
-      npm stage publish ./slotlock-<version>.tgz --access public
-      npm stage approve <stage-id>                 (asks for your 2FA code)
-    npm keeps one version index for staged and published versions, so the Release run for that
-    version's tag cannot stage it again; expect its "Stage on npm" job to fail that one time.
-
-[ ] Create the npm trusted publisher for the package slotlock (npm org pylotahq), shortly
-    before you push the next v* tag: npm expires a new configuration that has no successful
-    publish within 2 days.
-      npmjs.com > Packages > slotlock > Settings > Trusted publishing > GitHub Actions
-      Organization or user: $OWNER
-      Repository:           $REPO
-      Workflow filename:    release.yml
-      Environment name:     npm
-    Leave direct "npm publish" off. release.yml only stages, and npm stage publish is always
-    allowed for a trusted publisher.
+[ ] Releases: merging a version to main releases it. tag-release.yml tags a package.json version
+    with a dated CHANGELOG.md heading and starts Release (npm, then the GitHub release) and Image
+    (GHCR, then the MCP Registry). Each staged npm version waits for your two-factor approval
+    (GOVERNANCE.md, Releases); the Release run's summary gives the npm stage approve command.
+    npm and GitHub keep three first-time steps for a person, and the run that needs one says so:
+      scripts/bootstrap-release.sh <tag>
+    - first release: puts the first version on npm from your npm session (npm accepts a trusted
+      publisher only for a package that exists), and waits while you make the GHCR image public
+      (GitHub has no API for it; the MCP Registry pulls anonymously). Then it re-runs both runs.
+    - second release: creates the npm trusted publisher (release.yml, environment npm, stage
+      only). npm expires one that has not published within 2 days, so it is created when a
+      version is waiting, and the re-run publishes it.
+    Run this script before the first release merges: it lets tag-release.yml create v* tags.
 EOF
   if [ "${SITE_SECRETS_SKIPPED:-0}" = 1 ]; then
     cat <<EOF

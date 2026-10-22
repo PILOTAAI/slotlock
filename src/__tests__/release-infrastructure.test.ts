@@ -1,9 +1,18 @@
 // The release and self-host files agree with each other and with the code: every GitHub Action is
 // pinned to a commit with its version beside it, every base image to a digest, server.json names
-// what the Dockerfile labels and what the CLI reads, and the DCO and release-tag scripts accept and
-// refuse what their workflows rely on.
+// what the Dockerfile labels and what the CLI reads, and the DCO, release-tag, release-planning and
+// bootstrap scripts accept and refuse what their workflows rely on.
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -304,5 +313,335 @@ describe.skipIf(!hasJq)('release tag check', () => {
     const repo = release('Unreleased');
     repo.git('tag', 'v1.2.3');
     expect(repo.script('check-release-tag.sh', 'v1.2.3').stderr).toMatch(/no dated heading/);
+  });
+
+  it('refuses a checkout that is not the commit the tag names', () => {
+    // A dispatch on a branch called v1.2.3 checks out the branch while the tag sits on main.
+    const repo = release();
+    const tagged = repo.git('rev-parse', 'HEAD');
+    repo.git('tag', 'v1.2.3');
+    repo.git('checkout', '--quiet', '-b', 'v1.2.3-branch');
+    const branch = repo.commit('not what the tag names');
+    const result = repo.script('check-release-tag.sh', 'v1.2.3');
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`The checkout is ${branch}, not ${tagged}`);
+  });
+
+  it('checks a commit before its tag exists, as tag-release.yml does', () => {
+    const repo = release();
+    const head = repo.git('rev-parse', 'HEAD');
+    const result = repo.script('check-release-tag.sh', 'v1.2.3', '--commit', head);
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(`${head} is on main`);
+  });
+
+  it('refuses a commit that is not on main before it is tagged', () => {
+    const repo = release();
+    repo.git('checkout', '--quiet', '-b', 'side');
+    const side = repo.commit('unmerged');
+    const result = repo.script('check-release-tag.sh', 'v1.2.3', '--commit', side);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`Commit ${side} is not on main`);
+  });
+
+  describe('release planning', () => {
+    const plan = (repo: ReturnType<typeof release>) =>
+      repo.script('plan-release.sh', repo.git('rev-parse', 'HEAD'));
+
+    it('releases a dated version that has no tag yet', () => {
+      const result = plan(release());
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toBe('tag=v1.2.3\nrelease=true\n');
+    });
+
+    it('skips a version that is already tagged', () => {
+      const repo = release();
+      repo.git('tag', 'v1.2.3');
+      const result = plan(repo);
+      expect(result.status).toBe(0);
+      expect(result.stdout).toBe('tag=v1.2.3\nrelease=false\n');
+      expect(result.stderr).toContain('v1.2.3 already exists');
+    });
+
+    it('skips a version whose CHANGELOG heading is not dated yet', () => {
+      const result = plan(release('Unreleased'));
+      expect(result.status).toBe(0);
+      expect(result.stdout).toBe('tag=v1.2.3\nrelease=false\n');
+      expect(result.stderr).toContain('does not date 1.2.3 yet');
+    });
+
+    it('fails a dated version that fails a release check instead of skipping it', () => {
+      const repo = release();
+      writeFileSync(
+        join(repo.cwd, 'server.json'),
+        JSON.stringify({
+          version: '1.2.2',
+          packages: [{ identifier: 'ghcr.io/pilotaai/slotlock:1.2.2' }],
+        }),
+      );
+      repo.git('add', '.');
+      const stale = repo.commit('server.json left at 1.2.2');
+      repo.git('update-ref', 'refs/remotes/origin/main', stale);
+      const result = plan(repo);
+      expect(result.status).toBe(1);
+      expect(result.stdout).not.toContain('release=true');
+      expect(result.stderr).toContain('server.json version is not 1.2.3');
+    });
+
+    it('fails a dated version on a commit that is not on main', () => {
+      const repo = release();
+      repo.git('checkout', '--quiet', '-b', 'side');
+      repo.commit('unmerged');
+      const result = plan(repo);
+      expect(result.status).toBe(1);
+      expect(result.stdout).not.toContain('release=true');
+      expect(result.stderr).toContain('is not on main');
+    });
+  });
+});
+
+describe('release automation', () => {
+  const workflow = (file: string) => read(join('.github', 'workflows', file));
+
+  it('tags a merged version on main and starts both release workflows on the tag', () => {
+    const text = workflow('tag-release.yml');
+    expect(text).toMatch(/^on:\n {2}push:\n {4}branches: \[main\]\n {2}workflow_dispatch:\n/m);
+    expect(text).toContain("if: github.ref == 'refs/heads/main'");
+    expect(text).toMatch(/permissions:\n\s+# .*\n\s+contents: write\n\s+# .*\n\s+actions: write\n/);
+    expect(text).toContain('scripts/plan-release.sh "$GITHUB_SHA" >> "$GITHUB_OUTPUT"');
+    expect(text).toContain("if: steps.plan.outputs.release == 'true'");
+    const started = [
+      ...text.matchAll(/gh workflow run (\S+) --repo "\$GITHUB_REPOSITORY" --ref "\$TAG"/g),
+    ].map((match) => match[1] as string);
+    expect(started).toEqual(['release.yml', 'image.yml']);
+    for (const file of started) {
+      // A tag pushed with GITHUB_TOKEN starts no workflow, so each one is dispatched on the tag.
+      expect(workflow(file), file).toMatch(
+        /^on:\n {2}push:\n {4}tags: \['v\*'\]\n(?: {2}#.*\n)* {2}workflow_dispatch:\n/m,
+      );
+      // A dispatch on any other ref fails here: its name is not v<package.json version>.
+      expect(workflow(file), file).toContain(
+        'run: scripts/check-release-tag.sh "$GITHUB_REF_NAME"',
+      );
+    }
+  });
+
+  it('only stages on npm, and asks for the bootstrap when npm needs a person', () => {
+    const text = workflow('release.yml');
+    const stage = text.slice(text.indexOf('\n  stage:\n'), text.indexOf('\n  github-release:\n'));
+    expect(stage).toContain('environment: npm');
+    expect(stage).toContain('id-token: write');
+    expect(stage).toContain('npm stage publish "./$TARBALL" --provenance --access public');
+    expect(stage).toContain('scripts/bootstrap-release.sh $GITHUB_REF_NAME');
+    // GOVERNANCE.md, Releases: a maintainer approves each version with two-factor authentication.
+    for (const { file, text: body } of workflows) {
+      expect(body, file).not.toMatch(/npm (?:publish|dist-tag)\b/);
+    }
+  });
+
+  it('names the image by its tag however the run started', () => {
+    const text = workflow('image.yml');
+    expect(text).toContain('type=semver,pattern={{version}},value=${{ github.ref_name }}');
+    expect(text).toContain(
+      'type=semver,pattern={{major}}.{{minor}},value=${{ github.ref_name }}',
+    );
+  });
+});
+
+interface DryRunRequest {
+  method: string;
+  path: string;
+  body: {
+    target?: string;
+    reviewers?: unknown[];
+    rules?: { type: string }[];
+    conditions?: { ref_name: { include: string[] } };
+  };
+}
+
+describe.skipIf(!hasJq)('GitHub configuration', () => {
+  function dryRun(...args: string[]): DryRunRequest[] {
+    const result = spawnSync(
+      'bash',
+      [join(root, 'scripts', 'configure-github.sh'), '--dry-run', ...args],
+      { encoding: 'utf8', env: { PATH: process.env.PATH ?? '', SKIP_SITE_SECRETS: '1' } },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    return [...result.stdout.matchAll(/^> (PUT|POST) \/(\S+)\n(\{[\s\S]*?\n\})$/gm)].map(
+      ([, method = '', path = '', body = '']) => ({
+        method,
+        path,
+        body: JSON.parse(body) as DryRunRequest['body'],
+      }),
+    );
+  }
+  const environment = (requests: DryRunRequest[], name: string) =>
+    requests.find(
+      (request) =>
+        request.method === 'PUT' &&
+        request.path === `repos/PILOTAAI/slotlock/environments/${name}`,
+    )?.body;
+
+  it('lets tag-release.yml create release tags, which then only an admin can move or delete', () => {
+    const tags = dryRun().find(
+      (request) => request.path.endsWith('/rulesets') && request.body.target === 'tag',
+    )?.body;
+    expect(tags?.conditions?.ref_name.include).toEqual(['refs/tags/v*']);
+    expect(tags?.rules?.map((rule) => rule.type).sort()).toEqual(['deletion', 'update']);
+  });
+
+  it('makes a release wait for no reviewer unless asked to', () => {
+    const plain = dryRun();
+    expect(environment(plain, 'npm')?.reviewers).toEqual([]);
+    expect(environment(plain, 'mcp-registry')?.reviewers).toEqual([]);
+    const approved = dryRun('--require-approval');
+    expect(environment(approved, 'npm')?.reviewers).toEqual([{ type: 'User', id: 0 }]);
+    expect(environment(approved, 'mcp-registry')?.reviewers).toEqual([{ type: 'User', id: 0 }]);
+  });
+});
+
+describe.skipIf(!hasJq)('release bootstrap', () => {
+  // Stand-ins for npm, gh and curl: each logs its arguments and answers as the scenario says.
+  const stubs: Record<string, string> = {
+    npm: `case "$*" in
+  --version) echo "$STUB_NPM_VERSION" ;;
+  'view slotlock@1.2.3 version') [ "$STUB_VERSION_ON_NPM" = 1 ] && echo 1.2.3 || exit 1 ;;
+  'view slotlock version') [ "$STUB_PACKAGE_ON_NPM" = 1 ] && echo 1.2.2 || exit 1 ;;
+  whoami) echo ada ;;
+  'stage list slotlock') ;;
+  'stage publish '*) echo '+ slotlock@1.2.3 (staged with id stage-1)' ;;
+  'stage approve stage-1') ;;
+  'trust list slotlock --json') echo '[]' ;;
+  'trust github '*) ;;
+  *) echo "unexpected: npm $*" >&2; exit 99 ;;
+esac`,
+    gh: `case "$*" in
+  'run list '*'--workflow release.yml '*) echo '11 completed failure' ;;
+  'run list '*'--workflow image.yml '*) echo '22 completed failure' ;;
+  'run download 11 '*) for last; do :; done; cp "$STUB_ARTIFACT"/* "$last" ;;
+  'run view 22 '*) echo "$STUB_IMAGE_JOB" ;;
+  'run rerun '*) ;;
+  *) echo "unexpected: gh $*" >&2; exit 99 ;;
+esac`,
+    curl: `case "$*" in
+  *ghcr.io/token*) [ "$STUB_IMAGE_PUBLIC" = 1 ] && echo '{"token":"anonymous"}' || exit 22 ;;
+  *ghcr.io/v2/*) [ "$STUB_IMAGE_PUBLIC" = 1 ] || exit 22 ;;
+  *) echo "unexpected: curl $*" >&2; exit 99 ;;
+esac`,
+  };
+
+  function bootstrap(scenario: Record<string, string>, checksum?: string) {
+    const dir = mkdtempSync(join(tmpdir(), 'slotlock-bootstrap-'));
+    scratch.push(dir);
+    const bin = join(dir, 'bin');
+    const artifact = join(dir, 'artifact');
+    const log = join(dir, 'log');
+    for (const path of [bin, artifact, log, join(dir, 'package')]) mkdirSync(path);
+    for (const [name, body] of Object.entries(stubs)) {
+      writeFileSync(
+        join(bin, name),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> "$STUB_LOG/${name}.log"\n${body}\n`,
+        { mode: 0o755 },
+      );
+    }
+    // The npm-package artifact a Release run uploads: the tarball and its SHA256SUMS.
+    writeFileSync(
+      join(dir, 'package', 'package.json'),
+      JSON.stringify({ name: 'slotlock', version: '1.2.3' }),
+    );
+    const tarball = join(artifact, 'slotlock-1.2.3.tgz');
+    execFileSync('tar', ['-czf', tarball, '-C', dir, 'package'], {
+      env: { ...process.env, COPYFILE_DISABLE: '1' },
+    });
+    const sum = checksum ?? createHash('sha256').update(readFileSync(tarball)).digest('hex');
+    writeFileSync(join(artifact, 'SHA256SUMS'), `${sum}  slotlock-1.2.3.tgz\n`);
+    const result = spawnSync('bash', [join(root, 'scripts', 'bootstrap-release.sh'), 'v1.2.3'], {
+      encoding: 'utf8',
+      input: '',
+      env: {
+        PATH: `${bin}:${process.env.PATH ?? ''}`,
+        STUB_LOG: log,
+        STUB_ARTIFACT: artifact,
+        STUB_NPM_VERSION: '11.19.0',
+        STUB_IMAGE_PUBLIC: '1',
+        STUB_IMAGE_JOB: 'success',
+        ...scenario,
+      },
+    });
+    const calls = (name: string) =>
+      existsSync(join(log, `${name}.log`))
+        ? readFileSync(join(log, `${name}.log`), 'utf8').trim().split('\n')
+        : [];
+    return { ...result, npm: calls('npm'), gh: calls('gh') };
+  }
+  const rerun = (id: number) => `run rerun ${id} --failed --repo PILOTAAI/slotlock`;
+
+  it('puts the first version on npm from the tested tarball, with no trusted publisher yet', () => {
+    const run = bootstrap({});
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.npm).toContainEqual(
+      expect.stringMatching(/^stage publish \S+\/slotlock-1\.2\.3\.tgz --access public --tag latest$/),
+    );
+    expect(run.npm).toContain('stage approve stage-1');
+    // npm expires a trusted publisher that has not published within 2 days.
+    expect(run.npm.filter((call) => call.startsWith('trust '))).toEqual([]);
+    expect(run.gh).toContain(rerun(11));
+    expect(run.gh).toContain(rerun(22));
+  });
+
+  it('creates the stage-only trusted publisher when a later version is waiting', () => {
+    const run = bootstrap({ STUB_PACKAGE_ON_NPM: '1' });
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.npm).toContain(
+      'trust github slotlock --file release.yml --repository PILOTAAI/slotlock --environment npm --allow-stage-publish',
+    );
+    expect(run.npm.filter((call) => call.startsWith('stage '))).toEqual([]);
+    expect(run.gh).toContain(rerun(11));
+  });
+
+  it('leaves npm alone for a version already there', () => {
+    const run = bootstrap({ STUB_PACKAGE_ON_NPM: '1', STUB_VERSION_ON_NPM: '1' });
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.npm.filter((call) => /^(?:stage|trust|publish) /.test(call))).toEqual([]);
+  });
+
+  it("refuses a tarball that does not match its run's checksum", () => {
+    const run = bootstrap({}, '0'.repeat(64));
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain('does not match its SHA256SUMS');
+    expect(run.npm.filter((call) => call.startsWith('stage '))).toEqual([]);
+    expect(run.gh).not.toContain(rerun(11));
+  });
+
+  it('stops at a private image, naming the page that makes it public', () => {
+    const run = bootstrap({
+      STUB_PACKAGE_ON_NPM: '1',
+      STUB_VERSION_ON_NPM: '1',
+      STUB_IMAGE_PUBLIC: '0',
+    });
+    expect(run.status).toBe(1);
+    expect(run.stdout).toContain('https://github.com/orgs/PILOTAAI/packages/container/package/slotlock');
+    expect(run.stderr).toContain('stopped before the image was public');
+    expect(run.gh).not.toContain(rerun(22));
+  });
+
+  it('re-runs an Image run whose image job failed, without asking about visibility', () => {
+    const run = bootstrap({
+      STUB_PACKAGE_ON_NPM: '1',
+      STUB_VERSION_ON_NPM: '1',
+      STUB_IMAGE_PUBLIC: '0',
+      STUB_IMAGE_JOB: 'failure',
+    });
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.stdout).toContain('did not push the image');
+    expect(run.gh).toContain(rerun(22));
+  });
+
+  it('refuses an npm without npm stage and npm trust', () => {
+    const run = bootstrap({ STUB_NPM_VERSION: '11.14.2' });
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain('npm 11.14.2 has no npm stage or npm trust');
+    expect(run.gh).toEqual([]);
   });
 });
