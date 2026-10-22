@@ -71,14 +71,17 @@ that section becomes the release notes.
 
 To release, run **Actions > Release a version** with the version (for example `0.1.1`). It sets the
 version in `package.json`, `package-lock.json`, `server.json` and `slotlock.manifest.json` and dates
-the `## Unreleased` heading (`scripts/prepare-release.sh`), opens the pull request, merges it once CI
-and DCO pass, and starts `tag-release.yml`, which tags the release commit. The tag starts
+the `## Unreleased` heading (`scripts/prepare-release.sh`) and opens the pull request. GitHub holds
+the checks of a pull request a workflow opens until someone with write access approves them: open it
+and click **Approve workflows to run**. The run then merges it once CI and DCO pass on it, and starts
+`tag-release.yml`, which tags the release commit. The tag starts
 `release.yml` (the suite, then npm and the GitHub release) and `image.yml` (the image, then the MCP
 Registry). npm holds each staged version until a maintainer approves it with two-factor
 authentication (GOVERNANCE.md); the Release run's summary gives the command. A version merged to
 `main` by hand, with its heading dated, is released the same way. After a failed run, run it again
-with the same version: it replaces the release branch the failed run left and reuses its pull
-request (`scripts/open-release-pr.sh`).
+with the same version: it keeps the release branch the failed run left when that already holds this
+release, so checks approved there still count, replaces it otherwise, and reuses its pull request
+(`scripts/open-release-pr.sh`).
 
 GitHub lets a workflow open pull requests only once an admin allows it (Settings > Actions >
 General > Workflow permissions); `scripts/configure-github.sh` sets it, and the run says so when it

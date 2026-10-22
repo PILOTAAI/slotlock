@@ -4,8 +4,6 @@ name: DCO
 
 on:
   pull_request:
-  # release-version.yml starts it on a release branch: its GITHUB_TOKEN pull request starts nothing.
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -28,12 +26,8 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      # The SHAs travel through the environment, never spliced into the script. A manual run has no
-      # pull request: it checks the branch's commits since it left main.
-      - run: |
-          base=${BASE_SHA:-$(git merge-base origin/main HEAD)}
-          head=${HEAD_SHA:-$(git rev-parse HEAD)}
-          scripts/check-dco.sh "$base" "$head"
+      # The SHAs travel through the environment, never spliced into the script.
+      - run: scripts/check-dco.sh "$BASE_SHA" "$HEAD_SHA"
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
