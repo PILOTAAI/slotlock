@@ -5,9 +5,6 @@ reservable, answers "when is this free?" from weekly availability rules, and let
 double bookings, however many writers race. Agents call it over MCP or A2A; your code calls it as a
 TypeScript library.
 
-> **Status: pre-release.** 0.1.0 is not on npm yet. Build it from this repository:
-> `npm ci && npm run build`, then `npm install <path-to>/dist` in your project.
-
 ## Why it is built for agents
 
 - Resources own calendars, not users, and the tenant comes only from the authenticated caller.
@@ -58,8 +55,9 @@ slotlock hours clear --all    # back to SLOTLOCK_AVAILABILITY
 
 ### Without Docker
 
-From a clone, with Node.js 22.12+ and PostgreSQL 16, build once and run each command as
-`node dist/cli.js` (a clone does not put `slotlock` on your `PATH`). Use two roles, as Compose does:
+With Node.js 22.12+ and PostgreSQL 16, run each command as `npx slotlock` after
+`npm install slotlock postgres`, or from a clone, built once, as `node dist/cli.js` (a clone does not
+put `slotlock` on your `PATH`). Use two roles, as Compose does:
 the server connects as a role that owns nothing and cannot bypass row-level security, and `migrate`
 connects as the database owner and grants that role what it needs. `serve` refuses to start as a
 superuser or a `BYPASSRLS` role, which row-level security does not confine.

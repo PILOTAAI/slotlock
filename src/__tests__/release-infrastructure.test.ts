@@ -1102,3 +1102,180 @@ esac`,
     }
   });
 });
+describe.skipIf(!hasJq)('release preparation', () => {
+  const server = (version: string) =>
+    `${JSON.stringify(
+      {
+        name: 'io.github.PILOTAAI/slotlock',
+        version,
+        packages: [{ registryType: 'oci', identifier: `ghcr.io/pilotaai/slotlock:${version}` }],
+      },
+      null,
+      2,
+    )}\n`;
+  const changelog = (unreleased = '### Changed\n\n- Something users will notice.\n') =>
+    `# Changelog\n\n## Unreleased\n\n${unreleased}\n## 1.2.3 - 2026-10-09\n\n- The last release.\n`;
+
+  /** A repository with v1.2.3 tagged and every copy of the version at VERSION. */
+  function project(files: Record<string, string> = {}, version = '1.2.3') {
+    const repo = repository();
+    const all: Record<string, string> = {
+      'package.json': `${JSON.stringify({ name: 'slotlock', version }, null, 2)}\n`,
+      'package-lock.json': `${JSON.stringify(
+        {
+          name: 'slotlock',
+          version,
+          lockfileVersion: 3,
+          requires: true,
+          packages: { '': { name: 'slotlock', version } },
+        },
+        null,
+        2,
+      )}\n`,
+      'server.json': server(version),
+      'slotlock.manifest.json': `${JSON.stringify({ name: 'slotlock', version, capabilities: [] }, null, 2)}\n`,
+      'CHANGELOG.md': changelog(),
+      ...files,
+    };
+    for (const [path, text] of Object.entries(all)) writeFileSync(join(repo.cwd, path), text);
+    repo.git('add', '.');
+    repo.commit('release 1.2.3');
+    repo.git('tag', 'v1.2.3');
+    return repo;
+  }
+  const contents = (repo: ReturnType<typeof project>, path: string) =>
+    readFileSync(join(repo.cwd, path), 'utf8');
+  const today = new Date().toISOString().slice(0, 10);
+
+  it('moves every copy of the version and dates the Unreleased notes, changing nothing else', () => {
+    const repo = project();
+    const before = {
+      server: contents(repo, 'server.json'),
+      manifest: contents(repo, 'slotlock.manifest.json'),
+      changelog: contents(repo, 'CHANGELOG.md'),
+    };
+    const result = repo.script('prepare-release.sh', '1.2.4');
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+    expect(JSON.parse(contents(repo, 'package.json')).version).toBe('1.2.4');
+    const lock = JSON.parse(contents(repo, 'package-lock.json'));
+    expect([lock.version, lock.packages[''].version]).toEqual(['1.2.4', '1.2.4']);
+    // Byte for byte apart from the version: no reformatting rides along.
+    expect(contents(repo, 'server.json')).toBe(before.server.replaceAll('1.2.3', '1.2.4'));
+    expect(contents(repo, 'slotlock.manifest.json')).toBe(before.manifest.replace('1.2.3', '1.2.4'));
+    expect(contents(repo, 'CHANGELOG.md')).toBe(
+      before.changelog.replace('## Unreleased', `## 1.2.4 - ${today}`),
+    );
+    // And the result is a release check-release-tag.sh accepts.
+    repo.git('add', '.');
+    const released = repo.commit('Release 1.2.4');
+    repo.git('update-ref', 'refs/remotes/origin/main', released);
+    expect(repo.script('check-release-tag.sh', 'v1.2.4', '--commit', released).status).toBe(0);
+  });
+
+  it.each([
+    ['1.2.4', true],
+    ['1.3.0', true],
+    ['2.0.0', true],
+    ['1.2.10', true],
+    ['1.2.3', false],
+    ['1.2.2', false],
+    ['1.1.9', false],
+    ['1.2.3-rc.1', false],
+  ])('from 1.2.3, %s is a later version: %s', (version, later) => {
+    const result = project().script('prepare-release.sh', version);
+    expect(result.status, result.stderr).toBe(later ? 0 : 1);
+    if (!later)
+      expect(result.stderr).toContain(`${version} is not later than package.json's 1.2.3`);
+  });
+
+  it('orders prereleases below their release and by name', () => {
+    const prepare = (from: string, to: string) => project({}, from).script('prepare-release.sh', to);
+    for (const [from, to, later] of [
+      ['1.2.4-rc.1', '1.2.4', true],
+      ['1.2.4-rc.1', '1.2.4-rc.2', true],
+      ['1.2.4-rc.2', '1.2.4-rc.1', false],
+      ['1.2.4', '1.2.4-rc.1', false],
+    ] as const) {
+      const result = prepare(from, to);
+      expect(result.status, `${from} -> ${to}: ${result.stderr}`).toBe(later ? 0 : 1);
+    }
+  });
+
+  it('refuses a version that is already tagged', () => {
+    const result = project({}, '1.2.2').script('prepare-release.sh', '1.2.3');
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('v1.2.3 is already tagged');
+  });
+
+  it.each([
+    [
+      'no Unreleased section',
+      '# Changelog\n\n## 1.2.3 - 2026-10-09\n',
+      "has no '## Unreleased' section",
+    ],
+    ['an empty Unreleased section', changelog(''), "'## Unreleased' section is empty"],
+    [
+      'an Unreleased heading with only blank lines',
+      changelog('\n\n'),
+      "'## Unreleased' section is empty",
+    ],
+  ])('refuses %s, and changes no file', (_, text, message) => {
+    const repo = project({ 'CHANGELOG.md': text });
+    const result = repo.script('prepare-release.sh', '1.2.4');
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(message);
+    expect(repo.git('status', '--porcelain')).toBe('');
+  });
+
+  it('refuses a version with a leading v, or one that is not semver', () => {
+    for (const version of ['v1.2.4', '1.2', '1.2.4.5', '1.2.4-']) {
+      const repo = project();
+      const result = repo.script('prepare-release.sh', version);
+      expect(result.status, version).toBe(1);
+      expect(repo.git('status', '--porcelain'), version).toBe('');
+    }
+  });
+});
+
+describe('release button', () => {
+  const workflow = (file: string) => read(join('.github', 'workflows', file));
+
+  it('runs only on demand, on main, with the version passed through the environment', () => {
+    const text = workflow('release-version.yml');
+    expect(text).toMatch(/^on:\n {2}workflow_dispatch:\n {4}inputs:\n {6}version:\n/m);
+    expect(text).toContain("if: github.ref == 'refs/heads/main'");
+    // The input is data: it reaches the shell as an environment variable, never as script text.
+    const inScripts = text
+      .split('\n')
+      .filter((line) => line.includes('${{ inputs.') && !/^\s+(?:VERSION|BRANCH): /.test(line));
+    expect(inScripts).toEqual([]);
+    expect(text).toContain('scripts/prepare-release.sh "$VERSION"');
+  });
+
+  it('runs CI and DCO on the release branch, merges only after both, then starts Tag release', () => {
+    const text = workflow('release-version.yml');
+    const order = [
+      'gh workflow run ci.yml --ref "$BRANCH"',
+      'gh workflow run dco.yml --ref "$BRANCH"',
+      'wait_for ci.yml "$BRANCH"',
+      'wait_for dco.yml "$BRANCH"',
+      'gh pr merge "$PR" --squash --delete-branch',
+      'gh workflow run tag-release.yml --ref main',
+    ].map((line) => text.indexOf(line));
+    expect(order.every((index) => index > 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(text).toContain('gh run watch "$id" --exit-status');
+    for (const permission of ['contents: write', 'pull-requests: write', 'actions: write']) {
+      expect(text).toContain(permission);
+    }
+  });
+
+  it('lets CI and DCO run on a release branch the workflow starts them on', () => {
+    for (const file of ['ci.yml', 'dco.yml']) {
+      expect(workflow(file), file).toMatch(/^on:\n(?: {2}.*\n)* {2}workflow_dispatch:\n/m);
+    }
+    // A manual DCO run has no pull request: it checks the branch's commits since it left main.
+    expect(workflow('dco.yml')).toContain('base=${BASE_SHA:-$(git merge-base origin/main HEAD)}');
+  });
+});
