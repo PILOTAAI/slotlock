@@ -76,7 +76,13 @@ and DCO pass, and starts `tag-release.yml`, which tags the release commit. The t
 `release.yml` (the suite, then npm and the GitHub release) and `image.yml` (the image, then the MCP
 Registry). npm holds each staged version until a maintainer approves it with two-factor
 authentication (GOVERNANCE.md); the Release run's summary gives the command. A version merged to
-`main` by hand, with its heading dated, is released the same way.
+`main` by hand, with its heading dated, is released the same way. After a failed run, run it again
+with the same version: it replaces the release branch the failed run left and reuses its pull
+request (`scripts/open-release-pr.sh`).
+
+GitHub lets a workflow open pull requests only once an admin allows it (Settings > Actions >
+General > Workflow permissions); `scripts/configure-github.sh` sets it, and the run says so when it
+is off.
 
 When a run needs a step npm or GitHub keeps for a person (the first npm version, the npm trusted
 publisher, the image's visibility, and the deploy key `tag-release.yml` pushes tags with), the

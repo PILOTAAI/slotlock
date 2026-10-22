@@ -564,6 +564,8 @@ interface GitHubRequest {
     title?: string;
     key?: string;
     read_only?: boolean;
+    default_workflow_permissions?: string;
+    can_approve_pull_request_reviews?: boolean;
   };
 }
 
@@ -629,10 +631,11 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
     expect(environment(approved, 'mcp-registry')?.reviewers).toEqual([{ type: 'User', id: 0 }]);
   });
 
-  describe.skipIf(!hasSshKeygen)('the tag deploy key', () => {
-    // A stand-in for gh that answers every request configure-github.sh sends, logs each one, and
-    // keeps the deploy key it is sent and the secret value it receives on stdin.
-    const gh = `#!/bin/sh
+  // A stand-in for gh that answers every request configure-github.sh sends, logs each one, and
+  // keeps the deploy key it is sent and the secret value it receives on stdin. With
+  // STUB_WORKFLOW_PERMISSIONS set, it refuses the Actions workflow permissions with that message,
+  // as GitHub does (409) when the organization holds the setting.
+  const gh = `#!/bin/sh
 printf '%s\\n' "$*" >> "$STUB_LOG/gh.log"
 case "$1 $2" in
   'secret set') cat > "$STUB_LOG/secret-$3"; ls "$TMPDIR" > "$STUB_LOG/tmpdir-while-storing"; exit 0 ;;
@@ -650,6 +653,10 @@ for arg; do
 done
 if [ "$method" != GET ]; then
   case " $* " in *' --input - '*) body=$(cat) ;; *) body='' ;; esac
+  if [ "$method $path" = 'PUT repos/PILOTAAI/slotlock/actions/permissions/workflow' ] && [ -n "$STUB_WORKFLOW_PERMISSIONS" ]; then
+    echo "$STUB_WORKFLOW_PERMISSIONS" >&2
+    exit 1
+  fi
   [ "$method $path" = 'POST repos/PILOTAAI/slotlock/keys' ] && printf '%s' "$body" > "$STUB_LOG/key.json"
   echo '{"id":1}'
   exit 0
@@ -665,34 +672,68 @@ case "$path" in
 esac
 `;
 
-    function configure(scenario: { keys: string; secrets: string }, ...args: string[]) {
-      const dir = mkdtempSync(join(tmpdir(), 'slotlock-configure-'));
-      scratch.push(dir);
-      const bin = join(dir, 'bin');
-      const log = join(dir, 'log');
-      const temp = join(dir, 'tmp');
-      for (const path of [bin, log, temp]) mkdirSync(path);
-      writeFileSync(join(bin, 'gh'), gh, { mode: 0o755 });
-      const result = spawnSync('bash', [script, ...args], {
-        encoding: 'utf8',
-        env: {
-          PATH: `${bin}:${process.env.PATH ?? ''}`,
-          TMPDIR: temp,
-          SKIP_SITE_SECRETS: '1',
-          STUB_LOG: log,
-          STUB_KEYS: scenario.keys,
-          STUB_SECRETS: scenario.secrets,
-        },
-      });
-      const calls = readFileSync(join(log, 'gh.log'), 'utf8').trim().split('\n');
-      return { ...result, dir, log, temp, calls };
-    }
-    const none = { keys: '[]', secrets: '{"secrets":[]}' };
-    const present = {
-      keys: '[{"id":7,"title":"slotlock tag-release (GitHub Actions)"}]',
-      secrets: '{"secrets":[{"name":"TAG_RELEASE_DEPLOY_KEY"}]}',
-    };
+  function configure(
+    scenario: { keys: string; secrets: string; workflowPermissions?: string },
+    ...args: string[]
+  ) {
+    const dir = mkdtempSync(join(tmpdir(), 'slotlock-configure-'));
+    scratch.push(dir);
+    const bin = join(dir, 'bin');
+    const log = join(dir, 'log');
+    const temp = join(dir, 'tmp');
+    for (const path of [bin, log, temp]) mkdirSync(path);
+    writeFileSync(join(bin, 'gh'), gh, { mode: 0o755 });
+    const result = spawnSync('bash', [script, ...args], {
+      encoding: 'utf8',
+      env: {
+        PATH: `${bin}:${process.env.PATH ?? ''}`,
+        TMPDIR: temp,
+        SKIP_SITE_SECRETS: '1',
+        STUB_LOG: log,
+        STUB_KEYS: scenario.keys,
+        STUB_SECRETS: scenario.secrets,
+        STUB_WORKFLOW_PERMISSIONS: scenario.workflowPermissions ?? '',
+      },
+    });
+    const calls = readFileSync(join(log, 'gh.log'), 'utf8').trim().split('\n');
+    return { ...result, dir, log, temp, calls };
+  }
+  const none = { keys: '[]', secrets: '{"secrets":[]}' };
+  const present = {
+    keys: '[{"id":7,"title":"slotlock tag-release (GitHub Actions)"}]',
+    secrets: '{"secrets":[{"name":"TAG_RELEASE_DEPLOY_KEY"}]}',
+  };
 
+  it('lets GitHub Actions open pull requests, with GITHUB_TOKEN read-only by default', () => {
+    const permissions = dryRun().find(
+      (request) =>
+        request.method === 'PUT' &&
+        request.path === 'repos/PILOTAAI/slotlock/actions/permissions/workflow',
+    )?.body;
+    expect(permissions).toEqual({
+      default_workflow_permissions: 'read',
+      can_approve_pull_request_reviews: true,
+    });
+  });
+
+  it.skipIf(!hasSshKeygen)(
+    'carries on when the organization holds that setting, and says where to change it',
+    () => {
+      const page = 'https://github.com/organizations/PILOTAAI/settings/actions';
+      const allowed = configure(present);
+      expect(allowed.status, allowed.stderr).toBe(0);
+      expect(allowed.stdout).toContain('may open pull requests');
+      expect(allowed.stdout).not.toContain(page);
+      const held = configure({ ...present, workflowPermissions: 'gh: Conflict (HTTP 409)' });
+      expect(held.status, held.stderr).toBe(0);
+      expect(held.stderr).toContain('refused to let Actions open pull requests: gh: Conflict');
+      expect(held.stdout).toContain(page);
+      // The steps after it still ran.
+      expect(held.stdout).toContain('6. Left for you to do by hand');
+    },
+  );
+
+  describe.skipIf(!hasSshKeygen)('the tag deploy key', () => {
     it('sends GitHub the public half and the environment the private half, and keeps neither', () => {
       const run = configure(none);
       expect(run.status, run.stderr).toBe(0);
@@ -1256,15 +1297,21 @@ describe('release button', () => {
   it('runs CI and DCO on the release branch, merges only after both, then starts Tag release', () => {
     const text = workflow('release-version.yml');
     const order = [
+      'scripts/prepare-release.sh "$VERSION"',
+      'scripts/open-release-pr.sh "$VERSION" >> "$GITHUB_ENV"',
       'gh workflow run ci.yml --ref "$BRANCH"',
       'gh workflow run dco.yml --ref "$BRANCH"',
       'wait_for ci.yml "$BRANCH"',
       'wait_for dco.yml "$BRANCH"',
       'gh pr merge "$PR" --squash --delete-branch',
       'gh workflow run tag-release.yml --ref main',
+      // The merge starts no push workflow, and the site shows the version.
+      'gh workflow run site.yml --ref main',
     ].map((line) => text.indexOf(line));
     expect(order.every((index) => index > 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
+    // Only the runs at this release commit: an earlier run's runs on the branch are at another one.
+    expect(text).toContain('--event workflow_dispatch --commit "$SHA"');
     expect(text).toContain('gh run watch "$id" --exit-status');
     for (const permission of ['contents: write', 'pull-requests: write', 'actions: write']) {
       expect(text).toContain(permission);
@@ -1277,5 +1324,217 @@ describe('release button', () => {
     }
     // A manual DCO run has no pull request: it checks the branch's commits since it left main.
     expect(workflow('dco.yml')).toContain('base=${BASE_SHA:-$(git merge-base origin/main HEAD)}');
+  });
+});
+
+describe('release pull request', () => {
+  const bot = 'github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>';
+  const branch = 'release/v1.2.4';
+  const files = [
+    'package.json',
+    'package-lock.json',
+    'server.json',
+    'slotlock.manifest.json',
+    'CHANGELOG.md',
+  ];
+  // A stand-in for gh: pr list answers with the open pull request's number, or nothing; pr create
+  // opens #52, or fails with STUB_CREATE_ERROR.
+  const gh = `#!/bin/sh
+printf '%s\\n' "$*" >> "$STUB_LOG/gh.log"
+case "$1 $2" in
+  'pr list') if [ -f "$STUB_LOG/created" ]; then echo 52; else printf '%s' "$STUB_OPEN_PR"; fi ;;
+  'pr create')
+    if [ -n "$STUB_CREATE_ERROR" ]; then echo "$STUB_CREATE_ERROR" >&2; exit 1; fi
+    touch "$STUB_LOG/created"
+    echo https://github.com/PILOTAAI/slotlock/pull/52 ;;
+  *) echo "unexpected: gh $*" >&2; exit 99 ;;
+esac
+`;
+
+  // The real git, for a wrapper that stands in front of it.
+  const realGit =
+    (process.env.PATH ?? '')
+      .split(':')
+      .map((dir) => join(dir, 'git'))
+      .find((path) => existsSync(path)) ?? 'git';
+
+  /**
+   * A checkout of main with an origin it pushes to, origin holding `leftover` (commits an earlier
+   * run left on the release branch) and the working tree holding the prepared release of 1.2.4.
+   */
+  function checkout(leftover: { author: string; message: string }[] = []) {
+    const dir = mkdtempSync(join(tmpdir(), 'slotlock-release-pr-'));
+    scratch.push(dir);
+    const origin = join(dir, 'origin.git');
+    const cwd = join(dir, 'work');
+    const bin = join(dir, 'bin');
+    const log = join(dir, 'log');
+    for (const path of [cwd, bin, log]) mkdirSync(path);
+    writeFileSync(join(bin, 'gh'), gh, { mode: 0o755 });
+    const base = {
+      PATH: `${bin}:${process.env.PATH ?? ''}`,
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_NOSYSTEM: '1',
+    };
+    const env = { ...base, GIT_COMMITTER_NAME: 'Ada', GIT_COMMITTER_EMAIL: 'ada@example.com' };
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd, env, encoding: 'utf8', stdio: 'pipe' }).trim();
+    git('init', '--quiet', '--bare', '--initial-branch=main', origin);
+    git('init', '--quiet', '--initial-branch=main');
+    const write = (version: string) => {
+      for (const file of files) writeFileSync(join(cwd, file), `${file} ${version}\n`);
+    };
+    write('1.2.3');
+    git('add', '.');
+    git('commit', '--quiet', '--author=Ada <ada@example.com>', '-m', 'Release 1.2.3');
+    git('remote', 'add', 'origin', origin);
+    git('push', '--quiet', 'origin', 'main');
+    if (leftover.length > 0) {
+      git('switch', '--quiet', '-c', 'leftover');
+      for (const { author, message } of leftover) {
+        git('commit', '--quiet', '--allow-empty', `--author=${author}`, '-m', message);
+      }
+      git('push', '--quiet', 'origin', `leftover:refs/heads/${branch}`);
+      git('switch', '--quiet', 'main');
+      git('branch', '--quiet', '-D', 'leftover');
+    }
+    git('fetch', '--quiet', 'origin');
+    write('1.2.4');
+    const remote = () => git('ls-remote', origin, `refs/heads/${branch}`).split('\t')[0] ?? '';
+    const calls = () =>
+      existsSync(join(log, 'gh.log')) ? readFileSync(join(log, 'gh.log'), 'utf8') : '';
+    // The script runs as release-version.yml runs it: no committer in the environment.
+    const run = (scenario: { openPr?: string; createError?: string } = {}) =>
+      spawnSync('sh', [join(root, 'scripts', 'open-release-pr.sh'), '1.2.4'], {
+        cwd,
+        encoding: 'utf8',
+        env: {
+          ...base,
+          GITHUB_SERVER_URL: 'https://github.com',
+          GITHUB_REPOSITORY: 'PILOTAAI/slotlock',
+          GITHUB_RUN_ID: '9',
+          STUB_LOG: log,
+          STUB_OPEN_PR: scenario.openPr ?? '',
+          STUB_CREATE_ERROR: scenario.createError ?? '',
+        },
+      });
+    return { cwd, origin, bin, git, write, remote, calls, run };
+  }
+
+  it('commits the prepared release on its branch, pushes it and opens its pull request', () => {
+    const repo = checkout();
+    const result = repo.run();
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+    const tip = repo.remote();
+    expect(result.stdout).toBe(`SHA=${tip}\nPR=52\n`);
+    expect(repo.git('log', '-1', '--format=%an <%ae>%n%s%n%b', tip)).toBe(
+      `${bot}\nRelease 1.2.4\nSigned-off-by: ${bot}`,
+    );
+    expect(repo.git('rev-parse', `${tip}^`)).toBe(repo.git('rev-parse', 'origin/main'));
+    expect(repo.git('diff', '--name-only', `${tip}^`, tip).split('\n').sort()).toEqual(
+      [...files].sort(),
+    );
+    expect(repo.calls()).toContain(
+      `pr create --repo PILOTAAI/slotlock --base main --head ${branch} --title Release 1.2.4 --body`,
+    );
+  });
+
+  it('replaces the branch an earlier run left, and reuses its open pull request', () => {
+    const repo = checkout([{ author: bot, message: 'Release 1.2.4' }]);
+    const left = repo.remote();
+    const result = repo.run({ openPr: '41' });
+    expect(result.status, result.stderr).toBe(0);
+    const tip = repo.remote();
+    expect(tip).not.toBe(left);
+    expect(result.stdout).toBe(`SHA=${tip}\nPR=41\n`);
+    expect(result.stderr).toContain(
+      `::notice::Replacing ${branch}, which an earlier run left at ${left}.`,
+    );
+    expect(repo.calls()).not.toContain('pr create');
+  });
+
+  it.each([
+    [
+      'a commit someone else made',
+      [{ author: 'Ada <ada@example.com>', message: 'Release 1.2.4' }],
+    ],
+    ["another version's release commit", [{ author: bot, message: 'Release 1.2.3' }]],
+    [
+      'a commit on top of a release commit',
+      [
+        { author: bot, message: 'Release 1.2.4' },
+        { author: bot, message: 'Release 1.2.4' },
+      ],
+    ],
+  ])('leaves a branch holding %s, and stops', (_, leftover) => {
+    const repo = checkout(leftover);
+    const left = repo.remote();
+    const result = repo.run();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      `::error::${branch} holds commits this workflow did not make.`,
+    );
+    expect(result.stdout).toBe('');
+    expect(repo.remote()).toBe(left);
+    expect(repo.calls()).toBe('');
+  });
+
+  it.each([
+    ['did not exist', []],
+    ['held an earlier run', [{ author: bot, message: 'Release 1.2.4' }]],
+  ])('never overwrites a push that lands after it looked, when the branch %s', (_, leftover) => {
+    const repo = checkout(leftover);
+    const intruder = repo.git('rev-parse', 'origin/main');
+    // Another push lands as this one starts: after the script looked at the branch, before git
+    // reads the remote's refs. (Moved any later, the server refuses even a forced push.)
+    writeFileSync(
+      join(repo.bin, 'git'),
+      [
+        '#!/bin/sh',
+        `[ "$1" != push ] || "${realGit}" --git-dir="${repo.origin}" update-ref refs/heads/${branch} ${intruder}`,
+        `exec "${realGit}" "$@"`,
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    const result = repo.run();
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).toBe('');
+    expect(repo.remote()).toBe(intruder);
+    expect(repo.calls()).toBe('');
+  });
+
+  it('names the setting when Actions may not open pull requests, and recovers once it is on', () => {
+    const repo = checkout();
+    // The message the first real run got, on 2026-10-22.
+    const refusal =
+      'pull request create failed: GraphQL: GitHub Actions is not permitted to create or approve pull requests (createPullRequest)';
+    const refused = repo.run({ createError: refusal });
+    expect(refused.status).toBe(1);
+    expect(refused.stdout).toBe('');
+    expect(refused.stderr).toContain(refusal);
+    expect(refused.stderr).toContain(
+      '::error::GitHub Actions may not open pull requests in PILOTAAI/slotlock.',
+    );
+    expect(refused.stderr).toContain('https://github.com/PILOTAAI/slotlock/settings/actions');
+    expect(refused.stderr).toContain('https://github.com/organizations/PILOTAAI/settings/actions');
+    const left = repo.remote();
+    expect(left).not.toBe('');
+    // Another run, from a fresh checkout of main, once an admin has allowed it.
+    repo.git('switch', '--quiet', 'main');
+    repo.git('branch', '--quiet', '-D', branch);
+    repo.write('1.2.4');
+    const allowed = repo.run();
+    expect(allowed.status, allowed.stderr).toBe(0);
+    expect(allowed.stderr).toContain(`::notice::Replacing ${branch}`);
+    expect(allowed.stdout).toBe(`SHA=${repo.remote()}\nPR=52\n`);
+  });
+
+  it('stops without that hint when opening the pull request fails for another reason', () => {
+    const result = checkout().run({ createError: 'HTTP 502: Bad Gateway' });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('::error::Could not open the pull request for release/v1.2.4.');
+    expect(result.stderr).not.toContain('settings/actions');
   });
 });

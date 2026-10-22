@@ -52,6 +52,8 @@
 #     DeployKey, whose actor_id is null)
 #   https://github.com/peter-evans/create-pull-request/blob/main/docs/concepts-guidelines.md (a push
 #     with a deploy key starts on: push workflows; one with GITHUB_TOKEN does not)
+#   https://docs.github.com/en/rest/actions/permissions#set-default-workflow-permissions-for-a-repository
+#     (can_approve_pull_request_reviews; 409 when the organization prevents the change)
 # Behaviour the REST reference does not cover came from:
 #   https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository
 #   https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets
@@ -617,6 +619,7 @@ configure_tag_ruleset() {
 
 # 5. Repository settings.
 configure_repository() {
+  local out
   step '5. Repository settings'
   # Squash only: main gets one commit per pull request. Its default message lists the branch's
   # commit messages, so their Signed-off-by lines (the DCO record) carry over to main. Merge
@@ -641,6 +644,20 @@ configure_repository() {
   # Topics make the repository findable. This replaces the whole list.
   gh_api PUT "repos/$OWNER/$REPO/topics" "$(jq -n --argjson names "$TOPICS" '{names: $names}')" >/dev/null
   result "topics: $(printf '%s' "$TOPICS" | jq -r 'join(", ")')"
+
+  # GitHub Actions may open pull requests: release-version.yml opens the release's with
+  # GITHUB_TOKEN. GitHub's one switch for it also lets Actions approve a pull request, which adds
+  # nothing while the "Protect main" ruleset requires no approval. GITHUB_TOKEN stays read-only
+  # unless a workflow asks for more. An organization can hold the switch (GitHub answers 409).
+  if out=$(gh_api PUT "repos/$OWNER/$REPO/actions/permissions/workflow" "$(jq -n '{
+      default_workflow_permissions: "read",
+      can_approve_pull_request_reviews: true
+    }')" 2>&1); then
+    result 'GitHub Actions: GITHUB_TOKEN read-only by default; may open pull requests'
+  else
+    ACTIONS_PULL_REQUESTS_SKIPPED=1
+    warn "GitHub refused to let Actions open pull requests: $out"
+  fi
 
   # Discussions: on. MAINTAINERS.md sends questions to "an issue or discussion". The documented
   # "Update a repository" body has no has_discussions field, so it is in the checklist below.
@@ -680,6 +697,17 @@ EOF
       scripts/configure-github.sh --site-secrets
 EOF
   fi
+  if [ "${ACTIONS_PULL_REQUESTS_SKIPPED:-0}" = 1 ]; then
+    cat <<EOF
+
+[ ] Let GitHub Actions open pull requests: GitHub refused it (see the warning above), and Release
+    a version opens the release's pull request with GITHUB_TOKEN. A 409 means the organization
+    holds the setting. In its Settings > Actions > General > Workflow permissions, tick "Allow
+    GitHub Actions to create and approve pull requests":
+    https://github.com/organizations/$OWNER/settings/actions
+    (an enterprise policy can hold that box in turn), then run this script again.
+EOF
+  fi
   if [ "${CODEQL_SKIPPED:-0}" = 1 ]; then
     cat <<EOF
 
@@ -702,6 +730,7 @@ EOF
 
 SITE_SECRETS_SKIPPED=0
 CODEQL_SKIPPED=0
+ACTIONS_PULL_REQUESTS_SKIPPED=0
 # The temporary directory holding a new deploy key, removed however the script ends.
 TAG_KEY_DIR=''
 trap '[ -z "$TAG_KEY_DIR" ] || rm -rf "$TAG_KEY_DIR"' EXIT
