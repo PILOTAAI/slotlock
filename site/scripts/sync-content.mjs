@@ -9,6 +9,7 @@
 //   src/content/docs/docs/*.md        the Starlight pages
 //   src/generated/facts.json          numbers and names the landing page prints
 //   public/schema/manifest.schema.json
+//   public/openapi.json               the REST API, which client generators read
 //
 // Any fact it cannot find fails the build: a renamed constant must be looked at, not guessed.
 import { copyFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -118,6 +119,7 @@ const SITE_LINKS = {
   'SPEC.md': '/docs/specification/',
   'CHANGELOG.md': '/docs/changelog/',
   'slotlock-manifest.schema.json': '/schema/manifest.schema.json',
+  'openapi.json': '/openapi.json',
 };
 
 /** README in-page anchors whose section lives on another docs page (postbuild checks every link). */
@@ -386,6 +388,11 @@ async function main() {
     join(ROOT, 'slotlock-manifest.schema.json'),
     join(SITE, 'public/schema/manifest.schema.json'),
   );
+  const openApi = JSON.parse(await read('openapi.json'));
+  if (openApi.openapi !== '3.1.0' || openApi.servers?.[0]?.url !== '{baseUrl}') {
+    fail('openapi.json is not the repository\'s OpenAPI 3.1 document with a {baseUrl} server');
+  }
+  await copyFile(join(ROOT, 'openapi.json'), join(SITE, 'public/openapi.json'));
 
   await writeFile(join(GENERATED, 'facts.json'), `${JSON.stringify(facts, null, 2)}\n`);
   const { tokensCss } = await import('../src/styles/tokens.mjs');

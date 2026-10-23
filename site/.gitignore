@@ -6,3 +6,4 @@ dist/
 src/content/docs/
 src/generated/
 public/schema/
+public/openapi.json

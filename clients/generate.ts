@@ -599,12 +599,17 @@ function javaOperations(operations: ClientOperation[]): string {
   out.push(
     '',
     '  /**',
-    '   * Runs an operation by its name ({@code slotlock_…}) with its arguments, path parameters included.',
+    '   * Runs an operation by its name with its arguments, path parameters included.',
     '   *',
+    '   * @param operation the operation\'s name, {@code slotlock_…}',
+    '   * @param values its arguments, by name; a null value sends null',
     '   * @return the response body',
     '   * @throws SlotlockException when the server refuses the call',
     '   */',
     '  public abstract Map<String, Object> call(String operation, Map<String, ?> values);',
+    '',
+    '  /** Only {@link SlotlockClient} extends this. */',
+    '  SlotlockOperations() {}',
     '',
     '  private static void putOptional(',
     '      Map<String, Object> values, Map<String, ?> optional, Set<String> names, String operation) {',
@@ -633,13 +638,16 @@ function javaOperations(operations: ClientOperation[]): string {
     ];
     if (path.length + required.length + optional.length > 0) doc.push('   *');
     for (const p of [...path, ...required]) {
-      doc.push(
-        ...wrap(
-          `@param ${camel(p.name)} ${javaDoc(p.description || p.name)}${p.nullable ? ' (may be null)' : ''}`,
-          '   * ',
-        ),
-      );
+      const about = p.description ? javaDoc(p.description) : `{@code ${p.name}}, ${kindName(p.kind)}`;
+      doc.push(...wrap(`@param ${camel(p.name)} ${about}${p.nullable ? ' (may be null)' : ''}`, '   * '));
     }
+    // The overload without optional arguments: the same, less the optional parameter.
+    const shortDoc = [
+      ...doc,
+      '   * @return the response body',
+      '   * @throws SlotlockException when the server refuses the call',
+      '   */',
+    ];
     if (optional.length > 0) {
       const names = optional.map(
         (p) => `{@code ${p.name}} (${kindName(p.kind)}${p.nullable ? ', null clears it' : ''})`,
@@ -666,7 +674,7 @@ function javaOperations(operations: ClientOperation[]): string {
     out.push(`    return call("${operation.id}", values);`, '  }', '');
     if (optional.length > 0) {
       out.push(
-        `  /** {@link #${method}} without optional arguments. */`,
+        ...shortDoc,
         `  public Map<String, Object> ${method}(${params.join(', ')}) {`,
         `    return ${method}(${[...params.map((param) => param.split(' ').pop()), 'null'].join(', ')});`,
         '  }',

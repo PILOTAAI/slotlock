@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <IsTrimmable>true</IsTrimmable>
+    <IsAotCompatible>true</IsAotCompatible>
+    <RootNamespace>Slotlock</RootNamespace>
+    <PackageId>Slotlock.Client</PackageId>
+    <Version>0.1.0</Version>
+    <Description>A client for Slotlock's REST API: calendars AI agents cannot double-book.</Description>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://slotlock.pylota.io</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/PILOTAAI/slotlock</RepositoryUrl>
+    <PackageTags>calendar;booking;agents;mcp;scheduling</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Slotlock.Tests" />
+  </ItemGroup>
+
+</Project>

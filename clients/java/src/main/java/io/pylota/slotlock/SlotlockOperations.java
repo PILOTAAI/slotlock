@@ -33,12 +33,17 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_run_maintenance", new Operation("POST", "/v1/maintenance", List.of(), List.of())));
 
   /**
-   * Runs an operation by its name ({@code slotlock_…}) with its arguments, path parameters included.
+   * Runs an operation by its name with its arguments, path parameters included.
    *
+   * @param operation the operation's name, {@code slotlock_…}
+   * @param values its arguments, by name; a null value sends null
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public abstract Map<String, Object> call(String operation, Map<String, ?> values);
+
+  /** Only {@link SlotlockClient} extends this. */
+  SlotlockOperations() {}
 
   private static void putOptional(
       Map<String, Object> values, Map<String, ?> optional, Set<String> names, String operation) {
@@ -65,7 +70,12 @@ public abstract class SlotlockOperations {
     return call("slotlock_list_resources", values);
   }
 
-  /** {@link #listResources} without optional arguments. */
+  /**
+   * List calendar resources. List resources visible to the authenticated tenant principal.
+   *
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
   public Map<String, Object> listResources() {
     return listResources(null);
   }
@@ -74,7 +84,7 @@ public abstract class SlotlockOperations {
    * Create or update a resource. Create the resource with this external reference, or update its
    * time zone if the tenant already has it. Repeating the call changes nothing more.
    *
-   * @param externalRef external_ref
+   * @param externalRef {@code external_ref}, string
    * @param optional the optional arguments, or null: {@code timezone} (string)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
@@ -86,7 +96,14 @@ public abstract class SlotlockOperations {
     return call("slotlock_create_resource", values);
   }
 
-  /** {@link #createResource} without optional arguments. */
+  /**
+   * Create or update a resource. Create the resource with this external reference, or update its
+   * time zone if the tenant already has it. Repeating the call changes nothing more.
+   *
+   * @param externalRef {@code external_ref}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
   public Map<String, Object> createResource(String externalRef) {
     return createResource(externalRef, null);
   }
@@ -94,9 +111,9 @@ public abstract class SlotlockOperations {
   /**
    * Get free-busy. Return privacy-minimized busy intervals and explicit coverage certainty.
    *
-   * @param resourceIds resource_ids
-   * @param start start
-   * @param end end
+   * @param resourceIds {@code resource_ids}, list of string
+   * @param start {@code start}, string
+   * @param end {@code end}, string
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -112,10 +129,10 @@ public abstract class SlotlockOperations {
    * Find next available interval. Find the earliest certain interval that satisfies the requested
    * duration (up to the 367-day search window, so a multi-month rental slot can be found).
    *
-   * @param resourceIds resource_ids
-   * @param start start
-   * @param end end
-   * @param durationMinutes duration_minutes
+   * @param resourceIds {@code resource_ids}, list of string
+   * @param start {@code start}, string
+   * @param end {@code end}, string
+   * @param durationMinutes {@code duration_minutes}, integer
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -131,9 +148,9 @@ public abstract class SlotlockOperations {
   /**
    * List resource events. List bounded events intersecting a time window.
    *
-   * @param resourceIds resource_ids
-   * @param start start
-   * @param end end
+   * @param resourceIds {@code resource_ids}, list of string
+   * @param start {@code start}, string
+   * @param end {@code end}, string
    * @param optional the optional arguments, or null: {@code cursor} (string), {@code limit}
    * (integer)
    * @return the response body
@@ -148,7 +165,15 @@ public abstract class SlotlockOperations {
     return call("slotlock_list_events", values);
   }
 
-  /** {@link #listEvents} without optional arguments. */
+  /**
+   * List resource events. List bounded events intersecting a time window.
+   *
+   * @param resourceIds {@code resource_ids}, list of string
+   * @param start {@code start}, string
+   * @param end {@code end}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
   public Map<String, Object> listEvents(List<?> resourceIds, String start, String end) {
     return listEvents(resourceIds, start, end, null);
   }
@@ -157,11 +182,11 @@ public abstract class SlotlockOperations {
    * Create resource event. Create an event of up to 3,660 days (a booking, lease or long rental);
    * opaque occurrences use the database overlap arbiter.
    *
-   * @param resourceId resource_id
-   * @param startsAt starts_at
-   * @param endsAt ends_at
-   * @param timezone timezone
-   * @param idempotencyKey idempotency_key
+   * @param resourceId {@code resource_id}, string
+   * @param startsAt {@code starts_at}, string
+   * @param endsAt {@code ends_at}, string
+   * @param timezone {@code timezone}, string
+   * @param idempotencyKey {@code idempotency_key}, string
    * @param optional the optional arguments, or null: {@code title} (string), {@code description}
    * (string), {@code location} (string), {@code organizer} (object), {@code transparency}
    * (string), {@code status} (string), {@code recurrence_rule} (string), {@code attendees} (list
@@ -181,7 +206,18 @@ public abstract class SlotlockOperations {
     return call("slotlock_create_event", values);
   }
 
-  /** {@link #createEvent} without optional arguments. */
+  /**
+   * Create resource event. Create an event of up to 3,660 days (a booking, lease or long rental);
+   * opaque occurrences use the database overlap arbiter.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param startsAt {@code starts_at}, string
+   * @param endsAt {@code ends_at}, string
+   * @param timezone {@code timezone}, string
+   * @param idempotencyKey {@code idempotency_key}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
   public Map<String, Object> createEvent(String resourceId, String startsAt, String endsAt, String timezone, String idempotencyKey) {
     return createEvent(resourceId, startsAt, endsAt, timezone, idempotencyKey, null);
   }
@@ -189,7 +225,7 @@ public abstract class SlotlockOperations {
   /**
    * Get resource event. Read one tenant-scoped event by stable identifier.
    *
-   * @param eventId event_id
+   * @param eventId {@code event_id}, string
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -203,9 +239,9 @@ public abstract class SlotlockOperations {
    * Update resource event. Apply an expected-revision event patch and rematerialize occupancy
    * atomically.
    *
-   * @param eventId event_id
-   * @param expectedRevision expected_revision
-   * @param idempotencyKey idempotency_key
+   * @param eventId {@code event_id}, string
+   * @param expectedRevision {@code expected_revision}, integer
+   * @param idempotencyKey {@code idempotency_key}, string
    * @param optional the optional arguments, or null: {@code resource_id} (string), {@code
    * starts_at} (string), {@code ends_at} (string), {@code timezone} (string), {@code title}
    * (string, null clears it), {@code description} (string, null clears it), {@code location}
@@ -225,7 +261,16 @@ public abstract class SlotlockOperations {
     return call("slotlock_update_event", values);
   }
 
-  /** {@link #updateEvent} without optional arguments. */
+  /**
+   * Update resource event. Apply an expected-revision event patch and rematerialize occupancy
+   * atomically.
+   *
+   * @param eventId {@code event_id}, string
+   * @param expectedRevision {@code expected_revision}, integer
+   * @param idempotencyKey {@code idempotency_key}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
   public Map<String, Object> updateEvent(String eventId, long expectedRevision, String idempotencyKey) {
     return updateEvent(eventId, expectedRevision, idempotencyKey, null);
   }
@@ -234,9 +279,9 @@ public abstract class SlotlockOperations {
    * Delete resource event. Tombstone an event at an expected revision so stale sync cannot
    * resurrect it.
    *
-   * @param eventId event_id
-   * @param expectedRevision expected_revision
-   * @param idempotencyKey idempotency_key
+   * @param eventId {@code event_id}, string
+   * @param expectedRevision {@code expected_revision}, integer
+   * @param idempotencyKey {@code idempotency_key}, string
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -251,7 +296,7 @@ public abstract class SlotlockOperations {
   /**
    * Get a resource. One resource of the tenant, with its own weekly bookable hours.
    *
-   * @param resourceId resource_id
+   * @param resourceId {@code resource_id}, string
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -266,8 +311,8 @@ public abstract class SlotlockOperations {
    * makes it use the server's default; `[]` makes it never bookable. Each rule is weekly with
    * BYDAY, in the resource's time zone: start_minutes after midnight, lasting duration_minutes.
    *
-   * @param resourceId resource_id
-   * @param rules rules (may be null)
+   * @param resourceId {@code resource_id}, string
+   * @param rules {@code rules}, list of object (may be null)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -283,7 +328,7 @@ public abstract class SlotlockOperations {
    * tenant has, as slotlock_set_resource_availability does for one. `null` makes them all use the
    * server's default. Returns how many resources changed.
    *
-   * @param rules rules (may be null)
+   * @param rules {@code rules}, list of object (may be null)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -298,10 +343,10 @@ public abstract class SlotlockOperations {
    * blocks every other booking until it expires (the database clock, ttl_seconds from now), is
    * confirmed, or is released. A taken window answers 409 overlap.
    *
-   * @param resourceId resource_id
-   * @param start start
-   * @param end end
-   * @param ttlSeconds ttl_seconds
+   * @param resourceId {@code resource_id}, string
+   * @param start {@code start}, string
+   * @param end {@code end}, string
+   * @param ttlSeconds {@code ttl_seconds}, integer
    * @param optional the optional arguments, or null: {@code source} (string)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
@@ -316,7 +361,18 @@ public abstract class SlotlockOperations {
     return call("slotlock_acquire_hold", values);
   }
 
-  /** {@link #acquireHold} without optional arguments. */
+  /**
+   * Hold time. Occupy a window without booking it, for example while a customer pays. The hold
+   * blocks every other booking until it expires (the database clock, ttl_seconds from now), is
+   * confirmed, or is released. A taken window answers 409 overlap.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param start {@code start}, string
+   * @param end {@code end}, string
+   * @param ttlSeconds {@code ttl_seconds}, integer
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
   public Map<String, Object> acquireHold(String resourceId, String start, String end, long ttlSeconds) {
     return acquireHold(resourceId, start, end, ttlSeconds, null);
   }
@@ -326,7 +382,7 @@ public abstract class SlotlockOperations {
    * answers the same reservation, so a retry is safe. An expired hold answers 409 hold_expired; a
    * released or unknown one, 404 hold_not_found.
    *
-   * @param holdId hold_id
+   * @param holdId {@code hold_id}, string
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -340,7 +396,7 @@ public abstract class SlotlockOperations {
    * Release a hold. Free a held window. released is false when the hold was already gone:
    * expired, confirmed or released.
    *
-   * @param holdId hold_id
+   * @param holdId {@code hold_id}, string
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -357,11 +413,11 @@ public abstract class SlotlockOperations {
    * leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as
    * well.
    *
-   * @param reservationRef reservation_ref
-   * @param resourceId resource_id
-   * @param start start
-   * @param end end
-   * @param revision revision
+   * @param reservationRef {@code reservation_ref}, string
+   * @param resourceId {@code resource_id}, string
+   * @param start {@code start}, string
+   * @param end {@code end}, string
+   * @param revision {@code revision}, integer
    * @param optional the optional arguments, or null: {@code buffer_after_minutes} (integer),
    * {@code source} (string)
    * @return the response body
@@ -378,7 +434,21 @@ public abstract class SlotlockOperations {
     return call("slotlock_put_reservation", values);
   }
 
-  /** {@link #putReservation} without optional arguments. */
+  /**
+   * Book or move a reservation. Book the reservation with this reference (revision 1), or move it
+   * (the next revision: the current one plus 1). Sending the same reservation at its current
+   * revision again changes nothing (replayed: true). A taken window answers 409 overlap and
+   * leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as
+   * well.
+   *
+   * @param reservationRef {@code reservation_ref}, string
+   * @param resourceId {@code resource_id}, string
+   * @param start {@code start}, string
+   * @param end {@code end}, string
+   * @param revision {@code revision}, integer
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
   public Map<String, Object> putReservation(String reservationRef, String resourceId, String start, String end, long revision) {
     return putReservation(reservationRef, resourceId, start, end, revision, null);
   }
@@ -389,8 +459,8 @@ public abstract class SlotlockOperations {
    * back; repeating the cancel answers cancelled: false. Use a new reference for a new
    * reservation.
    *
-   * @param reservationRef reservation_ref
-   * @param revision revision
+   * @param reservationRef {@code reservation_ref}, string
+   * @param revision {@code revision}, integer
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -407,11 +477,11 @@ public abstract class SlotlockOperations {
    * unproven, not free, until every source a resource requires covers it. Revisions only go
    * forward; repeating one changes nothing.
    *
-   * @param resourceId resource_id
-   * @param source source
-   * @param start start
-   * @param end end
-   * @param revision revision
+   * @param resourceId {@code resource_id}, string
+   * @param source {@code source}, string
+   * @param start {@code start}, string
+   * @param end {@code end}, string
+   * @param revision {@code revision}, integer
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */

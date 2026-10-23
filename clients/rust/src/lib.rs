@@ -80,7 +80,9 @@ impl Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Refused { status, code, .. } => write!(f, "slotlock: the server answered {status} {code}"),
+            Error::Refused { status, code, .. } => {
+                write!(f, "slotlock: the server answered {status} {code}")
+            }
             Error::Invalid(message) => write!(f, "slotlock: {message}"),
             Error::Transport(error) => write!(f, "slotlock: {error}"),
             Error::Json(error) => write!(f, "slotlock: {error}"),
@@ -124,7 +126,11 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { timeout: Duration::from_secs(30), allow_insecure: false, user_agent: None }
+        Options {
+            timeout: Duration::from_secs(30),
+            allow_insecure: false,
+            user_agent: None,
+        }
     }
 }
 
@@ -140,7 +146,9 @@ pub struct Client {
 impl fmt::Debug for Client {
     // Never the key.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Client").field("base_url", &self.base_url).finish_non_exhaustive()
+        f.debug_struct("Client")
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
     }
 }
 
@@ -159,10 +167,14 @@ impl Client {
         let scheme = uri.scheme_str().unwrap_or("");
         let host = uri.host().unwrap_or("");
         if (scheme != "http" && scheme != "https") || host.is_empty() {
-            return Err(Error::Invalid("base_url must be an http:// or https:// URL".into()));
+            return Err(Error::Invalid(
+                "base_url must be an http:// or https:// URL".into(),
+            ));
         }
         if uri.query().is_some() || base_url.contains('#') {
-            return Err(Error::Invalid("base_url must not have a query or a fragment".into()));
+            return Err(Error::Invalid(
+                "base_url must not have a query or a fragment".into(),
+            ));
         }
         let loopback = matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1");
         if scheme == "http" && !loopback && !options.allow_insecure {
@@ -172,7 +184,9 @@ impl Client {
             ));
         }
         if api_key.is_empty() || api_key.bytes().any(|byte| !(0x21..=0x7e).contains(&byte)) {
-            return Err(Error::Invalid("api_key must be a Slotlock API key or the server token".into()));
+            return Err(Error::Invalid(
+                "api_key must be a Slotlock API key or the server token".into(),
+            ));
         }
         let config = ureq::Agent::config_builder()
             .http_status_as_error(false)
@@ -181,7 +195,9 @@ impl Client {
         Ok(Client {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
-            user_agent: options.user_agent.unwrap_or_else(|| format!("slotlock-rust/{VERSION}")),
+            user_agent: options
+                .user_agent
+                .unwrap_or_else(|| format!("slotlock-rust/{VERSION}")),
             agent: ureq::Agent::new_with_config(config),
         })
     }
@@ -196,35 +212,63 @@ impl Client {
         let mut arguments = match values {
             Value::Object(map) => map,
             Value::Null => Map::new(),
-            _ => return Err(Error::Invalid(format!("{operation} takes its arguments as a JSON object"))),
+            _ => {
+                return Err(Error::Invalid(format!(
+                    "{operation} takes its arguments as a JSON object"
+                )))
+            }
         };
         let mut path = spec.path.to_string();
         for name in spec.path_params {
             let value = match arguments.remove(*name) {
                 Some(Value::String(value)) if !value.is_empty() => value,
-                _ => return Err(Error::Invalid(format!("{operation} needs {name}, a non-empty string"))),
+                _ => {
+                    return Err(Error::Invalid(format!(
+                        "{operation} needs {name}, a non-empty string"
+                    )))
+                }
             };
             path = path.replace(&format!("{{{name}}}"), &encode(&value));
         }
         let url_and_body = if spec.method == "GET" || spec.method == "DELETE" {
-            if let Some(name) = arguments.keys().find(|name| !spec.query.contains(&name.as_str())) {
-                return Err(Error::Invalid(format!("{operation} has no argument {name}")));
+            if let Some(name) = arguments
+                .keys()
+                .find(|name| !spec.query.contains(&name.as_str()))
+            {
+                return Err(Error::Invalid(format!(
+                    "{operation} has no argument {name}"
+                )));
             }
             let mut pairs = Vec::new();
             for (name, value) in &arguments {
                 match value {
                     Value::Array(items) => {
                         for item in items {
-                            pairs.push(format!("{}={}", encode(name), encode(&query_value(name, item)?)));
+                            pairs.push(format!(
+                                "{}={}",
+                                encode(name),
+                                encode(&query_value(name, item)?)
+                            ));
                         }
                     }
-                    other => pairs.push(format!("{}={}", encode(name), encode(&query_value(name, other)?))),
+                    other => pairs.push(format!(
+                        "{}={}",
+                        encode(name),
+                        encode(&query_value(name, other)?)
+                    )),
                 }
             }
-            let query = if pairs.is_empty() { String::new() } else { format!("?{}", pairs.join("&")) };
+            let query = if pairs.is_empty() {
+                String::new()
+            } else {
+                format!("?{}", pairs.join("&"))
+            };
             (format!("{}{path}{query}", self.base_url), None)
         } else {
-            (format!("{}{path}", self.base_url), Some(serde_json::to_vec(&Value::Object(arguments))?))
+            (
+                format!("{}{path}", self.base_url),
+                Some(serde_json::to_vec(&Value::Object(arguments))?),
+            )
         };
         let (url, body) = url_and_body;
         let builder = http::Request::builder()
@@ -242,7 +286,9 @@ impl Client {
                 self.agent.run(request)?
             }
             None => {
-                let request = builder.body(()).map_err(|error| Error::Invalid(error.to_string()))?;
+                let request = builder
+                    .body(())
+                    .map_err(|error| Error::Invalid(error.to_string()))?;
                 self.agent.run(request)?
             }
         };
@@ -261,7 +307,11 @@ impl Client {
                 .and_then(|body| body.get("error")?.get("code")?.as_str().map(str::to_string))
                 .filter(|code| !code.is_empty())
                 .unwrap_or_else(|| format!("http_{status}"));
-            return Err(Error::Refused { status, code, retry_after });
+            return Err(Error::Refused {
+                status,
+                code,
+                retry_after,
+            });
         }
         if text.is_empty() {
             return Ok(Value::Object(Map::new()));
@@ -275,7 +325,9 @@ fn query_value(name: &str, value: &Value) -> Result<String, Error> {
         Value::String(text) => Ok(text.clone()),
         Value::Number(number) => Ok(number.to_string()),
         Value::Bool(flag) => Ok(flag.to_string()),
-        _ => Err(Error::Invalid(format!("query argument {name} must be a string, number or boolean"))),
+        _ => Err(Error::Invalid(format!(
+            "query argument {name} must be a string, number or boolean"
+        ))),
     }
 }
 

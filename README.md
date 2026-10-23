@@ -714,7 +714,10 @@ curl "http://localhost:8080/v1/resources" -H "Authorization: Bearer $SLOTLOCK_AP
   `{"error":{"code":…}}` with the matching HTTP status.
 - REST cannot ask a person, so a write listed in `confirmation` answers `428 confirmation_required`.
 - There are no CORS headers: call it from a server, not a browser.
-- From another language, generate a client from `/openapi.json` with any OpenAPI 3.1 generator.
+- From Python, Go, Rust, Java or .NET, use the [clients](clients/README.md): one method per
+  operation, the application API included, each tested against the server in CI. For another
+  language, generate one from [`openapi.json`](openapi.json) (or a server's `/openapi.json`) with any
+  OpenAPI 3.1 generator.
 
 ### Application API
 

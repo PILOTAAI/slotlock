@@ -21,6 +21,12 @@ versioning.
   same in a process of your own.
 - `confirmHold` and `releaseHold` take `{ tenantRef }`, so another tenant's hold is not found
   whatever the connection's row-level security.
+- Clients for Python, Go, Rust, Java and .NET (`clients/`): one method per REST operation, the
+  application API included, generated from `openapi.json` with hand-written transports. Each runs
+  the same scenario against the server image in CI. They are not on their package registries yet.
+- `openapi.json`, the REST API's OpenAPI 3.1 document, in the repository and at
+  https://slotlock.pylota.io/openapi.json; `slotlockOpenApi()` builds it.
+- Property-based tests (fast-check) of the engine, time zones, iCalendar parsing and API keys.
 - Releases are opened and merged by a GitHub App once it is set up
   (`node scripts/create-release-app.mjs`), so its checks run without a maintainer approving them.
 

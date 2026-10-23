@@ -9,18 +9,27 @@ use serde_json::{json, Value};
 use slotlock::*;
 
 fn all_week() -> Vec<Value> {
-    vec![json!({"rrule": "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR,SA,SU", "start_minutes": 0, "duration_minutes": 1440})]
+    vec![
+        json!({"rrule": "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR,SA,SU", "start_minutes": 0, "duration_minutes": 1440}),
+    ]
 }
 
 #[test]
 fn refuses_to_send_a_key_over_plain_http_to_another_host() {
     let refused = Client::new("http://calendar.example.com", "slk_x").unwrap_err();
     assert!(refused.to_string().contains("unencrypted"), "{refused}");
-    let insecure = Options { allow_insecure: true, ..Options::default() };
+    let insecure = Options {
+        allow_insecure: true,
+        ..Options::default()
+    };
     assert!(Client::with_options("http://calendar.example.com", "slk_x", insecure).is_ok());
     assert!(Client::new("http://localhost:8080", "slk_x").is_ok());
     assert!(Client::new("https://calendar.example.com/", "slk_x").is_ok());
-    for url in ["ftp://example.com", "calendar.example.com", "https://example.com/?a=1"] {
+    for url in [
+        "ftp://example.com",
+        "calendar.example.com",
+        "https://example.com/?a=1",
+    ] {
         assert!(Client::new(url, "slk_x").is_err(), "{url}");
     }
     for key in ["", "slk_ x", "slk_\n"] {
@@ -37,11 +46,24 @@ fn never_shows_the_key() {
 #[test]
 fn refuses_an_unknown_operation_or_a_missing_path_parameter() {
     let client = Client::new("https://calendar.example.com", "slk_x").unwrap();
-    assert!(matches!(client.call("slotlock_nothing", Value::Null), Err(Error::Invalid(_))));
-    let missing = client.get_resource(&GetResourceInput::default()).unwrap_err();
-    assert!(missing.to_string().contains("needs resource_id"), "{missing}");
-    let unknown = client.call("slotlock_list_resources", serde_json::json!({"limt": 5})).unwrap_err();
-    assert!(unknown.to_string().contains("has no argument limt"), "{unknown}");
+    assert!(matches!(
+        client.call("slotlock_nothing", Value::Null),
+        Err(Error::Invalid(_))
+    ));
+    let missing = client
+        .get_resource(&GetResourceInput::default())
+        .unwrap_err();
+    assert!(
+        missing.to_string().contains("needs resource_id"),
+        "{missing}"
+    );
+    let unknown = client
+        .call("slotlock_list_resources", serde_json::json!({"limt": 5}))
+        .unwrap_err();
+    assert!(
+        unknown.to_string().contains("has no argument limt"),
+        "{unknown}"
+    );
 }
 
 struct Server {
@@ -51,7 +73,10 @@ struct Server {
 }
 
 fn server() -> Option<Server> {
-    let (url, key) = (std::env::var("SLOTLOCK_URL").ok()?, std::env::var("SLOTLOCK_ADMIN_KEY").ok()?);
+    let (url, key) = (
+        std::env::var("SLOTLOCK_URL").ok()?,
+        std::env::var("SLOTLOCK_ADMIN_KEY").ok()?,
+    );
     if url.is_empty() || key.is_empty() {
         return None;
     }
@@ -78,7 +103,12 @@ impl Server {
         let day = doy - (153 * mp + 2) / 5 + 1;
         let month = if mp < 10 { mp + 3 } else { mp - 9 };
         let year = yoe + era * 400 + i64::from(month <= 2);
-        format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z", rest / 3_600, rest % 3_600 / 60, rest % 60)
+        format!(
+            "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+            rest / 3_600,
+            rest % 3_600 / 60,
+            rest % 60
+        )
     }
 }
 
@@ -91,34 +121,74 @@ fn instant(value: &Value) -> String {
 
 fn refused(result: Result<Value, Error>, status: u16, code: &str) {
     match result {
-        Err(error) => assert_eq!((error.status(), error.code()), (Some(status), Some(code)), "{error}"),
+        Err(error) => assert_eq!(
+            (error.status(), error.code()),
+            (Some(status), Some(code)),
+            "{error}"
+        ),
         Ok(value) => panic!("expected {status} {code}, got {value}"),
     }
 }
 
 #[test]
 fn books_holds_and_reservations_without_double_booking() {
-    let Some(s) = server() else { return eprintln!("set SLOTLOCK_URL and SLOTLOCK_ADMIN_KEY to run against a server") };
+    let Some(s) = server() else {
+        return eprintln!("set SLOTLOCK_URL and SLOTLOCK_ADMIN_KEY to run against a server");
+    };
     let c = &s.client;
     let resource = c
-        .create_resource(&CreateResourceInput { external_ref: format!("rust-{}", s.suffix), timezone: Some("UTC".into()) })
+        .create_resource(&CreateResourceInput {
+            external_ref: format!("rust-{}", s.suffix),
+            timezone: Some("UTC".into()),
+        })
         .unwrap()["resource"]
         .clone();
     let id = resource["id"].as_str().unwrap().to_string();
-    assert_eq!(c.get_resource(&GetResourceInput { resource_id: id.clone() }).unwrap()["resource"], resource);
+    assert_eq!(
+        c.get_resource(&GetResourceInput {
+            resource_id: id.clone()
+        })
+        .unwrap()["resource"],
+        resource
+    );
     let hours = c
-        .set_resource_availability(&SetResourceAvailabilityInput { resource_id: id.clone(), rules: Some(all_week()) })
+        .set_resource_availability(&SetResourceAvailabilityInput {
+            resource_id: id.clone(),
+            rules: Some(all_week()),
+        })
         .unwrap();
     assert_eq!(hours["resource"]["availability"], Value::Array(all_week()));
 
-    let window = AcquireHoldInput { resource_id: id.clone(), start: s.at(9.0), end: s.at(10.0), ttl_seconds: 600, source: Some("checkout".into()) };
+    let window = AcquireHoldInput {
+        resource_id: id.clone(),
+        start: s.at(9.0),
+        end: s.at(10.0),
+        ttl_seconds: 600,
+        source: Some("checkout".into()),
+    };
     let hold = c.acquire_hold(&window).unwrap()["hold"].clone();
     assert_eq!(hold["source"], "checkout");
-    refused(c.acquire_hold(&AcquireHoldInput { ttl_seconds: 60, source: None, ..window.clone() }), 409, "overlap");
+    refused(
+        c.acquire_hold(&AcquireHoldInput {
+            ttl_seconds: 60,
+            source: None,
+            ..window.clone()
+        }),
+        409,
+        "overlap",
+    );
     let hold_id = hold["id"].as_str().unwrap().to_string();
-    let confirmed = c.confirm_hold(&ConfirmHoldInput { hold_id: hold_id.clone() }).unwrap()["reservation"].clone();
+    let confirmed = c
+        .confirm_hold(&ConfirmHoldInput {
+            hold_id: hold_id.clone(),
+        })
+        .unwrap()["reservation"]
+        .clone();
     assert_eq!(confirmed["id"], hold["id"]);
-    assert_eq!(c.confirm_hold(&ConfirmHoldInput { hold_id }).unwrap()["reservation"], confirmed);
+    assert_eq!(
+        c.confirm_hold(&ConfirmHoldInput { hold_id }).unwrap()["reservation"],
+        confirmed
+    );
 
     // A reference with a slash, a space and an accent travels in the path intact.
     let reference = format!("BK/{} ü", s.suffix);
@@ -132,25 +202,51 @@ fn books_holds_and_reservations_without_double_booking() {
         source: None,
     };
     let put = c.put_reservation(&booking).unwrap();
-    assert_eq!((put["replayed"].clone(), put["reservation"]["reservation_ref"].clone()), (json!(false), json!(reference)));
+    assert_eq!(
+        (
+            put["replayed"].clone(),
+            put["reservation"]["reservation_ref"].clone()
+        ),
+        (json!(false), json!(reference))
+    );
     assert_eq!(put["reservation"]["buffer_after_minutes"], 30);
     assert_eq!(c.put_reservation(&booking).unwrap()["replayed"], true);
     refused(
-        c.acquire_hold(&AcquireHoldInput { resource_id: id.clone(), start: s.at(12.25), end: s.at(12.5), ttl_seconds: 60, source: None }),
+        c.acquire_hold(&AcquireHoldInput {
+            resource_id: id.clone(),
+            start: s.at(12.25),
+            end: s.at(12.5),
+            ttl_seconds: 60,
+            source: None,
+        }),
         409,
         "overlap",
     );
 
-    let free_busy = c.get_free_busy(&GetFreeBusyInput { resource_ids: vec![id.clone()], start: s.at(0.0), end: s.at(24.0) }).unwrap();
+    let free_busy = c
+        .get_free_busy(&GetFreeBusyInput {
+            resource_ids: vec![id.clone()],
+            start: s.at(0.0),
+            end: s.at(24.0),
+        })
+        .unwrap();
     let busy: Vec<(String, String)> = free_busy["resources"][0]["busy"]
         .as_array()
         .unwrap()
         .iter()
         .map(|interval| (instant(&interval["start"]), instant(&interval["end"])))
         .collect();
-    assert_eq!(busy, vec![(s.at(9.0), s.at(10.0)), (s.at(11.0), s.at(12.5))]);
+    assert_eq!(
+        busy,
+        vec![(s.at(9.0), s.at(10.0)), (s.at(11.0), s.at(12.5))]
+    );
 
-    let cancelled = c.cancel_reservation(&CancelReservationInput { reservation_ref: reference, revision: 2 }).unwrap();
+    let cancelled = c
+        .cancel_reservation(&CancelReservationInput {
+            reservation_ref: reference,
+            revision: 2,
+        })
+        .unwrap();
     assert_eq!(cancelled, json!({"cancelled": true, "revision": 2}));
     let coverage = c
         .record_coverage(&RecordCoverageInput {
@@ -165,12 +261,24 @@ fn books_holds_and_reservations_without_double_booking() {
     let maintenance = c.run_maintenance(&RunMaintenanceInput::default()).unwrap();
     let mut keys: Vec<&String> = maintenance.as_object().unwrap().keys().collect();
     keys.sort();
-    assert_eq!(keys, ["capped", "conflicts", "extended", "pruned", "refused"]);
+    assert_eq!(
+        keys,
+        ["capped", "conflicts", "extended", "pruned", "refused"]
+    );
 
     let (mut found, mut cursor) = (false, None);
     loop {
-        let page = c.list_resources(&ListResourcesInput { cursor: cursor.clone(), limit: Some(100) }).unwrap();
-        found |= page["resources"].as_array().unwrap().iter().any(|r| r["id"] == json!(id));
+        let page = c
+            .list_resources(&ListResourcesInput {
+                cursor: cursor.clone(),
+                limit: Some(100),
+            })
+            .unwrap();
+        found |= page["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == json!(id));
         match page["next_cursor"].as_str() {
             Some(next) if !found => cursor = Some(next.to_string()),
             _ => break,
@@ -181,14 +289,24 @@ fn books_holds_and_reservations_without_double_booking() {
 
 #[test]
 fn writes_events_and_clears_a_field_with_null() {
-    let Some(s) = server() else { return eprintln!("set SLOTLOCK_URL and SLOTLOCK_ADMIN_KEY to run against a server") };
+    let Some(s) = server() else {
+        return eprintln!("set SLOTLOCK_URL and SLOTLOCK_ADMIN_KEY to run against a server");
+    };
     let c = &s.client;
-    let id = c.create_resource(&CreateResourceInput { external_ref: format!("rust-events-{}", s.suffix), timezone: None }).unwrap()
-        ["resource"]["id"]
+    let id = c
+        .create_resource(&CreateResourceInput {
+            external_ref: format!("rust-events-{}", s.suffix),
+            timezone: None,
+        })
+        .unwrap()["resource"]["id"]
         .as_str()
         .unwrap()
         .to_string();
-    c.set_resource_availability(&SetResourceAvailabilityInput { resource_id: id.clone(), rules: Some(all_week()) }).unwrap();
+    c.set_resource_availability(&SetResourceAvailabilityInput {
+        resource_id: id.clone(),
+        rules: Some(all_week()),
+    })
+    .unwrap();
     let key = |n: u8| format!("rust-{}-{n}", s.suffix);
     let created = c
         .create_event(&CreateEventInput {
@@ -203,7 +321,10 @@ fn writes_events_and_clears_a_field_with_null() {
         })
         .unwrap()["event"]
         .clone();
-    assert_eq!((created["title"].clone(), created["description"].clone()), (json!("Handover"), json!("Keys at the desk")));
+    assert_eq!(
+        (created["title"].clone(), created["description"].clone()),
+        (json!("Handover"), json!("Keys at the desk"))
+    );
     // Some(None) sends null, which clears the description; the title, left None, stays.
     let updated = c
         .update_event(&UpdateEventInput {
@@ -215,7 +336,10 @@ fn writes_events_and_clears_a_field_with_null() {
         })
         .unwrap()["event"]
         .clone();
-    assert_eq!((updated["title"].clone(), updated["description"].clone()), (json!("Handover"), Value::Null));
+    assert_eq!(
+        (updated["title"].clone(), updated["description"].clone()),
+        (json!("Handover"), Value::Null)
+    );
     // The server makes deletes wait for a person, which REST cannot ask: 428.
     refused(
         c.delete_event(&DeleteEventInput {
@@ -230,8 +354,24 @@ fn writes_events_and_clears_a_field_with_null() {
 
 #[test]
 fn says_why_a_call_was_refused() {
-    let Some(s) = server() else { return eprintln!("set SLOTLOCK_URL and SLOTLOCK_ADMIN_KEY to run against a server") };
-    refused(s.client.get_resource(&GetResourceInput { resource_id: "00000000-0000-4000-8000-000000000000".into() }), 404, "resource_not_found");
-    let stranger = Client::new(&std::env::var("SLOTLOCK_URL").unwrap(), &format!("slk_{}", "0".repeat(46))).unwrap();
-    refused(stranger.run_maintenance(&RunMaintenanceInput::default()), 401, "authentication_required");
+    let Some(s) = server() else {
+        return eprintln!("set SLOTLOCK_URL and SLOTLOCK_ADMIN_KEY to run against a server");
+    };
+    refused(
+        s.client.get_resource(&GetResourceInput {
+            resource_id: "00000000-0000-4000-8000-000000000000".into(),
+        }),
+        404,
+        "resource_not_found",
+    );
+    let stranger = Client::new(
+        &std::env::var("SLOTLOCK_URL").unwrap(),
+        &format!("slk_{}", "0".repeat(46)),
+    )
+    .unwrap();
+    refused(
+        stranger.run_maintenance(&RunMaintenanceInput::default()),
+        401,
+        "authentication_required",
+    );
 }
