@@ -22,7 +22,7 @@ const FOURTEEN_HOURS_MS = 14 * 60 * 60 * 1000;
  * Date.UTC remaps years 0..99 to 1900..1999. Slotlock accepts ISO calendar years down to 1,
  * so construct UTC frames through setUTCFullYear instead of inheriting that legacy quirk.
  */
-function utcFrame(
+export function utcFrame(
   year: number,
   month: number,
   day: number,
