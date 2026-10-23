@@ -36,6 +36,12 @@ versioning.
 ### Changed
 
 - `slotlock serve` serves REST by default; `SLOTLOCK_REST_API=off` turns it off.
+- `expandRules` and `findNextAvailableFor` refuse a search window longer than 367 days with
+  `invalid_window`, as free/busy already did. Fifty daily rules over a century were two million
+  windows of synchronous work.
+- Upgrading rebuilds the unique index on booking references
+  (`slotlock_reservations_booking_external_ref_key`) to leave calendar event rows out, and drops
+  the one it replaces after the new one is built.
 - Upgrading widens the API key scope constraint in place, and replaces the reservations overlap
   constraint with one that counts every row's turnaround buffer (below). Expired holds in a buffer's
   way are removed; while a live hold or untenanted reservation is in one, migrate stops with their
@@ -43,6 +49,20 @@ versioning.
 
 ### Fixed
 
+- A calendar event's occupation could be freed or moved through the reservation commands
+  (`cancelExternalReservation`, `rescheduleExternalReservation`, and the application API's
+  reservation routes) by naming the reference the store derives for it: the event stayed active but
+  stopped occupying its time. Those commands now leave event rows out. An event freed this way
+  before upgrading occupies its time again once it is written again.
+- Maintenance replaced a series' stored window with the rolling horizon even when the stored window
+  ended later, deleting the occurrences past it.
+- Free/busy called a window complete when a series started inside it but was stored only from
+  later: those occurrences were reported as free time.
+- Upgrading as a non-superuser owner under forced row-level security failed with a raw error (or,
+  for some repairs, skipped them): the upgrade's data steps saw no rows.
+- `expandRules` without a time zone offered windows after the rule's UNTIL.
+- A delayed copy of a create, after the reservation had moved on, answered `idempotency_conflict`
+  instead of `stale_revision`.
 - A time zone a calendar names without a VTIMEZONE was read as floating, and compared with UTC
   values as if it were UTC. East of UTC a series lost the occurrence its UNTIL names (in a stored
   series, a booking could then take that time); west of it, a series ran hours past its UNTIL; an

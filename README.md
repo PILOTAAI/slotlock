@@ -267,7 +267,8 @@ export const slot = findNextAvailable({
 // slot: 2026-09-14 10:00–12:00 UTC, the first two free hours after the busy one
 ```
 
-A rule `expandRules` cannot evaluate adds no availability; it never invents a slot.
+A rule `expandRules` cannot evaluate adds no availability; it never invents a slot. A search window
+may be 367 days at most (`invalid_window`), here and in `findNextAvailableFor`.
 
 ## Set up PostgreSQL
 
@@ -413,7 +414,8 @@ export async function scheduleWeeklyInspection(
 ```
 
 Occurrences are stored for a window of at most 367 days and 2,000 occurrences; maintenance rolls
-the window forward. Past it, free/busy reports the time as unproven.
+the window forward, never moving its end back. Outside it, before or after, free/busy reports the
+time as unproven.
 
 A rule is expanded within a budget: 50,000 steps and a second for a feed (the whole read, from its
 text), or for a stored series as maintenance rolls it; half of that for one event as it is written.
@@ -773,7 +775,10 @@ curl -X PUT "http://localhost:8080/v1/reservations/BK-42" \
   busy for holds and other reservations alike.
 - Every write is safe to retry: the same reservation at its current revision answers
   `replayed: true`, a confirmed hold confirms again, and a cancelled reference stays cancelled (a
-  late booking for it answers `409`).
+  late booking for it answers `409`). A late copy of a booking or a move that has since been
+  superseded answers `409 stale_revision`.
+- The time a calendar event occupies is the event's: reservation calls never find, move or cancel
+  it, whatever reference they name. Change the event instead.
 - The tenant is the key's. Another tenant's resource or hold is `404`, whatever the database role.
 - With the library, pass `application` beside `rest: true`:
   `{ backend: createSlotlockStoreApplicationBackend(store, { maxTenantResources }), authorize }`.

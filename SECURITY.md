@@ -30,6 +30,13 @@ PostgreSQL exclusion constraint. Tenant policies are forced and fail closed when
 context is missing. Embedding applications remain responsible for authentication, authorization,
 provider-secret storage, webhook verification, network egress, and erasure.
 
+Upgrading repairs data across tenants (expired holds in a turnaround buffer, duplicate resources,
+archives and event details from earlier versions), which forced policies would hide from the owning
+role. `applySchema` therefore lifts FORCE from the tables that have it for its data steps and puts
+it back on exactly those, inside its one locked transaction: a failure rolls the lift back with the
+rest. Run the deployment DDL through `applySchema` or `slotlock migrate`, not statement by
+statement, so FORCE can never be left lifted.
+
 Application traffic must use a role that cannot leave forced RLS. `grantApplicationRole` grants
 such a role schema usage and DML on the tenant tables, and first refuses the known ways out, whether
 the role holds them itself, through a role it belongs to, or through `PUBLIC`, and names the ones
