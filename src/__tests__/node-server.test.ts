@@ -289,6 +289,46 @@ describe('Slotlock Node HTTP server adapter', () => {
     expect(fetchTarget.fetch).not.toHaveBeenCalled();
   });
 
+  it('rejects dot segments, raw or percent-encoded, which URL parsing would resolve away', async () => {
+    // `/v1/resources/%2E%2E/availability` would reach the target as `/v1/availability`: a path
+    // parameter of `..` names another route.
+    const fetchTarget = { fetch: vi.fn(async (request: Request) => new Response(request.url)) };
+    const { address } = await startServer(fetchTarget);
+    const get = (path: string) =>
+      new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const request = requestHttp({ host: address.host, port: address.port, path }, (response) => {
+          let body = '';
+          response.setEncoding('utf8');
+          response.on('data', (chunk: string) => {
+            body += chunk;
+          });
+          response.once('end', () => resolve({ status: response.statusCode ?? 0, body }));
+        });
+        request.once('error', reject);
+        request.end();
+      });
+
+    for (const path of [
+      '/v1/resources/../availability',
+      '/v1/resources/%2E%2E/availability',
+      '/v1/resources/%2e./availability',
+      '/v1/resources/.%2E',
+      '/v1/./resources',
+      '/v1/resources/%2e?limit=1',
+      '/v1/resources/..#x',
+    ]) {
+      expect((await get(path)).status, path).toBe(400);
+    }
+    expect(fetchTarget.fetch).not.toHaveBeenCalled();
+
+    // The canary: dots inside a segment are an ordinary path parameter.
+    for (const path of ['/v1/resources/..x', '/v1/events/a.b', '/v1/resources/%2E%2Ex']) {
+      const forwarded = await get(path);
+      expect(forwarded.status, path).toBe(200);
+      expect(new URL(forwarded.body).pathname, path).toBe(path);
+    }
+  });
+
   it('rejects unbounded listener configuration before opening a socket', () => {
     const target = { fetch: async () => new Response('ok') };
 

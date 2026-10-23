@@ -215,6 +215,12 @@ function toWebRequest(
   if (!target.startsWith('/') || target.startsWith('//')) {
     throw new Error('invalid_request_target');
   }
+  // URL parsing resolves dot segments, `%2E` spellings included: `/v1/resources/%2E%2E/availability`
+  // would reach the target as `/v1/availability`, a path parameter of `..` naming another route.
+  const path = target.split(/[?#]/, 1)[0] ?? '';
+  if (path.split('/').some((segment) => /^(?:\.|%2e){1,2}$/i.test(segment))) {
+    throw new Error('invalid_request_target');
+  }
   const url = new URL(target, requestOrigin);
   if (url.origin !== requestOrigin) throw new Error('invalid_request_target');
 
