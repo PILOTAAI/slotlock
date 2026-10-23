@@ -1,6 +1,12 @@
 import { createHash } from 'node:crypto';
 import ICAL from 'ical.js';
-import { zonedDateTimeToUtc } from './timezone.js';
+import {
+  type ZonedDateTimeFields,
+  createTimeZoneConverter,
+  utcFrame,
+  zonedDateTimeFields,
+  zonedDateTimeToUtc,
+} from './timezone.js';
 import type {
   CalendarAttendee,
   CalendarAttendeeRole,
@@ -663,8 +669,8 @@ function calendarTimeValue(
       );
     } catch {
       // A standards-compliant embedded VTIMEZONE may use a private TZID that Intl does not know.
-      // ical.js resolves that definition itself; an undeclared TZID remains `floating` and cannot
-      // reach this fallback.
+      // ical.js resolves that definition itself; an undeclared TZID Intl does not know either
+      // remains `floating` and cannot reach this fallback.
       if (zone && valueZone === zone && valueZone !== 'floating' && valueZone !== 'local') {
         const resolved = time.toJSDate();
         if (Number.isFinite(resolved.getTime())) return resolved;
@@ -674,6 +680,13 @@ function calendarTimeValue(
   }
   if (valueZone && valueZone !== 'floating' && valueZone !== 'local') return time.toJSDate();
   throw new CalendarContractError('invalid_icalendar');
+}
+
+/** The TZID of a time ical.js reads in a zone (a VTIMEZONE's, an IntlTimezone, UTC); else none. */
+function ownZone(value: unknown): string | undefined {
+  if (!(value instanceof ICAL.Time)) return undefined;
+  const tzid = value.zone?.tzid;
+  return tzid && tzid !== 'floating' && tzid !== 'local' ? tzid : undefined;
 }
 
 /**
@@ -763,6 +776,35 @@ function budgetedExpansion(
   if (!Array.isArray(iterators) || !iterators.every((iterator) => iterator instanceof Budgeted)) {
     throw new CalendarContractError('invalid_icalendar');
   }
+  return withEveryRule(expansion);
+}
+
+/**
+ * `expansion`, choosing among its RRULEs' iterators correctly. ical.js 2.2.1's own choice
+ * (RecurExpansion#_nextRecurrenceIter) drops one that has ended by index as it walks them: it
+ * skipped the iterator after an ended first one, and for any other removed the one before it,
+ * which had not ended, so a series with two RRULEs lost occurrences once either rule ended.
+ */
+function withEveryRule(expansion: ICAL.RecurExpansion): ICAL.RecurExpansion {
+  const state = expansion as unknown as ExpansionState & { _nextRecurrenceIter?: unknown };
+  if (typeof state._nextRecurrenceIter !== 'function') {
+    throw new CalendarContractError('invalid_icalendar');
+  }
+  state._nextRecurrenceIter = () => {
+    const iterators = state.ruleIterators as IteratorState[];
+    let chosen: IteratorState | null = null;
+    for (let index = 0; index < iterators.length; ) {
+      const iterator = iterators[index] as IteratorState;
+      if (iterator.completed) {
+        iterators.splice(index, 1);
+        continue;
+      }
+      // The earliest next time; the first of equal ones, as ical.js chose.
+      if (chosen === null || chosen.last.compare(iterator.last) > 0) chosen = iterator;
+      index += 1;
+    }
+    return chosen;
+  };
   return expansion;
 }
 
@@ -779,12 +821,39 @@ function fieldsMs(time: ICAL.Time): number {
   return Date.UTC(time.year, time.month - 1, time.day, time.hour, time.minute, time.second);
 }
 
+/** The day a time's own fields name: how ical.js matches a DATE EXDATE with an occurrence. */
+function dayOf(time: ICAL.Time): string {
+  return `${time.year}-${time.month}-${time.day}`;
+}
+
 /**
- * Refuse a VEVENT that ical.js would spend unbounded work reading, before anything reads its end:
+ * Milliseconds since 1970 of a DATE or DATE-TIME property's first value as written, ignoring its
+ * zone, or undefined for anything else. Read from the raw form, so nothing resolves a zone yet.
+ */
+function writtenFieldsMs(property: ICAL.Property | null): number | undefined {
+  const value = property?.jCal[3];
+  if (typeof value !== 'string') return undefined;
+  const match = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2})Z?)?$/.exec(value);
+  if (!match) return undefined;
+  const [year, month, day, hour, minute, second] = match.slice(1).map((part) => Number(part ?? 0));
+  return utcFrame(
+    year as number,
+    month as number,
+    day as number,
+    hour as number,
+    minute as number,
+    second as number,
+    0,
+  ).getTime();
+}
+
+/**
+ * Refuse a VEVENT that ical.js would spend unbounded work reading, before anything reads its times:
  * a DURATION, or a DTEND after its DTSTART, longer than MAX_ICAL_STEP_DAYS (ical.js adds a span to
  * a time a month at a time, Time#adjust, and `DURATION:PT99999999999999999999S` held the process),
  * a negative DURATION, or more RDATE and EXDATE values than MAX_ICAL_DATES_PER_EVENT. Returns how
- * many it lists, for the feed's own limit.
+ * many it lists, for the feed's own limit. It reads times only as written, so it runs before the
+ * times are framed: framing reads every date value, and 115,000 EXDATE values took 11 seconds.
  */
 function boundComponent(component: ICAL.Component): number {
   const maxMs = MAX_ICAL_STEP_DAYS * 24 * 60 * 60 * 1000;
@@ -793,11 +862,11 @@ function boundComponent(component: ICAL.Component): number {
     if (!(duration instanceof ICAL.Duration)) throw new CalendarContractError('invalid_icalendar');
     if (duration.isNegative || duration.toSeconds() * 1000 > maxMs) expansionLimit();
   }
-  const start = component.getFirstPropertyValue('dtstart');
-  const end = component.getFirstPropertyValue('dtend');
-  if (start instanceof ICAL.Time && end instanceof ICAL.Time) {
+  const start = writtenFieldsMs(component.getFirstProperty('dtstart'));
+  const end = writtenFieldsMs(component.getFirstProperty('dtend'));
+  if (start !== undefined && end !== undefined) {
     // The fields ignore zones, so allow the day they can be out by.
-    if (Math.abs(fieldsMs(end) - fieldsMs(start)) > maxMs + 24 * 60 * 60 * 1000) expansionLimit();
+    if (Math.abs(end - start) > maxMs + 24 * 60 * 60 * 1000) expansionLimit();
   }
   let dates = 0;
   for (const name of ['rdate', 'exdate']) {
@@ -1136,13 +1205,24 @@ function seriesKey(component: ICAL.Component): string | null {
   ) {
     return null;
   }
+  const start = starts[0] as ICAL.Property;
+  const rule = rules[0] as ICAL.Property;
+  // Slotlock 0.1 compared a zoned series' occurrences with its UTC UNTIL as if they were UTC, so a
+  // cursor it kept for one that ends may have ended an occurrence early or gone one past: such a
+  // series has a key of its own now, and those cursors are searched past from the start.
+  const zone = start.getParameter('tzid');
+  const zonedUntil =
+    typeof zone === 'string' &&
+    zone.trim() !== 'UTC' &&
+    (rule.jCal[3] as { until?: unknown } | undefined)?.until !== undefined;
   return createHash('sha256')
     .update(
       JSON.stringify([
         SERIES_CURSOR_FORMAT,
         ICAL_JS_VERSION,
-        (starts[0] as ICAL.Property).toICALString(),
-        (rules[0] as ICAL.Property).toICALString(),
+        start.toICALString(),
+        rule.toICALString(),
+        ...(zonedUntil ? ['zoned-until'] : []),
       ]),
     )
     .digest('hex');
@@ -1309,7 +1389,7 @@ function resumedExpansion(
   if (iterators.length !== 1 || !(iterators[0] instanceof Budgeted)) {
     throw new CalendarContractError('invalid_icalendar');
   }
-  return expansion;
+  return withEveryRule(expansion);
 }
 
 /**
@@ -1358,6 +1438,302 @@ function cursorFitsRule(
   return true;
 }
 
+/**
+ * An IANA zone ical.js reads through Intl, for a TZID a calendar names without a VTIMEZONE (RFC
+ * 5545 wants one for each; real feeds, and the series Slotlock stores, name IANA zones bare). Left
+ * alone, ical.js reads such a time as floating and compares it with UTC values (an UNTIL, EXDATE,
+ * RDATE or RECURRENCE-ID) as if it were UTC: a 09:00 Berlin series lost the occurrence its UNTIL
+ * named, and a moved or excluded occurrence was not found. Offsets come from the converter the rest
+ * of Slotlock reads wall times with: a gap moves forward, a fold takes its first instant.
+ */
+class IntlTimezone extends ICAL.Timezone {
+  private readonly converter: ReturnType<typeof createTimeZoneConverter>;
+  /** Offsets already found, by wall time: ical.js asks again at every comparison. */
+  private readonly offsets = new Map<number, number>();
+
+  constructor(tzid: string) {
+    super({ tzid });
+    // A TZID is matched as written (" Europe/Berlin" is that TZID); Slotlock reads its zone trimmed.
+    this.converter = createTimeZoneConverter(tzid.trim());
+  }
+
+  override utcOffset(time: ICAL.Time): number {
+    const wall = utcFrame(time.year, time.month, time.day, time.hour, time.minute, time.second, 0);
+    const wallMs = wall.getTime();
+    let offset = this.offsets.get(wallMs);
+    if (offset === undefined) {
+      offset = Math.round((wallMs - this.converter.wallFrameToUtc(wallMs).getTime()) / 1000);
+      if (this.offsets.size >= 4_096) this.offsets.clear();
+      this.offsets.set(wallMs, offset);
+    }
+    return offset;
+  }
+}
+
+/** VEVENT properties whose times ical.js compares with one another. */
+const COMPARED_TIME_PROPERTIES = ['dtstart', 'dtend', 'recurrence-id', 'rdate', 'exdate'];
+
+/** A PERIOD RDATE value, read as its start: the end (a date-time or a duration) is kept here. */
+interface RecurrencePeriod {
+  property: ICAL.Property;
+  start: string;
+  end: string;
+}
+
+function isKnownTimezone(timezone: string): boolean {
+  try {
+    validTimezone(timezone);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Wall-clock fields as a jCal DATE-TIME, `2027-01-04T09:00:00`, with a `Z` when they are UTC's. */
+function jCalDateTime(fields: ZonedDateTimeFields, utc = false): string {
+  const pad = (value: number, width = 2) => String(value).padStart(width, '0');
+  const date = `${pad(fields.year, 4)}-${pad(fields.month)}-${pad(fields.day)}`;
+  const time = `${pad(fields.hour)}:${pad(fields.minute)}:${pad(fields.second)}`;
+  return `${date}T${time}${utc ? 'Z' : ''}`;
+}
+
+/** The instant an ical.js time names, read in its own zone; undefined when it has none. */
+function zonedInstant(time: ICAL.Time): Date | undefined {
+  return ownZone(time) === undefined ? undefined : new Date(time.toUnixTime() * 1000);
+}
+
+/** `value` (a jCal date-time) as the date it falls on in `timezone`; undefined if it cannot say. */
+function localDateOf(value: string, tzid: unknown, timezone: string): string | undefined {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(Z?)$/.exec(value);
+  if (!match) return undefined;
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number) as [
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+  ];
+  const fields = { year, month, day, hour, minute, second };
+  let instant: Date;
+  if (match[7] === 'Z') {
+    instant = utcFrame(year, month, day, hour, minute, second, 0);
+  } else if (typeof tzid === 'string' && isKnownTimezone(tzid)) {
+    instant = zonedDateTimeToUtc(fields, tzid.trim());
+  } else {
+    // Floating: the wall time is the calendar's own, and so is its date.
+    return value.slice(0, 10);
+  }
+  return jCalDateTime(zonedDateTimeFields(instant, timezone)).slice(0, 10);
+}
+
+/**
+ * Prepare a calendar's events before anything reads their times, so ical.js compares them at their
+ * real instants:
+ * - a floating time is framed in the calendar's zone, the zone Slotlock reads it in;
+ * - each zone the events name that Intl knows becomes an IntlTimezone, whether or not the feed
+ *   defines it; a feed names no more zones it does not define than it may define
+ *   (MAX_ICAL_TIMEZONES): 50,000 spellings of one zone, each a zone of its own to ical.js, took
+ *   3.4 seconds;
+ * - an all-day series' UTC or zoned UNTIL, EXDATE and RECURRENCE-ID become the local dates they
+ *   fall on (RFC 5545 wants them as dates; a local midnight east of UTC is the day before in UTC);
+ * - a PERIOD RDATE becomes its start, its end kept in the map returned, by event: ical.js orders a
+ *   period among times by whether a time falls inside it, and hands back the period itself;
+ * - then, every zone resolving, a timed series' own times are aligned (alignSeriesTimes).
+ * Every DATE and DATE-TIME value this reads is one boundComponents has counted.
+ */
+function frameEventTimes(
+  root: ICAL.Component,
+  components: ICAL.Component[],
+  calendarTimezone: string | undefined,
+  budget: RecurrenceBudget,
+): Map<ICAL.Component, RecurrencePeriod[]> {
+  const timezone =
+    calendarTimezone !== undefined && isKnownTimezone(calendarTimezone)
+      ? calendarTimezone
+      : undefined;
+  const declared = new Set(
+    root.getAllSubcomponents('vtimezone').map((zone) => zone.getFirstPropertyValue('tzid')),
+  );
+  const named = new Set<string>();
+  let undeclared = 0;
+  const nameZone = (tzid: string) => {
+    if (named.has(tzid)) return;
+    named.add(tzid);
+    if (!declared.has(tzid) && ++undeclared > MAX_ICAL_TIMEZONES) expansionLimit();
+  };
+  const periods = new Map<ICAL.Component, RecurrencePeriod[]>();
+  const allDayMasters = new Set<string>();
+  for (const component of components) {
+    for (const name of COMPARED_TIME_PROPERTIES) {
+      for (const property of component.getAllProperties(name)) {
+        const values = property.jCal.slice(3) as unknown[];
+        const starts = values.map((value) => (Array.isArray(value) ? value[0] : value));
+        const tzid = property.getParameter('tzid');
+        if (typeof tzid === 'string') {
+          nameZone(tzid);
+        } else if (
+          timezone &&
+          (property.type === 'date-time' || property.type === 'period') &&
+          starts.some((start) => typeof start === 'string' && !start.endsWith('Z'))
+        ) {
+          property.setParameter('tzid', timezone);
+          nameZone(timezone);
+        }
+        if (name === 'rdate' && property.type === 'period') {
+          const kept = periods.get(component) ?? [];
+          for (const value of values) {
+            const [start, end] = Array.isArray(value) ? value : [];
+            if (typeof start !== 'string' || typeof end !== 'string') {
+              throw new CalendarContractError('invalid_icalendar');
+            }
+            kept.push({ property, start, end });
+          }
+          periods.set(component, kept);
+          property.resetType('date-time');
+          for (const value of values) property.jCal.push((value as string[])[0]);
+        }
+        budget.check();
+      }
+    }
+    if (
+      !component.hasProperty('recurrence-id') &&
+      component.getFirstProperty('dtstart')?.type === 'date'
+    ) {
+      const uid = component.getFirstPropertyValue('uid');
+      if (typeof uid === 'string') allDayMasters.add(uid);
+    }
+  }
+  if (timezone) {
+    const toDate = (property: ICAL.Property) => {
+      budget.check();
+      if (property.type !== 'date-time') return;
+      const tzid = property.getParameter('tzid');
+      const dates = (property.jCal.slice(3) as unknown[]).map((value) =>
+        typeof value === 'string' ? localDateOf(value, tzid, timezone) : undefined,
+      );
+      if (dates.some((date) => date === undefined)) return;
+      property.resetType('date');
+      property.removeParameter('tzid');
+      for (const date of dates) property.jCal.push(date as string);
+    };
+    for (const component of components) {
+      const uid = component.getFirstPropertyValue('uid');
+      if (typeof uid !== 'string' || !allDayMasters.has(uid)) continue;
+      if (component.hasProperty('recurrence-id')) {
+        for (const property of component.getAllProperties('recurrence-id')) toDate(property);
+        continue;
+      }
+      for (const property of component.getAllProperties('exdate')) toDate(property);
+      for (const property of component.getAllProperties('rrule')) {
+        const rule = property.jCal[3] as { until?: unknown } | undefined;
+        if (typeof rule?.until === 'string' && rule.until.length > 10) {
+          const date = localDateOf(rule.until, undefined, timezone);
+          if (date !== undefined) rule.until = date;
+        }
+      }
+    }
+  }
+  const cache = (root as unknown as { _timezoneCache?: Map<string, ICAL.Timezone> })._timezoneCache;
+  for (const tzid of named) {
+    // A zone Intl knows by this name is read through Intl, as calendarTimeValue reads it, even when
+    // the feed defines it: ical.js read a stale VTIMEZONE's rules (standard time only) while
+    // Slotlock read Intl's, so the two placed one time an hour apart and a moved occurrence was
+    // found in a feed but not in the series stored from it.
+    if (ICAL.TimezoneService.has(tzid) || !isKnownTimezone(tzid)) continue;
+    // ical.js keeps a calendar's zones here; without it, it could not use one of these.
+    if (!(cache instanceof Map)) throw new CalendarContractError('invalid_icalendar');
+    cache.set(tzid, new IntlTimezone(tzid));
+    budget.check();
+  }
+  alignSeriesTimes(components, budget);
+  return periods;
+}
+
+/**
+ * With every zone resolving, put what ical.js compares with a timed series' own times in the terms
+ * it compares them in:
+ * - a floating UNTIL becomes the UTC instant it names on the series' clock: RFC 5545 §3.3.10 reads
+ *   it as DTSTART is read, and ical.js read it as UTC, so a New York series lost its last day;
+ * - a RECURRENCE-ID named in another zone becomes the same instant in UTC, which ical.js matches
+ *   with an occurrence (it matched one in New York time with none); one for this and every later
+ *   occurrence (RANGE=THISANDFUTURE) becomes the series' own wall time instead, since ical.js moves
+ *   those by the wall-clock distance from it to the exception's start, read in the start's zone.
+ * A DATE EXDATE of a timed series becomes the series' start time that day: ical.js excluded every
+ * occurrence that day, and a series stored from the feed, whose exceptions are instants, excluded
+ * none (most series occur once a day; one that occurs more keeps the others). And a series of
+ * RDATEs with no RRULE gets its DTSTART as one: it is the first instance (RFC 5545 §3.8.2.4), which
+ * ical.js left out.
+ */
+function alignSeriesTimes(components: ICAL.Component[], budget: RecurrenceBudget): void {
+  const seriesStarts = new Map<string, { time: ICAL.Time; tzid: unknown }>();
+  for (const component of components) {
+    if (component.hasProperty('recurrence-id')) continue;
+    const uid = component.getFirstPropertyValue('uid');
+    const start = component.getFirstProperty('dtstart');
+    const value = start?.jCal[3];
+    if (typeof uid !== 'string' || !start || typeof value !== 'string') continue;
+    if (component.hasProperty('rdate') && !component.hasProperty('rrule')) {
+      const parameters = { ...(start.jCal[1] as Record<string, unknown>) };
+      component.addProperty(new ICAL.Property(['rdate', parameters, start.type, value]));
+    }
+    if (start.type !== 'date-time') continue;
+    const time = ICAL.Time.fromDateTimeString(value, start);
+    if (zonedInstant(time) === undefined) continue;
+    seriesStarts.set(uid, { time, tzid: start.getParameter('tzid') });
+    for (const property of component.getAllProperties('exdate')) {
+      const days = property.jCal.slice(3) as unknown[];
+      if (property.type !== 'date' || !days.every((day) => typeof day === 'string')) continue;
+      property.resetType('date-time');
+      const zone = start.getParameter('tzid');
+      if (typeof zone === 'string') property.setParameter('tzid', zone);
+      for (const day of days) property.jCal.push(`${day as string}${value.slice(10)}`);
+    }
+    for (const property of component.getAllProperties('rrule')) {
+      const rule = property.jCal[3] as { until?: unknown } | undefined;
+      const until = rule?.until;
+      if (typeof until !== 'string' || until.length <= 10 || until.endsWith('Z')) continue;
+      const instant = zonedInstant(ICAL.Time.fromDateTimeString(until, start));
+      if (instant !== undefined && rule) {
+        rule.until = jCalDateTime(zonedDateTimeFields(instant, 'UTC'), true);
+      }
+    }
+    budget.check();
+  }
+  for (const component of components) {
+    const uid = component.getFirstPropertyValue('uid');
+    const series = typeof uid === 'string' ? seriesStarts.get(uid) : undefined;
+    if (series === undefined) continue;
+    for (const property of component.getAllProperties('recurrence-id')) {
+      budget.check();
+      const value = property.jCal[3];
+      if (property.type !== 'date-time' || typeof value !== 'string') continue;
+      // Named in the series' own zone, it is matched by its wall time as it stands.
+      if (typeof series.tzid === 'string' && property.getParameter('tzid') === series.tzid) continue;
+      const time = ICAL.Time.fromDateTimeString(value, property);
+      const instant = zonedInstant(time);
+      if (instant === undefined) continue;
+      const seriesZone = series.time.zone as ICAL.Timezone;
+      const zone =
+        property.getParameter('range') === undefined ? ICAL.Timezone.utcTimezone : seriesZone;
+      if (time.zone?.tzid === zone.tzid) continue;
+      let written: string;
+      if (zone.tzid === 'UTC') {
+        written = jCalDateTime(zonedDateTimeFields(instant, 'UTC'), true);
+      } else if (zone instanceof IntlTimezone) {
+        written = jCalDateTime(zonedDateTimeFields(instant, zone.tzid.trim()));
+      } else {
+        // A zone the calendar defines is ical.js's to read.
+        written = time.convertToZone(zone).toString();
+      }
+      property.resetType('date-time');
+      if (zone.tzid === 'UTC') property.removeParameter('tzid');
+      else property.setParameter('tzid', series.tzid as string);
+      property.jCal.push(written);
+    }
+  }
+}
+
 /** Parse VEVENTs with the standards library; event content is deliberately discarded. */
 export function parseICalendarChanges(
   input: string,
@@ -1380,13 +1756,17 @@ function parseCalendarChanges(
     boundInput(input);
     const budget = new RecurrenceBudget(limits);
     const root = new ICAL.Component(ICAL.parse(input));
+    // A bare VEVENT (or anything else) would read as a calendar with no events.
+    if (root.name !== 'vcalendar') throw new CalendarContractError('invalid_icalendar');
     budget.check();
     let Budgeted: typeof ICAL.RecurIterator | undefined;
     const budgeted = () => (Budgeted ??= budgetedRecurIterator(budget));
     budgetTimezoneRules(root, budgeted);
     budgetTimezoneCoverage(root, budget);
+    // A time read in a zone of its own (a VTIMEZONE's, or an IntlTimezone) is read in that zone: an
+    // RDATE may name another zone than its series' DTSTART, and an occurrence keeps the RDATE's.
     const timeValue = (value: unknown, zone: unknown, fallback: string | undefined) =>
-      budget.search(() => calendarTimeValue(value, zone, fallback));
+      budget.search(() => calendarTimeValue(value, ownZone(value) ?? zone, fallback));
     const embeddedTimezone = root.getFirstPropertyValue('x-wr-timezone');
     const defaultTimezone =
       calendarTimezone?.trim() ||
@@ -1397,6 +1777,7 @@ function parseCalendarChanges(
       throw new CalendarContractError('invalid_icalendar');
     }
     boundComponents(components, budget);
+    const periods = frameEventTimes(root, components, defaultTimezone, budget);
     const events = feedEvents(components, budget);
     const masters = new Map<string, ICAL.Event>();
     const exceptionsByUid = new Map<string, ICAL.Event[]>();
@@ -1424,12 +1805,19 @@ function parseCalendarChanges(
       }
     }
 
+    /**
+     * One event or occurrence as a change, or null when it has no length: RFC 5545 §3.6.1 ends a
+     * DATE-TIME DTSTART without DTEND or DURATION when it starts, so it occupies no time. One that
+     * ends before it starts, or has no UID, makes the feed an invalid calendar. `knownEnd` is an end
+     * already found: a PERIOD RDATE's, or an occurrence's that starts in an hour the clocks skip.
+     */
     const normalizeEvent = (
       event: ICAL.Event,
       startValue: unknown,
       endValue: unknown,
       recurrenceValue?: unknown,
-    ): ExternalCalendarChange => {
+      knownEnd?: Date,
+    ): ExternalCalendarChange | null => {
       const component = event.component;
       const startProperty = component.getFirstProperty('dtstart');
       const endProperty = component.getFirstProperty('dtend');
@@ -1438,18 +1826,28 @@ function parseCalendarChanges(
       const transparency = String(
         component.getFirstPropertyValue('transp') ?? 'opaque',
       ).toLowerCase();
-      const change: ExternalCalendarChangeInput = {
-        externalId: event.uid,
-        start: timeValue(startValue, startProperty?.getParameter('tzid'), defaultTimezone),
-        end: timeValue(
+      const start = timeValue(startValue, startProperty?.getParameter('tzid'), defaultTimezone);
+      const end =
+        knownEnd ??
+        timeValue(
           endValue,
           endProperty?.getParameter('tzid') ?? startProperty?.getParameter('tzid'),
           defaultTimezone,
-        ),
+        );
+      const change: ExternalCalendarChangeInput = {
+        externalId: event.uid,
+        start,
+        end,
         status,
         transparent: transparency === 'transparent',
         sequence: Number(component.getFirstPropertyValue('sequence') ?? 0),
       };
+      if (end.getTime() === start.getTime()) {
+        if (status !== 'cancelled') return null;
+        // Cancelled, it still says so, with no time.
+        change.start = null;
+        change.end = null;
+      }
       if (recurrenceValue) {
         change.recurrenceId = timeValue(
           recurrenceValue,
@@ -1457,17 +1855,99 @@ function parseCalendarChanges(
           defaultTimezone,
         ).toISOString();
       }
-      return normalizeExternalCalendarChange(change);
+      try {
+        return normalizeExternalCalendarChange(change);
+      } catch (error) {
+        if (error instanceof CalendarContractError) {
+          throw new CalendarContractError('invalid_icalendar');
+        }
+        throw error;
+      }
+    };
+
+    /** Each PERIOD RDATE of a series, by the instant it starts: the instant it ends. */
+    const periodEndsOf = (event: ICAL.Event): Map<number, Date> => {
+      const ends = new Map<number, Date>();
+      const maxMs = MAX_ICAL_STEP_DAYS * 24 * 60 * 60 * 1000;
+      for (const period of periods.get(event.component) ?? []) {
+        const zone = period.property.getParameter('tzid');
+        const start = ICAL.Time.fromDateTimeString(period.start, period.property);
+        let end: ICAL.Time;
+        if (/^[+-]?P/.test(period.end)) {
+          // Bounded first, as boundComponent bounds a DURATION: ical.js adds a month at a time.
+          const duration = ICAL.Duration.fromString(period.end);
+          if (duration.isNegative || duration.toSeconds() * 1000 > maxMs) expansionLimit();
+          end = start.clone();
+          end.addDuration(duration);
+        } else {
+          end = ICAL.Time.fromDateTimeString(period.end, period.property);
+          if (Math.abs(fieldsMs(end) - fieldsMs(start)) > maxMs + 24 * 60 * 60 * 1000) {
+            expansionLimit();
+          }
+        }
+        const startMs = timeValue(start, zone, defaultTimezone).getTime();
+        const endsAt = timeValue(end, zone, defaultTimezone);
+        if (endsAt.getTime() < startMs) throw new CalendarContractError('invalid_icalendar');
+        ends.set(startMs, endsAt);
+        budget.check();
+      }
+      return ends;
+    };
+
+    /**
+     * The exact length of a timed series: what its DTEND gives it (RFC 5545 §3.8.5.3), a clock
+     * change or not, or its DURATION in seconds (exact for hours, minutes and seconds, §3.3.6; days
+     * count as 24 hours, but a length of days never ends as it starts, where this is used);
+     * undefined for an all-day series.
+     */
+    const exactLengthOf = (event: ICAL.Event): number | undefined => {
+      const startProperty = event.component.getFirstProperty('dtstart');
+      if (startProperty?.type !== 'date-time') return undefined;
+      const duration = event.component.getFirstPropertyValue('duration');
+      if (duration instanceof ICAL.Duration) return duration.toSeconds() * 1000;
+      const endProperty = event.component.getFirstProperty('dtend');
+      if (!endProperty) return undefined;
+      const start = timeValue(event.startDate, startProperty.getParameter('tzid'), defaultTimezone);
+      const end = timeValue(
+        event.endDate,
+        endProperty.getParameter('tzid') ?? startProperty.getParameter('tzid'),
+        defaultTimezone,
+      );
+      return end.getTime() - start.getTime();
+    };
+
+    /**
+     * A series' EXDATEs: the instants its DATE-TIME values name, and the days its DATE values name
+     * (one excludes every occurrence that day, as ical.js reads it). ical.js passes them one at a
+     * time as it goes, so an occurrence after two EXDATEs it had not passed, or the second of an
+     * instant both RRULE and RDATE name, escaped its EXDATE; RFC 5545 §3.8.5.1 has every EXDATE win.
+     */
+    const exclusionsOf = (event: ICAL.Event) => {
+      const instants = new Set<number>();
+      const days = new Set<string>();
+      const startZone = event.component.getFirstProperty('dtstart')?.getParameter('tzid');
+      for (const property of event.component.getAllProperties('exdate')) {
+        const zone = property.getParameter('tzid') ?? startZone;
+        for (const value of property.getValues()) {
+          if (!(value instanceof ICAL.Time)) throw new CalendarContractError('invalid_icalendar');
+          if (value.isDate) days.add(dayOf(value));
+          else instants.add(timeValue(value, zone, defaultTimezone).getTime());
+        }
+      }
+      return { instants, days };
     };
 
     const changes: ExternalCalendarChange[] = [];
-    let remainingWork = MAX_ICAL_WORK;
     for (const event of events) {
       if (event.isRecurrenceException() && masters.has(event.uid)) continue;
       if (!event.isRecurring()) {
-        changes.push(
-          normalizeEvent(event, event.startDate, event.endDate, event.recurrenceId ?? undefined),
+        const change = normalizeEvent(
+          event,
+          event.startDate,
+          event.endDate,
+          event.recurrenceId ?? undefined,
         );
+        if (change) changes.push(change);
         continue;
       }
       if (
@@ -1479,6 +1959,8 @@ function parseCalendarChanges(
       ) {
         throw new CalendarContractError('invalid_icalendar');
       }
+      // What one series may pass from its start, so that one series' age never refuses another's.
+      let remainingWork = MAX_ICAL_WORK;
       let maxBackwardExceptionShiftMs = 0;
       for (const exception of exceptionsByUid.get(event.uid) ?? []) {
         remainingWork -= 1;
@@ -1513,6 +1995,9 @@ function parseCalendarChanges(
           ? kept
           : null;
       const startZone = event.component.getFirstProperty('dtstart')?.getParameter('tzid');
+      let periodEnds: Map<number, Date> | undefined;
+      let exclusions: ReturnType<typeof exclusionsOf> | undefined;
+      const exactLengthMs = exactLengthOf(event);
       // The occurrences in the window from `resume` (or the start), and the cursor to keep; null
       // when `resume` does not fit this series.
       const expand = (resume: CalendarSeriesCursor | null) => {
@@ -1535,6 +2020,7 @@ function parseCalendarChanges(
         }
         const found: ExternalCalendarChange[] = [];
         let position = resume?.position;
+        let previous: number | undefined;
         let snapshot = resume;
         let leaving = key !== null;
         while (true) {
@@ -1552,22 +2038,59 @@ function parseCalendarChanges(
           const occurrenceStart = timeValue(occurrence, startZone, defaultTimezone);
           position = occurrenceStart.getTime();
           if (occurrenceStart.getTime() >= recurrenceScanEndMs) break;
+          // An instant is one occurrence however many RRULEs and RDATEs name it (RFC 5545
+          // §3.8.5.3; ical.js yields it again), and none where an EXDATE names it.
+          const repeated = position === previous;
+          previous = position;
+          if (repeated) continue;
+          if (event.component.hasProperty('exdate')) {
+            exclusions ??= exclusionsOf(event);
+            if (exclusions.instants.has(position) || exclusions.days.has(dayOf(occurrence))) {
+              continue;
+            }
+          }
           const details = event.getOccurrenceDetails(occurrence);
           const start = timeValue(
             details.startDate,
             details.item.component.getFirstProperty('dtstart')?.getParameter('tzid'),
             defaultTimezone,
           );
-          const end = timeValue(
-            details.endDate,
-            details.item.component.getFirstProperty('dtend')?.getParameter('tzid') ??
-              details.item.component.getFirstProperty('dtstart')?.getParameter('tzid'),
-            defaultTimezone,
-          );
-          if (end > expansionWindow.start && start < expansionWindow.end) {
-            found.push(
-              normalizeEvent(details.item, details.startDate, details.endDate, occurrence),
+          // A PERIOD RDATE's occurrence ends where its period does, unless an exception moved it.
+          let knownEnd =
+            details.item === event
+              ? (periodEnds ??= periodEndsOf(event)).get(occurrenceStart.getTime())
+              : undefined;
+          let end =
+            knownEnd ??
+            timeValue(
+              details.endDate,
+              details.item.component.getFirstProperty('dtend')?.getParameter('tzid') ??
+                details.item.component.getFirstProperty('dtstart')?.getParameter('tzid'),
+              defaultTimezone,
             );
+          // Any other ends on the wall clock, as calendars show it: ical.js adds its series' length
+          // there. One that starts in an hour the clocks skip ended as it started (a 02:00-03:00
+          // occurrence the night Berlin skips 02:00), and was dropped: it lasts its series' exact
+          // length, as RFC 5545 §3.8.5.3 has every occurrence last.
+          if (
+            knownEnd === undefined &&
+            details.item === event &&
+            exactLengthMs !== undefined &&
+            exactLengthMs > 0 &&
+            end <= start
+          ) {
+            knownEnd = new Date(start.getTime() + exactLengthMs);
+            end = knownEnd;
+          }
+          if (end > expansionWindow.start && start < expansionWindow.end) {
+            const change = normalizeEvent(
+              details.item,
+              details.startDate,
+              details.endDate,
+              occurrence,
+              knownEnd,
+            );
+            if (change) found.push(change);
             if (changes.length + found.length > MAX_ICAL_OCCURRENCES) expansionLimit();
           }
         }
@@ -1610,40 +2133,6 @@ function requiredEventText(value: string, code: CalendarContractError['code']): 
   return normalized;
 }
 
-interface ZonedParts {
-  year: number;
-  month: number;
-  day: number;
-  hour: number;
-  minute: number;
-  second: number;
-}
-
-function partsInZone(value: Date, timezone: string): ZonedParts {
-  const formatter = new Intl.DateTimeFormat('en-GB', {
-    timeZone: timezone,
-    hourCycle: 'h23',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  });
-  const values: Record<string, number> = {};
-  for (const part of formatter.formatToParts(value)) {
-    if (part.type !== 'literal') values[part.type] = Number(part.value);
-  }
-  return {
-    year: values.year ?? 0,
-    month: values.month ?? 0,
-    day: values.day ?? 0,
-    hour: (values.hour ?? 0) % 24,
-    minute: values.minute ?? 0,
-    second: values.second ?? 0,
-  };
-}
-
 function addDateTimeProperty(
   component: ICAL.Component,
   name: 'dtstart' | 'dtend' | 'recurrence-id',
@@ -1655,7 +2144,9 @@ function addDateTimeProperty(
     property.setValue(ICAL.Time.fromJSDate(value, true));
   } else {
     property.setParameter('tzid', timezone);
-    property.setValue(ICAL.Time.fromData({ ...partsInZone(value, timezone), isDate: false }));
+    property.setValue(
+      ICAL.Time.fromData({ ...zonedDateTimeFields(value, timezone), isDate: false }),
+    );
   }
   component.addProperty(property);
 }
@@ -1998,6 +2489,7 @@ export function parseTrustedICalendarEvents(
     boundInput(input);
     const budget = new RecurrenceBudget(FEED_LIMITS);
     const root = new ICAL.Component(ICAL.parse(input));
+    if (root.name !== 'vcalendar') throw new CalendarContractError('invalid_icalendar');
     budget.check();
     let Budgeted: typeof ICAL.RecurIterator | undefined;
     budgetTimezoneRules(root, () => (Budgeted ??= budgetedRecurIterator(budget)));
@@ -2014,6 +2506,9 @@ export function parseTrustedICalendarEvents(
       throw new CalendarContractError('invalid_icalendar');
     }
     boundComponents(components, budget);
+    // Times are read as a feed's are, so a stored series occupies what the feed reports: zones it
+    // names without defining them, floating times in the calendar's zone, all-day EXDATEs as days.
+    frameEventTimes(root, components, defaultTimezone, budget);
     const masters = new Map<string, ICAL.Event>();
     const exceptionsByUid = new Map<string, ICAL.Event[]>();
     for (const event of feedEvents(components, budget)) {
@@ -2181,7 +2676,8 @@ export function parseTrustedICalendarEvents(
     }
     return trusted;
   } catch (error) {
-    if (error instanceof CalendarContractError) throw error;
+    // An event the calendar gives no length or no UID is the calendar's fault, as in a feed.
+    if (error instanceof CalendarContractError && error.code === 'invalid_icalendar') throw error;
     throw new CalendarContractError('invalid_icalendar');
   }
 }

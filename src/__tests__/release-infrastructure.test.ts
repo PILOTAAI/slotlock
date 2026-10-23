@@ -622,6 +622,18 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
     expect(key).toMatchObject({ title: 'slotlock tag-release (GitHub Actions)', read_only: false });
   });
 
+  it('keeps the release app in an environment only main can use, with no reviewer', () => {
+    const requests = dryRun();
+    expect(environment(requests, 'release-app')?.reviewers).toEqual([]);
+    const policy = requests.find(
+      (request) =>
+        request.method === 'POST' &&
+        request.path ===
+          'repos/PILOTAAI/slotlock/environments/release-app/deployment-branch-policies',
+    )?.body;
+    expect(policy).toEqual({ name: 'main', type: 'branch' });
+  });
+
   it('makes a release wait for no reviewer unless asked to', () => {
     const plain = dryRun();
     expect(environment(plain, 'npm')?.reviewers).toEqual([]);
@@ -1312,6 +1324,48 @@ describe('release button', () => {
     }
   });
 
+  it('opens and merges as the release app once it is stored, and as GITHUB_TOKEN until then', () => {
+    const text = workflow('release-version.yml');
+    const step = (name: string) => {
+      const start = text.indexOf(`- name: ${name}`);
+      expect(start, name).toBeGreaterThan(0);
+      const next = text.indexOf('\n      - ', start + 1);
+      return text.slice(start, next === -1 ? undefined : next);
+    };
+    expect(text).toContain('\n    environment: release-app\n');
+    const mint = step("Mint the release app's token");
+    expect(mint).toContain("if: vars.RELEASE_APP_CLIENT_ID != ''");
+    expect(mint).toContain('client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}');
+    expect(mint).toContain('private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}');
+    // Only what opening and merging the pull request needs.
+    expect(mint.match(/permission-[a-z-]+: \w+/g)).toEqual([
+      'permission-contents: write',
+      'permission-pull-requests: write',
+    ]);
+    expect(text.indexOf("- name: Mint the release app's token")).toBeLessThan(
+      text.indexOf('uses: actions/checkout@'),
+    );
+    const appOrGitHub = '${{ steps.app.outputs.token || github.token }}';
+    expect(text).toContain(`token: ${appOrGitHub}`);
+    for (const name of ['Push the release branch and open its pull request', 'Merge it']) {
+      expect(step(name)).toContain(`GH_TOKEN: ${appOrGitHub}`);
+    }
+    // Reading workflow runs needs actions: read, which the app's token does not have.
+    expect(step('Wait for CI and DCO on the pull request')).toContain(
+      'GH_TOKEN: ${{ github.token }}',
+    );
+    // The app's merge is a push, which starts Tag release and Site; a GITHUB_TOKEN merge starts none.
+    expect(step('Start Tag release and Site on main')).toContain(
+      "if: steps.app.outputs.token == ''",
+    );
+    expect(step('Say what the merge starts')).toContain("if: steps.app.outputs.token != ''");
+    expect(step('Say how to repair the release app')).toContain(
+      "if: failure() && steps.app.outcome == 'failure'",
+    );
+    // Every step names the token it uses: none comes from the job.
+    expect(text).not.toMatch(/^ {4}env:\n(?: {6}.*\n)* {6}GH_TOKEN:/m);
+  });
+
   it('leaves CI and DCO to the pull request, whose own runs are the checks its merge needs', () => {
     // On the first real release (0.1.1, 2026-10-22), CI and DCO started with workflow_dispatch passed
     // at the release commit, and the pull request still had none of its required checks.
@@ -1695,5 +1749,25 @@ printf '%s' "$answer" | jq -r "$filter"
     const result = wait({ 'ci.yml': [run(1, 'completed', 'success')], 'dco.yml': [none] }, '0');
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(`::error::Still waiting for dco.yml on ${url}.`);
+  });
+});
+
+describe('release version and merge', () => {
+  it('refuses a version that is more than one line', () => {
+    const repo = repository();
+    // grep matches a line at a time, so `1.2.3` on the first line once passed the pattern.
+    for (const version of ['1.2.3\nfoo', '1.2.3\n', '1.2.3 ', '1.2.3/x']) {
+      const result = repo.script('prepare-release.sh', version);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('is not a version like 1.2.3');
+    }
+  });
+
+  it('merges only the commit whose checks it waited for', () => {
+    const workflow = read('.github/workflows/release-version.yml');
+    const merges = workflow.split('\n').filter((line) => line.includes('pr merge'));
+    expect(merges).toEqual([
+      '        run: gh pr merge "$PR" --squash --delete-branch --match-head-commit "$SHA"',
+    ]);
   });
 });

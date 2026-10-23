@@ -22,7 +22,7 @@ const FOURTEEN_HOURS_MS = 14 * 60 * 60 * 1000;
  * Date.UTC remaps years 0..99 to 1900..1999. Slotlock accepts ISO calendar years down to 1,
  * so construct UTC frames through setUTCFullYear instead of inheriting that legacy quirk.
  */
-function utcFrame(
+export function utcFrame(
   year: number,
   month: number,
   day: number,
@@ -155,6 +155,32 @@ export function zonedWallTime(instant: Date, timezone: string): ZonedWallTime {
 /** How far `timezone` is ahead of UTC at `instant`, in whole minutes (negative west of UTC). */
 export function zonedOffsetMinutes(instant: Date, timezone: string): number {
   return Math.round((wallFrame(instant, timezone).getTime() - instant.getTime()) / 60_000);
+}
+
+/** A wall clock's fields, to the second. */
+export interface ZonedDateTimeFields {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+}
+
+/**
+ * The wall-clock fields an instant reads as in `timezone`, to the second: what a calendar writes
+ * beside a TZID. Reads through the cached formatters, as every conversion here does.
+ */
+export function zonedDateTimeFields(instant: Date, timezone: string): ZonedDateTimeFields {
+  const wall = wallFrame(instant, timezone);
+  return {
+    year: wall.getUTCFullYear(),
+    month: wall.getUTCMonth() + 1,
+    day: wall.getUTCDate(),
+    hour: wall.getUTCHours(),
+    minute: wall.getUTCMinutes(),
+    second: wall.getUTCSeconds(),
+  };
 }
 
 /** The instant shifted so its UTC fields read as the wall clock in `timezone`. */

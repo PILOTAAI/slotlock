@@ -17,6 +17,10 @@ fail() {
   exit 1
 }
 new=$1
+# grep reads a line at a time: anything but the characters of a version (a line break, say) first.
+case $new in
+*[!0-9A-Za-z.-]*) fail "$new is not a version like 1.2.3 or 1.2.3-rc.1 (no leading v)." ;;
+esac
 printf '%s' "$new" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' ||
   fail "$new is not a version like 1.2.3 or 1.2.3-rc.1 (no leading v)."
 current=$(jq -r .version package.json)

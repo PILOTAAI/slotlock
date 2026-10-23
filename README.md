@@ -37,6 +37,7 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
 | --- | --- |
 | `http://localhost:8080/mcp` | MCP, with `Authorization: Bearer <SLOTLOCK_AUTH_TOKEN>` |
 | `http://localhost:8080/a2a` | A2A 1.0, same token; card at `/.well-known/agent-card.json` |
+| `http://localhost:8080/v1/…` | [REST](#rest-and-openapi): the tools, and the [application API](#application-api) for admin keys; described at `/openapi.json` |
 | `http://localhost:8080/healthz` | Readiness, including the database |
 
 - The server runs as a role that owns nothing and cannot bypass row-level security; a one-off
@@ -85,6 +86,7 @@ Give each agent its own key instead of sharing the server token:
 ```sh
 slotlock key create "Booking agent"
 slotlock key create "Availability bot" --scope read --expires-in-days 90
+slotlock key create "Booking site" --scope read,write,admin
 slotlock key list
 slotlock key rotate <id>
 slotlock key revoke <id>
@@ -92,8 +94,8 @@ slotlock key revoke <id>
 
 - A key (`slk_…`) is shown once and stored only as a SHA-256. Send it as `Authorization: Bearer`.
 - It acts in the tenant it was created for (`SLOTLOCK_TENANT`), so one server serves many tenants.
-- `read` covers the five tools that only look; `write` covers create, update and delete. Default:
-  both.
+- `read` covers the five tools that only look; `write` covers create, update and delete; `admin`
+  covers the [application API](#application-api), which no agent needs. Default: read and write.
 - `rotate` keeps the key's id, scopes and bookings; `revoke` stops it on its next request.
 - A tenant may hold 100 active keys. The last six characters are a checksum secret scanners can
   verify offline.
@@ -265,7 +267,8 @@ export const slot = findNextAvailable({
 // slot: 2026-09-14 10:00–12:00 UTC, the first two free hours after the busy one
 ```
 
-A rule `expandRules` cannot evaluate adds no availability; it never invents a slot.
+A rule `expandRules` cannot evaluate adds no availability; it never invents a slot. A search window
+may be 367 days at most (`invalid_window`), here and in `findNextAvailableFor`.
 
 ## Set up PostgreSQL
 
@@ -411,26 +414,29 @@ export async function scheduleWeeklyInspection(
 ```
 
 Occurrences are stored for a window of at most 367 days and 2,000 occurrences; maintenance rolls
-the window forward. Past it, free/busy reports the time as unproven.
+the window forward, never moving its end back. Outside it, before or after, free/busy reports the
+time as unproven.
 
 A rule is expanded within a budget: 50,000 steps and a second for a feed (the whole read, from its
 text), or for a stored series as maintenance rolls it; half of that for one event as it is written.
-A feed's own time zones (VTIMEZONE) count against the same budget. A feed may carry 100 time zones,
-1,000 of their observances and 2,000 RDATE values in them, and 20,000 RDATE and EXDATE values in
-its events; a property's name and parameters may take 8 KB and list 100. A SECONDLY to WEEKLY step,
-a `DURATION`, or an event's length may be a century at most. A calendar that needs more, such as a
-rule that never occurs (`FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30`), is refused: `invalid_event` on a
-write, `invalid_icalendar` from a feed.
+A feed's own time zones (VTIMEZONE) count against the same budget. A feed may carry 100 time zones
+and name 100 it does not define, 1,000 observances and 2,000 RDATE values in the zones it carries,
+and 20,000 RDATE and EXDATE values in its events; a property's name and parameters may take 8 KB
+and list 100. A SECONDLY to WEEKLY step, a `DURATION`, or an event's length may be a century at
+most. A calendar that needs more, such as a rule that never occurs
+(`FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30`), is refused: `invalid_event` on a write, `invalid_icalendar`
+from a feed.
 
-A feed's rules are expanded from their start. A stored series keeps where its last expansion
-stopped, and the next one resumes there, so a daily series keeps rolling for as long as it runs:
-its budget goes on the window, not on the years before it. A write that changes a series searches
-from its start, and resumes from where it stopped only if that search is over the budget. A place
-serves only the rule, start and time zone it was kept for, read by the same version of ical.js, and
-never lies past an occurrence that could still reach the window (one within the event's length and
-a day of it, or one an exception moves into it). Otherwise the series is searched from its start,
-within the same budget. During maintenance, a stored series that outgrows the budget is counted as
-`refused` (its ids in `refusedEventIds`) and keeps its old coverage.
+A feed's rules are expanded from their start, and each series may pass 4,000 occurrences on the way
+(a daily one, about 11 years) whatever the feed's other series take. A stored series keeps where
+its last expansion stopped, and the next one resumes there, so a daily series keeps rolling for as
+long as it runs: its budget goes on the window, not on the years before it. A write that changes a
+series searches from its start, and resumes from where it stopped only if that search is over the
+budget. A place serves only the rule, start and time zone it was kept for, read by the same version
+of ical.js, and never lies past an occurrence that could still reach the window (one within the
+event's length and a day of it, or one an exception moves into it). Otherwise the series is searched
+from its start, within the same budget. During maintenance, a stored series that outgrows the budget
+is counted as `refused` (its ids in `refusedEventIds`) and keeps its old coverage.
 
 ### External calendars
 
@@ -440,6 +446,24 @@ Slotlock gives them neutral boundaries:
 - `normalizeExternalCalendarChange` for webhook changes; `parseICalendarChanges` and `emitICalendar`
   for bounded iCalendar in and out; `emitITipCalendar` for invitations.
 - All-day events become whole local days in the calendar's time zone; a feed without one is refused.
+- A TZID Intl knows is read as that IANA zone, whether or not the feed defines it (a VTIMEZONE's
+  own rules for such a name are not used); one only the feed defines, such as a Windows name, is
+  read from its VTIMEZONE. A floating time is read in the calendar's zone. So an UNTIL, EXDATE,
+  RDATE or RECURRENCE-ID written in UTC or another zone names the occurrence it means, a floating
+  UNTIL is read on the series' own clock, and a `RANGE=THISANDFUTURE` exception moves every later
+  occurrence by its own shift.
+- An event with no length (a DATE-TIME DTSTART without DTEND or DURATION) occupies no time and is
+  left out. A PERIOD RDATE ends where its period does. A document whose root is not a VCALENDAR, or
+  an event that ends before it starts, is refused as `invalid_icalendar`.
+- A series' DTSTART is its first occurrence, with or without an RRULE; every RRULE is expanded; an
+  instant two of them, or an RRULE and an RDATE, name is one occurrence; every EXDATE excludes the
+  occurrence it names (RFC 5545 §3.8.5). A DATE EXDATE of a timed series names the occurrence at the
+  series' start time that day.
+- An occurrence ends on the wall clock, as calendars show it (00:30-02:30 lasts three hours the
+  night the clocks go back). One that starts in an hour the clocks skip lasts its series' exact
+  length instead, from the offset before the gap (RFC 5545 §3.3.5).
+- `parseTrustedICalendarEvents` reads times as `parseICalendarChanges` does, so a series stored from
+  it occupies what the feed reports.
 - `recordCalendarCoverage` marks how much of a feed is read. Pass the sources a resource depends on as
   `requiredSources`, and any coverage short of `complete` means the time is not proven free.
 
@@ -625,10 +649,10 @@ on stderr.
 
 | Where | Error |
 | --- | --- |
-| HTTP | `401` with `WWW-Authenticate`, `403` disallowed origin, `413`/`415` bad body, `429` rate limit |
-| MCP | `-32602` unknown tool or altered confirmation, `-32603` server fault, `-32601` unknown method |
+| HTTP | `401` with `WWW-Authenticate`, `403` disallowed origin, `413`/`415` bad body, `429` rate limit (MCP, REST) |
+| MCP | `-32602` unknown tool, `arguments` that are not an object, or altered confirmation; `-32603` server fault; `-32601` unknown method |
 | MCP 2026-07-28 | `-32020` header disagrees with body, `-32021` form elicitation not declared, `-32022` unsupported revision, `-31029` rate limit |
-| A2A | `-32009` unsupported `A2A-Version`, `-32003` push notifications, `-32004` streaming, `-32001` task not found (the server keeps no tasks) |
+| A2A | `-32602` malformed message or parameters, `-32029` rate limit (`RATE_LIMITED`, in the 200 envelope like every A2A error), `-32009` unsupported `A2A-Version`, `-32003` push notifications, `-32004` streaming, `-32001` task not found (the server keeps no tasks) |
 
 ### Authentication and OAuth discovery
 
@@ -655,6 +679,8 @@ With `confirmation`, a listed write first asks the person a yes/no question that
 will change, such as `Book vehicle-42 for 2027-03-29 10:00–11:00 (Europe/London): "Vehicle
 handover".` Only an explicit yes runs the write.
 
+- A booking that leaves the time free (`transparency: 'transparent'`) says so, and a write names
+  the other fields it sets (`also description, attendees`) without quoting them.
 - Facts come first: the resource by its own reference, times in its own zone, and an event as it
   stands now, read through your backend's `describeResource` and `getEvent` when the caller may
   read them (within 2 seconds in all). Otherwise things are named by id, and each time carries its
@@ -685,10 +711,29 @@ returns busy time and coverage for the next `resourceWindowDays` (30). `subscrip
 2026-07-28 results carry cache hints: discovery and tool lists are public for an hour, free/busy is
 never cached. W3C `traceparent`, `tracestate` and `baggage` reach your backend as `context.trace`.
 
+`onEvent` hears about every call that names an operation, so you can count, time and correlate them:
+
+- `{ type: 'call', protocol, operation, outcome, durationMs, traceId? }` for an MCP `tools/call` or
+  A2A `SendMessage`; `outcome` is `ok`, the refusal's code (`overlap`, `rate_limited`, …), or why
+  it was refused before it ran: `invalid_arguments`, `missing_capability` (a guarded write from a
+  client that cannot confirm), `invalid_message` or `invalid_message_parameters` (A2A).
+- `{ type: 'rest', operation, status, durationMs, traceId? }` for a REST call, or one refused before
+  it ran: a body that is not JSON (415, 400), too large (413) or not an object (400).
+- `{ type: 'confirmation', operation, outcome }` for each confirmation, before the call it decides.
+- A request refused before its operation is read is not reported: a missing credential, the rate
+  limit, an `A2A-Version` other than 1.0, a JSON-RPC envelope that does not parse, a path no route
+  has.
+- `traceId` is the trace id of a valid `traceparent` from `_meta` or the header. Arguments, callers,
+  the parent span, `tracestate` and `baggage` are never reported, and an `onEvent` or `onError` that
+  throws, or returns a promise that rejects, changes nothing a client sees. Resource reads and
+  subscription polls are not reported.
+
+`slotlock serve` writes each as a JSON line (`"event":"call"`, `duration_ms`, `trace_id`).
+
 ### REST and OpenAPI
 
-`rest: true` (`SLOTLOCK_REST_API=on` for `slotlock serve`) also serves each tool as plain HTTP,
-described by an OpenAPI 3.1 document at `/openapi.json`:
+`rest: true` also serves each tool as plain HTTP, described by an OpenAPI 3.1 document at
+`/openapi.json`. `slotlock serve` has it on; `SLOTLOCK_REST_API=off` turns it off.
 
 | Request | Tool |
 | --- | --- |
@@ -706,13 +751,65 @@ curl "http://localhost:8080/v1/resources" -H "Authorization: Bearer $SLOTLOCK_AP
 ```
 
 - `GET` and `DELETE` take the tool's arguments as query parameters (a list repeats:
-  `resource_ids=a&resource_ids=b`); `POST` and `PATCH` take a JSON body. The event id is in the path.
+  `resource_ids=a&resource_ids=b`); `POST`, `PUT` and `PATCH` take a JSON body. Ids are in the path;
+  percent-encode one that holds `/`.
 - Keys, scopes, `authorize` and the rate limit apply as over MCP. The body is the tool's output, or
   `{"error":{"code":…}}` with the matching HTTP status.
 - REST cannot ask a person, so a write listed in `confirmation` answers `428 confirmation_required`.
 - There are no CORS headers: call it from a server, not a browser.
+- From Python, Go, Rust, Java or .NET, use the [clients](clients/README.md): one method per
+  operation, the application API included, each tested against the server in CI. For another
+  language, generate one from [`openapi.json`](openapi.json) (or a server's `/openapi.json`) with any
+  OpenAPI 3.1 generator.
+
+### Application API
+
+What the application around the agents does, from any language: the store's resource, hours, hold,
+reservation, coverage and maintenance calls, as REST beside the tools. It needs a key with the
+`admin` scope ("Full" in the dashboard); the server's own `SLOTLOCK_AUTH_TOKEN`, the token agents
+are given, reads and writes but is never admin. It is never an MCP tool or an A2A skill, and never
+waits for a confirmation.
+
+| Request | Does |
+| --- | --- |
+| `POST /v1/resources` | Create the resource with this `external_ref`, or update its `timezone` |
+| `GET /v1/resources/{resource_id}` | One resource, with its own weekly hours |
+| `PUT /v1/resources/{resource_id}/availability` | Its own weekly hours; `[]` never bookable, `null` the server's |
+| `PUT /v1/availability` | Every resource's weekly hours at once |
+| `POST /v1/holds` | Hold a window for `ttl_seconds` (up to 7 days) |
+| `POST /v1/holds/{hold_id}/confirm` | Turn the hold into a reservation |
+| `DELETE /v1/holds/{hold_id}` | Release the hold |
+| `PUT /v1/reservations/{reservation_ref}` | Book (`revision: 1`) or move (the current revision plus 1) |
+| `DELETE /v1/reservations/{reservation_ref}?revision=…` | Cancel, at the current revision plus 1 |
+| `PUT /v1/resources/{resource_id}/coverage/{source}` | Record that `source`'s events are complete for a window |
+| `POST /v1/maintenance` | Run [maintenance](#operations) for the key's tenant |
+
+```sh
+curl -X PUT "http://localhost:8080/v1/reservations/BK-42" \
+  -H "Authorization: Bearer $SLOTLOCK_ADMIN_KEY" -H "Content-Type: application/json" \
+  -d '{"resource_id":"<id>","start":"2027-03-29T09:00:00Z","end":"2027-03-31T09:00:00Z",
+       "buffer_after_minutes":60,"revision":1}'
+```
+
+- A taken window answers `409 overlap`. `buffer_after_minutes` keeps the time after a reservation
+  busy for holds and other reservations alike.
+- Every write is safe to retry: the same reservation at its current revision answers
+  `replayed: true`, a confirmed hold confirms again, and a cancelled reference stays cancelled (a
+  late booking for it answers `409`). A late copy of a booking or a move that has since been
+  superseded answers `409 stale_revision`.
+- The time a calendar event occupies is the event's: reservation calls never find, move or cancel
+  it, whatever reference they name. Change the event instead.
+- The tenant is the key's. Another tenant's resource or hold is `404`, whatever the database role.
+- With the library, pass `application` beside `rest: true`:
+  `{ backend: createSlotlockStoreApplicationBackend(store, { maxTenantResources }), authorize }`.
+  A principal with `scopes` needs `admin`; then `authorize` decides.
 
 ## Connect an agent
+
+MCP and A2A are wire protocols, so an agent in any language connects with its own MCP or A2A client
+to `/mcp` or `/a2a`, the API key as a bearer token. The examples below use TypeScript. Code that
+calls Slotlock directly, without an agent, can use the [REST clients](clients/README.md) for
+Python, Go, Rust, Java and .NET.
 
 ### MCP (any client)
 
@@ -878,62 +975,37 @@ and never writes.
 
 ## Operations
 
-Run this at least daily for every tenant:
+Every tenant needs maintenance at least daily: it extends recurring events to the rolling horizon
+and prunes what the retention window no longer needs, which is what returns agent quota.
+
+- `slotlock serve` maintains `SLOTLOCK_TENANT` when it starts and every tenant whose key it serves,
+  then each hourly, one tenant at a time. It logs a `maintenance` line with counts.
+- `slotlock maintain` runs one tenant's maintenance now, for cron or after a bulk import. An admin
+  key can call `POST /v1/maintenance`.
+- Each pass holds a per-tenant PostgreSQL advisory lock, so servers and cron jobs never repeat each
+  other's work; a pass that finds the lock taken does nothing.
+
+In a process of your own:
 
 <!-- example: examples/maintenance.ts#maintenance -->
 ```ts
-import {
-  type CalendarHorizonRollCursor,
-  type CalendarHorizonRollResult,
-  type SlotlockStore,
-  calendarEventRollingHorizon,
-} from 'slotlock';
-
-const MAX_BATCHES = 10;
+import { type SlotlockStore, maintainSlotlockTenant } from 'slotlock';
 
 export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
-  const window = calendarEventRollingHorizon();
-  let extended = 0;
-  let conflicts = 0;
-  let refused = 0;
-  let horizonCapped = true;
-  let after: CalendarHorizonRollCursor | null = null;
-  for (let batch = 0; batch < MAX_BATCHES; batch++) {
-    const from = after;
-    const roll: CalendarHorizonRollResult = await store.withTenant(tenantRef, (tenant) =>
-      tenant.rollCalendarEventHorizon({ tenantRef, window, ...(from ? { after: from } : {}) }),
-    );
-    extended += roll.extended;
-    conflicts += roll.conflicts;
-    refused += roll.refused;
-    after = roll.next;
-    if (!after) {
-      horizonCapped = false;
-      break;
-    }
-  }
-
-  let pruned = 0;
-  let retentionCapped = true;
-  for (let batch = 0; batch < MAX_BATCHES; batch++) {
-    const prune = await store.withTenant(tenantRef, (tenant) =>
-      tenant.pruneCalendarEventRetention({ tenantRef }),
-    );
-    pruned += prune.commandsDeleted + prune.tombstonesDeleted;
-    if (!prune.hasMore) {
-      retentionCapped = false;
-      break;
-    }
-  }
-  return { extended, conflicts, refused, pruned, capped: horizonCapped || retentionCapped };
+  // Extends recurring events to the rolling horizon, then prunes past the retention window, each in
+  // at most ten batches. `capped: true` means work was left: run another pass.
+  return maintainSlotlockTenant(store, tenantRef, { batches: 10 });
 }
 ```
 
-- **Run maintenance at least daily for every tenant.** Forced RLS hides other tenants from the
-  application role, so iterate your own tenant list.
-- **Page the roll with `next`.** Pass each batch's `next` as `after` to the next batch of the same
-  pass. A series left in conflict or refused keeps its place at the front of the order, so without
-  `after` every later batch would examine it again.
+- **Every tenant.** Forced RLS hides other tenants from the application role, so iterate your own
+  tenant list. `startSlotlockMaintenance({ store, sql, tenants, intervalMs })` is the scheduler
+  `serve` uses, lock included; `withSlotlockMaintenanceLock` is the lock alone.
+- **Capped passes.** A capped pass that extended and pruned nothing met only series it cannot extend
+  (counted in `conflicts` and `refused`): another pass would too, so wait for the next interval.
+- **Paging the roll yourself.** `rollCalendarEventHorizon` returns `next`; pass it as `after` to the
+  next batch of the same pass. A series left in conflict or refused keeps its place at the front of
+  the order, so without `after` every later batch would examine it again.
 - **Quotas.** Each agent principal may retain 1,000 event identities (active plus cancelled) and
   10,000 idempotency commands, of which 9,000 can be creates or updates, so a cancel always has
   room. Adjust with `agentOwnerEventQuota` and `agentOwnerCommandQuota` on `createSlotlockStore`.
@@ -964,6 +1036,10 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
 8. Keep writes confirmation-gated wherever your policy needs a person.
 9. Size live updates: at most `maxTotal` backend reads per `pollIntervalMs`.
 10. Give each agent its own API key with the narrowest scope and an expiry.
+11. After each deployment, check it end to end with a short-lived admin key, then revoke the key:
+    `SLOTLOCK_URL=https://… SLOTLOCK_ADMIN_KEY=… node scripts/smoke-deployment.mjs` checks health,
+    discovery, MCP, A2A, holds and reservations (in a resource named `slotlock-smoke`, 400 days
+    ahead, cancelled after) and the 401, 409, 413 and 415 refusals.
 
 ## Supported versions
 

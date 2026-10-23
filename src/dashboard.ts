@@ -16,6 +16,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
 import type { Sql } from 'postgres';
 import type { SlotlockApiKey, SlotlockApiKeyScope, SlotlockApiKeyStore } from './api-keys.js';
 import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from './ddl.js';
+import { ignoreRejection } from './hooks.js';
 import type { SlotlockSql, SlotlockStore } from './store.js';
 import type { SlotlockResource, WeeklyAvailabilityRule } from './types.js';
 import {
@@ -66,6 +67,7 @@ const DAY_MS = 86_400_000;
 const KEY_ACCESS: Readonly<Record<string, SlotlockApiKeyScope[]>> = Object.freeze({
   read: ['read'],
   read_write: ['read', 'write'],
+  full: ['read', 'write', 'admin'],
 });
 const KEY_EXPIRY_DAYS: Readonly<Record<string, number | null>> = Object.freeze({
   never: null,
@@ -159,7 +161,10 @@ export interface SlotlockDashboardOptions {
   availability?: readonly WeeklyAvailabilityRule[];
   fetch?: typeof fetch;
   now?: () => number;
-  /** Called with whatever a request handler throws; the person sees a generic error page. */
+  /**
+   * Called with whatever a request handler throws; the person sees a generic error page. Not
+   * awaited; what it throws, or its promise rejects with, is ignored.
+   */
   onError?: (error: unknown) => void;
 }
 
@@ -576,7 +581,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
 
   function report(message: string): void {
     try {
-      options.onError?.(new Error(message));
+      ignoreRejection(options.onError?.(new Error(message)));
     } catch {
       // A failing reporter must not change the response.
     }
@@ -723,7 +728,7 @@ ${notice ? html`<p class="notice" role="alert">${notice}</p>` : html``}
       return html`<tr>
 <td data-label="Name">${key.name}</td>
 <td data-label="Key"><code>${key.prefix}…</code></td>
-<td data-label="Access">${key.scopes.includes('write') ? 'Read and write' : 'Read only'}</td>
+<td data-label="Access">${key.scopes.includes('admin') ? 'Full' : key.scopes.includes('write') ? 'Read and write' : 'Read only'}</td>
 <td data-label="Created">${formatDate(key.createdAt)}</td>
 <td data-label="Last used">${key.lastUsedAt ? formatDate(key.lastUsedAt) : 'Never'}</td>
 <td data-label="Expires">${key.expiresAt ? formatDate(key.expiresAt) : 'Never'}</td>
@@ -753,7 +758,7 @@ ${notice ? html`<p class="notice" role="alert">${notice}</p>` : html``}
 <input type="hidden" name="csrf" value="${token}">
 <input type="hidden" name="once" value="${formNonce(session)}">
 <label>Name<input name="name" required maxlength="100" placeholder="Booking agent"></label>
-<label>Access<select name="access"><option value="read_write">Read and write</option><option value="read">Read only</option></select></label>
+<label>Access<select name="access"><option value="read_write">Read and write</option><option value="read">Read only</option><option value="full">Full, with the application API</option></select></label>
 <label>Expires<select name="expires"><option value="90">In 90 days</option><option value="30">In 30 days</option><option value="365">In a year</option><option value="never">Never</option></select></label>
 <button class="primary" type="submit">Create key</button>
 </form>
@@ -1369,7 +1374,7 @@ ${
         );
       } catch (error) {
         try {
-          options.onError?.(error);
+          ignoreRejection(options.onError?.(error));
         } catch {
           // A failing reporter must not change the response.
         }

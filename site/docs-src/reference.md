@@ -35,4 +35,6 @@ kinds.
 
 <!-- include README.md#rest-and-openapi promote -->
 
+<!-- include README.md#application-api promote -->
+
 <!-- include README.md#supported-versions -->

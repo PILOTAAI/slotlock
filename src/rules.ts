@@ -29,6 +29,36 @@ import type { Interval, WeeklyAvailabilityRule } from './types.js';
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
 
+/**
+ * The longest window Slotlock reads or searches at once, in days: free/busy, the rolling event
+ * horizon, a recurring event's materialization and a search for the next slot all stop here.
+ */
+export const SLOTLOCK_CALENDAR_HORIZON_DAYS = 367;
+const MAX_SEARCH_WINDOW_MS = SLOTLOCK_CALENDAR_HORIZON_DAYS * DAY_MS;
+/**
+ * The longest window one availability rule may open, in minutes: a week. Expansion scans back as
+ * many days as a rule lasts, so a longer one is skipped, as the hours validator refuses it.
+ */
+export const SLOTLOCK_MAX_RULE_DURATION_MINUTES = 10_080;
+
+export function invalidWindowError(
+  message = 'Slotlock window must contain two finite dates with end > start',
+): Error & { code: 'invalid_window' } {
+  return Object.assign(new Error(message), { code: 'invalid_window' as const });
+}
+
+/**
+ * Refuse (`invalid_window`) a search window longer than SLOTLOCK_CALENDAR_HORIZON_DAYS. Expansion
+ * is synchronous: fifty daily rules over a century are close to two million windows.
+ */
+export function assertBoundedSearchWindow(window: Interval): void {
+  if (window.end.getTime() - window.start.getTime() > MAX_SEARCH_WINDOW_MS) {
+    throw invalidWindowError(
+      `Slotlock searches a window of at most ${SLOTLOCK_CALENDAR_HORIZON_DAYS} days at once`,
+    );
+  }
+}
+
 /** UTC midnight of the day containing `d`. */
 function utcDayFloor(d: Date): Date {
   return new Date(Math.floor(d.getTime() / DAY_MS) * DAY_MS);
@@ -108,12 +138,14 @@ function isSupportedRule(parsed: Partial<RRuleOptions>): boolean {
  * Unsupported or unparseable rules contribute nothing rather than throwing: one bad rule must not
  * blank the whole calendar — and must never manufacture availability the rule doesn't mean.
  * Callers should validate rules at write time; this read-path skip remains the fail-closed backstop.
+ * A search window longer than SLOTLOCK_CALENDAR_HORIZON_DAYS is refused (`invalid_window`).
  */
 export function expandRules(
   rules: WeeklyAvailabilityRule[],
   searchWindow: Interval,
   timezone?: string,
 ): Interval[] {
+  assertBoundedSearchWindow(searchWindow);
   // Validate ONCE, loudly: a typo'd zone must never silently fall back to UTC math — that
   // would manufacture availability shifted by the zone offset. 'UTC'/omitted = spike path.
   const converter = timezone !== undefined ? createTimeZoneConverter(timezone) : null;
@@ -124,7 +156,8 @@ export function expandRules(
       rule.startMinutes < 0 ||
       rule.startMinutes > 1439 ||
       !Number.isInteger(rule.durationMinutes) ||
-      rule.durationMinutes <= 0
+      rule.durationMinutes <= 0 ||
+      rule.durationMinutes > SLOTLOCK_MAX_RULE_DURATION_MINUTES
     ) {
       continue;
     }
@@ -139,9 +172,11 @@ export function expandRules(
     try {
       const parsed = RRule.parseString(rule.rrule);
       if (!isSupportedRule(parsed)) continue;
-      // rrule operates on pseudo-UTC local-date stamps. In zoned mode its UNTIL comparison must
-      // happen after wall time becomes a real instant or east-of-UTC occurrences disappear early.
-      if (converter && parsed.until) {
+      // rrule's stamps are days, not window starts: a UTC midnight, or under a zone a LOCAL date
+      // read as UTC. Left to rrule, UNTIL would keep a window that starts after it on its own day,
+      // and under a zone east of UTC drop one that starts before it. Each window's real start is
+      // compared with UNTIL instead (below), with or without a zone, so the two paths agree.
+      if (parsed.until) {
         absoluteUntil = parsed.until;
         parsed.until = null;
       }

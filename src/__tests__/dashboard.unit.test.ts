@@ -506,6 +506,24 @@ describe('API keys in the dashboard', () => {
     expect(keys.store.create.mock.calls[0]?.[0]).not.toHaveProperty('expiresAt');
   });
 
+  it('creates a full key, which the application API takes, and lists it as Full', async () => {
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const form = await (await get(target, '/base/dashboard', session)).text();
+    expect(form).toContain('<option value="full">Full, with the application API</option>');
+    await post(
+      target,
+      '/base/dashboard/keys',
+      { csrf: await csrf(target, session), name: 'Booking site', access: 'full', expires: '365' },
+      session,
+    );
+    expect(keys.store.create).toHaveBeenCalledWith(
+      expect.objectContaining({ scopes: ['read', 'write', 'admin'] }),
+    );
+    const listed = await (await get(target, '/base/dashboard', session)).text();
+    expect(listed).toContain('<td data-label="Access">Full</td>');
+  });
+
   it.each([
     ['no CSRF token', (token: string) => ({ name: 'x', access: 'read', expires: 'never' }), ORIGIN],
     [

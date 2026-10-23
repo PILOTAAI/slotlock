@@ -432,14 +432,43 @@ describe('a REST call', () => {
     expect(listResources).not.toHaveBeenCalled();
   });
 
-  it('reports each call by operation and status, never its arguments or caller', async () => {
+  it('reports each call by operation, status, duration and trace id, never its arguments or caller', async () => {
     const server = buildServer();
     await server.fetch(call('GET', '/v1/resources'));
     createEvent.mockRejectedValueOnce(new SlotlockAgentOperationError('overlap', 409));
-    await server.fetch(call('POST', '/v1/events', { body: BOOKING }));
+    await server.fetch(
+      call('POST', '/v1/events', {
+        body: BOOKING,
+        headers: {
+          traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
+          tracestate: 'vendor=opaque',
+        },
+      }),
+    );
     expect(onEvent.mock.calls.map(([event]) => event)).toEqual([
-      { type: 'rest', operation: 'slotlock_list_resources', status: 200 },
-      { type: 'rest', operation: 'slotlock_create_event', status: 409 },
+      {
+        type: 'rest',
+        operation: 'slotlock_list_resources',
+        status: 200,
+        durationMs: expect.any(Number),
+      },
+      {
+        type: 'rest',
+        operation: 'slotlock_create_event',
+        status: 409,
+        durationMs: expect.any(Number),
+        traceId: '4bf92f3577b34da6a3ce929d0e0e4736',
+      },
     ]);
+    const reported = JSON.stringify(onEvent.mock.calls);
+    for (const absent of [
+      '00f067aa0ba902b7',
+      'vendor=opaque',
+      'agent-1',
+      'tenant-a',
+      BOOKING.title,
+    ]) {
+      expect(reported).not.toContain(absent);
+    }
   });
 });

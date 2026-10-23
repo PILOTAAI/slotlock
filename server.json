@@ -103,8 +103,8 @@
         },
         {
           "name": "SLOTLOCK_REST_API",
-          "description": "on: also serve the tools as a REST API under /v1, described by an OpenAPI 3.1 document at /openapi.json. Writes that wait for confirmation answer 428 there.",
-          "default": "off"
+          "description": "on: also serve the tools as a REST API under /v1, and the application API (resources, bookable hours, holds, reservations, coverage, maintenance) for admin keys, described by an OpenAPI 3.1 document at /openapi.json. Writes that wait for confirmation answer 428 there. off: MCP and A2A only.",
+          "default": "on"
         },
         {
           "name": "SLOTLOCK_TENANT",

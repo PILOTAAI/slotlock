@@ -1,48 +1,11 @@
-// Scheduled maintenance: run at least daily for every tenant, as the application role.
+// Scheduled maintenance: run at least daily for every tenant, as the application role. `slotlock
+// serve` does this for the tenants it serves; a process of your own calls maintainSlotlockTenant.
 // #region maintenance
-import {
-  type CalendarHorizonRollCursor,
-  type CalendarHorizonRollResult,
-  type SlotlockStore,
-  calendarEventRollingHorizon,
-} from 'slotlock';
-
-const MAX_BATCHES = 10;
+import { type SlotlockStore, maintainSlotlockTenant } from 'slotlock';
 
 export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
-  const window = calendarEventRollingHorizon();
-  let extended = 0;
-  let conflicts = 0;
-  let refused = 0;
-  let horizonCapped = true;
-  let after: CalendarHorizonRollCursor | null = null;
-  for (let batch = 0; batch < MAX_BATCHES; batch++) {
-    const from = after;
-    const roll: CalendarHorizonRollResult = await store.withTenant(tenantRef, (tenant) =>
-      tenant.rollCalendarEventHorizon({ tenantRef, window, ...(from ? { after: from } : {}) }),
-    );
-    extended += roll.extended;
-    conflicts += roll.conflicts;
-    refused += roll.refused;
-    after = roll.next;
-    if (!after) {
-      horizonCapped = false;
-      break;
-    }
-  }
-
-  let pruned = 0;
-  let retentionCapped = true;
-  for (let batch = 0; batch < MAX_BATCHES; batch++) {
-    const prune = await store.withTenant(tenantRef, (tenant) =>
-      tenant.pruneCalendarEventRetention({ tenantRef }),
-    );
-    pruned += prune.commandsDeleted + prune.tombstonesDeleted;
-    if (!prune.hasMore) {
-      retentionCapped = false;
-      break;
-    }
-  }
-  return { extended, conflicts, refused, pruned, capped: horizonCapped || retentionCapped };
+  // Extends recurring events to the rolling horizon, then prunes past the retention window, each in
+  // at most ten batches. `capped: true` means work was left: run another pass.
+  return maintainSlotlockTenant(store, tenantRef, { batches: 10 });
 }
 // #endregion maintenance

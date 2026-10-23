@@ -141,3 +141,138 @@ jobs:
           curl --fail --silent --show-error http://127.0.0.1:8080/healthz
           docker stop slotlock
           [ "$(docker inspect --format '{{.State.ExitCode}}' slotlock)" = 0 ]
+
+  clients:
+    name: Language clients against the image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16.15@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+        env:
+          POSTGRES_USER: slotlock_ci
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: slotlock
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username=slotlock_ci --dbname=slotlock"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          push: false
+          tags: slotlock:ci
+      # The server the clients call: the image, as a role row-level security confines, confirming
+      # only deletes (so the suites write events and still meet a 428), with an admin key.
+      - name: Serves the image with an admin key
+        run: |
+          docker run --rm --network host --env PGPASSWORD=ci-only-password \
+            postgres:16.15@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d \
+            psql --host=127.0.0.1 --username=slotlock_ci --dbname=slotlock --no-psqlrc \
+              -v ON_ERROR_STOP=1 \
+              -c "CREATE ROLE slotlock_app LOGIN PASSWORD 'ci-app-password' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE"
+          docker run --detach --name slotlock --network host \
+            --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+            --env DATABASE_URL=postgresql://slotlock_app:ci-app-password@127.0.0.1:5432/slotlock \
+            --env SLOTLOCK_MIGRATE_DATABASE_URL=postgresql://slotlock_ci:ci-only-password@127.0.0.1:5432/slotlock \
+            --env SLOTLOCK_CONFIRMATION_SECRET="$(openssl rand -hex 32)" \
+            --env SLOTLOCK_CONFIRM_WRITES=slotlock_delete_event \
+            --env SLOTLOCK_TENANT=clients \
+            --env HOST=127.0.0.1 \
+            slotlock:ci serve --migrate
+          health=starting
+          for _ in $(seq 1 30); do
+            health=$(docker inspect --format '{{.State.Health.Status}}' slotlock)
+            [ "$health" = healthy ] && break
+            sleep 2
+          done
+          if [ "$health" != healthy ]; then
+            docker logs slotlock
+            echo "::error::the container is $health, not healthy"
+            exit 1
+          fi
+          key=$(docker exec slotlock slotlock key create "Client suites" --scope read,write,admin | jq -r .key)
+          # Without the key every server test would skip and the job would pass having called nothing.
+          if [[ ! "$key" =~ ^slk_[0-9A-Za-z]{46}$ ]]; then
+            echo "::error::key create printed no key"
+            exit 1
+          fi
+          echo "::add-mask::$key"
+          {
+            echo "SLOTLOCK_URL=http://localhost:8080"
+            echo "SLOTLOCK_ADMIN_KEY=$key"
+          } >> "$GITHUB_ENV"
+
+      # The check an operator runs after a deployment (scripts/smoke-deployment.mjs), run against
+      # the image here so it stays true to the server.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Deployment smoke check
+        run: node scripts/smoke-deployment.mjs
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Python
+        working-directory: clients/python
+        run: PYTHONPATH=src python -m unittest -v tests/test_client.py
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.24'
+          cache: false
+      - name: Go
+        working-directory: clients/go
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt would change: $unformatted"
+            exit 1
+          fi
+          go vet ./...
+          go test -count=1 -v ./...
+
+      - name: Rust
+        working-directory: clients/rust
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal --component rustfmt,clippy
+          cargo +1.94.0 fmt --check
+          cargo +1.94.0 clippy --all-targets --locked -- -D warnings
+          cargo +1.94.0 test --locked
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          gradle-version: '9.5.1'
+      - name: Java
+        working-directory: clients/java
+        run: gradle build --console=plain
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '10.0.x'
+      - name: .NET
+        working-directory: clients/dotnet
+        env:
+          DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+          DOTNET_NOLOGO: '1'
+        run: |
+          dotnet build src/Slotlock --configuration Release
+          dotnet run --project tests/Slotlock.Tests --configuration Release
+
+      - name: Server log
+        if: failure()
+        run: docker logs slotlock

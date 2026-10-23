@@ -7,9 +7,10 @@ documented breaking changes; security releases will identify the lowest safe ver
 
 ## Report a vulnerability
 
-Do not open a public issue. Report privately through GitHub's private vulnerability reporting on the
-repository that publishes the package: open its **Security** tab and choose **Report a
-vulnerability**. The maintainers listed in [MAINTAINERS.md](./MAINTAINERS.md) receive the report.
+Do not open a public issue. Report privately through GitHub's private vulnerability reporting:
+<https://github.com/PILOTAAI/slotlock/security/advisories/new> (the repository's **Security** tab,
+**Report a vulnerability**). The maintainers listed in
+[MAINTAINERS.md](https://github.com/PILOTAAI/slotlock/blob/main/MAINTAINERS.md) receive the report.
 Include:
 
 - the affected version and surface;
@@ -18,7 +19,8 @@ Include:
 - any known mitigations.
 
 Do not include real customer, credential, calendar, or booking data. We will acknowledge a report
-within three business days and coordinate disclosure after a fix is available.
+within three business days and coordinate disclosure after a fix is available. Fixed vulnerabilities
+are published as advisories at <https://github.com/PILOTAAI/slotlock/security/advisories>.
 
 ## Security model
 
@@ -27,6 +29,16 @@ occurrence, exception, work, and expansion-window bounds. Reservation conflicts 
 PostgreSQL exclusion constraint. Tenant policies are forced and fail closed when their transaction
 context is missing. Embedding applications remain responsible for authentication, authorization,
 provider-secret storage, webhook verification, network egress, and erasure.
+
+Upgrading repairs data across tenants (expired holds in a turnaround buffer, duplicate resources,
+archives and event details from earlier versions), which forced policies would hide from the owning
+role. `applySchema` therefore lifts FORCE from the tables that have it for its data steps and puts
+it back on exactly those, inside its one locked transaction: a failure rolls the lift back with the
+rest. Run statement by statement instead (psql without `--single-transaction`), a refused step
+stops the run with FORCE lifted. The tables lifted are recorded in
+`slotlock.deployment_lifted_row_security`, so the next deployment, from any session, puts FORCE back
+on each of them, and until it does `slotlock serve` refuses to start (`row_security_lifted`). Run
+the deployment DDL through `applySchema` or `slotlock migrate`.
 
 Application traffic must use a role that cannot leave forced RLS. `grantApplicationRole` grants
 such a role schema usage and DML on the tenant tables, and first refuses the known ways out, whether
@@ -97,3 +109,27 @@ embedder's `authenticate` must verify every token, including its audience. Embed
 bearer-token verification, per-principal authorization, distributed rate limiting, TLS termination,
 and a readiness check. Do not place provider credentials or raw calendar content in authentication,
 authorization, rate-limit, or health callbacks.
+
+## API keys and the application API
+
+An API key is `slk_`, 40 base62 characters from the operating system's random source (about 238
+bits) and a 6-character checksum, and the database keeps only its SHA-256. A slow password hash
+(bcrypt, scrypt, Argon2) defends a secret a person chose against offline guessing; nobody can guess
+238 random bits, so a fast hash
+loses nothing and lets every request look a key up by its digest in one indexed read. Code scanners
+that treat every secret as a password report this as weak hashing (CodeQL
+`js/insufficient-password-hash`); it is the design, as for GitHub's and Stripe's tokens.
+
+A key acts only in the tenant it was created for. `read` and `write` cover the agent tools; `admin`
+covers the application API (resources, hours, holds, reservations, coverage, maintenance), which is
+never offered to agents over MCP or A2A. Every application operation checks the tenant itself, not
+only through row-level security: another tenant's resource or hold is not found even on a connection
+that bypasses RLS.
+
+## Dependencies
+
+The published package depends on `ical.js`, `rrule` and `zod`, and on `postgres` as a peer; the
+image adds nothing else. The documentation site (`site/`) is built with Astro and Starlight, and
+those development dependencies never reach the package or the image. `braces`, which the site's
+`starlight-llms-txt` reaches through `micromatch`, has an open denial-of-service advisory with no fixed
+release; it only expands the site's own glob patterns at build time, so no outside input reaches it.

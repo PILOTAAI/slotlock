@@ -51,7 +51,7 @@ async function run(argv: string[], env: SlotlockEnv = {}) {
 }
 
 describe('slotlock serve configuration', () => {
-  it('defaults to loopback, port 8080, one tenant and confirmation on every write', () => {
+  it('defaults to loopback, port 8080, one tenant, confirmation on every write and REST on', () => {
     const env = serveEnv();
     const config = readSlotlockServeConfig(env);
     expect(config).toEqual({
@@ -64,7 +64,7 @@ describe('slotlock serve configuration', () => {
       confirmWrites: ['slotlock_create_event', 'slotlock_update_event', 'slotlock_delete_event'],
       confirmationSecret: env.SLOTLOCK_CONFIRMATION_SECRET,
       availability: [],
-      restApi: false,
+      restApi: true,
     });
   });
 
@@ -78,11 +78,11 @@ describe('slotlock serve configuration', () => {
         SLOTLOCK_TENANT: ' fleet-7 ',
         SLOTLOCK_CONFIRM_WRITES: 'slotlock_delete_event, slotlock_create_event',
         SLOTLOCK_AVAILABILITY: WEEKDAYS,
-        SLOTLOCK_REST_API: 'on',
+        SLOTLOCK_REST_API: 'off',
       }),
     );
     expect(config).toMatchObject({
-      restApi: true,
+      restApi: false,
       migrateDatabaseUrl: 'postgres://owner:pw@db.internal/slotlock',
       host: '0.0.0.0',
       port: 3000,
@@ -412,8 +412,10 @@ describe('slotlock command line', () => {
     [['key', 'list', 'all'], /wrong number of arguments for "key list"/],
     [['serve', '--scope', 'read'], /--scope applies only to key create/],
     [['key', 'list', '--expires-in-days', '30'], /--expires-in-days applies only to key create/],
-    [['key', 'create', 'agent', '--scope', 'admin'], /--scope must be read, write or read,write/],
-    [['key', 'create', 'agent', '--scope', ''], /--scope must be read, write or read,write/],
+    [['key', 'create', 'agent', '--scope', 'owner'], /--scope must be a comma-separated list of read, write and admin/],
+    [['key', 'create', 'agent', '--scope', 'read,'], /--scope must be a comma-separated list of read, write and admin/],
+    [['key', 'create', 'agent', '--scope', ''], /--scope must be a comma-separated list of read, write and admin/],
+    [['maintain', 'now'], /wrong number of arguments for "maintain"/],
     [['key', 'create', 'agent', '--expires-in-days', '0'], /--expires-in-days must be/],
     [['key', 'create', 'agent', '--expires-in-days', '3651'], /--expires-in-days must be/],
     [['key', 'create', 'agent', '--expires-in-days', '7.5'], /--expires-in-days must be/],

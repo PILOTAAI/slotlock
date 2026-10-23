@@ -9,19 +9,22 @@
 // key.
 import { createHash, randomBytes } from 'node:crypto';
 import type { Sql } from 'postgres';
-import {
-  type SlotlockAgentPrincipal,
-  type SlotlockAgentScope,
-  slotlockAgentOperationScope,
-} from './agent-server.js';
+import { type SlotlockAgentPrincipal, slotlockAgentOperationScope } from './agent-server.js';
 import { SLOTLOCK_API_KEY_ACTIVE_LIMIT, SLOTLOCK_API_KEY_RETAINED_LIMIT } from './ddl.js';
 import type { SlotlockSql } from './store.js';
 
 export { SLOTLOCK_API_KEY_ACTIVE_LIMIT, SLOTLOCK_API_KEY_RETAINED_LIMIT };
 
-/** `read` covers the operations that only look; `write` the ones that change a calendar. */
-export const SLOTLOCK_API_KEY_SCOPES = Object.freeze(['read', 'write'] as const);
-export type SlotlockApiKeyScope = SlotlockAgentScope;
+/**
+ * `read` covers the agent operations that only look; `write` the ones that change a calendar; `admin`
+ * the application API (application-api.ts: resources, bookable hours, holds, reservations, coverage
+ * and maintenance), for an application's backend rather than an agent. A key's scopes are stored in
+ * this order.
+ */
+export const SLOTLOCK_API_KEY_SCOPES = Object.freeze(['read', 'write', 'admin'] as const);
+/** What a key gets unless it asks for more: what an agent needs. `admin` is never a default. */
+export const SLOTLOCK_API_KEY_DEFAULT_SCOPES = Object.freeze(['read', 'write'] as const);
+export type SlotlockApiKeyScope = (typeof SLOTLOCK_API_KEY_SCOPES)[number];
 
 /** Every key starts with this, so a person or a secret scanner can tell what it is. */
 export const SLOTLOCK_API_KEY_PREFIX = 'slk_';

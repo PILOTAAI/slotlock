@@ -129,19 +129,29 @@ event, an exhausted quota) is a result, not a protocol error:
 - A2A returns the agent's reply message with one `application/json` data part holding the result or
   `{"error":{"code":"…"}}`.
 
-Protocol errors stay in the protocol. MCP: an unknown tool is JSON-RPC `-32602`, a server fault
+A body must be `application/json`, compared without regard to case (RFC 9110 §8.3.1), or the request
+is HTTP 415; one longer than the server's limit is HTTP 413, refused as soon as it passes the limit,
+whether or not it declares a `Content-Length`.
+
+Protocol errors stay in the protocol. MCP: an unknown tool, or `arguments` that are not an object
+(left out or null is none), is JSON-RPC `-32602`, a server fault
 (including backend output that violates the declared schema) is `-32603` with HTTP 500, and a
 missing or unsupported `MCP-Protocol-Version` header is HTTP 400. A 2026-07-28 request is checked in
 that revision's order, each failure HTTP 400: a missing or malformed `_meta` field is `-32602`, an
 `MCP-Protocol-Version`, `Mcp-Method` or (Base64-sentinel-decoded) `Mcp-Name` that disagrees with the
 body is `-32020`, and an unimplemented revision is `-32022` naming the supported ones. An
 unimplemented method is HTTP 404 `-32601`; a rate-limited request is HTTP 429 `-31029`, outside the
-`-32020`..`-32099` range that revision reserves. A2A: every JSON-RPC error travels
-in an HTTP 200 envelope with a `google.rpc.ErrorInfo` detail; an `A2A-Version` other than `1.0`,
-including none (read as 0.3), is `VersionNotSupportedError` (`-32009`); push-notification methods are
+`-32020`..`-32099` range that revision reserves. A2A: every JSON-RPC error travels in an HTTP 200
+envelope (a body over the size limit is HTTP 413); A2A's own errors, below, carry a
+`google.rpc.ErrorInfo` detail and JSON-RPC's (`-32700`, `-32600`, `-32601`, `-32603`) none. An
+`A2A-Version` other than `1.0`, including none (read as 0.3), is `VersionNotSupportedError`
+(`-32009`); push-notification methods are
 `PushNotificationNotSupportedError` (`-32003`); streaming, task subscription and the extended card
 are `UnsupportedOperationError` (`-32004`); a message that is not exactly one data part
-`{"skill": "<id>", "arguments": {…}}` is `-32602`. The server replies with messages and keeps no
+`{"skill": "<id>", "arguments": {…}}` (`arguments` left out or null is none; any other value that is
+not an object is not arguments) is `-32602`, as is a `configuration` or `metadata` that is set but
+is not an object; a rate-limited request is `-32029` with the reason `RATE_LIMITED` and a null id,
+answered before its body is read. The server replies with messages and keeps no
 tasks, so the core task operations answer as for an unknown task: `GetTask` and `CancelTask` are
 `TaskNotFoundError` (`-32001`), `ListTasks` returns an empty page (`pageSize` 1-100, default 50).
 Their params are checked first, as `SendMessage`'s are: a field the method does not define, a
@@ -237,4 +247,7 @@ rejects absolute-form request targets, applies finite header/body/handler and co
 propagates disconnects through `AbortSignal`, and force-closes only after a bounded graceful-shutdown
 window. When it closes it first asks the target to end long-lived responses (the agent server's
 `shutdown()`), and closes keep-alive connections whose response finished during shutdown. It exposes
-sanitized transport failures and leaves public TLS termination to the deployment.
+sanitized transport failures and leaves public TLS termination to the deployment. A body the target
+stops reading (one past its size limit) does not abort the request: once the response is written,
+the rest is discarded as it arrives, within `requestTimeout`. Closing the adapter while it is still
+starting rejects the pending `listen()` with `listen_aborted`.

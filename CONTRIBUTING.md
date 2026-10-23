@@ -16,7 +16,8 @@ npm test            # tests, build, then the packed-artifact verification
 ```
 
 Database suites (`*.integration.test.ts`) run when `DATABASE_URL` points at a PostgreSQL 16
-database whose connecting role can create roles and extensions, and are skipped otherwise:
+database whose connecting role can create roles, databases and extensions, and are skipped
+otherwise (the upgrade suite builds a database of its own and drops it):
 
 ```sh
 DATABASE_URL=postgresql://slotlock_dev:dev-only-password@localhost:5432/slotlock_test npm test
@@ -28,6 +29,11 @@ roles. Never point them at production or shared customer data. Connect as any ro
 role named `slotlock` is the package's schema, which `"$user"` puts first on the search path. The
 command-line tool redacts the database password from everything it prints, so a short or
 product-like password rewrites the output the tests read.
+
+Property suites (`*.property.test.ts`) check the engine, time zones, iCalendar parsing and API
+keys on input [fast-check](https://fast-check.dev/) generates, with a new seed each run. A failure
+prints the seed and the shrunk counterexample; add `{ seed, path }` from it to that `fc.assert` to
+replay it, then keep the counterexample as an ordinary test once it is fixed.
 
 ## Sign off your commits
 
@@ -71,21 +77,24 @@ that section becomes the release notes.
 
 To release, run **Actions > Release a version** with the version (for example `0.1.1`). It sets the
 version in `package.json`, `package-lock.json`, `server.json` and `slotlock.manifest.json` and dates
-the `## Unreleased` heading (`scripts/prepare-release.sh`) and opens the pull request. GitHub holds
-the checks of a pull request a workflow opens until someone with write access approves them: open it
-and click **Approve workflows to run**. The run then merges it once CI and DCO pass on it, and starts
-`tag-release.yml`, which tags the release commit. The tag starts
-`release.yml` (the suite, then npm and the GitHub release) and `image.yml` (the image, then the MCP
-Registry). npm holds each staged version until a maintainer approves it with two-factor
-authentication (GOVERNANCE.md); the Release run's summary gives the command. A version merged to
-`main` by hand, with its heading dated, is released the same way. After a failed run, run it again
-with the same version: it keeps the release branch the failed run left when that already holds this
-release, so checks approved there still count, replaces it otherwise, and reuses its pull request
-(`scripts/open-release-pr.sh`).
+the `## Unreleased` heading (`scripts/prepare-release.sh`), opens the pull request, merges it once CI
+and DCO pass on it, and `tag-release.yml` tags the release commit. The tag starts `release.yml` (the
+suite, then npm and the GitHub release) and `image.yml` (the image, then the MCP Registry). npm holds
+each staged version until a maintainer approves it with two-factor authentication (GOVERNANCE.md);
+the Release run's summary gives the command. A version merged to `main` by hand, with its heading
+dated, is released the same way. After a failed run, run it again with the same version: it keeps
+the release branch the failed run left when that already holds this release, so checks already run
+there still count, replaces it otherwise, and reuses its pull request (`scripts/open-release-pr.sh`).
 
-GitHub lets a workflow open pull requests only once an admin allows it (Settings > Actions >
-General > Workflow permissions); `scripts/configure-github.sh` sets it, and the run says so when it
-is off.
+The pull request is opened and merged by the release app, a GitHub App that can only write this
+repository's contents and pull requests. An owner of the organization creates it once with
+`node scripts/create-release-app.mjs` (click **Create GitHub App**, then install it on `slotlock`
+only); the script checks the installation and stores the app's key in the `release-app` environment,
+which only `main` can use. Without the app, the workflow opens the pull request as
+github-actions[bot], whose checks GitHub holds until someone with write access approves them on the
+pull request (**Approve workflows to run**). GitHub lets a workflow open pull requests at all only
+once an admin allows it (Settings > Actions > General > Workflow permissions);
+`scripts/configure-github.sh` sets it, and the run says so when it is off.
 
 When a run needs a step npm or GitHub keeps for a person (the first npm version, the npm trusted
 publisher, the image's visibility, and the deploy key `tag-release.yml` pushes tags with), the

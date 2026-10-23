@@ -3,6 +3,131 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Added
+
+- The application API: what an application does through the store, over REST from any language.
+  Create resources and set their weekly hours; hold, confirm and release time; book, move and cancel
+  reservations by reference and revision; record external calendar coverage; run maintenance. The
+  routes sit under `/v1` beside the tools, in the same OpenAPI document, and need an API key with the
+  new `admin` scope. They are never MCP tools or A2A skills. `createSlotlockStoreApplicationBackend`
+  serves them from the store; `createSlotlockAgentServer` takes them as `application`.
+- The `admin` API key scope: `slotlock key create <name> --scope read,write,admin`, or "Full" in the
+  dashboard. New keys still default to read and write, and `SLOTLOCK_AUTH_TOKEN` is never admin: it
+  is the token agents are given, and the application API asks no person before it writes.
+- Built-in maintenance. `slotlock serve` maintains every tenant it serves, hourly, one at a time,
+  under a per-tenant advisory lock, and logs the counts; `slotlock maintain` runs it once.
+  `maintainSlotlockTenant`, `startSlotlockMaintenance` and `withSlotlockMaintenanceLock` do the
+  same in a process of your own.
+- `confirmHold` and `releaseHold` take `{ tenantRef }`, so another tenant's hold is not found
+  whatever the connection's row-level security.
+- Clients for Python, Go, Rust, Java and .NET (`clients/`): one method per REST operation, the
+  application API included, generated from `openapi.json` with hand-written transports. Each runs
+  the same scenario against the server image in CI. They are not on their package registries yet.
+- `openapi.json`, the REST API's OpenAPI 3.1 document, in the repository and at
+  https://slotlock.pylota.io/openapi.json; `slotlockOpenApi()` builds it.
+- Property-based tests (fast-check) of the engine, time zones, iCalendar parsing and API keys.
+- A `call` event for each MCP `tools/call` and A2A `SendMessage` that names an operation: its
+  outcome, duration and W3C trace id. `rest` events carry the duration and trace id too, and
+  `slotlock serve` logs both.
+- Releases are opened and merged by a GitHub App once it is set up
+  (`node scripts/create-release-app.mjs`), so its checks run without a maintainer approving them.
+  Only the commit whose checks passed is merged.
+
+### Changed
+
+- `slotlock serve` serves REST by default; `SLOTLOCK_REST_API=off` turns it off.
+- `expandRules` and `findNextAvailableFor` refuse a search window longer than 367 days with
+  `invalid_window`, as free/busy already did, and skip a rule that lasts longer than a week, as the
+  hours validator refuses one. Fifty daily rules over a century were two million windows of
+  synchronous work.
+- Upgrading rebuilds the unique index on booking references
+  (`slotlock_reservations_booking_external_ref_key`) to leave calendar event rows out, and drops
+  the one it replaces after the new one is built.
+- A cursor 0.1 kept beside a stored series is not resumed if the series is zoned and ends (UNTIL):
+  0.1 read its occurrences as UTC beside the UNTIL, so the cursor may have stopped one occurrence
+  early (a booking could then take that time) or gone one past. The next roll searches such a series
+  from its start, within the same budget, and keeps a new cursor.
+- Upgrading widens the API key scope constraint in place, and replaces the reservations overlap
+  constraint with one that counts every row's turnaround buffer (below). Expired holds in a buffer's
+  way are removed; while a live hold or untenanted reservation is in one, migrate stops with their
+  ids and changes nothing.
+
+### Fixed
+
+- A calendar event's occupation could be freed or moved through the reservation commands
+  (`cancelExternalReservation`, `rescheduleExternalReservation`, and the application API's
+  reservation routes) by naming the reference the store derives for it: the event stayed active but
+  stopped occupying its time. Those commands now leave event rows out. An event freed this way
+  before upgrading occupies its time again once it is written again.
+- Maintenance replaced a series' stored window with the rolling horizon even when the stored window
+  ended later, deleting the occurrences past it.
+- Free/busy called a window complete when a series started inside it but was stored only from
+  later: those occurrences were reported as free time.
+- Upgrading as a non-superuser owner under forced row-level security failed with a raw error (or,
+  for some repairs, skipped them): the upgrade's data steps saw no rows. The upgrade now lifts FORCE
+  for those steps and records what it lifted, so an upgrade stopped part way is put right by the
+  next one, and `slotlock serve` refuses to start while a tenant table is left without FORCE.
+- `expandRules` without a time zone offered windows after the rule's UNTIL.
+- A delayed copy of a create, after the reservation had moved on, answered `idempotency_conflict`
+  instead of `stale_revision`.
+- A time zone a calendar names without a VTIMEZONE was read as floating, and compared with UTC
+  values as if it were UTC. East of UTC a series lost the occurrence its UNTIL names (in a stored
+  series, a booking could then take that time); west of it, a series ran hours past its UNTIL; an
+  EXDATE or a moved occurrence's RECURRENCE-ID written in UTC was not found. All-day series had the
+  same fault with a UTC UNTIL.
+- A feed with a PERIOD RDATE, or an event with no DTEND, was refused whole; a feed's event that
+  ended before it started was refused with `invalid_external_interval` instead of
+  `invalid_icalendar`; a document whose root is not a VCALENDAR read as an empty calendar.
+- The 4,000 occurrences a series may pass from its start were shared by every series in a feed, so
+  three daily series begun in 2023 refused it for good.
+- An EXDATE left its occurrence in when EXDATEs before it named no occurrence (ical.js passes them
+  one per occurrence), or when an RRULE and an RDATE both named it; such an instant was also
+  reported twice. A series of RDATEs with no RRULE left out its DTSTART, its first occurrence.
+- An occurrence starting in an hour the clocks skip ended as it started and was left out; it now
+  lasts its series' exact length, from its DTEND or its DURATION. Others still end on the wall clock.
+- ical.js matched exceptions and compared UNTIL and EXDATE values with a feed's own VTIMEZONE for an
+  IANA name, while Slotlock read the same times through Intl: under a stale definition, a moved
+  occurrence was found in the feed and lost from the series stored from it. Such a name is read
+  through Intl throughout.
+- A series with two RRULEs lost occurrences once either rule ended: ical.js dropped the rule after
+  an ended first one, or the one before any other.
+- A DATE EXDATE of a timed series excluded every occurrence that day from a feed and none from the
+  series stored from it; both now exclude the occurrence at the series' start time that day.
+- A floating UNTIL was read as UTC beside a zoned DTSTART. A RECURRENCE-ID written in another zone
+  than its series' DTSTART did not find its occurrence, and a `RANGE=THISANDFUTURE` one written in
+  UTC moved later occurrences by the wrong amount.
+- `parseTrustedICalendarEvents` did not read times as `parseICalendarChanges` does: a stored
+  all-day series kept an occurrence the feed's UTC EXDATE excludes. An event it cannot hold (no
+  length, say) is now `invalid_icalendar`, not `invalid_external_interval`.
+- A feed naming thousands of time zones it does not define (50,000 spellings of one zone took
+  seconds) is refused past 100, as one defining more than 100 is; a feed listing too many EXDATE
+  values is refused before they are read, not after.
+- A request body sent without `Content-Length` (chunked) was read whole before the size limit
+  applied, so any key holder could make the server hold gigabytes. It is refused as soon as it
+  passes `maxRequestBytes`. The Node adapter no longer aborts a request whose body the server stops
+  reading; it discards the rest once it has answered.
+- `close()` while the Node adapter was still starting left `listen()` pending forever.
+- On the Workers dashboard, `/dashboard/sign-in/` and `/dashboard/callback/` (with a trailing slash)
+  were outside the global sign-in rate limit.
+- The confirmation question for a create did not say that a transparent booking leaves the time
+  free, or name the other fields it sets.
+- `arguments` that were not an object (a string, an array) ran the operation with none; they are
+  now `-32602` on MCP and an invalid message on A2A. Left out or null is still none.
+- A rate-limited A2A request was answered with an MCP error over HTTP 429; it is now A2A's 200
+  envelope with a `RATE_LIMITED` ErrorInfo. `Content-Type` is matched without regard to case.
+- Calls refused before they ran (a client that cannot confirm, a malformed A2A message, a REST body
+  that is not JSON, too large or not an object) were not reported to `onEvent`. On MCP 2026-07-28
+  a confirmation was reported after the call it decided; it now comes first, as elsewhere.
+- An async `onEvent`, `onError` or maintenance `onPass` that rejected was an unhandled rejection,
+  which ends a Node process by default; an `onPass` that threw made a pass that ran count as failed.
+- A hold could take the time a reservation's `bufferAfterMs` keeps busy, and a buffered reservation
+  could be booked over a hold: the buffer bound only tenant-owned reservations to each other.
+- `confirmHold` with the id of a reservation that has an external reference answered as if it had
+  confirmed a hold, describing it without its reference, revision or buffer. It is now
+  `hold_not_found`.
+
 ## 0.1.1 - 2026-10-22
 
 ### Changed

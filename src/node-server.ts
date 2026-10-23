@@ -1,7 +1,7 @@
 // Kept in the emitted node-server.d.ts: this entry point's types import `node:http`.
 /// <reference types="node" preserve="true" />
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from 'node:http';
-import { Readable } from 'node:stream';
+import { Readable, finished } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 
@@ -9,6 +9,8 @@ const DEFAULT_HANDLER_TIMEOUT_MS = 30_000;
 const DEFAULT_HEADERS_TIMEOUT_MS = 10_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_KEEP_ALIVE_TIMEOUT_MS = 5_000;
+/** How often Node checks its connections against headersTimeout and requestTimeout, at most. */
+const DEFAULT_CONNECTIONS_CHECKING_INTERVAL_MS = 1_000;
 const DEFAULT_SHUTDOWN_GRACE_MS = 10_000;
 const DEFAULT_MAX_HEADER_BYTES = 16_384;
 const DEFAULT_MAX_REQUESTS_PER_SOCKET = 100;
@@ -145,13 +147,80 @@ function appendIncomingHeaders(request: IncomingMessage): Headers {
   return headers;
 }
 
+/** A request body as the fetch target reads it, and how to drop what the client still sends. */
+interface RequestBody {
+  stream: ReadableStream<Uint8Array>;
+  /** Stop delivering the body and discard the rest of it as it arrives. */
+  discard(): void;
+}
+
+/**
+ * The request body as a web stream that a target may cancel, as it does a body over its size limit.
+ * Cancelling a `Readable.toWeb` stream destroys the IncomingMessage: Node emits 'aborted', read
+ * here as the client leaving, and the unread rest stays on the connection, which then holds
+ * `close()` until it is forced. Cancelling this one only stops delivery; once the response is
+ * written the rest is discarded as it arrives, as Node discards a body no handler reads, within
+ * `requestTimeout`.
+ */
+function requestBody(request: IncomingMessage): RequestBody {
+  let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+  // Once the stream is closed, errored or cancelled, what arrives is dropped.
+  let settled = false;
+  const stream = new ReadableStream<Uint8Array>(
+    {
+      start(started) {
+        controller = started;
+        request.pause();
+        request.on('data', (chunk: Buffer) => {
+          if (settled) return;
+          started.enqueue(new Uint8Array(chunk));
+          if ((started.desiredSize ?? 0) <= 0) request.pause();
+        });
+        finished(request, (error) => {
+          if (settled) return;
+          settled = true;
+          if (error) started.error(error);
+          else started.close();
+        });
+      },
+      pull() {
+        if (!settled) request.resume();
+      },
+      cancel() {
+        // Held until the response is written, so the client is not read from while it waits.
+        settled = true;
+        request.pause();
+      },
+    },
+    { highWaterMark: request.readableHighWaterMark, size: (chunk) => chunk.byteLength },
+  );
+  return {
+    stream,
+    discard() {
+      // A target still reading a body it has already answered gets an error, not a read that
+      // never settles.
+      if (!settled) {
+        settled = true;
+        controller?.error(abortReason('request_body_discarded'));
+      }
+      request.resume();
+    },
+  };
+}
+
 function toWebRequest(
   request: IncomingMessage,
   requestOrigin: string,
   signal: AbortSignal,
-): Request {
+): { request: Request; body?: RequestBody } {
   const target = request.url ?? '';
   if (!target.startsWith('/') || target.startsWith('//')) {
+    throw new Error('invalid_request_target');
+  }
+  // URL parsing resolves dot segments, `%2E` spellings included: `/v1/resources/%2E%2E/availability`
+  // would reach the target as `/v1/availability`, a path parameter of `..` naming another route.
+  const path = target.split(/[?#]/, 1)[0] ?? '';
+  if (path.split('/').some((segment) => /^(?:\.|%2e){1,2}$/i.test(segment))) {
     throw new Error('invalid_request_target');
   }
   const url = new URL(target, requestOrigin);
@@ -165,11 +234,19 @@ function toWebRequest(
     headers: appendIncomingHeaders(request),
     signal,
   };
+  let body: RequestBody | undefined;
   if (init.method !== 'GET' && init.method !== 'HEAD') {
-    init.body = Readable.toWeb(request) as unknown as NonNullable<RequestInit['body']>;
+    body = requestBody(request);
+    init.body = body.stream as unknown as NonNullable<RequestInit['body']>;
     init.duplex = 'half';
   }
-  return new Request(url, init);
+  try {
+    return { request: new Request(url, init), ...(body ? { body } : {}) };
+  } catch (error) {
+    // A method the Fetch API forbids, say: nothing will read the body, so drop it as it arrives.
+    body?.discard();
+    throw error;
+  }
 }
 
 const HOP_BY_HOP_RESPONSE_HEADERS = new Set([
@@ -268,12 +345,21 @@ export function createSlotlockNodeServer(
   // opening check, but `close()` can change the state while the handler awaits.
   const closing = (): boolean => state === 'closing';
   let removeLifecycleAbort: (() => void) | undefined;
+  /** Rejects a listen() still starting with `listen_aborted`; set while one is. */
+  let cancelStartup: (() => void) | undefined;
   let closePromise: Promise<SlotlockNodeServerCloseResult> | undefined;
 
   const server = createServer(
     {
       headersTimeout: headersTimeoutMs,
       requestTimeout: requestTimeoutMs,
+      // Node enforces both only when it checks its connections (every 30 s by default), so a body
+      // trickled after its answer could outlast requestTimeout by that much.
+      connectionsCheckingInterval: Math.min(
+        DEFAULT_CONNECTIONS_CHECKING_INTERVAL_MS,
+        headersTimeoutMs,
+        requestTimeoutMs,
+      ),
       keepAliveTimeout: boundedInteger(
         'keepAliveTimeoutMs',
         options.keepAliveTimeoutMs ?? DEFAULT_KEEP_ALIVE_TIMEOUT_MS,
@@ -307,8 +393,13 @@ export function createSlotlockNodeServer(
       });
 
       let webRequest: Request;
+      let body: RequestBody | undefined;
       try {
-        webRequest = toWebRequest(request, config.requestOrigin, controller.signal);
+        ({ request: webRequest, body } = toWebRequest(
+          request,
+          config.requestOrigin,
+          controller.signal,
+        ));
       } catch {
         activeRequests.delete(controller);
         request.resume();
@@ -339,6 +430,17 @@ export function createSlotlockNodeServer(
       } finally {
         if (timeout) clearTimeout(timeout);
         activeRequests.delete(controller);
+        // The answer is written: what is left of a body the target did not read (one it refused as
+        // too large, say) is discarded as it arrives rather than held.
+        if (!request.complete) {
+          body?.discard();
+          // The connection is idle only once that rest has arrived: close it then if shutting down.
+          request.once('end', () => {
+            setImmediate(() => {
+              if (closing()) server.closeIdleConnections();
+            });
+          });
+        }
         // A keep-alive connection whose response finished during shutdown would otherwise hold
         // `server.close()` open until its idle timeout; Node closed only the idle ones at the start.
         if (closing()) server.closeIdleConnections();
@@ -370,6 +472,16 @@ export function createSlotlockNodeServer(
     closePromise = (async (): Promise<SlotlockNodeServerCloseResult> => {
       removeLifecycleAbort?.();
       removeLifecycleAbort = undefined;
+      if (state === 'starting') {
+        // Closed before it was listening. Node abandons a listen whose server closes first, with
+        // neither 'listening' nor 'error', so the pending listen() is rejected here, as an aborted
+        // signal rejects it.
+        state = 'closing';
+        cancelStartup?.();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        state = 'closed';
+        return { forced: false };
+      }
       if (state === 'new' || state === 'closed') {
         state = 'closed';
         return { forced: false };
@@ -430,23 +542,31 @@ export function createSlotlockNodeServer(
       state = 'starting';
       return new Promise<SlotlockNodeServerAddress>((resolve, reject) => {
         let abortRequested = false;
+        let cancelled = false;
         const onAbort = () => {
           abortRequested = true;
           if (state === 'listening') void close();
         };
         const cleanupStartup = () => {
+          cancelStartup = undefined;
           server.off('error', onListenError);
           server.off('listening', onListening);
         };
         const onListenError = (error: Error) => {
           cleanupStartup();
           listenOptions.signal?.removeEventListener('abort', onAbort);
-          state = 'closed';
           safeReport(config.onError, error, 'listen');
+          if (cancelled) return;
+          state = 'closed';
           reject(error);
         };
         const onListening = () => {
           cleanupStartup();
+          if (cancelled) {
+            // close() came first; a listener that bound all the same goes with it.
+            server.close();
+            return;
+          }
           const address = server.address();
           if (!address || typeof address === 'string') {
             state = 'closing';
@@ -468,6 +588,12 @@ export function createSlotlockNodeServer(
             port: address.port,
             origin: formatListenerOrigin(address.address, address.port),
           });
+        };
+        cancelStartup = () => {
+          cancelled = true;
+          cancelStartup = undefined;
+          listenOptions.signal?.removeEventListener('abort', onAbort);
+          reject(abortReason('listen_aborted'));
         };
         listenOptions.signal?.addEventListener('abort', onAbort, { once: true });
         server.once('error', onListenError);

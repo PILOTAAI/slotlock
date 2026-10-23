@@ -9,6 +9,7 @@
 //   src/content/docs/docs/*.md        the Starlight pages
 //   src/generated/facts.json          numbers and names the landing page prints
 //   public/schema/manifest.schema.json
+//   public/openapi.json               the REST API, which client generators read
 //
 // Any fact it cannot find fails the build: a renamed constant must be looked at, not guessed.
 import { copyFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -118,12 +119,15 @@ const SITE_LINKS = {
   'SPEC.md': '/docs/specification/',
   'CHANGELOG.md': '/docs/changelog/',
   'slotlock-manifest.schema.json': '/schema/manifest.schema.json',
+  'openapi.json': '/openapi.json',
 };
 
 /** README in-page anchors whose section lives on another docs page (postbuild checks every link). */
 const ANCHORS = {
+  '#application-api': '/docs/reference/#application-api',
   '#confirm-before-writing': '/docs/security/#confirmation-before-writes',
   '#operations': '/docs/security/#quotas-and-retention',
+  '#rest-and-openapi': '/docs/reference/#rest-and-openapi',
 };
 
 /** Rewrite repository-relative links so they work on slotlock.pylota.io. */
@@ -240,11 +244,12 @@ function boundedDefault(source, name) {
 }
 
 async function readFacts() {
-  const [pkg, agentServer, store, ddl] = await Promise.all([
+  const [pkg, agentServer, store, ddl, rules] = await Promise.all([
     read('package.json').then(JSON.parse),
     read('src/agent-server.ts'),
     read('src/store.ts'),
     read('src/ddl.ts'),
+    read('src/rules.ts'),
   ]);
   const tools = readTools(agentServer);
   const mcpModern = /SLOTLOCK_MCP_PROTOCOL_VERSION = '([0-9-]+)'/.exec(agentServer)?.[1];
@@ -285,7 +290,7 @@ async function readFacts() {
     mcpLegacy: must(mcpLegacy, 'SLOTLOCK_MCP_LEGACY_PROTOCOL_VERSION'),
     mcpOlder: must(mcpOlder, 'the third supported MCP revision'),
     a2a: must(a2a, 'SLOTLOCK_A2A_PROTOCOL_VERSION'),
-    horizonDays: must(numberConst(store, 'SLOTLOCK_CALENDAR_HORIZON_DAYS'), 'horizon days'),
+    horizonDays: must(numberConst(rules, 'SLOTLOCK_CALENDAR_HORIZON_DAYS'), 'horizon days'),
     maxEventDays: must(numberConst(store, 'SLOTLOCK_MAX_EVENT_DURATION_DAYS'), 'max event days'),
     maxEventDaysText: must(
       numberConst(store, 'SLOTLOCK_MAX_EVENT_DURATION_DAYS'),
@@ -330,16 +335,17 @@ async function readFacts() {
  * instructions the server gives the model. The names must match what readTools found.
  */
 async function readToolsReference(facts) {
-  const [agentServer, store, backend, types] = await Promise.all([
+  const [agentServer, store, backend, types, rules] = await Promise.all([
     read('src/agent-server.ts'),
     read('src/store.ts'),
     read('src/agent-store-backend.ts'),
     read('src/types.ts'),
+    read('src/rules.ts'),
   ]);
   let parsed;
   try {
     parsed = readOperations(agentServer, {
-      SLOTLOCK_CALENDAR_HORIZON_DAYS: numberConst(store, 'SLOTLOCK_CALENDAR_HORIZON_DAYS'),
+      SLOTLOCK_CALENDAR_HORIZON_DAYS: numberConst(rules, 'SLOTLOCK_CALENDAR_HORIZON_DAYS'),
       SLOTLOCK_MAX_EVENT_DURATION_DAYS: numberConst(store, 'SLOTLOCK_MAX_EVENT_DURATION_DAYS'),
     });
   } catch (error) {
@@ -384,6 +390,11 @@ async function main() {
     join(ROOT, 'slotlock-manifest.schema.json'),
     join(SITE, 'public/schema/manifest.schema.json'),
   );
+  const openApi = JSON.parse(await read('openapi.json'));
+  if (openApi.openapi !== '3.1.0' || openApi.servers?.[0]?.url !== '{baseUrl}') {
+    fail('openapi.json is not the repository\'s OpenAPI 3.1 document with a {baseUrl} server');
+  }
+  await copyFile(join(ROOT, 'openapi.json'), join(SITE, 'public/openapi.json'));
 
   await writeFile(join(GENERATED, 'facts.json'), `${JSON.stringify(facts, null, 2)}\n`);
   const { tokensCss } = await import('../src/styles/tokens.mjs');

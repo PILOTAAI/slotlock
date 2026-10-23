@@ -821,17 +821,47 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
   });
 
   it('rejects an accidental tenant-context rebind but permits an explicit migration', async () => {
-    const otherContextStore = createSlotlockStore(sql, {
-      tenantContextSetting: 'app.other_tenant',
-    });
-    await expect(otherContextStore.applyTenantRls()).rejects.toMatchObject({
-      code: 'tenant_context_conflict',
-    });
-    await expect(otherContextStore.applyTenantRls({ allowRebind: true })).resolves.toBeUndefined();
-    await expect(store.applyTenantRls()).rejects.toMatchObject({
-      code: 'tenant_context_conflict',
-    });
-    await expect(store.applyTenantRls({ allowRebind: true })).resolves.toBeUndefined();
+    // The policies are the whole database's: every other test file reads through them at the same
+    // time. Rebinding them for real hid every row from those files until this test bound them back,
+    // so the rebind runs in a transaction that rolls back, and no other session ever sees it.
+    const committedBindings = async () =>
+      (
+        await sql<{ binding: string }[]>`
+          SELECT DISTINCT obj_description(policy.oid, 'pg_policy') AS binding
+            FROM pg_policy policy
+            JOIN pg_class table_class ON table_class.oid = policy.polrelid
+            JOIN pg_namespace namespace ON namespace.oid = table_class.relnamespace
+           WHERE namespace.nspname = 'slotlock'
+             AND obj_description(policy.oid, 'pg_policy') LIKE 'slotlock:tenant-context:%'`
+      ).map(({ binding }) => binding);
+    const bound = ['slotlock:tenant-context:slotlock.tenant_ref'];
+    expect(await committedBindings()).toEqual(bound);
+    const rolledBack = new Error('roll the rebind back');
+    await expect(
+      sql.begin(async (tx) => {
+        const otherContextStore = createSlotlockStore(tx, {
+          tenantContextSetting: 'app.other_tenant',
+        });
+        const sameContextStore = createSlotlockStore(tx);
+        await expect(otherContextStore.applyTenantRls()).rejects.toMatchObject({
+          code: 'tenant_context_conflict',
+        });
+        await expect(otherContextStore.applyTenantRls({ allowRebind: true })).resolves.toBeUndefined();
+        // Rebound inside this transaction; still bound as before for every other session.
+        const [inside] = await tx<{ binding: string }[]>`
+          SELECT obj_description(oid, 'pg_policy') AS binding
+            FROM pg_policy WHERE polname = 'tenant_isolation_v1'
+             AND polrelid = 'slotlock.resources'::regclass`;
+        expect(inside?.binding).toBe('slotlock:tenant-context:app.other_tenant');
+        expect(await committedBindings()).toEqual(bound);
+        await expect(sameContextStore.applyTenantRls()).rejects.toMatchObject({
+          code: 'tenant_context_conflict',
+        });
+        await expect(sameContextStore.applyTenantRls({ allowRebind: true })).resolves.toBeUndefined();
+        throw rolledBack;
+      }),
+    ).rejects.toBe(rolledBack);
+    expect(await committedBindings()).toEqual(bound);
   });
 
   it('database backstops tenant ownership and the materialized occupied end', async () => {

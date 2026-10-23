@@ -80,7 +80,7 @@ services:
       SLOTLOCK_PUBLIC_URL: ${SLOTLOCK_PUBLIC_URL:-http://localhost:${SLOTLOCK_PORT:-8080}}
       SLOTLOCK_TENANT: ${SLOTLOCK_TENANT:-default}
       SLOTLOCK_AVAILABILITY: ${SLOTLOCK_AVAILABILITY:-}
-      SLOTLOCK_REST_API: ${SLOTLOCK_REST_API:-off}
+      SLOTLOCK_REST_API: ${SLOTLOCK_REST_API:-on}
       # The GitHub sign-in dashboard at $SLOTLOCK_PUBLIC_URL/dashboard: off while all four are empty,
       # and serve refuses to start with only some of them.
       SLOTLOCK_GITHUB_CLIENT_ID: ${SLOTLOCK_GITHUB_CLIENT_ID:-}

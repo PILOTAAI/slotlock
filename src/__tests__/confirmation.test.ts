@@ -413,7 +413,14 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
         await server.fetch(toolCall('slotlock_create_event', { ...BOOKING, ends_at: 'soon' })),
       ),
     ).toBe('invalid_arguments');
-    expect(onEvent).not.toHaveBeenCalled();
+    // Each call is reported by its outcome; nothing was asked, so no confirmation is.
+    const reported = onEvent.mock.calls.map(([event]) =>
+      'outcome' in event ? [event.type, event.outcome] : [event.type],
+    );
+    expect(reported).toEqual([
+      ['call', 'forbidden'],
+      ['call', 'invalid_arguments'],
+    ]);
   });
 
   it('runs unlisted operations and unconfigured servers without asking', async () => {

@@ -25,8 +25,22 @@ import {
   stateSecrets,
   traceContextFrom,
 } from './mcp-modern.js';
+import {
+  SLOTLOCK_APPLICATION_OPERATIONS,
+  SLOTLOCK_APPLICATION_SCOPE,
+  type SlotlockApplicationBackend,
+  type SlotlockApplicationInvocationContext,
+  type SlotlockApplicationOperation,
+  type SlotlockApplicationOperationDefinition,
+  isSlotlockApplicationOperation,
+  slotlockApplicationOperation,
+} from './application-api.js';
+import { ignoreRejection } from './hooks.js';
 import { slotlockPackageVersion } from './package-version.js';
 import {
+  SLOTLOCK_APPLICATION_REST_ROUTES,
+  SLOTLOCK_REST_ROUTES,
+  type SlotlockRestRoute,
   matchSlotlockRestRoute,
   restInputFromBody,
   restQueryInput,
@@ -500,10 +514,32 @@ export type SlotlockAgentServerEvent =
         | 'unavailable';
     }
   | {
-      /** A REST call that reached an operation, and the HTTP status it answered. */
+      /**
+       * A REST call that named an operation, and the HTTP status it answered: run, or refused before
+       * it ran (a body that is not JSON, too large or not an object).
+       */
       type: 'rest';
-      operation: SlotlockAgentOperation;
+      operation: SlotlockAgentOperation | SlotlockApplicationOperation;
       status: number;
+      /** How long the call took from naming its operation, in milliseconds to a tenth. */
+      durationMs: number;
+      /** The W3C trace id of the call's valid `traceparent`, when it carried one. */
+      traceId?: string;
+    }
+  | {
+      /** An MCP `tools/call` or A2A `SendMessage` that named an operation, and how it ended. */
+      type: 'call';
+      protocol: 'mcp' | 'a2a';
+      operation: SlotlockAgentOperation;
+      /**
+       * `ok`, or the refusal's code (`overlap`, `forbidden`, `rate_limited`, …), or why the request
+       * was refused before the operation ran: `invalid_arguments` (MCP arguments that are not an
+       * object), `missing_capability` (a guarded write from a 2026-07-28 client without form
+       * elicitation), `invalid_message` or `invalid_message_parameters` (A2A).
+       */
+      outcome: string;
+      durationMs: number;
+      traceId?: string;
     }
   | {
       type: 'subscription';
@@ -540,6 +576,21 @@ export interface SlotlockAgentServerOptions {
    * to ask a person. Off unless set.
    */
   rest?: boolean;
+  /**
+   * Also serve the application API under `/v1` (application-api.ts): resources, bookable hours,
+   * holds, reservations, calendar coverage and maintenance, for the application around the agents,
+   * in any language. Needs `rest`. A principal whose `scopes` are set needs `admin`
+   * (SLOTLOCK_APPLICATION_SCOPE); then `authorize` decides. They are never MCP tools or A2A skills,
+   * and never wait for a confirmation. Off unless set.
+   */
+  application?: {
+    backend: SlotlockApplicationBackend;
+    authorize(args: {
+      principal: SlotlockAgentPrincipal;
+      operation: SlotlockApplicationOperation;
+      input: Record<string, unknown>;
+    }): Promise<boolean>;
+  };
   /** Require a person's confirmation before the listed writes run. Off unless set. */
   confirmation?: SlotlockAgentConfirmationOptions;
   /**
@@ -554,16 +605,17 @@ export interface SlotlockAgentServerOptions {
    */
   subscriptions?: SlotlockAgentSubscriptionOptions | false;
   /**
-   * Observe confirmations and subscriptions (counts and outcomes, no arguments or identities) for
-   * metrics or audit. It runs synchronously and whatever it throws is ignored.
+   * Observe calls, confirmations and subscriptions (counts and outcomes, no arguments or
+   * identities) for metrics or audit. It is not awaited, and whatever it throws, or its promise
+   * rejects with, is ignored.
    */
   onEvent?: (event: SlotlockAgentServerEvent) => void;
   /**
    * Called with a failure no client is told about: an operation's backend threw something other
    * than a `SlotlockAgentOperationError`, or returned a result outside the operation's schema. The
    * client gets `internal_error` and nothing more, so log it here to find out why. It receives the
-   * error and the operation, never the arguments or the request; it runs synchronously and whatever
-   * it throws is ignored.
+   * error and the operation, never the arguments or the request. It is not awaited, and whatever it
+   * throws, or its promise rejects with, is ignored.
    */
   onError?: (error: unknown, context: SlotlockAgentErrorContext) => void;
 }
@@ -571,7 +623,7 @@ export interface SlotlockAgentServerOptions {
 /** What `onError` is told about an unexpected failure besides the error itself. */
 export interface SlotlockAgentErrorContext {
   /** The operation that failed; `null` when the failure came before one was resolved. */
-  operation: SlotlockAgentOperation | null;
+  operation: SlotlockAgentOperation | SlotlockApplicationOperation | null;
 }
 
 export interface SlotlockAgentOperationDispatchOptions {
@@ -949,6 +1001,38 @@ export function slotlockMcpToolResult(
   return { content: [{ type: 'text', text: JSON.stringify({ error }) }], isError: true };
 }
 
+/** The agent tools as REST serves them: each with the scope it needs. */
+function restAgentTools() {
+  return slotlockAgentTools().map((tool) => ({ ...tool, scope: slotlockAgentOperationScope(tool.name) }));
+}
+
+/** The application operations with their input and output as JSON Schema, as REST serves them. */
+export function slotlockApplicationOperations() {
+  return SLOTLOCK_APPLICATION_OPERATIONS.map((operation) => ({
+    name: operation.name,
+    title: operation.title,
+    description: operation.description,
+    method: operation.method,
+    path: operation.path,
+    inputSchema: toJsonSchema(operation.input, 'input'),
+    outputSchema: toJsonSchema(operation.output, 'output'),
+  }));
+}
+
+/**
+ * The OpenAPI 3.1 document of the REST API: what a server with `rest` (and `application`) serves at
+ * /openapi.json. Without `publicBaseUrl` the server URL is a variable, `{baseUrl}`, as in the
+ * repository's openapi.json, which client generators read.
+ */
+export function slotlockOpenApi(options: { publicBaseUrl?: string; application?: boolean } = {}) {
+  return slotlockOpenApiDocument({
+    ...(options.publicBaseUrl !== undefined ? { publicBaseUrl: options.publicBaseUrl } : {}),
+    version: SLOTLOCK_AGENT_SERVER_VERSION,
+    tools: restAgentTools(),
+    ...(options.application ? { application: slotlockApplicationOperations() } : {}),
+  });
+}
+
 export function slotlockAgentTools() {
   return OPERATION_DEFINITIONS.map((operation) => ({
     name: operation.name,
@@ -1011,11 +1095,43 @@ function rpcError(
   return { jsonrpc: '2.0', id, error: { code, message } };
 }
 
+/**
+ * Whether a Content-Type names `application/json`, whatever its parameters. A media type's type
+ * and subtype are case-insensitive (RFC 9110 §8.3.1), so `Application/JSON` is the same type.
+ */
+function isJsonMediaType(contentType: string | null): boolean {
+  return contentType?.split(';')[0]?.trim().toLowerCase() === 'application/json';
+}
+
+/**
+ * Parse a JSON body of at most `maxBytes`. The body is counted as it arrives, so one sent without
+ * Content-Length (chunked) is refused, and its stream cancelled, as soon as it passes the limit,
+ * rather than buffered whole first.
+ */
 async function readJson(request: Request, maxBytes: number): Promise<unknown> {
   const declared = request.headers.get('content-length');
   if (declared && Number(declared) > maxBytes) throw new Error('request_too_large');
-  const bytes = new Uint8Array(await request.arrayBuffer());
-  if (bytes.byteLength > maxBytes) throw new Error('request_too_large');
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  if (request.body) {
+    const reader = request.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error('request_too_large');
+      }
+      chunks.push(value);
+    }
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
   try {
     return JSON.parse(new TextDecoder().decode(bytes));
   } catch {
@@ -1224,11 +1340,11 @@ export async function invokeSlotlockAgentOperation(args: {
     if (!principalScopesCover(principal, operation.name)) {
       return { ok: false, status: 403, code: 'forbidden' };
     }
-    const input =
-      args.input && typeof args.input === 'object' && !Array.isArray(args.input)
-        ? (args.input as Record<string, unknown>)
-        : {};
-    const parsed = operation.input.safeParse(input);
+    // No input, or null, is no arguments; anything else that is not an object is refused.
+    if (args.input != null && !isRecord(args.input)) {
+      return { ok: false, status: 400, code: 'invalid_arguments' };
+    }
+    const parsed = operation.input.safeParse(args.input ?? {});
     if (!parsed.success) return { ok: false, status: 400, code: 'invalid_arguments' };
     if (
       !(await args.options.authorize({
@@ -1290,17 +1406,28 @@ export async function invokeSlotlockAgentOperation(args: {
   }
 }
 
+
 /** Hand an unexpected failure to `onError`; nothing it does can change the protocol answer. */
 function reportUnexpected(
   onError: SlotlockAgentOperationDispatchOptions['onError'],
   error: unknown,
-  operation: SlotlockAgentOperation | null,
+  operation: SlotlockAgentOperation | SlotlockApplicationOperation | null,
 ): void {
   try {
-    onError?.(error, { operation });
+    ignoreRejection(onError?.(error, { operation }));
   } catch {
     // Observability must never change what a protocol client receives.
   }
+}
+
+/** Milliseconds since `started` (a `performance.now()` reading), to a tenth. */
+function elapsedMs(started: number): number {
+  return Math.round((performance.now() - started) * 10) / 10;
+}
+
+/** The trace id of a valid `traceparent` (`version-traceid-parentid-flags`): its second field. */
+function traceIdOf(trace: SlotlockTraceContext): string {
+  return trace.traceparent.split('-', 2)[1] ?? '';
 }
 
 /** Failures that are server faults, not operation outcomes an agent could act on. */
@@ -2146,11 +2273,16 @@ async function confirmationMessage(
           )
         : `for ${promptRange(promptInstantOf(input.starts_at), promptInstantOf(input.ends_at), zone)}`;
     const tentative = input.status === 'tentative' ? ', tentatively' : '';
+    // A transparent booking does not make the resource busy: the person must know it stays free.
+    const free =
+      input.transparency === 'transparent' ? ', leaving the time free for other bookings' : '';
+    const details = promptDetails(input);
+    const also = details ? ` (${details})` : '';
     const title =
       typeof input.title === 'string' && input.title.length > 0
         ? `: ${promptQuoted(input.title)}`
         : '';
-    return `Book ${resource.label} ${when}${tentative}${title}.`;
+    return `Book ${resource.label} ${when}${tentative}${free}${also}${title}.`;
   }
 
   const event = await lookup.event(input.event_id);
@@ -2217,16 +2349,26 @@ async function confirmationMessage(
       changes.push(`exceptions to ${promptRequestedExceptions(input.recurrence_exceptions, zone)}`);
     }
   }
-  const details = ['description', 'location', 'organizer', 'attendees', 'reminders'].filter(
-    (field) => input[field] !== undefined,
-  );
-  if (details.length > 0) changes.push(`also ${details.join(', ')}`);
+  const details = promptDetails(input);
+  if (details) changes.push(details);
   // The agent's own text goes last.
   if (input.title !== undefined) {
     changes.push(input.title === null ? 'title removed' : `title to ${promptQuoted(input.title)}`);
   }
   return `Change ${target}${changes.length > 0 ? `: ${changes.join('; ')}` : ''}.${titled}`;
 }
+
+/**
+ * The other fields a write sets, by name only (`also description, attendees`): their values are
+ * the agent's text, and only the title is quoted. `null` when it sets none of them.
+ */
+function promptDetails(input: Record<string, unknown>): string | null {
+  const details = ['description', 'location', 'organizer', 'attendees', 'reminders'].filter(
+    (field) => input[field] !== undefined,
+  );
+  return details.length > 0 ? `also ${details.join(', ')}` : null;
+}
+
 type ConfirmationDecision =
   | 'accepted'
   | 'declined'
@@ -2365,15 +2507,38 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
   if (options.rest !== undefined && typeof options.rest !== 'boolean') {
     throw new Error('Slotlock agent server rest must be a boolean');
   }
-  const restTools = options.rest ? slotlockAgentTools() : [];
-  const restInputSchemas = new Map(restTools.map((tool) => [tool.name, tool.inputSchema]));
+  const application = options.application;
+  if (application !== undefined) {
+    if (options.rest !== true) {
+      throw new Error('Slotlock agent server application needs rest: it is served only as REST');
+    }
+    const backend = application?.backend as unknown as Record<string, unknown> | undefined;
+    if (
+      typeof application !== 'object' ||
+      application === null ||
+      typeof application.authorize !== 'function' ||
+      typeof backend !== 'object' ||
+      backend === null ||
+      SLOTLOCK_APPLICATION_OPERATIONS.some((operation) => typeof backend[operation.invoke] !== 'function')
+    ) {
+      throw new Error(
+        'Slotlock agent server application needs an authorize function and a backend with every application method',
+      );
+    }
+  }
+  const restTools = options.rest ? restAgentTools() : [];
+  const applicationTools = application ? slotlockApplicationOperations() : [];
+  const restInputSchemas = new Map<string, JsonSchema>([
+    ...restTools.map((tool) => [tool.name, tool.inputSchema] as const),
+    ...applicationTools.map((tool) => [tool.name, tool.inputSchema] as const),
+  ]);
+  const restRoutes: readonly SlotlockRestRoute<SlotlockAgentOperation | SlotlockApplicationOperation>[] = [
+    ...SLOTLOCK_REST_ROUTES,
+    ...(application ? SLOTLOCK_APPLICATION_REST_ROUTES : []),
+  ];
   const openApi = options.rest
     ? Object.freeze(
-        slotlockOpenApiDocument({
-          publicBaseUrl: config.publicBaseUrl,
-          version: SLOTLOCK_AGENT_SERVER_VERSION,
-          tools: restTools,
-        }),
+        slotlockOpenApi({ publicBaseUrl: config.publicBaseUrl, application: application !== undefined }),
       )
     : null;
   const manifest = Object.freeze({
@@ -2398,10 +2563,42 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
   const confirmation = validateConfirmation(options.confirmation);
   const emit = (event: SlotlockAgentServerEvent): void => {
     try {
-      options.onEvent?.(event);
+      ignoreRejection(options.onEvent?.(event));
     } catch {
       // Observability must never change what a protocol client receives.
     }
+  };
+  /**
+   * Report how an MCP or A2A call that named an operation ended, as a `call` event: run, or refused
+   * before it could run (a malformed message, a client that cannot confirm). Never its arguments.
+   */
+  const reportCall = (
+    protocol: 'mcp' | 'a2a',
+    operation: SlotlockAgentOperation,
+    outcome: string,
+    started: number,
+    trace: SlotlockTraceContext | undefined,
+  ): void => {
+    emit({
+      type: 'call',
+      protocol,
+      operation,
+      outcome,
+      durationMs: elapsedMs(started),
+      ...(trace ? { traceId: traceIdOf(trace) } : {}),
+    });
+  };
+  /** Run an operation an MCP or A2A caller named, and report how it ended as a `call` event. */
+  const invokeReported = async (
+    protocol: 'mcp' | 'a2a',
+    args: Parameters<typeof invokeSlotlockAgentOperation>[0] & {
+      operation: SlotlockAgentOperation;
+    },
+  ): Promise<SlotlockAgentOperationDispatchResult> => {
+    const started = performance.now();
+    const outcome = await invokeSlotlockAgentOperation(args);
+    reportCall(protocol, args.operation, outcome.ok ? 'ok' : outcome.code, started, args.trace);
+    return outcome;
   };
   const dispatchOptions = (
     principal: SlotlockAgentPrincipal,
@@ -2501,6 +2698,12 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     const { id, params, principal } = call;
     const operation = resolveSlotlockAgentOperation(params.name);
     if (!operation) return modernError(200, id, -32602, 'Unknown tool');
+    const started = performance.now();
+    // `arguments` may be left out or null; anything else but an object is malformed params.
+    if (params.arguments != null && !isRecord(params.arguments)) {
+      reportCall('mcp', operation, 'invalid_arguments', started, call.trace);
+      return modernError(200, id, -32602, 'Invalid params');
+    }
     const dispatch = dispatchOptions(principal);
     const gate: {
       decision?: ConfirmationDecision;
@@ -2509,6 +2712,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     } = {};
     if (confirmation?.operations.has(operation)) {
       if (!clientSupportsFormElicitation(call.capabilities)) {
+        reportCall('mcp', operation, 'missing_capability', started, call.trace);
         return modernError(
           400,
           id,
@@ -2527,19 +2731,18 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
           operation,
           argsDigest: gate.argsDigest,
         });
+        // Before the call it decides, as on every other protocol.
+        emit({ type: 'confirmation', operation, outcome: CONFIRMATION_OUTCOME[gate.decision] });
         return gate.decision === 'accepted' ? null : CONFIRMATION_HALT[gate.decision];
       };
     }
-    const outcome = await invokeSlotlockAgentOperation({
+    const outcome = await invokeReported('mcp', {
       operation,
       input: isRecord(params.arguments) ? params.arguments : {},
       request: call.request,
       options: dispatch,
       ...(call.trace ? { trace: call.trace } : {}),
     });
-    if (gate.decision) {
-      emit({ type: 'confirmation', operation, outcome: CONFIRMATION_OUTCOME[gate.decision] });
-    }
     if (
       confirmation &&
       (gate.decision === 'prompt' || gate.decision === 'expired') &&
@@ -2995,6 +3198,63 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
   }
 
   /**
+   * One application operation for an authenticated principal: the admin scope (when the principal
+   * carries scopes), the operation's strict input schema, `application.authorize`, the backend, and
+   * its output schema. A refusal the backend throws as a `SlotlockAgentOperationError` is the answer;
+   * anything else is reported to `onError` and answers only `internal_error`.
+   */
+  async function invokeApplicationOperation(
+    definition: SlotlockApplicationOperationDefinition,
+    principal: SlotlockAgentPrincipal,
+    given: Record<string, unknown>,
+    request: Request,
+    trace: SlotlockTraceContext | undefined,
+  ): Promise<SlotlockAgentOperationDispatchResult> {
+    const served = application as NonNullable<SlotlockAgentServerOptions['application']>;
+    try {
+      const scopes: unknown = principal.scopes;
+      if (
+        scopes !== undefined &&
+        !(Array.isArray(scopes) && scopes.includes(SLOTLOCK_APPLICATION_SCOPE))
+      ) {
+        return { ok: false, status: 403, code: 'forbidden' };
+      }
+      const parsed = definition.input.safeParse(given);
+      if (!parsed.success) return { ok: false, status: 400, code: 'invalid_arguments' };
+      if (!(await served.authorize({ principal, operation: definition.name, input: parsed.data }))) {
+        return { ok: false, status: 403, code: 'forbidden' };
+      }
+      const context: SlotlockApplicationInvocationContext = {
+        principal,
+        operation: definition.name,
+        signal: request.signal,
+      };
+      if (trace) context.trace = trace;
+      const data = await served.backend[definition.invoke].call(served.backend, context, parsed.data);
+      if (!definition.output.safeParse(data).success) {
+        reportUnexpected(
+          options.onError,
+          Object.assign(
+            new Error(
+              `The application backend's ${definition.name} result does not match the operation's output schema`,
+            ),
+            { code: 'invalid_backend_result' },
+          ),
+          definition.name,
+        );
+        return { ok: false, status: 500, code: 'invalid_backend_result' };
+      }
+      return { ok: true, data };
+    } catch (error) {
+      if (error instanceof SlotlockAgentOperationError) {
+        return { ok: false, status: error.status, code: error.code };
+      }
+      reportUnexpected(options.onError, error, definition.name);
+      return { ok: false, status: 500, code: 'internal_error' };
+    }
+  }
+
+  /**
    * One REST call, checked as /mcp and /a2a are (origin, credential, rate limit), then run through
    * the same dispatcher: scopes, arguments, `authorize`, and confirmation, which REST cannot ask
    * for, so a guarded write answers 428 `confirmation_required`.
@@ -3007,7 +3267,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
         ? json(200, openApi)
         : refuse(405, 'method_not_allowed', { Allow: 'GET' });
     }
-    const match = matchSlotlockRestRoute(request.method, path);
+    const match = matchSlotlockRestRoute(request.method, path, restRoutes);
     if (match === null) return refuse(404, 'not_found');
     if ('allow' in match) {
       return refuse(405, 'method_not_allowed', { Allow: match.allow.join(', ') });
@@ -3037,37 +3297,63 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     }
     if ('invalid' in match) return refuse(400, 'invalid_arguments');
     const { route, params } = match;
+    const trace = traceContextFrom(undefined, request.headers);
+    const started = performance.now();
+    const report = (status: number): void =>
+      emit({
+        type: 'rest',
+        operation: route.operation,
+        status,
+        durationMs: elapsedMs(started),
+        ...(trace ? { traceId: traceIdOf(trace) } : {}),
+      });
+    // A call refused before its operation runs is reported as one that ran, as on MCP and A2A.
+    const refuseCall = (status: number, code: string): Response => {
+      report(status);
+      return refuse(status, code);
+    };
     let given: Record<string, unknown>;
     if (restInputFromBody(route)) {
-      const contentType = request.headers.get('content-type')?.split(';')[0]?.trim();
-      if (contentType !== 'application/json') return refuse(415, 'unsupported_media_type');
+      if (!isJsonMediaType(request.headers.get('content-type'))) {
+        return refuseCall(415, 'unsupported_media_type');
+      }
       let body: unknown;
       try {
         body = await readJson(request, config.maxRequestBytes);
       } catch (error) {
         const tooLarge = error instanceof Error && error.message === 'request_too_large';
-        return refuse(tooLarge ? 413 : 400, tooLarge ? 'request_too_large' : 'invalid_json');
+        return refuseCall(tooLarge ? 413 : 400, tooLarge ? 'request_too_large' : 'invalid_json');
       }
-      if (!isRecord(body)) return refuse(400, 'invalid_arguments');
+      if (!isRecord(body)) return refuseCall(400, 'invalid_arguments');
       given = body;
     } else {
-      given = restQueryInput(url.searchParams, restInputSchemas.get(route.operation) ?? {});
+      given = restQueryInput(
+        url.searchParams,
+        (restInputSchemas.get(route.operation) ?? {}) as Record<string, unknown>,
+      );
     }
     // The path names the event; the body or query may not name another.
     if (Object.keys(params).some((name) => Object.hasOwn(given, name))) {
-      return refuse(400, 'invalid_arguments');
+      return refuseCall(400, 'invalid_arguments');
     }
-    const trace = traceContextFrom(undefined, request.headers);
-    const outcome = await invokeSlotlockAgentOperation({
-      operation: route.operation,
-      input: { ...given, ...params },
-      request,
-      options: withoutConfirmationRound(principal, route.operation),
-      ...(trace ? { trace } : {}),
-    });
+    const outcome = isSlotlockApplicationOperation(route.operation)
+      ? await invokeApplicationOperation(
+          slotlockApplicationOperation(route.operation),
+          principal,
+          { ...given, ...params },
+          request,
+          trace,
+        )
+      : await invokeSlotlockAgentOperation({
+          operation: route.operation,
+          input: { ...given, ...params },
+          request,
+          options: withoutConfirmationRound(principal, route.operation),
+          ...(trace ? { trace } : {}),
+        });
     const internal = !outcome.ok && INTERNAL_FAILURES.has(outcome.code);
     const status = outcome.ok ? 200 : internal ? 500 : outcome.status;
-    emit({ type: 'rest', operation: route.operation, status });
+    report(status);
     if (outcome.ok) return json(200, outcome.data);
     return refuse(status, internal ? 'internal_error' : outcome.code);
   }
@@ -3134,8 +3420,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       if (request.method !== 'POST' || (path !== '/mcp' && path !== '/a2a')) {
         return json(404, { error: { code: 'not_found' } });
       }
-      const contentType = request.headers.get('content-type')?.split(';')[0]?.trim();
-      if (contentType !== 'application/json') {
+      if (!isJsonMediaType(request.headers.get('content-type'))) {
         return json(415, { error: { code: 'unsupported_media_type' } });
       }
       const origin = request.headers.get('origin');
@@ -3160,7 +3445,14 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
         options.consumeRateLimit &&
         !(await options.consumeRateLimit({ principal, operation: 'protocol' }))
       ) {
-        // Answered before the body is read, so the era comes from the version header alone.
+        // Answered before the body is read: the request's id is unknown, and the MCP era comes
+        // from the version header alone. A2A keeps the error in its 200 envelope with an ErrorInfo.
+        if (path === '/a2a') {
+          return a2aError(null, -32029, 'Rate limit exceeded', {
+            reason: 'RATE_LIMITED',
+            domain: 'slotlock',
+          });
+        }
         const modernClient =
           path === '/mcp' &&
           MODERN_MCP_VERSIONS.includes(request.headers.get('mcp-protocol-version') ?? '');
@@ -3292,18 +3584,19 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
         if (rpc.method !== 'tools/call') return json(200, rpcError(id, -32601, 'Method not found'));
         const operation = resolveSlotlockAgentOperation(rpc.params?.name);
         if (!operation) return json(200, rpcError(id, -32602, 'Unknown tool'));
-        const input =
-          rpc.params?.arguments &&
-          typeof rpc.params.arguments === 'object' &&
-          !Array.isArray(rpc.params.arguments)
-            ? (rpc.params.arguments as Record<string, unknown>)
-            : {};
+        const started = performance.now();
+        const trace = traceContextFrom(
+          isRecord(rpc.params?._meta) ? rpc.params._meta : undefined,
+          request.headers,
+        );
+        // `arguments` may be left out or null; anything else but an object is malformed params.
+        const input = rpc.params?.arguments;
+        if (input != null && !isRecord(input)) {
+          reportCall('mcp', operation, 'invalid_arguments', started, trace);
+          return json(200, rpcError(id, -32602, 'Invalid params'));
+        }
         try {
-          const trace = traceContextFrom(
-            isRecord(rpc.params?._meta) ? rpc.params._meta : undefined,
-            request.headers,
-          );
-          const outcome = await invokeSlotlockAgentOperation({
+          const outcome = await invokeReported('mcp', {
             operation,
             input,
             request,
@@ -3367,18 +3660,8 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       if (rpc.method !== 'SendMessage') {
         return json(200, rpcError(id, -32601, 'Method not found'));
       }
-      const a2aParamKeys = Object.keys(rpc.params ?? {});
-      if (
-        a2aParamKeys.some(
-          (key) => !['message', 'configuration', 'metadata', 'tenant'].includes(key),
-        ) ||
-        !isCallerTenant(rpc.params?.tenant, principal.tenantRef)
-      ) {
-        return a2aError(id, -32602, 'Invalid message parameters', {
-          reason: 'INVALID_MESSAGE_PARAMETERS',
-          domain: 'slotlock',
-        });
-      }
+      const started = performance.now();
+      const trace = traceContextFrom(undefined, request.headers);
       const message = rpc.params?.message as
         | {
             messageId?: unknown;
@@ -3392,28 +3675,53 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       const part = parts.length === 1 ? (parts[0] as { data?: unknown }) : null;
       const data = part?.data as { skill?: unknown; arguments?: unknown } | undefined;
       const operation = resolveSlotlockAgentOperation(data?.skill);
-      const input =
-        data?.arguments && typeof data.arguments === 'object' && !Array.isArray(data.arguments)
-          ? (data.arguments as Record<string, unknown>)
-          : {};
+      // A refused message that names an operation is still a call, reported by the error's reason.
+      const refuse = (outcome: string, response: Response): Response => {
+        if (operation) reportCall('a2a', operation, outcome, started, trace);
+        return response;
+      };
+      const a2aParamKeys = Object.keys(rpc.params ?? {});
+      if (
+        a2aParamKeys.some(
+          (key) => !['message', 'configuration', 'metadata', 'tenant'].includes(key),
+        ) ||
+        !isCallerTenant(rpc.params?.tenant, principal.tenantRef) ||
+        // a2a.proto: a SendMessageConfiguration and a Struct, each optional (null is unset in proto3
+        // JSON). What A2A 1.0 defines inside them (output modes, history length, ...) is the client's.
+        (rpc.params?.configuration != null && !isRecord(rpc.params.configuration)) ||
+        (rpc.params?.metadata != null && !isRecord(rpc.params.metadata))
+      ) {
+        return refuse(
+          'invalid_message_parameters',
+          a2aError(id, -32602, 'Invalid message parameters', {
+            reason: 'INVALID_MESSAGE_PARAMETERS',
+            domain: 'slotlock',
+          }),
+        );
+      }
+      // `arguments` may be left out or null; anything else but an object is not arguments.
+      const input = data?.arguments;
       if (
         !operation ||
         message?.role !== 'ROLE_USER' ||
         !isCanonicalBoundedIdentifier(message.messageId, 200) ||
         message.taskId !== undefined ||
-        (message.contextId !== undefined && !isCanonicalBoundedIdentifier(message.contextId, 200))
+        (message.contextId !== undefined && !isCanonicalBoundedIdentifier(message.contextId, 200)) ||
+        (input != null && !isRecord(input))
       ) {
-        return a2aError(id, -32602, 'Invalid message', {
-          reason: 'INVALID_MESSAGE',
-          domain: 'slotlock',
-          metadata: {
-            expected: 'one application/json data part {"skill": "<skill id>", "arguments": {…}}',
-          },
-        });
+        return refuse(
+          'invalid_message',
+          a2aError(id, -32602, 'Invalid message', {
+            reason: 'INVALID_MESSAGE',
+            domain: 'slotlock',
+            metadata: {
+              expected: 'one application/json data part {"skill": "<skill id>", "arguments": {…}}',
+            },
+          }),
+        );
       }
       try {
-        const trace = traceContextFrom(undefined, request.headers);
-        const outcome = await invokeSlotlockAgentOperation({
+        const outcome = await invokeReported('a2a', {
           operation,
           input,
           request,

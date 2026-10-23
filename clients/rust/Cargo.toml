@@ -1,0 +1,17 @@
+[package]
+name = "slotlock"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "A client for Slotlock's REST API: calendars AI agents cannot double-book."
+license = "Apache-2.0"
+repository = "https://github.com/PILOTAAI/slotlock"
+homepage = "https://slotlock.pylota.io"
+readme = "README.md"
+keywords = ["calendar", "booking", "agents", "mcp", "scheduling"]
+categories = ["api-bindings", "date-and-time"]
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+ureq = { version = "=3.4.2", default-features = false, features = ["rustls", "json"] }

@@ -85,7 +85,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
   });
 
   afterAll(async () => {
-    await admin`DELETE FROM slotlock.resources WHERE tenant_ref = ${tenantRef}`;
+    await admin`DELETE FROM slotlock.resources WHERE tenant_ref IN (${tenantRef}, ${otherTenantRef})`;
     await admin`DELETE FROM slotlock.api_keys WHERE tenant_ref IN (${tenantRef}, ${otherTenantRef}, 'github:4242', 'github:999')`;
     await admin.unsafe(`DROP OWNED BY ${role}`).catch(() => undefined);
     await admin.unsafe(`DROP ROLE IF EXISTS ${role}`);
@@ -209,8 +209,25 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         tenant: tenantRef,
         confirm_writes: ['slotlock_create_event', 'slotlock_update_event', 'slotlock_delete_event'],
         availability_rules: 1,
+        rest: 'http://localhost:8080/openapi.json',
+        maintenance_interval_minutes: 60,
       });
       const origin = listening.address as string;
+
+      // The server maintains its tenant as soon as it listens, and logs counts, never the tenant.
+      const maintained = await eventually(() =>
+        stdout.events().find(({ event }) => event === 'maintenance'),
+      );
+      expect(maintained).toEqual({
+        level: expect.any(String),
+        time: expect.any(String),
+        event: 'maintenance',
+        extended: 0,
+        conflicts: 0,
+        refused: 0,
+        pruned: 0,
+        capped: false,
+      });
       expect(origin).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
 
       const health = await fetch(`${origin}/healthz`);
@@ -318,10 +335,35 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       'schema_applied',
       'application_role_granted',
       'listening',
+      'maintenance',
+      'call',
       'confirmation',
+      'call',
       'stopping',
       'stopped',
     ]);
+    // Each tool call logs its operation, outcome and duration; never its arguments.
+    expect(stdout.events().filter(({ event }) => event === 'call')).toEqual([
+      {
+        level: expect.any(String),
+        time: expect.any(String),
+        event: 'call',
+        protocol: 'mcp',
+        operation: 'slotlock_list_resources',
+        outcome: 'ok',
+        duration_ms: expect.any(Number),
+      },
+      {
+        level: expect.any(String),
+        time: expect.any(String),
+        event: 'call',
+        protocol: 'mcp',
+        operation: 'slotlock_create_event',
+        outcome: 'confirmation_required',
+        duration_ms: expect.any(Number),
+      },
+    ]);
+    expect(stdout.text()).not.toContain('cli-test-create');
     expect(stderr.text()).toBe('');
     for (const secret of [token, confirmationSecret, password]) {
       expect(stdout.text()).not.toContain(secret);
@@ -476,6 +518,150 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     expect(foreign.stdout.text()).toBe('');
     expect(foreign.stderr.text()).toMatch(/no API key with that id/);
   });
+  it('serves the application API over REST by default, to admin keys only, in their own tenant', async () => {
+    const create = async (name: string, extra: string[], tenant = tenantRef) => {
+      const stdout = output();
+      const code = await runSlotlockCli(['key', 'create', name, ...extra], {
+        env: { ...env, SLOTLOCK_TENANT: tenant },
+        stdout,
+        stderr: output(),
+        signal: new AbortController().signal,
+      });
+      expect(code).toBe(0);
+      return JSON.parse(stdout.text()) as { id: string; key: string; scopes: string[] };
+    };
+    const application = await create('Booking site', ['--scope', 'read,write,admin']);
+    expect(application.scopes).toEqual(['read', 'write', 'admin']);
+    const agent = await create('Booking agent', []);
+    expect(agent.scopes).toEqual(['read', 'write']);
+    const elsewhere = await create('Other site', ['--scope', 'admin'], otherTenantRef);
+    expect(elsewhere.scopes).toEqual(['admin']);
+
+    const shutdown = new AbortController();
+    const stdout = output();
+    const stderr = output();
+    // SLOTLOCK_REST_API is not set: REST is on unless it says off.
+    const serving = runSlotlockCli(['serve'], { env, stdout, stderr, signal: shutdown.signal });
+    try {
+      const listening = await eventually(() =>
+        stdout.events().find(({ event }) => event === 'listening'),
+      );
+      expect(listening.rest).toBe('http://localhost:8080/openapi.json');
+      const origin = listening.address as string;
+      const rest = async (bearer: string, method: string, path: string, body?: unknown) => {
+        const response = await fetch(`${origin}${path}`, {
+          method,
+          headers: {
+            Authorization: `Bearer ${bearer}`,
+            ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        });
+        return { status: response.status, body: (await response.json()) as Record<string, any> };
+      };
+
+      const document = (await (await fetch(`${origin}/openapi.json`)).json()) as {
+        tags: { name: string }[];
+        paths: Record<string, unknown>;
+      };
+      expect(document.tags.map(({ name }) => name)).toEqual(['Agent tools', 'Application']);
+      expect(document.paths).toHaveProperty(['/v1/holds/{hold_id}/confirm']);
+
+      const created = await rest(application.key, 'POST', '/v1/resources', {
+        external_ref: 'vehicle-app',
+        timezone: 'Europe/London',
+      });
+      expect(created).toMatchObject({ status: 200, body: { resource: { external_ref: 'vehicle-app' } } });
+      const resourceId = created.body.resource.id as string;
+      expect(await rest(agent.key, 'POST', '/v1/resources', { external_ref: 'vehicle-agent' })).toEqual({
+        status: 403,
+        body: { error: { code: 'forbidden' } },
+      });
+      // The server token is what the docs give agents, so it reads and writes but is never admin:
+      // the application API asks no person before it writes.
+      expect(await rest(token, 'GET', `/v1/resources/${resourceId}`)).toEqual({
+        status: 403,
+        body: { error: { code: 'forbidden' } },
+      });
+      expect(await rest(token, 'PUT', '/v1/availability', { rules: [] })).toEqual({
+        status: 403,
+        body: { error: { code: 'forbidden' } },
+      });
+
+      const held = await rest(application.key, 'POST', '/v1/holds', {
+        resource_id: resourceId,
+        start: '2027-04-05T09:00:00Z',
+        end: '2027-04-05T10:00:00Z',
+        ttl_seconds: 600,
+      });
+      expect(held.status).toBe(200);
+      const holdId = held.body.hold.id as string;
+      // Another tenant's admin key, read through the serving role's row-level security as well.
+      expect(await rest(elsewhere.key, 'GET', `/v1/resources/${resourceId}`)).toEqual({
+        status: 404,
+        body: { error: { code: 'resource_not_found' } },
+      });
+      expect(await rest(elsewhere.key, 'POST', `/v1/holds/${holdId}/confirm`, {})).toEqual({
+        status: 404,
+        body: { error: { code: 'hold_not_found' } },
+      });
+      expect(await rest(elsewhere.key, 'DELETE', `/v1/holds/${holdId}`)).toEqual({
+        status: 200,
+        body: { released: false },
+      });
+      expect((await rest(application.key, 'POST', `/v1/holds/${holdId}/confirm`, {})).body).toMatchObject({
+        reservation: { id: holdId, resource_id: resourceId },
+      });
+      expect(await rest(application.key, 'POST', '/v1/maintenance', {})).toEqual({
+        status: 200,
+        body: { extended: 0, conflicts: 0, refused: 0, pruned: 0, capped: false },
+      });
+
+      expect((await run(['key', 'revoke', application.id])).code).toBe(0);
+      expect((await rest(application.key, 'GET', `/v1/resources/${resourceId}`)).status).toBe(401);
+    } finally {
+      shutdown.abort();
+      await admin`
+        DELETE FROM slotlock.resources
+         WHERE tenant_ref = ${tenantRef} AND external_ref IS DISTINCT FROM 'vehicle-42'`;
+    }
+    expect(await serving).toBe(0);
+    expect(stderr.text()).toBe('');
+    for (const key of [application.key, agent.key, elsewhere.key]) {
+      expect(stdout.text()).not.toContain(key);
+    }
+  });
+
+  it('maintains the tenant from the command line, and leaves it to a server already doing so', async () => {
+    const first = await run(['maintain']);
+    expect(first.code).toBe(0);
+    expect(first.stderr.text()).toBe('');
+    expect(JSON.parse(first.stdout.text())).toEqual({
+      extended: 0,
+      conflicts: 0,
+      refused: 0,
+      pruned: 0,
+      capped: false,
+      passes: 1,
+    });
+
+    // Another server holding the tenant's lock: nothing runs, and that is not a failure.
+    const holder = await admin.reserve();
+    try {
+      const key = `slotlock.maintenance:${tenantRef}`;
+      const [locked] = await holder<{ locked: boolean }[]>`
+        SELECT pg_try_advisory_lock(hashtextextended(${key}, 0)) AS locked`;
+      expect(locked?.locked).toBe(true);
+      const busy = await run(['maintain']);
+      expect(busy.code).toBe(0);
+      expect(busy.stdout.text()).toBe('');
+      expect(busy.stderr.text()).toMatch(/another server is maintaining this tenant now/);
+      await holder`SELECT pg_advisory_unlock(hashtextextended(${key}, 0))`;
+    } finally {
+      holder.release();
+    }
+  });
+
   it('refuses to serve as a role that bypasses row-level security, and says how to fix it', async (context) => {
     const [connecting] = await admin<{ rolsuper: boolean }[]>`
       SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user`;
@@ -566,6 +752,29 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     ]);
     for (const secret of [token, confirmationSecret, password]) {
       expect(stderr.text()).not.toContain(secret);
+    }
+  });
+
+  it('refuses to serve while a tenant table is left without forced row-level security', async () => {
+    // What an upgrade stopped part way, statement by statement, leaves until the next one runs.
+    await admin.unsafe('ALTER TABLE slotlock.calendar_coverage NO FORCE ROW LEVEL SECURITY');
+    try {
+      const stdout = output();
+      const stderr = output();
+      const code = await runSlotlockCli(['serve'], {
+        env: { ...env, SLOTLOCK_MIGRATE_DATABASE_URL: undefined },
+        stdout,
+        stderr,
+        signal: AbortSignal.timeout(3_000),
+      });
+      expect(code).toBe(1);
+      expect(stdout.events().find(({ event }) => event === 'listening')).toBeUndefined();
+      const [failure] = stderr.events();
+      expect(failure).toMatchObject({ event: 'serve_failed', code: 'row_security_lifted' });
+      expect(failure?.error).toContain('slotlock.calendar_coverage');
+      expect(failure?.error).toContain('slotlock migrate');
+    } finally {
+      await admin.unsafe('ALTER TABLE slotlock.calendar_coverage FORCE ROW LEVEL SECURITY');
     }
   });
 

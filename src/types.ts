@@ -266,7 +266,10 @@ export interface CalendarHorizonRollCursor {
 export interface CalendarHorizonRollResult {
   /** Due recurring masters examined in deterministic order. */
   examined: number;
-  /** Masters atomically rematerialized to the requested window. */
+  /**
+   * Masters atomically rematerialized from the requested window's start through the later of their
+   * stored end and the window's: a roll never moves a series' end back.
+   */
   extended: number;
   /** Masters whose new occurrence collided; their previous coverage remains intact. */
   conflicts: number;

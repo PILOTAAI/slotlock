@@ -20,6 +20,59 @@ SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true);
 const DEPLOYMENT_SEARCH_PATH_RESTORE = `SELECT pg_catalog.set_config('search_path', pg_catalog.current_setting('${CALLER_SEARCH_PATH_SETTING}'), true);
 `;
 
+// applyTenantRls forces row-level security, which binds the table owner too, and the deployment
+// sets no tenant: its data steps (reaping holds and listing conflicts before the overlap
+// constraint, merging duplicate resources, binding archives, backfilling event children) would see
+// no rows, skip what they repair and leave a constraint to meet rows its own check never saw. The
+// deployment lifts FORCE from the tables that have it before its first data step and puts it back
+// after its last, on those tables only. applySchema runs both in one transaction, which holds the
+// tables locked in between; a failure rolls the lift back with everything else. Run statement by
+// statement, the lift commits on its own and a refused data step stops the run before the restore,
+// so the tables lifted are recorded in a table, not the session: the next deployment, from any
+// session or connection, puts FORCE back on every table recorded, and `slotlock serve` refuses to
+// start while a tenant table is left without it.
+const DEPLOYMENT_LIFT_FORCED_ROW_SECURITY = `CREATE TABLE IF NOT EXISTS slotlock.deployment_lifted_row_security (
+  table_name text PRIMARY KEY
+);
+REVOKE ALL ON slotlock.deployment_lifted_row_security FROM PUBLIC;
+DO $slotlock_lift_forced_row_security$
+DECLARE
+  forced_table text;
+BEGIN
+  INSERT INTO slotlock.deployment_lifted_row_security (table_name)
+  SELECT rel.relname::text
+    FROM pg_catalog.pg_class rel
+    JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+   WHERE ns.nspname = 'slotlock' AND rel.relkind IN ('r', 'p') AND rel.relforcerowsecurity
+  ON CONFLICT (table_name) DO NOTHING;
+  FOR forced_table IN
+    SELECT rel.relname::text
+      FROM pg_catalog.pg_class rel
+      JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+     WHERE ns.nspname = 'slotlock' AND rel.relkind IN ('r', 'p') AND rel.relforcerowsecurity
+     ORDER BY rel.relname
+  LOOP
+    EXECUTE pg_catalog.format('ALTER TABLE slotlock.%I NO FORCE ROW LEVEL SECURITY', forced_table);
+  END LOOP;
+END
+$slotlock_lift_forced_row_security$;
+`;
+const DEPLOYMENT_RESTORE_FORCED_ROW_SECURITY = `DO $slotlock_restore_forced_row_security$
+DECLARE
+  forced_table text;
+BEGIN
+  FOR forced_table IN
+    SELECT table_name FROM slotlock.deployment_lifted_row_security ORDER BY table_name
+  LOOP
+    IF pg_catalog.to_regclass(pg_catalog.format('slotlock.%I', forced_table)) IS NOT NULL THEN
+      EXECUTE pg_catalog.format('ALTER TABLE slotlock.%I FORCE ROW LEVEL SECURITY', forced_table);
+    END IF;
+  END LOOP;
+  DELETE FROM slotlock.deployment_lifted_row_security;
+END
+$slotlock_restore_forced_row_security$;
+`;
+
 /** The start of the message with which the deployment DDL refuses a `slotlock` schema. */
 export const SLOTLOCK_SCHEMA_CONTROL_REFUSAL = 'Slotlock will not deploy into schema slotlock';
 
@@ -205,8 +258,13 @@ CREATE TABLE IF NOT EXISTS slotlock.api_keys (
   CONSTRAINT slotlock_api_keys_name_valid
     CHECK (char_length(name) BETWEEN 1 AND 100 AND name !~ '[[:cntrl:]]'),
   CONSTRAINT slotlock_api_keys_prefix_valid CHECK (prefix ~ '^slk_[0-9A-Za-z]{8}$'),
-  CONSTRAINT slotlock_api_keys_scopes_valid
-    CHECK (scopes IN (ARRAY['read']::text[], ARRAY['write']::text[], ARRAY['read', 'write']::text[])),
+  -- A non-empty list of read, write and admin, each once, in that order (api-keys.ts).
+  CONSTRAINT slotlock_api_keys_scopes_known
+    CHECK (scopes IN (
+      ARRAY['read']::text[], ARRAY['write']::text[], ARRAY['admin']::text[],
+      ARRAY['read', 'write']::text[], ARRAY['read', 'admin']::text[], ARRAY['write', 'admin']::text[],
+      ARRAY['read', 'write', 'admin']::text[]
+    )),
   CONSTRAINT slotlock_api_keys_created_by_valid
     CHECK (created_by IS NULL OR (octet_length(created_by) BETWEEN 1 AND 200
                                   AND created_by !~ '[[:cntrl:]]')),
@@ -218,6 +276,27 @@ CREATE TABLE IF NOT EXISTS slotlock.api_keys (
 CREATE INDEX IF NOT EXISTS slotlock_api_keys_tenant_idx
   ON slotlock.api_keys (tenant_ref, created_at DESC, id DESC);
 ALTER TABLE slotlock.api_keys ENABLE ROW LEVEL SECURITY;
+
+-- Schemas from 0.1 allow only read and write. The CHECK with admin admits every row the old one
+-- did, so it is added NOT VALID (no table scan under the lock) and the old one dropped in the same
+-- transaction.
+DO $slotlock_api_key_scopes$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'slotlock_api_keys_scopes_known'
+       AND conrelid = 'slotlock.api_keys'::regclass
+  ) THEN
+    ALTER TABLE slotlock.api_keys
+      ADD CONSTRAINT slotlock_api_keys_scopes_known CHECK (scopes IN (
+      ARRAY['read']::text[], ARRAY['write']::text[], ARRAY['admin']::text[],
+      ARRAY['read', 'write']::text[], ARRAY['read', 'admin']::text[], ARRAY['write', 'admin']::text[],
+      ARRAY['read', 'write', 'admin']::text[]
+    )) NOT VALID;
+  END IF;
+  ALTER TABLE slotlock.api_keys DROP CONSTRAINT IF EXISTS slotlock_api_keys_scopes_valid;
+END
+$slotlock_api_key_scopes$;
 REVOKE ALL ON slotlock.api_keys FROM PUBLIC;
 
 CREATE TABLE IF NOT EXISTS slotlock.api_key_retired_digests (
@@ -512,7 +591,7 @@ REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[1]} FROM PUBLIC;
 export const SLOTLOCK_CORE_DDL: string = `
 ${DEPLOYMENT_SEARCH_PATH_PIN}CREATE SCHEMA IF NOT EXISTS slotlock;
 ${SLOTLOCK_SCHEMA_CONTROL_CHECK}CREATE EXTENSION IF NOT EXISTS btree_gist SCHEMA slotlock;
-
+${DEPLOYMENT_LIFT_FORCED_ROW_SECURITY}
 -- Records the exact catalog representation installed for each owned RLS policy. Health checks
 -- compare live policy fingerprints with this contract so ALTER POLICY drift cannot hide behind a
 -- retained name/comment. This table contains configuration only, never tenant or calendar data.
@@ -568,7 +647,7 @@ CREATE TABLE IF NOT EXISTS slotlock.reservations (
   ),
   CONSTRAINT slotlock_reservations_no_overlap EXCLUDE USING gist (
     resource_id WITH =,
-    tstzrange(starts_at, ends_at, '[)') WITH &&
+    tstzrange(starts_at, COALESCE(occupied_ends_at, ends_at), '[)') WITH &&
   )
 );
 
@@ -765,10 +844,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS slotlock_resources_legacy_external_ref_key
   ON slotlock.resources (external_ref)
   WHERE tenant_ref IS NULL AND external_ref IS NOT NULL;
 
-CREATE UNIQUE INDEX IF NOT EXISTS slotlock_reservations_tenant_external_ref_key
-  ON slotlock.reservations (tenant_ref, external_ref)
-  WHERE tenant_ref IS NOT NULL AND external_ref IS NOT NULL;
-
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -871,18 +946,62 @@ BEGIN
         buffer_after_ms >= 0 AND buffer_after_ms <= 2592000000
       ) NOT VALID;
   END IF;
+END $$;
+
+-- Every row occupies from its start to its occupied end: its end plus its turnaround buffer. Up to
+-- 0.1 the buffer bound only tenant-owned bookings to each other (slotlock_reservations_buffered_no_overlap),
+-- so a hold could take a booking's buffer and a buffered booking could cover a hold. The upgrade
+-- reaps expired holds in the way, as the next writer would, then refuses to go on while a live row
+-- is in the way: a constraint is never made to fit by deleting a booking or a live hold. Rows from
+-- before the occupied-end trigger may lack occupied_ends_at; their end is where they stop.
+DO $slotlock_occupied_overlap$
+DECLARE
+  conflicts bigint;
+  examples text;
+BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
-     WHERE conname = 'slotlock_reservations_buffered_no_overlap'
+     WHERE conname = 'slotlock_reservations_no_overlap'
        AND conrelid = 'slotlock.reservations'::regclass
+       AND pg_catalog.pg_get_constraintdef(oid) LIKE '%occupied_ends_at%'
   ) THEN
+    DELETE FROM slotlock.reservations hold
+     USING slotlock.reservations buffered
+     WHERE hold.status = 'held'
+       AND hold.expires_at <= now()
+       AND buffered.resource_id = hold.resource_id
+       AND buffered.id <> hold.id
+       AND buffered.buffer_after_ms > 0
+       AND tstzrange(buffered.starts_at, COALESCE(buffered.occupied_ends_at, buffered.ends_at), '[)')
+           && tstzrange(hold.starts_at, hold.ends_at, '[)');
+    SELECT count(*),
+           string_agg(buffered.id::text || ' and ' || other.id::text, ', ' ORDER BY buffered.id, other.id)
+      INTO conflicts, examples
+      FROM slotlock.reservations buffered
+      JOIN slotlock.reservations other
+        ON other.resource_id = buffered.resource_id
+       AND other.id <> buffered.id
+       AND tstzrange(buffered.starts_at, COALESCE(buffered.occupied_ends_at, buffered.ends_at), '[)')
+           && tstzrange(other.starts_at, COALESCE(other.occupied_ends_at, other.ends_at), '[)')
+     WHERE buffered.buffer_after_ms > 0
+       -- A pair of buffered rows counts once.
+       AND (other.buffer_after_ms = 0 OR buffered.id < other.id);
+    IF conflicts > 0 THEN
+      RAISE EXCEPTION 'Slotlock cannot upgrade: % reservations or holds overlap another''s turnaround buffer', conflicts
+        USING ERRCODE = '23P01',
+              DETAIL = 'Reservation ids, in pairs: ' || left(examples, 2000),
+              HINT = 'Move, cancel or release one of each pair (slotlock.reservations), then migrate again.';
+    END IF;
+    ALTER TABLE slotlock.reservations DROP CONSTRAINT IF EXISTS slotlock_reservations_no_overlap;
     ALTER TABLE slotlock.reservations
-      ADD CONSTRAINT slotlock_reservations_buffered_no_overlap EXCLUDE USING gist (
+      ADD CONSTRAINT slotlock_reservations_no_overlap EXCLUDE USING gist (
         resource_id WITH =,
-        tstzrange(starts_at, occupied_ends_at, '[)') WITH &&
-      ) WHERE (tenant_ref IS NOT NULL);
+        tstzrange(starts_at, COALESCE(occupied_ends_at, ends_at), '[)') WITH &&
+      );
   END IF;
-END $$;
+  ALTER TABLE slotlock.reservations DROP CONSTRAINT IF EXISTS slotlock_reservations_buffered_no_overlap;
+END
+$slotlock_occupied_overlap$;
 
 CREATE INDEX IF NOT EXISTS slotlock_reservations_resource_time_idx
   ON slotlock.reservations (resource_id, starts_at, ends_at);
@@ -1295,6 +1414,15 @@ BEGIN
   END IF;
 END $$;
 
+-- A booking's reference is unique in its tenant. The rows a calendar event occupies carry a
+-- reference derived from the event in the same columns, but they are not bookings and are left out:
+-- a booking with the same reference neither collides with one nor answers for it. Up to 0.1 one
+-- index covered both; every row it admitted, this one admits.
+CREATE UNIQUE INDEX IF NOT EXISTS slotlock_reservations_booking_external_ref_key
+  ON slotlock.reservations (tenant_ref, external_ref)
+  WHERE tenant_ref IS NOT NULL AND external_ref IS NOT NULL AND calendar_event_id IS NULL;
+DROP INDEX IF EXISTS slotlock.slotlock_reservations_tenant_external_ref_key;
+
 -- Materialized occurrences point at reservations created under the SAME exclusion arbiter as
 -- bookings and holds. Transparent events retain occurrence visibility with a NULL reservation.
 CREATE TABLE IF NOT EXISTS slotlock.calendar_event_occurrences (
@@ -1470,13 +1598,14 @@ CREATE INDEX IF NOT EXISTS slotlock_calendar_event_occurrences_resource_time_idx
   ON slotlock.calendar_event_occurrences (tenant_ref, starts_at, ends_at);
 CREATE INDEX IF NOT EXISTS slotlock_reservations_calendar_event_idx
   ON slotlock.reservations (calendar_event_id) WHERE calendar_event_id IS NOT NULL;
-${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_DASHBOARD_DDL}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
+${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_DASHBOARD_DDL}${DEPLOYMENT_RESTORE_FORCED_ROW_SECURITY}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
 
 export const SLOTLOCK_TENANT_CONTEXT_SETTING = 'slotlock.tenant_ref';
 
 /**
  * Every table the store reads or writes at runtime, each under forced tenant RLS.
- * `slotlock.rls_policy_contracts` is deployment-only and deliberately absent.
+ * `slotlock.rls_policy_contracts` and `slotlock.deployment_lifted_row_security` are
+ * deployment-only and deliberately absent.
  */
 export const SLOTLOCK_TENANT_TABLES = Object.freeze([
   'resources',
