@@ -45,6 +45,10 @@ versioning.
 - Upgrading rebuilds the unique index on booking references
   (`slotlock_reservations_booking_external_ref_key`) to leave calendar event rows out, and drops
   the one it replaces after the new one is built.
+- A cursor 0.1 kept beside a stored series is not resumed if the series is zoned and ends (UNTIL):
+  0.1 read its occurrences as UTC beside the UNTIL, so the cursor may have stopped one occurrence
+  early (a booking could then take that time) or gone one past. The next roll searches such a series
+  from its start, within the same budget, and keeps a new cursor.
 - Upgrading widens the API key scope constraint in place, and replaces the reservations overlap
   constraint with one that counts every row's turnaround buffer (below). Expired holds in a buffer's
   way are removed; while a live hold or untenanted reservation is in one, migrate stops with their
@@ -78,6 +82,20 @@ versioning.
   `invalid_icalendar`; a document whose root is not a VCALENDAR read as an empty calendar.
 - The 4,000 occurrences a series may pass from its start were shared by every series in a feed, so
   three daily series begun in 2023 refused it for good.
+- An EXDATE left its occurrence in when EXDATEs before it named no occurrence (ical.js passes them
+  one per occurrence), or when an RRULE and an RDATE both named it; such an instant was also
+  reported twice. A series of RDATEs with no RRULE left out its DTSTART, its first occurrence.
+- An occurrence starting in an hour the clocks skip ended as it started and was left out; it now
+  lasts its series' exact length. Others still end on the wall clock.
+- A floating UNTIL was read as UTC beside a zoned DTSTART. A RECURRENCE-ID written in another zone
+  than its series' DTSTART did not find its occurrence, and a `RANGE=THISANDFUTURE` one written in
+  UTC moved later occurrences by the wrong amount.
+- `parseTrustedICalendarEvents` did not read times as `parseICalendarChanges` does: a stored
+  all-day series kept an occurrence the feed's UTC EXDATE excludes. An event it cannot hold (no
+  length, say) is now `invalid_icalendar`, not `invalid_external_interval`.
+- A feed naming thousands of time zones it does not define (50,000 spellings of one zone took
+  seconds) is refused past 100, as one defining more than 100 is; a feed listing too many EXDATE
+  values is refused before they are read, not after.
 - A request body sent without `Content-Length` (chunked) was read whole before the size limit
   applied, so any key holder could make the server hold gigabytes. It is refused as soon as it
   passes `maxRequestBytes`. The Node adapter no longer aborts a request whose body the server stops

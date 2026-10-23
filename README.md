@@ -419,12 +419,13 @@ time as unproven.
 
 A rule is expanded within a budget: 50,000 steps and a second for a feed (the whole read, from its
 text), or for a stored series as maintenance rolls it; half of that for one event as it is written.
-A feed's own time zones (VTIMEZONE) count against the same budget. A feed may carry 100 time zones,
-1,000 of their observances and 2,000 RDATE values in them, and 20,000 RDATE and EXDATE values in
-its events; a property's name and parameters may take 8 KB and list 100. A SECONDLY to WEEKLY step,
-a `DURATION`, or an event's length may be a century at most. A calendar that needs more, such as a
-rule that never occurs (`FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30`), is refused: `invalid_event` on a
-write, `invalid_icalendar` from a feed.
+A feed's own time zones (VTIMEZONE) count against the same budget. A feed may carry 100 time zones
+and name 100 it does not define, 1,000 observances and 2,000 RDATE values in the zones it carries,
+and 20,000 RDATE and EXDATE values in its events; a property's name and parameters may take 8 KB
+and list 100. A SECONDLY to WEEKLY step, a `DURATION`, or an event's length may be a century at
+most. A calendar that needs more, such as a rule that never occurs
+(`FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30`), is refused: `invalid_event` on a write, `invalid_icalendar`
+from a feed.
 
 A feed's rules are expanded from their start, and each series may pass 4,000 occurrences on the way
 (a daily one, about 11 years) whatever the feed's other series take. A stored series keeps where
@@ -447,10 +448,18 @@ Slotlock gives them neutral boundaries:
 - All-day events become whole local days in the calendar's time zone; a feed without one is refused.
 - A time zone a feed names without defining it (no VTIMEZONE) is read as that IANA zone, and a
   floating time in the calendar's zone, so an UNTIL, EXDATE, RDATE or RECURRENCE-ID written in UTC
-  names the occurrence it means.
+  or another zone names the occurrence it means. A floating UNTIL is read on the series' own clock.
+  A `RANGE=THISANDFUTURE` exception moves every later occurrence by its own shift.
 - An event with no length (a DATE-TIME DTSTART without DTEND or DURATION) occupies no time and is
   left out. A PERIOD RDATE ends where its period does. A document whose root is not a VCALENDAR, or
   an event that ends before it starts, is refused as `invalid_icalendar`.
+- A series' DTSTART is its first occurrence, with or without an RRULE; an instant both RRULE and
+  RDATE name is one occurrence; every EXDATE excludes the occurrence it names (RFC 5545 §3.8.5).
+- An occurrence ends on the wall clock, as calendars show it (00:30-02:30 lasts three hours the
+  night the clocks go back). One that starts in an hour the clocks skip lasts its series' exact
+  length instead, from the offset before the gap (RFC 5545 §3.3.5).
+- `parseTrustedICalendarEvents` reads times as `parseICalendarChanges` does, so a series stored from
+  it occupies what the feed reports.
 - `recordCalendarCoverage` marks how much of a feed is read. Pass the sources a resource depends on as
   `requiredSources`, and any coverage short of `complete` means the time is not proven free.
 
