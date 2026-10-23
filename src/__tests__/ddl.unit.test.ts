@@ -257,12 +257,13 @@ describe('deployment DDL name resolution', () => {
 
 describe('application role grants', () => {
   it('covers exactly the tables the core schema creates, each under forced RLS', () => {
-    // rls_policy_contracts is deployment-only; the API key and dashboard tables are reached only
-    // through their functions.
+    // rls_policy_contracts and deployment_lifted_row_security are deployment-only; the API key and
+    // dashboard tables are reached only through their functions.
+    const deploymentTables = ['rls_policy_contracts', 'deployment_lifted_row_security'];
     const definerTables: readonly string[] = SLOTLOCK_DEFINER_TABLES;
     const created = [...SLOTLOCK_CORE_DDL.matchAll(/CREATE TABLE IF NOT EXISTS slotlock\.([a-z_]+)/g)]
       .map((match) => match[1] as string)
-      .filter((table) => table !== 'rls_policy_contracts' && !definerTables.includes(table));
+      .filter((table) => !deploymentTables.includes(table) && !definerTables.includes(table));
     expect([...SLOTLOCK_TENANT_TABLES].sort()).toEqual([...new Set(created)].sort());
     for (const table of SLOTLOCK_TENANT_TABLES) {
       expect(SLOTLOCK_TENANT_RLS_DDL).toContain(
@@ -278,6 +279,7 @@ describe('application role grants', () => {
     );
     for (const signature of SLOTLOCK_DASHBOARD_FUNCTIONS) expect(ddl).toContain(signature);
     expect(ddl).not.toContain('rls_policy_contracts');
+    expect(ddl).not.toContain('deployment_lifted_row_security');
     for (const table of SLOTLOCK_DEFINER_TABLES) expect(ddl).not.toContain(`slotlock.${table} `);
     for (const table of SLOTLOCK_DEFINER_TABLES) expect(ddl).not.toContain(`slotlock.${table},`);
     expect(ddl).not.toMatch(/ALL|TRUNCATE|REFERENCES|TRIGGER|CREATE|OWNER/);

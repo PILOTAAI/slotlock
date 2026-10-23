@@ -1604,7 +1604,8 @@ export const SLOTLOCK_TENANT_CONTEXT_SETTING = 'slotlock.tenant_ref';
 
 /**
  * Every table the store reads or writes at runtime, each under forced tenant RLS.
- * `slotlock.rls_policy_contracts` is deployment-only and deliberately absent.
+ * `slotlock.rls_policy_contracts` and `slotlock.deployment_lifted_row_security` are
+ * deployment-only and deliberately absent.
  */
 export const SLOTLOCK_TENANT_TABLES = Object.freeze([
   'resources',
