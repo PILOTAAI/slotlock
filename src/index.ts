@@ -81,8 +81,36 @@ export type {
   SlotlockNodeServerFetchTarget,
   SlotlockNodeServerOptions,
 } from './node-server.js';
-export { createSlotlockStoreAgentBackend, projectSlotlockCalendarEvent } from './agent-store-backend.js';
-export type { SlotlockStoreAgentBackendOptions } from './agent-store-backend.js';
+export {
+  createSlotlockStoreAgentBackend,
+  createSlotlockStoreApplicationBackend,
+  projectSlotlockCalendarEvent,
+} from './agent-store-backend.js';
+export type {
+  SlotlockStoreAgentBackendOptions,
+  SlotlockStoreApplicationBackendOptions,
+} from './agent-store-backend.js';
+export {
+  SLOTLOCK_APPLICATION_OPERATIONS,
+  SLOTLOCK_APPLICATION_SCOPE,
+  isSlotlockApplicationOperation,
+} from './application-api.js';
+export type {
+  SlotlockApplicationBackend,
+  SlotlockApplicationInvocationContext,
+  SlotlockApplicationOperation,
+  SlotlockApplicationOperationDefinition,
+} from './application-api.js';
+export {
+  maintainSlotlockTenant,
+  startSlotlockMaintenance,
+  withSlotlockMaintenanceLock,
+} from './maintenance.js';
+export type {
+  SlotlockMaintenanceResult,
+  SlotlockMaintenanceScheduler,
+  SlotlockMaintenanceSchedulerOptions,
+} from './maintenance.js';
 export {
   createSlotlockApiKeyAuthenticator,
   createSlotlockApiKeyStore,
@@ -165,6 +193,7 @@ export {
   SLOTLOCK_INTERNAL_EVENT_OWNER_REF,
   SLOTLOCK_LOCAL_RECURRENCE_COVERAGE_SOURCE,
   SLOTLOCK_MAX_EVENT_DURATION_DAYS,
+  type SlotlockHoldTenantOptions,
   type SlotlockSql,
   type SlotlockStore,
   type SlotlockStoreOptions,

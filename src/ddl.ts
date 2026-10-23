@@ -205,8 +205,13 @@ CREATE TABLE IF NOT EXISTS slotlock.api_keys (
   CONSTRAINT slotlock_api_keys_name_valid
     CHECK (char_length(name) BETWEEN 1 AND 100 AND name !~ '[[:cntrl:]]'),
   CONSTRAINT slotlock_api_keys_prefix_valid CHECK (prefix ~ '^slk_[0-9A-Za-z]{8}$'),
-  CONSTRAINT slotlock_api_keys_scopes_valid
-    CHECK (scopes IN (ARRAY['read']::text[], ARRAY['write']::text[], ARRAY['read', 'write']::text[])),
+  -- A non-empty list of read, write and admin, each once, in that order (api-keys.ts).
+  CONSTRAINT slotlock_api_keys_scopes_known
+    CHECK (scopes IN (
+      ARRAY['read']::text[], ARRAY['write']::text[], ARRAY['admin']::text[],
+      ARRAY['read', 'write']::text[], ARRAY['read', 'admin']::text[], ARRAY['write', 'admin']::text[],
+      ARRAY['read', 'write', 'admin']::text[]
+    )),
   CONSTRAINT slotlock_api_keys_created_by_valid
     CHECK (created_by IS NULL OR (octet_length(created_by) BETWEEN 1 AND 200
                                   AND created_by !~ '[[:cntrl:]]')),
@@ -218,6 +223,27 @@ CREATE TABLE IF NOT EXISTS slotlock.api_keys (
 CREATE INDEX IF NOT EXISTS slotlock_api_keys_tenant_idx
   ON slotlock.api_keys (tenant_ref, created_at DESC, id DESC);
 ALTER TABLE slotlock.api_keys ENABLE ROW LEVEL SECURITY;
+
+-- Schemas from 0.1 allow only read and write. The CHECK with admin admits every row the old one
+-- did, so it is added NOT VALID (no table scan under the lock) and the old one dropped in the same
+-- transaction.
+DO $slotlock_api_key_scopes$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'slotlock_api_keys_scopes_known'
+       AND conrelid = 'slotlock.api_keys'::regclass
+  ) THEN
+    ALTER TABLE slotlock.api_keys
+      ADD CONSTRAINT slotlock_api_keys_scopes_known CHECK (scopes IN (
+      ARRAY['read']::text[], ARRAY['write']::text[], ARRAY['admin']::text[],
+      ARRAY['read', 'write']::text[], ARRAY['read', 'admin']::text[], ARRAY['write', 'admin']::text[],
+      ARRAY['read', 'write', 'admin']::text[]
+    )) NOT VALID;
+  END IF;
+  ALTER TABLE slotlock.api_keys DROP CONSTRAINT IF EXISTS slotlock_api_keys_scopes_valid;
+END
+$slotlock_api_key_scopes$;
 REVOKE ALL ON slotlock.api_keys FROM PUBLIC;
 
 CREATE TABLE IF NOT EXISTS slotlock.api_key_retired_digests (
@@ -568,7 +594,7 @@ CREATE TABLE IF NOT EXISTS slotlock.reservations (
   ),
   CONSTRAINT slotlock_reservations_no_overlap EXCLUDE USING gist (
     resource_id WITH =,
-    tstzrange(starts_at, ends_at, '[)') WITH &&
+    tstzrange(starts_at, COALESCE(occupied_ends_at, ends_at), '[)') WITH &&
   )
 );
 
@@ -871,18 +897,62 @@ BEGIN
         buffer_after_ms >= 0 AND buffer_after_ms <= 2592000000
       ) NOT VALID;
   END IF;
+END $$;
+
+-- Every row occupies from its start to its occupied end: its end plus its turnaround buffer. Up to
+-- 0.1 the buffer bound only tenant-owned bookings to each other (slotlock_reservations_buffered_no_overlap),
+-- so a hold could take a booking's buffer and a buffered booking could cover a hold. The upgrade
+-- reaps expired holds in the way, as the next writer would, then refuses to go on while a live row
+-- is in the way: a constraint is never made to fit by deleting a booking or a live hold. Rows from
+-- before the occupied-end trigger may lack occupied_ends_at; their end is where they stop.
+DO $slotlock_occupied_overlap$
+DECLARE
+  conflicts bigint;
+  examples text;
+BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
-     WHERE conname = 'slotlock_reservations_buffered_no_overlap'
+     WHERE conname = 'slotlock_reservations_no_overlap'
        AND conrelid = 'slotlock.reservations'::regclass
+       AND pg_catalog.pg_get_constraintdef(oid) LIKE '%occupied_ends_at%'
   ) THEN
+    DELETE FROM slotlock.reservations hold
+     USING slotlock.reservations buffered
+     WHERE hold.status = 'held'
+       AND hold.expires_at <= now()
+       AND buffered.resource_id = hold.resource_id
+       AND buffered.id <> hold.id
+       AND buffered.buffer_after_ms > 0
+       AND tstzrange(buffered.starts_at, COALESCE(buffered.occupied_ends_at, buffered.ends_at), '[)')
+           && tstzrange(hold.starts_at, hold.ends_at, '[)');
+    SELECT count(*),
+           string_agg(buffered.id::text || ' and ' || other.id::text, ', ' ORDER BY buffered.id, other.id)
+      INTO conflicts, examples
+      FROM slotlock.reservations buffered
+      JOIN slotlock.reservations other
+        ON other.resource_id = buffered.resource_id
+       AND other.id <> buffered.id
+       AND tstzrange(buffered.starts_at, COALESCE(buffered.occupied_ends_at, buffered.ends_at), '[)')
+           && tstzrange(other.starts_at, COALESCE(other.occupied_ends_at, other.ends_at), '[)')
+     WHERE buffered.buffer_after_ms > 0
+       -- A pair of buffered rows counts once.
+       AND (other.buffer_after_ms = 0 OR buffered.id < other.id);
+    IF conflicts > 0 THEN
+      RAISE EXCEPTION 'Slotlock cannot upgrade: % reservations or holds overlap another''s turnaround buffer', conflicts
+        USING ERRCODE = '23P01',
+              DETAIL = 'Reservation ids, in pairs: ' || left(examples, 2000),
+              HINT = 'Move, cancel or release one of each pair (slotlock.reservations), then migrate again.';
+    END IF;
+    ALTER TABLE slotlock.reservations DROP CONSTRAINT IF EXISTS slotlock_reservations_no_overlap;
     ALTER TABLE slotlock.reservations
-      ADD CONSTRAINT slotlock_reservations_buffered_no_overlap EXCLUDE USING gist (
+      ADD CONSTRAINT slotlock_reservations_no_overlap EXCLUDE USING gist (
         resource_id WITH =,
-        tstzrange(starts_at, occupied_ends_at, '[)') WITH &&
-      ) WHERE (tenant_ref IS NOT NULL);
+        tstzrange(starts_at, COALESCE(occupied_ends_at, ends_at), '[)') WITH &&
+      );
   END IF;
-END $$;
+  ALTER TABLE slotlock.reservations DROP CONSTRAINT IF EXISTS slotlock_reservations_buffered_no_overlap;
+END
+$slotlock_occupied_overlap$;
 
 CREATE INDEX IF NOT EXISTS slotlock_reservations_resource_time_idx
   ON slotlock.reservations (resource_id, starts_at, ends_at);

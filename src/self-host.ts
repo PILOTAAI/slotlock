@@ -13,8 +13,12 @@ import {
   createSlotlockAgentServer,
   slotlockAgentOperationScope,
 } from './agent-server.js';
-import { createSlotlockStoreAgentBackend } from './agent-store-backend.js';
 import {
+  createSlotlockStoreAgentBackend,
+  createSlotlockStoreApplicationBackend,
+} from './agent-store-backend.js';
+import {
+  SLOTLOCK_API_KEY_DEFAULT_SCOPES,
   SLOTLOCK_API_KEY_MAX_LIFETIME_DAYS,
   SLOTLOCK_API_KEY_SCOPES,
   type SlotlockApiKey,
@@ -39,7 +43,15 @@ import {
   readSecret,
   readServerUrl,
 } from './config.js';
+import { SLOTLOCK_APPLICATION_SCOPE } from './application-api.js';
 import { SLOTLOCK_DASHBOARD_FUNCTIONS } from './ddl.js';
+import {
+  type SlotlockMaintenanceResult,
+  type SlotlockMaintenanceScheduler,
+  maintainSlotlockTenant,
+  startSlotlockMaintenance,
+  withSlotlockMaintenanceLock,
+} from './maintenance.js';
 import {
   type SlotlockNodeServerAddress,
   type SlotlockNodeServerCloseResult,
@@ -79,6 +91,15 @@ const SELF_HOST_SUBJECT = 'self-host';
 /** Who `key create` records as a key's creator. */
 const CLI_KEY_CREATOR = 'cli';
 const DAY_MS = 86_400_000;
+/**
+ * The most resources `serve` lets one tenant create through the application API. A dashboard open to
+ * every GitHub user gives each a tenant, so the cap keeps one from filling the database.
+ */
+const SERVE_MAX_TENANT_RESOURCES = 10_000;
+/** How often `serve` maintains each tenant it serves (README, Operations: at least daily). */
+const SERVE_MAINTENANCE_INTERVAL_MS = 60 * 60 * 1_000;
+/** Passes `slotlock maintain` runs at most, each as big as `serve`'s, until nothing is left. */
+const MAINTAIN_MAX_PASSES = 100;
 const WRITE_OPERATIONS: readonly SlotlockAgentWriteOperation[] = [
   'slotlock_create_event',
   'slotlock_update_event',
@@ -132,7 +153,10 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
   availability: readonly WeeklyAvailabilityRule[];
   /** Set exactly when SLOTLOCK_GITHUB_CLIENT_ID is. */
   dashboard?: SlotlockServeDashboardConfig;
-  /** Serve the REST API under /v1 and its OpenAPI document (SLOTLOCK_REST_API=on). */
+  /**
+   * Serve the REST API under /v1, with the application API for admin keys, and its OpenAPI document
+   * (SLOTLOCK_REST_API: on unless off).
+   */
   restApi: boolean;
 }
 
@@ -213,7 +237,7 @@ export function readSlotlockDatabaseConfig(env: SlotlockEnv): SlotlockDatabaseCo
 }
 
 function readRestApi(env: SlotlockEnv): boolean {
-  const value = optional(env, 'SLOTLOCK_REST_API') ?? 'off';
+  const value = optional(env, 'SLOTLOCK_REST_API') ?? 'on';
   if (value !== 'on' && value !== 'off') {
     throw new SlotlockConfigError('SLOTLOCK_REST_API must be on or off');
   }
@@ -508,6 +532,8 @@ export async function startSlotlockServer(
             tenantRef: config.tenantRef,
             scopes: SLOTLOCK_API_KEY_SCOPES,
           });
+    // Set once the listener is up; the authenticator tells it which tenants this server serves.
+    let maintenance: SlotlockMaintenanceScheduler | undefined;
     const agentServer = createSlotlockAgentServer({
       publicBaseUrl: config.publicUrl,
       // readPublicUrl admits plain HTTP only on a loopback host, which is all this permits anyway.
@@ -519,7 +545,9 @@ export async function startSlotlockServer(
       // dashboard no longer allows loses their keys with their session.
       authenticate: async (request) => {
         const principal = (await authenticateToken?.(request)) ?? (await authenticateKey(request));
-        return principal && dashboardAllows(config, principal.tenantRef) ? principal : null;
+        if (!principal || !dashboardAllows(config, principal.tenantRef)) return null;
+        maintenance?.touch(principal.tenantRef);
+        return principal;
       },
       authorize: async ({ principal, operation }) =>
         authorizeSlotlockServeOperation({ principal, operation }),
@@ -533,7 +561,19 @@ export async function startSlotlockServer(
       // never the arguments or the request, with every configured secret redacted.
       onError: (error, { operation }) =>
         log.error('agent_error', { operation, ...describeError(error) }),
-      ...(config.restApi ? { rest: true } : {}),
+      ...(config.restApi
+        ? {
+            rest: true,
+            // Resources, hours, holds, reservations, coverage and maintenance: admin keys only.
+            application: {
+              backend: createSlotlockStoreApplicationBackend(store, {
+                maxTenantResources: SERVE_MAX_TENANT_RESOURCES,
+              }),
+              authorize: async ({ principal }) =>
+                principal.scopes?.includes(SLOTLOCK_APPLICATION_SCOPE) === true,
+            },
+          }
+        : {}),
       ...(config.confirmationSecret !== undefined
         ? {
             confirmation: {
@@ -572,6 +612,15 @@ export async function startSlotlockServer(
       onError: (error, phase) => log.error('http_error', { phase, ...describeError(error) }),
     });
     const address = await listener.listen({ host: config.host, port: config.port });
+    maintenance = startSlotlockMaintenance({
+      store,
+      sql,
+      tenants: [config.tenantRef],
+      intervalMs: SERVE_MAINTENANCE_INTERVAL_MS,
+      // Counts only, never the tenant.
+      onPass: (result) => log.info('maintenance', { ...result }),
+      onError: (error) => log.error('maintenance_failed', describeError(error)),
+    });
     log.info('listening', {
       address: address.origin,
       mcp: `${config.publicUrl}/mcp`,
@@ -581,11 +630,14 @@ export async function startSlotlockServer(
       dashboard: dashboard ? `${config.publicUrl}/dashboard` : null,
       confirm_writes: config.confirmWrites,
       availability_rules: config.availability.length,
+      rest: config.restApi ? `${config.publicUrl}/openapi.json` : null,
+      maintenance_interval_minutes: SERVE_MAINTENANCE_INTERVAL_MS / 60_000,
     });
     return {
       address,
       async close() {
         const result = await listener.close();
+        await maintenance?.close();
         await sql.end({ timeout: 5 });
         return result;
       },
@@ -735,15 +787,46 @@ function apiKeyLine(apiKey: SlotlockApiKey, key?: string): string {
   })}\n`;
 }
 
-/** `--scope`: read, write, or both comma-separated. */
+/** `--scope`: read, write and admin, comma-separated; read,write unless given. */
 function parseKeyScopes(value: string | undefined): SlotlockApiKeyScope[] {
-  if (value === undefined) return [...SLOTLOCK_API_KEY_SCOPES];
+  if (value === undefined) return [...SLOTLOCK_API_KEY_DEFAULT_SCOPES];
   const names = value.split(',').map((name) => name.trim());
   const scopes = SLOTLOCK_API_KEY_SCOPES.filter((scope) => names.includes(scope));
   if (names.length === 0 || names.some((name) => !scopes.includes(name as SlotlockApiKeyScope))) {
-    throw new Error('--scope must be read, write or read,write');
+    throw new Error('--scope must be a comma-separated list of read, write and admin');
   }
   return scopes;
+}
+
+/**
+ * `maintain`: maintenance passes for the tenant until nothing is left, under the tenant's lock, so
+ * it never repeats what a server is doing. Null when another server holds the lock.
+ */
+async function maintainTenant(
+  config: SlotlockDatabaseConfig,
+): Promise<(SlotlockMaintenanceResult & { passes: number }) | null> {
+  const sql = connect(config.databaseUrl, 2);
+  try {
+    const store = createSlotlockStore(sql);
+    const total = await withSlotlockMaintenanceLock(sql, config.tenantRef, async () => {
+      const sum = { extended: 0, conflicts: 0, refused: 0, pruned: 0, capped: true, passes: 0 };
+      while (sum.capped && sum.passes < MAINTAIN_MAX_PASSES) {
+        const pass = await maintainSlotlockTenant(store, config.tenantRef);
+        sum.passes += 1;
+        sum.extended += pass.extended;
+        sum.conflicts += pass.conflicts;
+        sum.refused += pass.refused;
+        sum.pruned += pass.pruned;
+        // A capped pass that got nowhere met only series it cannot extend: another would too.
+        sum.capped = pass.capped;
+        if (pass.capped && pass.extended + pass.pruned === 0) break;
+      }
+      return sum;
+    });
+    return total ?? null;
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
 }
 
 /** `--expires-in-days`: a whole number of days up to the longest a key may live. */
@@ -794,7 +877,10 @@ export const SLOTLOCK_CLI_HELP = `Usage: slotlock <command> [options]
 Commands:
   migrate                  Apply the schema and row-level security, then grant the serving
                            role when SLOTLOCK_MIGRATE_DATABASE_URL names another role
-  serve [--migrate]        Serve MCP and A2A over HTTP (--migrate runs migrate first)
+  serve [--migrate]        Serve MCP, A2A and REST over HTTP (--migrate runs migrate first);
+                           maintains each tenant it serves every hour
+  maintain                 Run maintenance for the tenant now: extend recurring events to the
+                           rolling horizon and prune past the retention window (for cron)
   resource add <ref> [--timezone <IANA zone>]
                            Create a calendar resource (a car, room, person or machine)
   resource list            Print the tenant's resources, one JSON object per line
@@ -804,9 +890,10 @@ Commands:
                            Give one resource, or every one, weekly hours of its own; [] closes
   hours clear (--resource <ref> | --all)
                            Hand one resource, or every one, back to the server's hours
-  key create <name> [--scope read|write|read,write] [--expires-in-days <n>]
+  key create <name> [--scope read,write,admin] [--expires-in-days <n>]
                            Create an API key for the tenant (default scope read,write, no
-                           expiry) and print it once; only its SHA-256 is stored
+                           expiry; admin adds the application API) and print it once; only its
+                           SHA-256 is stored
   key list                 Print the tenant's API keys, one JSON object per line
   key rotate <id>          Give an active key a new secret and print it once; the old one stops
                            working at once, and the key keeps its id and what it booked
@@ -828,8 +915,9 @@ Environment:
   SLOTLOCK_PUBLIC_URL            URL clients use (default http://localhost:$PORT)
   SLOTLOCK_TENANT                Tenant of the token, resource and key commands (default "default")
   SLOTLOCK_AVAILABILITY          JSON array of weekly bookable-hours rules (default: none)
-  SLOTLOCK_REST_API              on: also serve the tools as a REST API under /v1, described at
-                                 /openapi.json, with the same keys and confirmation (default off)
+  SLOTLOCK_REST_API              on (default): also serve the tools as a REST API under /v1, and
+                                 the application API for admin keys, described at /openapi.json;
+                                 off: MCP and A2A only
   SLOTLOCK_GITHUB_CLIENT_ID      Serve the dashboard at $SLOTLOCK_PUBLIC_URL/dashboard: the Client ID
                                  of a GitHub OAuth app with callback .../dashboard/callback
   SLOTLOCK_GITHUB_CLIENT_SECRET  That app's client secret (dashboard)
@@ -878,6 +966,7 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
   const expectedOperands: Record<string, number> = {
     migrate: 0,
     serve: 0,
+    maintain: 0,
     healthcheck: 0,
     'resource add': 2,
     'resource list': 1,
@@ -955,6 +1044,15 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
         log.info('stopping');
         const { forced } = await server.close();
         log.info('stopped', { forced });
+        return 0;
+      }
+      case 'maintain': {
+        const result = await maintainTenant(readSlotlockDatabaseConfig(io.env));
+        if (!result) {
+          io.stderr.write('slotlock: another server is maintaining this tenant now; nothing to do\n');
+          return 0;
+        }
+        io.stdout.write(`${JSON.stringify(result)}\n`);
         return 0;
       }
       case 'resource add': {

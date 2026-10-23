@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  SLOTLOCK_API_KEY_DEFAULT_SCOPES,
   SLOTLOCK_API_KEY_SCOPES,
   createSlotlockApiKeyAuthenticator,
   createSlotlockApiKeyStore,
@@ -61,8 +62,12 @@ describe('API key format', () => {
 });
 
 describe('API key scopes', () => {
-  it('are read and write, the scopes the agent server enforces', () => {
-    expect(SLOTLOCK_API_KEY_SCOPES).toEqual(['read', 'write']);
+  it('are read and write, which the agent tools need, and admin, which the application API needs', () => {
+    expect(SLOTLOCK_API_KEY_SCOPES).toEqual(['read', 'write', 'admin']);
+  });
+
+  it('give a new key read and write unless it asks for more', () => {
+    expect(SLOTLOCK_API_KEY_DEFAULT_SCOPES).toEqual(['read', 'write']);
   });
 });
 
@@ -173,7 +178,7 @@ describe('API key store input', () => {
     ['a name with a line break', { name: 'a\nb' }, 'invalid_api_key_name'],
     ['a name over 100 characters', { name: 'n'.repeat(101) }, 'invalid_api_key_name'],
     ['no scopes', { scopes: [] }, 'invalid_api_key_scopes'],
-    ['an unknown scope', { scopes: ['read', 'admin'] }, 'invalid_api_key_scopes'],
+    ['an unknown scope', { scopes: ['read', 'owner'] }, 'invalid_api_key_scopes'],
     [
       'an expiry in the past',
       { expiresAt: new Date(Date.now() - 1_000) },

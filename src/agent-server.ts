@@ -25,8 +25,21 @@ import {
   stateSecrets,
   traceContextFrom,
 } from './mcp-modern.js';
+import {
+  SLOTLOCK_APPLICATION_OPERATIONS,
+  SLOTLOCK_APPLICATION_SCOPE,
+  type SlotlockApplicationBackend,
+  type SlotlockApplicationInvocationContext,
+  type SlotlockApplicationOperation,
+  type SlotlockApplicationOperationDefinition,
+  isSlotlockApplicationOperation,
+  slotlockApplicationOperation,
+} from './application-api.js';
 import { slotlockPackageVersion } from './package-version.js';
 import {
+  SLOTLOCK_APPLICATION_REST_ROUTES,
+  SLOTLOCK_REST_ROUTES,
+  type SlotlockRestRoute,
   matchSlotlockRestRoute,
   restInputFromBody,
   restQueryInput,
@@ -502,7 +515,7 @@ export type SlotlockAgentServerEvent =
   | {
       /** A REST call that reached an operation, and the HTTP status it answered. */
       type: 'rest';
-      operation: SlotlockAgentOperation;
+      operation: SlotlockAgentOperation | SlotlockApplicationOperation;
       status: number;
     }
   | {
@@ -540,6 +553,21 @@ export interface SlotlockAgentServerOptions {
    * to ask a person. Off unless set.
    */
   rest?: boolean;
+  /**
+   * Also serve the application API under `/v1` (application-api.ts): resources, bookable hours,
+   * holds, reservations, calendar coverage and maintenance, for the application around the agents,
+   * in any language. Needs `rest`. A principal whose `scopes` are set needs `admin`
+   * (SLOTLOCK_APPLICATION_SCOPE); then `authorize` decides. They are never MCP tools or A2A skills,
+   * and never wait for a confirmation. Off unless set.
+   */
+  application?: {
+    backend: SlotlockApplicationBackend;
+    authorize(args: {
+      principal: SlotlockAgentPrincipal;
+      operation: SlotlockApplicationOperation;
+      input: Record<string, unknown>;
+    }): Promise<boolean>;
+  };
   /** Require a person's confirmation before the listed writes run. Off unless set. */
   confirmation?: SlotlockAgentConfirmationOptions;
   /**
@@ -571,7 +599,7 @@ export interface SlotlockAgentServerOptions {
 /** What `onError` is told about an unexpected failure besides the error itself. */
 export interface SlotlockAgentErrorContext {
   /** The operation that failed; `null` when the failure came before one was resolved. */
-  operation: SlotlockAgentOperation | null;
+  operation: SlotlockAgentOperation | SlotlockApplicationOperation | null;
 }
 
 export interface SlotlockAgentOperationDispatchOptions {
@@ -1294,7 +1322,7 @@ export async function invokeSlotlockAgentOperation(args: {
 function reportUnexpected(
   onError: SlotlockAgentOperationDispatchOptions['onError'],
   error: unknown,
-  operation: SlotlockAgentOperation | null,
+  operation: SlotlockAgentOperation | SlotlockApplicationOperation | null,
 ): void {
   try {
     onError?.(error, { operation });
@@ -2365,14 +2393,52 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
   if (options.rest !== undefined && typeof options.rest !== 'boolean') {
     throw new Error('Slotlock agent server rest must be a boolean');
   }
-  const restTools = options.rest ? slotlockAgentTools() : [];
-  const restInputSchemas = new Map(restTools.map((tool) => [tool.name, tool.inputSchema]));
+  const application = options.application;
+  if (application !== undefined) {
+    if (options.rest !== true) {
+      throw new Error('Slotlock agent server application needs rest: it is served only as REST');
+    }
+    const backend = application?.backend as unknown as Record<string, unknown> | undefined;
+    if (
+      typeof application !== 'object' ||
+      application === null ||
+      typeof application.authorize !== 'function' ||
+      typeof backend !== 'object' ||
+      backend === null ||
+      SLOTLOCK_APPLICATION_OPERATIONS.some((operation) => typeof backend[operation.invoke] !== 'function')
+    ) {
+      throw new Error(
+        'Slotlock agent server application needs an authorize function and a backend with every application method',
+      );
+    }
+  }
+  const restTools = options.rest
+    ? slotlockAgentTools().map((tool) => ({ ...tool, scope: slotlockAgentOperationScope(tool.name) }))
+    : [];
+  const applicationTools = application
+    ? SLOTLOCK_APPLICATION_OPERATIONS.map((operation) => ({
+        name: operation.name,
+        title: operation.title,
+        description: operation.description,
+        inputSchema: toJsonSchema(operation.input, 'input'),
+        outputSchema: toJsonSchema(operation.output, 'output'),
+      }))
+    : [];
+  const restInputSchemas = new Map<string, JsonSchema>([
+    ...restTools.map((tool) => [tool.name, tool.inputSchema] as const),
+    ...applicationTools.map((tool) => [tool.name, tool.inputSchema] as const),
+  ]);
+  const restRoutes: readonly SlotlockRestRoute<SlotlockAgentOperation | SlotlockApplicationOperation>[] = [
+    ...SLOTLOCK_REST_ROUTES,
+    ...(application ? SLOTLOCK_APPLICATION_REST_ROUTES : []),
+  ];
   const openApi = options.rest
     ? Object.freeze(
         slotlockOpenApiDocument({
           publicBaseUrl: config.publicBaseUrl,
           version: SLOTLOCK_AGENT_SERVER_VERSION,
           tools: restTools,
+          ...(application ? { application: applicationTools } : {}),
         }),
       )
     : null;
@@ -2995,6 +3061,63 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
   }
 
   /**
+   * One application operation for an authenticated principal: the admin scope (when the principal
+   * carries scopes), the operation's strict input schema, `application.authorize`, the backend, and
+   * its output schema. A refusal the backend throws as a `SlotlockAgentOperationError` is the answer;
+   * anything else is reported to `onError` and answers only `internal_error`.
+   */
+  async function invokeApplicationOperation(
+    definition: SlotlockApplicationOperationDefinition,
+    principal: SlotlockAgentPrincipal,
+    given: Record<string, unknown>,
+    request: Request,
+    trace: SlotlockTraceContext | undefined,
+  ): Promise<SlotlockAgentOperationDispatchResult> {
+    const served = application as NonNullable<SlotlockAgentServerOptions['application']>;
+    try {
+      const scopes: unknown = principal.scopes;
+      if (
+        scopes !== undefined &&
+        !(Array.isArray(scopes) && scopes.includes(SLOTLOCK_APPLICATION_SCOPE))
+      ) {
+        return { ok: false, status: 403, code: 'forbidden' };
+      }
+      const parsed = definition.input.safeParse(given);
+      if (!parsed.success) return { ok: false, status: 400, code: 'invalid_arguments' };
+      if (!(await served.authorize({ principal, operation: definition.name, input: parsed.data }))) {
+        return { ok: false, status: 403, code: 'forbidden' };
+      }
+      const context: SlotlockApplicationInvocationContext = {
+        principal,
+        operation: definition.name,
+        signal: request.signal,
+      };
+      if (trace) context.trace = trace;
+      const data = await served.backend[definition.invoke].call(served.backend, context, parsed.data);
+      if (!definition.output.safeParse(data).success) {
+        reportUnexpected(
+          options.onError,
+          Object.assign(
+            new Error(
+              `The application backend's ${definition.name} result does not match the operation's output schema`,
+            ),
+            { code: 'invalid_backend_result' },
+          ),
+          definition.name,
+        );
+        return { ok: false, status: 500, code: 'invalid_backend_result' };
+      }
+      return { ok: true, data };
+    } catch (error) {
+      if (error instanceof SlotlockAgentOperationError) {
+        return { ok: false, status: error.status, code: error.code };
+      }
+      reportUnexpected(options.onError, error, definition.name);
+      return { ok: false, status: 500, code: 'internal_error' };
+    }
+  }
+
+  /**
    * One REST call, checked as /mcp and /a2a are (origin, credential, rate limit), then run through
    * the same dispatcher: scopes, arguments, `authorize`, and confirmation, which REST cannot ask
    * for, so a guarded write answers 428 `confirmation_required`.
@@ -3007,7 +3130,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
         ? json(200, openApi)
         : refuse(405, 'method_not_allowed', { Allow: 'GET' });
     }
-    const match = matchSlotlockRestRoute(request.method, path);
+    const match = matchSlotlockRestRoute(request.method, path, restRoutes);
     if (match === null) return refuse(404, 'not_found');
     if ('allow' in match) {
       return refuse(405, 'method_not_allowed', { Allow: match.allow.join(', ') });
@@ -3051,20 +3174,31 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       if (!isRecord(body)) return refuse(400, 'invalid_arguments');
       given = body;
     } else {
-      given = restQueryInput(url.searchParams, restInputSchemas.get(route.operation) ?? {});
+      given = restQueryInput(
+        url.searchParams,
+        (restInputSchemas.get(route.operation) ?? {}) as Record<string, unknown>,
+      );
     }
     // The path names the event; the body or query may not name another.
     if (Object.keys(params).some((name) => Object.hasOwn(given, name))) {
       return refuse(400, 'invalid_arguments');
     }
     const trace = traceContextFrom(undefined, request.headers);
-    const outcome = await invokeSlotlockAgentOperation({
-      operation: route.operation,
-      input: { ...given, ...params },
-      request,
-      options: withoutConfirmationRound(principal, route.operation),
-      ...(trace ? { trace } : {}),
-    });
+    const outcome = isSlotlockApplicationOperation(route.operation)
+      ? await invokeApplicationOperation(
+          slotlockApplicationOperation(route.operation),
+          principal,
+          { ...given, ...params },
+          request,
+          trace,
+        )
+      : await invokeSlotlockAgentOperation({
+          operation: route.operation,
+          input: { ...given, ...params },
+          request,
+          options: withoutConfirmationRound(principal, route.operation),
+          ...(trace ? { trace } : {}),
+        });
     const internal = !outcome.ok && INTERNAL_FAILURES.has(outcome.code);
     const status = outcome.ok ? 200 : internal ? 500 : outcome.status;
     emit({ type: 'rest', operation: route.operation, status });

@@ -1062,10 +1062,17 @@ export interface SlotlockStore {
     ttlMs: number;
     source?: string;
   }): Promise<AcquireHoldResult>;
-  /** Flip an unexpired hold to a confirmed reservation (expiry cleared). */
-  confirmHold(holdId: string): Promise<ConfirmHoldResult>;
-  /** Delete a live hold; released=false when it was already gone (expired-reaped or confirmed). */
-  releaseHold(holdId: string): Promise<ReleaseHoldResult>;
+  /**
+   * Flip an unexpired hold to a confirmed reservation (expiry cleared). Confirming it again answers
+   * the same reservation. With `tenantRef`, only a hold on one of that tenant's resources counts:
+   * another tenant's is `hold_not_found` whatever the connection's row-level security.
+   */
+  confirmHold(holdId: string, options?: SlotlockHoldTenantOptions): Promise<ConfirmHoldResult>;
+  /**
+   * Delete a live hold; released=false when it was already gone (expired-reaped or confirmed). With
+   * `tenantRef`, only a hold on one of that tenant's resources, as for confirmHold.
+   */
+  releaseHold(holdId: string, options?: SlotlockHoldTenantOptions): Promise<ReleaseHoldResult>;
   /** Reservations overlapping `window` for one resource, as merged-ready half-open intervals. */
   listBusy(resourceId: string, window: Interval): Promise<Interval[]>;
   /** Create or revise one trusted event under expected-revision + tenant idempotency guards. */
@@ -1213,6 +1220,23 @@ async function overlapLoss(
      ORDER BY starts_at
      LIMIT 1`;
   return { ok: false, code: 'overlap', conflictingReservationId: winners[0]?.id ?? null };
+}
+
+export interface SlotlockHoldTenantOptions {
+  /** Only a hold on one of this tenant's resources: 1-500 UTF-8 bytes. */
+  tenantRef?: string;
+}
+
+/** The tenant a hold call is limited to, or null for none; an invalid one is refused. */
+function holdTenantRef(options: SlotlockHoldTenantOptions): string | null {
+  const tenantRef = options.tenantRef;
+  if (tenantRef === undefined) return null;
+  if (!isValidIdentity(tenantRef)) {
+    throw Object.assign(new Error('Slotlock tenantRef must be 1-500 UTF-8 bytes'), {
+      code: 'invalid_tenant_ref' as const,
+    });
+  }
+  return tenantRef;
 }
 
 export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions = {}): SlotlockStore {
@@ -1871,7 +1895,8 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
       }
     },
 
-    async confirmHold(holdId) {
+    async confirmHold(holdId, options = {}) {
+      const tenantRef = holdTenantRef(options);
       const rows = await sql<
         {
           id: string;
@@ -1884,6 +1909,8 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
         UPDATE slotlock.reservations
            SET status = 'confirmed', expires_at = NULL
          WHERE id = ${holdId} AND status = 'held' AND expires_at > now()
+           AND (${tenantRef}::text IS NULL
+                OR resource_id IN (SELECT id FROM slotlock.resources WHERE tenant_ref = ${tenantRef}))
          RETURNING id, resource_id, starts_at, ends_at, source`;
       const row = rows[0];
       if (row) {
@@ -1914,7 +1941,13 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
       >`
         SELECT status, (status = 'held' AND expires_at <= now()) AS expired,
                resource_id, starts_at, ends_at, source
-          FROM slotlock.reservations WHERE id = ${holdId}`;
+          FROM slotlock.reservations
+         WHERE id = ${holdId}
+           -- A hold has no external identity, before or after it is confirmed; a booking that has
+           -- one is not a hold, and confirming it again would describe it wrongly.
+           AND tenant_ref IS NULL
+           AND (${tenantRef}::text IS NULL
+                OR resource_id IN (SELECT id FROM slotlock.resources WHERE tenant_ref = ${tenantRef}))`;
       const found = present[0];
       // Idempotent confirm: a retried confirm (network replay) of an already-confirmed hold is
       // SUCCESS — the booking exists; reporting failure would make callers double-book elsewhere.
@@ -1941,10 +1974,13 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
       return { ok: false, code: 'hold_not_found' };
     },
 
-    async releaseHold(holdId) {
+    async releaseHold(holdId, options = {}) {
+      const tenantRef = holdTenantRef(options);
       const rows = await sql<{ id: string }[]>`
         DELETE FROM slotlock.reservations
          WHERE id = ${holdId} AND status = 'held'
+           AND (${tenantRef}::text IS NULL
+                OR resource_id IN (SELECT id FROM slotlock.resources WHERE tenant_ref = ${tenantRef}))
          RETURNING id`;
       return { ok: true, released: rows.length > 0 };
     },

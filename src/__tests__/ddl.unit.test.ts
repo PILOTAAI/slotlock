@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { SLOTLOCK_API_KEY_SCOPES } from '../api-keys.js';
 import {
   SLOTLOCK_API_KEY_FUNCTIONS,
   SLOTLOCK_API_KEY_TABLES,
@@ -173,9 +174,29 @@ describe('deployment DDL name resolution', () => {
     expect(SLOTLOCK_CORE_DDL).not.toMatch(/api_keys[^;]*\bkey text\b/);
     // The database holds the limits the library checks, not only the library.
     expect(SLOTLOCK_CORE_DDL).toContain("expires_at <= created_at + interval '3651 days'");
-    expect(SLOTLOCK_CORE_DDL).toContain(
-      "scopes IN (ARRAY['read']::text[], ARRAY['write']::text[], ARRAY['read', 'write']::text[])",
+  });
+
+  it('holds API key scopes to the lists api-keys.ts writes, in a new schema and an upgraded one', () => {
+    // Every non-empty list of the scopes, each once, in SLOTLOCK_API_KEY_SCOPES order.
+    const lists: string[][] = [];
+    for (let mask = 1; mask < 1 << SLOTLOCK_API_KEY_SCOPES.length; mask++) {
+      lists.push(SLOTLOCK_API_KEY_SCOPES.filter((_scope, index) => (mask >> index) & 1));
+    }
+    const checks = [...SLOTLOCK_CORE_DDL.matchAll(/slotlock_api_keys_scopes_known\s+CHECK \(scopes IN \(([^)]*)\)\)/g)];
+    // One in CREATE TABLE, one in the upgrade from 0.1's read-and-write-only constraint.
+    expect(checks).toHaveLength(2);
+    for (const [, body] of checks) {
+      const arrays = [...(body as string).matchAll(/ARRAY\[([^\]]*)\]::text\[\]/g)].map(([, items]) =>
+        (items as string).split(',').map((item) => item.trim().replaceAll("'", '')),
+      );
+      expect(arrays.map((list) => list.join(',')).sort()).toEqual(lists.map((list) => list.join(',')).sort());
+    }
+    const upgrade = SLOTLOCK_CORE_DDL.slice(
+      SLOTLOCK_CORE_DDL.indexOf('DO $slotlock_api_key_scopes$'),
+      SLOTLOCK_CORE_DDL.lastIndexOf('$slotlock_api_key_scopes$;'),
     );
+    expect(upgrade).toContain(') NOT VALID;');
+    expect(upgrade).toContain('DROP CONSTRAINT IF EXISTS slotlock_api_keys_scopes_valid;');
   });
 
   it("records a dashboard token once, as a digest, by the database's clock", () => {
