@@ -35,6 +35,11 @@ const MINUTE_MS = 60 * 1000;
  */
 export const SLOTLOCK_CALENDAR_HORIZON_DAYS = 367;
 const MAX_SEARCH_WINDOW_MS = SLOTLOCK_CALENDAR_HORIZON_DAYS * DAY_MS;
+/**
+ * The longest window one availability rule may open, in minutes: a week. Expansion scans back as
+ * many days as a rule lasts, so a longer one is skipped, as the hours validator refuses it.
+ */
+export const SLOTLOCK_MAX_RULE_DURATION_MINUTES = 10_080;
 
 export function invalidWindowError(
   message = 'Slotlock window must contain two finite dates with end > start',
@@ -151,7 +156,8 @@ export function expandRules(
       rule.startMinutes < 0 ||
       rule.startMinutes > 1439 ||
       !Number.isInteger(rule.durationMinutes) ||
-      rule.durationMinutes <= 0
+      rule.durationMinutes <= 0 ||
+      rule.durationMinutes > SLOTLOCK_MAX_RULE_DURATION_MINUTES
     ) {
       continue;
     }

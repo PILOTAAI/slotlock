@@ -39,8 +39,9 @@ versioning.
 
 - `slotlock serve` serves REST by default; `SLOTLOCK_REST_API=off` turns it off.
 - `expandRules` and `findNextAvailableFor` refuse a search window longer than 367 days with
-  `invalid_window`, as free/busy already did. Fifty daily rules over a century were two million
-  windows of synchronous work.
+  `invalid_window`, as free/busy already did, and skip a rule that lasts longer than a week, as the
+  hours validator refuses one. Fifty daily rules over a century were two million windows of
+  synchronous work.
 - Upgrading rebuilds the unique index on booking references
   (`slotlock_reservations_booking_external_ref_key`) to leave calendar event rows out, and drops
   the one it replaces after the new one is built.
@@ -61,7 +62,9 @@ versioning.
 - Free/busy called a window complete when a series started inside it but was stored only from
   later: those occurrences were reported as free time.
 - Upgrading as a non-superuser owner under forced row-level security failed with a raw error (or,
-  for some repairs, skipped them): the upgrade's data steps saw no rows.
+  for some repairs, skipped them): the upgrade's data steps saw no rows. The upgrade now lifts FORCE
+  for those steps and records what it lifted, so an upgrade stopped part way is put right by the
+  next one, and `slotlock serve` refuses to start while a tenant table is left without FORCE.
 - `expandRules` without a time zone offered windows after the rule's UNTIL.
 - A delayed copy of a create, after the reservation had moved on, answered `idempotency_conflict`
   instead of `stale_revision`.

@@ -1,13 +1,13 @@
 // Bookable hours: the one validator for weekly availability rules, and the conversion between rules
 // and a week of windows, the form people edit them in (two windows a day at most).
-import { expandRules } from './rules.js';
+import { SLOTLOCK_MAX_RULE_DURATION_MINUTES, expandRules } from './rules.js';
 import type { WeeklyAvailabilityRule } from './types.js';
 
 /** Rules one schedule may hold: the server default, or one resource's own hours. */
 export const SLOTLOCK_MAX_AVAILABILITY_RULES = 50;
 const RULE_KEYS = new Set(['rrule', 'startMinutes', 'durationMinutes']);
 const MAX_RRULE_CHARACTERS = 500;
-const MAX_DURATION_MINUTES = 10_080;
+const MAX_DURATION_MINUTES = SLOTLOCK_MAX_RULE_DURATION_MINUTES;
 const DAY_MINUTES = 1_440;
 /** Two weeks every supported weekly rule produces a window in. */
 const SAMPLE = { start: new Date('2026-01-05T00:00:00Z'), end: new Date('2026-01-19T00:00:00Z') };

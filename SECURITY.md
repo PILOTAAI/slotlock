@@ -34,8 +34,11 @@ Upgrading repairs data across tenants (expired holds in a turnaround buffer, dup
 archives and event details from earlier versions), which forced policies would hide from the owning
 role. `applySchema` therefore lifts FORCE from the tables that have it for its data steps and puts
 it back on exactly those, inside its one locked transaction: a failure rolls the lift back with the
-rest. Run the deployment DDL through `applySchema` or `slotlock migrate`, not statement by
-statement, so FORCE can never be left lifted.
+rest. Run statement by statement instead (psql without `--single-transaction`), a refused step
+stops the run with FORCE lifted. The tables lifted are recorded in
+`slotlock.deployment_lifted_row_security`, so the next deployment, from any session, puts FORCE back
+on each of them, and until it does `slotlock serve` refuses to start (`row_security_lifted`). Run
+the deployment DDL through `applySchema` or `slotlock migrate`.
 
 Application traffic must use a role that cannot leave forced RLS. `grantApplicationRole` grants
 such a role schema usage and DML on the tenant tables, and first refuses the known ways out, whether

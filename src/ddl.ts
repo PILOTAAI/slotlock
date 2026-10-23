@@ -25,22 +25,33 @@ const DEPLOYMENT_SEARCH_PATH_RESTORE = `SELECT pg_catalog.set_config('search_pat
 // constraint, merging duplicate resources, binding archives, backfilling event children) would see
 // no rows, skip what they repair and leave a constraint to meet rows its own check never saw. The
 // deployment lifts FORCE from the tables that have it before its first data step and puts it back
-// after its last, on those tables only. Both run in its one transaction, which holds the tables
-// locked in between; a failure rolls the lift back with everything else. The list is kept for the
-// session, not the transaction, so the restore still finds it when the statements run one by one.
-const FORCED_ROW_SECURITY_SETTING = 'slotlock.forced_row_security';
-const DEPLOYMENT_LIFT_FORCED_ROW_SECURITY = `DO $slotlock_lift_forced_row_security$
+// after its last, on those tables only. applySchema runs both in one transaction, which holds the
+// tables locked in between; a failure rolls the lift back with everything else. Run statement by
+// statement, the lift commits on its own and a refused data step stops the run before the restore,
+// so the tables lifted are recorded in a table, not the session: the next deployment, from any
+// session or connection, puts FORCE back on every table recorded, and `slotlock serve` refuses to
+// start while a tenant table is left without it.
+const DEPLOYMENT_LIFT_FORCED_ROW_SECURITY = `CREATE TABLE IF NOT EXISTS slotlock.deployment_lifted_row_security (
+  table_name text PRIMARY KEY
+);
+REVOKE ALL ON slotlock.deployment_lifted_row_security FROM PUBLIC;
+DO $slotlock_lift_forced_row_security$
 DECLARE
-  forced text[];
   forced_table text;
 BEGIN
-  SELECT COALESCE(pg_catalog.array_agg(rel.relname::text ORDER BY rel.relname), ARRAY[]::text[])
-    INTO forced
+  INSERT INTO slotlock.deployment_lifted_row_security (table_name)
+  SELECT rel.relname::text
     FROM pg_catalog.pg_class rel
     JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
-   WHERE ns.nspname = 'slotlock' AND rel.relkind IN ('r', 'p') AND rel.relforcerowsecurity;
-  PERFORM pg_catalog.set_config('${FORCED_ROW_SECURITY_SETTING}', forced::text, false);
-  FOREACH forced_table IN ARRAY forced LOOP
+   WHERE ns.nspname = 'slotlock' AND rel.relkind IN ('r', 'p') AND rel.relforcerowsecurity
+  ON CONFLICT (table_name) DO NOTHING;
+  FOR forced_table IN
+    SELECT rel.relname::text
+      FROM pg_catalog.pg_class rel
+      JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+     WHERE ns.nspname = 'slotlock' AND rel.relkind IN ('r', 'p') AND rel.relforcerowsecurity
+     ORDER BY rel.relname
+  LOOP
     EXECUTE pg_catalog.format('ALTER TABLE slotlock.%I NO FORCE ROW LEVEL SECURITY', forced_table);
   END LOOP;
 END
@@ -50,12 +61,14 @@ const DEPLOYMENT_RESTORE_FORCED_ROW_SECURITY = `DO $slotlock_restore_forced_row_
 DECLARE
   forced_table text;
 BEGIN
-  FOREACH forced_table IN ARRAY COALESCE(
-    NULLIF(pg_catalog.current_setting('${FORCED_ROW_SECURITY_SETTING}', true), ''), '{}'
-  )::text[] LOOP
-    EXECUTE pg_catalog.format('ALTER TABLE slotlock.%I FORCE ROW LEVEL SECURITY', forced_table);
+  FOR forced_table IN
+    SELECT table_name FROM slotlock.deployment_lifted_row_security ORDER BY table_name
+  LOOP
+    IF pg_catalog.to_regclass(pg_catalog.format('slotlock.%I', forced_table)) IS NOT NULL THEN
+      EXECUTE pg_catalog.format('ALTER TABLE slotlock.%I FORCE ROW LEVEL SECURITY', forced_table);
+    END IF;
   END LOOP;
-  PERFORM pg_catalog.set_config('${FORCED_ROW_SECURITY_SETTING}', '', false);
+  DELETE FROM slotlock.deployment_lifted_row_security;
 END
 $slotlock_restore_forced_row_security$;
 `;

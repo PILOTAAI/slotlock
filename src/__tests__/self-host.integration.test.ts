@@ -755,6 +755,29 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     }
   });
 
+  it('refuses to serve while a tenant table is left without forced row-level security', async () => {
+    // What an upgrade stopped part way, statement by statement, leaves until the next one runs.
+    await admin.unsafe('ALTER TABLE slotlock.calendar_coverage NO FORCE ROW LEVEL SECURITY');
+    try {
+      const stdout = output();
+      const stderr = output();
+      const code = await runSlotlockCli(['serve'], {
+        env: { ...env, SLOTLOCK_MIGRATE_DATABASE_URL: undefined },
+        stdout,
+        stderr,
+        signal: AbortSignal.timeout(3_000),
+      });
+      expect(code).toBe(1);
+      expect(stdout.events().find(({ event }) => event === 'listening')).toBeUndefined();
+      const [failure] = stderr.events();
+      expect(failure).toMatchObject({ event: 'serve_failed', code: 'row_security_lifted' });
+      expect(failure?.error).toContain('slotlock.calendar_coverage');
+      expect(failure?.error).toContain('slotlock migrate');
+    } finally {
+      await admin.unsafe('ALTER TABLE slotlock.calendar_coverage FORCE ROW LEVEL SECURITY');
+    }
+  });
+
   it('refuses to serve the dashboard until migrate has granted its functions', async () => {
     await admin.unsafe(
       `REVOKE EXECUTE ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS.join(', ')} FROM ${role}`,

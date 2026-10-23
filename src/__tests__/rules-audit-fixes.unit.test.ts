@@ -80,3 +80,33 @@ describe('expandRules search window', () => {
     expect(performance.now() - started).toBeLessThan(100);
   });
 });
+
+describe('expandRules rule length', () => {
+  const window = { start: d('2026-01-05T00:00:00Z'), end: d('2026-01-06T00:00:00Z') };
+  const daily = 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR,SA,SU';
+
+  it('skips a rule longer than a week, as the hours validator refuses one', () => {
+    // Each rule scans back as many days as it lasts: a year-long one bypassed the window's bound.
+    expect(expandRules([{ rrule: daily, startMinutes: 0, durationMinutes: 10_081 }], window)).toEqual(
+      [],
+    );
+    const started = performance.now();
+    expect(
+      expandRules(
+        Array.from({ length: 50 }, () => ({
+          rrule: daily,
+          startMinutes: 0,
+          durationMinutes: 1440 * 365_000,
+        })),
+        window,
+      ),
+    ).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(100);
+  });
+
+  it('still expands a rule of exactly a week', () => {
+    expect(
+      expandRules([{ rrule: 'FREQ=WEEKLY;BYDAY=MO', startMinutes: 0, durationMinutes: 10_080 }], window),
+    ).toEqual([{ start: d('2026-01-05T00:00:00Z'), end: d('2026-01-06T00:00:00Z') }]);
+  });
+});

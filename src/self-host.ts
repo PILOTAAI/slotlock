@@ -44,7 +44,7 @@ import {
   readServerUrl,
 } from './config.js';
 import { SLOTLOCK_APPLICATION_SCOPE } from './application-api.js';
-import { SLOTLOCK_DASHBOARD_FUNCTIONS } from './ddl.js';
+import { SLOTLOCK_DASHBOARD_FUNCTIONS, SLOTLOCK_TENANT_TABLES } from './ddl.js';
 import {
   type SlotlockMaintenanceResult,
   type SlotlockMaintenanceScheduler,
@@ -514,6 +514,25 @@ export async function startSlotlockServer(
           'The slotlock schema is missing: run `slotlock migrate` or `slotlock serve --migrate`',
         ),
         { code: 'schema_missing' },
+      );
+    }
+    // A deployment run statement by statement lifts forced row-level security for its data steps
+    // and, stopped part way, leaves it lifted until the next one puts it back. The owning role then
+    // reads every tenant's rows: refuse to serve until then.
+    const lifted = await sql<{ name: string }[]>`
+      SELECT rel.relname AS name
+        FROM pg_catalog.pg_class rel
+        JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+       WHERE ns.nspname = 'slotlock'
+         AND rel.relname IN ${sql(SLOTLOCK_TENANT_TABLES)}
+         AND rel.relrowsecurity AND NOT rel.relforcerowsecurity
+       ORDER BY rel.relname`;
+    if (lifted.length > 0) {
+      throw Object.assign(
+        new Error(
+          `Row-level security is enabled but not forced on ${lifted.map(({ name }) => `slotlock.${name}`).join(', ')}: a deployment stopped part way. Run \`slotlock migrate\` (or \`slotlock serve --migrate\`) to put it back`,
+        ),
+        { code: 'row_security_lifted' },
       );
     }
     if (config.dashboard) {
