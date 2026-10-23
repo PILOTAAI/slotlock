@@ -24,7 +24,9 @@ export const meta = {
 };
 
 export const hero = {
-  pill: { label: `${facts.version} on npm`, link: 'Release notes', href: '/docs/changelog/' },
+  // The site deploys when a release merges, but npm serves that version only once a maintainer
+  // approves it, so the pill names the version and claims nothing about where it is published.
+  pill: { label: `Version ${facts.version}`, link: 'Release notes', href: '/docs/changelog/' },
   eyebrow: `Open source · ${facts.license} · PostgreSQL 16`,
   heading: {
     soft: 'Slotlock is a calendar for AI agents.',
