@@ -216,7 +216,8 @@ function openApiOperation(
 
 /** The OpenAPI 3.1 document for the REST routes, from the operations' own schemas. */
 export function slotlockOpenApiDocument(args: {
-  publicBaseUrl: string;
+  /** Where the server is; without it, the `{baseUrl}` server variable. */
+  publicBaseUrl?: string;
   version: string;
   tools: readonly (SlotlockOpenApiOperation & { scope?: string })[];
   /** The application operations, when the server serves them. */
@@ -276,7 +277,19 @@ export function slotlockOpenApiDocument(args: {
         'maintenance) need an API key with the admin scope. An error is `{"error":{"code":…}}`, and ' +
         'a write that waits for a person answers 428 `confirmation_required`.',
     },
-    servers: [{ url: args.publicBaseUrl }],
+    servers: [
+      args.publicBaseUrl !== undefined
+        ? { url: args.publicBaseUrl }
+        : {
+            url: '{baseUrl}',
+            variables: {
+              baseUrl: {
+                default: 'http://localhost:8080',
+                description: "The server's public URL (SLOTLOCK_PUBLIC_URL), without a trailing slash.",
+              },
+            },
+          },
+    ],
     security: [{ bearer: [] }],
     tags: [
       { name: 'Agent tools', description: 'What an agent does: the MCP tools and A2A skills.' },

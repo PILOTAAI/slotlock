@@ -10,3 +10,11 @@ site/.astro/
 workers/dashboard/node_modules/
 workers/dashboard/.dev.vars
 workers/dashboard/dist/
+# Language clients' build output
+clients/rust/target/
+clients/java/build/
+clients/java/.gradle/
+clients/dotnet/**/bin/
+clients/dotnet/**/obj/
+__pycache__/
+*.egg-info/

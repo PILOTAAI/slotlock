@@ -31,6 +31,8 @@ export {
   invokeSlotlockAgentOperation,
   isSlotlockAgentOperation,
   slotlockAgentTools,
+  slotlockApplicationOperations,
+  slotlockOpenApi,
   slotlockCalendarResourceUri,
   slotlockMcpToolResult,
   parseSlotlockA2ATimestamp,

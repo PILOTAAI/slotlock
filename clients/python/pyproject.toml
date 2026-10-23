@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "slotlock"
+version = "0.1.0"
+description = "A client for Slotlock's REST API: calendars AI agents cannot double-book."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = []
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://slotlock.pylota.io"
+Source = "https://github.com/PILOTAAI/slotlock/tree/main/clients/python"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/slotlock"]

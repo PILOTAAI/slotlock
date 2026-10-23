@@ -977,6 +977,38 @@ export function slotlockMcpToolResult(
   return { content: [{ type: 'text', text: JSON.stringify({ error }) }], isError: true };
 }
 
+/** The agent tools as REST serves them: each with the scope it needs. */
+function restAgentTools() {
+  return slotlockAgentTools().map((tool) => ({ ...tool, scope: slotlockAgentOperationScope(tool.name) }));
+}
+
+/** The application operations with their input and output as JSON Schema, as REST serves them. */
+export function slotlockApplicationOperations() {
+  return SLOTLOCK_APPLICATION_OPERATIONS.map((operation) => ({
+    name: operation.name,
+    title: operation.title,
+    description: operation.description,
+    method: operation.method,
+    path: operation.path,
+    inputSchema: toJsonSchema(operation.input, 'input'),
+    outputSchema: toJsonSchema(operation.output, 'output'),
+  }));
+}
+
+/**
+ * The OpenAPI 3.1 document of the REST API: what a server with `rest` (and `application`) serves at
+ * /openapi.json. Without `publicBaseUrl` the server URL is a variable, `{baseUrl}`, as in the
+ * repository's openapi.json, which client generators read.
+ */
+export function slotlockOpenApi(options: { publicBaseUrl?: string; application?: boolean } = {}) {
+  return slotlockOpenApiDocument({
+    ...(options.publicBaseUrl !== undefined ? { publicBaseUrl: options.publicBaseUrl } : {}),
+    version: SLOTLOCK_AGENT_SERVER_VERSION,
+    tools: restAgentTools(),
+    ...(options.application ? { application: slotlockApplicationOperations() } : {}),
+  });
+}
+
 export function slotlockAgentTools() {
   return OPERATION_DEFINITIONS.map((operation) => ({
     name: operation.name,
@@ -2412,18 +2444,8 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       );
     }
   }
-  const restTools = options.rest
-    ? slotlockAgentTools().map((tool) => ({ ...tool, scope: slotlockAgentOperationScope(tool.name) }))
-    : [];
-  const applicationTools = application
-    ? SLOTLOCK_APPLICATION_OPERATIONS.map((operation) => ({
-        name: operation.name,
-        title: operation.title,
-        description: operation.description,
-        inputSchema: toJsonSchema(operation.input, 'input'),
-        outputSchema: toJsonSchema(operation.output, 'output'),
-      }))
-    : [];
+  const restTools = options.rest ? restAgentTools() : [];
+  const applicationTools = application ? slotlockApplicationOperations() : [];
   const restInputSchemas = new Map<string, JsonSchema>([
     ...restTools.map((tool) => [tool.name, tool.inputSchema] as const),
     ...applicationTools.map((tool) => [tool.name, tool.inputSchema] as const),
@@ -2434,12 +2456,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
   ];
   const openApi = options.rest
     ? Object.freeze(
-        slotlockOpenApiDocument({
-          publicBaseUrl: config.publicBaseUrl,
-          version: SLOTLOCK_AGENT_SERVER_VERSION,
-          tools: restTools,
-          ...(application ? { application: applicationTools } : {}),
-        }),
+        slotlockOpenApi({ publicBaseUrl: config.publicBaseUrl, application: application !== undefined }),
       )
     : null;
   const manifest = Object.freeze({
