@@ -196,7 +196,10 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       if (!(await limits.client.limit({ key: `client:${address}` })).success) {
         return tooManyRequests();
       }
-      if (signInPaths.has(path) && !(await limits.signIn.limit({ key: 'sign-in' })).success) {
+      // The dashboard routes a path with one trailing slash as the path without it, so a sign-in is
+      // recognised as it recognises one: `/dashboard/sign-in/` is a sign-in too.
+      const route = path.replace(/\/$/, '');
+      if (signInPaths.has(route) && !(await limits.signIn.limit({ key: 'sign-in' })).success) {
         return tooManyRequests();
       }
       const sql = postgres(env.HYPERDRIVE.connectionString, {
