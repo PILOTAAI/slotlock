@@ -460,19 +460,26 @@ describe('the step budget on recurrence expansion', () => {
       }
     });
 
-    it('refuses a zone named like an IANA zone, whose own rule never occurs, promptly', () => {
-      // ical.js compares a repeating event's times by the feed's own definition of the zone.
-      const { ms, error } = timed(() =>
-        parseICalendarChanges(
+    it('reads a zone named like an IANA zone as Intl does, never by its own rule, promptly', () => {
+      // A name Intl knows is read through Intl everywhere, ical.js's comparisons included, so the
+      // feed's own rule, which never occurs, is never expanded.
+      let changes: { start: Date | null }[] = [];
+      const { ms, error } = timed(() => {
+        changes = parseICalendarChanges(
           zoned(never, '20261102T090000', 'FREQ=DAILY;COUNT=3').replaceAll(
             'Custom/Fleet',
             'Europe/London',
           ),
           undefined,
           WINDOW,
-        ),
-      );
-      expect(error).toEqual(refused);
+        );
+      });
+      expect(error).toBeNull();
+      expect(changes.map((change) => change.start?.toISOString())).toEqual([
+        '2026-11-02T09:00:00.000Z',
+        '2026-11-03T09:00:00.000Z',
+        '2026-11-04T09:00:00.000Z',
+      ]);
       expect(ms).toBeLessThan(2_500);
     });
 

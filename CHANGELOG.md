@@ -86,7 +86,15 @@ versioning.
   one per occurrence), or when an RRULE and an RDATE both named it; such an instant was also
   reported twice. A series of RDATEs with no RRULE left out its DTSTART, its first occurrence.
 - An occurrence starting in an hour the clocks skip ended as it started and was left out; it now
-  lasts its series' exact length. Others still end on the wall clock.
+  lasts its series' exact length, from its DTEND or its DURATION. Others still end on the wall clock.
+- ical.js matched exceptions and compared UNTIL and EXDATE values with a feed's own VTIMEZONE for an
+  IANA name, while Slotlock read the same times through Intl: under a stale definition, a moved
+  occurrence was found in the feed and lost from the series stored from it. Such a name is read
+  through Intl throughout.
+- A series with two RRULEs lost occurrences once either rule ended: ical.js dropped the rule after
+  an ended first one, or the one before any other.
+- A DATE EXDATE of a timed series excluded every occurrence that day from a feed and none from the
+  series stored from it; both now exclude the occurrence at the series' start time that day.
 - A floating UNTIL was read as UTC beside a zoned DTSTART. A RECURRENCE-ID written in another zone
   than its series' DTSTART did not find its occurrence, and a `RANGE=THISANDFUTURE` one written in
   UTC moved later occurrences by the wrong amount.

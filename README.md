@@ -446,15 +446,19 @@ Slotlock gives them neutral boundaries:
 - `normalizeExternalCalendarChange` for webhook changes; `parseICalendarChanges` and `emitICalendar`
   for bounded iCalendar in and out; `emitITipCalendar` for invitations.
 - All-day events become whole local days in the calendar's time zone; a feed without one is refused.
-- A time zone a feed names without defining it (no VTIMEZONE) is read as that IANA zone, and a
-  floating time in the calendar's zone, so an UNTIL, EXDATE, RDATE or RECURRENCE-ID written in UTC
-  or another zone names the occurrence it means. A floating UNTIL is read on the series' own clock.
-  A `RANGE=THISANDFUTURE` exception moves every later occurrence by its own shift.
+- A TZID Intl knows is read as that IANA zone, whether or not the feed defines it (a VTIMEZONE's
+  own rules for such a name are not used); one only the feed defines, such as a Windows name, is
+  read from its VTIMEZONE. A floating time is read in the calendar's zone. So an UNTIL, EXDATE,
+  RDATE or RECURRENCE-ID written in UTC or another zone names the occurrence it means, a floating
+  UNTIL is read on the series' own clock, and a `RANGE=THISANDFUTURE` exception moves every later
+  occurrence by its own shift.
 - An event with no length (a DATE-TIME DTSTART without DTEND or DURATION) occupies no time and is
   left out. A PERIOD RDATE ends where its period does. A document whose root is not a VCALENDAR, or
   an event that ends before it starts, is refused as `invalid_icalendar`.
-- A series' DTSTART is its first occurrence, with or without an RRULE; an instant both RRULE and
-  RDATE name is one occurrence; every EXDATE excludes the occurrence it names (RFC 5545 §3.8.5).
+- A series' DTSTART is its first occurrence, with or without an RRULE; every RRULE is expanded; an
+  instant two of them, or an RRULE and an RDATE, name is one occurrence; every EXDATE excludes the
+  occurrence it names (RFC 5545 §3.8.5). A DATE EXDATE of a timed series names the occurrence at the
+  series' start time that day.
 - An occurrence ends on the wall clock, as calendars show it (00:30-02:30 lasts three hours the
   night the clocks go back). One that starts in an hour the clocks skip lasts its series' exact
   length instead, from the offset before the gap (RFC 5545 §3.3.5).

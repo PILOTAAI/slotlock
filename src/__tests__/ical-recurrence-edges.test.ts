@@ -390,3 +390,152 @@ describe('recurrence edges', () => {
     ]);
   });
 });
+
+// A third review: a feed's own VTIMEZONE for an IANA name, the cap on zones, a DATE EXDATE on a
+// timed series, a DURATION in a gap, and two RRULEs.
+describe('recurrence edges, third review', () => {
+  const stored = (feed: string, window: { start: Date; end: Date }, timezone?: string) => {
+    const [series] = parseTrustedICalendarEvents(feed, timezone);
+    return spans(expandCalendarEventOccurrences(series as never, window));
+  };
+
+  it('reads an IANA zone the feed defines as Intl does, everywhere ical.js compares it', () => {
+    // A stale definition: standard time only, so it reads July's 09:00 as 14:00Z, not 13:00Z.
+    const staleNewYork = [
+      'BEGIN:VTIMEZONE',
+      'TZID:America/New_York',
+      'BEGIN:STANDARD',
+      'DTSTART:19700101T000000',
+      'TZOFFSETFROM:-0500',
+      'TZOFFSETTO:-0500',
+      'END:STANDARD',
+      'END:VTIMEZONE',
+    ];
+    const feed = (recurrenceId: string) =>
+      cal(
+        ...staleNewYork,
+        ...ev(
+          's',
+          'SUMMARY:Standup',
+          'DTSTART;TZID=America/New_York:20270705T090000',
+          'DTEND;TZID=America/New_York:20270705T100000',
+          'RRULE:FREQ=WEEKLY;COUNT=3',
+        ),
+        ...ev(
+          's',
+          recurrenceId,
+          'DTSTART;TZID=America/New_York:20270712T150000',
+          'DTEND;TZID=America/New_York:20270712T160000',
+        ),
+      );
+    const W = w('2027-07-01T00:00:00Z', '2027-07-31T00:00:00Z');
+    const moved = [
+      ['2027-07-05T13:00:00.000Z', '2027-07-05T14:00:00.000Z'],
+      ['2027-07-12T19:00:00.000Z', '2027-07-12T20:00:00.000Z'],
+      ['2027-07-19T13:00:00.000Z', '2027-07-19T14:00:00.000Z'],
+    ];
+    // Named in the series' zone, and in UTC at the instant Intl gives it.
+    for (const recurrenceId of [
+      'RECURRENCE-ID;TZID=America/New_York:20270712T090000',
+      'RECURRENCE-ID:20270712T130000Z',
+    ]) {
+      expect({
+        recurrenceId,
+        feed: spans(parseICalendarChanges(feed(recurrenceId), undefined, W)),
+        stored: stored(feed(recurrenceId), W),
+      }).toEqual({ recurrenceId, feed: moved, stored: moved });
+    }
+  });
+
+  it('counts only zones a feed names without defining against the cap', () => {
+    const zones = Array.from({ length: 100 }, (_, i) => [
+      'BEGIN:VTIMEZONE',
+      `TZID:Custom/Z${i}`,
+      'BEGIN:STANDARD',
+      'DTSTART:19700101T000000',
+      'TZOFFSETFROM:+0000',
+      'TZOFFSETTO:+0000',
+      'END:STANDARD',
+      'END:VTIMEZONE',
+    ]).flat();
+    const events = Array.from({ length: 100 }, (_, i) =>
+      ev(
+        `z${i}`,
+        `DTSTART;TZID=Custom/Z${i}:20270104T090000`,
+        `DTEND;TZID=Custom/Z${i}:20270104T100000`,
+      ),
+    ).flat();
+    const feed = cal(
+      ...zones,
+      ...events,
+      ...ev(
+        'ny',
+        'DTSTART;TZID=America/New_York:20270104T090000',
+        'DTEND;TZID=America/New_York:20270104T100000',
+      ),
+    );
+    expect(parseICalendarChanges(feed)).toHaveLength(101);
+  });
+
+  it('a DATE EXDATE on a timed series excludes that day, stored or read from the feed', () => {
+    const feed = cal(
+      ...ev(
+        'd',
+        'SUMMARY:Car out',
+        'DTSTART;TZID=Europe/Berlin:20270104T090000',
+        'DTEND;TZID=Europe/Berlin:20270104T100000',
+        'RRULE:FREQ=DAILY;COUNT=3',
+        'EXDATE;VALUE=DATE:20270105',
+      ),
+    );
+    const W = w('2027-01-01T00:00:00Z', '2027-01-10T00:00:00Z');
+    const days = [
+      ['2027-01-04T08:00:00.000Z', '2027-01-04T09:00:00.000Z'],
+      ['2027-01-06T08:00:00.000Z', '2027-01-06T09:00:00.000Z'],
+    ];
+    expect({
+      feed: spans(parseICalendarChanges(feed, undefined, W)),
+      stored: stored(feed, W),
+    }).toEqual({ feed: days, stored: days });
+  });
+
+  it('an occurrence of a DURATION series starting in a DST gap lasts its exact length', () => {
+    const feed = cal(
+      ...ev(
+        'g',
+        'SUMMARY:Night run',
+        'DTSTART;TZID=Europe/Berlin:20270327T020000',
+        'DURATION:PT1H',
+        'RRULE:FREQ=DAILY;COUNT=3',
+      ),
+    );
+    const W = w('2027-03-26T00:00:00Z', '2027-04-02T00:00:00Z');
+    const nights = [
+      ['2027-03-27T01:00:00.000Z', '2027-03-27T02:00:00.000Z'],
+      ['2027-03-28T01:00:00.000Z', '2027-03-28T02:00:00.000Z'],
+      ['2027-03-29T00:00:00.000Z', '2027-03-29T01:00:00.000Z'],
+    ];
+    expect({
+      feed: spans(parseICalendarChanges(feed, undefined, W)),
+      stored: stored(feed, W),
+    }).toEqual({ feed: nights, stored: nights });
+  });
+
+  it('expands every RRULE of a series, after one of them ends (RFC 5545 3.8.5.3)', () => {
+    // ical.js skipped the rule after one that had finished, so 11 January was never reached.
+    const feed = cal(
+      ...ev(
+        'm',
+        'DTSTART:20270104T090000Z',
+        'DTEND:20270104T100000Z',
+        'RRULE:FREQ=DAILY;COUNT=2',
+        'RRULE:FREQ=WEEKLY;COUNT=2',
+      ),
+    );
+    expect(
+      starts(
+        parseICalendarChanges(feed, undefined, w('2027-01-01T00:00:00Z', '2027-02-01T00:00:00Z')),
+      ),
+    ).toEqual(['2027-01-04T09:00:00.000Z', '2027-01-05T09:00:00.000Z', '2027-01-11T09:00:00.000Z']);
+  });
+});
