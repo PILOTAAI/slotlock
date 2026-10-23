@@ -9,6 +9,8 @@ const DEFAULT_HANDLER_TIMEOUT_MS = 30_000;
 const DEFAULT_HEADERS_TIMEOUT_MS = 10_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_KEEP_ALIVE_TIMEOUT_MS = 5_000;
+/** How often Node checks its connections against headersTimeout and requestTimeout, at most. */
+const DEFAULT_CONNECTIONS_CHECKING_INTERVAL_MS = 1_000;
 const DEFAULT_SHUTDOWN_GRACE_MS = 10_000;
 const DEFAULT_MAX_HEADER_BYTES = 16_384;
 const DEFAULT_MAX_REQUESTS_PER_SOCKET = 100;
@@ -351,6 +353,13 @@ export function createSlotlockNodeServer(
     {
       headersTimeout: headersTimeoutMs,
       requestTimeout: requestTimeoutMs,
+      // Node enforces both only when it checks its connections (every 30 s by default), so a body
+      // trickled after its answer could outlast requestTimeout by that much.
+      connectionsCheckingInterval: Math.min(
+        DEFAULT_CONNECTIONS_CHECKING_INTERVAL_MS,
+        headersTimeoutMs,
+        requestTimeoutMs,
+      ),
       keepAliveTimeout: boundedInteger(
         'keepAliveTimeoutMs',
         options.keepAliveTimeoutMs ?? DEFAULT_KEEP_ALIVE_TIMEOUT_MS,
@@ -423,7 +432,15 @@ export function createSlotlockNodeServer(
         activeRequests.delete(controller);
         // The answer is written: what is left of a body the target did not read (one it refused as
         // too large, say) is discarded as it arrives rather than held.
-        if (!request.complete) body?.discard();
+        if (!request.complete) {
+          body?.discard();
+          // The connection is idle only once that rest has arrived: close it then if shutting down.
+          request.once('end', () => {
+            setImmediate(() => {
+              if (closing()) server.closeIdleConnections();
+            });
+          });
+        }
         // A keep-alive connection whose response finished during shutdown would otherwise hold
         // `server.close()` open until its idle timeout; Node closed only the idle ones at the start.
         if (closing()) server.closeIdleConnections();
