@@ -11,7 +11,12 @@ import {
   createSlotlockTenantRlsDdl,
 } from './ddl.js';
 import { findNextAvailable, mergeIntervals } from './engine.js';
-import { expandRules } from './rules.js';
+import {
+  SLOTLOCK_CALENDAR_HORIZON_DAYS,
+  assertBoundedSearchWindow,
+  expandRules,
+  invalidWindowError,
+} from './rules.js';
 import {
   CalendarContractError,
   CalendarExpansionLimitError,
@@ -65,7 +70,7 @@ const SERIALIZATION_FAILURE = '40001';
 const MAX_HOLD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** Turnaround cannot occupy a resource indefinitely because of a caller/unit error. */
 const MAX_BUFFER_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
-export const SLOTLOCK_CALENDAR_HORIZON_DAYS = 367;
+export { SLOTLOCK_CALENDAR_HORIZON_DAYS };
 /**
  * Longest one-off event the store accepts (ten years and some leap days): long enough for any lease
  * or long-term rental, short enough that a unit error cannot occupy a resource for ever. A recurring
@@ -136,6 +141,18 @@ function resumeStoredSeries(
 /** A series cursor as the jsonb column takes it. */
 function seriesCursorJson(tx: TransactionSql, cursor: CalendarSeriesCursor | null) {
   return cursor === null ? null : tx.json(cursor as unknown as Parameters<TransactionSql['json']>[0]);
+}
+
+/**
+ * The window a roll to `horizon` gives a series stored for `stored`: from the horizon's start to
+ * the later of the two ends, so its end never moves back. `null` keeps the stored window: it covers
+ * the horizon already, or it ends so far past it that no window from the horizon's start to its end
+ * fits the 367-day cap (it rolls once the horizon is close enough).
+ */
+function rolledWindow(stored: Interval, horizon: Interval): Interval | null {
+  if (stored.start <= horizon.start && stored.end >= horizon.end) return null;
+  if (stored.end.getTime() - horizon.start.getTime() > MAX_CALENDAR_WINDOW_MS) return null;
+  return { start: horizon.start, end: stored.end > horizon.end ? stored.end : horizon.end };
 }
 
 /** The roll's `after`, checked, or `undefined` for a pass's first batch. */
@@ -330,12 +347,6 @@ function isFiniteWindow(window: Interval): boolean {
     Number.isFinite(window.end.getTime()) &&
     window.end.getTime() > window.start.getTime()
   );
-}
-
-function invalidWindowError(): Error & { code: 'invalid_window' } {
-  return Object.assign(new Error('Slotlock window must contain two finite dates with end > start'), {
-    code: 'invalid_window' as const,
-  });
 }
 
 function isValidIdentity(value: string | undefined): value is string {
@@ -1039,7 +1050,11 @@ export interface SlotlockStore {
     end: Date;
     source?: string;
   }): Promise<CreateReservationResult>;
-  /** Idempotently create a tenant-owned booking reservation by its stable business identity. */
+  /**
+   * Idempotently create a tenant-owned booking reservation by its stable business identity. The
+   * rows a calendar event occupies are not bookings: here, in reschedule and in cancel their
+   * references answer as references no booking holds.
+   */
   createExternalReservation(params: ExternalReservationCommand): Promise<ExternalReservationResult>;
   /** Atomically move an existing tenant-owned booking; a conflict leaves its old range intact. */
   rescheduleExternalReservation(
@@ -1107,6 +1122,10 @@ export interface SlotlockStore {
   /**
    * Atomically rematerialize due recurring masters into one rolling window without changing their
    * semantic revision. A collision rolls back that master and leaves its old coverage untouched.
+   * A master is rolled from the window's start through the later of its stored end and the
+   * window's, so its end never moves back. One that already covers the window, or whose end lies
+   * too far past it for the 367-day cap from the window's start, is not due: it is left as it is
+   * and not counted.
    */
   rollCalendarEventHorizon(params: {
     tenantRef: string;
@@ -1140,7 +1159,10 @@ export interface SlotlockStore {
     requiredSources?: string[];
     coverageMaxAgeMs?: number;
   }): Promise<CalendarFreeBusy>;
-  /** Convenience composition: listBusy × expandRules (in the resource's stored timezone) → findNextAvailable. */
+  /**
+   * Convenience composition: listBusy × expandRules (in the resource's stored timezone) →
+   * findNextAvailable. A search window longer than 367 days is refused (`invalid_window`).
+   */
   findNextAvailableFor(params: {
     resourceId: string;
     rules: WeeklyAvailabilityRule[];
@@ -1654,14 +1676,22 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
               SELECT revision FROM slotlock.reservation_tombstones
                WHERE tenant_ref = ${params.tenantRef} AND external_ref = ${params.externalRef}`;
             if (cancelled[0]) return { ok: false, code: 'reservation_cancelled' };
+            // A calendar event's occupation carries a reference in this namespace too, but it is
+            // not a booking: create, reschedule and cancel never read, replay, move or free it,
+            // and answer as for a reference no booking holds. Bookings have their own unique index.
             const existing = await tx<ReservationRow[]>`
               SELECT id, resource_id, tenant_ref, external_ref, starts_at, ends_at,
                      buffer_after_ms, revision, source
                 FROM slotlock.reservations
                WHERE tenant_ref = ${params.tenantRef} AND external_ref = ${params.externalRef}
+                 AND calendar_event_id IS NULL
                FOR UPDATE`;
             const found = existing[0];
             if (found) {
+              // The booking has moved on since: a delayed create is stale, as a delayed move is.
+              if (params.revision < Number(found.revision)) {
+                return { ok: false, code: 'stale_revision' };
+              }
               if (!sameExternalPayload(found, params)) {
                 return { ok: false, code: 'idempotency_conflict' };
               }
@@ -1721,6 +1751,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
                      buffer_after_ms, revision, source
                 FROM slotlock.reservations
                WHERE tenant_ref = ${params.tenantRef} AND external_ref = ${params.externalRef}
+                 AND calendar_event_id IS NULL
                FOR UPDATE`;
             const found = existing[0];
             if (!found) {
@@ -1813,6 +1844,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
         const existing = await tx<{ id: string; revision: string | number }[]>`
           SELECT id, revision FROM slotlock.reservations
            WHERE tenant_ref = ${params.tenantRef} AND external_ref = ${params.externalRef}
+             AND calendar_event_id IS NULL
            FOR UPDATE`;
         const found = existing[0];
         if (found) {
@@ -2348,15 +2380,18 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
         });
       }
       const after = rollCursor(params.after);
+      // Due: the masters rolledWindow rolls, which do not cover the window and end within the cap
+      // of its start.
       const candidates = await sql<{ id: string; materialized_ends_at: Date }[]>`
         SELECT id, materialized_ends_at
           FROM slotlock.calendar_events
          WHERE tenant_ref = ${params.tenantRef}
            AND recurrence_rule IS NOT NULL
            AND (
-             materialized_starts_at <> ${window.start}
+             materialized_starts_at > ${window.start}
              OR materialized_ends_at < ${window.end}
            )
+           AND materialized_ends_at <= ${new Date(window.start.getTime() + MAX_CALENDAR_WINDOW_MS)}
            AND (
              ${after?.materializedEndsAt ?? null}::timestamptz IS NULL
              OR (materialized_ends_at, id) >
@@ -2383,18 +2418,16 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
                   FROM slotlock.calendar_events
                  WHERE id = ${candidate.id} AND tenant_ref = ${params.tenantRef}
                  FOR UPDATE`;
-              if (
-                !row ||
-                row.recurrence_rule === null ||
-                (row.materialized_starts_at.getTime() === window.start.getTime() &&
-                  row.materialized_ends_at >= window.end)
-              ) {
-                return false;
-              }
+              if (!row || row.recurrence_rule === null) return false;
+              const rolled = rolledWindow(
+                { start: row.materialized_starts_at, end: row.materialized_ends_at },
+                window,
+              );
+              if (!rolled) return false;
               const childMap = await loadCalendarEventChildren(tx, [row.id]);
               const event = toCalendarEvent(row, childMap.get(row.id));
               // From where its last expansion stopped, when that can be trusted; else its start.
-              const { occurrences, cursor } = expandCalendarEventSeries(event, window, {
+              const { occurrences, cursor } = expandCalendarEventSeries(event, rolled, {
                 cursor: row.recurrence_cursor ?? null,
                 stored: true,
               });
@@ -2408,8 +2441,8 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
               });
               await tx`
                 UPDATE slotlock.calendar_events
-                   SET materialized_starts_at = ${window.start},
-                       materialized_ends_at = ${window.end},
+                   SET materialized_starts_at = ${rolled.start},
+                       materialized_ends_at = ${rolled.end},
                        recurrence_cursor = ${seriesCursorJson(tx, cursor)}
                  WHERE id = ${row.id} AND tenant_ref = ${params.tenantRef}`;
               return true;
@@ -2825,19 +2858,16 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
              AND event.transparency = 'opaque'
         )
         SELECT count(*)::int AS source_count,
+               -- Complete when what is stored runs from where the series can first occur in the
+               -- window (its start, if that is later) to the window's end: a series stored only
+               -- from after its start leaves the occurrences before that unknown.
                bool_and(
                  materialized_ends_at >= ${window.end}
-                 AND (
-                   earliest_possible_at >= ${window.start}
-                   OR materialized_starts_at <= ${window.start}
-                 )
+                 AND materialized_starts_at <= GREATEST(earliest_possible_at, ${window.start})
                ) AS complete,
                bool_or(
                  materialized_ends_at > ${window.start}
-                 AND (
-                   earliest_possible_at >= ${window.start}
-                   OR materialized_starts_at < ${window.end}
-                 )
+                 AND materialized_starts_at < ${window.end}
                ) AS overlaps
           FROM recurring_sources
          WHERE earliest_possible_at < ${window.end}`;
@@ -2902,6 +2932,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
 
     async findNextAvailableFor(params) {
       if (!isFiniteWindow(params.searchWindow)) throw invalidWindowError();
+      assertBoundedSearchWindow(params.searchWindow);
       if (!Number.isFinite(params.durationMs) || params.durationMs <= 0) return null;
       // Rules are authored in the resource's zone — expansion must honour it (DST-correct).
       const tzRows = await sql<{ timezone: string }[]>`

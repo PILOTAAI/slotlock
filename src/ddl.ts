@@ -20,6 +20,46 @@ SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true);
 const DEPLOYMENT_SEARCH_PATH_RESTORE = `SELECT pg_catalog.set_config('search_path', pg_catalog.current_setting('${CALLER_SEARCH_PATH_SETTING}'), true);
 `;
 
+// applyTenantRls forces row-level security, which binds the table owner too, and the deployment
+// sets no tenant: its data steps (reaping holds and listing conflicts before the overlap
+// constraint, merging duplicate resources, binding archives, backfilling event children) would see
+// no rows, skip what they repair and leave a constraint to meet rows its own check never saw. The
+// deployment lifts FORCE from the tables that have it before its first data step and puts it back
+// after its last, on those tables only. Both run in its one transaction, which holds the tables
+// locked in between; a failure rolls the lift back with everything else. The list is kept for the
+// session, not the transaction, so the restore still finds it when the statements run one by one.
+const FORCED_ROW_SECURITY_SETTING = 'slotlock.forced_row_security';
+const DEPLOYMENT_LIFT_FORCED_ROW_SECURITY = `DO $slotlock_lift_forced_row_security$
+DECLARE
+  forced text[];
+  forced_table text;
+BEGIN
+  SELECT COALESCE(pg_catalog.array_agg(rel.relname::text ORDER BY rel.relname), ARRAY[]::text[])
+    INTO forced
+    FROM pg_catalog.pg_class rel
+    JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+   WHERE ns.nspname = 'slotlock' AND rel.relkind IN ('r', 'p') AND rel.relforcerowsecurity;
+  PERFORM pg_catalog.set_config('${FORCED_ROW_SECURITY_SETTING}', forced::text, false);
+  FOREACH forced_table IN ARRAY forced LOOP
+    EXECUTE pg_catalog.format('ALTER TABLE slotlock.%I NO FORCE ROW LEVEL SECURITY', forced_table);
+  END LOOP;
+END
+$slotlock_lift_forced_row_security$;
+`;
+const DEPLOYMENT_RESTORE_FORCED_ROW_SECURITY = `DO $slotlock_restore_forced_row_security$
+DECLARE
+  forced_table text;
+BEGIN
+  FOREACH forced_table IN ARRAY COALESCE(
+    NULLIF(pg_catalog.current_setting('${FORCED_ROW_SECURITY_SETTING}', true), ''), '{}'
+  )::text[] LOOP
+    EXECUTE pg_catalog.format('ALTER TABLE slotlock.%I FORCE ROW LEVEL SECURITY', forced_table);
+  END LOOP;
+  PERFORM pg_catalog.set_config('${FORCED_ROW_SECURITY_SETTING}', '', false);
+END
+$slotlock_restore_forced_row_security$;
+`;
+
 /** The start of the message with which the deployment DDL refuses a `slotlock` schema. */
 export const SLOTLOCK_SCHEMA_CONTROL_REFUSAL = 'Slotlock will not deploy into schema slotlock';
 
@@ -538,7 +578,7 @@ REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[1]} FROM PUBLIC;
 export const SLOTLOCK_CORE_DDL: string = `
 ${DEPLOYMENT_SEARCH_PATH_PIN}CREATE SCHEMA IF NOT EXISTS slotlock;
 ${SLOTLOCK_SCHEMA_CONTROL_CHECK}CREATE EXTENSION IF NOT EXISTS btree_gist SCHEMA slotlock;
-
+${DEPLOYMENT_LIFT_FORCED_ROW_SECURITY}
 -- Records the exact catalog representation installed for each owned RLS policy. Health checks
 -- compare live policy fingerprints with this contract so ALTER POLICY drift cannot hide behind a
 -- retained name/comment. This table contains configuration only, never tenant or calendar data.
@@ -790,10 +830,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS slotlock_resources_tenant_external_ref_key
 CREATE UNIQUE INDEX IF NOT EXISTS slotlock_resources_legacy_external_ref_key
   ON slotlock.resources (external_ref)
   WHERE tenant_ref IS NULL AND external_ref IS NOT NULL;
-
-CREATE UNIQUE INDEX IF NOT EXISTS slotlock_reservations_tenant_external_ref_key
-  ON slotlock.reservations (tenant_ref, external_ref)
-  WHERE tenant_ref IS NOT NULL AND external_ref IS NOT NULL;
 
 DO $$
 BEGIN
@@ -1365,6 +1401,15 @@ BEGIN
   END IF;
 END $$;
 
+-- A booking's reference is unique in its tenant. The rows a calendar event occupies carry a
+-- reference derived from the event in the same columns, but they are not bookings and are left out:
+-- a booking with the same reference neither collides with one nor answers for it. Up to 0.1 one
+-- index covered both; every row it admitted, this one admits.
+CREATE UNIQUE INDEX IF NOT EXISTS slotlock_reservations_booking_external_ref_key
+  ON slotlock.reservations (tenant_ref, external_ref)
+  WHERE tenant_ref IS NOT NULL AND external_ref IS NOT NULL AND calendar_event_id IS NULL;
+DROP INDEX IF EXISTS slotlock.slotlock_reservations_tenant_external_ref_key;
+
 -- Materialized occurrences point at reservations created under the SAME exclusion arbiter as
 -- bookings and holds. Transparent events retain occurrence visibility with a NULL reservation.
 CREATE TABLE IF NOT EXISTS slotlock.calendar_event_occurrences (
@@ -1540,7 +1585,7 @@ CREATE INDEX IF NOT EXISTS slotlock_calendar_event_occurrences_resource_time_idx
   ON slotlock.calendar_event_occurrences (tenant_ref, starts_at, ends_at);
 CREATE INDEX IF NOT EXISTS slotlock_reservations_calendar_event_idx
   ON slotlock.reservations (calendar_event_id) WHERE calendar_event_id IS NOT NULL;
-${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_DASHBOARD_DDL}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
+${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_DASHBOARD_DDL}${DEPLOYMENT_RESTORE_FORCED_ROW_SECURITY}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
 
 export const SLOTLOCK_TENANT_CONTEXT_SETTING = 'slotlock.tenant_ref';
 

@@ -244,11 +244,12 @@ function boundedDefault(source, name) {
 }
 
 async function readFacts() {
-  const [pkg, agentServer, store, ddl] = await Promise.all([
+  const [pkg, agentServer, store, ddl, rules] = await Promise.all([
     read('package.json').then(JSON.parse),
     read('src/agent-server.ts'),
     read('src/store.ts'),
     read('src/ddl.ts'),
+    read('src/rules.ts'),
   ]);
   const tools = readTools(agentServer);
   const mcpModern = /SLOTLOCK_MCP_PROTOCOL_VERSION = '([0-9-]+)'/.exec(agentServer)?.[1];
@@ -289,7 +290,7 @@ async function readFacts() {
     mcpLegacy: must(mcpLegacy, 'SLOTLOCK_MCP_LEGACY_PROTOCOL_VERSION'),
     mcpOlder: must(mcpOlder, 'the third supported MCP revision'),
     a2a: must(a2a, 'SLOTLOCK_A2A_PROTOCOL_VERSION'),
-    horizonDays: must(numberConst(store, 'SLOTLOCK_CALENDAR_HORIZON_DAYS'), 'horizon days'),
+    horizonDays: must(numberConst(rules, 'SLOTLOCK_CALENDAR_HORIZON_DAYS'), 'horizon days'),
     maxEventDays: must(numberConst(store, 'SLOTLOCK_MAX_EVENT_DURATION_DAYS'), 'max event days'),
     maxEventDaysText: must(
       numberConst(store, 'SLOTLOCK_MAX_EVENT_DURATION_DAYS'),
@@ -334,16 +335,17 @@ async function readFacts() {
  * instructions the server gives the model. The names must match what readTools found.
  */
 async function readToolsReference(facts) {
-  const [agentServer, store, backend, types] = await Promise.all([
+  const [agentServer, store, backend, types, rules] = await Promise.all([
     read('src/agent-server.ts'),
     read('src/store.ts'),
     read('src/agent-store-backend.ts'),
     read('src/types.ts'),
+    read('src/rules.ts'),
   ]);
   let parsed;
   try {
     parsed = readOperations(agentServer, {
-      SLOTLOCK_CALENDAR_HORIZON_DAYS: numberConst(store, 'SLOTLOCK_CALENDAR_HORIZON_DAYS'),
+      SLOTLOCK_CALENDAR_HORIZON_DAYS: numberConst(rules, 'SLOTLOCK_CALENDAR_HORIZON_DAYS'),
       SLOTLOCK_MAX_EVENT_DURATION_DAYS: numberConst(store, 'SLOTLOCK_MAX_EVENT_DURATION_DAYS'),
     });
   } catch (error) {
