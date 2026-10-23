@@ -537,10 +537,12 @@ export async function startSlotlockServer(
     const authenticateToken =
       config.authToken === undefined
         ? undefined
-        : createSlotlockTokenAuthenticator(config.authToken, {
+        : // Read and write, never admin: this is the token the docs put in agents' configuration,
+          // and the application API's writes ask no person. An admin key is made for the purpose.
+          createSlotlockTokenAuthenticator(config.authToken, {
             subject: SELF_HOST_SUBJECT,
             tenantRef: config.tenantRef,
-            scopes: SLOTLOCK_API_KEY_SCOPES,
+            scopes: SLOTLOCK_API_KEY_DEFAULT_SCOPES,
           });
     // Set once the listener is up; the authenticator tells it which tenants this server serves.
     let maintenance: SlotlockMaintenanceScheduler | undefined;

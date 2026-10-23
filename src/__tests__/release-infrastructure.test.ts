@@ -1751,3 +1751,23 @@ printf '%s' "$answer" | jq -r "$filter"
     expect(result.stderr).toContain(`::error::Still waiting for dco.yml on ${url}.`);
   });
 });
+
+describe('release version and merge', () => {
+  it('refuses a version that is more than one line', () => {
+    const repo = repository();
+    // grep matches a line at a time, so `1.2.3` on the first line once passed the pattern.
+    for (const version of ['1.2.3\nfoo', '1.2.3\n', '1.2.3 ', '1.2.3/x']) {
+      const result = repo.script('prepare-release.sh', version);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('is not a version like 1.2.3');
+    }
+  });
+
+  it('merges only the commit whose checks it waited for', () => {
+    const workflow = read('.github/workflows/release-version.yml');
+    const merges = workflow.split('\n').filter((line) => line.includes('pr merge'));
+    expect(merges).toEqual([
+      '        run: gh pr merge "$PR" --squash --delete-branch --match-head-commit "$SHA"',
+    ]);
+  });
+});

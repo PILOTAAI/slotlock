@@ -14,7 +14,8 @@ versioning.
   new `admin` scope. They are never MCP tools or A2A skills. `createSlotlockStoreApplicationBackend`
   serves them from the store; `createSlotlockAgentServer` takes them as `application`.
 - The `admin` API key scope: `slotlock key create <name> --scope read,write,admin`, or "Full" in the
-  dashboard. New keys still default to read and write.
+  dashboard. New keys still default to read and write, and `SLOTLOCK_AUTH_TOKEN` is never admin: it
+  is the token agents are given, and the application API asks no person before it writes.
 - Built-in maintenance. `slotlock serve` maintains every tenant it serves, hourly, one at a time,
   under a per-tenant advisory lock, and logs the counts; `slotlock maintain` runs it once.
   `maintainSlotlockTenant`, `startSlotlockMaintenance` and `withSlotlockMaintenanceLock` do the
@@ -32,6 +33,7 @@ versioning.
   `slotlock serve` logs both.
 - Releases are opened and merged by a GitHub App once it is set up
   (`node scripts/create-release-app.mjs`), so its checks run without a maintainer approving them.
+  Only the commit whose checks passed is merged.
 
 ### Changed
 

@@ -577,8 +577,16 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         status: 403,
         body: { error: { code: 'forbidden' } },
       });
-      // The server token carries every scope.
-      expect((await rest(token, 'GET', `/v1/resources/${resourceId}`)).status).toBe(200);
+      // The server token is what the docs give agents, so it reads and writes but is never admin:
+      // the application API asks no person before it writes.
+      expect(await rest(token, 'GET', `/v1/resources/${resourceId}`)).toEqual({
+        status: 403,
+        body: { error: { code: 'forbidden' } },
+      });
+      expect(await rest(token, 'PUT', '/v1/availability', { rules: [] })).toEqual({
+        status: 403,
+        body: { error: { code: 'forbidden' } },
+      });
 
       const held = await rest(application.key, 'POST', '/v1/holds', {
         resource_id: resourceId,

@@ -747,8 +747,9 @@ curl "http://localhost:8080/v1/resources" -H "Authorization: Bearer $SLOTLOCK_AP
 
 What the application around the agents does, from any language: the store's resource, hours, hold,
 reservation, coverage and maintenance calls, as REST beside the tools. It needs a key with the
-`admin` scope ("Full" in the dashboard). It is never an MCP tool or an A2A skill, and never waits for
-a confirmation.
+`admin` scope ("Full" in the dashboard); the server's own `SLOTLOCK_AUTH_TOKEN`, the token agents
+are given, reads and writes but is never admin. It is never an MCP tool or an A2A skill, and never
+waits for a confirmation.
 
 | Request | Does |
 | --- | --- |

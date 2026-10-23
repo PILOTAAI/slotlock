@@ -108,7 +108,8 @@ jobs:
       - name: Merge it
         env:
           GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
-        run: gh pr merge "$PR" --squash --delete-branch
+        # Only the commit whose checks were waited for: a head pushed since is not merged.
+        run: gh pr merge "$PR" --squash --delete-branch --match-head-commit "$SHA"
       - name: Start Tag release and Site on main
         # The app's merge is a push to main, which starts both itself; a GITHUB_TOKEN merge starts
         # nothing.
