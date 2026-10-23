@@ -424,15 +424,16 @@ a `DURATION`, or an event's length may be a century at most. A calendar that nee
 rule that never occurs (`FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30`), is refused: `invalid_event` on a
 write, `invalid_icalendar` from a feed.
 
-A feed's rules are expanded from their start. A stored series keeps where its last expansion
-stopped, and the next one resumes there, so a daily series keeps rolling for as long as it runs:
-its budget goes on the window, not on the years before it. A write that changes a series searches
-from its start, and resumes from where it stopped only if that search is over the budget. A place
-serves only the rule, start and time zone it was kept for, read by the same version of ical.js, and
-never lies past an occurrence that could still reach the window (one within the event's length and
-a day of it, or one an exception moves into it). Otherwise the series is searched from its start,
-within the same budget. During maintenance, a stored series that outgrows the budget is counted as
-`refused` (its ids in `refusedEventIds`) and keeps its old coverage.
+A feed's rules are expanded from their start, and each series may pass 4,000 occurrences on the way
+(a daily one, about 11 years) whatever the feed's other series take. A stored series keeps where
+its last expansion stopped, and the next one resumes there, so a daily series keeps rolling for as
+long as it runs: its budget goes on the window, not on the years before it. A write that changes a
+series searches from its start, and resumes from where it stopped only if that search is over the
+budget. A place serves only the rule, start and time zone it was kept for, read by the same version
+of ical.js, and never lies past an occurrence that could still reach the window (one within the
+event's length and a day of it, or one an exception moves into it). Otherwise the series is searched
+from its start, within the same budget. During maintenance, a stored series that outgrows the budget
+is counted as `refused` (its ids in `refusedEventIds`) and keeps its old coverage.
 
 ### External calendars
 
@@ -442,6 +443,12 @@ Slotlock gives them neutral boundaries:
 - `normalizeExternalCalendarChange` for webhook changes; `parseICalendarChanges` and `emitICalendar`
   for bounded iCalendar in and out; `emitITipCalendar` for invitations.
 - All-day events become whole local days in the calendar's time zone; a feed without one is refused.
+- A time zone a feed names without defining it (no VTIMEZONE) is read as that IANA zone, and a
+  floating time in the calendar's zone, so an UNTIL, EXDATE, RDATE or RECURRENCE-ID written in UTC
+  names the occurrence it means.
+- An event with no length (a DATE-TIME DTSTART without DTEND or DURATION) occupies no time and is
+  left out. A PERIOD RDATE ends where its period does. A document whose root is not a VCALENDAR, or
+  an event that ends before it starts, is refused as `invalid_icalendar`.
 - `recordCalendarCoverage` marks how much of a feed is read. Pass the sources a resource depends on as
   `requiredSources`, and any coverage short of `complete` means the time is not proven free.
 

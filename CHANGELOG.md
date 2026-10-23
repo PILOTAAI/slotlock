@@ -43,6 +43,16 @@ versioning.
 
 ### Fixed
 
+- A time zone a calendar names without a VTIMEZONE was read as floating, and compared with UTC
+  values as if it were UTC. East of UTC a series lost the occurrence its UNTIL names (in a stored
+  series, a booking could then take that time); west of it, a series ran hours past its UNTIL; an
+  EXDATE or a moved occurrence's RECURRENCE-ID written in UTC was not found. All-day series had the
+  same fault with a UTC UNTIL.
+- A feed with a PERIOD RDATE, or an event with no DTEND, was refused whole; a feed's event that
+  ended before it started was refused with `invalid_external_interval` instead of
+  `invalid_icalendar`; a document whose root is not a VCALENDAR read as an empty calendar.
+- The 4,000 occurrences a series may pass from its start were shared by every series in a feed, so
+  three daily series begun in 2023 refused it for good.
 - A hold could take the time a reservation's `bufferAfterMs` keeps busy, and a buffered reservation
   could be booked over a hold: the buffer bound only tenant-owned reservations to each other.
 - `confirmHold` with the id of a reservation that has an external reference answered as if it had
