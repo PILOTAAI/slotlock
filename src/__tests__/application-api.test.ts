@@ -412,8 +412,8 @@ describe('the application API over REST', () => {
     await server.fetch(exampleRequest('slotlock_put_reservation', 'agent'));
     const events = onEvent.mock.calls.map(([event]) => event).filter((event) => event.type === 'rest');
     expect(events).toEqual([
-      { type: 'rest', operation: 'slotlock_put_reservation', status: 200 },
-      { type: 'rest', operation: 'slotlock_put_reservation', status: 403 },
+      { type: 'rest', operation: 'slotlock_put_reservation', status: 200, durationMs: expect.any(Number) },
+      { type: 'rest', operation: 'slotlock_put_reservation', status: 403, durationMs: expect.any(Number) },
     ]);
     expect(JSON.stringify(onEvent.mock.calls)).not.toContain('booking-BK-42');
   });

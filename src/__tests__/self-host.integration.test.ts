@@ -336,10 +336,34 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       'application_role_granted',
       'listening',
       'maintenance',
+      'call',
       'confirmation',
+      'call',
       'stopping',
       'stopped',
     ]);
+    // Each tool call logs its operation, outcome and duration; never its arguments.
+    expect(stdout.events().filter(({ event }) => event === 'call')).toEqual([
+      {
+        level: expect.any(String),
+        time: expect.any(String),
+        event: 'call',
+        protocol: 'mcp',
+        operation: 'slotlock_list_resources',
+        outcome: 'ok',
+        duration_ms: expect.any(Number),
+      },
+      {
+        level: expect.any(String),
+        time: expect.any(String),
+        event: 'call',
+        protocol: 'mcp',
+        operation: 'slotlock_create_event',
+        outcome: 'confirmation_required',
+        duration_ms: expect.any(Number),
+      },
+    ]);
+    expect(stdout.text()).not.toContain('cli-test-create');
     expect(stderr.text()).toBe('');
     for (const secret of [token, confirmationSecret, password]) {
       expect(stdout.text()).not.toContain(secret);

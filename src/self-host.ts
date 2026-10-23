@@ -401,6 +401,16 @@ function describeError(error: unknown): Record<string, unknown> {
   return detail;
 }
 
+/** An agent server event's fields under the log's snake_case keys (`durationMs` → `duration_ms`). */
+function snakeCaseKeys(fields: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(fields).map(([key, value]) => [
+      key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`),
+      value,
+    ]),
+  );
+}
+
 function connect(url: string, max: number): postgres.Sql {
   return postgres(url, { max, onnotice: () => {}, connect_timeout: 10 });
 }
@@ -556,7 +566,7 @@ export async function startSlotlockServer(
           ? { ready: true, checks: ['database'] }
           : { ready: false, checks: ['database_unreachable'] },
       // Outcomes and counts only: the server never reports arguments or identities.
-      onEvent: ({ type, ...fields }) => log.info(type, fields),
+      onEvent: ({ type, ...fields }) => log.info(type, snakeCaseKeys(fields)),
       // What an agent sees only as internal_error: the operation and the error's message and code,
       // never the arguments or the request, with every configured secret redacted.
       onError: (error, { operation }) =>

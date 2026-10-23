@@ -687,6 +687,17 @@ returns busy time and coverage for the next `resourceWindowDays` (30). `subscrip
 2026-07-28 results carry cache hints: discovery and tool lists are public for an hour, free/busy is
 never cached. W3C `traceparent`, `tracestate` and `baggage` reach your backend as `context.trace`.
 
+`onEvent` hears about every call that names an operation, so you can count, time and correlate them:
+
+- `{ type: 'call', protocol, operation, outcome, durationMs, traceId? }` for an MCP `tools/call` or
+  A2A `SendMessage`; `outcome` is `ok` or the refusal's code (`overlap`, `rate_limited`, …).
+- `{ type: 'rest', operation, status, durationMs, traceId? }` for a REST call.
+- `traceId` is the trace id of a valid `traceparent` from `_meta` or the header. Arguments, callers,
+  the parent span, `tracestate` and `baggage` are never reported, and a throwing `onEvent` changes
+  nothing a client sees. Resource reads and subscription polls are not reported.
+
+`slotlock serve` writes each as a JSON line (`"event":"call"`, `duration_ms`, `trace_id`).
+
 ### REST and OpenAPI
 
 `rest: true` also serves each tool as plain HTTP, described by an OpenAPI 3.1 document at

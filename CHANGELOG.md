@@ -27,6 +27,9 @@ versioning.
 - `openapi.json`, the REST API's OpenAPI 3.1 document, in the repository and at
   https://slotlock.pylota.io/openapi.json; `slotlockOpenApi()` builds it.
 - Property-based tests (fast-check) of the engine, time zones, iCalendar parsing and API keys.
+- A `call` event for each MCP `tools/call` and A2A `SendMessage` that names an operation: its
+  outcome, duration and W3C trace id. `rest` events carry the duration and trace id too, and
+  `slotlock serve` logs both.
 - Releases are opened and merged by a GitHub App once it is set up
   (`node scripts/create-release-app.mjs`), so its checks run without a maintainer approving them.
 

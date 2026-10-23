@@ -517,6 +517,20 @@ export type SlotlockAgentServerEvent =
       type: 'rest';
       operation: SlotlockAgentOperation | SlotlockApplicationOperation;
       status: number;
+      /** How long the operation ran, in milliseconds to a tenth. */
+      durationMs: number;
+      /** The W3C trace id of the call's valid `traceparent`, when it carried one. */
+      traceId?: string;
+    }
+  | {
+      /** An MCP `tools/call` or A2A `SendMessage` that named an operation, and how it ended. */
+      type: 'call';
+      protocol: 'mcp' | 'a2a';
+      operation: SlotlockAgentOperation;
+      /** `ok`, or the refusal's code (`overlap`, `forbidden`, `rate_limited`, …). */
+      outcome: string;
+      durationMs: number;
+      traceId?: string;
     }
   | {
       type: 'subscription';
@@ -1361,6 +1375,16 @@ function reportUnexpected(
   } catch {
     // Observability must never change what a protocol client receives.
   }
+}
+
+/** Milliseconds since `started` (a `performance.now()` reading), to a tenth. */
+function elapsedMs(started: number): number {
+  return Math.round((performance.now() - started) * 10) / 10;
+}
+
+/** The trace id of a valid `traceparent` (`version-traceid-parentid-flags`): its second field. */
+function traceIdOf(trace: SlotlockTraceContext): string {
+  return trace.traceparent.split('-', 2)[1] ?? '';
 }
 
 /** Failures that are server faults, not operation outcomes an agent could act on. */
@@ -2486,6 +2510,25 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       // Observability must never change what a protocol client receives.
     }
   };
+  /** Run an operation an MCP or A2A caller named, and report how it ended as a `call` event. */
+  const invokeReported = async (
+    protocol: 'mcp' | 'a2a',
+    args: Parameters<typeof invokeSlotlockAgentOperation>[0] & {
+      operation: SlotlockAgentOperation;
+    },
+  ): Promise<SlotlockAgentOperationDispatchResult> => {
+    const started = performance.now();
+    const outcome = await invokeSlotlockAgentOperation(args);
+    emit({
+      type: 'call',
+      protocol,
+      operation: args.operation,
+      outcome: outcome.ok ? 'ok' : outcome.code,
+      durationMs: elapsedMs(started),
+      ...(args.trace ? { traceId: traceIdOf(args.trace) } : {}),
+    });
+    return outcome;
+  };
   const dispatchOptions = (
     principal: SlotlockAgentPrincipal,
   ): SlotlockAgentOperationDispatchOptions => ({
@@ -2613,7 +2656,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
         return gate.decision === 'accepted' ? null : CONFIRMATION_HALT[gate.decision];
       };
     }
-    const outcome = await invokeSlotlockAgentOperation({
+    const outcome = await invokeReported('mcp', {
       operation,
       input: isRecord(params.arguments) ? params.arguments : {},
       request: call.request,
@@ -3201,6 +3244,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       return refuse(400, 'invalid_arguments');
     }
     const trace = traceContextFrom(undefined, request.headers);
+    const started = performance.now();
     const outcome = isSlotlockApplicationOperation(route.operation)
       ? await invokeApplicationOperation(
           slotlockApplicationOperation(route.operation),
@@ -3218,7 +3262,13 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
         });
     const internal = !outcome.ok && INTERNAL_FAILURES.has(outcome.code);
     const status = outcome.ok ? 200 : internal ? 500 : outcome.status;
-    emit({ type: 'rest', operation: route.operation, status });
+    emit({
+      type: 'rest',
+      operation: route.operation,
+      status,
+      durationMs: elapsedMs(started),
+      ...(trace ? { traceId: traceIdOf(trace) } : {}),
+    });
     if (outcome.ok) return json(200, outcome.data);
     return refuse(status, internal ? 'internal_error' : outcome.code);
   }
@@ -3454,7 +3504,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
             isRecord(rpc.params?._meta) ? rpc.params._meta : undefined,
             request.headers,
           );
-          const outcome = await invokeSlotlockAgentOperation({
+          const outcome = await invokeReported('mcp', {
             operation,
             input,
             request,
@@ -3564,7 +3614,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       }
       try {
         const trace = traceContextFrom(undefined, request.headers);
-        const outcome = await invokeSlotlockAgentOperation({
+        const outcome = await invokeReported('a2a', {
           operation,
           input,
           request,
