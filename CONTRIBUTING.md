@@ -16,7 +16,8 @@ npm test            # tests, build, then the packed-artifact verification
 ```
 
 Database suites (`*.integration.test.ts`) run when `DATABASE_URL` points at a PostgreSQL 16
-database whose connecting role can create roles and extensions, and are skipped otherwise:
+database whose connecting role can create roles, databases and extensions, and are skipped
+otherwise (the upgrade suite builds a database of its own and drops it):
 
 ```sh
 DATABASE_URL=postgresql://slotlock_dev:dev-only-password@localhost:5432/slotlock_test npm test
@@ -28,6 +29,11 @@ roles. Never point them at production or shared customer data. Connect as any ro
 role named `slotlock` is the package's schema, which `"$user"` puts first on the search path. The
 command-line tool redacts the database password from everything it prints, so a short or
 product-like password rewrites the output the tests read.
+
+Property suites (`*.property.test.ts`) check the engine, time zones, iCalendar parsing and API
+keys on input [fast-check](https://fast-check.dev/) generates, with a new seed each run. A failure
+prints the seed and the shrunk counterexample; add `{ seed, path }` from it to that `fc.assert` to
+replay it, then keep the counterexample as an ordinary test once it is fixed.
 
 ## Sign off your commits
 
