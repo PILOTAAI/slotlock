@@ -28,10 +28,13 @@ if errors.As(err, &refused) && refused.Code == "overlap" {
 
 - Each method takes its own input struct and returns the response body as `map[string]any`;
   `client.Call(ctx, "slotlock_...", values)` runs an operation by name.
-- Optional arguments are pointers (`slotlock.Ptr(v)`); one that may be null is a
+- Optional arguments are pointers (`slotlock.Ptr(v)`). One that may be null, required or not, is a
   `slotlock.Nullable[T]`: the zero value leaves it out, `slotlock.Null[string]()` clears it,
-  `slotlock.Value("x")` sets it.
+  `slotlock.Value("x")` sets it, and `Value` of a nil slice or map sends it empty. So
+  `Rules: slotlock.Value(rules)` sets bookable hours (none, when `rules` is empty) and
+  `Rules: slotlock.Null[[]map[string]any]()` returns to the server's default.
 - A refusal is a `*slotlock.Error` with `Status`, `Code` and `RetryAfter`.
-- `slotlock.New(url, key, slotlock.WithHTTPClient(c), slotlock.WithUserAgent(ua), slotlock.AllowInsecure())`.
+- `slotlock.New(url, key, slotlock.WithHTTPClient(c), slotlock.WithUserAgent(ua), slotlock.AllowInsecure())`;
+  a client given with `WithHTTPClient` keeps its transport and timeout, but follows no redirect.
 
 The [clients overview](../README.md) covers keys, errors and testing.

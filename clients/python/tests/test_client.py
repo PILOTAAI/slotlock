@@ -7,8 +7,15 @@ Every language client runs the same scenario.
 
 from __future__ import annotations
 
+import email.utils
+import http.server
+import json
 import os
+import threading
+import time
 import unittest
+import unittest.mock
+import urllib.parse
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -59,6 +66,157 @@ class WithoutAServer(unittest.TestCase):
     def test_unset_is_falsy_and_one_value(self) -> None:
         self.assertFalse(UNSET)
         self.assertIs(type(UNSET)(), UNSET)
+
+
+class Stub:
+    """A local HTTP server that records each request and answers with `respond(handler)`."""
+
+    def __init__(self, respond) -> None:  # type: ignore[no-untyped-def]
+        self.requests: list[dict] = []
+        stub = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args) -> None:  # type: ignore[no-untyped-def]
+                pass
+
+            def answer(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                stub.requests.append(
+                    {
+                        "path": self.path,
+                        "authorization": self.headers.get("Authorization", ""),
+                        "body": self.rfile.read(length) if length else b"",
+                    }
+                )
+                respond(self)
+
+            do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = answer
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def answer(status: int, body: bytes = b"{}", headers: dict[str, str] | None = None):  # type: ignore[no-untyped-def]
+    def respond(handler) -> None:  # type: ignore[no-untyped-def]
+        handler.send_response(status)
+        for name, value in (headers or {}).items():
+            handler.send_header(name, value)
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+
+    return respond
+
+
+class AgainstAStub(unittest.TestCase):
+    """The transport, against a local stub: what goes on the wire, and how answers are read."""
+
+    def stub(self, respond=None) -> Stub:  # type: ignore[no-untyped-def]
+        stub = Stub(respond or answer(200))
+        self.addCleanup(stub.close)
+        return stub
+
+    def client(self, stub: Stub, **options) -> Client:  # type: ignore[no-untyped-def]
+        return Client(f"http://127.0.0.1:{stub.port}", "slk_secret", **options)
+
+    def refusal(self, respond) -> SlotlockError:  # type: ignore[no-untyped-def]
+        with self.assertRaises(SlotlockError) as caught:
+            self.client(self.stub(respond)).list_resources()
+        return caught.exception
+
+    def test_a_redirect_is_a_refusal_and_the_key_stays(self) -> None:
+        elsewhere = self.stub()
+        location = f"http://localhost:{elsewhere.port}/v1/resources"
+        error = self.refusal(answer(302, b"", {"Location": location}))
+        self.assertEqual((error.status, error.code), (302, "http_302"))
+        self.assertEqual(elsewhere.requests, [])
+
+    def test_a_loopback_url_ignores_a_proxy(self) -> None:
+        proxy, server = self.stub(), self.stub()
+        proxied = {"http_proxy": f"http://localhost:{proxy.port}", "no_proxy": "", "NO_PROXY": ""}
+        with unittest.mock.patch.dict(os.environ, proxied):
+            self.client(server).list_resources()
+        self.assertEqual(proxy.requests, [])
+        self.assertEqual(len(server.requests), 1)
+
+    def test_refuses_a_dot_segment_path_parameter_before_any_request(self) -> None:
+        stub = self.stub()
+        for reference in (".", ".."):
+            with self.assertRaisesRegex(ValueError, "needs resource_id"):
+                self.client(stub).set_resource_availability(reference, rules=None)
+        self.assertEqual(stub.requests, [])
+
+    def test_encodes_path_and_query_parameters(self) -> None:
+        stub = self.stub()
+        self.client(stub).get_event("BK/42 ?#%é\\x..")
+        self.client(stub).list_events(
+            resource_ids=["a b", "c+d/é"], start="2027-03-29T09:00:00+01:00", end="2027-03-29T10:00:00+01:00", limit=5
+        )
+        self.assertEqual(stub.requests[0]["path"], "/v1/events/BK%2F42%20%3F%23%25%C3%A9%5Cx..")
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(stub.requests[1]["path"]).query)
+        self.assertEqual(
+            query,
+            {"resource_ids": ["a b", "c+d/é"], "start": ["2027-03-29T09:00:00+01:00"],
+             "end": ["2027-03-29T10:00:00+01:00"], "limit": ["5"]},
+        )
+
+    def test_leaves_out_unset_sends_none_as_null(self) -> None:
+        stub = self.stub()
+        self.client(stub).update_event(
+            "e1", expected_revision=3, idempotency_key="k", description=None, location="Dock 4"
+        )
+        body = json.loads(stub.requests[0]["body"])
+        self.assertEqual(body, {"expected_revision": 3, "idempotency_key": "k", "description": None, "location": "Dock 4"})
+
+    def test_reads_retry_after_in_seconds_or_as_a_date(self) -> None:
+        def retry_after(value: str) -> float | None:
+            body = b'{"error":{"code":"rate_limited"}}'
+            error = self.refusal(answer(429, body, {"Retry-After": value}))
+            self.assertEqual((error.status, error.code), (429, "rate_limited"))
+            return error.retry_after
+
+        self.assertEqual(retry_after("7"), 7.0)
+        self.assertEqual(retry_after("1.5"), 1.5)
+        self.assertEqual(retry_after("99999999999999999999"), 86400.0)
+        in_two_minutes = retry_after(email.utils.formatdate(time.time() + 120, usegmt=True))
+        self.assertIsNotNone(in_two_minutes)
+        self.assertTrue(100 <= in_two_minutes <= 120, in_two_minutes)  # type: ignore[operator]
+        self.assertEqual(retry_after("Wed, 21 Oct 2015 07:28:00 GMT"), 0.0)
+        for value in ("-5", "nan", "inf", "1e3", "soon", "Wed, 21 Oct 2015 07:28:00 +0000"):
+            self.assertIsNone(retry_after(value), value)
+
+    def test_an_error_without_a_json_body_is_still_a_refusal(self) -> None:
+        error = self.refusal(answer(500, b"<html>oops</html>"))
+        self.assertEqual((error.status, error.code), (500, "http_500"))
+        error = self.refusal(answer(502, b""))
+        self.assertEqual((error.status, error.code), (502, "http_502"))
+        with self.assertRaises(ValueError):
+            self.client(self.stub(answer(200, b"<html>captive portal</html>"))).list_resources()
+
+    def test_the_timeout_covers_the_body(self) -> None:
+        def trickle(handler) -> None:  # type: ignore[no-untyped-def]
+            handler.send_response(200)
+            handler.send_header("Content-Length", "100")
+            handler.end_headers()
+            try:
+                for _ in range(100):
+                    handler.wfile.write(b" ")
+                    handler.wfile.flush()
+                    time.sleep(0.2)
+            except OSError:
+                pass  # the client gave up
+
+        started = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            self.client(self.stub(trickle), timeout=0.5).list_resources()
+        self.assertLess(time.monotonic() - started, 2.0)
+        with self.assertRaises(OSError):
+            Client("http://127.0.0.1:9", "slk_secret", timeout=1).list_resources()
 
 
 @unittest.skipUnless(URL and KEY, "set SLOTLOCK_URL and SLOTLOCK_ADMIN_KEY to run against a server")

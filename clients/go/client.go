@@ -18,6 +18,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -35,8 +37,9 @@ type operation struct {
 }
 
 // Error is a call the server refused: Status is the HTTP status, Code says why (overlap,
-// forbidden, confirmation_required, ...), or http_<status> when the response carried no code.
-// RetryAfter is what a 429 or 503 asks the caller to wait, when it says.
+// forbidden, confirmation_required, ...), or http_<status> when the response carried no code; a
+// redirect is one too (http_302), never followed. RetryAfter is what a 429 or 503 asks the caller
+// to wait, when its Retry-After says, in seconds or as a date (at most a day).
 type Error struct {
 	Status     int
 	Code       string
@@ -64,7 +67,8 @@ type options struct {
 	allowInsecure bool
 }
 
-// WithHTTPClient sends requests with the given client (timeouts, proxies, transports).
+// WithHTTPClient sends requests with the given client (timeouts, proxies, transports), less its
+// redirect policy: no redirect is followed.
 func WithHTTPClient(client *http.Client) Option { return func(o *options) { o.httpClient = client } }
 
 // WithUserAgent replaces the User-Agent, slotlock-go/<version> by default.
@@ -95,16 +99,23 @@ func New(baseURL, apiKey string, opts ...Option) (*Client, error) {
 	if apiKey == "" || strings.IndexFunc(apiKey, func(r rune) bool { return r < 0x21 || r > 0x7e }) >= 0 {
 		return nil, errors.New("slotlock: apiKey must be a Slotlock API key or the server token")
 	}
+	// A copy, so the caller's client keeps its own policy. A redirect is answered as it came: the key
+	// never goes with another request. (The default transport's proxy already skips this machine.)
+	httpClient := *o.httpClient
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		apiKey:     apiKey,
-		httpClient: o.httpClient,
+		httpClient: &httpClient,
 		userAgent:  o.userAgent,
 	}, nil
 }
 
 // String names the server, never the key.
-func (c *Client) String() string { return "slotlock.Client(" + c.baseURL + ")" }
+func (c Client) String() string { return "slotlock.Client(" + c.baseURL + ")" }
+
+// GoString is String, so %#v never shows the key either.
+func (c Client) GoString() string { return c.String() }
 
 // Call runs an operation by its name (slotlock_...) with its arguments, path parameters included,
 // and returns the response body.
@@ -120,8 +131,9 @@ func (c *Client) Call(ctx context.Context, name string, values map[string]any) (
 	path := op.path
 	for _, param := range op.pathParams {
 		value, ok := arguments[param].(string)
-		if !ok || value == "" {
-			return nil, fmt.Errorf("slotlock: %s needs %s, a non-empty string", name, param)
+		// The server resolves . and .. as path segments, which would name another route.
+		if !ok || value == "" || value == "." || value == ".." {
+			return nil, fmt.Errorf("slotlock: %s needs %s, a non-empty string other than . and ..", name, param)
 		}
 		delete(arguments, param)
 		path = strings.Replace(path, "{"+param+"}", url.PathEscape(value), 1)
@@ -225,20 +237,39 @@ func refusal(response *http.Response, payload []byte) error {
 	if json.Unmarshal(payload, &body) == nil && body.Error.Code != "" {
 		failure.Code = body.Error.Code
 	}
-	if seconds, err := strconv.ParseFloat(response.Header.Get("Retry-After"), 64); err == nil && seconds >= 0 {
-		failure.RetryAfter = time.Duration(seconds * float64(time.Second))
-	}
+	failure.RetryAfter = retryAfter(response.Header.Get("Retry-After"), time.Now())
 	return failure
 }
 
-// Nullable is an optional argument that may also be null: the zero value leaves it out, Null
-// sends null (which clears it), and Value sends a value.
+// maxRetryAfter is the longest wait a Retry-After is read as.
+const maxRetryAfter = 24 * time.Hour
+
+var retryAfterSeconds = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?$`)
+
+// retryAfter reads Retry-After in seconds or as an HTTP date, at most a day; anything else is 0.
+func retryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if retryAfterSeconds.MatchString(value) {
+		seconds, err := strconv.ParseFloat(value, 64)
+		if err != nil || seconds >= maxRetryAfter.Seconds() {
+			return maxRetryAfter // a day or more, or too long for a float64
+		}
+		return time.Duration(seconds * float64(time.Second))
+	}
+	if when, err := time.Parse(http.TimeFormat, value); err == nil {
+		return min(max(when.Sub(now), 0), maxRetryAfter)
+	}
+	return 0
+}
+
+// Nullable is an argument that may be null: the zero value leaves it out, Null sends null (which
+// clears it, or for rules means the server's default), and Value sends a value.
 type Nullable[T any] struct {
 	value T
 	state uint8
 }
 
-// Value is a Nullable that sends v.
+// Value is a Nullable that sends v; a nil slice or map is sent empty, never as null.
 func Value[T any](v T) Nullable[T] { return Nullable[T]{value: v, state: 2} }
 
 // Null is a Nullable that sends null.
@@ -249,6 +280,13 @@ func (n Nullable[T]) get() (any, bool) {
 	case 1:
 		return nil, true
 	case 2:
+		value := reflect.ValueOf(n.value)
+		switch {
+		case value.Kind() == reflect.Slice && value.IsNil():
+			return reflect.MakeSlice(value.Type(), 0, 0).Interface(), true
+		case value.Kind() == reflect.Map && value.IsNil():
+			return reflect.MakeMap(value.Type()).Interface(), true
+		}
 		return n.value, true
 	default:
 		return nil, false

@@ -22,6 +22,7 @@ try {
 - Every method returns the response body as `Map<String, Object>`; `call("slotlock_...", values)`
   runs an operation by name.
 - A refusal throws `SlotlockException` with `status()`, `code()` and `retryAfter()`.
-- `SlotlockClient.builder(url, key).timeout(d).userAgent(ua).httpClient(c).allowInsecure().build()`.
+- `SlotlockClient.builder(url, key).timeout(d).userAgent(ua).httpClient(c).allowInsecure().build()`;
+  `build()` refuses an `httpClient` that follows redirects.
 
 The [clients overview](../README.md) covers keys, errors and testing.

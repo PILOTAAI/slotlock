@@ -25,6 +25,7 @@ catch (SlotlockException refused) when (refused.Code == "overlap")
 - Every method returns the response body as a `JsonObject`; `CallAsync("slotlock_...", values)` runs
   an operation by name.
 - A refusal throws `SlotlockException` with `Status`, `Code` and `RetryAfter`.
-- `new SlotlockClient(url, key, new SlotlockClientOptions { Timeout, AllowInsecure, UserAgent, HttpClient })`.
+- `new SlotlockClient(url, key, new SlotlockClientOptions { Timeout, AllowInsecure, UserAgent, HttpClient })`;
+  an `HttpClient` you pass keeps its handler's settings, so give it `AllowAutoRedirect = false`.
 
 The [clients overview](../README.md) covers keys, errors and testing.

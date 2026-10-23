@@ -396,13 +396,15 @@ func (c *Client) GetResource(ctx context.Context, in GetResourceInput) (map[stri
 type SetResourceAvailabilityInput struct {
 	ResourceID string
 
-	Rules []map[string]any
+	Rules Nullable[[]map[string]any]
 }
 
 func (in SetResourceAvailabilityInput) values() map[string]any {
 	values := map[string]any{}
 	values["resource_id"] = in.ResourceID
-	values["rules"] = in.Rules
+	if value, ok := in.Rules.get(); ok {
+		values["rules"] = value
+	}
 	return values
 }
 
@@ -416,12 +418,14 @@ func (c *Client) SetResourceAvailability(ctx context.Context, in SetResourceAvai
 
 // SetTenantAvailabilityInput holds the arguments of [Client.SetTenantAvailability].
 type SetTenantAvailabilityInput struct {
-	Rules []map[string]any
+	Rules Nullable[[]map[string]any]
 }
 
 func (in SetTenantAvailabilityInput) values() map[string]any {
 	values := map[string]any{}
-	values["rules"] = in.Rules
+	if value, ok := in.Rules.get(); ok {
+		values["rules"] = value
+	}
 	return values
 }
 

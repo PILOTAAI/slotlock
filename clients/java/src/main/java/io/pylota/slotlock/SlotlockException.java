@@ -6,7 +6,7 @@ import java.util.Optional;
 /**
  * A call the server refused: {@link #status()} is the HTTP status, {@link #code()} says why
  * ({@code overlap}, {@code forbidden}, {@code confirmation_required}, ...), or {@code http_<status>}
- * when the response carried no code.
+ * when the response carried no code; a redirect is one too ({@code http_302}), never followed.
  */
 public final class SlotlockException extends RuntimeException {
   private static final long serialVersionUID = 1L;
@@ -46,7 +46,8 @@ public final class SlotlockException extends RuntimeException {
   }
 
   /**
-   * What a 429 or 503 asks the caller to wait, when it says.
+   * What a 429 or 503 asks the caller to wait, when its Retry-After says, in seconds or as a date (at
+   * most a day).
    *
    * @return the wait, or empty
    */

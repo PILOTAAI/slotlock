@@ -24,7 +24,7 @@ mod operations;
 pub use operations::*;
 
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
 use ureq::http;
@@ -44,8 +44,9 @@ pub(crate) struct Operation {
 #[derive(Debug)]
 pub enum Error {
     /// The server refused the call: the HTTP status, and its code (`overlap`, `forbidden`,
-    /// `confirmation_required`, ...), or `http_<status>` when the response carried none.
-    /// `retry_after` is what a 429 or 503 asks the caller to wait, when it says.
+    /// `confirmation_required`, ...), or `http_<status>` when the response carried none; a
+    /// redirect is one too (`http_302`), never followed. `retry_after` is what a 429 or 503 asks
+    /// the caller to wait, when its Retry-After says, in seconds or as a date (at most a day).
     Refused {
         status: u16,
         code: String,
@@ -118,7 +119,7 @@ pub struct Options {
     /// The longest one call may take, connection included. Default 30 seconds.
     pub timeout: Duration,
     /// Send the key over plain HTTP to a host other than this machine. Never needed for
-    /// `http://localhost`.
+    /// `http://localhost`, which is reached without the environment's proxy.
     pub allow_insecure: bool,
     /// Sent as User-Agent; `slotlock-rust/<version>` unless set.
     pub user_agent: Option<String>,
@@ -188,10 +189,17 @@ impl Client {
                 "api_key must be a Slotlock API key or the server token".into(),
             ));
         }
-        let config = ureq::Agent::config_builder()
+        let mut config = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .timeout_global(Some(options.timeout))
-            .build();
+            // A redirect is answered as it came: the key never goes with another request.
+            .max_redirects(0);
+        if loopback {
+            // This machine is reached directly: a proxy from the environment would carry the key
+            // off it.
+            config = config.proxy(None);
+        }
+        let config = config.build();
         Ok(Client {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
@@ -220,11 +228,12 @@ impl Client {
         };
         let mut path = spec.path.to_string();
         for name in spec.path_params {
+            // The server resolves `.` and `..` as path segments, which would name another route.
             let value = match arguments.remove(*name) {
-                Some(Value::String(value)) if !value.is_empty() => value,
+                Some(Value::String(value)) if !matches!(value.as_str(), "" | "." | "..") => value,
                 _ => {
                     return Err(Error::Invalid(format!(
-                        "{operation} needs {name}, a non-empty string"
+                        "{operation} needs {name}, a non-empty string other than . and .."
                     )))
                 }
             };
@@ -297,9 +306,7 @@ impl Client {
             .headers()
             .get("retry-after")
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.trim().parse::<f64>().ok())
-            .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
-            .map(Duration::from_secs_f64);
+            .and_then(|value| retry_after(value, SystemTime::now()));
         let text = response.body_mut().read_to_string()?;
         if !(200..300).contains(&status) {
             let code = serde_json::from_str::<Value>(&text)
@@ -318,6 +325,78 @@ impl Client {
         }
         Ok(serde_json::from_str(&text)?)
     }
+}
+
+/// The longest wait a Retry-After is read as: one day.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(86400);
+
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// Retry-After in seconds or as an HTTP date, at most a day; anything else is no wait.
+fn retry_after(value: &str, now: SystemTime) -> Option<Duration> {
+    let value = value.trim();
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    let seconds = match value.split_once('.') {
+        Some((whole, fraction)) => digits(whole) && digits(fraction),
+        None => digits(value),
+    };
+    if seconds {
+        // A number too long for an f64 parses as infinity, which the day caps.
+        let seconds = value.parse::<f64>().ok()?;
+        return Some(Duration::from_secs_f64(
+            seconds.min(MAX_RETRY_AFTER.as_secs_f64()),
+        ));
+    }
+    let when = http_date(value)?;
+    Some(
+        when.duration_since(now)
+            .unwrap_or(Duration::ZERO)
+            .min(MAX_RETRY_AFTER),
+    )
+}
+
+/// An HTTP date (IMF-fixdate: `Sun, 06 Nov 1994 08:49:37 GMT`), or nothing.
+fn http_date(value: &str) -> Option<SystemTime> {
+    let rest = [
+        "Mon, ", "Tue, ", "Wed, ", "Thu, ", "Fri, ", "Sat, ", "Sun, ",
+    ]
+    .iter()
+    .find_map(|weekday| value.strip_prefix(weekday))?;
+    let parts: Vec<&str> = rest.split(' ').collect();
+    let [day, month, year, clock, "GMT"] = parts.as_slice() else {
+        return None;
+    };
+    let number = |text: &str, width: usize| -> Option<i64> {
+        let ok = text.len() == width && text.bytes().all(|byte| byte.is_ascii_digit());
+        ok.then(|| text.parse().ok()).flatten()
+    };
+    let clock: Vec<&str> = clock.split(':').collect();
+    let [hour, minute, second] = clock.as_slice() else {
+        return None;
+    };
+    let (day, year) = (number(day, 2)?, number(year, 4)?);
+    let month = MONTHS.iter().position(|name| name == month)? as i64 + 1;
+    let (hour, minute, second) = (number(hour, 2)?, number(minute, 2)?, number(second, 2)?);
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if day < 1 || day > days_in_month || hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    // Days since 1970-01-01 (Howard Hinnant's days_from_civil).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let days = era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
+    let seconds = days * 86400 + hour * 3600 + minute * 60 + second;
+    Some(UNIX_EPOCH + Duration::from_secs(u64::try_from(seconds).unwrap_or(0)))
 }
 
 fn query_value(name: &str, value: &Value) -> Result<String, Error> {
@@ -352,5 +431,23 @@ mod tests {
     fn encodes_all_but_unreserved_characters() {
         assert_eq!(encode("BK/42 ü?&=#"), "BK%2F42%20%C3%BC%3F%26%3D%23");
         assert_eq!(encode("a-b.c_d~e"), "a-b.c_d~e");
+    }
+
+    #[test]
+    fn reads_an_http_date() {
+        let at = |seconds: u64| Some(UNIX_EPOCH + Duration::from_secs(seconds));
+        assert_eq!(http_date("Sun, 06 Nov 1994 08:49:37 GMT"), at(784111777));
+        assert_eq!(http_date("Thu, 01 Jan 1970 00:00:00 GMT"), at(0));
+        assert_eq!(http_date("Thu, 29 Feb 2024 23:59:59 GMT"), at(1709251199));
+        for value in [
+            "Wed, 29 Feb 2023 00:00:00 GMT",
+            "Sun, 06 Nov 1994 24:00:00 GMT",
+            "Sun, 6 Nov 1994 08:49:37 GMT",
+            "Sunday, 06-Nov-94 08:49:37 GMT",
+            "Sun, 06 Nov 1994 08:49:37 UTC",
+            "Sun, 06 Nov 1994 08:49:37 GMT ",
+        ] {
+            assert_eq!(http_date(value), None, "{value}");
+        }
     }
 }

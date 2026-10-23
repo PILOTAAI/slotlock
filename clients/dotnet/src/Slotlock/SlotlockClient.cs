@@ -32,6 +32,13 @@ public sealed partial class SlotlockClient : IDisposable
 
     private static readonly HashSet<string> Loopback = new(StringComparer.OrdinalIgnoreCase) { "localhost", "127.0.0.1", "[::1]", "::1" };
 
+    /// <summary>The longest wait a Retry-After is read as.</summary>
+    private static readonly TimeSpan MaxRetryAfter = TimeSpan.FromDays(1);
+
+    private static readonly string[] Weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+    private static readonly string[] Months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
     private readonly Uri _baseUrl;
     private readonly string _apiKey;
     private readonly string _userAgent;
@@ -74,7 +81,12 @@ public sealed partial class SlotlockClient : IDisposable
         _apiKey = apiKey;
         _userAgent = options.UserAgent ?? $"slotlock-dotnet/{Version}";
         _ownsHttp = options.HttpClient is null;
-        _http = options.HttpClient ?? new HttpClient { Timeout = options.Timeout };
+        // A redirect is answered as it came, so the key goes with no other request; this machine is
+        // reached directly, since a proxy would carry the key off it.
+        _http = options.HttpClient ?? new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, UseProxy = !Loopback.Contains(uri.Host) })
+        {
+            Timeout = options.Timeout,
+        };
     }
 
     /// <summary>Names the server, never the key.</summary>
@@ -104,9 +116,10 @@ public sealed partial class SlotlockClient : IDisposable
         var path = spec.Path;
         foreach (var name in spec.PathParams)
         {
-            if (!arguments.Remove(name, out var node) || node is not JsonValue text || !text.TryGetValue(out string? value) || value.Length == 0)
+            // The server resolves . and .. as path segments, which would name another route.
+            if (!arguments.Remove(name, out var node) || node is not JsonValue text || !text.TryGetValue(out string? value) || value is "" or "." or "..")
             {
-                throw new ArgumentException($"{operation} needs {name}, a non-empty string", nameof(values));
+                throw new ArgumentException($"{operation} needs {name}, a non-empty string other than . and ..", nameof(values));
             }
             path = path.Replace("{" + name + "}", Uri.EscapeDataString(value));
         }
@@ -138,7 +151,13 @@ public sealed partial class SlotlockClient : IDisposable
         using var response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
         var payload = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
         var status = (int)response.StatusCode;
-        if (!response.IsSuccessStatusCode) throw Refusal(status, payload, response.Headers.RetryAfter);
+        if (!response.IsSuccessStatusCode)
+        {
+            var retryAfter = response.Headers.NonValidated.TryGetValues("Retry-After", out var retryValues)
+                ? RetryAfter(retryValues.FirstOrDefault(), DateTimeOffset.UtcNow)
+                : null;
+            throw Refusal(status, payload, retryAfter);
+        }
         if (payload.Length == 0) return new JsonObject();
         try
         {
@@ -163,7 +182,31 @@ public sealed partial class SlotlockClient : IDisposable
         throw new ArgumentException($"query argument {name} must be a string, number or boolean");
     }
 
-    private static SlotlockException Refusal(int status, string payload, RetryConditionHeaderValue? retry)
+    /// <summary>Retry-After in seconds or as an HTTP date, at most a day; anything else is null.</summary>
+    internal static TimeSpan? RetryAfter(string? value, DateTimeOffset now)
+    {
+        if (value is null) return null;
+        value = value.Trim();
+        var dot = value.IndexOf('.');
+        if (Digits(dot < 0 ? value : value[..dot]) && (dot < 0 || Digits(value[(dot + 1)..])))
+        {
+            // A number too long for a double parses as infinity, which the day caps.
+            var seconds = double.Parse(value, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture);
+            return seconds >= MaxRetryAfter.TotalSeconds ? MaxRetryAfter : TimeSpan.FromSeconds(seconds);
+        }
+        // IMF-fixdate, `Sun, 06 Nov 1994 08:49:37 GMT`; the day of the week is checked for its form only.
+        if (value.Length == 29 && value[3..5] == ", " && Weekdays.Contains(value[..3]) && Months.Contains(value[8..11])
+            && DateTimeOffset.TryParseExact(value[5..], "dd MMM yyyy HH':'mm':'ss 'GMT'", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var when))
+        {
+            var wait = when - now;
+            return wait < TimeSpan.Zero ? TimeSpan.Zero : wait > MaxRetryAfter ? MaxRetryAfter : wait;
+        }
+        return null;
+    }
+
+    private static bool Digits(string text) => text.Length > 0 && text.All(c => c is >= '0' and <= '9');
+
+    private static SlotlockException Refusal(int status, string payload, TimeSpan? retryAfter)
     {
         var code = $"http_{status}";
         try
@@ -181,14 +224,14 @@ public sealed partial class SlotlockClient : IDisposable
         {
             // JSON, but not an object with an error: the status alone says what happened.
         }
-        return new SlotlockException(status, code, retry?.Delta);
+        return new SlotlockException(status, code, retryAfter);
     }
 }
 
 /// <summary>How <see cref="SlotlockClient"/> sends requests.</summary>
 public sealed class SlotlockClientOptions
 {
-    /// <summary>The longest one call may take, when the client creates its HttpClient. Default 30 seconds.</summary>
+    /// <summary>The longest one call may take, its response body included, when the client creates its HttpClient. Default 30 seconds.</summary>
     public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(30);
 
     /// <summary>Send the key over plain HTTP to a host other than this machine.</summary>
@@ -197,14 +240,17 @@ public sealed class SlotlockClientOptions
     /// <summary>Sent as User-Agent; <c>slotlock-dotnet/&lt;version&gt;</c> unless set.</summary>
     public string? UserAgent { get; init; }
 
-    /// <summary>Send requests with this HttpClient (handlers, proxies, timeouts); the client never disposes it.</summary>
+    /// <summary>
+    /// Send requests with this HttpClient (handlers, proxies, timeouts); the client never disposes it. Its handler
+    /// should not follow redirects (<c>AllowAutoRedirect = false</c>), as the client's own does not.
+    /// </summary>
     public HttpClient? HttpClient { get; init; }
 }
 
 /// <summary>
 /// A call the server refused: <see cref="Status"/> is the HTTP status, <see cref="Code"/> says why
 /// (<c>overlap</c>, <c>forbidden</c>, <c>confirmation_required</c>, ...), or <c>http_&lt;status&gt;</c>
-/// when the response carried no code.
+/// when the response carried no code; a redirect is one too (<c>http_302</c>), never followed.
 /// </summary>
 public sealed class SlotlockException : Exception
 {
@@ -222,7 +268,7 @@ public sealed class SlotlockException : Exception
     /// <summary>The server's error code.</summary>
     public string Code { get; }
 
-    /// <summary>What a 429 or 503 asks the caller to wait, when it says.</summary>
+    /// <summary>What a 429 or 503 asks the caller to wait, when its Retry-After says, in seconds or as a date (at most a day).</summary>
     public TimeSpan? RetryAfter { get; }
 }
 

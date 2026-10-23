@@ -386,10 +386,11 @@ function goOperations(operations: ClientOperation[]): string {
     fields.forEach((p, index) => {
       if (index > 0) out.push('');
       if (p.description) out.push(...wrap(p.description, '\t// '));
+      // An argument that may be null, required or not, is a Nullable: a nil slice cannot tell null
+      // from an empty list, which can mean opposite things (`rules`).
       let fieldType: string;
-      if (p.required)
-        fieldType = p.nullable && !goReference(p.kind) ? `*${goType(p.kind)}` : goType(p.kind);
-      else if (p.nullable) fieldType = `Nullable[${goType(p.kind)}]`;
+      if (p.nullable) fieldType = `Nullable[${goType(p.kind)}]`;
+      else if (p.required) fieldType = goType(p.kind);
       else fieldType = goReference(p.kind) ? goType(p.kind) : `*${goType(p.kind)}`;
       out.push(`\t${goName(p.name)} ${fieldType}`);
     });
@@ -397,14 +398,14 @@ function goOperations(operations: ClientOperation[]): string {
     out.push(`func (in ${type}) values() map[string]any {`, '\tvalues := map[string]any{}');
     for (const p of fields) {
       const name = goName(p.name);
-      if (p.required) {
-        out.push(`\tvalues["${p.name}"] = in.${name}`);
-      } else if (p.nullable) {
+      if (p.nullable) {
         out.push(
           `\tif value, ok := in.${name}.get(); ok {`,
           `\t\tvalues["${p.name}"] = value`,
           '\t}',
         );
+      } else if (p.required) {
+        out.push(`\tvalues["${p.name}"] = in.${name}`);
       } else if (goReference(p.kind)) {
         out.push(`\tif in.${name} != nil {`, `\t\tvalues["${p.name}"] = in.${name}`, '\t}');
       } else {

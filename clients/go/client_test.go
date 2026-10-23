@@ -141,7 +141,7 @@ func TestBooksHoldsAndReservationsWithoutDoubleBooking(t *testing.T) {
 	if got := s.must(c.GetResource(s.ctx, GetResourceInput{ResourceID: id}))["resource"]; !reflect.DeepEqual(got, resource) {
 		t.Fatalf("get_resource: %v", got)
 	}
-	hours := s.must(c.SetResourceAvailability(s.ctx, SetResourceAvailabilityInput{ResourceID: id, Rules: allWeek}))["resource"].(map[string]any)
+	hours := s.must(c.SetResourceAvailability(s.ctx, SetResourceAvailabilityInput{ResourceID: id, Rules: Value(allWeek)}))["resource"].(map[string]any)
 	if !reflect.DeepEqual(hours["availability"], []any{map[string]any(allWeek[0])}) {
 		t.Fatalf("availability: %v", hours["availability"])
 	}
@@ -225,7 +225,7 @@ func TestWritesEventsAndClearsAFieldWithNull(t *testing.T) {
 	s := newServer(t)
 	c := s.client
 	id := s.must(c.CreateResource(s.ctx, CreateResourceInput{ExternalRef: "go-events-" + s.suffix}))["resource"].(map[string]any)["id"].(string)
-	s.must(c.SetResourceAvailability(s.ctx, SetResourceAvailabilityInput{ResourceID: id, Rules: allWeek}))
+	s.must(c.SetResourceAvailability(s.ctx, SetResourceAvailabilityInput{ResourceID: id, Rules: Value(allWeek)}))
 	key := func() string {
 		random := make([]byte, 16)
 		_, _ = rand.Read(random)

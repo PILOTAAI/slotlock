@@ -2,20 +2,35 @@ package io.pylota.slotlock;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.math.BigDecimal;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.time.format.ResolverStyle;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * A client for Slotlock's REST API: the agent tools and the application API.
@@ -35,18 +50,35 @@ public final class SlotlockClient extends SlotlockOperations {
 
   private static final Set<String> LOOPBACK = Set.of("localhost", "127.0.0.1", "[::1]", "::1");
 
+  /** The longest wait a Retry-After is read as. */
+  private static final Duration MAX_RETRY_AFTER = Duration.ofDays(1);
+
+  private static final Pattern SECONDS = Pattern.compile("[0-9]+(\\.[0-9]+)?");
+  private static final Pattern HTTP_DATE =
+      Pattern.compile("(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), ([0-9]{2} [A-Z][a-z]{2} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2}) GMT");
+  private static final DateTimeFormatter HTTP_DATE_TIME =
+      DateTimeFormatter.ofPattern("dd MMM uuuu HH:mm:ss", Locale.US).withResolverStyle(ResolverStyle.STRICT);
+
   private final String baseUrl;
   private final String apiKey;
   private final Duration timeout;
   private final String userAgent;
   private final HttpClient http;
 
-  private SlotlockClient(Builder builder) {
+  private SlotlockClient(Builder builder, boolean loopback) {
     this.baseUrl = builder.baseUrl.replaceAll("/+$", "");
     this.apiKey = builder.apiKey;
     this.timeout = builder.timeout;
     this.userAgent = builder.userAgent;
-    this.http = builder.http != null ? builder.http : HttpClient.newBuilder().connectTimeout(builder.timeout).build();
+    if (builder.http != null) {
+      this.http = builder.http;
+    } else {
+      // Redirects are never followed (the default), so the key goes with no other request; this
+      // machine is reached directly, since a proxy would carry the key off it.
+      HttpClient.Builder http = HttpClient.newBuilder().connectTimeout(builder.timeout);
+      if (loopback) http.proxy(HttpClient.Builder.NO_PROXY);
+      this.http = http.build();
+    }
   }
 
   /**
@@ -76,7 +108,7 @@ public final class SlotlockClient extends SlotlockOperations {
     }
 
     /**
-     * The longest one call may take. Default 30 seconds.
+     * The longest one call may take, its response body included. Default 30 seconds.
      *
      * @param timeout the limit
      * @return this builder
@@ -108,7 +140,8 @@ public final class SlotlockClient extends SlotlockOperations {
     }
 
     /**
-     * Sends requests with this client (proxies, TLS, executors).
+     * Sends requests with this client (proxies, TLS, executors). It must not follow redirects, which
+     * would send the key with another request: {@link #build} refuses one that does.
      *
      * @param http the client
      * @return this builder
@@ -123,7 +156,8 @@ public final class SlotlockClient extends SlotlockOperations {
      *
      * @return the client
      * @throws IllegalArgumentException for a URL that is not http(s), plain HTTP to another host
-     *     without {@link #allowInsecure}, or a key that cannot be a credential
+     *     without {@link #allowInsecure}, a key that cannot be a credential, or an HTTP client that
+     *     follows redirects
      */
     public SlotlockClient build() {
       URI uri;
@@ -146,7 +180,10 @@ public final class SlotlockClient extends SlotlockOperations {
       if (apiKey.isEmpty() || apiKey.chars().anyMatch(c -> c < 0x21 || c > 0x7e)) {
         throw new IllegalArgumentException("apiKey must be a Slotlock API key or the server token");
       }
-      return new SlotlockClient(this);
+      if (http != null && http.followRedirects() != HttpClient.Redirect.NEVER) {
+        throw new IllegalArgumentException("httpClient must not follow redirects, which would send the key elsewhere");
+      }
+      return new SlotlockClient(this, LOOPBACK.contains(uri.getHost()));
     }
   }
 
@@ -164,8 +201,9 @@ public final class SlotlockClient extends SlotlockOperations {
     if (values != null) arguments.putAll(values);
     String path = spec.path();
     for (String name : spec.pathParams()) {
-      if (!(arguments.remove(name) instanceof String value) || value.isEmpty()) {
-        throw new IllegalArgumentException(operation + " needs " + name + ", a non-empty string");
+      // The server resolves . and .. as path segments, which would name another route.
+      if (!(arguments.remove(name) instanceof String value) || value.isEmpty() || value.equals(".") || value.equals("..")) {
+        throw new IllegalArgumentException(operation + " needs " + name + ", a non-empty string other than . and ..");
       }
       path = path.replace("{" + name + "}", encode(value));
     }
@@ -193,12 +231,21 @@ public final class SlotlockClient extends SlotlockOperations {
             .header("User-Agent", userAgent)
             .method(spec.method(), body);
     if (hasBody) request.header("Content-Type", "application/json");
+    CompletableFuture<HttpResponse<String>> pending =
+        http.sendAsync(request.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
     HttpResponse<String> response;
     try {
-      response = http.send(request.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-    } catch (IOException e) {
-      throw new UncheckedIOException(e);
+      // The whole call, body included: the request's own timeout stops at the response headers.
+      response = pending.get(timeout.toNanos(), TimeUnit.NANOSECONDS);
+    } catch (TimeoutException e) {
+      pending.cancel(true);
+      throw new UncheckedIOException(new HttpTimeoutException("Slotlock did not answer within " + timeout));
+    } catch (ExecutionException e) {
+      if (e.getCause() instanceof IOException cause) throw new UncheckedIOException(cause);
+      if (e.getCause() instanceof RuntimeException cause) throw cause;
+      throw new IllegalStateException("calling Slotlock failed", e.getCause());
     } catch (InterruptedException e) {
+      pending.cancel(true);
       Thread.currentThread().interrupt();
       throw new IllegalStateException("interrupted while calling Slotlock", e);
     }
@@ -230,20 +277,28 @@ public final class SlotlockClient extends SlotlockOperations {
       // Not JSON: the status alone says what happened.
     }
     Duration retryAfter =
-        response
-            .headers()
-            .firstValue("Retry-After")
-            .map(
-                value -> {
-                  try {
-                    double seconds = Double.parseDouble(value.trim());
-                    return seconds >= 0 && Double.isFinite(seconds) ? Duration.ofMillis((long) (seconds * 1000)) : null;
-                  } catch (NumberFormatException e) {
-                    return null;
-                  }
-                })
-            .orElse(null);
+        response.headers().firstValue("Retry-After").map(value -> retryAfter(value, Instant.now())).orElse(null);
     return new SlotlockException(status, code, retryAfter);
+  }
+
+  /** Retry-After in seconds or as an HTTP date, at most a day; anything else is null. */
+  static Duration retryAfter(String value, Instant now) {
+    String trimmed = value.trim();
+    if (SECONDS.matcher(trimmed).matches()) {
+      BigDecimal seconds = new BigDecimal(trimmed);
+      if (seconds.compareTo(BigDecimal.valueOf(MAX_RETRY_AFTER.getSeconds())) >= 0) return MAX_RETRY_AFTER;
+      return Duration.ofNanos(seconds.movePointRight(9).longValue());
+    }
+    Matcher date = HTTP_DATE.matcher(trimmed);
+    if (!date.matches()) return null;
+    try {
+      Instant when = LocalDateTime.parse(date.group(1), HTTP_DATE_TIME).toInstant(ZoneOffset.UTC);
+      Duration wait = Duration.between(now, when);
+      if (wait.isNegative()) return Duration.ZERO;
+      return wait.compareTo(MAX_RETRY_AFTER) > 0 ? MAX_RETRY_AFTER : wait;
+    } catch (DateTimeParseException e) {
+      return null;
+    }
   }
 
   private static String queryValue(String name, Object value) {

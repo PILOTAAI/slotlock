@@ -22,13 +22,21 @@ None is on PyPI, the Go module proxy's tagged versions, crates.io, Maven Central
   (`slotlock key create "Booking site" --scope read,write,admin`).
 - **Errors.** A refusal carries the HTTP status and the server's code: `409 overlap` for a taken
   window, `428 confirmation_required` for a write that waits for a person, `404 resource_not_found`,
-  `403 forbidden` for a key without the scope. `retry_after` comes with a 429 or 503 that says how
-  long to wait.
+  `403 forbidden` for a key without the scope, `http_<status>` when the answer has no code (a
+  non-JSON error page, an empty body). `retry_after` comes with a 429 or 503 whose `Retry-After`
+  says how long to wait, in seconds or as an HTTP date (`Wed, 21 Oct 2015 07:28:00 GMT`, read as
+  the time left, never below zero); either is capped at a day, and any other value is no wait.
 - **Null clears.** An optional argument that may be null (`update_event`'s title, description,
   location, organizer and recurrence rule) has three states: left out keeps the value, null clears
-  it, a value sets it.
-- **Safe defaults.** Plain HTTP is refused except to `localhost`, since it would send the key
-  unencrypted. A client never prints its key.
+  it, a value sets it. A required one that may be null (`rules`) sends null or a value, which differ:
+  null is the server's default hours, `[]` is never bookable.
+- **Safe defaults.** Plain HTTP is refused except to `localhost`, `127.0.0.1` and `::1`, since it
+  would send the key unencrypted. With the HTTP client it makes itself, a client for one of those
+  reaches it directly, never through a proxy from the environment; elsewhere each platform's usual
+  proxy settings apply. No redirect is followed: a 3xx is a refusal (`http_302`), so the key goes
+  with no other request. A path argument of `.` or `..` is refused before any request, since the
+  server would read it as a path segment. The timeout covers the whole call, the response body
+  included. A client never prints its key.
 
 ## Generated from the server
 
