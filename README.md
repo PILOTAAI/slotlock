@@ -770,6 +770,11 @@ curl -X PUT "http://localhost:8080/v1/reservations/BK-42" \
 
 ## Connect an agent
 
+MCP and A2A are wire protocols, so an agent in any language connects with its own MCP or A2A client
+to `/mcp` or `/a2a`, the API key as a bearer token. The examples below use TypeScript. Code that
+calls Slotlock directly, without an agent, can use the [REST clients](clients/README.md) for
+Python, Go, Rust, Java and .NET.
+
 ### MCP (any client)
 
 <!-- example: examples/mcp-client.ts#mcp -->

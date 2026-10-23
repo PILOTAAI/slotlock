@@ -7,6 +7,11 @@ A Slotlock server answers MCP at `{base}/mcp` and A2A at `{base}/a2a`, with a be
 server's own, or an [API key](/docs/keys/) per agent. The examples use the
 [Quickstart](/docs/quickstart/) server, `http://localhost:8080`; for your own, use its `https://` URL.
 
+Both are wire protocols, so an agent in any language connects with its own MCP or A2A client. Code
+that calls Slotlock directly, without an agent, can use the
+[REST clients](https://github.com/PILOTAAI/slotlock/blob/main/clients/README.md) for Python, Go,
+Rust, Java and .NET.
+
 ## Editors and coding agents
 
 <!-- include README.md#connect-an-mcp-client body -->
