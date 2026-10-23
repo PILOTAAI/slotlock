@@ -3,6 +3,43 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Added
+
+- The application API: what an application does through the store, over REST from any language.
+  Create resources and set their weekly hours; hold, confirm and release time; book, move and cancel
+  reservations by reference and revision; record external calendar coverage; run maintenance. The
+  routes sit under `/v1` beside the tools, in the same OpenAPI document, and need an API key with the
+  new `admin` scope. They are never MCP tools or A2A skills. `createSlotlockStoreApplicationBackend`
+  serves them from the store; `createSlotlockAgentServer` takes them as `application`.
+- The `admin` API key scope: `slotlock key create <name> --scope read,write,admin`, or "Full" in the
+  dashboard. New keys still default to read and write.
+- Built-in maintenance. `slotlock serve` maintains every tenant it serves, hourly, one at a time,
+  under a per-tenant advisory lock, and logs the counts; `slotlock maintain` runs it once.
+  `maintainSlotlockTenant`, `startSlotlockMaintenance` and `withSlotlockMaintenanceLock` do the
+  same in a process of your own.
+- `confirmHold` and `releaseHold` take `{ tenantRef }`, so another tenant's hold is not found
+  whatever the connection's row-level security.
+- Releases are opened and merged by a GitHub App once it is set up
+  (`node scripts/create-release-app.mjs`), so its checks run without a maintainer approving them.
+
+### Changed
+
+- `slotlock serve` serves REST by default; `SLOTLOCK_REST_API=off` turns it off.
+- Upgrading widens the API key scope constraint in place, and replaces the reservations overlap
+  constraint with one that counts every row's turnaround buffer (below). Expired holds in a buffer's
+  way are removed; while a live hold or untenanted reservation is in one, migrate stops with their
+  ids and changes nothing.
+
+### Fixed
+
+- A hold could take the time a reservation's `bufferAfterMs` keeps busy, and a buffered reservation
+  could be booked over a hold: the buffer bound only tenant-owned reservations to each other.
+- `confirmHold` with the id of a reservation that has an external reference answered as if it had
+  confirmed a hold, describing it without its reference, revision or buffer. It is now
+  `hold_not_found`.
+
 ## 0.1.1 - 2026-10-22
 
 ### Changed

@@ -37,6 +37,7 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
 | --- | --- |
 | `http://localhost:8080/mcp` | MCP, with `Authorization: Bearer <SLOTLOCK_AUTH_TOKEN>` |
 | `http://localhost:8080/a2a` | A2A 1.0, same token; card at `/.well-known/agent-card.json` |
+| `http://localhost:8080/v1/…` | [REST](#rest-and-openapi): the tools, and the [application API](#application-api) for admin keys; described at `/openapi.json` |
 | `http://localhost:8080/healthz` | Readiness, including the database |
 
 - The server runs as a role that owns nothing and cannot bypass row-level security; a one-off
@@ -85,6 +86,7 @@ Give each agent its own key instead of sharing the server token:
 ```sh
 slotlock key create "Booking agent"
 slotlock key create "Availability bot" --scope read --expires-in-days 90
+slotlock key create "Booking site" --scope read,write,admin
 slotlock key list
 slotlock key rotate <id>
 slotlock key revoke <id>
@@ -92,8 +94,8 @@ slotlock key revoke <id>
 
 - A key (`slk_…`) is shown once and stored only as a SHA-256. Send it as `Authorization: Bearer`.
 - It acts in the tenant it was created for (`SLOTLOCK_TENANT`), so one server serves many tenants.
-- `read` covers the five tools that only look; `write` covers create, update and delete. Default:
-  both.
+- `read` covers the five tools that only look; `write` covers create, update and delete; `admin`
+  covers the [application API](#application-api), which no agent needs. Default: read and write.
 - `rotate` keeps the key's id, scopes and bookings; `revoke` stops it on its next request.
 - A tenant may hold 100 active keys. The last six characters are a checksum secret scanners can
   verify offline.
@@ -687,8 +689,8 @@ never cached. W3C `traceparent`, `tracestate` and `baggage` reach your backend a
 
 ### REST and OpenAPI
 
-`rest: true` (`SLOTLOCK_REST_API=on` for `slotlock serve`) also serves each tool as plain HTTP,
-described by an OpenAPI 3.1 document at `/openapi.json`:
+`rest: true` also serves each tool as plain HTTP, described by an OpenAPI 3.1 document at
+`/openapi.json`. `slotlock serve` has it on; `SLOTLOCK_REST_API=off` turns it off.
 
 | Request | Tool |
 | --- | --- |
@@ -706,11 +708,51 @@ curl "http://localhost:8080/v1/resources" -H "Authorization: Bearer $SLOTLOCK_AP
 ```
 
 - `GET` and `DELETE` take the tool's arguments as query parameters (a list repeats:
-  `resource_ids=a&resource_ids=b`); `POST` and `PATCH` take a JSON body. The event id is in the path.
+  `resource_ids=a&resource_ids=b`); `POST`, `PUT` and `PATCH` take a JSON body. Ids are in the path;
+  percent-encode one that holds `/`.
 - Keys, scopes, `authorize` and the rate limit apply as over MCP. The body is the tool's output, or
   `{"error":{"code":…}}` with the matching HTTP status.
 - REST cannot ask a person, so a write listed in `confirmation` answers `428 confirmation_required`.
 - There are no CORS headers: call it from a server, not a browser.
+- From another language, generate a client from `/openapi.json` with any OpenAPI 3.1 generator.
+
+### Application API
+
+What the application around the agents does, from any language: the store's resource, hours, hold,
+reservation, coverage and maintenance calls, as REST beside the tools. It needs a key with the
+`admin` scope ("Full" in the dashboard). It is never an MCP tool or an A2A skill, and never waits for
+a confirmation.
+
+| Request | Does |
+| --- | --- |
+| `POST /v1/resources` | Create the resource with this `external_ref`, or update its `timezone` |
+| `GET /v1/resources/{resource_id}` | One resource, with its own weekly hours |
+| `PUT /v1/resources/{resource_id}/availability` | Its own weekly hours; `[]` never bookable, `null` the server's |
+| `PUT /v1/availability` | Every resource's weekly hours at once |
+| `POST /v1/holds` | Hold a window for `ttl_seconds` (up to 7 days) |
+| `POST /v1/holds/{hold_id}/confirm` | Turn the hold into a reservation |
+| `DELETE /v1/holds/{hold_id}` | Release the hold |
+| `PUT /v1/reservations/{reservation_ref}` | Book (`revision: 1`) or move (the current revision plus 1) |
+| `DELETE /v1/reservations/{reservation_ref}?revision=…` | Cancel, at the current revision plus 1 |
+| `PUT /v1/resources/{resource_id}/coverage/{source}` | Record that `source`'s events are complete for a window |
+| `POST /v1/maintenance` | Run [maintenance](#operations) for the key's tenant |
+
+```sh
+curl -X PUT "http://localhost:8080/v1/reservations/BK-42" \
+  -H "Authorization: Bearer $SLOTLOCK_ADMIN_KEY" -H "Content-Type: application/json" \
+  -d '{"resource_id":"<id>","start":"2027-03-29T09:00:00Z","end":"2027-03-31T09:00:00Z",
+       "buffer_after_minutes":60,"revision":1}'
+```
+
+- A taken window answers `409 overlap`. `buffer_after_minutes` keeps the time after a reservation
+  busy for holds and other reservations alike.
+- Every write is safe to retry: the same reservation at its current revision answers
+  `replayed: true`, a confirmed hold confirms again, and a cancelled reference stays cancelled (a
+  late booking for it answers `409`).
+- The tenant is the key's. Another tenant's resource or hold is `404`, whatever the database role.
+- With the library, pass `application` beside `rest: true`:
+  `{ backend: createSlotlockStoreApplicationBackend(store, { maxTenantResources }), authorize }`.
+  A principal with `scopes` needs `admin`; then `authorize` decides.
 
 ## Connect an agent
 
@@ -878,62 +920,37 @@ and never writes.
 
 ## Operations
 
-Run this at least daily for every tenant:
+Every tenant needs maintenance at least daily: it extends recurring events to the rolling horizon
+and prunes what the retention window no longer needs, which is what returns agent quota.
+
+- `slotlock serve` maintains `SLOTLOCK_TENANT` when it starts and every tenant whose key it serves,
+  then each hourly, one tenant at a time. It logs a `maintenance` line with counts.
+- `slotlock maintain` runs one tenant's maintenance now, for cron or after a bulk import. An admin
+  key can call `POST /v1/maintenance`.
+- Each pass holds a per-tenant PostgreSQL advisory lock, so servers and cron jobs never repeat each
+  other's work; a pass that finds the lock taken does nothing.
+
+In a process of your own:
 
 <!-- example: examples/maintenance.ts#maintenance -->
 ```ts
-import {
-  type CalendarHorizonRollCursor,
-  type CalendarHorizonRollResult,
-  type SlotlockStore,
-  calendarEventRollingHorizon,
-} from 'slotlock';
-
-const MAX_BATCHES = 10;
+import { type SlotlockStore, maintainSlotlockTenant } from 'slotlock';
 
 export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
-  const window = calendarEventRollingHorizon();
-  let extended = 0;
-  let conflicts = 0;
-  let refused = 0;
-  let horizonCapped = true;
-  let after: CalendarHorizonRollCursor | null = null;
-  for (let batch = 0; batch < MAX_BATCHES; batch++) {
-    const from = after;
-    const roll: CalendarHorizonRollResult = await store.withTenant(tenantRef, (tenant) =>
-      tenant.rollCalendarEventHorizon({ tenantRef, window, ...(from ? { after: from } : {}) }),
-    );
-    extended += roll.extended;
-    conflicts += roll.conflicts;
-    refused += roll.refused;
-    after = roll.next;
-    if (!after) {
-      horizonCapped = false;
-      break;
-    }
-  }
-
-  let pruned = 0;
-  let retentionCapped = true;
-  for (let batch = 0; batch < MAX_BATCHES; batch++) {
-    const prune = await store.withTenant(tenantRef, (tenant) =>
-      tenant.pruneCalendarEventRetention({ tenantRef }),
-    );
-    pruned += prune.commandsDeleted + prune.tombstonesDeleted;
-    if (!prune.hasMore) {
-      retentionCapped = false;
-      break;
-    }
-  }
-  return { extended, conflicts, refused, pruned, capped: horizonCapped || retentionCapped };
+  // Extends recurring events to the rolling horizon, then prunes past the retention window, each in
+  // at most ten batches. `capped: true` means work was left: run another pass.
+  return maintainSlotlockTenant(store, tenantRef, { batches: 10 });
 }
 ```
 
-- **Run maintenance at least daily for every tenant.** Forced RLS hides other tenants from the
-  application role, so iterate your own tenant list.
-- **Page the roll with `next`.** Pass each batch's `next` as `after` to the next batch of the same
-  pass. A series left in conflict or refused keeps its place at the front of the order, so without
-  `after` every later batch would examine it again.
+- **Every tenant.** Forced RLS hides other tenants from the application role, so iterate your own
+  tenant list. `startSlotlockMaintenance({ store, sql, tenants, intervalMs })` is the scheduler
+  `serve` uses, lock included; `withSlotlockMaintenanceLock` is the lock alone.
+- **Capped passes.** A capped pass that extended and pruned nothing met only series it cannot extend
+  (counted in `conflicts` and `refused`): another pass would too, so wait for the next interval.
+- **Paging the roll yourself.** `rollCalendarEventHorizon` returns `next`; pass it as `after` to the
+  next batch of the same pass. A series left in conflict or refused keeps its place at the front of
+  the order, so without `after` every later batch would examine it again.
 - **Quotas.** Each agent principal may retain 1,000 event identities (active plus cancelled) and
   10,000 idempotency commands, of which 9,000 can be creates or updates, so a cancel always has
   room. Adjust with `agentOwnerEventQuota` and `agentOwnerCommandQuota` on `createSlotlockStore`.

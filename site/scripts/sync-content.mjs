@@ -122,8 +122,10 @@ const SITE_LINKS = {
 
 /** README in-page anchors whose section lives on another docs page (postbuild checks every link). */
 const ANCHORS = {
+  '#application-api': '/docs/reference/#application-api',
   '#confirm-before-writing': '/docs/security/#confirmation-before-writes',
   '#operations': '/docs/security/#quotas-and-retention',
+  '#rest-and-openapi': '/docs/reference/#rest-and-openapi',
 };
 
 /** Rewrite repository-relative links so they work on slotlock.pylota.io. */
