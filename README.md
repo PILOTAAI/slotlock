@@ -713,10 +713,16 @@ never cached. W3C `traceparent`, `tracestate` and `baggage` reach your backend a
   A2A `SendMessage`; `outcome` is `ok`, the refusal's code (`overlap`, `rate_limited`, …), or why
   it was refused before it ran: `invalid_arguments`, `missing_capability` (a guarded write from a
   client that cannot confirm), `invalid_message` or `invalid_message_parameters` (A2A).
-- `{ type: 'rest', operation, status, durationMs, traceId? }` for a REST call.
+- `{ type: 'rest', operation, status, durationMs, traceId? }` for a REST call, or one refused before
+  it ran: a body that is not JSON (415, 400), too large (413) or not an object (400).
+- `{ type: 'confirmation', operation, outcome }` for each confirmation, before the call it decides.
+- A request refused before its operation is read is not reported: a missing credential, the rate
+  limit, an `A2A-Version` other than 1.0, a JSON-RPC envelope that does not parse, a path no route
+  has.
 - `traceId` is the trace id of a valid `traceparent` from `_meta` or the header. Arguments, callers,
-  the parent span, `tracestate` and `baggage` are never reported, and a throwing `onEvent` changes
-  nothing a client sees. Resource reads and subscription polls are not reported.
+  the parent span, `tracestate` and `baggage` are never reported, and an `onEvent` or `onError` that
+  throws, or returns a promise that rejects, changes nothing a client sees. Resource reads and
+  subscription polls are not reported.
 
 `slotlock serve` writes each as a JSON line (`"event":"call"`, `duration_ms`, `trace_id`).
 

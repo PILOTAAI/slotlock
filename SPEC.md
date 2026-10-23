@@ -141,9 +141,11 @@ that revision's order, each failure HTTP 400: a missing or malformed `_meta` fie
 `MCP-Protocol-Version`, `Mcp-Method` or (Base64-sentinel-decoded) `Mcp-Name` that disagrees with the
 body is `-32020`, and an unimplemented revision is `-32022` naming the supported ones. An
 unimplemented method is HTTP 404 `-32601`; a rate-limited request is HTTP 429 `-31029`, outside the
-`-32020`..`-32099` range that revision reserves. A2A: every JSON-RPC error travels
-in an HTTP 200 envelope with a `google.rpc.ErrorInfo` detail; an `A2A-Version` other than `1.0`,
-including none (read as 0.3), is `VersionNotSupportedError` (`-32009`); push-notification methods are
+`-32020`..`-32099` range that revision reserves. A2A: every JSON-RPC error travels in an HTTP 200
+envelope (a body over the size limit is HTTP 413); A2A's own errors, below, carry a
+`google.rpc.ErrorInfo` detail and JSON-RPC's (`-32700`, `-32600`, `-32601`, `-32603`) none. An
+`A2A-Version` other than `1.0`, including none (read as 0.3), is `VersionNotSupportedError`
+(`-32009`); push-notification methods are
 `PushNotificationNotSupportedError` (`-32003`); streaming, task subscription and the extended card
 are `UnsupportedOperationError` (`-32004`); a message that is not exactly one data part
 `{"skill": "<id>", "arguments": {…}}` (`arguments` left out or null is none; any other value that is

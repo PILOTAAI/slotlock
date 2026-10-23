@@ -16,6 +16,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
 import type { Sql } from 'postgres';
 import type { SlotlockApiKey, SlotlockApiKeyScope, SlotlockApiKeyStore } from './api-keys.js';
 import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from './ddl.js';
+import { ignoreRejection } from './hooks.js';
 import type { SlotlockSql, SlotlockStore } from './store.js';
 import type { SlotlockResource, WeeklyAvailabilityRule } from './types.js';
 import {
@@ -160,7 +161,10 @@ export interface SlotlockDashboardOptions {
   availability?: readonly WeeklyAvailabilityRule[];
   fetch?: typeof fetch;
   now?: () => number;
-  /** Called with whatever a request handler throws; the person sees a generic error page. */
+  /**
+   * Called with whatever a request handler throws; the person sees a generic error page. Not
+   * awaited; what it throws, or its promise rejects with, is ignored.
+   */
   onError?: (error: unknown) => void;
 }
 
@@ -577,7 +581,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
 
   function report(message: string): void {
     try {
-      options.onError?.(new Error(message));
+      ignoreRejection(options.onError?.(new Error(message)));
     } catch {
       // A failing reporter must not change the response.
     }
@@ -1370,7 +1374,7 @@ ${
         );
       } catch (error) {
         try {
-          options.onError?.(error);
+          ignoreRejection(options.onError?.(error));
         } catch {
           // A failing reporter must not change the response.
         }

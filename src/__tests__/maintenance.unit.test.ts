@@ -12,6 +12,9 @@ import {
 import type { SlotlockStore } from '../store.js';
 import type { CalendarEventRetentionResult, CalendarHorizonRollResult } from '../types.js';
 
+// The timers a test runs on, before startSlotlockMaintenance's tests fake them.
+const realSetTimeout = globalThis.setTimeout;
+
 const DONE_ROLL: CalendarHorizonRollResult = {
   examined: 0,
   extended: 0,
@@ -325,6 +328,48 @@ describe('startSlotlockMaintenance', () => {
     await vi.advanceTimersByTimeAsync(30 * 60_000);
     expect(onError).toHaveBeenCalledTimes(1);
     await scheduler.close();
+  });
+
+  it('lets a reporter that throws or rejects change nothing', async () => {
+    const unhandled: unknown[] = [];
+    const record = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', record);
+    try {
+      const fake = fakeStore();
+      fake.fail('broken', new Error('connection reset'));
+      const onError = vi.fn(async () => {
+        throw new Error('the logger is down');
+      });
+      // The first pass's report throws, the second's rejects.
+      const onPass = vi
+        .fn()
+        .mockImplementationOnce(() => {
+          throw new Error('the metrics sink is down');
+        })
+        .mockImplementationOnce(async () => {
+          throw new Error('the metrics sink is down');
+        });
+      const scheduler = startSlotlockMaintenance({
+        store: fake.store,
+        sql: fakeSql().sql,
+        tenants: ['fine', 'broken', 'also-fine'],
+        intervalMs: HOUR,
+        onPass,
+        onError,
+      });
+      await settle();
+      await new Promise((resolve) => realSetTimeout(resolve, 20));
+      // Only the pass that failed is reported as failed.
+      expect({
+        passes: onPass.mock.calls.length,
+        failures: onError.mock.calls.length,
+        maintained: tenantsMaintained(fake),
+        unhandled,
+      }).toEqual({ passes: 2, failures: 1, maintained: ['fine', 'also-fine'], unhandled: [] });
+      await scheduler.close();
+    } finally {
+      process.off('unhandledRejection', record);
+    }
   });
 
   it('skips a tenant another server is maintaining until the next interval', async () => {

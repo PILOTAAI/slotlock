@@ -5,6 +5,7 @@
 // other's work. Row-level security hides other tenants from the role a server runs as, so a server
 // maintains the tenants it is configured with and the ones whose keys it has served.
 import type { Sql } from 'postgres';
+import { ignoreRejection } from './hooks.js';
 import { type SlotlockStore, calendarEventRollingHorizon } from './store.js';
 import type { CalendarHorizonRollCursor, CalendarHorizonRollResult } from './types.js';
 
@@ -121,9 +122,12 @@ export interface SlotlockMaintenanceSchedulerOptions {
   maxTenants?: number;
   /** Batches of each task per pass (maintainSlotlockTenant). */
   batches?: number;
-  /** A pass that ran: counts only, never the tenant. */
+  /** A pass that ran: counts only, never the tenant. Not awaited; what it throws is ignored. */
   onPass?: (result: SlotlockMaintenanceResult) => void;
-  /** A pass that failed. The scheduler carries on with the next tenant. */
+  /**
+   * A pass that failed. The scheduler carries on with the next tenant. Not awaited; what it throws,
+   * or its promise rejects with, is ignored.
+   */
   onError?: (error: unknown) => void;
 }
 
@@ -174,7 +178,11 @@ export function startSlotlockMaintenance(
           );
           recordPass(tenantRef, Date.now());
           if (result) {
-            options.onPass?.(result);
+            try {
+              ignoreRejection(options.onPass?.(result));
+            } catch {
+              // Reporting must never stop maintenance, or make a pass that ran look failed.
+            }
             // A capped pass that got somewhere goes round again at once; one that only met series it
             // cannot extend waits for the next interval rather than examine them again and again.
             again = result.capped && result.extended + result.pruned > 0;
@@ -183,7 +191,7 @@ export function startSlotlockMaintenance(
           if (controller.signal.aborted) return;
           recordPass(tenantRef, Date.now());
           try {
-            options.onError?.(error);
+            ignoreRejection(options.onError?.(error));
           } catch {
             // Reporting must never stop maintenance.
           }

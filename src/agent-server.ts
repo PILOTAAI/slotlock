@@ -35,6 +35,7 @@ import {
   isSlotlockApplicationOperation,
   slotlockApplicationOperation,
 } from './application-api.js';
+import { ignoreRejection } from './hooks.js';
 import { slotlockPackageVersion } from './package-version.js';
 import {
   SLOTLOCK_APPLICATION_REST_ROUTES,
@@ -513,11 +514,14 @@ export type SlotlockAgentServerEvent =
         | 'unavailable';
     }
   | {
-      /** A REST call that reached an operation, and the HTTP status it answered. */
+      /**
+       * A REST call that named an operation, and the HTTP status it answered: run, or refused before
+       * it ran (a body that is not JSON, too large or not an object).
+       */
       type: 'rest';
       operation: SlotlockAgentOperation | SlotlockApplicationOperation;
       status: number;
-      /** How long the operation ran, in milliseconds to a tenth. */
+      /** How long the call took from naming its operation, in milliseconds to a tenth. */
       durationMs: number;
       /** The W3C trace id of the call's valid `traceparent`, when it carried one. */
       traceId?: string;
@@ -601,16 +605,17 @@ export interface SlotlockAgentServerOptions {
    */
   subscriptions?: SlotlockAgentSubscriptionOptions | false;
   /**
-   * Observe confirmations and subscriptions (counts and outcomes, no arguments or identities) for
-   * metrics or audit. It runs synchronously and whatever it throws is ignored.
+   * Observe calls, confirmations and subscriptions (counts and outcomes, no arguments or
+   * identities) for metrics or audit. It is not awaited, and whatever it throws, or its promise
+   * rejects with, is ignored.
    */
   onEvent?: (event: SlotlockAgentServerEvent) => void;
   /**
    * Called with a failure no client is told about: an operation's backend threw something other
    * than a `SlotlockAgentOperationError`, or returned a result outside the operation's schema. The
    * client gets `internal_error` and nothing more, so log it here to find out why. It receives the
-   * error and the operation, never the arguments or the request; it runs synchronously and whatever
-   * it throws is ignored.
+   * error and the operation, never the arguments or the request. It is not awaited, and whatever it
+   * throws, or its promise rejects with, is ignored.
    */
   onError?: (error: unknown, context: SlotlockAgentErrorContext) => void;
 }
@@ -1401,6 +1406,7 @@ export async function invokeSlotlockAgentOperation(args: {
   }
 }
 
+
 /** Hand an unexpected failure to `onError`; nothing it does can change the protocol answer. */
 function reportUnexpected(
   onError: SlotlockAgentOperationDispatchOptions['onError'],
@@ -1408,7 +1414,7 @@ function reportUnexpected(
   operation: SlotlockAgentOperation | SlotlockApplicationOperation | null,
 ): void {
   try {
-    onError?.(error, { operation });
+    ignoreRejection(onError?.(error, { operation }));
   } catch {
     // Observability must never change what a protocol client receives.
   }
@@ -2557,7 +2563,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
   const confirmation = validateConfirmation(options.confirmation);
   const emit = (event: SlotlockAgentServerEvent): void => {
     try {
-      options.onEvent?.(event);
+      ignoreRejection(options.onEvent?.(event));
     } catch {
       // Observability must never change what a protocol client receives.
     }
@@ -2725,6 +2731,8 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
           operation,
           argsDigest: gate.argsDigest,
         });
+        // Before the call it decides, as on every other protocol.
+        emit({ type: 'confirmation', operation, outcome: CONFIRMATION_OUTCOME[gate.decision] });
         return gate.decision === 'accepted' ? null : CONFIRMATION_HALT[gate.decision];
       };
     }
@@ -2735,9 +2743,6 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       options: dispatch,
       ...(call.trace ? { trace: call.trace } : {}),
     });
-    if (gate.decision) {
-      emit({ type: 'confirmation', operation, outcome: CONFIRMATION_OUTCOME[gate.decision] });
-    }
     if (
       confirmation &&
       (gate.decision === 'prompt' || gate.decision === 'expired') &&
@@ -3292,19 +3297,34 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     }
     if ('invalid' in match) return refuse(400, 'invalid_arguments');
     const { route, params } = match;
+    const trace = traceContextFrom(undefined, request.headers);
+    const started = performance.now();
+    const report = (status: number): void =>
+      emit({
+        type: 'rest',
+        operation: route.operation,
+        status,
+        durationMs: elapsedMs(started),
+        ...(trace ? { traceId: traceIdOf(trace) } : {}),
+      });
+    // A call refused before its operation runs is reported as one that ran, as on MCP and A2A.
+    const refuseCall = (status: number, code: string): Response => {
+      report(status);
+      return refuse(status, code);
+    };
     let given: Record<string, unknown>;
     if (restInputFromBody(route)) {
       if (!isJsonMediaType(request.headers.get('content-type'))) {
-        return refuse(415, 'unsupported_media_type');
+        return refuseCall(415, 'unsupported_media_type');
       }
       let body: unknown;
       try {
         body = await readJson(request, config.maxRequestBytes);
       } catch (error) {
         const tooLarge = error instanceof Error && error.message === 'request_too_large';
-        return refuse(tooLarge ? 413 : 400, tooLarge ? 'request_too_large' : 'invalid_json');
+        return refuseCall(tooLarge ? 413 : 400, tooLarge ? 'request_too_large' : 'invalid_json');
       }
-      if (!isRecord(body)) return refuse(400, 'invalid_arguments');
+      if (!isRecord(body)) return refuseCall(400, 'invalid_arguments');
       given = body;
     } else {
       given = restQueryInput(
@@ -3314,10 +3334,8 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     }
     // The path names the event; the body or query may not name another.
     if (Object.keys(params).some((name) => Object.hasOwn(given, name))) {
-      return refuse(400, 'invalid_arguments');
+      return refuseCall(400, 'invalid_arguments');
     }
-    const trace = traceContextFrom(undefined, request.headers);
-    const started = performance.now();
     const outcome = isSlotlockApplicationOperation(route.operation)
       ? await invokeApplicationOperation(
           slotlockApplicationOperation(route.operation),
@@ -3335,13 +3353,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
         });
     const internal = !outcome.ok && INTERNAL_FAILURES.has(outcome.code);
     const status = outcome.ok ? 200 : internal ? 500 : outcome.status;
-    emit({
-      type: 'rest',
-      operation: route.operation,
-      status,
-      durationMs: elapsedMs(started),
-      ...(trace ? { traceId: traceIdOf(trace) } : {}),
-    });
+    report(status);
     if (outcome.ok) return json(200, outcome.data);
     return refuse(status, internal ? 'internal_error' : outcome.code);
   }

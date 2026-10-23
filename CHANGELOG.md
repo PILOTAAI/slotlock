@@ -109,8 +109,11 @@ versioning.
   now `-32602` on MCP and an invalid message on A2A. Left out or null is still none.
 - A rate-limited A2A request was answered with an MCP error over HTTP 429; it is now A2A's 200
   envelope with a `RATE_LIMITED` ErrorInfo. `Content-Type` is matched without regard to case.
-- Calls refused before they ran (a client that cannot confirm, a malformed A2A message) were not
-  reported to `onEvent`.
+- Calls refused before they ran (a client that cannot confirm, a malformed A2A message, a REST body
+  that is not JSON, too large or not an object) were not reported to `onEvent`. On MCP 2026-07-28
+  a confirmation was reported after the call it decided; it now comes first, as elsewhere.
+- An async `onEvent`, `onError` or maintenance `onPass` that rejected was an unhandled rejection,
+  which ends a Node process by default; an `onPass` that threw made a pass that ran count as failed.
 - A hold could take the time a reservation's `bufferAfterMs` keeps busy, and a buffered reservation
   could be booked over a hold: the buffer bound only tenant-owned reservations to each other.
 - `confirmHold` with the id of a reservation that has an external reference answered as if it had
