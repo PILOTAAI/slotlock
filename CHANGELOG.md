@@ -53,6 +53,21 @@ versioning.
   `invalid_icalendar`; a document whose root is not a VCALENDAR read as an empty calendar.
 - The 4,000 occurrences a series may pass from its start were shared by every series in a feed, so
   three daily series begun in 2023 refused it for good.
+- A request body sent without `Content-Length` (chunked) was read whole before the size limit
+  applied, so any key holder could make the server hold gigabytes. It is refused as soon as it
+  passes `maxRequestBytes`. The Node adapter no longer aborts a request whose body the server stops
+  reading; it discards the rest once it has answered.
+- `close()` while the Node adapter was still starting left `listen()` pending forever.
+- On the Workers dashboard, `/dashboard/sign-in/` and `/dashboard/callback/` (with a trailing slash)
+  were outside the global sign-in rate limit.
+- The confirmation question for a create did not say that a transparent booking leaves the time
+  free, or name the other fields it sets.
+- `arguments` that were not an object (a string, an array) ran the operation with none; they are
+  now `-32602` on MCP and an invalid message on A2A. Left out or null is still none.
+- A rate-limited A2A request was answered with an MCP error over HTTP 429; it is now A2A's 200
+  envelope with a `RATE_LIMITED` ErrorInfo. `Content-Type` is matched without regard to case.
+- Calls refused before they ran (a client that cannot confirm, a malformed A2A message) were not
+  reported to `onEvent`.
 - A hold could take the time a reservation's `bufferAfterMs` keeps busy, and a buffered reservation
   could be booked over a hold: the buffer bound only tenant-owned reservations to each other.
 - `confirmHold` with the id of a reservation that has an external reference answered as if it had

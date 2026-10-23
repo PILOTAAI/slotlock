@@ -634,10 +634,10 @@ on stderr.
 
 | Where | Error |
 | --- | --- |
-| HTTP | `401` with `WWW-Authenticate`, `403` disallowed origin, `413`/`415` bad body, `429` rate limit |
-| MCP | `-32602` unknown tool or altered confirmation, `-32603` server fault, `-32601` unknown method |
+| HTTP | `401` with `WWW-Authenticate`, `403` disallowed origin, `413`/`415` bad body, `429` rate limit (MCP, REST) |
+| MCP | `-32602` unknown tool, `arguments` that are not an object, or altered confirmation; `-32603` server fault; `-32601` unknown method |
 | MCP 2026-07-28 | `-32020` header disagrees with body, `-32021` form elicitation not declared, `-32022` unsupported revision, `-31029` rate limit |
-| A2A | `-32009` unsupported `A2A-Version`, `-32003` push notifications, `-32004` streaming, `-32001` task not found (the server keeps no tasks) |
+| A2A | `-32602` malformed message or parameters, `-32029` rate limit (`RATE_LIMITED`, in the 200 envelope like every A2A error), `-32009` unsupported `A2A-Version`, `-32003` push notifications, `-32004` streaming, `-32001` task not found (the server keeps no tasks) |
 
 ### Authentication and OAuth discovery
 
@@ -664,6 +664,8 @@ With `confirmation`, a listed write first asks the person a yes/no question that
 will change, such as `Book vehicle-42 for 2027-03-29 10:00–11:00 (Europe/London): "Vehicle
 handover".` Only an explicit yes runs the write.
 
+- A booking that leaves the time free (`transparency: 'transparent'`) says so, and a write names
+  the other fields it sets (`also description, attendees`) without quoting them.
 - Facts come first: the resource by its own reference, times in its own zone, and an event as it
   stands now, read through your backend's `describeResource` and `getEvent` when the caller may
   read them (within 2 seconds in all). Otherwise things are named by id, and each time carries its
@@ -697,7 +699,9 @@ never cached. W3C `traceparent`, `tracestate` and `baggage` reach your backend a
 `onEvent` hears about every call that names an operation, so you can count, time and correlate them:
 
 - `{ type: 'call', protocol, operation, outcome, durationMs, traceId? }` for an MCP `tools/call` or
-  A2A `SendMessage`; `outcome` is `ok` or the refusal's code (`overlap`, `rate_limited`, …).
+  A2A `SendMessage`; `outcome` is `ok`, the refusal's code (`overlap`, `rate_limited`, …), or why
+  it was refused before it ran: `invalid_arguments`, `missing_capability` (a guarded write from a
+  client that cannot confirm), `invalid_message` or `invalid_message_parameters` (A2A).
 - `{ type: 'rest', operation, status, durationMs, traceId? }` for a REST call.
 - `traceId` is the trace id of a valid `traceparent` from `_meta` or the header. Arguments, callers,
   the parent span, `tracestate` and `baggage` are never reported, and a throwing `onEvent` changes
