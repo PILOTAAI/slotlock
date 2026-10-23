@@ -1016,6 +1016,10 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
 8. Keep writes confirmation-gated wherever your policy needs a person.
 9. Size live updates: at most `maxTotal` backend reads per `pollIntervalMs`.
 10. Give each agent its own API key with the narrowest scope and an expiry.
+11. After each deployment, check it end to end with a short-lived admin key, then revoke the key:
+    `SLOTLOCK_URL=https://… SLOTLOCK_ADMIN_KEY=… node scripts/smoke-deployment.mjs` checks health,
+    discovery, MCP, A2A, holds and reservations (in a resource named `slotlock-smoke`, 400 days
+    ahead, cancelled after) and the 401, 409, 413 and 415 refusals.
 
 ## Supported versions
 
