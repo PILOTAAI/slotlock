@@ -73,6 +73,12 @@ versioning.
   version (they said 0.1.0 beside a 0.2.0 server): `scripts/prepare-release.sh` moves them with each
   release and `scripts/check-release-tag.sh` refuses a release where one disagrees.
   `docs/release/clients.md` has each registry's one-time setup.
+- `scripts/check-stage.sh <stage-id>`, which a maintainer runs before `npm stage approve`. Approving
+  publishes the tarball the tag's run built, however old: 0.2.0 went public with zod 4.6.5
+  (GHSA-mrhx-c7xc-m3w5) after `main` had moved past it. The check refuses a stage whose tarball is
+  not the one the release tested, whose dist-tag would move `latest` backwards, or whose runtime
+  dependencies, installed as a consumer would that day, have a high or critical advisory, unless a
+  maintainer names it with `--allow`. The Release run's summary and CONTRIBUTING.md ask for it.
 
 ## 0.2.0 - 2026-10-23
 

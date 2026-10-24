@@ -104,6 +104,14 @@ passed" and "Signed-off-by"): a change whose checks cannot pass is fixed in anot
 first. The npm, `ghcr` and `mcp-registry` environments wait for a maintainer's approval in every
 Release run.
 
+Approving a stage publishes the tarball the tag's run built, however long ago that was. Before
+`npm stage approve`, run `scripts/check-stage.sh <stage-id>` from a checkout, logged in to npm and
+gh. It refuses a stage whose tarball is not the one the release tested (the GitHub release's
+`SHA256SUMS`), whose dist-tag would move `latest` backwards, or whose runtime dependencies, as a
+consumer installs them that day, have a high or critical advisory (`npm audit --omit=dev`). Reject
+such a stage and release a version that fixes it; accept a named advisory with
+`--allow <GHSA id>` only when the release notes say why. It approves nothing itself.
+
 When a run needs a step npm or GitHub keeps for a person (the first npm version, the npm trusted
 publisher, the image's visibility, and the deploy key `tag-release.yml` pushes tags with), the
 failing job names `scripts/bootstrap-release.sh`. One run of it does that step, re-runs the failed

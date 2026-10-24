@@ -187,9 +187,11 @@ jobs:
           stage_id=$(sed -n 's/^+ .* (staged with id \([^)]*\))$/\1/p' stage.log)
           {
             echo "### Staged slotlock@$version on npm (dist-tag $dist_tag)"
-            echo "Approve with two-factor authentication:"
+            echo "Check it again on the day you approve it (CONTRIBUTING.md, Releases), then approve with"
+            echo "two-factor authentication:"
             echo '```'
             echo "npm stage view ${stage_id:-<stage-id from npm stage list slotlock>}"
+            echo "scripts/check-stage.sh ${stage_id:-<stage-id>}"
             echo "npm stage approve ${stage_id:-<stage-id>}"
             echo '```'
             echo "Rejecting it instead (npm stage reject) leaves the tag and the GitHub release this run creates; delete"
