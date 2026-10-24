@@ -79,6 +79,11 @@ versioning.
   not the one the release tested, whose dist-tag would move `latest` backwards, or whose runtime
   dependencies, installed as a consumer would that day, have a high or critical advisory, unless a
   maintainer names it with `--allow`. The Release run's summary and CONTRIBUTING.md ask for it.
+- A public status for hosted Slotlock: `.github/workflows/status.yml` checks the API's `/healthz`
+  and the dashboard every ten minutes from GitHub's runners (`scripts/status-probe.sh`) and keeps an
+  issue labelled `status` open while either is down, closing it when it recovers
+  (`docs/hosted/status.md`). It stays off until the owner sets `SLOTLOCK_STATUS_PROBE` to `on`. A
+  test also keeps every workflow's default token read-only, as OpenSSF Scorecard checks.
 
 ## 0.2.0 - 2026-10-23
 

@@ -91,6 +91,25 @@ describe('pinned dependencies', () => {
   });
 });
 
+describe('token permissions', () => {
+  // OpenSSF Scorecard's Token-Permissions check: a workflow's default token reads at most, and each
+  // job asks for the writes it needs.
+  it('gives every workflow a top-level permissions block that grants no write', () => {
+    expect(workflows.length).toBeGreaterThanOrEqual(12);
+    for (const { file, text } of workflows) {
+      const block = /^permissions:(.*)\n((?:[ \t]+.*\n)*)/m.exec(text);
+      expect(block, `${file} has no top-level permissions`).not.toBeNull();
+      const [, inline = '', nested = ''] = block ?? [];
+      if (inline.trim()) {
+        expect(['{}', 'read-all'], file).toContain(inline.trim());
+      } else {
+        const entries = nested.split('\n').filter((line) => line.trim() && !/^\s*#/.test(line));
+        for (const line of entries) expect(line.trim(), file).toMatch(/^[\w-]+: read$/);
+      }
+    }
+  });
+});
+
 describe('MCP Registry entry', () => {
   it('names the server the image is labelled with, at the package version', () => {
     const label = /io\.modelcontextprotocol\.server\.name="([^"]+)"/.exec(read('Dockerfile'))?.[1];
