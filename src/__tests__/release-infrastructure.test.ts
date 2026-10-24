@@ -2101,29 +2101,50 @@ describe('dependency updates', () => {
     }
   });
 
-  it('installs no undici in the range of GHSA-xjj6-f33q-929c (high), in any lockfile', () => {
-    // The advisory's vulnerable ranges (gh api /advisories/GHSA-xjj6-f33q-929c, 2026-10-24).
-    const vulnerable = (version: string) => {
-      const [major = 0, minor = 0, patch = 0] = version.split('.').map(Number);
-      const at = major * 1e6 + minor * 1e3 + patch;
-      return (
-        (at >= 6_023_000 && at < 6_029_001) ||
-        (at >= 7_018_000 && at < 7_030_001) ||
-        (at >= 8_000_000 && at < 8_012_002)
-      );
+  it('installs no version Scorecard reported vulnerable on 2026-10-24, in any lockfile', () => {
+    // Scorecard's Vulnerabilities check named these advisories; their vulnerable ranges are from
+    // gh api /advisories/<id> (2026-10-24), as [from, to) pairs of major.minor.patch.
+    const advisories: Record<string, [string, string, string][]> = {
+      undici: [
+        ['GHSA-xjj6-f33q-929c', '6.23.0', '6.29.1'],
+        ['GHSA-xjj6-f33q-929c', '7.18.0', '7.30.1'],
+        ['GHSA-xjj6-f33q-929c', '8.0.0', '8.12.2'],
+        ['GHSA-4qv8-2p9j-2685', '6.5.0', '6.29.1'],
+        ['GHSA-4qv8-2p9j-2685', '7.0.0', '7.30.1'],
+        ['GHSA-4qv8-2p9j-2685', '8.0.0', '8.12.2'],
+        ['GHSA-f72v-6w45-q472', '7.15.0', '7.30.1'],
+        ['GHSA-f72v-6w45-q472', '8.0.0', '8.12.2'],
+      ],
+      'body-parser': [
+        ['GHSA-27r3-jxmh-p828', '0.0.0', '1.20.9'],
+        ['GHSA-27r3-jxmh-p828', '2.0.0', '2.4.0'],
+      ],
     };
-    let found = 0;
+    const at = (version: string) => {
+      const [major = 0, minor = 0, patch = 0] = version.split('-')[0]?.split('.').map(Number) ?? [];
+      return major * 1e6 + minor * 1e3 + patch;
+    };
+    const found = new Set<string>();
     for (const dir of holding((file) => file === 'package-lock.json')) {
       const lock = JSON.parse(read(join(dir.slice(1), 'package-lock.json'))) as {
         packages: Record<string, { version?: string }>;
       };
       for (const [path, entry] of Object.entries(lock.packages)) {
-        if (!/(?:^|\/)node_modules\/undici$/.test(path)) continue;
-        found += 1;
-        expect(vulnerable(entry.version ?? ''), `${dir} ${path} ${entry.version}`).toBe(false);
+        const name = /(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)$/.exec(path)?.[1] ?? '';
+        for (const [id, from, to] of advisories[name] ?? []) {
+          found.add(name);
+          const version = at(entry.version ?? '');
+          expect(
+            version >= at(from) && version < at(to),
+            `${dir} ${path} ${entry.version} is in ${id}`,
+          ).toBe(false);
+        }
       }
     }
-    expect(found, 'canary: undici is in the site and dashboard lockfiles').toBeGreaterThanOrEqual(2);
+    expect([...found].sort(), 'canary: both packages are in the lockfiles').toEqual([
+      'body-parser',
+      'undici',
+    ]);
   });
 });
 

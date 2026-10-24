@@ -45,7 +45,9 @@ versioning.
   modules, Gradle, NuGet, pip) as well, and a test fails when a manifest is added without an entry.
   The site's and the dashboard Worker's Wrangler pinned undici 7.29.1 (GHSA-xjj6-f33q-929c, high,
   development tooling only) through miniflare, which Dependabot could not move; both lockfiles now
-  override it to 7.30.1.
+  override it to 7.30.1. The development lockfile moves body-parser (through the A2A SDK's express)
+  from 2.3.0 to 2.4.0, past GHSA-27r3-jxmh-p828; a test keeps every lockfile out of the advisories
+  Scorecard reported.
 - `server.json` (the MCP Registry entry) no longer marks `SLOTLOCK_AUTH_TOKEN` and
   `SLOTLOCK_CONFIRMATION_SECRET` as required: `slotlock serve` runs with API keys alone, and without
   the secret when `SLOTLOCK_CONFIRM_WRITES` is `none`. Its Authorization header takes the token or an
