@@ -108,7 +108,17 @@ protected-resource metadata, when configured, only tells clients where to obtain
 embedder's `authenticate` must verify every token, including its audience. Embedders must provide
 bearer-token verification, per-principal authorization, distributed rate limiting, TLS termination,
 and a readiness check. Do not place provider credentials or raw calendar content in authentication,
-authorization, rate-limit, or health callbacks.
+authorization, rate-limit, or health callbacks. `slotlock serve`, its own embedder, limits requests
+per client address before any credential is looked up, then per key, per tenant and for the whole
+server, caps writes that expand a recurring series and live-update streams per tenant, answers a
+full key-lookup queue as busy rather than unauthenticated, and logs counts of refusals with each
+client as a pseudonym (`SLOTLOCK_LIMITS`, `SLOTLOCK_TRUSTED_PROXY_HEADER`). Its counts are one
+process's: several instances each limit alone.
+
+Write confirmation (MCP 2026-07-28 form elicitation) seals the pending write to the caller, the tool
+and its exact arguments, but the answer comes from the client: Slotlock relies on the MCP client to
+ask its person, and a key holder's own client can answer yes. It keeps an agent from writing unasked;
+it is not an authorization boundary. Scopes and `authorize` decide who may write.
 
 ## API keys and the application API
 

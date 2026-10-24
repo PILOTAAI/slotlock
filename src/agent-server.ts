@@ -465,7 +465,10 @@ export type SlotlockAgentWriteOperation = Extract<
  * A listed write first answers `input_required` with a yes/no form describing the change; it runs
  * only when the client retries with the person's explicit acceptance and the sealed state it was
  * given. Where no confirmation is possible — the 2025 MCP revisions and A2A — a listed write fails
- * with `confirmation_required`, never silently runs.
+ * with `confirmation_required`, never silently runs. The acceptance comes from the client, which a
+ * key holder controls: confirmation keeps an agent from writing unasked, and is not an
+ * authorization boundary (scopes and `authorize` are). Off unless set; `slotlock serve` sets it only
+ * when SLOTLOCK_CONFIRM_WRITES opts in.
  */
 export interface SlotlockAgentConfirmationOptions {
   operations: readonly SlotlockAgentWriteOperation[];
