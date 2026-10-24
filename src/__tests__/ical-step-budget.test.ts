@@ -474,8 +474,8 @@ describe('the step budget on recurrence expansion', () => {
     });
 
     it('refuses a zone whose rule takes slow steps, within the budget, in both parsers', () => {
-      // ical.js expands every day of every year for this rule, which never occurs, to the year
-      // 20000: each year's scan is charged as a hundred steps, so the budget stops it.
+      // ical.js lists every weekday of every year for this rule, which never occurs, to the year
+      // 20000: each year's 365 days are charged as about 190 steps, so the budget stops it.
       const slowZone = zoned(
         'FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30;BYDAY=MO,TU,WE,TH,FR,SA,SU',
         '20261102T090000',
@@ -521,6 +521,62 @@ describe('the step budget on recurrence expansion', () => {
       );
       expect(error).toEqual(refused);
       expect(ms).toBeLessThan(2_500);
+    });
+
+    it('reads an Outlook feed with twenty Windows zones defined from 1601 (ENG-17)', () => {
+      // Outlook and Exchange write each zone's observances from 1 January 1601. ical.js expands
+      // them from there to five years past this one, a year at a time, for every zone the feed
+      // reads a time in: a few microseconds a year for a rule like these.
+      const outlookZone = (name: string, hours: number) => [
+        'BEGIN:VTIMEZONE',
+        `TZID:${name}`,
+        'BEGIN:STANDARD',
+        'DTSTART:16010101T030000',
+        `TZOFFSETFROM:+${String(hours + 1).padStart(2, '0')}00`,
+        `TZOFFSETTO:+${String(hours).padStart(2, '0')}00`,
+        'RRULE:FREQ=YEARLY;INTERVAL=1;BYDAY=-1SU;BYMONTH=10',
+        'END:STANDARD',
+        'BEGIN:DAYLIGHT',
+        'DTSTART:16010101T020000',
+        `TZOFFSETFROM:+${String(hours).padStart(2, '0')}00`,
+        `TZOFFSETTO:+${String(hours + 1).padStart(2, '0')}00`,
+        'RRULE:FREQ=YEARLY;INTERVAL=1;BYDAY=-1SU;BYMONTH=3',
+        'END:DAYLIGHT',
+        'END:VTIMEZONE',
+      ];
+      const zones = Array.from({ length: 20 }, (_, i) => `Fleet ${i} Standard Time`);
+      const outlook = [
+        'BEGIN:VCALENDAR',
+        'VERSION:2.0',
+        'PRODID:-//Microsoft Corporation//Outlook 16.0 MIMEDIR//EN',
+        ...zones.flatMap((name, i) => outlookZone(name, i % 10)),
+        ...zones.flatMap((name, i) => [
+          'BEGIN:VEVENT',
+          `UID:weekly-${i}`,
+          'DTSTAMP:20261010T000000Z',
+          `DTSTART;TZID=${name}:20150105T090000`,
+          `DTEND;TZID=${name}:20150105T100000`,
+          'RRULE:FREQ=WEEKLY;BYDAY=TU',
+          'END:VEVENT',
+          'BEGIN:VEVENT',
+          `UID:monthly-${i}`,
+          'DTSTAMP:20261010T000000Z',
+          `DTSTART;TZID=${name}:20150105T110000`,
+          `DTEND;TZID=${name}:20150105T120000`,
+          'RRULE:FREQ=MONTHLY;BYDAY=1MO',
+          'END:VEVENT',
+        ]),
+        'END:VCALENDAR',
+        '',
+      ].join('\r\n');
+      const changes = parseICalendarChanges(outlook, undefined, WINDOW);
+      const count = (prefix: string) =>
+        changes.filter((change) => change.externalId.startsWith(prefix)).length;
+      // 2026-10-01 to 2027-10-01: 52 Tuesdays and 12 first Mondays, in each of the twenty zones.
+      expect([count('weekly-'), count('monthly-')]).toEqual([20 * 52, 20 * 12]);
+      // In its zone, a Tuesday 09:00 in winter is 09:00 less the zone's standard offset.
+      const first = changes.find((change) => change.externalId === 'weekly-3');
+      expect(first?.start?.toISOString()).toBe('2026-10-06T05:00:00.000Z');
     });
 
     it('refuses a zone whose step is longer than a century', () => {

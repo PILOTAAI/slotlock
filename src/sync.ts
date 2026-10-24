@@ -149,15 +149,41 @@ const MAX_ICAL_INTERVAL: Readonly<Record<string, number>> = {
  * three microseconds for a DAILY rule with BYMONTH and BYMONTHDAY. `ruleDayOfWeek` reads one BYDAY value, which the
  * searches of a month and a week and the checks of a day do for every day and every value they
  * compare. `increment_monthday` walks its days one at a time, about a tenth of a microsecond each.
- * `expand_year_days` is a YEARLY rule's scan of one year for matching days (up to every day of it,
- * about 100 microseconds), which the constructor repeats as far as the year 20000.
+ * `expand_year_days` lists the days of one year a YEARLY rule names, which the constructor repeats
+ * as far as the year 20000: about three microseconds, and an eighth of one for each day it lists
+ * and sorts (`BYMONTH` with 28 `BYMONTHDAY` values, 336 days, about 42). The days of the week
+ * through a whole year, which it filters by month and day of the month, it gets from
+ * `expand_by_day`: about half a microsecond for each day that lists (all seven weekdays filtered
+ * to the 13th, 365 days, about 150). A scan of every day of a month for `BYSETPOS` is charged
+ * through `ruleDayOfWeek`, as a day's check is. Outlook writes every zone's observances from 1601
+ * as `BYMONTH` with one numbered `BYDAY`, so one zone's 430 years cost about 6,000 steps.
  */
-const ICAL_STEP_CHARGES: Readonly<Record<string, (...args: unknown[]) => number>> = {
-  next_second: () => 3,
-  ruleDayOfWeek: () => 1,
-  increment_monthday: (days) => (typeof days === 'number' && days > 0 ? days / 8 : 1),
-  expand_year_days: () => 100,
+const ICAL_STEP_CHARGES: Readonly<Record<string, StepCharge>> = {
+  next_second: { before: () => 3 },
+  ruleDayOfWeek: { before: () => 1 },
+  increment_monthday: {
+    before: (days) => (typeof days === 'number' && days > 0 ? days / 8 : 1),
+  },
+  expand_year_days: {
+    before: () => 3,
+    after: (iterator) => listedDays((iterator as { days?: unknown }).days) / 8,
+  },
+  expand_by_day: { before: () => 0, after: (_iterator, days) => listedDays(days) / 2 },
 };
+
+/**
+ * What one RecurIterator method costs: charged before it runs, from its arguments, and after, from
+ * the days it listed (at most a year's worth, so each call is bounded before it is charged).
+ */
+interface StepCharge {
+  before: (...args: unknown[]) => number;
+  after?: (iterator: unknown, result: unknown) => number;
+}
+
+/** How many days a list holds, or a whole year's when ical.js no longer gives one. */
+function listedDays(days: unknown): number {
+  return Array.isArray(days) ? days.length : 366;
+}
 
 /**
  * The ical.js release a series cursor holds the iterator state of. A cursor is ical.js's own
@@ -1046,8 +1072,10 @@ function budgetedRecurIterator(budget: RecurrenceBudget): typeof ICAL.RecurItera
     const step = inherited[name];
     if (typeof step !== 'function') throw new CalendarContractError('invalid_icalendar');
     own[name] = function (this: unknown, ...args: unknown[]) {
-      budget.charge(cost(...args));
-      return step.apply(this, args);
+      budget.charge(cost.before(...args));
+      const result = step.apply(this, args);
+      if (cost.after) budget.charge(cost.after(this, result));
+      return result;
     };
   }
   return BudgetedRecurIterator;
