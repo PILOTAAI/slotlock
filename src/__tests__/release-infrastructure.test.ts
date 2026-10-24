@@ -180,7 +180,10 @@ describe('Compose quickstart', () => {
   });
 
   it('hands the server every setting serve reads, so .env can set each one', () => {
-    const service = compose.slice(compose.indexOf('\n  slotlock:\n'), compose.indexOf('\nvolumes:'));
+    const service = compose.slice(
+      compose.indexOf('\n  slotlock:\n'),
+      compose.indexOf('\nvolumes:'),
+    );
     const passed = new Set(
       [...service.matchAll(/^ {6}([A-Z][A-Z0-9_]*):/gm)].map(([, name]) => name),
     );
@@ -196,10 +199,15 @@ describe('Compose quickstart', () => {
   it("mounts Postgres's volume where its image keeps the data", () => {
     // From 18 the official image keeps its data in a version directory under /var/lib/postgresql,
     // and refuses to start (exit 1, even on a new empty volume) with a mount at .../data.
-    const service = compose.slice(compose.indexOf('\n  postgres:\n'), compose.indexOf('\n  db-roles:\n'));
+    const service = compose.slice(
+      compose.indexOf('\n  postgres:\n'),
+      compose.indexOf('\n  db-roles:\n'),
+    );
     const major = Number(/image:\s*postgres:(\d+)/.exec(service)?.[1]);
     expect(major, 'canary: the postgres service and its image were found').toBeGreaterThan(0);
-    const mounts = [...service.matchAll(/^\s+-\s*postgres-data:(\S+)\s*$/gm)].map(([, path]) => path);
+    const mounts = [...service.matchAll(/^\s+-\s*postgres-data:(\S+)\s*$/gm)].map(
+      ([, path]) => path,
+    );
     expect(mounts).toEqual([major >= 18 ? '/var/lib/postgresql' : '/var/lib/postgresql/data']);
   });
 
@@ -664,9 +672,16 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
       (request) => request.path.endsWith('/rulesets') && request.body.target === 'tag',
     );
     expect(tags, 'two tag rulesets').toHaveLength(2);
-    for (const { body } of tags) expect(body.conditions?.ref_name.include).toContain('refs/tags/v*');
+    for (const { body } of tags)
+      expect(body.conditions?.ref_name.include).toContain('refs/tags/v*');
     const byRules = (types: string) =>
-      tags.find(({ body }) => body.rules?.map((rule) => rule.type).sort().join() === types)?.body;
+      tags.find(
+        ({ body }) =>
+          body.rules
+            ?.map((rule) => rule.type)
+            .sort()
+            .join() === types,
+      )?.body;
     // A DeployKey bypass names no key (the REST docs: its actor_id "should be null"), so it covers
     // every write deploy key; it is kept to creation, where tag-release.yml needs it.
     expect(byRules('creation')?.bypass_actors).toEqual([
@@ -905,7 +920,9 @@ describe.skipIf(!hasJq)('release bootstrap', () => {
   --version) echo "$STUB_NPM_VERSION" ;;
   'view slotlock@1.2.3 version') [ "$STUB_VERSION_ON_NPM" = 1 ] && echo 1.2.3 || exit 1 ;;
   'view slotlock version') [ "$STUB_PACKAGE_ON_NPM" = 1 ] && echo 1.2.2 || exit 1 ;;
-  'view slotlock dist-tags.latest') [ "$STUB_PACKAGE_ON_NPM" = 1 ] && echo 1.2.2 || exit 1 ;;
+  'view slotlock dist-tags.latest')
+    [ "$STUB_REGISTRY_DOWN" = 1 ] && { echo 'npm error code ECONNRESET' >&2; exit 1; }
+    [ "$STUB_PACKAGE_ON_NPM" = 1 ] && echo 1.2.2 || { echo 'npm error code E404' >&2; exit 1; } ;;
   whoami) echo ada ;;
   'stage list slotlock') printf '%s' "$STUB_STAGED" ;;
   'stage publish '*) echo '+ slotlock@1.2.3 (staged with id stage-1)' ;;
@@ -1043,7 +1060,8 @@ esac`,
     const rerunAt = result.gh.indexOf(rerun(5));
     // Right after a re-run GitHub still shows the finished attempt: it waits for the next one first.
     const attemptAt = result.gh.findIndex(
-      (call, index) => index > rerunAt && call.startsWith('run view 5 ') && call.includes('--json attempt'),
+      (call, index) =>
+        index > rerunAt && call.startsWith('run view 5 ') && call.includes('--json attempt'),
     );
     const watchAt = result.gh.findIndex((call) => call.startsWith('run watch 5 '));
     expect(rerunAt).toBeGreaterThanOrEqual(0);
@@ -1070,9 +1088,9 @@ esac`,
       const result = bootstrap({ STUB_TAG_TYPE: type });
       expect(result.status, `${type}: ${result.stderr}`).toBe(0);
       expect(result.stdout).toContain(`v1.2.3 names ${tagCommit}`);
-      expect(result.gh.some((call) => call.startsWith('api repos/PILOTAAI/slotlock/git/tags/'))).toBe(
-        type === 'tag',
-      );
+      expect(
+        result.gh.some((call) => call.startsWith('api repos/PILOTAAI/slotlock/git/tags/')),
+      ).toBe(type === 'tag');
     }
   });
 
@@ -1081,6 +1099,14 @@ esac`,
     expect(result.gh).toContain('workflow run tag-release.yml --repo PILOTAAI/slotlock --ref main');
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('no Tag release run started for main');
+  });
+
+  it('stages nothing when npm cannot say which version is latest', () => {
+    const result = bootstrap({ STUB_REGISTRY_DOWN: '1' });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('ECONNRESET');
+    expect(result.stderr).toContain('could not choose the dist-tag');
+    expect(result.npm.filter((call) => /^(?:stage|trust) /.test(call))).toEqual([]);
   });
 
   it('stops when Tag release passed without pushing the tag', () => {
@@ -1306,7 +1332,9 @@ describe.skipIf(!hasJq)('release preparation', () => {
     expect([lock.version, lock.packages[''].version]).toEqual(['1.2.4', '1.2.4']);
     // Byte for byte apart from the version: no reformatting rides along.
     expect(contents(repo, 'server.json')).toBe(before.server.replaceAll('1.2.3', '1.2.4'));
-    expect(contents(repo, 'slotlock.manifest.json')).toBe(before.manifest.replace('1.2.3', '1.2.4'));
+    expect(contents(repo, 'slotlock.manifest.json')).toBe(
+      before.manifest.replace('1.2.3', '1.2.4'),
+    );
     expect(contents(repo, 'CHANGELOG.md')).toBe(
       before.changelog.replace('## Unreleased', `## 1.2.4 - ${today}`),
     );
@@ -1334,7 +1362,8 @@ describe.skipIf(!hasJq)('release preparation', () => {
   });
 
   it('orders prereleases below their release and by name', () => {
-    const prepare = (from: string, to: string) => project({}, from).script('prepare-release.sh', to);
+    const prepare = (from: string, to: string) =>
+      project({}, from).script('prepare-release.sh', to);
     for (const [from, to, later] of [
       ['1.2.4-rc.1', '1.2.4', true],
       ['1.2.4-rc.1', '1.2.4-rc.2', true],
@@ -1610,10 +1639,7 @@ esac
   });
 
   it.each([
-    [
-      'a commit someone else made',
-      [{ author: 'Ada <ada@example.com>', message: 'Release 1.2.4' }],
-    ],
+    ['a commit someone else made', [{ author: 'Ada <ada@example.com>', message: 'Release 1.2.4' }]],
     ["another version's release commit", [{ author: bot, message: 'Release 1.2.3' }]],
     [
       'a commit on top of a release commit',
@@ -1627,9 +1653,7 @@ esac
     const left = repo.remote();
     const result = repo.run();
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain(
-      `::error::${branch} holds commits this workflow did not make.`,
-    );
+    expect(result.stderr).toContain(`::error::${branch} holds commits this workflow did not make.`);
     expect(result.stdout).toBe('');
     expect(repo.remote()).toBe(left);
     expect(repo.calls()).toBe('');
@@ -1893,7 +1917,61 @@ describe('release channel', () => {
   it('never names a tag npm would read as a version range', () => {
     // npm dist-tag: "Tags that can be interpreted as valid semver ranges will be rejected."
     const result = channel('0.2.1', '0.3.0');
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe('latest-0.2\n');
     expect(result.stdout.trim()).not.toMatch(/^v?\d+(?:\.\d+)?$/);
+  });
+
+  /** dist-tag.sh <version> --npm, with a stand-in npm that answers `npm view` as given. */
+  function fromRegistry(version: string, npm: string) {
+    const dir = mkdtempSync(join(tmpdir(), 'slotlock-dist-tag-'));
+    scratch.push(dir);
+    writeFileSync(
+      join(dir, 'npm'),
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "${dir}/npm.log"\n${npm}\n`,
+      { mode: 0o755 },
+    );
+    const result = spawnSync('sh', [join(root, 'scripts', 'dist-tag.sh'), version, '--npm'], {
+      encoding: 'utf8',
+      env: { PATH: `${dir}:${process.env.PATH ?? ''}`, TMPDIR: dir },
+    });
+    const log = existsSync(join(dir, 'npm.log')) ? readFileSync(join(dir, 'npm.log'), 'utf8') : '';
+    return { ...result, log, dir };
+  }
+  // What npm 11.17 prints for a package the registry does not have (lib/utils/error-message.js).
+  const notFound = "echo 'npm error code E404' >&2; echo 'npm error 404 Not Found' >&2; exit 1";
+
+  it('asks the registry for the current latest when given --npm', () => {
+    const result = fromRegistry('0.2.1', 'echo 0.3.0');
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe('latest-0.2\n');
+    expect(result.log).toBe('view slotlock dist-tags.latest\n');
+  });
+
+  it('takes a package the registry does not have (E404) as having no latest yet', () => {
+    const result = fromRegistry('0.1.0', notFound);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe('latest\n');
+  });
+
+  it('stops when the registry does not answer, rather than read it as no release yet', () => {
+    // A transient error must not stage a patch to an older line as an immutable `latest`.
+    const result = fromRegistry(
+      '0.2.1',
+      "echo 'npm error code ECONNRESET' >&2; echo 'npm error network aborted' >&2; exit 1",
+    );
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain('ECONNRESET');
+    expect(result.stderr).toContain('::error::');
+    expect(readdirSync(result.dir).sort()).toEqual(['npm', 'npm.log']);
+  });
+
+  it('stops when the registry has the package but names no latest', () => {
+    const result = fromRegistry('0.2.1', 'exit 0');
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain('::error::');
   });
 
   it('compares with the highest release tag in git when asked to, for the image', () => {
@@ -1920,11 +1998,18 @@ describe('release channel', () => {
 
   it('stages on npm with the tag the registry calls for, and the image tags latest the same way', () => {
     const release = read('.github/workflows/release.yml');
-    const stage = release.slice(release.indexOf('\n  stage:\n'), release.indexOf('\n  github-release:\n'));
-    expect(stage).toContain('current=$(npm view slotlock dist-tags.latest 2>/dev/null || true)');
-    expect(stage).toContain('dist_tag=$(../scripts/dist-tag.sh "$version" "$current")');
+    const stage = release.slice(
+      release.indexOf('\n  stage:\n'),
+      release.indexOf('\n  github-release:\n'),
+    );
+    // The registry lookup is dist-tag.sh's own, which fails closed (the tests above).
+    expect(stage).toContain('dist_tag=$(../scripts/dist-tag.sh "$version" --npm)');
+    expect(stage).not.toContain('dist-tags.latest');
     expect(stage).not.toMatch(/dist_tag=latest\b/);
-    expect(read('scripts/bootstrap-release.sh')).not.toMatch(/dist_tag=latest\b/);
+    const bootstrap = read('scripts/bootstrap-release.sh');
+    expect(bootstrap).toContain('dist_tag=$(sh "$DIST_TAG" "$VERSION" --npm)');
+    expect(bootstrap).not.toContain('dist-tags.latest');
+    expect(bootstrap).not.toMatch(/dist_tag=latest\b/);
     const image = read('.github/workflows/image.yml');
     expect(image).toContain('scripts/dist-tag.sh "${GITHUB_REF_NAME#v}" --git-tags');
     expect(image).toMatch(/flavor: \|\n\s+latest=false\n/);
@@ -2062,9 +2147,12 @@ describe('required checks', () => {
     expect(passed).toContain('name: CI passed');
     // Without always() a failed job would skip this one, and a skipped required check passes.
     expect(passed).toContain('if: always()');
-    const needs = /needs: \[([^\]]+)\]/.exec(passed)?.[1]?.split(',').map((id) => id.trim());
+    const needs = /needs: \[([^\]]+)\]/
+      .exec(passed)?.[1]
+      ?.split(',')
+      .map((id) => id.trim());
     expect(needs?.sort()).toEqual(jobIds.filter((id) => id !== 'passed').sort());
-    expect(passed).toContain("jq -e 'all(. == \"success\")'");
+    expect(passed).toContain('jq -e \'all(. == "success")\'');
   });
 
   it.skipIf(!hasJq)('is what the main ruleset requires, with DCO', () => {
@@ -2076,7 +2164,8 @@ describe('required checks', () => {
     const body = [...result.stdout.matchAll(/^> (?:PUT|POST) \/\S+\n(\{[\s\S]*?\n\})$/gm)]
       .map(([, json]) => JSON.parse(json as string))
       .find((request) => request.target === 'branch');
-    const checks = body.rules.find((rule: { type: string }) => rule.type === 'required_status_checks')
+    const checks = body.rules
+      .find((rule: { type: string }) => rule.type === 'required_status_checks')
       .parameters.required_status_checks.map((check: { context: string }) => check.context);
     expect(checks).toEqual(['CI passed', 'Signed-off-by']);
     expect(result.stderr).not.toContain('no longer names its jobs');
@@ -2102,7 +2191,8 @@ describe('dependency updates', () => {
       }
       const path = join(dir, entry.name);
       if (entry.isDirectory()) holding(test, path, out);
-      else if (test(entry.name)) out.push(`/${dirname(path).slice(root.length + 1)}`.replace(/\/$/, ''));
+      else if (test(entry.name))
+        out.push(`/${dirname(path).slice(root.length + 1)}`.replace(/\/$/, ''));
     }
     return out;
   }
@@ -2117,7 +2207,12 @@ describe('dependency updates', () => {
       ...holding((file) => file.endsWith('.csproj')).map((dir) => `nuget ${dir}`),
     ];
     expect(expected, 'canary: the manifests were found').toEqual(
-      expect.arrayContaining(['npm /', 'npm /site', 'npm /workers/dashboard', 'cargo /clients/rust']),
+      expect.arrayContaining([
+        'npm /',
+        'npm /site',
+        'npm /workers/dashboard',
+        'cargo /clients/rust',
+      ]),
     );
     for (const entry of expected) expect([...watched], entry).toContain(entry);
     for (const entry of ['github-actions /', 'docker /', 'docker-compose /']) {
@@ -2188,15 +2283,23 @@ describe('code scanning', () => {
     expect(read('SECURITY.md')).toContain('`js/insufficient-password-hash`');
   });
 
-  it.skipIf(!hasJq)('turns default setup off, which an advanced configuration cannot run beside', () => {
-    const result = spawnSync('bash', [join(root, 'scripts', 'configure-github.sh'), '--dry-run'], {
-      encoding: 'utf8',
-      env: { PATH: process.env.PATH ?? '', SKIP_SITE_SECRETS: '1' },
-    });
-    expect(result.status, result.stderr).toBe(0);
-    const setup = /^> PATCH \/repos\/PILOTAAI\/slotlock\/code-scanning\/default-setup\n(\{[\s\S]*?\n\})$/m.exec(
-      result.stdout,
-    )?.[1];
-    expect(JSON.parse(setup ?? '{}')).toEqual({ state: 'not-configured' });
-  });
+  it.skipIf(!hasJq)(
+    'turns default setup off, which an advanced configuration cannot run beside',
+    () => {
+      const result = spawnSync(
+        'bash',
+        [join(root, 'scripts', 'configure-github.sh'), '--dry-run'],
+        {
+          encoding: 'utf8',
+          env: { PATH: process.env.PATH ?? '', SKIP_SITE_SECRETS: '1' },
+        },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      const setup =
+        /^> PATCH \/repos\/PILOTAAI\/slotlock\/code-scanning\/default-setup\n(\{[\s\S]*?\n\})$/m.exec(
+          result.stdout,
+        )?.[1];
+      expect(JSON.parse(setup ?? '{}')).toEqual({ state: 'not-configured' });
+    },
+  );
 });

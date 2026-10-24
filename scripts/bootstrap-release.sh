@@ -332,7 +332,8 @@ first_publish() {
   [ "$spec" = "$PACKAGE@$VERSION" ] || die "$tarball holds $spec, not $PACKAGE@$VERSION"
   say "  $tarball: Release run $id's tested artifact, checksum verified"
 
-  dist_tag=$(sh "$DIST_TAG" "$VERSION" "$(npm view "$PACKAGE" dist-tags.latest 2>/dev/null || true)") ||
+  # It asks the registry, and stops rather than take an error for "nothing published yet".
+  dist_tag=$(sh "$DIST_TAG" "$VERSION" --npm) ||
     die "could not choose the dist-tag for $VERSION"
   npm_login
   # A version already staged cannot be staged again; approve that one instead. 1.2.3 is not

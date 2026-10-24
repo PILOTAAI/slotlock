@@ -71,7 +71,9 @@ echo "$*" >> "${dir}/npm.log"
 case "$1 $2" in
 "stage view") cat "${dir}/stage.json" ;;
 "stage download") cp "${dir}/stage.tgz" "slotlock-${version}-$3.tgz"; echo "slotlock-${version}-$3.tgz" ;;
-"view slotlock") [ -n "$STUB_LATEST" ] && echo "$STUB_LATEST" ;;
+"view slotlock")
+  [ "$STUB_LATEST" = unreachable ] && { echo 'npm error code ECONNRESET' >&2; exit 1; }
+  echo "$STUB_LATEST" ;;
 "install --package-lock-only") cp package.json "${dir}/consumer.json"; echo '{}' > package-lock.json ;;
 "audit --omit=dev") cat "$STUB_AUDIT"; jq -e '.metadata.vulnerabilities.total == 0' "$STUB_AUDIT" >/dev/null ;;
 *) echo "unexpected npm $*" >&2; exit 9 ;;
@@ -176,6 +178,15 @@ describe.skipIf(!hasJq)('scripts/check-stage.sh', () => {
     const line = check({ version: '0.2.1', tag: 'latest-0.2', latest: '0.3.0' });
     expect(line.stderr).toBe('');
     expect(line.status).toBe(0);
+  });
+
+  it('refuses when the registry cannot say which version is latest', () => {
+    // Read as "nothing published", an error would pass a stage that moves latest backwards.
+    const result = check({ version: '0.2.1', tag: 'latest', latest: 'unreachable' });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('ECONNRESET');
+    expect(result.stderr).toContain('could not tell which version is latest');
+    expect(result.stdout).not.toContain('npm stage approve');
   });
 
   it('refuses another package, and a malformed stage id', () => {

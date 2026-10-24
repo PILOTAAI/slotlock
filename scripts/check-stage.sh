@@ -53,10 +53,12 @@ is_version "$version" || fail "stage $stage_id names version '$version'."
 echo "Stage $stage_id: slotlock@$version, dist-tag $tag, staged $staged."
 
 # `latest` only moves forward. A stage's tag is fixed when it is staged, so a later version approved
-# first (0.3.0 before 0.2.1) leaves an older stage that would take `latest` back.
-current=$(npm view slotlock dist-tags.latest 2>/dev/null || true)
-expected=$("$scripts/dist-tag.sh" "$version" "$current")
+# first (0.3.0 before 0.2.1) leaves an older stage that would take `latest` back. dist-tag.sh asks
+# the registry, and fails rather than take a registry error for "nothing published yet".
+expected=$("$scripts/dist-tag.sh" "$version" --npm) ||
+  fail "npm could not tell which version is latest, so whether approving stage $stage_id moves latest backwards is unknown. Run this again."
 if [ "$tag" = latest ] && [ "$expected" != latest ]; then
+  current=$(npm view slotlock dist-tags.latest 2>/dev/null) || current='a later version'
   fail "approving it would move latest from $current back to $version. Reject it (npm stage reject $stage_id) and release it again from a tag; scripts/dist-tag.sh gives it $expected."
 fi
 

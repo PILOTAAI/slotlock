@@ -167,9 +167,9 @@ jobs:
               "npm accepts a trusted publisher only for a package that exists, so the first version comes from a maintainer's own npm session."
           fi
           # The tag is fixed once staged. `latest` only moves forward: a prerelease goes to `next`,
-          # and a release on an older line (0.2.1 after 0.3.0) to latest-0.2.
-          current=$(npm view slotlock dist-tags.latest 2>/dev/null || true)
-          dist_tag=$(../scripts/dist-tag.sh "$version" "$current")
+          # and a release on an older line (0.2.1 after 0.3.0) to latest-0.2. dist-tag.sh asks the
+          # registry, and stops if it cannot say which version is latest.
+          dist_tag=$(../scripts/dist-tag.sh "$version" --npm)
           if ! npm stage publish "./$TARBALL" --provenance --access public --tag "$dist_tag" 2>&1 | tee stage.log; then
             # npm answers an OIDC token it cannot match to a trusted publisher with ENEEDAUTH.
             if grep -Eq 'ENEEDAUTH|E401' stage.log; then
