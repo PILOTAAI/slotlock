@@ -419,9 +419,10 @@ time as unproven.
 
 A rule is expanded within a budget of steps, a count of ical.js's work that reads no clock, so the
 same input is accepted or refused however loaded the machine: 500,000 for a feed (the whole read,
-from its text) or for a stored series as maintenance rolls it, and 25,000 for one event as it is
-written, which is refused within a few hundredths of a second. A step is about a microsecond: a step
-of the search, a weekday compared, eight days walked; a year scanned is a hundred. A feed's own time
+from its text) or for a stored series as maintenance rolls it, and 50,000 for one event as it is
+written, which is refused within a few hundredths of a second. A step is about a microsecond: a
+step of the search costs three, a weekday compared one, eight days walked one, a year scanned a
+hundred. A feed's own time
 zones (VTIMEZONE) count against the same budget. A feed may carry 100 time zones
 and name 100 it does not define, 1,000 observances and 2,000 RDATE values in the zones it carries,
 and 20,000 RDATE and EXDATE values in its events; a property's name and parameters may take 8 KB

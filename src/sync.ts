@@ -99,7 +99,7 @@ const MAX_ICAL_TIMEZONE_DATES = 2_000;
  * machine (ICAL_STEP_CHARGES says what each piece of work costs).
  *
  * A feed, and a stored series as maintenance rolls it, may take half a million: thirty series on the
- * fifth Monday of the month since 2000 take about 320,000.
+ * fifth Monday of the month since 2000 take about 350,000.
  */
 const MAX_ICAL_STEPS = 500_000;
 
@@ -112,15 +112,15 @@ interface ExpansionLimits {
 const FEED_LIMITS: ExpansionLimits = { steps: MAX_ICAL_STEPS };
 
 /**
- * One event as it is written or asked about (expandCalendarEventOccurrences): a twentieth of a
- * feed's, so a write is refused within a few hundredths of a second whatever its rule (fifty writes
+ * One event as it is written or asked about (expandCalendarEventOccurrences): a tenth of a feed's,
+ * so a write is refused within a few hundredths of a second whatever its rule (fifty writes
  * of one that walks 9,999 days a step held a hosted server for 23 seconds when a write could search
  * for half of one), and a series written today still fits when the roll searches it again from its
  * start for decades (that search grows as the window moves; the roll resumes from a cursor instead
  * whenever it has one). A yearly date written as a daily rule fits from 1990, and from 1950 does
  * not, but rolls.
  */
-const EVENT_LIMITS: ExpansionLimits = { steps: 25_000 };
+const EVENT_LIMITS: ExpansionLimits = { steps: 50_000 };
 
 /** RDATE and EXDATE values one event may list: ical.js sorts them in as it reads them. */
 const MAX_ICAL_DATES_PER_EVENT = MAX_ICAL_EXCEPTIONS_PER_SERIES;
@@ -145,14 +145,15 @@ const MAX_ICAL_INTERVAL: Readonly<Record<string, number>> = {
  * microsecond (measured on ical.js 2.2.1 under Node 26, with the costliest rule shapes each method
  * serves). Every step of a search, whatever the frequency, ends in exactly one `next_second`
  * (`next_year`, `next_month`, `next_week` and `next_day` each call `next_hour`, which calls
- * `next_minute`, which calls `next_second`). `ruleDayOfWeek` reads one BYDAY value, which the
+ * `next_minute`, which calls `next_second`), and is followed by a check of the rule's parts: about
+ * three microseconds for a DAILY rule with BYMONTH and BYMONTHDAY. `ruleDayOfWeek` reads one BYDAY value, which the
  * searches of a month and a week and the checks of a day do for every day and every value they
  * compare. `increment_monthday` walks its days one at a time, about a tenth of a microsecond each.
  * `expand_year_days` is a YEARLY rule's scan of one year for matching days (up to every day of it,
  * about 100 microseconds), which the constructor repeats as far as the year 20000.
  */
 const ICAL_STEP_CHARGES: Readonly<Record<string, (...args: unknown[]) => number>> = {
-  next_second: () => 1,
+  next_second: () => 3,
   ruleDayOfWeek: () => 1,
   increment_monthday: (days) => (typeof days === 'number' && days > 0 ? days / 8 : 1),
   expand_year_days: () => 100,

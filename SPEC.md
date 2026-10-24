@@ -123,9 +123,9 @@ relative reminders, one RFC 5545 RRULE, and bounded recurrence exceptions. A mat
 mandatory for recurring events, must not exceed 367 days, and may produce at most 2,000 occurrences.
 Expansion is bounded by a count of work, never a clock, so an input is accepted or refused the same
 way however loaded the machine: each series may pass 4,000 occurrences from its start, and ical.js
-may take 25,000 steps (search steps, weekday comparisons, an eighth of one for each day it walks, a
-hundred for each year it scans) for an event as it is written and 500,000 for a feed or a stored
-series as maintenance rolls it.
+may take 50,000 steps (three for each step of its search, one for each weekday it compares, an
+eighth of one for each day it walks, a hundred for each year it scans) for an event as it is
+written and 500,000 for a feed or a stored series as maintenance rolls it.
 
 A stored rule is daily or less frequent, follows RFC 5545 §3.3.10's grammar (every part known and
 given once, `COUNT` at least 1, never `COUNT` with `UNTIL`), and is of a shape the expander reads

@@ -115,18 +115,18 @@ describe('the step budget on recurrence expansion', () => {
   });
 
   it('shares one budget among all the events of a feed', () => {
-    // A yearly date written as a daily rule takes a step a day, and an eighth of one for the day it
-    // walks: from 1950 that is about 32,000 steps, so fifteen fit the budget of 500,000 and
-    // sixteen do not.
+    // A yearly date written as a daily rule takes three steps a day, and an eighth of one for the
+    // day it walks: from 1950 that is about 89,000 steps, so five fit the budget of 500,000 and six
+    // do not. (A COUNT is counted from DTSTART, so each is searched from there.)
     const yearly = (uid: string) => ({
       uid,
       start: '19500101T090000Z',
-      rule: 'FREQ=DAILY;BYMONTH=1;BYMONTHDAY=1',
+      rule: 'FREQ=DAILY;BYMONTH=1;BYMONTHDAY=1;COUNT=1000',
     });
     const many = (count: number) =>
       feed(...Array.from({ length: count }, (_, index) => yearly(`yearly-${index}`)));
-    expect(parseICalendarChanges(many(15), 'UTC', WINDOW)).toHaveLength(15);
-    expect(timed(() => parseICalendarChanges(many(16), 'UTC', WINDOW)).error).toEqual(refused);
+    expect(parseICalendarChanges(many(5), 'UTC', WINDOW)).toHaveLength(5);
+    expect(timed(() => parseICalendarChanges(many(6), 'UTC', WINDOW)).error).toEqual(refused);
   });
 
   it('reads a busy feed: thirty series on the fifth Monday of the month since 2000', () => {
@@ -186,7 +186,7 @@ describe('the step budget on recurrence expansion', () => {
 
   // These take few search steps but slow ones, walked a day at a time: about 4 ms for a century.
   // Each day walked is charged, so they are refused within the budget: about 0.4 s for a feed (and a
-  // stored series as the roll expands it), 0.02 s for one event as it is written or asked about.
+  // stored series as the roll expands it), 0.04 s for one event as it is written or asked about.
   const slow = [
     ['29 February a century at a time', 'FREQ=DAILY;INTERVAL=36600;BYMONTH=2;BYMONTHDAY=29'],
     ['29 February every 9,999 days', 'FREQ=DAILY;INTERVAL=9999;BYMONTH=2;BYMONTHDAY=29'],
@@ -227,8 +227,20 @@ describe('the step budget on recurrence expansion', () => {
     expect(ms).toBeLessThan(250);
   });
 
-  it('gives one event a twentieth of the steps of a feed, so a series written today keeps rolling', () => {
-    // A yearly date written as a daily rule from 1950: about 32,000 steps, over the 25,000 one event
+  it('writes a monthly series on a weekday that began in 1990', () => {
+    // Each month compares every day with the rule's weekday: about 36 steps, 16,500 since 1990.
+    const board = {
+      start: new Date('1990-01-26T09:00:00Z'),
+      end: new Date('1990-01-26T10:00:00Z'),
+      timezone: 'UTC',
+      summary: 'Board meeting',
+      recurrence: { rrule: 'FREQ=MONTHLY;BYDAY=-1FR' },
+    };
+    expect(expandCalendarEventOccurrences(board, WINDOW)).toHaveLength(12);
+  });
+
+  it('gives one event a tenth of the steps of a feed, so a series written today keeps rolling', () => {
+    // A yearly date written as a daily rule from 1950: about 89,000 steps, over the 50,000 one event
     // may take as it is written, within the 500,000 the roll expands a stored series with.
     const series = {
       start: new Date('1950-01-01T09:00:00Z'),
@@ -239,6 +251,13 @@ describe('the step budget on recurrence expansion', () => {
     };
     expect(timed(() => expandCalendarEventOccurrences(series, WINDOW)).error).toEqual(refused);
     expect(expandStoredCalendarEventOccurrences(series, WINDOW)).toHaveLength(1);
+    // From 1990, about 43,000 steps: written.
+    const later = {
+      ...series,
+      start: new Date('1990-01-01T09:00:00Z'),
+      end: new Date('1990-01-01T10:00:00Z'),
+    };
+    expect(expandCalendarEventOccurrences(later, WINDOW)).toHaveLength(1);
   });
 
   describe('spans and date lists', () => {
