@@ -839,7 +839,8 @@ describe('a yearly day some years lack, drawn at random', () => {
         const expected = oracleOccurrences(rule, first, window.end.getTime())
           .filter((t) => t >= start)
           .map(stamp);
-        const got = parseICalendarChanges(feed(stamp(first).slice(0, 15), rule, null), undefined, window)
+        const text = feed(stamp(first).slice(0, 15), rule, null);
+        const got = parseICalendarChanges(text, undefined, window)
           .map((change) => stamp((change.start as Date).getTime()))
           .filter((t) => t !== stamp(first));
         expect(got, rule).toEqual(expected);

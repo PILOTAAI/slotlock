@@ -148,7 +148,7 @@ describe.skipIf(!url)('the daylight-saving corpus in PostgreSQL', () => {
     },
   );
 
-  it('stores a daily 24-hour series across the spring change, each day ending where the next starts', async () => {
+  it('stores a daily 24-hour series across the spring change, one after another', async () => {
     // Every occurrence is its own reservation under one EXCLUDE constraint: on 2027-03-28 the exact
     // 24 hours run to 01:00 BST, an hour into the next day's occurrence, which the store must not
     // be handed as an overlap.

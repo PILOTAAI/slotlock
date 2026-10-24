@@ -548,9 +548,9 @@ function sortRuleParts(recur: ICAL.Recur): void {
  * - BYMONTH with FREQ=MONTHLY: it walked BYMONTH from its first value whatever DTSTART's month,
  *   dropping whole months or repeating them;
  * - a negative BYMONTHDAY except with FREQ=MONTHLY and no BYDAY: compared as written with each day;
- * - BYMONTHDAY with FREQ=YEARLY but no BYMONTH (only DTSTART's month was expanded), naming only days
- *   none of its BYMONTH months has (it searched every year to 20000 for one), or a day one of them
- *   can lack with COUNT (31 April became 1 May, and was counted: yearlyDays filters it out
+ * - BYMONTHDAY with FREQ=YEARLY but no BYMONTH (only DTSTART's month was expanded), naming only
+ *   days none of its BYMONTH months has (it searched every year to 20000 for one), or a day one of
+ *   them can lack with COUNT (31 April became 1 May, and was counted: yearlyDays filters it out
  *   otherwise) or with BYDAY (BYMONTH=4,5;BYMONTHDAY=30,31;BYDAY=WE missed 31 May 2034);
  * - with FREQ=YEARLY, BYYEARDAY with BYMONTH or BYMONTHDAY (it found no day at all), and a numbered
  *   BYDAY with BYMONTHDAY (counted in the year, not the month);
@@ -2887,11 +2887,11 @@ function parseCalendarChanges(
 /**
  * Make one series' busy occurrences, `changes` from `from` on, disjoint without freeing a minute of
  * them: where one ends after the next starts, it ends where the next starts, and the next ends at
- * the later of the two ends. The union rule makes an occurrence of about a day or longer reach into
- * the next one where the clocks go forward (24 exact hours from midnight end at 01:00 the next day),
- * and the store holds each occurrence as a reservation under one EXCLUDE constraint, which refuses
- * two that overlap. Two that start at the same instant are left as they are. An occurrence cut to
- * end before the window is dropped: the next one holds its time there.
+ * the later of the two ends. The union rule makes an occurrence of about a day or longer reach
+ * into the next one where the clocks go forward (24 exact hours from midnight end at 01:00 the
+ * next day), and the store holds each occurrence as a reservation under one EXCLUDE constraint,
+ * which refuses two that overlap. Two that start at the same instant are left as they are. An
+ * occurrence cut to end before the window is dropped: the next one holds its time there.
  */
 function separateOccurrences(
   changes: ExternalCalendarChange[],
