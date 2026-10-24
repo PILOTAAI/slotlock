@@ -46,7 +46,9 @@ export interface SlotlockDashboardWorkerEnv {
   SLOTLOCK_SIGN_IN_RATE_LIMIT?: SlotlockRateLimit;
   /**
    * GitHub sign-ins and their callbacks, counted for every client together: a ceiling well above one
-   * client's limit, so a few clients cannot use it up for everyone.
+   * client's limit, so a few clients cannot use it up for everyone. Without it, a configuration
+   * from before it existed, SLOTLOCK_SIGN_IN_RATE_LIMIT counts every client together instead, as it
+   * did then, and the Worker logs a warning.
    */
   SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT?: SlotlockRateLimit;
   [name: string]: unknown;
@@ -115,7 +117,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
         limits: {
           client: SlotlockRateLimit;
           signIn: SlotlockRateLimit;
-          signInCeiling: SlotlockRateLimit;
+          signInCeiling: SlotlockRateLimit | null;
         };
       }
     | undefined;
@@ -126,10 +128,19 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
     // many: without these bindings nothing bounds them all together, so the Worker does not serve.
     const client = env.SLOTLOCK_CLIENT_RATE_LIMIT;
     const signIn = env.SLOTLOCK_SIGN_IN_RATE_LIMIT;
-    const signInCeiling = env.SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT;
-    if (!isRateLimit(client) || !isRateLimit(signIn) || !isRateLimit(signInCeiling)) {
+    const ceiling = env.SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT;
+    if (!isRateLimit(client) || !isRateLimit(signIn)) {
       throw new SlotlockConfigError(
-        'the SLOTLOCK_CLIENT_RATE_LIMIT, SLOTLOCK_SIGN_IN_RATE_LIMIT and SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT rate limiting bindings are required',
+        'the SLOTLOCK_CLIENT_RATE_LIMIT and SLOTLOCK_SIGN_IN_RATE_LIMIT rate limiting bindings are required',
+      );
+    }
+    const signInCeiling = isRateLimit(ceiling) ? ceiling : null;
+    if (!signInCeiling) {
+      console.warn(
+        JSON.stringify({
+          message:
+            'slotlock dashboard sign-ins share one budget for every client: add the SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT rate limiting binding to limit them per client',
+        }),
       );
     }
     const vars = variables(env);
@@ -211,12 +222,12 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       // The dashboard routes a path with one trailing slash as the path without it, so a sign-in is
       // recognised as it recognises one: `/dashboard/sign-in/` is a sign-in too.
       const route = path.replace(/\/$/, '');
-      if (
-        signInPaths.has(route) &&
-        (!(await limits.signIn.limit({ key: `sign-in:${address}` })).success ||
-          !(await limits.signInCeiling.limit({ key: 'sign-in' })).success)
-      ) {
-        return tooManyRequests();
+      if (signInPaths.has(route)) {
+        const allowed = limits.signInCeiling
+          ? (await limits.signIn.limit({ key: `sign-in:${address}` })).success &&
+            (await limits.signInCeiling.limit({ key: 'sign-in' })).success
+          : (await limits.signIn.limit({ key: 'sign-in' })).success;
+        if (!allowed) return tooManyRequests();
       }
       const sql = postgres(env.HYPERDRIVE.connectionString, {
         max: MAX_CONNECTIONS,

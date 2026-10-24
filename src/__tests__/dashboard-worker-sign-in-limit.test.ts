@@ -4,7 +4,7 @@
 // trailing slash as the path without it, so `/dashboard/sign-in/` and `/dashboard/callback/` are
 // sign-ins too. No database is needed: a refused request never opens a client.
 import { randomBytes } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   type SlotlockDashboardWorkerEnv,
   type SlotlockRateLimit,
@@ -107,7 +107,7 @@ describe('SEC-12: sign-ins are limited per client, under a higher ceiling for al
     ]);
   });
 
-  it('still bounds every client together, and needs the ceiling to serve', async () => {
+  it('still bounds every client together', async () => {
     const ceiling = limiter(3);
     const worker = createSlotlockDashboardWorker();
     const env = environment(limiter(), ceiling);
@@ -117,13 +117,43 @@ describe('SEC-12: sign-ins are limited per client, under a higher ceiling for al
     }
     expect(statuses).toEqual([302, 302, 302, 429]);
     expect(new Set(ceiling.asked)).toEqual(new Set(['sign-in']));
+  });
 
-    const { SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT: _, ...without } = environment(limiter());
-    const unbounded = await createSlotlockDashboardWorker().fetch(
-      from('192.0.2.9'),
-      without as SlotlockDashboardWorkerEnv,
-      ctx,
-    );
-    expect(unbounded.status).toBe(503);
+  it('without the ceiling binding, keeps one sign-in budget for every client, as before, and says so', async () => {
+    // A deployment whose configuration predates the ceiling: the dashboard keeps serving, with the
+    // one shared budget it had, rather than answering 503 until the configuration catches up.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const signIn = limiter(2);
+      const { SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT: _, ...without } = environment(signIn);
+      const worker = createSlotlockDashboardWorker();
+      const statuses: number[] = [];
+      for (const address of ['192.0.2.1', '192.0.2.2', '192.0.2.3']) {
+        statuses.push(
+          (await worker.fetch(from(address), without as SlotlockDashboardWorkerEnv, ctx)).status,
+        );
+      }
+      expect(statuses).toEqual([302, 302, 429]);
+      expect(signIn.asked).toEqual(['sign-in', 'sign-in', 'sign-in']);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toContain('SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('still needs the per-client bindings to serve', async () => {
+    const { SLOTLOCK_SIGN_IN_RATE_LIMIT: _, ...without } = environment(limiter());
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const unbounded = await createSlotlockDashboardWorker().fetch(
+        from('192.0.2.9'),
+        without as SlotlockDashboardWorkerEnv,
+        ctx,
+      );
+      expect(unbounded.status).toBe(503);
+    } finally {
+      error.mockRestore();
+    }
   });
 });

@@ -197,8 +197,11 @@ this one and read its session secret, which signs in as any tenant.
   - `SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT` counts them from every client together, set far above one
     client's limit so a few clients cannot use it up for everyone.
 
-  Their counts are per Cloudflare location. Without any of them the Worker answers 503. The example
-  configuration also removes query strings (a callback's OAuth code) from the URLs Workers Logs keep.
+  Their counts are per Cloudflare location. Without either of the first two the Worker answers 503.
+  Without the ceiling, as in a configuration from before it, `SLOTLOCK_SIGN_IN_RATE_LIMIT` counts
+  every client together, and the Worker logs a warning: add the ceiling before lowering that
+  binding's limit to one client's. The example configuration also removes query strings (a
+  callback's OAuth code) from the URLs Workers Logs keep.
 - The server checks a dashboard tenant against `SLOTLOCK_DASHBOARD_USERS` only when it serves the
   dashboard itself. With the dashboard on Workers, removing a person from the Worker's list signs
   them out of the dashboard; to stop their keys, revoke them or erase the tenant.

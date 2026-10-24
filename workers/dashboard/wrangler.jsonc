@@ -32,10 +32,12 @@
       "id": "set-this-to-the-hyperdrive-configuration-id"
     }
   ],
-  // Required: the Worker answers 503 without them. A sign-in writes to the database and asks GitHub
-  // with the app's client secret, and the limit on sign-ins in flight is per isolate, so these bound
-  // the requests of every isolate. Counts are per Cloudflare location. namespace_id must be unique in
-  // the account (two bindings with the same one share their counts); period is 10 or 60 seconds.
+  // The Worker answers 503 without the first two, and without the ceiling counts sign-ins from every
+  // client in SLOTLOCK_SIGN_IN_RATE_LIMIT, as before the ceiling existed. A sign-in writes to the
+  // database and asks GitHub with the app's client secret, and the limit on sign-ins in flight is per
+  // isolate, so these bound the requests of every isolate. Counts are per Cloudflare location.
+  // namespace_id must be unique in the account (two bindings with the same one share their counts);
+  // period is 10 or 60 seconds.
   "ratelimits": [
     {
       // Every dashboard request, per client address.
