@@ -12,6 +12,7 @@
 //   public/openapi.json               the REST API, which client generators read
 //
 // Any fact it cannot find fails the build: a renamed constant must be looked at, not guessed.
+import { statSync } from 'node:fs';
 import { copyFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -120,6 +121,17 @@ const SITE_LINKS = {
   'CHANGELOG.md': '/docs/changelog/',
   'slotlock-manifest.schema.json': '/schema/manifest.schema.json',
   'openapi.json': '/openapi.json',
+  'PRIVACY.md': '/docs/privacy/',
+  'TERMS.md': '/docs/terms/',
+  'ACCEPTABLE-USE.md': '/docs/acceptable-use/',
+  'VERSIONING.md': '/docs/versioning/',
+  'docs/hosted/README.md': '/docs/hosted/',
+  'docs/hosted/status.md': '/docs/status/',
+};
+
+/** Repository sections that are docs pages of their own, included without their heading. */
+const SECTION_LINKS = {
+  'README.md#known-issues-in-020': '/docs/known-issues/',
 };
 
 /** README in-page anchors whose section lives on another docs page (postbuild checks every link). */
@@ -136,7 +148,15 @@ function rewriteLinks(markdown) {
     ANCHORS[anchor] ? `](${ANCHORS[anchor]})` : match,
   );
   return anchored.replace(/\]\((?:\.\/)?([A-Za-z0-9_./-]+?)(#[^)]*)?\)/g, (match, target, hash) => {
-    if (/^(https?:|mailto:|\/|#)/.test(target)) return match;
+    if (/^(https?:|mailto:|#)/.test(target)) return match;
+    // A file path from the repository root (GitHub reads /PRIVACY.md so); any other /path, such as
+    // /docs/hosted/, is the site's.
+    if (target.startsWith('/')) {
+      if (!statSync(join(ROOT, target), { throwIfNoEntry: false })?.isFile()) return match;
+      target = target.slice(1);
+    }
+    const section = SECTION_LINKS[`${target}${hash ?? ''}`];
+    if (section) return `](${section})`;
     const site = SITE_LINKS[target];
     if (site) return `](${site}${hash ?? ''})`;
     const kind = target.endsWith('/') ? 'tree' : 'blob';

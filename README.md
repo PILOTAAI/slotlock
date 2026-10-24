@@ -5,6 +5,39 @@ reservable, answers "when is this free?" from weekly availability rules, and let
 double bookings, however many writers race. Agents call it over MCP or A2A; your code calls it as a
 TypeScript library.
 
+## Known issues in 0.2.0
+
+0.2.0, the version npm installs today, can occupy less time than a recurring event was written
+with, so another booking can take the rest: around daylight-saving changes, in any time zone that
+has them, and at the end of some series. The library and `slotlock serve` are affected alike. The
+next changes are on 25 October 2026 in Europe and 1 November 2026 in the United States and Canada.
+The fixes will ship in 0.3.0: upgrade as soon as it is published, and until then do not rely on
+0.2.0 alone to refuse bookings in these cases.
+
+- A recurring event whose first occurrence spans a daylight-saving change gets that occurrence an
+  hour short: in spring, an hour of the written time is free to book.
+- Recurring events written through the store (the agent tools and the application API) lose the
+  repeated hour of an autumn change: times in it move an hour early, and a series whose first
+  occurrence spans it can store no occurrences, so all of its time is free.
+- A stored recurring series cannot cancel or move an occurrence that falls in the skipped hour of a
+  spring change; the time it was moved to stays free.
+- An occurrence that starts in the skipped hour and lasts longer than the skipped hour is cut short:
+  a 75-minute occurrence occupies 15 minutes.
+- A timed recurring series with a date-only `UNTIL` ends at midnight UTC, so it can lose its last
+  day.
+
+0.1.0, 0.1.1 and 0.2.0 also pin zod 4.6.5 exactly, which has a high advisory
+([GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5): validating an oversized
+array can exhaust memory), so `npm audit` reports it with no fix available. Until 0.3.0, add this to
+your application's `package.json` and run `npm install`:
+
+```json
+"overrides": {"zod": "4.6.7"}
+```
+
+The full notice, with the versions affected, is in
+[docs/release/0.2.0-known-issues.md](https://github.com/PILOTAAI/slotlock/blob/main/docs/release/0.2.0-known-issues.md).
+
 ## Why it is built for agents
 
 - Resources own calendars, not users, and the tenant comes only from the authenticated caller.

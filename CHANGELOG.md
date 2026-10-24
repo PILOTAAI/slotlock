@@ -31,6 +31,10 @@ versioning.
   check, and a restart on the same volume (`scripts/compose-smoke.sh`). The docs now say PostgreSQL
   16 or newer, and that Compose ships 18; they said 16 while Compose ran 18.
 - `.env.example` turns the REST API on, as `slotlock serve` and Compose already do by default.
+- The site's install row names the version (`npm install slotlock@<version> postgres`); it offered
+  `npm install slotlock postgres` twice, once as "From source" and once "once the first release is
+  published". The quickstart no longer says a clone runs exactly the released version, and the
+  concepts page says holds are also in the REST application API, as they are since 0.2.0.
 - One aggregate check, "CI passed", gathers every CI job: the suites on each Node.js and
   PostgreSQL, the image, the five language clients and the Compose quickstart.
   `scripts/configure-github.sh` requires it and DCO's "Signed-off-by" on `main`; the client suites
@@ -84,6 +88,22 @@ versioning.
   issue labelled `status` open while either is down, closing it when it recovers
   (`docs/hosted/status.md`). It stays off until the owner sets `SLOTLOCK_STATUS_PROBE` to `on`. A
   test also keeps every workflow's default token read-only, as OpenSSF Scorecard checks.
+- A known-issues notice for 0.2.0, in the README ahead of the install instructions, on the site
+  (`/docs/known-issues/`, linked from the landing page and llms.txt) and as ready-to-publish text for
+  the v0.2.0 release notes, a pinned issue and two security advisories
+  (`docs/release/0.2.0-known-issues.md`): the five ways 0.2.0 can accept a double booking around
+  daylight-saving changes and series ends, the exact zod 4.6.5 pin (GHSA-mrhx-c7xc-m3w5) with the
+  `"overrides": {"zod": "4.6.7"}` workaround, and upgrade to 0.3.0. `docs/release/deprecations.md`
+  gives the maintainer the `npm deprecate` and `mcp-publisher status` commands for 0.0.0-stage,
+  0.1.0, 0.1.1 and 0.2.0.
+- Drafts of the hosted service's privacy notice (`PRIVACY.md`, with what UK GDPR Article 13 asks
+  for), Terms of Service (`TERMS.md`, with the Article 28(3) data processing terms for the people in
+  tenants' calendars) and Acceptable Use Policy (`ACCEPTABLE-USE.md`), each marked for owner and
+  legal review before the hosted service opens; a hosted service page (`docs/hosted/README.md`) with
+  the addresses, price, limits read from the code, that writes take effect at once, and the support,
+  abuse, privacy and security contacts; and `VERSIONING.md`, what `/v1`, the tools and the version
+  numbers promise and the 90 days' notice before hosted Slotlock changes anything under `/v1`. The
+  site has a page for each and a Hosted section, and no longer says there is no hosted service.
 
 ## 0.2.0 - 2026-10-23
 

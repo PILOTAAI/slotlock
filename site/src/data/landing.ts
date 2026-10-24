@@ -10,6 +10,9 @@ export const DDL_URL = `${REPO_URL}/blob/main/src/ddl.ts`;
 
 export { facts };
 
+/** 0.2 can accept double bookings around daylight-saving changes (/docs/known-issues/). */
+const knownIssues = facts.version.startsWith('0.2.');
+
 export const toolNames: string[] = facts.tools.map((tool) => tool.name);
 
 export interface Heading {
@@ -46,16 +49,10 @@ export const hero = {
         ]
       : []),
     {
-      id: 'source',
-      label: 'From source',
-      command: 'npm install slotlock postgres',
-      note: `Then \`npx slotlock migrate\` and \`npx slotlock serve\`, with two database roles as the README shows.`,
-    },
-    {
       id: 'npm',
       label: 'npm',
-      command: 'npm install slotlock postgres',
-      note: 'Works once the first release is published.',
+      command: `npm install slotlock@${facts.version} postgres`,
+      note: `Then \`npx slotlock migrate\` and \`npx slotlock serve\`, with two database roles as the README shows.${knownIssues ? ' Read the [known issues](/docs/known-issues/) first.' : ''}`,
     },
   ],
 };
@@ -509,7 +506,7 @@ export const openSource = {
     facts.composeUp
       ? 'Docker Compose runs PostgreSQL 18 and the server on 127.0.0.1; writes wait for a person by default.'
       : 'Needs Node.js 22.12 or newer and PostgreSQL 16 or newer with btree_gist.',
-    'There is no hosted service. You run it, next to your own data.',
+    'Run it next to your own data, or use [hosted Slotlock](/docs/hosted/) once it opens.',
     'Report vulnerabilities privately through the repository’s Security tab.',
   ],
 };
@@ -528,7 +525,9 @@ export const faq = {
     },
     {
       q: 'Is it ready for production?',
-      a: `Not yet. ${facts.version} is an early 0.x release; the README keeps the production checklist.`,
+      a: knownIssues
+        ? `Not ${facts.version}: it can accept a double booking around a daylight-saving change. Read the [known issues](/docs/known-issues/), and use 0.3.0 once it is published; the README keeps the production checklist.`
+        : `${facts.version} is a 0.x release, so a minor release may change the API, as [versioning](/docs/versioning/) explains; the README keeps the production checklist.`,
     },
     {
       q: 'Does a model decide anything?',
@@ -571,6 +570,16 @@ export const footer = {
         { label: 'MCP and A2A server', href: '/docs/reference/' },
         { label: 'Specification', href: '/docs/specification/' },
         { label: 'Manifest schema', href: '/schema/manifest.schema.json' },
+      ],
+    },
+    {
+      title: 'Hosted',
+      links: [
+        { label: 'Hosted Slotlock', href: '/docs/hosted/' },
+        { label: 'Status', href: '/docs/status/' },
+        { label: 'Privacy notice', href: '/docs/privacy/' },
+        { label: 'Terms of Service', href: '/docs/terms/' },
+        { label: 'Acceptable use', href: '/docs/acceptable-use/' },
       ],
     },
     {

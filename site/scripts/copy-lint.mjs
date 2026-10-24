@@ -151,7 +151,8 @@ function attributeCopy(html) {
 const DIST = new URL('../dist/', import.meta.url);
 // Pages written for this site. Several mix site copy with README sections, and the tools
 // reference adds the registry's descriptions; the README is held to the same rules in its own
-// repository review.
+// repository review. The privacy notice, terms and acceptable-use policy are left out: each opens
+// with the owner's draft banner, kept word for word, until legal review replaces it.
 const PAGES = [
   'index.html',
   'index.md',
@@ -163,6 +164,10 @@ const PAGES = [
   'docs/security/index.html',
   'docs/tools/index.html',
   'docs/reference/index.html',
+  'docs/hosted/index.html',
+  'docs/status/index.html',
+  'docs/versioning/index.html',
+  'docs/known-issues/index.html',
   '404.html',
   'llms.txt',
 ];

@@ -10,6 +10,7 @@ site/
   docs-src/*.md           docs pages; <!-- include README.md#section --> pulls text from the repo
                           (modifiers: body, lead, promote)
   src/data/landing.ts     every sentence on the landing page (the page and /index.md share it)
+  src/data/llms.mjs       what llms.txt tells agents beyond the page list (the repository tests read it)
   src/pages/index.astro   the landing page; index.md.ts its Markdown twin
   src/pages/docs/[...slug].md.ts   a Markdown twin of every docs page
   src/components/docs/    Starlight overrides: site title, page title (eyebrow, title, lede), footer
