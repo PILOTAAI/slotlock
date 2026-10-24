@@ -10,9 +10,12 @@ import {
   SLOTLOCK_DEFINER_FUNCTIONS,
   SLOTLOCK_DEFINER_TABLES,
   SLOTLOCK_DEPLOYMENT_CHECKS,
+  SLOTLOCK_OPERATOR_FUNCTIONS,
   SLOTLOCK_SCHEMA_FUNCTIONS,
   SLOTLOCK_SCHEMA_TABLES,
   SLOTLOCK_SCHEMA_VERSION,
+  SLOTLOCK_TENANT_ADMIN_FUNCTIONS,
+  SLOTLOCK_TENANT_ADMIN_TABLES,
   SLOTLOCK_TENANT_CONTEXT_SETTING,
   SLOTLOCK_TENANT_RLS_DDL,
   SLOTLOCK_TENANT_TABLES,
@@ -161,11 +164,12 @@ describe('deployment DDL name resolution', () => {
   });
 
   // A function is executable by PUBLIC unless revoked, and a SECURITY DEFINER one runs as the owner.
-  it('defines the API key, dashboard and schema version functions as SECURITY DEFINER, executable by no one by default', () => {
+  it('defines the API key, dashboard, schema version and tenant functions as SECURITY DEFINER, executable by no one by default', () => {
     expect([...SLOTLOCK_DEFINER_FUNCTIONS]).toEqual([
       ...SLOTLOCK_API_KEY_FUNCTIONS,
       ...SLOTLOCK_DASHBOARD_FUNCTIONS,
       ...SLOTLOCK_SCHEMA_FUNCTIONS,
+      ...SLOTLOCK_TENANT_ADMIN_FUNCTIONS,
     ]);
     const definers = functions.filter(([, , , header]) => header?.includes('SECURITY DEFINER'));
     expect(definers.map(([, name]) => name).sort()).toEqual(
@@ -186,11 +190,25 @@ describe('deployment DDL name resolution', () => {
     }
   });
 
-  it('keeps API keys, dashboard records and the schema version in tables no role but their owner reads or writes', () => {
+  // Suspending runs as the deployment role only: the functions run as their caller, and no role is
+  // granted them, so a serving role cannot lift a suspension.
+  it('defines suspend and unsuspend as functions only the deployment role runs', () => {
+    for (const signature of SLOTLOCK_OPERATOR_FUNCTIONS) {
+      const name = signature.slice(0, signature.indexOf('('));
+      const found = functions.find(([, defined]) => defined === name);
+      expect(found?.[3]).toBeDefined();
+      expect(found?.[3]).not.toContain('SECURITY DEFINER');
+      expect(SLOTLOCK_CORE_DDL).toContain(`REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`);
+      expect(createSlotlockApplicationRoleGrantsDdl('slotlock_app')).not.toContain(name);
+    }
+  });
+
+  it('keeps API keys, dashboard records, the schema version and suspensions in tables no role but their owner reads or writes', () => {
     expect([...SLOTLOCK_DEFINER_TABLES]).toEqual([
       ...SLOTLOCK_API_KEY_TABLES,
       ...SLOTLOCK_DASHBOARD_TABLES,
       ...SLOTLOCK_SCHEMA_TABLES,
+      ...SLOTLOCK_TENANT_ADMIN_TABLES,
     ]);
     for (const table of SLOTLOCK_DEFINER_TABLES) {
       expect(SLOTLOCK_CORE_DDL).toContain(`CREATE TABLE IF NOT EXISTS slotlock.${table} (`);

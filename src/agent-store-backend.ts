@@ -99,10 +99,19 @@ async function withTenant<T>(
   options?: { isolation?: 'read committed' },
 ): Promise<T> {
   assertActive(context);
-  const value =
-    options === undefined
-      ? await store.withTenant(context.principal.tenantRef, callback)
-      : await store.withTenant(context.principal.tenantRef, callback, options);
+  let value: T;
+  try {
+    value =
+      options === undefined
+        ? await store.withTenant(context.principal.tenantRef, callback)
+        : await store.withTenant(context.principal.tenantRef, callback, options);
+  } catch (error) {
+    // A suspended tenant may read; a write it asks for is forbidden, not a server failure.
+    if ((error as { code?: unknown } | null)?.code === 'tenant_suspended') {
+      throw new SlotlockAgentOperationError('tenant_suspended', 403);
+    }
+    throw error;
+  }
   assertActive(context);
   return value;
 }

@@ -391,6 +391,14 @@ export interface CalendarEventRetentionResult {
   hasMore: boolean;
 }
 
+/** What erasing a tenant deleted. */
+export interface SlotlockTenantErasure {
+  /** Rows deleted, by table (every table the tenant owns rows in is named, with 0 for none). */
+  rows: Record<string, number>;
+  /** Rows deleted in all; 0 when the tenant had already been erased. */
+  total: number;
+}
+
 export interface BookingRetentionResult {
   /** Holds past their expiry: they occupy nothing, and only a rival's write would reap them. */
   expiredHoldsDeleted: number;

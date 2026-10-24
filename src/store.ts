@@ -13,6 +13,7 @@ import {
   SLOTLOCK_TENANT_TABLES,
   createSlotlockApplicationRoleGrantsDdl,
   createSlotlockTenantRlsDdl,
+  slotlockTenantLockKey,
 } from './ddl.js';
 import { findNextAvailable, mergeIntervals } from './engine.js';
 import {
@@ -38,6 +39,7 @@ import type {
   CalendarEventOccurrence,
   CalendarEventRetentionResult,
   BookingRetentionResult,
+  SlotlockTenantErasure,
   CalendarFreeBusy,
   CalendarHorizonRollCursor,
   CalendarHorizonRollResult,
@@ -1894,6 +1896,30 @@ export interface SlotlockStore {
     /** In whole days, 1-3650. Defaults to `SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS`. */
     retentionDays?: number;
   }): Promise<BookingRetentionResult>;
+  /**
+   * Suspend a tenant: from when this returns, every withTenant transaction for it (as every server
+   * runs its requests) may read, and its writes are refused (`tenant_suspended`); one in flight is
+   * waited for. Its keys still authenticate, but it gets no new key or secret. Maintenance and
+   * erasure go on. True when it was not suspended already. Only the deployment role, which owns the
+   * schema, may suspend (`tenant_suspension_not_permitted` for another).
+   */
+  suspendTenant(params: {
+    tenantRef: string;
+    /** Why, for the operator: 1-500 characters without control characters. */
+    reason?: string;
+  }): Promise<{ suspended: boolean }>;
+  /** Lift a suspension; true when the tenant was suspended. The deployment role only. */
+  unsuspendTenant(params: { tenantRef: string }): Promise<{ unsuspended: boolean }>;
+  /** Whether the tenant is suspended. */
+  isTenantSuspended(params: { tenantRef: string }): Promise<boolean>;
+  /**
+   * Erase a tenant: delete every row it owns (resources, holds, bookings, events with their
+   * attendees and reminders, cancellations, idempotency records, coverage, API keys, and a personal
+   * tenant's dashboard records) in one transaction, waiting for its transactions in flight. API key
+   * digests are retired so no erased key works again; a suspension stays. Erasing again deletes
+   * nothing.
+   */
+  eraseTenant(params: { tenantRef: string }): Promise<SlotlockTenantErasure>;
   /** Record the bounded, complete source window represented by a provider cursor/revision. */
   recordCalendarCoverage(params: CalendarCoverageCommand): Promise<CalendarCoverageResult>;
   /** Return merged busy intervals plus explicit completeness for caller-required provider sources. */
@@ -2128,10 +2154,44 @@ function holdTenantRef(options: SlotlockHoldTenantOptions): string | null {
 }
 
 export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions = {}): SlotlockStore {
-  return buildSlotlockStore(sql, options);
+  return buildSlotlockStore(sql, options, false);
 }
 
-function buildSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions): SlotlockStore {
+/**
+ * Every store method that writes for a tenant: what a suspended tenant's withTenant store refuses.
+ * Maintenance (rolling series, pruning, purging) and erasure are not among them.
+ */
+export const SLOTLOCK_TENANT_WRITE_METHODS = Object.freeze([
+  'createResource',
+  'archiveResource',
+  'restoreResource',
+  'deleteResource',
+  'setResourceAvailability',
+  'setTenantAvailability',
+  'createReservation',
+  'createExternalReservation',
+  'rescheduleExternalReservation',
+  'cancelExternalReservation',
+  'acquireHold',
+  'confirmHold',
+  'releaseHold',
+  'putCalendarEvent',
+  'cancelCalendarEvent',
+  'cancelCalendarEventById',
+  'recordCalendarCoverage',
+] as const satisfies readonly (keyof SlotlockStore)[]);
+
+function tenantSuspendedError(): Error & { code: 'tenant_suspended' } {
+  return Object.assign(new Error('Slotlock tenant is suspended: it may read, and write nothing'), {
+    code: 'tenant_suspended' as const,
+  });
+}
+
+function buildSlotlockStore(
+  sql: StoreSql,
+  options: SlotlockStoreOptions,
+  suspended: boolean,
+): SlotlockStore {
   const configuredTenantSetting = options.tenantContextSetting ?? SLOTLOCK_TENANT_CONTEXT_SETTING;
   const configuredAgentOwnerEventQuota =
     options.agentOwnerEventQuota ?? SLOTLOCK_AGENT_OWNER_EVENT_QUOTA;
@@ -2385,11 +2445,21 @@ function buildSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions): Slotl
       if (isolation !== undefined && isolation !== 'read committed') throw invalidIsolationError();
       return inTransaction(sql, async (tx) => {
         if (isolation !== undefined) await assertReadCommitted(tx);
+        // Held shared until the transaction ends: suspension and erasure, which take it exclusively,
+        // wait for this transaction, and one that starts after them reads them below (READ
+        // COMMITTED: a statement after the lock sees what committed before it was granted).
         const previous = await tx<{ value: string | null }[]>`
-          SELECT current_setting(${configuredTenantSetting}, true) AS value`;
-        await tx`SELECT set_config(${configuredTenantSetting}, ${tenantRef}, true)`;
+          SELECT current_setting(${configuredTenantSetting}, true) AS value,
+                 pg_advisory_xact_lock_shared(
+                   hashtextextended(${slotlockTenantLockKey(tenantRef)}, 0)
+                 ) AS locked`;
+        const [context] = await tx<{ suspended: boolean }[]>`
+          SELECT set_config(${configuredTenantSetting}, ${tenantRef}, true) AS tenant,
+                 slotlock.tenant_suspended(${tenantRef}) AS suspended`;
         try {
-          return await callback(buildSlotlockStore(tx, storeOptions) as SlotlockTenantStore);
+          return await callback(
+            buildSlotlockStore(tx, storeOptions, context?.suspended === true) as SlotlockTenantStore,
+          );
         } finally {
           await tx`SELECT set_config(${configuredTenantSetting}, ${previous[0]?.value ?? ''}, true)`;
         }
@@ -4382,6 +4452,89 @@ function buildSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions): Slotl
         durationMs: params.durationMs,
       });
     },
+
+    async suspendTenant(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const reason = params.reason;
+      if (
+        reason !== undefined &&
+        (typeof reason !== 'string' ||
+          reason.length === 0 ||
+          Array.from(reason).length > 500 ||
+          Array.from(reason).some((character) => {
+            const codePoint = character.codePointAt(0) ?? 0;
+            return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f);
+          }))
+      ) {
+        throw Object.assign(
+          new Error('Slotlock suspension reason must be 1-500 characters without control characters'),
+          { code: 'invalid_suspension_reason' as const },
+        );
+      }
+      try {
+        const [row] = await sql<{ suspended: boolean }[]>`
+          SELECT slotlock.suspend_tenant(${params.tenantRef}::text, ${reason ?? null}::text) AS suspended`;
+        return { suspended: row?.suspended === true };
+      } catch (error) {
+        throw suspensionRefusal(error);
+      }
+    },
+
+    async unsuspendTenant(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      try {
+        const [row] = await sql<{ unsuspended: boolean }[]>`
+          SELECT slotlock.unsuspend_tenant(${params.tenantRef}::text) AS unsuspended`;
+        return { unsuspended: row?.unsuspended === true };
+      } catch (error) {
+        throw suspensionRefusal(error);
+      }
+    },
+
+    async isTenantSuspended(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const [row] = await sql<{ suspended: boolean }[]>`
+        SELECT slotlock.tenant_suspended(${params.tenantRef}::text) AS suspended`;
+      return row?.suspended === true;
+    },
+
+    async eraseTenant(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const erased = await sql<{ erased_table: string; erased_rows: string | number }[]>`
+        SELECT erased_table, erased_rows FROM slotlock.erase_tenant(${params.tenantRef}::text)`;
+      const rows: Record<string, number> = {};
+      let total = 0;
+      for (const row of erased) {
+        const count = Number(row.erased_rows);
+        rows[row.erased_table] = count;
+        total += count;
+      }
+      return { rows, total };
+    },
   };
-  return store;
+  if (!suspended) return store;
+  const refuse = async () => {
+    throw tenantSuspendedError();
+  };
+  return Object.assign(
+    store,
+    Object.fromEntries(SLOTLOCK_TENANT_WRITE_METHODS.map((name) => [name, refuse])),
+  );
+}
+
+/** The deployment role alone may suspend: another role is refused EXECUTE on the functions. */
+function suspensionRefusal(error: unknown): unknown {
+  if (pgCode(error) !== '42501') return error;
+  return Object.assign(
+    new Error('Slotlock suspends tenants and lifts suspensions only as the deployment role'),
+    { code: 'tenant_suspension_not_permitted' as const, cause: error },
+  );
 }

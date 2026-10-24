@@ -581,4 +581,31 @@ describe('Slotlock store-backed agent server adapter', () => {
       }),
     ).rejects.toMatchObject({ code: 'owner_command_quota_exceeded', status: 429 });
   });
+
+  it("answers a suspended tenant's write with 403 tenant_suspended, not a server failure", async () => {
+    const backend = createSlotlockStoreAgentBackend(store, { availabilityRules });
+    putCalendarEvent.mockRejectedValueOnce(
+      Object.assign(new Error('Slotlock tenant is suspended: it may read, and write nothing'), {
+        code: 'tenant_suspended',
+      }),
+    );
+    const outcome = await invokeSlotlockAgentOperation({
+      operation: 'slotlock_create_event',
+      input: {
+        resource_id: resource.id,
+        starts_at: '2027-01-10T09:00:00.000Z',
+        ends_at: '2027-01-10T10:00:00.000Z',
+        timezone: 'Europe/London',
+        title: 'Collection',
+        idempotency_key: 'suspended',
+      },
+      request: new Request('http://localhost/mcp'),
+      options: {
+        backend,
+        authenticate: async () => context.principal,
+        authorize: async () => true,
+      },
+    });
+    expect(outcome).toEqual({ ok: false, status: 403, code: 'tenant_suspended' });
+  });
 });

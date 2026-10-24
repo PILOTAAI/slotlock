@@ -254,10 +254,32 @@ export const SLOTLOCK_SCHEMA_FUNCTIONS = Object.freeze([
   'slotlock.installed_schema_version()',
 ] as const);
 
+/** The table of suspended tenants: they may read, and write nothing (store.ts withTenant). */
+export const SLOTLOCK_TENANT_ADMIN_TABLES = Object.freeze(['tenant_suspensions'] as const);
+
+/**
+ * The SECURITY DEFINER functions through which a server checks a tenant's suspension and erases a
+ * tenant, by signature.
+ */
+export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
+  'slotlock.tenant_suspended(text)',
+  'slotlock.erase_tenant(text)',
+] as const);
+
+/**
+ * Functions only the deployment role runs: suspending and lifting a suspension. No other role is
+ * granted them, so a serving role cannot lift a suspension.
+ */
+export const SLOTLOCK_OPERATOR_FUNCTIONS = Object.freeze([
+  'slotlock.suspend_tenant(text, text)',
+  'slotlock.unsuspend_tenant(text)',
+] as const);
+
 export const SLOTLOCK_DEFINER_FUNCTIONS = Object.freeze([
   ...SLOTLOCK_API_KEY_FUNCTIONS,
   ...SLOTLOCK_DASHBOARD_FUNCTIONS,
   ...SLOTLOCK_SCHEMA_FUNCTIONS,
+  ...SLOTLOCK_TENANT_ADMIN_FUNCTIONS,
 ]);
 
 /** Tables no role but their owner reads or writes, reached only through SLOTLOCK_DEFINER_FUNCTIONS. */
@@ -265,8 +287,16 @@ export const SLOTLOCK_DEFINER_TABLES = Object.freeze([
   ...SLOTLOCK_API_KEY_TABLES,
   ...SLOTLOCK_DASHBOARD_TABLES,
   ...SLOTLOCK_SCHEMA_TABLES,
+  ...SLOTLOCK_TENANT_ADMIN_TABLES,
 ]);
 
+/**
+ * The advisory lock every server transaction for a tenant holds shared (store.ts withTenant), and
+ * suspension and erasure take exclusively, keyed by this text's hashtextextended(…, 0).
+ */
+export function slotlockTenantLockKey(tenantRef: string): string {
+  return `slotlock:tenant:${tenantRef}`;
+}
 
 const API_KEY_COLUMNS = `key_id uuid,
   key_tenant_ref text,
@@ -386,6 +416,11 @@ BEGIN
       USING ERRCODE = 'invalid_transaction_state';
   END IF;
   PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || requested_tenant_ref, 0));
+  IF EXISTS (SELECT 1 FROM slotlock.tenant_suspensions suspended
+              WHERE suspended.tenant_ref = requested_tenant_ref) THEN
+    RAISE EXCEPTION 'Slotlock tenant is suspended: it gets no new API key'
+      USING ERRCODE = 'insufficient_privilege', HINT = 'tenant_suspended';
+  END IF;
   IF EXISTS (SELECT 1 FROM slotlock.api_key_retired_digests retired
               WHERE retired.secret_hash = requested_secret_hash) THEN
     RAISE EXCEPTION 'Slotlock never uses a retired API key digest again'
@@ -440,6 +475,11 @@ AS $slotlock_rotate_api_key$
 DECLARE
   retiring bytea;
 BEGIN
+  IF EXISTS (SELECT 1 FROM slotlock.tenant_suspensions suspended
+              WHERE suspended.tenant_ref = requested_tenant_ref) THEN
+    RAISE EXCEPTION 'Slotlock tenant is suspended: it gets no new API key secret'
+      USING ERRCODE = 'insufficient_privilege', HINT = 'tenant_suspended';
+  END IF;
   IF EXISTS (SELECT 1 FROM slotlock.api_key_retired_digests retired
               WHERE retired.secret_hash = requested_secret_hash) THEN
     RAISE EXCEPTION 'Slotlock never uses a retired API key digest again'
@@ -671,6 +711,188 @@ AS $slotlock_installed_schema_version$
   SELECT version FROM slotlock.schema_version WHERE singleton;
 $slotlock_installed_schema_version$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_SCHEMA_FUNCTIONS[0]} FROM PUBLIC;
+`;
+
+// Tenant suspension and erasure. A suspended tenant's server transactions (withTenant) may read and
+// write nothing; its keys still authenticate, but it gets no new key or secret. The table names
+// tenants and why they were suspended, so RLS is enabled with no policy and no role is granted
+// anything: a server reads it only through tenant_suspended(), and only the deployment role, which
+// owns it, suspends or lifts a suspension. Erasure keeps the suspension, so an erased abuser stays
+// suspended.
+//
+// Every server transaction for a tenant holds the tenant's lock shared, from before it reads the
+// suspension; suspension and erasure take it exclusively. So a suspension waits for the tenant's
+// transactions in flight, and every one that starts after it sees it.
+const SLOTLOCK_TENANT_ADMIN_DDL = `
+CREATE TABLE IF NOT EXISTS slotlock.tenant_suspensions (
+  tenant_ref text PRIMARY KEY,
+  reason text,
+  suspended_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT slotlock_tenant_suspensions_tenant_ref_valid
+    CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500),
+  CONSTRAINT slotlock_tenant_suspensions_reason_valid
+    CHECK (reason IS NULL OR (char_length(reason) BETWEEN 1 AND 500 AND reason !~ '[[:cntrl:]]'))
+);
+ALTER TABLE slotlock.tenant_suspensions ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.tenant_suspensions FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION slotlock.tenant_suspended(requested_tenant_ref text)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_tenant_suspended$
+  SELECT EXISTS (
+    SELECT 1 FROM slotlock.tenant_suspensions suspended
+     WHERE suspended.tenant_ref = requested_tenant_ref
+  );
+$slotlock_tenant_suspended$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[0]} FROM PUBLIC;
+
+-- True when the tenant was not suspended already; a second suspension keeps the first's reason.
+CREATE OR REPLACE FUNCTION slotlock.suspend_tenant(requested_tenant_ref text, requested_reason text)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_suspend_tenant$
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:tenant:' || requested_tenant_ref, 0));
+  INSERT INTO slotlock.tenant_suspensions (tenant_ref, reason)
+  VALUES (requested_tenant_ref, requested_reason)
+  ON CONFLICT (tenant_ref) DO NOTHING;
+  RETURN FOUND;
+END
+$slotlock_suspend_tenant$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_OPERATOR_FUNCTIONS[0]} FROM PUBLIC;
+
+-- True when the tenant was suspended.
+CREATE OR REPLACE FUNCTION slotlock.unsuspend_tenant(requested_tenant_ref text)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_unsuspend_tenant$
+BEGIN
+  DELETE FROM slotlock.tenant_suspensions WHERE tenant_ref = requested_tenant_ref;
+  RETURN FOUND;
+END
+$slotlock_unsuspend_tenant$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_OPERATOR_FUNCTIONS[1]} FROM PUBLIC;
+
+-- Tenant erasure: every row the tenant owns, one row of the result per table with how many were
+-- deleted, in an order no foreign key refuses. Holds carry no tenant: those on the tenant's resources
+-- are its. API key digests are retired, as erase_api_keys retires them, so no erased key works again.
+-- A personal (github:<id>) tenant's dashboard form records carry a digest of the person, the
+-- dashboard's (dashboard.ts ownerDigest). Running it again deletes nothing. Forced row-level security
+-- binds the function's owner too, so it names the tenant in every setting a policy reads, and puts
+-- the caller's values back after.
+CREATE OR REPLACE FUNCTION slotlock.erase_tenant(requested_tenant_ref text)
+RETURNS TABLE (erased_table text, erased_rows bigint)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_erase_tenant$
+DECLARE
+  setting text;
+  previous jsonb := '{}'::jsonb;
+BEGIN
+  IF requested_tenant_ref IS NULL OR octet_length(requested_tenant_ref) NOT BETWEEN 1 AND 500 THEN
+    RAISE EXCEPTION 'Slotlock tenant reference must be 1-500 UTF-8 bytes'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:tenant:' || requested_tenant_ref, 0));
+  FOR setting IN
+    SELECT DISTINCT contract.tenant_context_setting FROM slotlock.rls_policy_contracts contract
+  LOOP
+    previous := previous || jsonb_build_object(setting, current_setting(setting, true));
+    PERFORM set_config(setting, requested_tenant_ref, true);
+  END LOOP;
+
+  erased_table := 'calendar_event_attendees';
+  DELETE FROM slotlock.calendar_event_attendees WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'calendar_event_reminders';
+  DELETE FROM slotlock.calendar_event_reminders WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'calendar_event_exceptions';
+  DELETE FROM slotlock.calendar_event_exceptions WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'calendar_event_occurrences';
+  DELETE FROM slotlock.calendar_event_occurrences WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'reservations';
+  DELETE FROM slotlock.reservations
+   WHERE tenant_ref = requested_tenant_ref
+      OR resource_id IN (SELECT owned.id FROM slotlock.resources owned
+                          WHERE owned.tenant_ref = requested_tenant_ref);
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'calendar_events';
+  DELETE FROM slotlock.calendar_events WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'calendar_event_tombstones';
+  DELETE FROM slotlock.calendar_event_tombstones WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'calendar_event_commands';
+  DELETE FROM slotlock.calendar_event_commands WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'reservation_tombstones';
+  DELETE FROM slotlock.reservation_tombstones WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'reservation_conflict_archive';
+  DELETE FROM slotlock.reservation_conflict_archive WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'calendar_coverage';
+  DELETE FROM slotlock.calendar_coverage WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'hold_commands';
+  DELETE FROM slotlock.hold_commands WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'resources';
+  DELETE FROM slotlock.resources WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'api_keys';
+  WITH erased AS (
+    DELETE FROM slotlock.api_keys WHERE tenant_ref = requested_tenant_ref RETURNING secret_hash
+  ), retired AS (
+    INSERT INTO slotlock.api_key_retired_digests (secret_hash)
+    SELECT erased.secret_hash FROM erased
+    ON CONFLICT DO NOTHING
+  )
+  SELECT count(*) INTO erased_rows FROM erased;
+  RETURN NEXT;
+  erased_table := 'dashboard_tokens';
+  erased_rows := 0;
+  IF requested_tenant_ref LIKE 'github:%' THEN
+    DELETE FROM slotlock.dashboard_tokens
+     WHERE kind = 'form'
+       AND owner_hash = sha256(convert_to(
+             'slotlock-dashboard-owner.' || substr(requested_tenant_ref, 8), 'UTF8'));
+    GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  END IF;
+  RETURN NEXT;
+
+  FOR setting IN SELECT jsonb_object_keys(previous) LOOP
+    PERFORM set_config(setting, coalesce(previous ->> setting, ''), true);
+  END LOOP;
+END
+$slotlock_erase_tenant$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[1]} FROM PUBLIC;
 `;
 
 // A constraint an upgrade added NOT VALID (no table scan under its ACCESS EXCLUSIVE lock) is checked
@@ -1835,7 +2057,7 @@ CREATE INDEX IF NOT EXISTS slotlock_calendar_event_occurrences_resource_time_idx
   ON slotlock.calendar_event_occurrences (tenant_ref, starts_at, ends_at);
 CREATE INDEX IF NOT EXISTS slotlock_reservations_calendar_event_idx
   ON slotlock.reservations (calendar_event_id) WHERE calendar_event_id IS NOT NULL;
-${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_DASHBOARD_DDL}${DEPLOYMENT_VALIDATE_CONSTRAINTS}${DEPLOYMENT_RESTORE_FORCED_ROW_SECURITY}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
+${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_DASHBOARD_DDL}${SLOTLOCK_TENANT_ADMIN_DDL}${DEPLOYMENT_VALIDATE_CONSTRAINTS}${DEPLOYMENT_RESTORE_FORCED_ROW_SECURITY}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
 
 export const SLOTLOCK_TENANT_CONTEXT_SETTING = 'slotlock.tenant_ref';
 
