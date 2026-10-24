@@ -14,8 +14,8 @@ query-filters:
   # with rejection sampling so no character is likelier than another), which no offline guessing can
   # search, so a slow password hash (bcrypt, scrypt, Argon2) would add nothing and would cost every
   # request a deliberately slow lookup. SECURITY.md, "API keys and the application API", gives the
-  # design; GitHub's and Stripe's tokens are stored the same way. The query has no way to tell a
-  # high-entropy token from a password a person chose, so it is dropped for the whole repository.
+  # design. The query has no way to tell a high-entropy token from a password a person chose, so it
+  # is dropped for the whole repository.
   # If Slotlock ever stores a secret a person chooses, it gets a slow hash, and this exclusion is
   # revisited in that change.
   - exclude:
