@@ -254,7 +254,11 @@ describe('recurrence edges', () => {
     const W = w('2027-01-01T00:00:00Z', '2027-01-20T00:00:00Z');
     const [series] = parseTrustedICalendarEvents(feed, 'Europe/Berlin');
     // 4, 6 and 7 January in Berlin: noon UTC on 5 January falls on the 5th there.
-    const days = ['2027-01-03T23:00:00.000Z', '2027-01-05T23:00:00.000Z', '2027-01-06T23:00:00.000Z'];
+    const days = [
+      '2027-01-03T23:00:00.000Z',
+      '2027-01-05T23:00:00.000Z',
+      '2027-01-06T23:00:00.000Z',
+    ];
     expect([
       starts(expandCalendarEventOccurrences(series as never, W)),
       starts(parseICalendarChanges(feed, 'Europe/Berlin', W)),
@@ -276,7 +280,11 @@ describe('recurrence edges', () => {
     );
     const W = w('2027-01-01T00:00:00Z', '2027-02-01T00:00:00Z');
     const [series] = parseTrustedICalendarEvents(feed, 'UTC');
-    const weeks = ['2027-01-04T09:00:00.000Z', '2027-01-11T09:00:00.000Z', '2027-01-25T09:00:00.000Z'];
+    const weeks = [
+      '2027-01-04T09:00:00.000Z',
+      '2027-01-11T09:00:00.000Z',
+      '2027-01-25T09:00:00.000Z',
+    ];
     expect([
       starts(parseICalendarChanges(feed, undefined, W)),
       starts(expandCalendarEventOccurrences(series as never, W)),
@@ -388,6 +396,32 @@ describe('recurrence edges', () => {
       ['2027-01-04T09:00:00.000Z', '2027-01-06T09:00:00.000Z'],
       3,
       ['2027-01-04T09:00:00.000Z', '2027-01-06T09:00:00.000Z'],
+    ]);
+  });
+
+  it('a CalDAV-expanded series keeps every instance, its first without a RECURRENCE-ID', () => {
+    // RFC 4791 §9.6.5: every instance but the first must carry a RECURRENCE-ID, and none carries
+    // RRULE. Each later instance was read as an exception of a one-off, and dropped.
+    const W = w('2027-01-01T00:00:00Z', '2027-02-01T00:00:00Z');
+    const expanded = cal(
+      ...ev('x', 'DTSTART:20270104T090000Z', 'DTEND:20270104T100000Z'),
+      ...ev(
+        'x',
+        'RECURRENCE-ID:20270105T090000Z',
+        'DTSTART:20270105T090000Z',
+        'DTEND:20270105T100000Z',
+      ),
+      ...ev(
+        'x',
+        'RECURRENCE-ID:20270106T090000Z',
+        'DTSTART:20270106T140000Z',
+        'DTEND:20270106T150000Z',
+      ),
+    );
+    expect(spans(parseICalendarChanges(expanded, undefined, W))).toEqual([
+      ['2027-01-04T09:00:00.000Z', '2027-01-04T10:00:00.000Z'],
+      ['2027-01-05T09:00:00.000Z', '2027-01-05T10:00:00.000Z'],
+      ['2027-01-06T14:00:00.000Z', '2027-01-06T15:00:00.000Z'],
     ]);
   });
 });

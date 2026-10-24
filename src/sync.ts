@@ -561,7 +561,10 @@ function recurShapeProblem(recur: ICAL.Recur): string | null {
   if (freq === 'MINUTELY' && (parts.BYMINUTE || parts.BYSECOND)) {
     return 'BYMINUTE or BYSECOND with FREQ=MINUTELY';
   }
-  if ((freq === 'MONTHLY' || freq === 'YEARLY') && (parts.BYHOUR || parts.BYMINUTE || parts.BYSECOND)) {
+  if (
+    (freq === 'MONTHLY' || freq === 'YEARLY') &&
+    (parts.BYHOUR || parts.BYMINUTE || parts.BYSECOND)
+  ) {
     return `BYHOUR, BYMINUTE or BYSECOND with FREQ=${freq}`;
   }
   return null;
@@ -1069,11 +1072,12 @@ function budgetRule(rule: unknown, Budgeted: typeof ICAL.RecurIterator): void {
 function budgetedExpansion(
   event: ICAL.Event,
   Budgeted: typeof ICAL.RecurIterator,
+  start?: ICAL.Time,
 ): ICAL.RecurExpansion {
   for (const property of event.component.getAllProperties('rrule')) {
     budgetRule(property.getFirstValue(), Budgeted);
   }
-  const expansion = event.iterator();
+  const expansion = event.iterator(start);
   const iterators = (expansion as unknown as { ruleIterators?: unknown }).ruleIterators;
   if (!Array.isArray(iterators) || !iterators.every((iterator) => iterator instanceof Budgeted)) {
     throw new CalendarContractError('invalid_icalendar');
@@ -2439,8 +2443,9 @@ function parseCalendarChanges(
         const change = makeChange(event.component, uid, lengths.start, end, recurrenceId);
         if (change) changes.push(change);
       }
-      // A server-expanded CalDAV series (RFC 4791 §9.6.5) sends its first instance without a
-      // RECURRENCE-ID and the others with one: each instance is an override of this one-off.
+      // A server-expanded CalDAV series may send its first instance without a RECURRENCE-ID, and
+      // must send every other one with one (RFC 4791 §9.6.5): each is an override of this one-off,
+      // and occupies its own time.
       for (const override of overrides) if (override.change) changes.push(override.change);
     };
 
@@ -2547,12 +2552,44 @@ function parseCalendarChanges(
           : null;
       let periodEnds: Map<number, number> | undefined;
       let exclusions: ReturnType<typeof exclusionsOf> | undefined;
+      // A feed's series that repeats every so many days (one RRULE, DAILY or WEEKLY, with no
+      // COUNT, RDATE or RANGE=THISANDFUTURE override) repeats the same way from DTSTART moved a
+      // whole number of its periods on the wall clock: a WEEKLY rule's weeks stay in step, a DAILY
+      // rule's BY parts only limit its days. So its search starts at the last such time from which
+      // no occurrence before it could reach the window (it lasts at most its wall-clock or exact
+      // length and a day more), and a daily standup since 2014 is read like one from this year.
+      let from: ICAL.Time | undefined;
+      const rules = event.component.getAllProperties('rrule');
+      const only = rules.length === 1 ? rules[0]?.getFirstValue() : undefined;
+      if (
+        !series &&
+        ranges.length === 0 &&
+        !event.component.hasProperty('rdate') &&
+        startTime instanceof ICAL.Time &&
+        only instanceof ICAL.Recur &&
+        only.count == null &&
+        (only.freq === 'DAILY' || only.freq === 'WEEKLY')
+      ) {
+        const periodMs = only.interval * (only.freq === 'WEEKLY' ? 7 : 1) * DAY_MS;
+        const reachMs =
+          Math.max(lengths.exact ?? 0, lengths.wall) + OCCURRENCE_END_SLACK_MS + periodMs;
+        const periods = Math.floor(
+          (expansionWindow.start.getTime() - reachMs - lengths.start) / periodMs,
+        );
+        if (periods > 0) {
+          const day = new Date(lengths.startWall + periods * periodMs);
+          from = startTime.clone();
+          from.year = day.getUTCFullYear();
+          from.month = day.getUTCMonth() + 1;
+          from.day = day.getUTCDate();
+        }
+      }
       // The occurrences in the window from `resume` (or the start), and the cursor to keep; null
       // when `resume` does not fit this series.
       const expand = (resume: CalendarSeriesCursor | null) => {
         const iterator = resume
           ? resumedExpansion(event, budgeted(), resume)
-          : budgetedExpansion(event, budgeted());
+          : budgetedExpansion(event, budgeted(), from);
         if (iterator === null) return null;
         // The cursor stands on the occurrence it last passed: the same time, read the same way.
         if (
@@ -2582,7 +2619,9 @@ function parseCalendarChanges(
         let scannedTo = Number.NEGATIVE_INFINITY;
         // DTSTART is the first instance (RFC 5545 §3.8.5.3), whether or not the rule gives it.
         let first: ICAL.Time | null =
-          resume === null && startTime instanceof ICAL.Time ? startTime : null;
+          resume === null && from === undefined && startTime instanceof ICAL.Time
+            ? startTime
+            : null;
         const firstAt = first ? timeValue(first, startZone, defaultTimezone).getTime() : 0;
         let held: ICAL.Time | null | undefined;
         while (true) {
