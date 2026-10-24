@@ -311,3 +311,49 @@ export function zonedDateTimeToUtc(
   ).getTime();
   return createTimeZoneConverter(timezone).wallFrameToUtc(wallFrame, choice);
 }
+
+/** A change of a zone's offset: the instant it takes effect, and the offsets before and after. */
+export interface ZoneTransition {
+  /** The first whole second at the new offset, in ms. */
+  at: number;
+  /** How far the zone is ahead of UTC before and after it, in ms. */
+  before: number;
+  after: number;
+}
+
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Every change of `timezone`'s offset from `fromMs` to `toMs`, as Intl reads the zone: its offset
+ * is compared a week apart and each change narrowed to the second. A change and its reversal both
+ * within one week, which no zone Intl knows makes from 2020 to 2032 (a test compares a day-by-day
+ * search), would be missed.
+ */
+export function zoneTransitions(timezone: string, fromMs: number, toMs: number): ZoneTransition[] {
+  if (timezone === 'UTC') return [];
+  const formatter = createFormatter(timezone);
+  const offsetIn = (utcMs: number) => offsetAt(utcMs, formatter);
+  const found: ZoneTransition[] = [];
+  let at = Math.floor(fromMs / 1000) * 1000;
+  let offset = offsetIn(at);
+  while (at < toMs) {
+    const next = Math.min(at + WEEK_MS, Math.ceil(toMs / 1000) * 1000);
+    if (offsetIn(next) === offset) {
+      at = next;
+      continue;
+    }
+    // The last whole second at `offset` and the first at another.
+    let low = at;
+    let high = next;
+    while (high - low > 1000) {
+      const middle = Math.floor((low + high) / 2000) * 1000;
+      if (offsetIn(middle) === offset) low = middle;
+      else high = middle;
+    }
+    const after = offsetIn(high);
+    found.push({ at: high, before: offset, after });
+    offset = after;
+    at = high;
+  }
+  return found;
+}

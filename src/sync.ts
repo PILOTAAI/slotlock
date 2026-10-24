@@ -7,8 +7,11 @@ import {
   createTimeZoneConverter,
   utcFrame,
   wallFrameToInstant,
+  type ZoneTransition,
   zonedDateTimeFields,
   zonedDateTimeToUtc,
+  zonedOffsetMinutes,
+  zoneTransitions,
 } from './timezone.js';
 import type {
   CalendarAttendee,
@@ -3089,6 +3092,110 @@ function eventComponent(params: {
   return component;
 }
 
+const WEEKDAYS = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
+/** How many years past its last stored time a series' VTIMEZONE lists, before its rules go on. */
+const VTIMEZONE_SERIES_YEARS = 30;
+/** And at most, from its first year: a longer series is left to the rules. */
+const MAX_VTIMEZONE_YEARS = 60;
+
+/** Changes of a zone already found, by zone and years: Intl answers the same for a process. */
+const zoneChanges = new Map<string, ZoneTransition[]>();
+
+/** One change a year, which one yearly rule names. */
+interface ZoneRun {
+  changes: ZoneTransition[];
+  /** The BYDAY values that name every change of the run in its month. */
+  days: string[];
+  lastYear: number;
+}
+
+/**
+ * A VTIMEZONE (RFC 5545 §3.6.5) for `timezone` as Intl reads it from `fromYear` to `toYear`: the
+ * offset at the start of `fromYear`, then every change (zoneTransitions). Changes in consecutive
+ * years on the same weekday of the same month, at the same local time and between the same
+ * offsets, are one observance with a yearly rule (`BYMONTH=3;BYDAY=-1SU`), with an UNTIL where they
+ * stop; one still running at `toYear` after three years at least is left open, so a reader carries
+ * the zone on past `toYear` as the IANA rules do. Any other change is an observance of its own. An
+ * observance starts at the local time before the change, as §3.6.5 has it, and offsets are written
+ * in whole minutes: ical.js 2.2.1 reads no seconds in one (UtcOffset.fromString).
+ */
+function vtimezoneComponent(timezone: string, fromYear: number, toYear: number): ICAL.Component {
+  const from = Date.UTC(fromYear, 0, 1);
+  const key = `${timezone}|${fromYear}|${toYear}`;
+  let changes = zoneChanges.get(key);
+  if (!changes) {
+    changes = zoneTransitions(timezone, from, Date.UTC(toYear + 1, 0, 1));
+    if (zoneChanges.size >= 64) zoneChanges.clear();
+    zoneChanges.set(key, changes);
+  }
+  const zone = new ICAL.Component('vtimezone');
+  zone.updatePropertyWithValue('tzid', timezone);
+  const offset = (ms: number) => ICAL.UtcOffset.fromSeconds(Math.round(ms / 60_000) * 60);
+  const observance = (at: number, before: number, after: number) => {
+    const component = new ICAL.Component(after > before ? 'daylight' : 'standard');
+    const wall = new Date(at + before);
+    component.updatePropertyWithValue(
+      'dtstart',
+      ICAL.Time.fromData({
+        year: wall.getUTCFullYear(),
+        month: wall.getUTCMonth() + 1,
+        day: wall.getUTCDate(),
+        hour: wall.getUTCHours(),
+        minute: wall.getUTCMinutes(),
+        second: wall.getUTCSeconds(),
+        isDate: false,
+      }),
+    );
+    component.updatePropertyWithValue('tzoffsetfrom', offset(before));
+    component.updatePropertyWithValue('tzoffsetto', offset(after));
+    zone.addSubcomponent(component);
+    return component;
+  };
+  const initial = changes[0]?.before ?? zonedOffsetMinutes(new Date(from), timezone) * 60_000;
+  observance(from - initial, initial, initial);
+  const open = new Map<string, ZoneRun>();
+  const runs: ZoneRun[] = [];
+  for (const change of changes) {
+    const wall = new Date(change.at + change.before);
+    const year = wall.getUTCFullYear();
+    const month = wall.getUTCMonth() + 1;
+    const day = wall.getUTCDate();
+    const weekday = WEEKDAYS[wall.getUTCDay()] as string;
+    const days = [`${Math.ceil(day / 7)}${weekday}`];
+    if (day > new Date(Date.UTC(year, month, 0)).getUTCDate() - 7) days.push(`-1${weekday}`);
+    const kind = `${change.before}|${change.after}|${month}|${wall.getTime() % DAY_MS}`;
+    const run = open.get(kind);
+    const shared = run?.days.filter((value) => days.includes(value)) ?? [];
+    if (run && run.lastYear === year - 1 && shared.length > 0) {
+      run.changes.push(change);
+      run.days = shared;
+      run.lastYear = year;
+    } else {
+      const started = { changes: [change], days, lastYear: year };
+      open.set(kind, started);
+      runs.push(started);
+    }
+  }
+  for (const run of runs) {
+    const first = run.changes[0] as ZoneTransition;
+    const last = run.changes[run.changes.length - 1] as ZoneTransition;
+    const running = run.lastYear >= toYear;
+    if (run.changes.length >= 3 || (run.changes.length === 2 && !running)) {
+      const month = new Date(first.at + first.before).getUTCMonth() + 1;
+      const until = running
+        ? ''
+        : `;UNTIL=${ICAL.Time.fromJSDate(new Date(last.at), true).toICALString()}`;
+      observance(first.at, first.before, first.after).updatePropertyWithValue(
+        'rrule',
+        ICAL.Recur.fromString(`FREQ=YEARLY;BYMONTH=${month};BYDAY=${run.days[0]}${until}`),
+      );
+    } else {
+      for (const change of run.changes) observance(change.at, change.before, change.after);
+    }
+  }
+  return zone;
+}
+
 /** Deterministic RFC 5545 + iTIP payload, validated by the installed ical.js implementation. */
 export function emitITipCalendar(input: ICalendarEvent, method: ITipMethod): string {
   try {
@@ -3144,7 +3251,7 @@ export function emitITipCalendar(input: ICalendarEvent, method: ITipMethod): str
       includeRecurrence: true,
     };
     if (status !== undefined) masterParams.status = status;
-    calendar.addSubcomponent(eventComponent(masterParams));
+    const events = [eventComponent(masterParams)];
     // A series whose first instance starts in the second pass of an hour the clocks repeat has a
     // DTSTART that reads as the first pass: an override (keyed by that first pass) puts the
     // instance at its own instants, unless an exception already says where it is.
@@ -3183,8 +3290,31 @@ export function emitITipCalendar(input: ICalendarEvent, method: ITipMethod): str
       };
       const exceptionStatus = exception.cancelled ? 'cancelled' : status;
       if (exceptionStatus !== undefined) exceptionParams.status = exceptionStatus;
-      calendar.addSubcomponent(eventComponent(exceptionParams));
+      events.push(eventComponent(exceptionParams));
     }
+    // RFC 5545 §3.6.5: a VTIMEZONE for the zone a time names, over every year the event's times
+    // fall in, and a series' rule's (to its UNTIL, else thirty years on, where its rules go on).
+    const zoned = events.some((component) =>
+      component.getAllProperties().some((property) => property.getParameter('tzid')),
+    );
+    if (zoned) {
+      const times = [event.start, event.end];
+      for (const exception of exceptions) {
+        times.push(exception.recurrenceId);
+        if (exception.start) times.push(exception.start);
+        if (exception.end) times.push(exception.end);
+      }
+      const years = times.map((time) => time.getUTCFullYear());
+      const fromYear = Math.min(...years) - 1;
+      let toYear = Math.max(...years) + 1;
+      if (event.recurrence) {
+        const until = ICAL.Recur.fromString(event.recurrence.rrule).until;
+        toYear = until ? Math.max(toYear, until.year + 1) : toYear + VTIMEZONE_SERIES_YEARS;
+      }
+      const lastYear = Math.min(toYear, fromYear + MAX_VTIMEZONE_YEARS);
+      calendar.addSubcomponent(vtimezoneComponent(event.timezone, fromYear, lastYear));
+    }
+    for (const component of events) calendar.addSubcomponent(component);
     const output = `${calendar
       .toString()
       .replace(/\r?\n/g, '\r\n')
