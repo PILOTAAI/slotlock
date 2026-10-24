@@ -93,12 +93,12 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
     const committed = application.begin('isolation level read committed', async (tx) => {
       if (rotateId === undefined) {
         await tx`
-          SELECT id FROM slotlock.create_api_key(
+          SELECT key_id FROM slotlock.create_api_key(
             ${tenantRef}::text, 'Racing key', ${prefix}::text, ${randomBytes(32)}::bytea,
             pg_catalog.string_to_array('read', ','), NULL::timestamptz, NULL::text)`;
       } else {
         await tx`
-          SELECT id FROM slotlock.rotate_api_key(
+          SELECT key_id FROM slotlock.rotate_api_key(
             ${tenantRef}::text, ${rotateId}::uuid, ${prefix}::text, ${randomBytes(32)}::bytea)`;
       }
       started();
