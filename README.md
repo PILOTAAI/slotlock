@@ -10,9 +10,8 @@ TypeScript library.
 Slotlock 0.2.0 can occupy less time than an event was written with, so another booking can take the
 rest: around daylight-saving changes, in any time zone that has them, and at the end of some series.
 The library and `slotlock serve` are both affected (the last case below is in the library's
-iCalendar readers only); the 0.1 releases are older still and unsupported. The fixes are for 0.3.0: upgrade to it once it is published, and until then do not
-rely on 0.2.0 alone to refuse bookings in these cases (the clocks change next on 25 October 2026 in
-Europe and 1 November 2026 in the United States and Canada).
+iCalendar readers only); the 0.1 releases are older still and unsupported. 0.3.0 fixes all six
+cases; while you run 0.2.0, do not rely on it alone to refuse bookings in them.
 
 - A recurring event whose first occurrence spans a daylight-saving change gets that occurrence an
   hour short: in spring, an hour of the written time is free to book.
@@ -32,8 +31,8 @@ Europe and 1 November 2026 in the United States and Canada).
 
 0.1.0, 0.1.1 and 0.2.0 also pin zod 4.6.5 exactly, which has a high advisory
 ([GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5): validating an oversized
-array can exhaust memory), so `npm audit` reports it with no fix available. Until 0.3.0, add this to
-your application's `package.json` and run `npm install`:
+array can exhaust memory), which `npm audit` reports. While you run one of them, add this to your
+application's `package.json` and run `npm install`:
 
 ```json
 "overrides": {"zod": "4.6.7"}

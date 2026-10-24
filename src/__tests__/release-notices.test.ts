@@ -75,6 +75,16 @@ describe('the 0.2.0 known-issues notice', () => {
     expect(readme).toContain('0.3.0');
   });
 
+  it('stays true in every later package that ships this README: no date, no waiting for 0.3.0', () => {
+    // scripts/prepare-package.mjs packs README.md into every release, 0.3.0 and later included.
+    expect(read('scripts/prepare-package.mjs')).toMatch(/^ {2}'README\.md',$/m);
+    const readme = notice();
+    expect(readme).not.toMatch(
+      /\b\d{1,2} (?:January|February|March|April|May|June|July|August|September|October|November|December) \d{4}\b/,
+    );
+    expect(readme).not.toMatch(/once it is published|until 0\.3\.0|until then/i);
+  });
+
   it('sits ahead of the install instructions, so npm and GitHub readers meet it first', () => {
     const text = read('README.md');
     expect(text.indexOf(HEADING)).toBeGreaterThan(0);
