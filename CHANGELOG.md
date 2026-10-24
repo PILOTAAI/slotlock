@@ -104,6 +104,10 @@ versioning.
   abuse, privacy and security contacts; and `VERSIONING.md`, what `/v1`, the tools and the version
   numbers promise and the 90 days' notice before hosted Slotlock changes anything under `/v1`. The
   site has a page for each and a Hosted section, and no longer says there is no hosted service.
+- `.github/SUPPORT.md` and the new-issue page give each kind of request its route: issues for
+  questions and bugs, `support@pylota.io`, `abuse@pylota.io` and `privacy@pylota.io` for the hosted
+  service, private vulnerability reporting for security, and the `status` issues. MAINTAINERS.md no
+  longer sends questions to Discussions, which are off.
 
 ## 0.2.0 - 2026-10-23
 
