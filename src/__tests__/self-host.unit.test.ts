@@ -3,7 +3,7 @@
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { SLOTLOCK_DEFAULT_LIMITS } from '../config.js';
+import { SLOTLOCK_DEFAULT_LIMITS, formatSlotlockRate } from '../config.js';
 import {
   SLOTLOCK_CLI_HELP,
   SLOTLOCK_ENVIRONMENT_VARIABLES,
@@ -94,6 +94,34 @@ describe('slotlock serve configuration', () => {
       global_write: { perSecond: 50 },
     });
     expect('trustedProxyHeader' in readSlotlockServeConfig(serveEnv())).toBe(false);
+  });
+
+  it('writes each rate back in the smallest whole unit, as the listening line shows it', () => {
+    expect(
+      Object.fromEntries(
+        Object.entries(SLOTLOCK_DEFAULT_LIMITS.rates).map(([name, rate]) => [
+          name,
+          formatSlotlockRate(rate),
+        ]),
+      ),
+    ).toEqual({
+      address: '50/s:100',
+      key_read: '20/s:40',
+      key_write: '5/s:20',
+      tenant_read: '20/s:40',
+      tenant_write: '5/s:20',
+      global_read: '500/s:1000',
+      global_write: '50/s:100',
+      sign_in: '20/m:20',
+    });
+    expect(formatSlotlockRate({ perSecond: 5 / 3600, burst: 5 })).toBe('5/h:5');
+    expect(formatSlotlockRate(null)).toBe('off');
+    // What it writes reads back as the same rate.
+    const written = 'tenant_write=7/m:3,sign_in=5/h:5';
+    const read = readSlotlockServeConfig(serveEnv({ SLOTLOCK_LIMITS: written })).limits.rates;
+    expect(`tenant_write=${formatSlotlockRate(read.tenant_write)},sign_in=${formatSlotlockRate(read.sign_in)}`).toBe(
+      written,
+    );
   });
 
   it.each([

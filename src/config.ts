@@ -252,7 +252,8 @@ const MAX_RATE_COUNT = 1_000_000;
 /** A rate as SLOTLOCK_LIMITS and the `listening` log line write it: `<count>/<s|m|h>:<burst>`. */
 export function formatSlotlockRate(rate: SlotlockRate | null): string {
   if (rate === null) return 'off';
-  for (const [unit, seconds] of Object.entries(RATE_PERIOD_SECONDS).reverse()) {
+  // The smallest unit in which the count is whole: 50/s rather than 180000/h.
+  for (const [unit, seconds] of Object.entries(RATE_PERIOD_SECONDS)) {
     const count = rate.perSecond * seconds;
     if (Number.isInteger(Math.round(count * 1e9) / 1e9) && count >= 1) {
       return `${Math.round(count)}/${unit}:${rate.burst}`;
