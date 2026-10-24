@@ -10,8 +10,10 @@ import {
   SLOTLOCK_SCHEMA_CONTROL_REFUSAL,
   SLOTLOCK_SCHEMA_NEWER_REFUSAL,
   SLOTLOCK_SCHEMA_VERSION,
+  SLOTLOCK_STRUCTURE_DDL,
   SLOTLOCK_TENANT_CONTEXT_SETTING,
   SLOTLOCK_TENANT_TABLES,
+  SLOTLOCK_VALIDATION_DDL,
   createSlotlockApplicationRoleGrantsDdl,
   createSlotlockTenantRlsDdl,
   slotlockTenantLockKey,
@@ -1697,7 +1699,9 @@ export interface SlotlockStore {
    * trigger running a function such a role owns. Ownership through a group role counts as another
    * role's: deploy as the owning role itself (`SET ROLE`). Refuses (`schema_newer`) a schema a newer
    * release migrated, changing nothing. Records SLOTLOCK_SCHEMA_VERSION. A schema this release
-   * already migrated, unchanged since, is left as it is without a lock on any table. Each lock it
+   * already migrated, unchanged since, is left as it is without a lock on any table. Constraints an
+   * upgrade adds NOT VALID are validated in a second transaction, whose locks no serving read or
+   * write waits for (one inside a caller's transaction shares its locks until it ends). Each lock it
    * waits for is bounded by `lockTimeoutMs`, after which it tries again (`schema_lock_timeout` once
    * out of attempts).
    */
@@ -2511,14 +2515,23 @@ function buildSlotlockStore(
       // application instances can still collide on pg_namespace/pg_extension unique indexes.
       // inMigration serializes bootstrap per database and the transaction releases the lock on
       // crashes. A schema this release already left as it is changes nothing and locks no table.
-      await inMigration(sql, migrationOptions, async (tx) => {
+      const changed = await inMigration(sql, migrationOptions, async (tx) => {
         await tx.unsafe(SLOTLOCK_DEPLOYMENT_CHECKS).catch((error: unknown) => {
           throw schemaControlRefusal(error);
         });
-        if (await slotlockSchemaUpToDate(tx)) return;
-        await tx.unsafe(SLOTLOCK_CORE_DDL).catch((error: unknown) => {
+        if (await slotlockSchemaUpToDate(tx)) return false;
+        await tx.unsafe(SLOTLOCK_STRUCTURE_DDL).catch((error: unknown) => {
           throw schemaControlRefusal(error);
         });
+        return true;
+      });
+      if (!changed) return;
+      // Once the DDL has committed, its ACCESS EXCLUSIVE locks are gone: validating holds none that
+      // a serving query waits for (ddl.ts, DEPLOYMENT_VALIDATE_CONSTRAINTS). Inside a caller's
+      // transaction both steps share it, and its locks, until it ends. The digests go last, so a
+      // migration stopped before them runs whole again.
+      await inMigration(sql, migrationOptions, async (tx) => {
+        await tx.unsafe(SLOTLOCK_VALIDATION_DDL);
         await tx`
           UPDATE slotlock.schema_version
              SET ddl_sha256 = ${SLOTLOCK_CORE_DDL_SHA256},

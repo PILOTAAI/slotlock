@@ -903,9 +903,14 @@ REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[1]} FROM PUBLIC;
 `;
 
 // A constraint an upgrade added NOT VALID (no table scan under its ACCESS EXCLUSIVE lock) is checked
-// here, under SHARE UPDATE EXCLUSIVE, which lets reads and writes go on. One that old rows still
-// break stays NOT VALID, with a notice, rather than stopping the migration: it binds every new row
-// either way. Once valid, a constraint is never checked again.
+// here. applySchema runs this in a transaction of its own once the DDL has committed: inside the
+// DDL's transaction every table it altered stays under ACCESS EXCLUSIVE until commit, so the scan
+// would hold up every serving query. On its own, each VALIDATE takes SHARE UPDATE EXCLUSIVE (and
+// ROW SHARE on a foreign key's referenced table), which no read or row write conflicts with
+// (PostgreSQL 17, ALTER TABLE and Explicit Locking). It sees every row whatever row-level security
+// the table forces: the check scans the table itself, and referential checks bypass row security.
+// One that old rows still break stays NOT VALID, with a notice, rather than stopping the migration:
+// it binds every new row either way. Once valid, a constraint is never checked again.
 const DEPLOYMENT_VALIDATE_CONSTRAINTS = `DO $slotlock_validate_constraints$
 DECLARE
   unchecked record;
@@ -928,7 +933,13 @@ BEGIN
   END LOOP;
 END
 $slotlock_validate_constraints$;
-INSERT INTO slotlock.schema_version (singleton, version, applied_at)
+`;
+
+/** The constraint validation applySchema runs after the rest of SLOTLOCK_CORE_DDL has committed. */
+export const SLOTLOCK_VALIDATION_DDL: string = DEPLOYMENT_VALIDATE_CONSTRAINTS;
+
+// The digests that let the next migration skip are recorded by applySchema once it has validated.
+const DEPLOYMENT_RECORD_VERSION = `INSERT INTO slotlock.schema_version (singleton, version, applied_at)
 VALUES (true, ${SLOTLOCK_SCHEMA_VERSION}, now())
 ON CONFLICT (singleton) DO UPDATE
 SET version = EXCLUDED.version, ddl_sha256 = NULL, catalog_sha256 = NULL,
@@ -936,7 +947,7 @@ SET version = EXCLUDED.version, ddl_sha256 = NULL, catalog_sha256 = NULL,
 `;
 
 // btree_gist is created in slotlock when it is missing; one installed elsewhere stays where it is.
-export const SLOTLOCK_CORE_DDL: string = `
+const CORE_DDL_BODY = `
 ${DEPLOYMENT_SEARCH_PATH_PIN}CREATE SCHEMA IF NOT EXISTS slotlock;
 ${SLOTLOCK_DEPLOYMENT_CHECKS}CREATE EXTENSION IF NOT EXISTS btree_gist SCHEMA slotlock;
 ${DEPLOYMENT_LIFT_FORCED_ROW_SECURITY}${SLOTLOCK_SCHEMA_VERSION_DDL}
@@ -2099,7 +2110,16 @@ CREATE INDEX IF NOT EXISTS slotlock_calendar_event_occurrences_resource_time_idx
   ON slotlock.calendar_event_occurrences (tenant_ref, starts_at, ends_at);
 CREATE INDEX IF NOT EXISTS slotlock_reservations_calendar_event_idx
   ON slotlock.reservations (calendar_event_id) WHERE calendar_event_id IS NOT NULL;
-${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_DASHBOARD_DDL}${SLOTLOCK_TENANT_ADMIN_DDL}${DEPLOYMENT_VALIDATE_CONSTRAINTS}${DEPLOYMENT_RESTORE_FORCED_ROW_SECURITY}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
+${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_DASHBOARD_DDL}${SLOTLOCK_TENANT_ADMIN_DDL}${DEPLOYMENT_RECORD_VERSION}`;
+
+/** The whole deployment DDL, run in one transaction: the schema, then its constraints validated. */
+export const SLOTLOCK_CORE_DDL: string = `${CORE_DDL_BODY}${DEPLOYMENT_VALIDATE_CONSTRAINTS}${DEPLOYMENT_RESTORE_FORCED_ROW_SECURITY}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
+
+/**
+ * SLOTLOCK_CORE_DDL without the validation, which applySchema runs as a step of its own after this
+ * commits (SLOTLOCK_VALIDATION_DDL).
+ */
+export const SLOTLOCK_STRUCTURE_DDL: string = `${CORE_DDL_BODY}${DEPLOYMENT_RESTORE_FORCED_ROW_SECURITY}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
 
 export const SLOTLOCK_TENANT_CONTEXT_SETTING = 'slotlock.tenant_ref';
 
