@@ -10,7 +10,9 @@ import { readFileSync } from 'node:fs';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { SLOTLOCK_A2A_PROTOCOL_VERSION, SLOTLOCK_MCP_LEGACY_PROTOCOL_VERSION } from '../agent-server.js';
+import { slotlockCalendarResourceUri } from '../agent-server.js';
 import { type SlotlockEnv, runSlotlockCli } from '../self-host.js';
+import { SseReader, modernRequest } from './helpers/modern-mcp.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
 const openApi = JSON.parse(readFileSync(new URL('../../openapi.json', import.meta.url), 'utf8')) as {
@@ -555,6 +557,47 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
       await server.stop();
     }
   }, 120_000);
+
+  it("caps each tenant's live-update streams, so one tenant's keys cannot hold every slot (SURF-3)", async () => {
+    const server = await serve({ SLOTLOCK_LIMITS: 'tenant_subscriptions=1' });
+    const listen = async (key: string | undefined, resource: string | undefined) => {
+      const request = modernRequest(
+        'subscriptions/listen',
+        { notifications: { resourceSubscriptions: [slotlockCalendarResourceUri(resource as string)] } },
+        { headers: { Authorization: `Bearer ${key}` } },
+      );
+      return fetch(`${server.origin}/mcp`, {
+        method: 'POST',
+        headers: request.headers,
+        body: await request.text(),
+      });
+    };
+    const open: SseReader[] = [];
+    try {
+      const first = await listen(keys['a-admin'], resources.a);
+      expect(first.status).toBe(200);
+      open.push(new SseReader(first));
+      expect(await open[0]?.message()).toMatchObject({
+        method: 'notifications/subscriptions/acknowledged',
+      });
+      // Another key of the same tenant is over the tenant's share.
+      const second = await listen(keys['a-second'], resources.a);
+      expect(second.status).toBe(429);
+      expect(await second.json()).toMatchObject({
+        error: { code: -31029, message: 'Too many subscriptions' },
+      });
+      // Another tenant is not.
+      const other = await listen(keys['b-second'], resources.b);
+      expect(other.status).toBe(200);
+      open.push(new SseReader(other));
+      expect(await open[1]?.message()).toMatchObject({
+        method: 'notifications/subscriptions/acknowledged',
+      });
+    } finally {
+      for (const reader of open) await reader.cancel();
+      await server.stop();
+    }
+  });
 
   it('lets an authenticated write take effect at once by default, as the hosted service runs (SURF-4)', async () => {
     const server = await serve();
