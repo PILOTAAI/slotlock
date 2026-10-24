@@ -161,7 +161,9 @@ export {
   normalizeCalendarEventContent,
   normalizeExternalCalendarChange,
   parseICalendarChanges,
+  parseICalendarFeed,
   parseTrustedICalendarEvents,
+  recurrenceRuleProblem,
 } from './sync.js';
 export type {
   ExternalCalendarChange,
@@ -169,6 +171,8 @@ export type {
   ExternalCalendarStatus,
   ICalendarEvent,
   ICalendarExpansionWindow,
+  ICalendarFeedRead,
+  ICalendarSeriesRefusal,
   ITipMethod,
 } from './sync.js';
 export {

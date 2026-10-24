@@ -6,6 +6,7 @@ import {
   CalendarContractError,
   CalendarExpansionLimitError,
   parseICalendarChanges,
+  parseICalendarFeed,
   parseTrustedICalendarEvents,
 } from './sync.js';
 
@@ -18,7 +19,9 @@ port.on('message', (request: ICalendarWorkerRequest) => {
     const value =
       request.op === 'changes'
         ? parseICalendarChanges(request.input, request.calendarTimezone, request.window)
-        : parseTrustedICalendarEvents(request.input, request.calendarTimezone);
+        : request.op === 'feed'
+          ? parseICalendarFeed(request.input, request.calendarTimezone, request.window)
+          : parseTrustedICalendarEvents(request.input, request.calendarTimezone);
     reply = { id: request.id, ok: true, value };
   } catch (error) {
     // The parsers turn every failure into a CalendarContractError; anything else is a fault, and

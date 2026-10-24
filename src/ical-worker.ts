@@ -9,6 +9,7 @@ import {
   CalendarExpansionLimitError,
   type ExternalCalendarChange,
   type ICalendarExpansionWindow,
+  type ICalendarFeedRead,
   MAX_ICAL_INPUT_BYTES,
 } from './sync.js';
 import type { TrustedICalendarEvent } from './types.js';
@@ -17,7 +18,7 @@ import type { TrustedICalendarEvent } from './types.js';
 export type ICalendarWorkerRequest =
   | {
       id: number;
-      op: 'changes';
+      op: 'changes' | 'feed';
       input: string;
       calendarTimezone: string | undefined;
       window: ICalendarExpansionWindow | undefined;
@@ -70,6 +71,12 @@ export interface ICalendarWorkerPool {
     calendarTimezone?: string,
     expansionWindow?: ICalendarExpansionWindow,
   ): Promise<ExternalCalendarChange[]>;
+  /** `parseICalendarFeed`, run on a worker. */
+  parseICalendarFeed(
+    input: string,
+    calendarTimezone?: string,
+    expansionWindow?: ICalendarExpansionWindow,
+  ): Promise<ICalendarFeedRead>;
   /** `parseTrustedICalendarEvents`, run on a worker. */
   parseTrustedICalendarEvents(
     input: string,
@@ -123,7 +130,8 @@ function workerFailure(error: unknown): Error {
 
 /**
  * A pool of worker threads that read untrusted iCalendar for the calling thread. Results and
- * errors are those of `parseICalendarChanges` and `parseTrustedICalendarEvents` (the same
+ * errors are those of `parseICalendarChanges`, `parseICalendarFeed` and
+ * `parseTrustedICalendarEvents` (the same
  * `CalendarContractError` codes), plus CalendarExpansionLimitError when a worker passes its
  * deadline or its heap, ICalendarWorkerBusyError when the queue is full, and
  * ICalendarWorkerPoolClosedError after `close()`. Idle workers do not keep the process alive.
@@ -231,7 +239,7 @@ export function createICalendarWorkerPool(
       throw new CalendarContractError('invalid_icalendar');
     }
     if (
-      request.op === 'changes' &&
+      request.op !== 'trusted' &&
       request.window !== undefined &&
       !(request.window?.start instanceof Date && request.window.end instanceof Date)
     ) {
@@ -266,6 +274,12 @@ export function createICalendarWorkerPool(
         calendarTimezone,
         window,
       })) as ExternalCalendarChange[];
+    },
+    async parseICalendarFeed(input, calendarTimezone, expansionWindow) {
+      const window = expansionWindow
+        ? { start: expansionWindow.start, end: expansionWindow.end }
+        : undefined;
+      return (await run({ op: 'feed', input, calendarTimezone, window })) as ICalendarFeedRead;
     },
     async parseTrustedICalendarEvents(input, calendarTimezone) {
       return (await run({ op: 'trusted', input, calendarTimezone })) as TrustedICalendarEvent[];

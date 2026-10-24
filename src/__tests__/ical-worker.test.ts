@@ -135,6 +135,25 @@ describe('reading iCalendar on worker threads', () => {
     expect(reply.echo.window.end).toEqual(window.end);
   });
 
+  it('reads a feed series by series, passing the feed, its zone and its window as given', async () => {
+    const window = {
+      start: new Date('2026-10-01T00:00:00Z'),
+      end: new Date('2027-10-01T00:00:00Z'),
+    };
+    const reply = (await pool().parseICalendarFeed('feed', 'Europe/London', window)) as unknown as {
+      echo: { op: string; input: string; calendarTimezone: string; window: { start: Date } };
+    };
+    expect(reply.echo).toMatchObject({
+      op: 'feed',
+      input: 'feed',
+      calendarTimezone: 'Europe/London',
+    });
+    expect(reply.echo.window.start).toEqual(window.start);
+    await expect(
+      pool().parseICalendarFeed('feed', undefined, { start: 'today' } as never),
+    ).rejects.toMatchObject({ code: 'invalid_icalendar' });
+  });
+
   it("gives the parsers' own refusals back as the same errors", async () => {
     const workers = pool();
     await expect(workers.parseICalendarChanges('limit')).rejects.toBeInstanceOf(
