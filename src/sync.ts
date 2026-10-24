@@ -548,8 +548,10 @@ function sortRuleParts(recur: ICAL.Recur): void {
  * - BYMONTH with FREQ=MONTHLY: it walked BYMONTH from its first value whatever DTSTART's month,
  *   dropping whole months or repeating them;
  * - a negative BYMONTHDAY except with FREQ=MONTHLY and no BYDAY: compared as written with each day;
- * - BYMONTHDAY with FREQ=YEARLY but no BYMONTH (only DTSTART's month was expanded), or naming a day
- *   one of its BYMONTH months can lack (31 April became 1 May);
+ * - BYMONTHDAY with FREQ=YEARLY but no BYMONTH (only DTSTART's month was expanded), naming only days
+ *   none of its BYMONTH months has (it searched every year to 20000 for one), or a day one of them
+ *   can lack with COUNT (31 April became 1 May, and was counted: yearlyDays filters it out
+ *   otherwise) or with BYDAY (BYMONTH=4,5;BYMONTHDAY=30,31;BYDAY=WE missed 31 May 2034);
  * - with FREQ=YEARLY, BYYEARDAY with BYMONTH or BYMONTHDAY (it found no day at all), and a numbered
  *   BYDAY with BYMONTHDAY (counted in the year, not the month);
  * - BYHOUR with FREQ=HOURLY, BYMINUTE or BYSECOND with FREQ=MINUTELY, and any of the three with
@@ -580,8 +582,14 @@ function recurShapeProblem(recur: ICAL.Recur): string | null {
   if (freq === 'YEARLY' && monthDays) {
     const months = parts.BYMONTH?.map(Number);
     if (!months) return 'BYMONTHDAY with FREQ=YEARLY and no BYMONTH';
-    if (months.some((month) => monthDays.some((day) => day > (MIN_MONTH_DAYS[month - 1] ?? 0)))) {
-      return 'a BYMONTHDAY one of its BYMONTH months can lack';
+    if (!months.some((month) => monthDays.some((day) => day <= (MONTH_DAYS[month - 1] ?? 0)))) {
+      return 'a BYMONTHDAY none of its BYMONTH months has';
+    }
+    if (
+      (recur.count != null || parts.BYDAY) &&
+      months.some((month) => monthDays.some((day) => day > (MIN_MONTH_DAYS[month - 1] ?? 0)))
+    ) {
+      return 'COUNT or BYDAY with a BYMONTHDAY one of its BYMONTH months can lack';
     }
   }
   if (freq === 'HOURLY' && parts.BYHOUR) return 'BYHOUR with FREQ=HOURLY';
@@ -601,16 +609,34 @@ function recurShapeProblem(recur: ICAL.Recur): string | null {
  * Why a rule cannot be expanded from this DTSTART, or null. FREQ=YEARLY with no BYMONTHDAY, BYDAY or
  * BYYEARDAY takes its day from DTSTART, and ical.js put a day its month lacks into the next month
  * (29 February 2024 recurred on 1 March 2025) instead of skipping that year (RFC 5545 §3.3.10).
+ * yearlyDays filters those out, but COUNT has already counted them.
  */
 function seriesShapeProblem(
   recur: ICAL.Recur,
   start: { month: number; day: number },
 ): string | null {
+  return recur.count != null && yearlyDays(recur, start) !== null
+    ? 'COUNT with a yearly DTSTART on a day one of its months can lack'
+    : null;
+}
+
+/**
+ * The months and days a FREQ=YEARLY rule's occurrences fall on, when it names a day one of its
+ * months can lack (29 February, or a 31st with April), or null. ical.js 2.2.1 moves such a day into
+ * the next month (29 February 2025 became 1 March) where RFC 5545 §3.3.10 ignores it, so an
+ * occurrence on any other day is not one. With BYYEARDAY it picks real dates already; with BYDAY
+ * such a rule is refused (recurShapeProblem).
+ */
+function yearlyDays(
+  recur: ICAL.Recur,
+  start: { month: number; day: number },
+): { months: Set<number>; days: Set<number> } | null {
   const parts = recur.parts as Record<string, (number | string)[] | undefined>;
-  if (recur.freq !== 'YEARLY' || parts.BYMONTHDAY || parts.BYDAY || parts.BYYEARDAY) return null;
+  if (recur.freq !== 'YEARLY' || parts.BYDAY || parts.BYYEARDAY) return null;
+  const days = parts.BYMONTHDAY?.map(Number) ?? [start.day];
   const months = parts.BYMONTH?.map(Number) ?? [start.month];
-  return months.some((month) => start.day > (MIN_MONTH_DAYS[month - 1] ?? 0))
-    ? 'a yearly DTSTART on a day one of its months can lack'
+  return months.some((month) => days.some((day) => day > (MIN_MONTH_DAYS[month - 1] ?? 0)))
+    ? { months: new Set(months), days: new Set(days) }
     : null;
 }
 
@@ -2534,6 +2560,21 @@ function parseCalendarChanges(
         }
         sortRuleParts(recur);
       }
+      // A yearly day some years lack is kept to the days the rule names (yearlyDays), which needs
+      // the rule to be the series' only source: ical.js mixes RDATEs and other rules in, and one of
+      // those on another day could not be told from a day it moved.
+      const ruleValues = event.component.getAllProperties('rrule');
+      const lacking =
+        startTime instanceof ICAL.Time
+          ? ruleValues.map((rule) => yearlyDays(rule.getFirstValue() as ICAL.Recur, startTime))
+          : [];
+      const onDays = lacking[0] ?? null;
+      if (
+        lacking.some((days) => days !== null) &&
+        (ruleValues.length > 1 || event.component.hasProperty('rdate'))
+      ) {
+        throw new CalendarContractError('invalid_icalendar');
+      }
       const stored = series?.stored;
       const lengths = lengthsOf(event, stored);
       const overrides: ReadOverride[] = stored
@@ -2694,6 +2735,13 @@ function parseCalendarChanges(
           if (position >= scanEndMs) {
             scannedTo = position;
             break;
+          }
+          if (
+            onDays &&
+            !isFirst &&
+            !(onDays.months.has(occurrence.month) && onDays.days.has(occurrence.day))
+          ) {
+            continue;
           }
           // The first instance is DTSTART's own instant: for a stored series, the instant stored.
           const at = isFirst ? lengths.start : position;

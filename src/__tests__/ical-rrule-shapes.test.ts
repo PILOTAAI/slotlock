@@ -477,6 +477,7 @@ const MIS_EXPANDED = [
   'FREQ=YEARLY;BYMONTH=2,3,6;BYYEARDAY=1,32',
   'FREQ=YEARLY;BYMONTHDAY=1,13,28;BYYEARDAY=32',
   'FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=1,2;BYDAY=1WE,-1MO,3TH',
+  'FREQ=YEARLY;BYMONTH=4,5;BYMONTHDAY=30,31;BYDAY=WE',
 ];
 
 describe('the oracle', () => {
@@ -692,5 +693,159 @@ describe('a DATE UNTIL on a timed series (ENG-7)', () => {
       '2027-01-05T08:00:00.000Z',
       '2027-01-06T08:00:00.000Z',
     ]);
+  });
+});
+
+describe('a yearly day some years lack (ENG-4)', () => {
+  // RFC 5545 §3.3.10 ignores a date a year does not have: a 29 February birthday occurs in leap
+  // years only. ical.js 2.2.1 moves it into the next month (1 March) instead.
+  const year = (from: number) => ({
+    start: new Date(Date.UTC(from, 0, 1)),
+    end: new Date(Date.UTC(from + 1, 0, 1)),
+  });
+  const starts = (rule: string, start: string, window: { start: Date; end: Date }) => {
+    const fromFeed = parseICalendarChanges(feed(start, rule, null), undefined, window).map(
+      (change) => wall((change.start as Date).getTime()),
+    );
+    const stored = expandCalendarEventOccurrences(
+      {
+        start: new Date(frame(start)),
+        end: new Date(frame(start) + 60_000),
+        timezone: 'UTC',
+        summary: 'x',
+        recurrence: { rrule: rule },
+      },
+      window,
+    ).map((occurrence) => wall(occurrence.start.getTime()));
+    expect(stored).toEqual(fromFeed);
+    return fromFeed;
+  };
+
+  it.each([
+    ['FREQ=YEARLY', '20280229T090000'],
+    ['FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=29', '20280229T090000'],
+    ['FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=29;UNTIL=20400101T000000Z', '20280229T090000'],
+  ])('%s from 29 February 2028 occurs in leap years only', (rule, start) => {
+    expect(recurrenceRuleProblem(rule)).toBeNull();
+    expect(starts(rule, start, year(2028))).toEqual(['2028-02-29T09:00']);
+    expect(starts(rule, start, year(2029))).toEqual([]);
+    expect(starts(rule, start, year(2031))).toEqual([]);
+    expect(starts(rule, start, year(2032))).toEqual(['2032-02-29T09:00']);
+  });
+
+  it('a 31st in a list of months occurs in the months that have one', () => {
+    const rule = 'FREQ=YEARLY;BYMONTH=4,5,6,7;BYMONTHDAY=31';
+    expect(starts(rule, '20270531T090000', year(2028))).toEqual([
+      '2028-05-31T09:00',
+      '2028-07-31T09:00',
+    ]);
+    expect(starts('FREQ=YEARLY;BYMONTH=1,4', '20270131T090000', year(2028))).toEqual([
+      '2028-01-31T09:00',
+    ]);
+  });
+
+  it('a feed with a 29 February birthday is read whole', () => {
+    const birthday = feed('20240229T090000', 'FREQ=YEARLY', null);
+    expect(parseICalendarChanges(birthday, undefined, year(2028))).toHaveLength(1);
+  });
+
+  it('with COUNT, which ical.js spends on the days it moves, it is refused on every path', () => {
+    const rule = 'FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=29;COUNT=3';
+    expect(recurrenceRuleProblem(rule)).toMatch(/COUNT/);
+    expect(isBookableRecurrenceRule(rule)).toBe(false);
+    for (const counted of [rule, 'FREQ=YEARLY;COUNT=3']) {
+      const text = feed('20280229T090000', counted, null);
+      expect(() => parseICalendarChanges(text, undefined, year(2028))).toThrow(
+        CalendarContractError,
+      );
+      expect(() => parseTrustedICalendarEvents(text)).toThrow(CalendarContractError);
+      expect(() =>
+        expandCalendarEventOccurrences(
+          {
+            start: new Date('2028-02-29T09:00:00Z'),
+            end: new Date('2028-02-29T10:00:00Z'),
+            timezone: 'UTC',
+            summary: 'x',
+            recurrence: { rrule: counted },
+          },
+          year(2028),
+        ),
+      ).toThrow(CalendarContractError);
+    }
+  });
+
+  it('with an RDATE or a second RRULE, which ical.js mixes in, it is refused as a series', () => {
+    for (const extra of ['RDATE:20290301T090000Z', 'RRULE:FREQ=YEARLY;BYMONTH=3;BYMONTHDAY=1']) {
+      const text = feed('20280229T090000', 'FREQ=YEARLY', null, extra);
+      expect(parseICalendarFeed(text, undefined, year(2029))).toEqual({
+        changes: [],
+        refused: [{ uid: 'r', code: 'invalid_icalendar' }],
+      });
+    }
+  });
+
+  it('a day none of its months has is refused, so no year is searched for it', () => {
+    expect(recurrenceRuleProblem('FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30')).toMatch(/none/);
+    expect(recurrenceRuleProblem('FREQ=YEARLY;BYMONTH=4,6;BYMONTHDAY=31;BYDAY=MO')).toMatch(/none/);
+  });
+});
+
+/** A FREQ=YEARLY rule naming a day one of its months can lack, with no COUNT. */
+const lackingYearlyRule = fc
+  .record({
+    months: fc.uniqueArray(fc.integer({ min: 1, max: 12 }), { minLength: 1, maxLength: 4 }),
+    monthDays: fc.option(
+      fc.uniqueArray(fc.constantFrom(1, 15, 28, 29, 30, 31), { minLength: 1, maxLength: 3 }),
+    ),
+    byMonth: fc.boolean(),
+    byDay: fc.option(
+      fc.uniqueArray(fc.constantFrom('MO', 'WE', 'SA'), { minLength: 1, maxLength: 2 }),
+    ),
+    interval: fc.constantFrom(1, 1, 2),
+    until: fc.boolean(),
+    from: fc.integer({ min: 0, max: 3_000 }),
+  })
+  .map((r) => {
+    const parts = ['FREQ=YEARLY'];
+    if (r.interval > 1) parts.push(`INTERVAL=${r.interval}`);
+    if (r.monthDays || r.byMonth) parts.push(`BYMONTH=${r.months.join(',')}`);
+    if (r.monthDays) parts.push(`BYMONTHDAY=${r.monthDays.join(',')}`);
+    if (r.byDay && r.monthDays) parts.push(`BYDAY=${r.byDay.join(',')}`);
+    if (r.until) parts.push('UNTIL=20400101T000000Z');
+    return { rule: parts.join(';'), from: Date.UTC(2024, 0, 1, 9) + r.from * DAY };
+  });
+
+describe('a yearly day some years lack, drawn at random', () => {
+  it('expands as the RFC 5545 oracle does, in leap years and common ones', () => {
+    let lacking = 0;
+    fc.assert(
+      fc.property(lackingYearlyRule, ({ rule, from }) => {
+        // DTSTART on a day the rule names (the first the oracle finds), or a 29th, 30th or 31st of
+        // one of its months for a rule that takes its day from DTSTART.
+        const first = oracleOccurrences(rule, from, from + 3_000 * DAY)[0];
+        if (first === undefined) return;
+        if (recurrenceRuleProblem(rule) !== null) return;
+        const recur = rule.split(';');
+        const dayOf = new Date(first).getUTCDate();
+        if (
+          !rule.includes('BYMONTHDAY') &&
+          !(dayOf >= 29 || recur.some((part) => part === 'BYMONTH=2'))
+        ) {
+          return;
+        }
+        lacking += 1;
+        const start = first + DAY * 365 * 2;
+        const window = { start: new Date(start), end: new Date(start + 366 * DAY) };
+        const expected = oracleOccurrences(rule, first, window.end.getTime())
+          .filter((t) => t >= start)
+          .map(stamp);
+        const got = parseICalendarChanges(feed(stamp(first).slice(0, 15), rule, null), undefined, window)
+          .map((change) => stamp((change.start as Date).getTime()))
+          .filter((t) => t !== stamp(first));
+        expect(got, rule).toEqual(expected);
+      }),
+      { seed: 20261027, numRuns: 800 },
+    );
+    expect(lacking).toBeGreaterThanOrEqual(200);
   });
 });
