@@ -2013,7 +2013,8 @@ export interface SlotlockStore {
    * keyed hold answers and references retired by a cancel no booking held, older than the retention
    * window. A cancelled booking's tombstone is never deleted here (only by erasing the tenant), so
    * its reference is never booked again. Rows another transaction holds are skipped, not waited on.
-   * Call until `hasMore` is false.
+   * It also gives a confirmed booking a 0.2 server wrote without its tenant the tenant and its own
+   * id as reference, as the migration does. Call until `hasMore` is false.
    */
   pruneBookingRetention(params: {
     tenantRef: string;
@@ -4277,6 +4278,45 @@ function buildSlotlockStore(
         });
       }
       return inTransaction(sql, async (tx): Promise<BookingRetentionResult> => {
+        // A 0.2 server still serving after the migration wrote its confirmed holds (and
+        // createReservation bookings) on the tenant's resources without the tenant or a reference,
+        // so no cancel or move reaches them; the migration gives those it finds the tenant and
+        // their own id, and this gives later ones the same. Each takes its reference's identity lock
+        // first, as every booking write does; a tombstone of its id retired nothing and goes.
+        const legacy = await tx<{ id: string }[]>`
+          SELECT booking.id
+            FROM slotlock.reservations booking
+            JOIN slotlock.resources resource ON resource.id = booking.resource_id
+           WHERE resource.tenant_ref = ${params.tenantRef}
+             AND booking.tenant_ref IS NULL AND booking.status = 'confirmed'
+             AND booking.calendar_event_id IS NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM slotlock.reservations taken
+                WHERE taken.tenant_ref = ${params.tenantRef}
+                  AND taken.external_ref = booking.id::text
+                  AND taken.calendar_event_id IS NULL
+             )
+           ORDER BY booking.id
+           LIMIT ${limit}`;
+        let adopted = 0;
+        for (const { id } of legacy) {
+          await lockExternalIdentity(tx, params.tenantRef, id);
+          const [taken] = await tx<{ id: string }[]>`
+            SELECT id FROM slotlock.reservations
+             WHERE tenant_ref = ${params.tenantRef} AND external_ref = ${id}
+               AND calendar_event_id IS NULL`;
+          if (taken) continue;
+          await tx`
+            DELETE FROM slotlock.reservation_tombstones
+             WHERE tenant_ref = ${params.tenantRef} AND external_ref = ${id}`;
+          const given = await tx<{ id: string }[]>`
+            UPDATE slotlock.reservations
+               SET tenant_ref = ${params.tenantRef}, external_ref = id::text,
+                   occupied_ends_at = ends_at + buffer_after_ms * interval '1 millisecond'
+             WHERE id = ${id} AND tenant_ref IS NULL AND status = 'confirmed'
+            RETURNING id`;
+          adopted += given.length;
+        }
         // A writer reaping or confirming a hold locks it: such a row is skipped, and the delete
         // repeats the predicate on the row as it now is.
         const [holds] = await tx<{ deleted: number }[]>`
@@ -4345,6 +4385,7 @@ function buildSlotlockStore(
           holdCommandsDeleted,
           tombstonesDeleted,
           hasMore:
+            legacy.length === limit ||
             expiredHoldsDeleted === limit ||
             holdCommandsDeleted === limit ||
             tombstonesDeleted === limit,

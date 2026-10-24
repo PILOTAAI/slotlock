@@ -219,6 +219,29 @@ describe.skipIf(!url)('maintenance purge and booking retention (real Postgres)',
     ).resolves.toEqual({ ok: true, cancelled: false, revision: 2 });
   });
 
+  it('gives a booking an older server confirmed without its tenant the tenant and its own reference', async () => {
+    const { tenantRef, resourceId } = await freshTenant();
+    // As a 0.2 server still serving after the migration writes a confirmed hold: no tenant, no
+    // reference, and a cancel of its id already tried (a stray tombstone).
+    const [legacy] = await sql<{ id: string }[]>`
+      INSERT INTO slotlock.reservations (resource_id, starts_at, ends_at, status)
+      VALUES (${resourceId}, ${slot(3).start}, ${slot(3).end}, 'confirmed')
+      RETURNING id`;
+    const id = legacy?.id as string;
+    await expect(
+      store.cancelExternalReservation({ tenantRef, externalRef: id, revision: 2 }),
+    ).resolves.toEqual({ ok: true, cancelled: false, revision: 2 });
+    await expect(maintainSlotlockTenant(store, tenantRef)).resolves.toMatchObject({
+      capped: false,
+    });
+    const [row] = await sql<{ tenant_ref: string | null; external_ref: string | null }[]>`
+      SELECT tenant_ref, external_ref FROM slotlock.reservations WHERE id = ${id}`;
+    expect(row).toEqual({ tenant_ref: tenantRef, external_ref: id });
+    await expect(
+      store.cancelExternalReservation({ tenantRef, externalRef: id, revision: 2 }),
+    ).resolves.toEqual({ ok: true, cancelled: true, revision: 2 });
+  });
+
   it('skips a hold a writer holds instead of waiting for it', async () => {
     const { tenantRef, resourceId } = await freshTenant();
     const hold = await store.acquireHold({ tenantRef, resourceId, ...slot(0), ttlMs: 50 });

@@ -2059,6 +2059,11 @@ CREATE INDEX IF NOT EXISTS slotlock_reservation_tombstones_stray_idx
 -- Holds by resource and expiry: a tenant's live-hold count, and maintenance's purge of expired ones.
 CREATE INDEX IF NOT EXISTS slotlock_reservations_held_expiry_idx
   ON slotlock.reservations (resource_id, expires_at) WHERE status = 'held';
+-- Confirmed bookings with no tenant, by resource: maintenance finds those a 0.2 server wrote on a
+-- tenant's resource after the migration (store.ts pruneBookingRetention).
+CREATE INDEX IF NOT EXISTS slotlock_reservations_untenanted_booking_idx
+  ON slotlock.reservations (resource_id)
+  WHERE tenant_ref IS NULL AND status = 'confirmed' AND calendar_event_id IS NULL;
 -- What the tenant limits count (store.ts tenantLimitCount), each read as a range so a count stops
 -- at the limit: bookings and events by when they end (one-offs and series apart) and by when they
 -- were made, and cancellations by when they were made.
