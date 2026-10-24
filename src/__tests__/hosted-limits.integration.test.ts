@@ -128,6 +128,8 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
     a: `hosted-a-${randomUUID()}`,
     b: `hosted-b-${randomUUID()}`,
   };
+  /** Tenants a case makes for itself, removed with the rest. */
+  const extraTenants: string[] = [];
   const keys: Record<string, string> = {};
   const resources: Record<string, string> = {};
   let admin: ReturnType<typeof postgres>;
@@ -207,7 +209,7 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
   });
 
   afterAll(async () => {
-    const refs = Object.values(tenants);
+    const refs = [...Object.values(tenants), ...extraTenants];
     await admin`DELETE FROM slotlock.resources WHERE tenant_ref IN ${admin(refs)}`;
     await admin`DELETE FROM slotlock.api_keys WHERE tenant_ref IN ${admin(refs)}`;
     await admin.unsafe(`DROP OWNED BY ${role}`).catch(() => undefined);
@@ -634,6 +636,121 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
       await server.stop();
     }
   }, 120_000);
+
+  it("answers another tenant's update and reads within a few expansions while six tenants keep firing costly writes (P11, SEC-3)", async () => {
+    // The verifier's cross-process probe: with a freed slot handed straight to the next waiter, one
+    // of the bursting tenants' expansions ran on each turn of the event loop another tenant's request
+    // needed. With six tenants and 500 ms expansions, that tenant's update took 3.3 s and its reads
+    // up to 2.8 s; tenants are free on the hosted service.
+    const bursting: Array<{ key: string; resource: string }> = [];
+    for (let index = 0; index < 6; index += 1) {
+      const tenantRef = `hosted-burst-${index}-${randomUUID()}`;
+      extraTenants.push(tenantRef);
+      const env = { ...base, SLOTLOCK_TENANT: tenantRef };
+      const resource = await cli(['resource', 'add', `vehicle-burst-${index}`, '--timezone', 'UTC'], env);
+      const key = await cli(['key', 'create', `burst-${index}`, '--scope', 'read,write'], env);
+      bursting.push({
+        resource: JSON.parse(resource.text()).id as string,
+        key: JSON.parse(key.text()).key as string,
+      });
+    }
+    const server = await serve({ SLOTLOCK_LIMITS: 'address=off' });
+    let firing = true;
+    const seed = randomUUID();
+    let sent = 0;
+    const costly = (tenant: { key: string; resource: string }) => {
+      const index = (sent += 1);
+      const start = new Date(Date.UTC(2033, 0, 1) + index * 3_600_000);
+      return call(server.origin, 'POST', '/v1/events', {
+        key: tenant.key,
+        body: {
+          resource_id: tenant.resource,
+          starts_at: start.toISOString().replace('.000', ''),
+          ends_at: new Date(start.getTime() + 600_000).toISOString().replace('.000', ''),
+          timezone: 'UTC',
+          idempotency_key: `burst-${seed}-${index}`,
+          recurrence_rule: COSTLY_RULE,
+        },
+      });
+    };
+    const ran = new Set<number>();
+    const outcomes: number[] = [];
+    let burst: Promise<void>[] = [];
+    try {
+      const single = (await costly(bursting[0] as { key: string; resource: string })).ms;
+      const made = await call(server.origin, 'POST', '/v1/events', {
+        key: keys['b-second'],
+        body: {
+          resource_id: resources.b,
+          starts_at: '2033-03-03T09:00:00Z',
+          ends_at: '2033-03-03T10:00:00Z',
+          timezone: 'UTC',
+          idempotency_key: `six-made-${randomUUID()}`,
+        },
+      });
+      expect(made.status).toBe(200);
+      const event = (made.body as { event: { id: string; revision: number } }).event;
+      // Each tenant keeps five costly writes in flight: one running and four waiting.
+      burst = Array.from({ length: 6 * 5 }, async (_, index) => {
+        const tenant = index % 6;
+        while (firing) {
+          const answer = await costly(bursting[tenant] as { key: string; resource: string });
+          outcomes.push(answer.status);
+          if (answer.status === 200) ran.add(tenant);
+        }
+      });
+      // Once each bursting tenant has had a slot, B, which has not had one lately, goes first.
+      await eventually(() => (ran.size === 6 ? true : undefined), 60_000);
+      const reads: number[] = [];
+      for (let index = 0; index < 8; index += 1) {
+        reads.push((await call(server.origin, 'GET', '/v1/resources', { key: keys['b-second'] })).ms);
+      }
+      const updated = await call(server.origin, 'PATCH', `/v1/events/${encodeURIComponent(event.id)}`, {
+        key: keys['b-second'],
+        body: {
+          expected_revision: event.revision,
+          title: 'Renamed while six tenants fire',
+          idempotency_key: `six-update-${randomUUID()}`,
+        },
+      });
+      const detail = `one costly write ${single.toFixed(0)} ms, update ${updated.ms.toFixed(0)} ms, reads ${reads.map((ms) => ms.toFixed(0)).join(', ')} ms, bursts ${JSON.stringify(tally(outcomes))}`;
+      expect(updated.status, detail).toBe(200);
+      // The expansion running when the update arrives, its slot's rest, and the update itself.
+      expect(updated.ms, detail).toBeLessThan(4 * single);
+      // A read waits for at most the expansion running when it arrives.
+      expect(Math.max(...reads), detail).toBeLessThan(Math.max(1_000, 2 * single));
+    } finally {
+      firing = false;
+      await Promise.all(burst);
+      await server.stop();
+    }
+  }, 180_000);
+
+  it("warns once when a proxy's client-address field arrives but none is trusted (HOST-3)", async () => {
+    // Behind cloudflared and kamal-proxy without SLOTLOCK_TRUSTED_PROXY_HEADER, every client would
+    // share the proxy's one address budget.
+    const server = await serve();
+    try {
+      for (const address of ['203.0.113.7', '203.0.113.8']) {
+        const answer = await call(server.origin, 'GET', '/v1/resources', {
+          key: keys['b-second'],
+          headers: { 'CF-Connecting-IP': address },
+        });
+        expect(answer.status).toBe(200);
+      }
+    } finally {
+      await server.stop();
+    }
+    const warnings = server.stderr.events().filter(({ event }) => event === 'client_address_field_ignored');
+    expect(warnings).toEqual([
+      expect.objectContaining({
+        level: 'warn',
+        field: 'cf-connecting-ip',
+        setting: 'SLOTLOCK_TRUSTED_PROXY_HEADER',
+      }),
+    ]);
+    expect(`${server.stdout.text()}${server.stderr.text()}`).not.toContain('203.0.113.');
+  });
 
   it("caps each tenant's live-update streams, so one tenant's keys cannot hold every slot (SURF-3)", async () => {
     const server = await serve({ SLOTLOCK_LIMITS: 'tenant_subscriptions=1' });
