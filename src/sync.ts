@@ -65,7 +65,9 @@ const MAX_ICAL_OCCURRENCES = 2_000;
 const MAX_ICAL_COMPONENTS = 2_000;
 const MAX_ICAL_EXCEPTIONS_PER_SERIES = 1_000;
 const MAX_ICAL_WORK = 4_000;
-const MAX_ICAL_WINDOW_MS = 367 * 24 * 60 * 60 * 1000;
+// The store materializes a recurring series for up to 369 days (SLOTLOCK_MATERIALIZATION_WINDOW_DAYS:
+// a 367-day search from any moment of the day, plus the day before it).
+const MAX_ICAL_WINDOW_MS = 369 * 24 * 60 * 60 * 1000;
 /**
  * A feed's own time zones (VTIMEZONE), their STANDARD and DAYLIGHT observances, and the RDATE values
  * those list. A real feed carries one zone per zone its events use, each a few observances (a zone's

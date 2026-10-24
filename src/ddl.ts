@@ -1163,12 +1163,13 @@ CREATE TABLE IF NOT EXISTS slotlock.calendar_events (
     AND octet_length(external_ref) BETWEEN 1 AND 500
   ),
   CONSTRAINT slotlock_calendar_events_window_valid CHECK (ends_at > starts_at),
-  -- A recurring series expands inside a window of at most 367 days. A one-off event is its own
-  -- window, so a lease or long rental may span up to 3,660 days (the store's hard ceiling).
-  CONSTRAINT slotlock_calendar_events_materialization_window_bounded CHECK (
+  -- A recurring series expands inside a window of at most 369 days (a 367-day search from any
+  -- moment of the day, plus the day before it). A one-off event is its own window, so a lease or
+  -- long rental may span up to 3,660 days (the store's hard ceiling).
+  CONSTRAINT slotlock_calendar_events_materialization_window_limit CHECK (
     materialized_ends_at > materialized_starts_at
     AND (
-      materialized_ends_at - materialized_starts_at <= interval '367 days'
+      materialized_ends_at - materialized_starts_at <= interval '369 days'
       OR (
         recurrence_rule IS NULL
         AND materialized_starts_at = starts_at
@@ -1247,7 +1248,8 @@ DO $slotlock_calendar_event_window_bounds$
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
-     WHERE conname = 'slotlock_calendar_events_materialization_window_bounded'
+     WHERE conname IN ('slotlock_calendar_events_materialization_window_bounded',
+                       'slotlock_calendar_events_materialization_window_limit')
        AND conrelid = 'slotlock.calendar_events'::regclass
   ) THEN
     ALTER TABLE slotlock.calendar_events
@@ -1268,6 +1270,34 @@ END
 $slotlock_calendar_event_window_bounds$;
 ALTER TABLE slotlock.calendar_events
   DROP CONSTRAINT IF EXISTS slotlock_calendar_events_materialization_window_valid;
+
+-- Up to 0.2 a series' window was at most 367 days. The 369-day CHECK admits every row the 367-day
+-- one did: add it NOT VALID and drop the old one in the same transaction.
+DO $slotlock_calendar_event_window_limit$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'slotlock_calendar_events_materialization_window_limit'
+       AND conrelid = 'slotlock.calendar_events'::regclass
+  ) THEN
+    ALTER TABLE slotlock.calendar_events
+      ADD CONSTRAINT slotlock_calendar_events_materialization_window_limit CHECK (
+        materialized_ends_at > materialized_starts_at
+        AND (
+          materialized_ends_at - materialized_starts_at <= interval '369 days'
+          OR (
+            recurrence_rule IS NULL
+            AND materialized_starts_at = starts_at
+            AND materialized_ends_at = ends_at
+            AND ends_at - starts_at <= interval '3660 days'
+          )
+        )
+      ) NOT VALID;
+  END IF;
+END
+$slotlock_calendar_event_window_limit$;
+ALTER TABLE slotlock.calendar_events
+  DROP CONSTRAINT IF EXISTS slotlock_calendar_events_materialization_window_bounded;
 
 -- Where a recurring series' last expansion stopped (ical.js's iterator state as JSON), so the next
 -- one resumes there instead of searching again from the series' start. Only Slotlock writes it. A

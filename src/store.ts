@@ -84,6 +84,13 @@ export { SLOTLOCK_CALENDAR_HORIZON_DAYS };
 export const SLOTLOCK_MAX_EVENT_DURATION_DAYS = 3_660;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_CALENDAR_WINDOW_MS = SLOTLOCK_CALENDAR_HORIZON_DAYS * DAY_MS;
+/**
+ * Longest window a recurring series is stored (materialized) for: the 367-day search window plus
+ * two days. The rolling horizon starts a day before the current UTC day and must reach 367 days
+ * past its end, so that a search of the full 367 days from any moment of the day is complete.
+ */
+export const SLOTLOCK_MATERIALIZATION_WINDOW_DAYS = SLOTLOCK_CALENDAR_HORIZON_DAYS + 2;
+const MAX_MATERIALIZATION_WINDOW_MS = SLOTLOCK_MATERIALIZATION_WINDOW_DAYS * DAY_MS;
 const MAX_EVENT_DURATION_MS = SLOTLOCK_MAX_EVENT_DURATION_DAYS * DAY_MS;
 const MAX_RESOURCE_LIST_LIMIT = 1_000;
 /** Highest per-tenant resource cap `createResource` accepts. */
@@ -113,12 +120,15 @@ const AGENT_EVENT_OWNER_PATTERN = /^agent:[0-9a-f]{64}$/;
 /** Store-owned coverage source for bounded, locally materialized recurring events. */
 export const SLOTLOCK_LOCAL_RECURRENCE_COVERAGE_SOURCE = 'slotlock:local-recurrence-materialization';
 
-/** Stable daily target shared by the event writer, maintenance worker, and readiness proof. */
+/**
+ * Stable daily target shared by the event writer, maintenance worker, and readiness proof: from a
+ * day before the current UTC day to 367 days past its end (SLOTLOCK_MATERIALIZATION_WINDOW_DAYS).
+ */
 export function calendarEventRollingHorizon(now = new Date()): Interval {
   if (!Number.isFinite(now.getTime())) throw invalidWindowError();
   const midnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   const start = new Date(midnight - DAY_MS);
-  return { start, end: new Date(start.getTime() + SLOTLOCK_CALENDAR_HORIZON_DAYS * DAY_MS) };
+  return { start, end: new Date(start.getTime() + MAX_MATERIALIZATION_WINDOW_MS) };
 }
 
 /**
@@ -156,7 +166,7 @@ function seriesCursorJson(tx: TransactionSql, cursor: CalendarSeriesCursor | nul
  */
 function rolledWindow(stored: Interval, horizon: Interval): Interval | null {
   if (stored.start <= horizon.start && stored.end >= horizon.end) return null;
-  if (stored.end.getTime() - horizon.start.getTime() > MAX_CALENDAR_WINDOW_MS) return null;
+  if (stored.end.getTime() - horizon.start.getTime() > MAX_MATERIALIZATION_WINDOW_MS) return null;
   return { start: horizon.start, end: stored.end > horizon.end ? stored.end : horizon.end };
 }
 
@@ -1017,6 +1027,17 @@ async function replaceCalendarEventOccurrences(
   }
 }
 
+/** A recurring series' materialization window: finite, forward, and at most 369 days. */
+function seriesWindow(window: Interval): Interval {
+  if (
+    !isFiniteWindow(window) ||
+    window.end.getTime() - window.start.getTime() > MAX_MATERIALIZATION_WINDOW_MS
+  ) {
+    throw new CalendarContractError('invalid_icalendar');
+  }
+  return { start: new Date(window.start), end: new Date(window.end) };
+}
+
 function calendarWindow(window: Interval): Interval {
   if (
     !isFiniteWindow(window) ||
@@ -1040,7 +1061,7 @@ function oneOffEventWindow(event: Interval, requested: Interval | undefined): In
     !isFiniteWindow(window) ||
     window.start > event.start ||
     window.end < event.end ||
-    window.end.getTime() - window.start.getTime() > Math.max(MAX_CALENDAR_WINDOW_MS, duration)
+    window.end.getTime() - window.start.getTime() > Math.max(MAX_MATERIALIZATION_WINDOW_MS, duration)
   ) {
     throw new CalendarContractError('invalid_icalendar');
   }
@@ -2604,7 +2625,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
         event = normalizeCalendarEventContent(params);
         if (event.recurrence) {
           if (!params.materializationWindow) return { ok: false, code: 'invalid_event' };
-          materializationWindow = calendarWindow(params.materializationWindow);
+          materializationWindow = seriesWindow(params.materializationWindow);
         } else {
           materializationWindow = oneOffEventWindow(event, params.materializationWindow);
         }
@@ -2924,7 +2945,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
           code: 'invalid_identity' as const,
         });
       }
-      const window = calendarWindow(params.window);
+      const window = seriesWindow(params.window);
       const limit = params.limit ?? 100;
       if (!Number.isSafeInteger(limit) || limit <= 0 || limit > MAX_CALENDAR_LIST_LIMIT) {
         throw Object.assign(new Error('Slotlock horizon batch limit must be 1-1000'), {
@@ -2943,7 +2964,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
              materialized_starts_at > ${window.start}
              OR materialized_ends_at < ${window.end}
            )
-           AND materialized_ends_at <= ${new Date(window.start.getTime() + MAX_CALENDAR_WINDOW_MS)}
+           AND materialized_ends_at <= ${new Date(window.start.getTime() + MAX_MATERIALIZATION_WINDOW_MS)}
            AND (
              ${after?.materializedEndsAt ?? null}::timestamptz IS NULL
              OR (materialized_ends_at, id) >

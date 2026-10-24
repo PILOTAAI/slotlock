@@ -4,7 +4,12 @@
 // tenant of its own, so a roll or maintenance pass sees only its rows. Skipped without DATABASE_URL.
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { type SlotlockStore, createSlotlockStore } from '../store.js';
+import { maintainSlotlockTenant } from '../maintenance.js';
+import {
+  type SlotlockStore,
+  calendarEventRollingHorizon,
+  createSlotlockStore,
+} from '../store.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
 const d = (iso: string) => new Date(iso);
@@ -86,5 +91,43 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
       code: 'overlap',
       conflictingReservationId: booking.reservation.id,
     });
+  });
+
+  it('proves a full 367-day window from now complete once a series is rolled to the horizon', async () => {
+    const { tenantRef, resourceId } = await freshTenant();
+    const horizon = calendarEventRollingHorizon();
+    const start = new Date(horizon.start.getTime() + DAY + 9 * HOUR);
+    const put = await store.putCalendarEvent({
+      tenantRef,
+      externalRef: `weekly-${crypto.randomUUID()}`,
+      idempotencyKey: `create-${crypto.randomUUID()}`,
+      expectedRevision: 0,
+      resourceId,
+      start,
+      end: new Date(start.getTime() + HOUR),
+      timezone: 'UTC',
+      summary: 'Weekly service',
+      recurrence: { rrule: 'FREQ=WEEKLY' },
+      materializationWindow: horizon,
+    });
+    expect(put.ok).toBe(true);
+    await maintainSlotlockTenant(store, tenantRef);
+    // The audit's repro: [now, now + 367 days) was partial, so a search of the advertised maximum
+    // found no certain slot.
+    const now = new Date();
+    const freeBusy = await store.getFreeBusy({
+      tenantRef,
+      resourceId,
+      window: { start: now, end: new Date(now.getTime() + 367 * DAY) },
+    });
+    expect(freeBusy.coverage).toEqual({ state: 'complete', missingSources: [] });
+    // At the latest moment of the UTC day too.
+    const lastMoment = new Date(horizon.start.getTime() + 2 * DAY - 1);
+    const atDayEnd = await store.getFreeBusy({
+      tenantRef,
+      resourceId,
+      window: { start: lastMoment, end: new Date(lastMoment.getTime() + 367 * DAY) },
+    });
+    expect(atDayEnd.coverage.state).toBe('complete');
   });
 });

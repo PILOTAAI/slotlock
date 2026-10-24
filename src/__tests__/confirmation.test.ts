@@ -858,10 +858,10 @@ describe('a confirmation question a person can trust', () => {
       expect(
         await asked({ ...BOOKING, recurrence_rule: 'FREQ=MONTHLY;UNTIL=20281231T000000Z' }),
       ).toBe(
-        'Book vehicle-42 8 times before 2027-10-11, from 2027-03-02 09:00–10:00 to 2027-10-02 09:00–10:00 (Europe/London), repeating FREQ=MONTHLY;UNTIL=20281231T000000Z, until 2028-12-31: "Vehicle handover".',
+        'Book vehicle-42 8 times before 2027-10-13, from 2027-03-02 09:00–10:00 to 2027-10-02 09:00–10:00 (Europe/London), repeating FREQ=MONTHLY;UNTIL=20281231T000000Z, until 2028-12-31: "Vehicle handover".',
       );
       expect(await asked({ ...BOOKING, recurrence_rule: 'FREQ=WEEKLY;BYDAY=TU;COUNT=40' })).toBe(
-        'Book vehicle-42 32 times before 2027-10-11, from 2027-03-02 09:00–10:00 to 2027-10-05 09:00–10:00 (Europe/London), repeating FREQ=WEEKLY;COUNT=40;BYDAY=TU, 40 counted by its rule, moved and cancelled ones included: "Vehicle handover".',
+        'Book vehicle-42 33 times before 2027-10-13, from 2027-03-02 09:00–10:00 to 2027-10-12 09:00–10:00 (Europe/London), repeating FREQ=WEEKLY;COUNT=40;BYDAY=TU, 40 counted by its rule, moved and cancelled ones included: "Vehicle handover".',
       );
     });
 
@@ -869,7 +869,7 @@ describe('a confirmation question a person can trust', () => {
       expect(
         await asked({ ...BOOKING, recurrence_rule: 'FREQ=WEEKLY;BYDAY=TU', status: 'tentative' }),
       ).toBe(
-        'Book vehicle-42 32 times before 2027-10-11, from 2027-03-02 09:00–10:00 to 2027-10-05 09:00–10:00 (Europe/London), repeating FREQ=WEEKLY;BYDAY=TU, with no end, tentatively: "Vehicle handover".',
+        'Book vehicle-42 33 times before 2027-10-13, from 2027-03-02 09:00–10:00 to 2027-10-12 09:00–10:00 (Europe/London), repeating FREQ=WEEKLY;BYDAY=TU, with no end, tentatively: "Vehicle handover".',
       );
     });
 
@@ -903,7 +903,7 @@ describe('a confirmation question a person can trust', () => {
           ],
         }),
       ).toBe(
-        'Book vehicle-42 2 times before 2027-10-11, from 2027-03-02 09:00–10:00 to 2027-03-13 03:00–04:00 (Europe/London), repeating FREQ=WEEKLY;COUNT=3;BYDAY=TU, 3 counted by its rule, moved and cancelled ones included, 1 moved (2027-03-16 09:00 to 2027-03-13 03:00–04:00): "Vehicle handover".',
+        'Book vehicle-42 2 times before 2027-10-13, from 2027-03-02 09:00–10:00 to 2027-03-13 03:00–04:00 (Europe/London), repeating FREQ=WEEKLY;COUNT=3;BYDAY=TU, 3 counted by its rule, moved and cancelled ones included, 1 moved (2027-03-16 09:00 to 2027-03-13 03:00–04:00): "Vehicle handover".',
       );
     });
 
@@ -920,7 +920,7 @@ describe('a confirmation question a person can trust', () => {
           recurrence_exceptions: [moved],
         }),
       ).toBe(
-        'Book vehicle-42 1 time before 2027-10-11, from 2027-03-02 09:00–10:00 to 2027-03-02 09:00–10:00 (Europe/London), repeating FREQ=DAILY;COUNT=2, 2 counted by its rule, moved and cancelled ones included, 1 moved past 2027-10-11 (2027-03-03 09:00 to 2027-10-31 13:00–18:00 UTC+00:00): "Vehicle handover".',
+        'Book vehicle-42 1 time before 2027-10-13, from 2027-03-02 09:00–10:00 to 2027-03-02 09:00–10:00 (Europe/London), repeating FREQ=DAILY;COUNT=2, 2 counted by its rule, moved and cancelled ones included, 1 moved past 2027-10-13 (2027-03-03 09:00 to 2027-10-31 13:00–18:00 UTC+00:00): "Vehicle handover".',
       );
       // An exception for an occurrence the rule never makes moves nothing, there or here.
       expect(

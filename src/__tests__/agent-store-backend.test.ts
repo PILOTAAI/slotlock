@@ -358,7 +358,7 @@ describe('Slotlock store-backed agent server adapter', () => {
         summary: 'Busy',
         materializationWindow: {
           start: new Date('2027-01-09T00:00:00.000Z'),
-          end: new Date('2028-01-11T00:00:00.000Z'),
+          end: new Date('2028-01-13T00:00:00.000Z'),
         },
       }),
     );
@@ -382,7 +382,7 @@ describe('Slotlock store-backed agent server adapter', () => {
       expect.objectContaining({
         materializationWindow: {
           start: new Date('2027-01-09T00:00:00.000Z'),
-          end: new Date('2028-01-11T00:00:00.000Z'),
+          end: new Date('2028-01-13T00:00:00.000Z'),
         },
       }),
     );

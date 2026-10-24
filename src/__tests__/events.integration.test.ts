@@ -594,7 +594,7 @@ describe.skipIf(!url)('Slotlock calendar events (real Postgres)', () => {
       store.listBusy(leaseResource, { start: lease.start, end: d('2029-01-01T00:00:00Z') }),
     ).resolves.toEqual([]);
 
-    // Recurrence keeps its 367-day materialization bound.
+    // Recurrence keeps its 369-day materialization bound (2028 is a leap year: this is 370 days).
     await expect(
       store.putCalendarEvent({
         ...lease,
@@ -606,31 +606,39 @@ describe.skipIf(!url)('Slotlock calendar events (real Postgres)', () => {
         recurrence: { rrule: 'FREQ=WEEKLY;COUNT=2' },
         materializationWindow: {
           start: d('2028-01-01T00:00:00Z'),
-          end: d('2029-01-04T00:00:00Z'),
+          end: d('2029-01-05T00:00:00Z'),
         },
       }),
     ).resolves.toEqual({ ok: false, code: 'invalid_event' });
   });
 
-  it('upgrades an installed 367-day window CHECK to the bounded one', async () => {
+  it.each([
+    ['0.1', 'slotlock_calendar_events_materialization_window_valid', "interval '367 days'"],
+    [
+      '0.2',
+      'slotlock_calendar_events_materialization_window_bounded',
+      `interval '367 days' OR (recurrence_rule IS NULL AND materialized_starts_at = starts_at
+         AND materialized_ends_at = ends_at AND ends_at - starts_at <= interval '3660 days')`,
+    ],
+  ])('upgrades the window CHECK %s installed to the 369-day one', async (_release, name, bound) => {
     await sql
       .begin(async (tx) => {
         await tx.unsafe(`
           ALTER TABLE slotlock.calendar_events
-            DROP CONSTRAINT slotlock_calendar_events_materialization_window_bounded;
+            DROP CONSTRAINT slotlock_calendar_events_materialization_window_limit;
           ALTER TABLE slotlock.calendar_events
-            ADD CONSTRAINT slotlock_calendar_events_materialization_window_valid CHECK (
+            ADD CONSTRAINT ${name} CHECK (
               materialized_ends_at > materialized_starts_at
-              AND materialized_ends_at - materialized_starts_at <= interval '367 days'
+              AND (materialized_ends_at - materialized_starts_at <= ${bound})
             );`);
         await createSlotlockStore(tx).applySchema();
-        const constraints = await tx<{ conname: string }[]>`
-          SELECT conname FROM pg_constraint
+        const constraints = await tx<{ conname: string; validated: boolean }[]>`
+          SELECT conname, convalidated AS validated FROM pg_constraint
            WHERE conrelid = 'slotlock.calendar_events'::regclass
              AND conname LIKE 'slotlock_calendar_events_materialization_window%'
            ORDER BY conname`;
-        expect(constraints.map((row) => row.conname)).toEqual([
-          'slotlock_calendar_events_materialization_window_bounded',
+        expect(constraints).toEqual([
+          { conname: 'slotlock_calendar_events_materialization_window_limit', validated: true },
         ]);
         throw new Error('rollback');
       })
