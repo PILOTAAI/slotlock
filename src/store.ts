@@ -1190,6 +1190,61 @@ async function calendarOwnerCommandCount(
 }
 
 /**
+ * The end of every event cancellation, under the event's identity and row locks: remove the event
+ * (when there is one) and its occupation, leave the identity's tombstone at `revision`, and record
+ * the command in `commandOwnerRef`'s namespace for replay.
+ */
+async function finishCalendarCancel(
+  tx: TransactionSql,
+  params: {
+    tenantRef: string;
+    ownerRef: string;
+    externalRef: string;
+    eventId: string | null;
+    revision: number;
+    commandOwnerRef: string;
+    idempotencyKey: string;
+    payloadHash: string;
+  },
+): Promise<CancelCalendarEventResult> {
+  const eventId = params.eventId ?? randomUUID();
+  if (params.eventId !== null) {
+    await tx`
+      DELETE FROM slotlock.reservations
+       WHERE id IN (
+         SELECT reservation_id FROM slotlock.calendar_event_occurrences
+          WHERE event_id = ${eventId} AND reservation_id IS NOT NULL
+       )`;
+    await tx`
+      DELETE FROM slotlock.calendar_events
+       WHERE id = ${eventId}
+         AND tenant_ref = ${params.tenantRef}
+         AND owner_ref = ${params.ownerRef}`;
+  }
+  await tx`
+    INSERT INTO slotlock.calendar_event_tombstones (
+      tenant_ref, owner_ref, external_ref, event_id, revision
+    ) VALUES (
+      ${params.tenantRef}, ${params.ownerRef}, ${params.externalRef}, ${eventId}, ${params.revision}
+    )`;
+  await tx`
+    INSERT INTO slotlock.calendar_event_commands (
+      tenant_ref, owner_ref, idempotency_key, operation, payload_hash, event_id, external_ref,
+      result_revision, occurrence_count
+    ) VALUES (
+      ${params.tenantRef}, ${params.commandOwnerRef}, ${params.idempotencyKey}, 'cancel',
+      ${params.payloadHash}, ${eventId}, ${params.externalRef}, ${params.revision}, 0
+    )`;
+  return {
+    ok: true,
+    eventId,
+    externalRef: params.externalRef,
+    revision: params.revision,
+    idempotent: false,
+  };
+}
+
+/**
  * The row an event write lost to. The write was rolled back, so the event's own rows from before
  * it are still there and are left out: they were to be replaced, and never block the event.
  */
@@ -1744,11 +1799,21 @@ export interface SlotlockStore {
     ownerRef?: string;
     externalRef: string;
   }): Promise<SlotlockCalendarEvent | null>;
+  /**
+   * One of the tenant's active events by id, whichever owner (the tenant itself or an agent key)
+   * wrote it: null when there is none, it was cancelled, or it is another tenant's.
+   */
+  getCalendarEventById(params: { tenantRef: string; eventId: string }): Promise<SlotlockCalendarEvent | null>;
   /** List active events with at least one materialized occurrence intersecting the window. */
   listCalendarEvents(params: {
     tenantRef: string;
     /** Defaults to the trusted `internal` namespace. */
     ownerRef?: string;
+    /**
+     * Every owner's events, each with its `ownerRef`, so a tenant reaches what any of its keys
+     * booked, a revoked one's included. Not with `ownerRef`.
+     */
+    allOwners?: boolean;
     resourceId: string;
     window: Interval;
     limit?: number;
@@ -1767,6 +1832,21 @@ export interface SlotlockStore {
      * The resource the writer read the event on: `event_not_found` when the stored event is on
      * another, checked under the event's lock.
      */
+    expectedResourceId?: string;
+  }): Promise<CancelCalendarEventResult>;
+  /**
+   * The tenant's cancellation of one of its events by id, whichever owner wrote it: an agent key's
+   * included, after the key is revoked and when it has spent its command quota. The event's
+   * identity is cancelled (its tombstone is its owner's, so that key cannot re-create it), and the
+   * command is the tenant's own: its idempotency key is in the trusted `internal` namespace, where
+   * it replays. A cancelled event, an unknown id or another tenant's is `event_not_found`.
+   */
+  cancelCalendarEventById(params: {
+    tenantRef: string;
+    eventId: string;
+    idempotencyKey: string;
+    expectedRevision: number;
+    /** As for cancelCalendarEvent: `event_not_found` when the event is on another resource. */
     expectedResourceId?: string;
   }): Promise<CancelCalendarEventResult>;
   /**
@@ -3244,7 +3324,31 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
       return toCalendarEvent(row, children.get(row.id));
     },
 
+    async getCalendarEventById(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      if (!isValidResourceId(params.eventId)) {
+        throw invalidIdentityError('Slotlock event id must be a UUID');
+      }
+      const rows = await sql<CalendarEventRow[]>`
+        SELECT id, tenant_ref, owner_ref, external_ref, resource_id, starts_at, ends_at, timezone,
+               summary, description, location, status, transparency, organizer, attendees,
+               reminders, recurrence_rule, recurrence_exceptions, materialized_starts_at,
+               materialized_ends_at, revision, source, created_at, updated_at
+          FROM slotlock.calendar_events
+         WHERE tenant_ref = ${params.tenantRef} AND id = ${params.eventId}`;
+      const row = rows[0];
+      if (!row) return null;
+      const children = await loadCalendarEventChildren(sql, [row.id]);
+      return toCalendarEvent(row, children.get(row.id));
+    },
+
     async listCalendarEvents(params) {
+      if (params.allOwners === true && params.ownerRef !== undefined) {
+        throw invalidIdentityError('Slotlock lists one owner or every owner, not both');
+      }
+      const allOwners = params.allOwners === true;
       const ownerRef = params.ownerRef ?? SLOTLOCK_INTERNAL_EVENT_OWNER_REF;
       if (!isValidIdentity(params.tenantRef) || !isValidEventOwnerRef(ownerRef)) {
         throw Object.assign(new Error('Slotlock tenant reference must be 1-500 UTF-8 bytes'), {
@@ -3284,7 +3388,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
                event.source, event.created_at, event.updated_at
           FROM slotlock.calendar_events event
          WHERE event.tenant_ref = ${params.tenantRef}
-           AND event.owner_ref = ${ownerRef}
+           AND (${allOwners}::boolean OR event.owner_ref = ${ownerRef})
            AND event.resource_id = ${params.resourceId}
            AND EXISTS (
              SELECT 1 FROM slotlock.calendar_event_occurrences occurrence
@@ -3494,42 +3598,101 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
         if (params.expectedRevision !== currentRevision) {
           return { ok: false, code: 'revision_conflict', currentRevision };
         }
-        const eventId = found?.id ?? randomUUID();
-        const revision = currentRevision + 1;
-        if (found) {
-          await tx`
-            DELETE FROM slotlock.reservations
-             WHERE id IN (
-               SELECT reservation_id FROM slotlock.calendar_event_occurrences
-                WHERE event_id = ${eventId} AND reservation_id IS NOT NULL
-             )`;
-          await tx`
-            DELETE FROM slotlock.calendar_events
-             WHERE id = ${eventId}
-               AND tenant_ref = ${params.tenantRef}
-               AND owner_ref = ${ownerRef}`;
-        }
-        await tx`
-          INSERT INTO slotlock.calendar_event_tombstones (
-            tenant_ref, owner_ref, external_ref, event_id, revision
-          ) VALUES (
-            ${params.tenantRef}, ${ownerRef}, ${params.externalRef}, ${eventId}, ${revision}
-          )`;
-        await tx`
-          INSERT INTO slotlock.calendar_event_commands (
-            tenant_ref, owner_ref, idempotency_key, operation, payload_hash, event_id, external_ref,
-            result_revision, occurrence_count
-          ) VALUES (
-            ${params.tenantRef}, ${ownerRef}, ${params.idempotencyKey}, 'cancel', ${payloadHash},
-            ${eventId}, ${params.externalRef}, ${revision}, 0
-          )`;
-        return {
-          ok: true,
-          eventId,
+        return finishCalendarCancel(tx, {
+          tenantRef: params.tenantRef,
+          ownerRef,
           externalRef: params.externalRef,
-          revision,
-          idempotent: false,
-        };
+          eventId: found?.id ?? null,
+          revision: currentRevision + 1,
+          commandOwnerRef: ownerRef,
+          idempotencyKey: params.idempotencyKey,
+          payloadHash,
+        });
+      });
+    },
+
+    async cancelCalendarEventById(params) {
+      if (
+        !isValidIdentity(params.tenantRef) ||
+        !isValidResourceId(params.eventId) ||
+        !isValidIdentity(params.idempotencyKey) ||
+        (params.expectedResourceId !== undefined && !isValidResourceId(params.expectedResourceId))
+      ) {
+        return { ok: false, code: 'invalid_identity' };
+      }
+      if (!Number.isSafeInteger(params.expectedRevision) || params.expectedRevision < 0) {
+        return { ok: false, code: 'invalid_revision' };
+      }
+      const commandOwnerRef = SLOTLOCK_INTERNAL_EVENT_OWNER_REF;
+      // Its own operation in the hash: an owner-scoped cancel under the same key never replays it.
+      const payloadHash = calendarCommandHash({
+        operation: 'cancel-by-id',
+        eventId: params.eventId,
+        idempotencyKey: params.idempotencyKey,
+        expectedRevision: params.expectedRevision,
+        expectedResourceId: params.expectedResourceId ?? null,
+      });
+      return inTransaction(sql, async (tx): Promise<CancelCalendarEventResult> => {
+        await lockCalendarIdempotency(tx, params.tenantRef, commandOwnerRef, params.idempotencyKey);
+        const commands = await tx<CalendarCommandRow[]>`
+          SELECT operation, payload_hash, event_id, external_ref,
+                 result_revision, occurrence_count
+            FROM slotlock.calendar_event_commands
+           WHERE tenant_ref = ${params.tenantRef}
+             AND owner_ref = ${commandOwnerRef}
+             AND idempotency_key = ${params.idempotencyKey}
+           FOR UPDATE`;
+        const priorCommand = commands[0];
+        if (priorCommand) {
+          if (priorCommand.operation !== 'cancel' || priorCommand.payload_hash !== payloadHash) {
+            return { ok: false, code: 'idempotency_conflict' };
+          }
+          return {
+            ok: true,
+            eventId: priorCommand.event_id,
+            externalRef: priorCommand.external_ref,
+            revision: Number(priorCommand.result_revision),
+            idempotent: true,
+          };
+        }
+        // An event's owner and reference never change, so they are read before its identity lock,
+        // which is taken before its row lock as every event write takes them.
+        const [identity] = await tx<{ owner_ref: string; external_ref: string }[]>`
+          SELECT owner_ref, external_ref FROM slotlock.calendar_events
+           WHERE tenant_ref = ${params.tenantRef} AND id = ${params.eventId}`;
+        if (!identity) return { ok: false, code: 'event_not_found' };
+        await lockCalendarEventIdentity(
+          tx,
+          params.tenantRef,
+          identity.owner_ref,
+          identity.external_ref,
+        );
+        const [found] = await tx<{ id: string; resource_id: string; revision: string | number }[]>`
+          SELECT id, resource_id, revision FROM slotlock.calendar_events
+           WHERE tenant_ref = ${params.tenantRef} AND id = ${params.eventId}
+           FOR UPDATE`;
+        // Cancelled while this waited on its lock.
+        if (!found) return { ok: false, code: 'event_not_found' };
+        if (
+          params.expectedResourceId !== undefined &&
+          found.resource_id !== params.expectedResourceId
+        ) {
+          return { ok: false, code: 'event_not_found' };
+        }
+        const currentRevision = Number(found.revision);
+        if (params.expectedRevision !== currentRevision) {
+          return { ok: false, code: 'revision_conflict', currentRevision };
+        }
+        return finishCalendarCancel(tx, {
+          tenantRef: params.tenantRef,
+          ownerRef: identity.owner_ref,
+          externalRef: identity.external_ref,
+          eventId: found.id,
+          revision: currentRevision + 1,
+          commandOwnerRef,
+          idempotencyKey: params.idempotencyKey,
+          payloadHash,
+        });
       });
     },
 
