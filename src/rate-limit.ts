@@ -26,7 +26,7 @@ import type { SlotlockApplicationOperation } from './application-api.js';
 import type { SlotlockLimits, SlotlockRate, SlotlockRateName } from './config.js';
 import type { SlotlockNodeServerConnection, SlotlockNodeServerFetchTarget } from './node-server.js';
 
-/** Keys one bucket remembers; past this, full buckets are dropped, then the least recently used. */
+/** Keys one policy remembers; past this, the least recently used tenth is dropped at once. */
 const MAX_BUCKET_KEYS = 100_000;
 /** Series writes that may wait for the server's slot, and how long each may wait. */
 const MAX_SERIES_WAITING = 64;
@@ -277,14 +277,13 @@ function bucketsFor(rate: SlotlockRate, now: () => number) {
       } else {
         bucket = { tokens: rate.burst, at };
         if (buckets.size >= MAX_BUCKET_KEYS) {
-          // A full bucket says nothing a new one would not; drop those first, then the oldest.
-          for (const [stale, entry] of buckets) {
-            refill(entry, at);
-            if (entry.tokens >= rate.burst) buckets.delete(stale);
-          }
+          // A tenth at a time, so a flood from ever new addresses costs one sweep per 10,000 of
+          // them rather than one per request. A dropped key starts afresh with a full bucket.
+          let dropping = MAX_BUCKET_KEYS / 10;
           for (const stale of buckets.keys()) {
-            if (buckets.size < MAX_BUCKET_KEYS) break;
+            if (dropping === 0) break;
             buckets.delete(stale);
+            dropping -= 1;
           }
         }
       }

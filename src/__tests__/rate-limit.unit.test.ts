@@ -244,14 +244,21 @@ describe('token buckets', () => {
     const first = { remoteAddress: '10.0.0.1' };
     expect((await target.fetch(get('/healthz'), first)).status).toBe(401);
     expect((await target.fetch(get('/healthz'), first)).status).toBe(429);
-    for (let index = 0; index < 100_001; index += 1) {
-      await target.fetch(get('/healthz'), {
-        remoteAddress: `10.${(index >> 16) & 255}.${(index >> 8) & 255}.${index & 255}`,
-      });
+    const address = (index: number) =>
+      `10.${(index >> 16) & 255}.${(index >> 8) & 255}.${(index & 255) + 1}`;
+    const started = performance.now();
+    for (let index = 1; index <= 300_000; index += 1) {
+      await target.fetch(get('/healthz'), { remoteAddress: address(index) });
     }
-    // The oldest empty bucket went to make room: that client starts afresh rather than the
-    // server growing without bound.
-    expect((await target.fetch(get('/healthz'), { remoteAddress: '10.1.134.161' })).status).toBe(401);
+    // Room is made a tenth at a time, so each new address costs a constant amount: 300,000 new
+    // addresses take far less than the quadratic sweep a scan per request would.
+    expect(performance.now() - started).toBeLessThan(30_000);
+    // The least recently used buckets went: the first client starts afresh rather than the server
+    // growing without bound, and a recent one is still counted.
+    expect((await target.fetch(get('/healthz'), first)).status).toBe(401);
+    expect((await target.fetch(get('/healthz'), { remoteAddress: address(300_000) })).status).toBe(
+      429,
+    );
   }, 60_000);
 });
 
