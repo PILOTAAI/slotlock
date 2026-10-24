@@ -70,6 +70,8 @@
     "SLOTLOCK_DASHBOARD_USERS": "*"
   },
   // Workers Logs keep each request's URL for up to 7 days; a sign-in callback's query holds its
-  // OAuth code and state, so query strings are removed from logged URLs.
+  // OAuth code and state, so query strings are removed from logged URLs. redact_query_string is the
+  // field's name in wrangler 4.149.0's config-schema.json (Observability, read 2026-10-24), the
+  // version package.json pins.
   "observability": { "enabled": true, "redact_query_string": true }
 }
