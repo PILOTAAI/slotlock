@@ -3,7 +3,7 @@
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { SLOTLOCK_DEFAULT_LIMITS, formatSlotlockRate } from '../config.js';
+import { SLOTLOCK_CAP_NAMES, SLOTLOCK_DEFAULT_LIMITS, formatSlotlockRate } from '../config.js';
 import {
   SLOTLOCK_CLI_HELP,
   SLOTLOCK_ENVIRONMENT_VARIABLES,
@@ -94,6 +94,15 @@ describe('slotlock serve configuration', () => {
       global_write: { perSecond: 50 },
     });
     expect('trustedProxyHeader' in readSlotlockServeConfig(serveEnv())).toBe(false);
+  });
+
+  it('reads the maintenance cap, apart from the series-write caps, and names every cap in --help (P11)', () => {
+    // An application-API maintenance run held the one series-write slot for its whole run, so it
+    // has a cap of its own.
+    const config = readSlotlockServeConfig(serveEnv({ SLOTLOCK_LIMITS: 'maintenance_runs=2' }));
+    expect(config.limits.caps).toEqual({ ...SLOTLOCK_DEFAULT_LIMITS.caps, maintenance_runs: 2 });
+    expect(SLOTLOCK_DEFAULT_LIMITS.caps).toMatchObject({ maintenance_runs: 1, series_writes: 1 });
+    for (const name of SLOTLOCK_CAP_NAMES) expect(SLOTLOCK_CLI_HELP).toContain(name);
   });
 
   it('writes each rate back in the smallest whole unit, as the listening line shows it', () => {

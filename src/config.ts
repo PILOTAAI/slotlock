@@ -202,6 +202,7 @@ export type SlotlockRateName = (typeof SLOTLOCK_RATE_NAMES)[number];
 const CAP_RANGES = Object.freeze({
   tenant_series_writes: [1, 100],
   series_writes: [1, 100],
+  maintenance_runs: [1, 100],
   tenant_subscriptions: [1, 10_000],
   key_lookups: [1, 8],
   key_lookup_queue: [0, 10_000],
@@ -227,7 +228,9 @@ export interface SlotlockLimits {
  *   and the tenant's agents cannot use up each other's budget; `global_*` counts it as well.
  * - `sign_in`: dashboard sign-ins and their callbacks from one client address.
  * - `tenant_series_writes` and `series_writes`: writes that may expand a recurring series (a
- *   recurring create, any update, a maintenance run) running at once in a tenant and in the server.
+ *   recurring create, any update) running at once in a tenant and in the server.
+ * - `maintenance_runs`: the application API's maintenance runs at once in the server, one a tenant,
+ *   in slots of their own.
  * - `tenant_subscriptions`: MCP live-update streams one tenant may hold open.
  * - `key_lookups` and `key_lookup_queue`: API key lookups running at once and waiting.
  */
@@ -247,6 +250,7 @@ export const SLOTLOCK_DEFAULT_LIMITS: SlotlockLimits = Object.freeze({
   caps: Object.freeze({
     tenant_series_writes: 1,
     series_writes: 1,
+    maintenance_runs: 1,
     tenant_subscriptions: 16,
     key_lookups: 2,
     key_lookup_queue: 256,

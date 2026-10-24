@@ -1023,6 +1023,7 @@ Environment:
                                  application API, sign_in (20/m:20); counts for
                                  tenant_series_writes and series_writes
                                  (1: writes that may expand a recurring series at once),
+                                 maintenance_runs (1: application API maintenance runs at once),
                                  tenant_subscriptions (16), key_lookups (2), key_lookup_queue (256)
   SLOTLOCK_TRUSTED_PROXY_HEADER  The request field a proxy in front sets to the client address,
                                  such as CF-Connecting-IP (default: the connection's address);

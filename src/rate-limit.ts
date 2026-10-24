@@ -1,10 +1,10 @@
 // Request limits for `slotlock serve`, a public multi-tenant server whose only rate limit this is:
 // token buckets per client address (counted before any credential is looked up), per API key, per
 // tenant and for the whole server, with reads and writes counted apart; one key lookup per request,
-// answered busy rather than anonymous when the lookup queue is full; a cap on writes that may expand
-// a recurring series running at once; and counts of what was refused, logged with each client as a
-// pseudonym. A process keeps its counts in memory, so each instance of a scaled-out server limits
-// alone.
+// answered busy rather than anonymous when the lookup queue is full; caps on writes that may expand
+// a recurring series, and on maintenance runs, running at once; and counts of what was refused,
+// logged with each client as a pseudonym. A process keeps its counts in memory, so each instance of
+// a scaled-out server limits alone.
 //
 // Refusals carry Retry-After and the RateLimit and RateLimit-Policy fields of
 // draft-ietf-httpapi-ratelimit-headers-11 (23 May 2026, read 2026-10-24): `"<policy>";r=<remaining>;
@@ -46,6 +46,7 @@ export type SlotlockRefusalReason =
   | 'rate_limited'
   | 'lookup_overflow'
   | 'series_writes_busy'
+  | 'maintenance_busy'
   | 'request_too_large';
 
 /** One `refusals` log line: counts since the last one, and the most refused clients as pseudonyms. */
@@ -79,8 +80,8 @@ export interface SlotlockRequestLimits {
     operation: SlotlockAgentOperation | 'protocol';
   }): Promise<boolean>;
   /**
-   * For `authorize`: when the operation may expand a recurring series, take its write token and
-   * wait for a slot, holding it until the request is answered. Throws a
+   * For `authorize`: when the operation may expand a recurring series, or runs maintenance, take its
+   * write token and wait for a slot, holding it until the request is answered. Throws a
    * `SlotlockAgentOperationError` when none comes: `rate_limited` (429) when the write is over its
    * budget or the tenant's own writes fill its slots, `server_busy` (503) while the server's do.
    */
@@ -125,7 +126,7 @@ interface RequestState {
   write: boolean;
   /** A route of the application API, counted in its tenant's `app_*` buckets. */
   application: boolean;
-  /** Aborted when the client goes, which ends a wait for a series slot. */
+  /** Aborted when the client goes, which ends a wait for a slot. */
   signal: AbortSignal;
   charged: { read: boolean; write: boolean };
   refusal?: { reason: SlotlockRefusalReason; fields: Record<string, string> };
@@ -399,15 +400,20 @@ function seriesGate(perKey: number, total: number) {
   };
 }
 
-/** Whether an operation may expand a recurring series: a recurring create, an update, maintenance. */
-function expandsSeries(
+/**
+ * The slots an operation waits for: `series` for a write that may expand a recurring series (a
+ * recurring create, an update), `maintenance` for a maintenance run, which rolls many series and so
+ * has slots of its own rather than holding every other tenant's writes; null for the rest.
+ */
+function slotsFor(
   operation: SlotlockAgentOperation | SlotlockApplicationOperation,
   input: Record<string, unknown>,
-): boolean {
+): 'series' | 'maintenance' | null {
+  if (operation === 'slotlock_run_maintenance') return 'maintenance';
   if (operation === 'slotlock_create_event') {
-    return input.recurrence_rule !== undefined && input.recurrence_rule !== null;
+    return input.recurrence_rule !== undefined && input.recurrence_rule !== null ? 'series' : null;
   }
-  return operation === 'slotlock_update_event' || operation === 'slotlock_run_maintenance';
+  return operation === 'slotlock_update_event' ? 'series' : null;
 }
 
 /** The limits `slotlock serve` puts in front of its agent server and dashboard. */
@@ -423,7 +429,21 @@ export function createSlotlockRequestLimits(
   const states = new AsyncLocalStorage<RequestState>();
   const looked = new WeakMap<Request, SlotlockAgentPrincipal | null>();
   const addresses = new WeakMap<Request, string>();
-  const gate = seriesGate(caps.tenant_series_writes, caps.series_writes);
+  const gates = {
+    series: {
+      gate: seriesGate(caps.tenant_series_writes, caps.series_writes),
+      tenant: { name: 'tenant_series_writes', cap: caps.tenant_series_writes },
+      server: { name: 'series_writes', cap: caps.series_writes },
+      busy: 'series_writes_busy',
+    },
+    // One a tenant: a second would roll the same series again.
+    maintenance: {
+      gate: seriesGate(1, caps.maintenance_runs),
+      tenant: { name: 'tenant_maintenance_runs', cap: 1 },
+      server: { name: 'maintenance_runs', cap: caps.maintenance_runs },
+      busy: 'maintenance_busy',
+    },
+  } as const;
   const signInPaths = new Set(options.signInPaths ?? []);
 
   // Refusal counts, logged with each client keyed by a secret this process alone holds.
@@ -439,6 +459,7 @@ export function createSlotlockRequestLimits(
       rate_limited: 0,
       lookup_overflow: 0,
       series_writes_busy: 0,
+      maintenance_busy: 0,
       request_too_large: 0,
     };
   }
@@ -588,7 +609,8 @@ export function createSlotlockRequestLimits(
 
     async admit({ principal, operation, input }) {
       const state = states.getStore();
-      if (!state || !expandsSeries(operation, input)) return;
+      const kind = state ? slotsFor(operation, input) : null;
+      if (!state || kind === null) return;
       // One slot a request: the confirmation round or a retry within it holds the same one.
       if (state.release.length > 0) return;
       // Each operation that waits here writes. Its token is taken now rather than after authorize,
@@ -598,7 +620,8 @@ export function createSlotlockRequestLimits(
       if (!chargeRequest(state, principal, ['write'])) {
         throw new SlotlockAgentOperationError('rate_limited', 429);
       }
-      const slot = await gate.acquire(principal.tenantRef, state.signal);
+      const slots = gates[kind];
+      const slot = await slots.gate.acquire(principal.tenantRef, state.signal);
       if (typeof slot === 'function') {
         state.release.push(slot);
         return;
@@ -606,13 +629,13 @@ export function createSlotlockRequestLimits(
       if (slot === 'tenant') {
         state.refusal = {
           reason: 'rate_limited',
-          fields: concurrencyFields('tenant_series_writes', caps.tenant_series_writes),
+          fields: concurrencyFields(slots.tenant.name, slots.tenant.cap),
         };
         throw new SlotlockAgentOperationError('rate_limited', 429);
       }
       state.refusal = {
-        reason: 'series_writes_busy',
-        fields: concurrencyFields('series_writes', caps.series_writes),
+        reason: slots.busy,
+        fields: concurrencyFields(slots.server.name, slots.server.cap),
       };
       throw new SlotlockAgentOperationError('server_busy', 503);
     },

@@ -1,6 +1,7 @@
 // The request limits of `slotlock serve` without a database or a socket: client addresses as
 // bucket keys, the order of the checks (the address before any lookup), the token arithmetic behind
-// Retry-After and the RateLimit fields, the series-write slots, and the refusal counts.
+// Retry-After and the RateLimit fields, the series-write and maintenance slots, and the refusal
+// counts.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   SLOTLOCK_A2A_PROTOCOL_VERSION,
@@ -626,6 +627,53 @@ describe('series writes', () => {
     }
     expect(counted).toEqual([expect.objectContaining({ rate_limited: 2, series_writes_busy: 0 })]);
   }, 15_000);
+
+  it("runs the application API's maintenance in a slot of its own, never holding another tenant's update (P11)", async () => {
+    // The verifier's probe: tenant A's maintenance run held the server's only series slot for the
+    // whole run, up to ten batches of series, and tenant B's update waited two seconds for it and
+    // was answered 503.
+    const limiter = createSlotlockRequestLimits({
+      limits: SLOTLOCK_DEFAULT_LIMITS,
+      basePath: '',
+      authenticate: async () => null,
+    });
+    let finishMaintenance: () => void = () => {};
+    const maintenance = inRequest(limiter, async () => {
+      await limiter.admit({
+        principal: { subject: 'api_key:a', tenantRef: 'a' },
+        operation: 'slotlock_run_maintenance',
+        input: {},
+      });
+      await new Promise<void>((resolve) => (finishMaintenance = resolve));
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    const started = performance.now();
+    const update = await inRequest(limiter, () =>
+      limiter.admit({
+        principal: { subject: 'api_key:b', tenantRef: 'b' },
+        operation: 'slotlock_update_event',
+        input: { title: 'Renamed' },
+      }),
+    );
+    expect(update.outcome).toBeUndefined();
+    expect(performance.now() - started).toBeLessThan(500);
+    // Another tenant's maintenance run waits for the server's maintenance slot, and is answered busy
+    // once it has waited two seconds.
+    const other = await inRequest(limiter, () =>
+      limiter.admit({
+        principal: { subject: 'api_key:c', tenantRef: 'c' },
+        operation: 'slotlock_run_maintenance',
+        input: {},
+      }),
+    );
+    expect(other.outcome).toMatchObject({ code: 'server_busy', status: 503 });
+    expect(other.response.headers.get('ratelimit-policy')).toBe(
+      '"maintenance_runs";q=1;qu="concurrent-requests"',
+    );
+    finishMaintenance();
+    await maintenance;
+    limiter.close();
+  }, 10_000);
 
   it('answers busy once a write has waited two seconds for the server', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setImmediate'] });
