@@ -29,9 +29,18 @@ const githubAnchor = (heading: string) =>
 
 const HEADING = '## Known issues in 0.2.0';
 const ANCHOR = `https://github.com/PILOTAAI/slotlock#${githubAnchor(HEADING)}`;
-const zod = (JSON.parse(read('package.json')) as { dependencies: Record<string, string> })
-  .dependencies.zod as string;
-const WORKAROUND = `"overrides": {"zod": "${zod}"}`;
+// The workaround is a fixed fact about published versions, not about the zod this repository pins
+// today, so a Dependabot bump of zod leaves these documents alone. GHSA-mrhx-c7xc-m3w5 covers zod
+// below 4.6.6, its first patched version (GitHub's advisory database, read 2026-10-24).
+const OVERRIDE = /"overrides": \{"zod": "(\d+)\.(\d+)\.(\d+)"\}/;
+const FIRST_PATCHED_ZOD = [4, 6, 6];
+const patched = (version: number[]) => {
+  for (const [index, part] of version.entries()) {
+    const floor = FIRST_PATCHED_ZOD[index] as number;
+    if (part !== floor) return part > floor;
+  }
+  return true;
+};
 
 /** The five double-booking classes, each by words only its description uses. */
 const CLASSES: [string, RegExp][] = [
@@ -50,9 +59,10 @@ describe('the 0.2.0 known-issues notice', () => {
     for (const [name, words] of CLASSES) expect(readme, name).toMatch(words);
     expect(readme).toContain('GHSA-mrhx-c7xc-m3w5');
     expect(readme).toContain('zod 4.6.5');
-    // The override names the zod the repository ships and tests, which is past the advisory.
-    expect(zod).not.toBe('4.6.5');
-    expect(readme).toContain(WORKAROUND);
+    // The override moves a consumer to a zod past the advisory.
+    const override = OVERRIDE.exec(readme);
+    expect(override, 'the README gives the override').not.toBeNull();
+    expect(patched((override ?? []).slice(1).map(Number))).toBe(true);
     expect(readme).toContain('0.3.0');
   });
 
@@ -72,7 +82,12 @@ describe('the 0.2.0 known-issues notice', () => {
   it('gives the v0.2.0 release-notes text and the advisory drafts the same facts', () => {
     const notes = flat(read('docs/release/0.2.0-known-issues.md'));
     for (const [name, words] of CLASSES) expect(notes, name).toMatch(words);
-    expect(notes).toContain(WORKAROUND);
+    // The same override as the README's, wherever the notes give it.
+    const workaround = OVERRIDE.exec(notice())?.[0] ?? 'the README override';
+    expect(notes).toContain(workaround);
+    expect(
+      notes.match(new RegExp(OVERRIDE.source, 'g'))?.every((found) => found === workaround),
+    ).toBe(true);
     expect(notes).toContain('GHSA-mrhx-c7xc-m3w5');
     expect(notes).toMatch(/gh release edit v0\.2\.0 [^\n]*--notes-file notes\.md/);
     // Two advisories: the inherited zod one and the double booking, each for every release so far.
