@@ -15,8 +15,49 @@ rule assumes a particular industry.
 - Availability rules use local wall time in the resource's IANA timezone.
 - Every interval is half-open `[start, end)`. `end` must be strictly after `start`.
 - Adjacent intervals do not conflict. Overlapping or touching availability windows may be merged.
-- Daylight-saving gaps move a nonexistent wall time forward by the gap. Ambiguous fall-back wall
-  times resolve to the first occurrence.
+- A time zone is an IANA name, kept in its canonical spelling (`europe/london` is stored as
+  `Europe/London`). A UTC offset such as `+05:00` is not a zone and is refused.
+- An event time in an hour the clocks skip moves forward by the gap, and one in an hour they repeat
+  is its first instant (RFC 5545 §3.3.5), except where "Daylight-saving time" below says otherwise.
+- An availability window's edge in an hour the clocks skip stands where that hour ends, so a window
+  holds only the wall times it names that exist: in New York on 2027-03-14, [02:30, 03:30) is
+  03:00-03:30 EDT and [02:00, 02:30) is nothing. An edge in a repeated hour is its first instant.
+
+## Daylight-saving time
+
+An occurrence of a timed recurring event starts at its wall time read as above, and ends at the
+later of two readings:
+
+- its exact end: its start plus the series' exact length, DTEND − DTSTART as instants (RFC 5545
+  §3.8.5.3), or its DURATION, whose days and weeks are calendar days and whose hours, minutes and
+  seconds are exact (§3.3.6);
+- its wall-clock end: DTEND's wall time carried to the occurrence's date, the later instant where
+  the clocks repeat that hour.
+
+It occupies `[start, later end)`, so whichever way people read an occurrence that the clocks
+change inside, none of the time they hold is offered as free. A stored series' first occurrence
+starts at the instant stored, which may be the second pass of a repeated hour. One-off events,
+overrides (moved occurrences) and PERIOD RDATEs occupy exactly the times they give. Display and
+export keep each event as written. Feeds, the trusted importer and the store read events this way
+in every zone, including zones whose rules changed in the past and zones a feed defines only by
+its VTIMEZONE.
+
+| Case | Example | Occupies |
+| --- | --- | --- |
+| The clocks go forward inside an occurrence | London, daily 00:00-06:00, 2027-03-28 | six exact hours, 00:00Z-06:00Z |
+| The clocks go back inside an occurrence | London, daily 00:00-06:00, 2026-10-25 | seven wall-clock hours, 2026-10-24 23:00Z-06:00Z |
+| The same, southern hemisphere | Santiago, daily 22:00-04:00, night of 2027-04-03 | seven hours, 2027-04-04 01:00Z-08:00Z |
+| | Auckland, daily 00:00-06:00, 2027-09-26 | six hours, 2027-09-25 12:00Z-18:00Z |
+| An occurrence starts in the skipped hour | Berlin, daily 02:30 for 75 minutes, 2027-03-28 | 75 exact minutes from 01:30Z (03:30 CEST) |
+| A half-hour change | Lord Howe, daily 02:00-02:45, 2027-10-03 | 45 minutes from 2027-10-02 15:30Z |
+| DTEND falls in the repeated hour | New York, daily 23:00-01:30 from 2026-10-31 | 2026-11-01 03:00Z to the later 01:30, 06:30Z |
+| The first instance spans the change | Berlin, weekly 01:00-04:00 from 2027-03-28 | as written, 00:00Z-02:00Z; later weeks three hours |
+| An occurrence starts in the repeated hour | London, daily 01:15-01:45 from 2026-10-20 | on 2026-10-25, its first 01:15 (00:15Z) to the later 01:45 (01:45Z) |
+| A stored first occurrence in the repeated hour | London, stored from 2026-10-25 01:15Z | the second 01:15, as stored |
+| A length the clocks reduce to nothing | DTSTART and DTEND both in one skipped hour, the end at its close | refused |
+
+A series whose DTSTART the clocks skip is read from a feed (from the offset before the gap) but is
+not stored: no instant reads back as its wall time.
 
 ## Availability
 
@@ -58,6 +99,13 @@ the provider, map a connection to one resource, normalize status/transparency/re
 durable cursor and coverage window, and reconcile deletions. iCalendar parsing must remain bounded by
 input size, components, exceptions, occurrences, work, and expansion horizon.
 
+A feed's overrides occupy what the provider shows: one without DTEND or DURATION lasts its series'
+length, and one whose RECURRENCE-ID names no occurrence, or whose occurrence the series also
+EXDATEs, occupies its own time. The instances of a CalDAV-expanded series are each read, the first
+with or without a RECURRENCE-ID. An event with both DTEND and DURATION is refused (RFC 5545
+§3.6.1). A reader that can name refused series refuses one series at a time and reads the rest of
+the feed; one that cannot refuses the feed, so a refused series is never read as free time.
+
 Content not required for conflict decisions should be discarded before reaching an agent. Outbound
 iCalendar updates retain stable UID and monotonic sequence; cancellation is explicit.
 
@@ -72,8 +120,24 @@ tombstone; delayed create delivery cannot resurrect the UID.
 
 Events may carry organizer, attendees, roles, participation status, RSVP requests, display/email
 relative reminders, one RFC 5545 RRULE, and bounded recurrence exceptions. A materialization window is
-mandatory for recurring events, must not exceed 367 days, and may produce at most 2,000 occurrences
-under one 4,000-step work budget. Opaque occurrences are reservations under the same PostgreSQL EXCLUDE
+mandatory for recurring events, must not exceed 367 days, and may produce at most 2,000 occurrences.
+Expansion is bounded by a count of work, never a clock, so an input is accepted or refused the same
+way however loaded the machine: each series may pass 4,000 occurrences from its start, and ical.js
+may take 25,000 steps (search steps, weekday comparisons, an eighth of one for each day it walks, a
+hundred for each year it scans) for an event as it is written and 500,000 for a feed or a stored
+series as maintenance rolls it.
+
+A stored rule is daily or less frequent, follows RFC 5545 §3.3.10's grammar (every part known and
+given once, `COUNT` at least 1, never `COUNT` with `UNTIL`), and is of a shape the expander reads
+as RFC 5545 does: `BYWEEKNO`, a two-digit `BYDAY` ordinal, `BYSETPOS` other than with
+`FREQ=MONTHLY` and `BYDAY` alone, `BYMONTH` with `FREQ=MONTHLY`, a negative `BYMONTHDAY` other
+than with `FREQ=MONTHLY` and no `BYDAY`, `FREQ=YEARLY` with `BYMONTHDAY` but no `BYMONTH` or with a
+day one of its months can lack, with `BYYEARDAY` and `BYMONTH` or `BYMONTHDAY`, or with a numbered
+`BYDAY` and `BYMONTHDAY`, and time parts with `FREQ=MONTHLY` or `YEARLY` are refused, with a
+reason. A DATE `UNTIL` on a timed series includes its whole day on the series' clock.
+
+A recurrence exception names the occurrence it changes by that occurrence's instant, exported as a
+UTC `RECURRENCE-ID`; one that names no occurrence is refused. Opaque occurrences are reservations under the same PostgreSQL EXCLUDE
 constraint as bookings and holds. Transparent occurrences remain queryable but occupy no resource.
 An event update replaces its materialized set transactionally, so an overlap rolls the entire mutation
 back and preserves the prior event.
@@ -89,7 +153,8 @@ contains the entire window. Any missing, stale, or partial source is returned by
 silently treated as free time.
 
 An event has a finite, positive duration. A one-off event may last up to 3,660 days and its
-occupation matches the event exactly; a recurring event's occurrences are materialized as above. An
+occupation matches the event exactly; a recurring event's occurrences are materialized as above,
+each occupying what "Daylight-saving time" says. An
 all-day (`VALUE=DATE`) iCalendar event covers whole local days of the calendar's timezone, from local
 midnight to local midnight, taken from the caller's calendar timezone, else the feed's
 `X-WR-TIMEZONE`; with neither the input is refused, never read in the server's zone. An all-day
