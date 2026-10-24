@@ -31,6 +31,10 @@ versioning.
   check, and a restart on the same volume (`scripts/compose-smoke.sh`). The docs now say PostgreSQL
   16 or newer, and that Compose ships 18; they said 16 while Compose ran 18.
 - `.env.example` turns the REST API on, as `slotlock serve` and Compose already do by default.
+- One aggregate check, "CI passed", gathers every CI job: the suites on each Node.js and
+  PostgreSQL, the image, the five language clients and the Compose quickstart.
+  `scripts/configure-github.sh` requires it and DCO's "Signed-off-by" on `main`; the client suites
+  and the deployment smoke check did not gate merges before.
 
 ## 0.2.0 - 2026-10-23
 

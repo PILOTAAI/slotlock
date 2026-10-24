@@ -2000,3 +2000,36 @@ describe.skipIf(!hasJq)('quickstart .env', () => {
     expect(written).toContain('SLOTLOCK_REST_API=on');
   });
 });
+
+describe('required checks', () => {
+  const ci = read('.github/workflows/ci.yml');
+  const jobIds = [...ci.matchAll(/^ {2}([\w-]+):\n {4}name: /gm)].map(([, id]) => id as string);
+
+  it('gathers every CI job, the client suites included, into one check', () => {
+    expect(jobIds, 'canary: the CI jobs were found').toEqual(
+      expect.arrayContaining(['test', 'postgres', 'image', 'clients', 'compose', 'passed']),
+    );
+    const passed = ci.slice(ci.indexOf('\n  passed:\n'));
+    expect(passed).toContain('name: CI passed');
+    // Without always() a failed job would skip this one, and a skipped required check passes.
+    expect(passed).toContain('if: always()');
+    const needs = /needs: \[([^\]]+)\]/.exec(passed)?.[1]?.split(',').map((id) => id.trim());
+    expect(needs?.sort()).toEqual(jobIds.filter((id) => id !== 'passed').sort());
+    expect(passed).toContain("jq -e 'all(. == \"success\")'");
+  });
+
+  it.skipIf(!hasJq)('is what the main ruleset requires, with DCO', () => {
+    const result = spawnSync('bash', [join(root, 'scripts', 'configure-github.sh'), '--dry-run'], {
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH ?? '', SKIP_SITE_SECRETS: '1' },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const body = [...result.stdout.matchAll(/^> (?:PUT|POST) \/\S+\n(\{[\s\S]*?\n\})$/gm)]
+      .map(([, json]) => JSON.parse(json as string))
+      .find((request) => request.target === 'branch');
+    const checks = body.rules.find((rule: { type: string }) => rule.type === 'required_status_checks')
+      .parameters.required_status_checks.map((check: { context: string }) => check.context);
+    expect(checks).toEqual(['CI passed', 'Signed-off-by']);
+    expect(result.stderr).not.toContain('no longer names its jobs');
+  });
+});

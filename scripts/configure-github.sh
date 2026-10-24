@@ -70,14 +70,13 @@ API_VERSION=2026-03-10
 HOMEPAGE=https://slotlock.pylota.io
 TOPICS='["agents","calendar","mcp","a2a","postgresql","scheduling","availability","booking"]'
 
-# The checks a pull request must pass. These are the job names that ci.yml and dco.yml report
-# on pull_request. A matrix job is reported under its evaluated name, so ci.yml's
-# "Test (Node.js ${{ matrix.node }})" becomes one check per Node.js version, with nothing
-# appended because the name already uses the matrix value (checked on 2026-10-09 against the
-# check runs of another workflow whose matrix job is named this way). site.yml is left out: it
-# only runs when certain paths change, and a required check from a skipped workflow stays
-# "Pending" and blocks the pull request.
-REQUIRED_CHECKS='["Test (Node.js 22)","Test (Node.js 24)","Docker image","Signed-off-by"]'
+# The checks a pull request must pass: ci.yml's "CI passed", which passes only when every other CI
+# job did (the suites on each Node.js and PostgreSQL, the image, the language clients and the
+# Compose quickstart), and dco.yml's "Signed-off-by". One aggregate check means a CI job added
+# later is required without changing this list. site.yml is left out: it only runs when certain
+# paths change, and a required check from a skipped workflow stays "Pending" and blocks the pull
+# request.
+REQUIRED_CHECKS='["CI passed","Signed-off-by"]'
 
 # The GitHub Actions app (GET /apps/github-actions returned id 15368 on 2026-10-09). Pinning the
 # checks to it means a commit status with the same name from anyone else does not count.
@@ -248,10 +247,7 @@ check_workflow_names() {
     warn "no .github/workflows next to this script; required check names not compared"
     return 0
   fi
-  # shellcheck disable=SC2016 # the ${{ }} is workflow text, not shell
-  if ! grep -Fq 'name: Test (Node.js ${{ matrix.node }})' "$dir/.github/workflows/ci.yml" ||
-    ! grep -Fq "node: ['22', '24']" "$dir/.github/workflows/ci.yml" ||
-    ! grep -Fq 'name: Docker image' "$dir/.github/workflows/ci.yml" ||
+  if ! grep -Fq 'name: CI passed' "$dir/.github/workflows/ci.yml" ||
     ! grep -Fq 'name: Signed-off-by' "$dir/.github/workflows/dco.yml"; then
     warn "ci.yml or dco.yml no longer names its jobs as REQUIRED_CHECKS expects; update REQUIRED_CHECKS"
   fi

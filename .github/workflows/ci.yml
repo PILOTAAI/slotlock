@@ -337,3 +337,23 @@ jobs:
         run: scripts/quickstart-env.sh > .env
       - name: Run the quickstart and check it
         run: scripts/compose-smoke.sh
+
+  # The one check the "Protect main" ruleset requires from this workflow (scripts/configure-github.sh,
+  # with DCO's Signed-off-by): it passes only when every job above passed, so the client suites, the
+  # database suites on each PostgreSQL and the quickstart gate merges, and a job added here is
+  # required without touching the ruleset. Its needs list every other job (release-infrastructure
+  # test).
+  passed:
+    name: CI passed
+    # A required check that is skipped counts as passing, so this runs whatever the jobs did.
+    if: always()
+    needs: [test, postgres, image, clients, compose]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every job passed
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          echo "$RESULTS"
+          jq -e 'all(. == "success")' <<<"$RESULTS" >/dev/null
