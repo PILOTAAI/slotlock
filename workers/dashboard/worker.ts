@@ -7,7 +7,7 @@
 // (Hyperdrive keeps the connections). The dashboard is built once per isolate, like one
 // `slotlock serve` process, and reaches the request's client through AsyncLocalStorage, so its
 // limit on sign-ins in flight holds across the requests that isolate serves. Workers run many
-// isolates, so two rate limiting bindings bound the requests of all of them together.
+// isolates, so three rate limiting bindings bound the requests of all of them together.
 import { AsyncLocalStorage } from 'node:async_hooks';
 import postgres from 'postgres';
 import { type SlotlockApiKeyStore, createSlotlockApiKeyStore } from '../../src/api-keys.js';
@@ -42,8 +42,13 @@ export interface SlotlockDashboardWorkerEnv {
   HYPERDRIVE: { connectionString: string };
   /** Every dashboard request, counted per client address (CF-Connecting-IP). */
   SLOTLOCK_CLIENT_RATE_LIMIT?: SlotlockRateLimit;
-  /** GitHub sign-ins and their callbacks, counted for every client together. */
+  /** GitHub sign-ins and their callbacks, counted per client address. */
   SLOTLOCK_SIGN_IN_RATE_LIMIT?: SlotlockRateLimit;
+  /**
+   * GitHub sign-ins and their callbacks, counted for every client together: a ceiling well above one
+   * client's limit, so a few clients cannot use it up for everyone.
+   */
+  SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT?: SlotlockRateLimit;
   [name: string]: unknown;
 }
 
@@ -107,7 +112,11 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
         dashboard: SlotlockDashboard;
         root: string;
         signInPaths: Set<string>;
-        limits: { client: SlotlockRateLimit; signIn: SlotlockRateLimit };
+        limits: {
+          client: SlotlockRateLimit;
+          signIn: SlotlockRateLimit;
+          signInCeiling: SlotlockRateLimit;
+        };
       }
     | undefined;
 
@@ -117,9 +126,10 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
     // many: without these bindings nothing bounds them all together, so the Worker does not serve.
     const client = env.SLOTLOCK_CLIENT_RATE_LIMIT;
     const signIn = env.SLOTLOCK_SIGN_IN_RATE_LIMIT;
-    if (!isRateLimit(client) || !isRateLimit(signIn)) {
+    const signInCeiling = env.SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT;
+    if (!isRateLimit(client) || !isRateLimit(signIn) || !isRateLimit(signInCeiling)) {
       throw new SlotlockConfigError(
-        'the SLOTLOCK_CLIENT_RATE_LIMIT and SLOTLOCK_SIGN_IN_RATE_LIMIT rate limiting bindings are required',
+        'the SLOTLOCK_CLIENT_RATE_LIMIT, SLOTLOCK_SIGN_IN_RATE_LIMIT and SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT rate limiting bindings are required',
       );
     }
     const vars = variables(env);
@@ -141,6 +151,8 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       sessionSecret: config.sessionSecret,
       allowedUsers: config.allowedUsers,
       availability: readAvailability(vars),
+      // Cloudflare sets CF-Connecting-IP itself, so one client's sign-ins in flight are capped.
+      clientAddress: (request) => request.headers.get('cf-connecting-ip') ?? undefined,
       keys: perRequest(() => current().keys),
       resources: perRequest(() => current().resources),
       state: perRequest(() => current().state),
@@ -159,7 +171,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       dashboard,
       root,
       signInPaths: new Set([`${base}/sign-in`, `${base}/callback`]),
-      limits: { client, signIn },
+      limits: { client, signIn, signInCeiling },
     };
   }
 
@@ -199,7 +211,11 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       // The dashboard routes a path with one trailing slash as the path without it, so a sign-in is
       // recognised as it recognises one: `/dashboard/sign-in/` is a sign-in too.
       const route = path.replace(/\/$/, '');
-      if (signInPaths.has(route) && !(await limits.signIn.limit({ key: 'sign-in' })).success) {
+      if (
+        signInPaths.has(route) &&
+        (!(await limits.signIn.limit({ key: `sign-in:${address}` })).success ||
+          !(await limits.signInCeiling.limit({ key: 'sign-in' })).success)
+      ) {
         return tooManyRequests();
       }
       const sql = postgres(env.HYPERDRIVE.connectionString, {

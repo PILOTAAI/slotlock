@@ -679,6 +679,7 @@ export async function startSlotlockServer(
             resources: createSlotlockDashboardResources(store),
             state: createSlotlockDashboardState(sql),
             availability: config.availability,
+            clientAddress: (request) => limits.clientAddress(request),
             onError: (error) => log.error('dashboard_error', describeError(error)),
           });
     const target = limits.serve(

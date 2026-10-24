@@ -38,6 +38,8 @@ const MAX_FORM_BYTES = 8_192;
  * This also bounds how fast unauthenticated callbacks can write sign-in records.
  */
 const MAX_SIGN_INS_IN_FLIGHT = 8;
+/** Of those, how many one client address may run at once, so one client cannot take every slot. */
+const MAX_SIGN_INS_IN_FLIGHT_PER_CLIENT = 2;
 /** Entries each in-memory record keeps (createSlotlockMemoryDashboardState); past this the oldest go first. */
 const MAX_REMEMBERED = 10_000;
 /** A form's single-use value: 18 random bytes, then a MAC binding them to the session. */
@@ -161,6 +163,12 @@ export interface SlotlockDashboardOptions {
   availability?: readonly WeeklyAvailabilityRule[];
   fetch?: typeof fetch;
   now?: () => number;
+  /**
+   * The address a request came from, as the server counts its clients (the socket's, or a trusted
+   * proxy's field such as CF-Connecting-IP), so one client's sign-ins in flight are capped below
+   * every client's. Without it, or when it returns undefined, only the cap on every client applies.
+   */
+  clientAddress?: (request: Request) => string | undefined;
   /**
    * Called with whatever a request handler throws; the person sees a generic error page. Not
    * awaited; what it throws, or its promise rejects with, is ignored.
@@ -578,6 +586,8 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     options.allowedUsers === '*' ||
     (Array.isArray(options.allowedUsers) && options.allowedUsers.includes(uid));
   let signInsInFlight = 0;
+  /** Sign-ins in flight by client address. */
+  const signInsByClient = new Map<string, number>();
 
   function report(message: string): void {
     try {
@@ -1088,7 +1098,12 @@ ${
     ) {
       return signedOutPage(400, SIGN_IN_AGAIN, [clearSignIn]);
     }
-    if (signInsInFlight >= MAX_SIGN_INS_IN_FLIGHT) {
+    const client = options.clientAddress?.(request);
+    const fromClient = client === undefined ? 0 : (signInsByClient.get(client) ?? 0);
+    if (
+      signInsInFlight >= MAX_SIGN_INS_IN_FLIGHT ||
+      fromClient >= MAX_SIGN_INS_IN_FLIGHT_PER_CLIENT
+    ) {
       return signedOutPage(
         503,
         'Too many people are signing in at once. Sign in again in a moment.',
@@ -1097,6 +1112,7 @@ ${
     }
     const verifier = pending.verifier;
     signInsInFlight += 1;
+    if (client !== undefined) signInsByClient.set(client, fromClient + 1);
     let user: { uid: string; login: string } | null;
     try {
       // Recorded before GitHub is asked, so a replayed callback is refused on every server unasked.
@@ -1106,6 +1122,11 @@ ${
       user = await askGitHub(code, verifier);
     } finally {
       signInsInFlight -= 1;
+      if (client !== undefined) {
+        const left = (signInsByClient.get(client) ?? 1) - 1;
+        if (left === 0) signInsByClient.delete(client);
+        else signInsByClient.set(client, left);
+      }
     }
     if (!user) {
       return signedOutPage(502, 'GitHub did not complete the sign-in. Try again.', [clearSignIn]);

@@ -35,7 +35,7 @@
   // Required: the Worker answers 503 without them. A sign-in writes to the database and asks GitHub
   // with the app's client secret, and the limit on sign-ins in flight is per isolate, so these bound
   // the requests of every isolate. Counts are per Cloudflare location. namespace_id must be unique in
-  // the account (two bindings with the same one share their counts).
+  // the account (two bindings with the same one share their counts); period is 10 or 60 seconds.
   "ratelimits": [
     {
       // Every dashboard request, per client address.
@@ -44,10 +44,17 @@
       "simple": { "limit": 60, "period": 60 }
     },
     {
-      // GitHub sign-ins and their callbacks, from every client together.
+      // GitHub sign-ins and their callbacks, per client address: five sign-ins a minute.
       "name": "SLOTLOCK_SIGN_IN_RATE_LIMIT",
       "namespace_id": "41002",
-      "simple": { "limit": 120, "period": 60 }
+      "simple": { "limit": 10, "period": 60 }
+    },
+    {
+      // GitHub sign-ins and their callbacks, from every client together: a ceiling far above one
+      // client's limit, so a few clients cannot use it up for everyone.
+      "name": "SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT",
+      "namespace_id": "41003",
+      "simple": { "limit": 600, "period": 60 }
     }
   ],
   // A page takes several queries; run the Worker near the database rather than near each visitor.

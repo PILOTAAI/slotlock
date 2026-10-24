@@ -90,6 +90,8 @@ export interface SlotlockRequestLimits {
   }): Promise<void>;
   /** Put the limits in front of `target`: the listener's fetch target. */
   serve(target: SlotlockNodeServerFetchTarget): SlotlockNodeServerFetchTarget;
+  /** The client address a request reaching `serve`'s target was counted as (the dashboard's). */
+  clientAddress(request: Request): string | undefined;
   /** Log what is still counted and stop the timer. */
   close(): void;
 }
@@ -397,6 +399,7 @@ export function createSlotlockRequestLimits(
   }
   const states = new AsyncLocalStorage<RequestState>();
   const looked = new WeakMap<Request, SlotlockAgentPrincipal | null>();
+  const addresses = new WeakMap<Request, string>();
   const gate = seriesGate(caps.tenant_series_writes, caps.series_writes);
   const signInPaths = new Set(options.signInPaths ?? []);
 
@@ -564,6 +567,7 @@ export function createSlotlockRequestLimits(
         async fetch(request, connection) {
           const route = routeOf(request);
           const address = clientOf(request, connection, options.trustedProxyHeader);
+          addresses.set(request, address);
           // Before anything is looked up: every request from the address, and its sign-ins.
           const before = charge([
             { name: 'address', key: address },
@@ -621,6 +625,10 @@ export function createSlotlockRequestLimits(
       };
       if (target.shutdown) limited.shutdown = () => target.shutdown?.();
       return limited;
+    },
+
+    clientAddress(request) {
+      return addresses.get(request);
     },
 
     close() {

@@ -1,7 +1,8 @@
-// The dashboard Worker's global sign-in limit (SLOTLOCK_SIGN_IN_RATE_LIMIT) counts every request the
-// dashboard routes to a sign-in or its callback. The dashboard routes a path with one trailing
-// slash as the path without it, so `/dashboard/sign-in/` and `/dashboard/callback/` are sign-ins
-// too. No database is needed: a refused request never opens a client.
+// The dashboard Worker's sign-in limits count every request the dashboard routes to a sign-in or its
+// callback: per client address (SLOTLOCK_SIGN_IN_RATE_LIMIT), and for every client together under a
+// higher ceiling (SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT). The dashboard routes a path with one
+// trailing slash as the path without it, so `/dashboard/sign-in/` and `/dashboard/callback/` are
+// sign-ins too. No database is needed: a refused request never opens a client.
 import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
@@ -27,7 +28,10 @@ function limiter(allowed = Number.POSITIVE_INFINITY): SlotlockRateLimit & { aske
   };
 }
 
-function environment(signIn: SlotlockRateLimit): SlotlockDashboardWorkerEnv {
+function environment(
+  signIn: SlotlockRateLimit,
+  ceiling: SlotlockRateLimit = limiter(),
+): SlotlockDashboardWorkerEnv {
   return {
     // No database answers at this address: a request that reached one would fail, not answer 429.
     HYPERDRIVE: { connectionString: 'postgres://nobody:nothing@127.0.0.1:9/none' },
@@ -39,6 +43,7 @@ function environment(signIn: SlotlockRateLimit): SlotlockDashboardWorkerEnv {
     SLOTLOCK_DASHBOARD_USERS: '*',
     SLOTLOCK_CLIENT_RATE_LIMIT: limiter(),
     SLOTLOCK_SIGN_IN_RATE_LIMIT: signIn,
+    SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT: ceiling,
   };
 }
 
@@ -59,7 +64,7 @@ describe('P2: the Worker sign-in limit and a trailing slash', () => {
       expect(response.status).toBe(429);
       expect(response.headers.get('retry-after')).toBe('60');
     }
-    expect(signIn.asked).toEqual(['sign-in', 'sign-in']);
+    expect(signIn.asked).toEqual(['sign-in:unknown', 'sign-in:unknown']);
     expect(githubAsked).toEqual([]);
   });
 
@@ -74,6 +79,51 @@ describe('P2: the Worker sign-in limit and a trailing slash', () => {
     // Two slashes are not one: the dashboard does not route this to a sign-in.
     const doubled = await worker.fetch(new Request(`${APP}/dashboard/sign-in//`), env, ctx);
     expect(doubled.status).toBe(404);
-    expect(signIn.asked).toEqual(['sign-in']);
+    expect(signIn.asked).toEqual(['sign-in:unknown']);
+  });
+});
+
+describe('SEC-12: sign-ins are limited per client, under a higher ceiling for all', () => {
+  const ctx = { waitUntil: (_promise: Promise<unknown>) => undefined };
+  const from = (address: string) =>
+    new Request(`${APP}/dashboard/sign-in`, { headers: { 'cf-connecting-ip': address } });
+
+  it("does not refuse another client's sign-in once one client has used its own", async () => {
+    // The audit: one global bucket of 120 a minute against a per-client limit of 60, so two clients
+    // at their limit refused every visitor at that Cloudflare location.
+    const signIn = limiter(2);
+    const worker = createSlotlockDashboardWorker();
+    const env = environment(signIn);
+    const statuses: number[] = [];
+    for (const address of ['203.0.113.7', '203.0.113.7', '203.0.113.7', '198.51.100.4']) {
+      statuses.push((await worker.fetch(from(address), env, ctx)).status);
+    }
+    expect(statuses).toEqual([302, 302, 429, 302]);
+    expect(signIn.asked).toEqual([
+      'sign-in:203.0.113.7',
+      'sign-in:203.0.113.7',
+      'sign-in:203.0.113.7',
+      'sign-in:198.51.100.4',
+    ]);
+  });
+
+  it('still bounds every client together, and needs the ceiling to serve', async () => {
+    const ceiling = limiter(3);
+    const worker = createSlotlockDashboardWorker();
+    const env = environment(limiter(), ceiling);
+    const statuses: number[] = [];
+    for (const address of ['192.0.2.1', '192.0.2.2', '192.0.2.3', '192.0.2.4']) {
+      statuses.push((await worker.fetch(from(address), env, ctx)).status);
+    }
+    expect(statuses).toEqual([302, 302, 302, 429]);
+    expect(new Set(ceiling.asked)).toEqual(new Set(['sign-in']));
+
+    const { SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT: _, ...without } = environment(limiter());
+    const unbounded = await createSlotlockDashboardWorker().fetch(
+      from('192.0.2.9'),
+      without as SlotlockDashboardWorkerEnv,
+      ctx,
+    );
+    expect(unbounded.status).toBe(503);
   });
 });
