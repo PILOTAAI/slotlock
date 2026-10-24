@@ -293,7 +293,12 @@ function bucketsFor(rate: SlotlockRate, now: () => number) {
   };
 }
 
-/** A FIFO of slots: at most `perKey` running for a key and `total` in all. */
+/**
+ * Slots, at most `perKey` running for a key and `total` in all, shared fairly between keys: a freed
+ * slot goes to the waiter whose key started one least recently (first come among equals), so one
+ * key's queue never stands in front of another key's write. Another key waits for at most the
+ * writes already running.
+ */
 function seriesGate(perKey: number, total: number) {
   let running = 0;
   const byKey = new Map<string, number>();
@@ -304,6 +309,9 @@ function seriesGate(perKey: number, total: number) {
     else byKey.set(key, count);
   };
   const runningFor = new Map<string, number>();
+  /** When each key last started a slot, oldest first; a key not here has not started one lately. */
+  const started = new Map<string, number>();
+  let starts = 0;
   const release = (key: string) => {
     running -= 1;
     const count = (runningFor.get(key) ?? 1) - 1;
@@ -316,7 +324,16 @@ function seriesGate(perKey: number, total: number) {
   };
   const next = () => {
     if (running >= total) return;
-    const index = waiting.findIndex(({ key }) => (runningFor.get(key) ?? 0) < perKey);
+    let index = -1;
+    let oldest = Number.POSITIVE_INFINITY;
+    for (const [at, { key }] of waiting.entries()) {
+      if ((runningFor.get(key) ?? 0) >= perKey) continue;
+      const last = started.get(key) ?? -1;
+      if (last < oldest) {
+        oldest = last;
+        index = at;
+      }
+    }
     if (index === -1) return;
     const [chosen] = waiting.splice(index, 1);
     chosen?.start();
@@ -333,6 +350,10 @@ function seriesGate(perKey: number, total: number) {
       const start = (): (() => void) => {
         running += 1;
         runningFor.set(key, (runningFor.get(key) ?? 0) + 1);
+        started.delete(key);
+        started.set(key, (starts += 1));
+        // Forgetting the key that started longest ago keeps the order: it would have gone first.
+        if (started.size > MAX_BUCKET_KEYS) started.delete(started.keys().next().value as string);
         let released = false;
         return () => {
           if (released) return;

@@ -558,6 +558,73 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
     }
   }, 120_000);
 
+  it("answers another tenant's recurring create and update within about one expansion while one tenant fires 50 costly writes (P11)", async () => {
+    const server = await serve({ SLOTLOCK_LIMITS: 'address=off' });
+    try {
+      const costly = (index: number, seed: string) => {
+        const start = new Date(Date.UTC(2031, 0, 1) + index * 3_600_000);
+        return call(server.origin, 'POST', '/v1/events', {
+          key: keys['a-admin'],
+          body: {
+            resource_id: resources.a,
+            starts_at: start.toISOString().replace('.000', ''),
+            ends_at: new Date(start.getTime() + 600_000).toISOString().replace('.000', ''),
+            timezone: 'UTC',
+            idempotency_key: `costly-${seed}-${index}`,
+            recurrence_rule: COSTLY_RULE,
+          },
+        });
+      };
+      const single = (await costly(0, randomUUID())).ms;
+      // Tenant B's own event, made before the burst, to update during it.
+      const made = await call(server.origin, 'POST', '/v1/events', {
+        key: keys['b-second'],
+        body: {
+          resource_id: resources.b,
+          starts_at: '2031-03-03T09:00:00Z',
+          ends_at: '2031-03-03T10:00:00Z',
+          timezone: 'UTC',
+          idempotency_key: `fair-made-${randomUUID()}`,
+        },
+      });
+      expect(made.status).toBe(200);
+      const event = (made.body as { event: { id: string; revision: number } }).event;
+
+      const seed = randomUUID();
+      const burst = Promise.all(Array.from({ length: 50 }, (_, index) => costly(index + 1, seed)));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const recurring = await call(server.origin, 'POST', '/v1/events', {
+        key: keys['b-second'],
+        body: {
+          resource_id: resources.b,
+          starts_at: '2031-03-04T09:00:00Z',
+          ends_at: '2031-03-04T10:00:00Z',
+          timezone: 'UTC',
+          idempotency_key: `fair-recurring-${randomUUID()}`,
+          recurrence_rule: 'FREQ=WEEKLY;COUNT=4',
+        },
+      });
+      const updated = await call(server.origin, 'PATCH', `/v1/events/${encodeURIComponent(event.id)}`, {
+        key: keys['b-second'],
+        body: {
+          expected_revision: event.revision,
+          title: 'Renamed during the burst',
+          idempotency_key: `fair-update-${randomUUID()}`,
+        },
+      });
+      const outcomes = tally((await burst).map(({ status }) => status));
+      const detail = `one costly write ${single.toFixed(0)} ms, create ${recurring.ms.toFixed(0)} ms, update ${updated.ms.toFixed(0)} ms, A ${JSON.stringify(outcomes)}`;
+      // Before slots were shared fairly, B queued behind every one of A's waiting writes and was
+      // answered 503 server_busy once it had waited two seconds.
+      expect([recurring.status, updated.status], detail).toEqual([200, 200]);
+      // A write of A's may be expanding when B's arrives, and B's own expansion follows it.
+      expect(Math.max(recurring.ms, updated.ms), detail).toBeLessThan(3 * single);
+      expect(outcomes['429'] ?? 0, detail).toBeGreaterThan(40);
+    } finally {
+      await server.stop();
+    }
+  }, 120_000);
+
   it("caps each tenant's live-update streams, so one tenant's keys cannot hold every slot (SURF-3)", async () => {
     const server = await serve({ SLOTLOCK_LIMITS: 'tenant_subscriptions=1' });
     const listen = async (key: string | undefined, resource: string | undefined) => {

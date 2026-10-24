@@ -61,6 +61,12 @@ function setup(
 const get = (path: string, headers: Record<string, string> = {}) =>
   new Request(`http://localhost${path}`, { headers });
 
+function tally(statuses: number[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const status of statuses) counts[status] = (counts[status] ?? 0) + 1;
+  return counts;
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -321,6 +327,99 @@ describe('series writes', () => {
       limiter.admit({ principal: PRINCIPAL, operation: 'slotlock_create_event', input: {} }),
     );
     expect(oneOff.outcome).toBeUndefined();
+    limiter.close();
+  });
+
+  it("hands a freed slot to the tenant that ran least recently, never to one tenant's queue first (P11)", async () => {
+    const limiter = createSlotlockRequestLimits({
+      limits: limitsWith({ caps: { tenant_series_writes: 1, series_writes: 1 } }),
+      basePath: '',
+      authenticate: async () => null,
+    });
+    const order: string[] = [];
+    const finish: Record<string, () => void> = {};
+    const write = (tenantRef: string, label: string) =>
+      inRequest(limiter, async () => {
+        await limiter.admit({
+          principal: { subject: 's', tenantRef },
+          operation: 'slotlock_update_event',
+          input: {},
+        });
+        order.push(label);
+        await new Promise<void>((resolve) => (finish[label] = resolve));
+      });
+    const tick = () => new Promise((resolve) => setImmediate(resolve));
+    const writes = [write('a', 'a1')];
+    await tick();
+    // Tenant A fills its queue; tenant B and then C ask for one write each behind it.
+    for (const index of [2, 3, 4, 5]) writes.push(write('a', `a${index}`));
+    await tick();
+    writes.push(write('b', 'b1'));
+    await tick();
+    writes.push(write('c', 'c1'));
+    await tick();
+    for (const label of ['a1', 'b1', 'c1', 'a2', 'a3', 'a4', 'a5']) {
+      expect(order.at(-1)).toBe(label);
+      finish[label]?.();
+      await tick();
+      await tick();
+    }
+    await Promise.all(writes);
+    // B and C each waited for one of A's writes, not for all five.
+    expect(order).toEqual(['a1', 'b1', 'c1', 'a2', 'a3', 'a4', 'a5']);
+    limiter.close();
+  });
+
+  it("serves another tenant's write within about one expansion while a tenant bursts (P11)", async () => {
+    // serve's order for a REST write: the protocol charge, the series slot, then an expansion that
+    // holds the event loop. The verifier's probe: with first-come slots, tenant B's one update
+    // waited behind every queued write of tenant A, 2.25 s and then 503 with 450 ms expansions.
+    const expansionMs = 150;
+    const limiter = createSlotlockRequestLimits({
+      limits: limitsWith({ rates: { address: null } }),
+      basePath: '',
+      authenticate: async (request) => ({
+        subject: `api_key:${request.headers.get('x-tenant')}`,
+        tenantRef: request.headers.get('x-tenant') as string,
+      }),
+    });
+    const target = limiter.serve({
+      async fetch(request) {
+        const principal = (await limiter.authenticate(request)) as SlotlockAgentPrincipal;
+        if (!(await limiter.consumeRateLimit({ principal, operation: 'protocol' }))) {
+          return new Response(null, { status: 429 });
+        }
+        try {
+          await limiter.admit({ principal, operation: 'slotlock_update_event', input: {} });
+        } catch (error) {
+          return new Response(null, { status: (error as SlotlockAgentOperationError).status });
+        }
+        const until = performance.now() + expansionMs;
+        while (performance.now() < until) {
+          // An expansion holds the event loop.
+        }
+        return new Response(null, { status: 200 });
+      },
+    });
+    const update = (tenant: string) =>
+      target.fetch(
+        new Request('http://localhost/v1/events/e', {
+          method: 'PATCH',
+          headers: { authorization: 'Bearer k', 'x-tenant': tenant },
+        }),
+        { remoteAddress: '203.0.113.7' },
+      );
+    const burst = Array.from({ length: 20 }, () => update('a'));
+    const started = performance.now();
+    const other = await update('b');
+    const waited = performance.now() - started;
+    const statuses = tally((await Promise.all(burst)).map(({ status }) => status));
+    expect(other.status).toBe(200);
+    // One of A's expansions may be running when B arrives, and B's own runs next: two at most.
+    expect(waited, `B waited ${waited.toFixed(0)} ms; A: ${JSON.stringify(statuses)}`).toBeLessThan(
+      3 * expansionMs,
+    );
+    expect(statuses).toEqual({ 200: 5, 429: 15 });
     limiter.close();
   });
 
