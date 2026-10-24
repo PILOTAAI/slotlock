@@ -230,7 +230,8 @@ export interface SlotlockLimits {
  * - `tenant_series_writes` and `series_writes`: writes that may expand a recurring series (a
  *   recurring create, any update) running at once in a tenant and in the server.
  * - `maintenance_runs`: the application API's maintenance runs at once in the server, one a tenant,
- *   in slots of their own.
+ *   in slots of their own. A freed slot of either kind rests for as long as its write kept the event
+ *   loop busy, up to a second (rate-limit.ts).
  * - `tenant_subscriptions`: MCP live-update streams one tenant may hold open.
  * - `key_lookups` and `key_lookup_queue`: API key lookups running at once and waiting.
  */

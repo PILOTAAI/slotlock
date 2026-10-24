@@ -436,11 +436,11 @@ describe('series writes', () => {
     await tick();
     writes.push(write('c', 'c1'));
     await tick();
-    for (const label of ['a1', 'b1', 'c1', 'a2', 'a3', 'a4', 'a5']) {
+    // A freed slot rests for as long as its write kept the event loop busy: wait for each start.
+    for (const [index, label] of ['a1', 'b1', 'c1', 'a2', 'a3', 'a4', 'a5'].entries()) {
+      await vi.waitFor(() => expect(order).toHaveLength(index + 1));
       expect(order.at(-1)).toBe(label);
       finish[label]?.();
-      await tick();
-      await tick();
     }
     await Promise.all(writes);
     // B and C each waited for one of A's writes, not for all five.
@@ -448,7 +448,7 @@ describe('series writes', () => {
     limiter.close();
   });
 
-  it("serves another tenant's write within about one expansion while a tenant bursts (P11)", async () => {
+  it("serves another tenant's write after the running expansion and its slot's rest while a tenant bursts (P11)", async () => {
     // serve's order for a REST write: the protocol charge, the series slot, then an expansion that
     // holds the event loop. The verifier's probe: with first-come slots, tenant B's one update
     // waited behind every queued write of tenant A, 2.25 s and then 503 with 450 ms expansions.
@@ -493,13 +493,97 @@ describe('series writes', () => {
     const waited = performance.now() - started;
     const statuses = tally((await Promise.all(burst)).map(({ status }) => status));
     expect(other.status).toBe(200);
-    // One of A's expansions may be running when B arrives, and B's own runs next: two at most.
+    // One of A's expansions may be running when B arrives, its slot then rests as long, and B's own
+    // runs next: three at most.
     expect(waited, `B waited ${waited.toFixed(0)} ms; A: ${JSON.stringify(statuses)}`).toBeLessThan(
-      3 * expansionMs,
+      4 * expansionMs,
     );
     expect(statuses).toEqual({ 200: 5, 429: 15 });
     limiter.close();
   });
+
+  it("keeps another tenant's update and reads within a few expansions while six tenants burst (P11, SEC-3)", async () => {
+    // The verifier's cross-process probe: a request takes several turns of the event loop before it
+    // reaches a slot (its key lookup, then the query behind it), and with a freed slot handed over
+    // at once, one of the bursting tenants' expansions ran on every turn. With six tenants bursting,
+    // another tenant's update took 6.7 expansions and its reads up to 5.6.
+    const expansionMs = 100;
+    const lookupTurns = 5;
+    const limiter = createSlotlockRequestLimits({
+      limits: limitsWith({
+        rates: {
+          address: null,
+          key_read: null,
+          key_write: null,
+          tenant_read: null,
+          tenant_write: null,
+          global_read: null,
+          global_write: null,
+        },
+      }),
+      basePath: '',
+      authenticate: async (request) => {
+        // A key lookup: round trips to the database, each a turn of the event loop.
+        for (let turn = 0; turn < lookupTurns; turn += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 1));
+        }
+        const tenant = request.headers.get('x-tenant') as string;
+        return { subject: `api_key:${tenant}`, tenantRef: tenant };
+      },
+    });
+    const target = limiter.serve({
+      async fetch(request) {
+        const principal = (await limiter.authenticate(request)) as SlotlockAgentPrincipal;
+        if (request.method === 'GET') return new Response(null, { status: 200 });
+        try {
+          await limiter.admit({ principal, operation: 'slotlock_update_event', input: {} });
+        } catch (error) {
+          return new Response(null, { status: (error as SlotlockAgentOperationError).status });
+        }
+        const until = performance.now() + expansionMs;
+        while (performance.now() < until) {
+          // An expansion holds the event loop.
+        }
+        return new Response(null, { status: 200 });
+      },
+    });
+    const send = (tenant: string, method: string) =>
+      target.fetch(
+        new Request('http://localhost/v1/events/e', {
+          method,
+          headers: { authorization: 'Bearer k', 'x-tenant': tenant },
+        }),
+        { remoteAddress: '203.0.113.7' },
+      );
+    let bursting = true;
+    const ran = new Set<string>();
+    // Six tenants, each keeping five writes in flight: one running and four waiting.
+    const burst = Array.from({ length: 6 * 5 }, async (_, index) => {
+      const tenant = `burst-${index % 6}`;
+      while (bursting) {
+        if ((await send(tenant, 'PATCH')).status === 200) ran.add(tenant);
+      }
+    });
+    // Once each has had a slot, a tenant that has not had one lately goes ahead of all of them.
+    await vi.waitFor(() => expect(ran.size).toBe(6), { timeout: 10_000, interval: 20 });
+    const timed = async (method: string) => {
+      const started = performance.now();
+      const { status } = await send('b', method);
+      return { status, ms: performance.now() - started };
+    };
+    const reads: number[] = [];
+    for (let index = 0; index < 4; index += 1) reads.push((await timed('GET')).ms);
+    const update = await timed('PATCH');
+    bursting = false;
+    await Promise.all(burst);
+    limiter.close();
+    const detail = `update ${update.ms.toFixed(0)} ms, reads ${reads.map((ms) => ms.toFixed(0)).join(', ')} ms, one expansion ${expansionMs} ms`;
+    expect(update.status, detail).toBe(200);
+    // The expansion running when the update arrives, the rest of its slot, and the update's own.
+    expect(update.ms, detail).toBeLessThan(4 * expansionMs);
+    // A read waits for at most the expansion running when it arrives.
+    expect(Math.max(...reads), detail).toBeLessThan(2.5 * expansionMs);
+  }, 60_000);
 
   it('charges an MCP or A2A write before it waits for a series slot, so one over budget is refused at once (P11)', async () => {
     // The verifier's probe: on /mcp and /a2a the protocol charge takes a read token only, so tenant

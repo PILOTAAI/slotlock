@@ -34,6 +34,8 @@ const MAX_SERIES_WAITING = 64;
 const MAX_SERIES_WAIT_MS = 2_000;
 /** A tenant's series writes that may wait behind its running one. */
 const MAX_TENANT_SERIES_WAITING = 4;
+/** The longest a freed slot rests, however long its write kept the event loop busy. */
+const MAX_SLOT_REST_MS = 1_000;
 /** How often the refusal counts are logged when there are any. */
 const REFUSAL_LOG_INTERVAL_MS = 60_000;
 /** Clients named in one refusal log line, most refused first. */
@@ -300,8 +302,11 @@ function bucketsFor(rate: SlotlockRate, now: () => number) {
 /**
  * Slots, at most `perKey` running for a key and `total` in all, shared fairly between keys: a freed
  * slot goes to the waiter whose key started one least recently (first come among equals), so one
- * key's queue never stands in front of another key's write. Another key waits for at most the
- * writes already running.
+ * key's queue never stands in front of another key's write. A freed slot first rests for as long as
+ * its write kept the event loop busy (up to MAX_SLOT_REST_MS): a request that needs a few turns of
+ * the loop before it is answered (another tenant's read, or its write on its way to a slot) has
+ * them in the rest, so the writes that wait here hold at most about half the loop, however many
+ * keys send them.
  */
 function seriesGate(perKey: number, total: number) {
   let running = 0;
@@ -316,31 +321,48 @@ function seriesGate(perKey: number, total: number) {
   /** When each key last started a slot, oldest first; a key not here has not started one lately. */
   const started = new Map<string, number>();
   let starts = 0;
-  const release = (key: string) => {
-    running -= 1;
+  /** Whether a hand-over is due on a later turn: one at a time, so slots never go out in a run. */
+  let handing = false;
+  const release = (key: string, busyMs: number) => {
     const count = (runningFor.get(key) ?? 1) - 1;
     if (count === 0) runningFor.delete(key);
     else runningFor.set(key, count);
     add(key, -1);
-    // Hand the slot over on a later turn of the event loop, so the requests waiting on I/O (another
-    // tenant's reads) are served between two writes that each hold the loop while they expand.
-    setImmediate(next);
+    const rest = Math.min(MAX_SLOT_REST_MS, Math.floor(busyMs));
+    if (rest > 0) {
+      const timer = setTimeout(() => {
+        running -= 1;
+        next();
+      }, rest);
+      timer.unref?.();
+      return;
+    }
+    running -= 1;
+    // Even after a write that hardly held the loop, the slot goes over on a later turn of it, so
+    // the requests waiting on I/O are served first.
+    if (handing) return;
+    handing = true;
+    setImmediate(() => {
+      handing = false;
+      next();
+    });
   };
   const next = () => {
-    if (running >= total) return;
-    let index = -1;
-    let oldest = Number.POSITIVE_INFINITY;
-    for (const [at, { key }] of waiting.entries()) {
-      if ((runningFor.get(key) ?? 0) >= perKey) continue;
-      const last = started.get(key) ?? -1;
-      if (last < oldest) {
-        oldest = last;
-        index = at;
+    while (running < total) {
+      let index = -1;
+      let oldest = Number.POSITIVE_INFINITY;
+      for (const [at, { key }] of waiting.entries()) {
+        if ((runningFor.get(key) ?? 0) >= perKey) continue;
+        const last = started.get(key) ?? -1;
+        if (last < oldest) {
+          oldest = last;
+          index = at;
+        }
       }
+      if (index === -1) return;
+      const [chosen] = waiting.splice(index, 1);
+      chosen?.start();
     }
-    if (index === -1) return;
-    const [chosen] = waiting.splice(index, 1);
-    chosen?.start();
   };
   return {
     /**
@@ -358,11 +380,14 @@ function seriesGate(perKey: number, total: number) {
         started.set(key, (starts += 1));
         // Forgetting the key that started longest ago keeps the order: it would have gone first.
         if (started.size > MAX_BUCKET_KEYS) started.delete(started.keys().next().value as string);
+        // Node's performance.eventLoopUtilization(earlier) is the time since `earlier` the loop
+        // spent outside waiting for I/O, a synchronous expansion still running included.
+        const loop = performance.eventLoopUtilization();
         let released = false;
         return () => {
           if (released) return;
           released = true;
-          release(key);
+          release(key, performance.eventLoopUtilization(loop).active);
         };
       };
       // Straight in when there is room, unless a waiter could use it: that one goes first.
