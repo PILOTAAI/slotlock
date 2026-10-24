@@ -25,6 +25,14 @@ export interface SlotlockResource {
    * uses the default (`SLOTLOCK_AVAILABILITY`, or the backend's `availabilityRules`).
    */
   availabilityRules?: WeeklyAvailabilityRule[];
+  /**
+   * `shared` resources are listed to agents and booked through them; `private` ones are invisible
+   * to agents and reached only by the tenant's own code. Fixed when the resource is created. The
+   * store always says which; a resource built elsewhere without it is shared.
+   */
+  visibility?: 'shared' | 'private';
+  /** When the tenant archived it: no longer listed or booked, its history kept. Absent in use. */
+  archivedAt?: Date;
 }
 
 /** A confirmed occupation of a resource. The DB EXCLUDE constraint is the overlap arbiter. */
@@ -73,6 +81,8 @@ export type ExternalReservationResult =
   | { ok: false; code: 'stale_revision' }
   | { ok: false; code: 'revision_conflict' }
   | { ok: false; code: 'idempotency_conflict' }
+  /** The resource is archived: it takes no new booking (cancel and release still work). */
+  | { ok: false; code: 'resource_archived' }
   /**
    * A recurring event on the resource is not stored as far as this write reaches, and cannot be
    * extended that far (past the rolling horizon, or blocked): the time cannot be proven free.
@@ -108,6 +118,8 @@ export type CreateReservationResult =
   | { ok: false; code: 'invalid_window' }
   /** No resource with that id, or (under tenant RLS or with `tenantRef`) not one of the tenant's. */
   | { ok: false; code: 'resource_not_found' }
+  /** The resource is archived: it takes no new booking (cancel and release still work). */
+  | { ok: false; code: 'resource_archived' }
   /**
    * A recurring event on the resource is not stored as far as this write reaches, and cannot be
    * extended that far (past the rolling horizon, or blocked): the time cannot be proven free.
@@ -137,6 +149,8 @@ export type AcquireHoldResult =
   | { ok: false; code: 'invalid_identity' }
   /** No resource with that id, or (under tenant RLS or with `tenantRef`) not one of the tenant's. */
   | { ok: false; code: 'resource_not_found' }
+  /** The resource is archived: it takes no new booking (cancel and release still work). */
+  | { ok: false; code: 'resource_archived' }
   /** The idempotency key already made a hold with another resource, window, ttl, buffer or source. */
   | { ok: false; code: 'idempotency_conflict' }
   /**
@@ -153,7 +167,9 @@ export type ConfirmHoldResult =
   /** A cancellation of the hold's reference (its id) arrived first and retired it. */
   | { ok: false; code: 'reservation_cancelled' }
   /** Another booking of the tenant already uses the hold's id as its reference. */
-  | { ok: false; code: 'idempotency_conflict' };
+  | { ok: false; code: 'idempotency_conflict' }
+  /** The hold's resource was archived since: it takes no new booking. */
+  | { ok: false; code: 'resource_archived' };
 
 export type ReleaseHoldResult = { ok: true; released: boolean };
 
@@ -244,6 +260,11 @@ export interface SlotlockCalendarEvent extends CalendarEventContent {
 }
 
 export interface PutCalendarEventCommand extends CalendarEventContent {
+  /**
+   * The resource the writer read the event on: a revision is refused (`resource_tenant_mismatch`)
+   * when the stored event is on another, checked under the event's lock.
+   */
+  expectedResourceId?: string;
   tenantRef: string;
   /** Defaults to the trusted `internal` namespace. Agent callers must supply their owner digest. */
   ownerRef?: string;
@@ -274,6 +295,8 @@ export type PutCalendarEventResult =
   | { ok: false; code: 'owner_event_quota_exceeded'; limit: number }
   | { ok: false; code: 'owner_command_quota_exceeded'; limit: number }
   | { ok: false; code: 'resource_tenant_mismatch' }
+  /** The resource is archived: it takes no new booking (cancel and release still work). */
+  | { ok: false; code: 'resource_archived' }
   | { ok: false; code: 'event_cancelled'; currentRevision: number }
   | { ok: false; code: 'revision_conflict'; currentRevision: number }
   /**
@@ -282,6 +305,12 @@ export type PutCalendarEventResult =
    */
   | { ok: false; code: 'recurrence_not_materialized' }
   | { ok: false; code: 'overlap'; conflictingReservationId: string | null };
+
+export type DeleteResourceResult =
+  /** `deleted`: false when the tenant has no resource with that id (deleted already, say). */
+  | { ok: true; deleted: boolean }
+  /** A future booking, a live hold, or a calendar event is still on it. */
+  | { ok: false; code: 'resource_in_use' };
 
 export type CancelCalendarEventResult =
   | {

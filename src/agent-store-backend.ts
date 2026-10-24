@@ -318,19 +318,34 @@ function encodeEventCursor(event: SlotlockCalendarEvent): string {
  * send (an external reference such as `vehicle-42`, the nil UUID, a version 7 UUID). The store
  * issues version 4 UUIDs (gen_random_uuid) and refuses an id that is not a version 1 to 5 UUID as an
  * invalid identity, so such an id names no resource: it is not found, like a well-formed id that
- * names nothing or another tenant's resource.
+ * names nothing or another tenant's resource. With `visibility`, a resource of the other is not
+ * found either: agents ask for `shared`, so a private resource is invisible to them.
  */
 async function requireResource(
   tenantStore: SlotlockTenantStore,
   tenantRef: string,
   resourceId: string,
+  visibility?: 'shared',
 ): Promise<SlotlockResource> {
   if (!STORE_ID_PATTERN.test(resourceId)) {
     throw new SlotlockAgentOperationError('resource_not_found', 404);
   }
-  const resource = await tenantStore.getResource({ tenantRef, id: resourceId });
+  const resource = await tenantStore.getResource({
+    tenantRef,
+    id: resourceId,
+    ...(visibility !== undefined ? { visibility } : {}),
+  });
   if (!resource) throw new SlotlockAgentOperationError('resource_not_found', 404);
   return resource;
+}
+
+/** The caller's shared resource with this id: what an agent may see and book. */
+function requireAgentResource(
+  tenantStore: SlotlockTenantStore,
+  tenantRef: string,
+  resourceId: string,
+): Promise<SlotlockResource> {
+  return requireResource(tenantStore, tenantRef, resourceId, 'shared');
 }
 
 /** Bind the protocol server to the production store without giving a request control of tenancy. */
@@ -345,6 +360,7 @@ export function createSlotlockStoreAgentBackend(
         const resource = await tenantStore.getResource({
           tenantRef: context.principal.tenantRef,
           id: resourceId,
+          visibility: 'shared',
         });
         return resource
           ? { name: resource.externalRef ?? null, timezone: resource.timezone }
@@ -358,6 +374,7 @@ export function createSlotlockStoreAgentBackend(
         const limit = input.limit as number;
         const resources = await tenantStore.listResources({
           tenantRef: context.principal.tenantRef,
+          visibility: 'shared',
           limit: limit + 1,
           ...(cursor !== undefined ? { after: cursor } : {}),
         });
@@ -379,7 +396,7 @@ export function createSlotlockStoreAgentBackend(
       return withTenant(store, context, async (tenantStore) => {
         const resources = [];
         for (const resourceId of resourceIds) {
-          const resource = await requireResource(
+          const resource = await requireAgentResource(
             tenantStore,
             context.principal.tenantRef,
             resourceId,
@@ -415,7 +432,7 @@ export function createSlotlockStoreAgentBackend(
         let best: { resourceId: string; interval: Interval } | null = null;
         let incomplete = false;
         for (const resourceId of resourceIds) {
-          const resource = await requireResource(
+          const resource = await requireAgentResource(
             tenantStore,
             context.principal.tenantRef,
             resourceId,
@@ -467,7 +484,7 @@ export function createSlotlockStoreAgentBackend(
     async createEvent(context, rawInput) {
       const input = rawInput as unknown as AgentEventInput;
       return withTenant(store, context, async (tenantStore) => {
-        await requireResource(tenantStore, context.principal.tenantRef, input.resource_id);
+        await requireAgentResource(tenantStore, context.principal.tenantRef, input.resource_id);
         const recurrence = recurrenceFromInput(input.recurrence_rule, input.recurrence_exceptions);
         const content: CalendarEventContent = {
           start: new Date(input.starts_at),
@@ -532,7 +549,7 @@ export function createSlotlockStoreAgentBackend(
       return withTenant(store, context, async (tenantStore) => {
         const combined: SlotlockCalendarEvent[] = [];
         for (const resourceId of resourceIds) {
-          await requireResource(tenantStore, context.principal.tenantRef, resourceId);
+          await requireAgentResource(tenantStore, context.principal.tenantRef, resourceId);
           combined.push(
             ...(await tenantStore.listCalendarEvents({
               tenantRef: context.principal.tenantRef,
@@ -571,7 +588,7 @@ export function createSlotlockStoreAgentBackend(
         if (!current) throw new SlotlockAgentOperationError('event_not_found', 404);
         const resourceId = input.resource_id ?? current.resourceId;
         if (resourceId !== current.resourceId) {
-          await requireResource(tenantStore, context.principal.tenantRef, resourceId);
+          await requireAgentResource(tenantStore, context.principal.tenantRef, resourceId);
         }
         const recurrence: CalendarRecurrence | undefined =
           input.recurrence_rule === null
@@ -633,6 +650,7 @@ export function createSlotlockStoreAgentBackend(
           tenantRef: context.principal.tenantRef,
           ownerRef: agentOwnerRef(context),
           externalRef: current.externalRef,
+          expectedResourceId: current.resourceId,
           resourceId,
           expectedRevision: input.expected_revision,
           idempotencyKey: agentCommandIdempotencyKey(context, input.idempotency_key),
@@ -664,6 +682,7 @@ export function createSlotlockStoreAgentBackend(
           tenantRef: context.principal.tenantRef,
           ownerRef: agentOwnerRef(context),
           externalRef,
+          expectedResourceId: current.resourceId,
           idempotencyKey: agentCommandIdempotencyKey(context, input.idempotency_key as string),
           expectedRevision: input.expected_revision as number,
         });

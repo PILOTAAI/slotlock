@@ -112,7 +112,8 @@ describe('Slotlock store-backed agent server adapter', () => {
       name: 'vehicle-1',
       timezone: 'Europe/London',
     });
-    expect(getResource).toHaveBeenCalledWith({ tenantRef, id: resource.id });
+    // Only a shared resource: a private one is invisible to agents.
+    expect(getResource).toHaveBeenCalledWith({ tenantRef, id: resource.id, visibility: 'shared' });
     expect(withTenant).toHaveBeenCalledWith(tenantRef, expect.any(Function));
 
     getResource.mockResolvedValueOnce(null);
@@ -409,10 +410,16 @@ describe('Slotlock store-backed agent server adapter', () => {
       },
     );
 
-    expect(getResource).toHaveBeenCalledWith({ tenantRef, id: replacement.id });
+    expect(getResource).toHaveBeenCalledWith({
+      tenantRef,
+      id: replacement.id,
+      visibility: 'shared',
+    });
     expect(putCalendarEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         externalRef: event().externalRef,
+        // Fenced to the resource the event was read on, in case it moved meanwhile.
+        expectedResourceId: resource.id,
         resourceId: replacement.id,
         expectedRevision: 1,
       }),

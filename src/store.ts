@@ -47,6 +47,7 @@ import type {
   CancelExternalReservationResult,
   ConfirmHoldResult,
   CreateReservationResult,
+  DeleteResourceResult,
   ExternalReservationCommand,
   ExternalReservationResult,
   Interval,
@@ -651,11 +652,21 @@ function isValidResourceId(value: string): boolean {
   return UUID_PATTERN.test(value);
 }
 
+function assertValidVisibility(visibility: unknown): void {
+  if (visibility !== undefined && visibility !== 'shared' && visibility !== 'private') {
+    throw Object.assign(new Error("Slotlock resource visibility must be 'shared' or 'private'"), {
+      code: 'invalid_visibility' as const,
+    });
+  }
+}
+
 function assertValidResourceInput(params: {
   externalRef?: string;
   tenantRef?: string;
   timezone?: string;
+  visibility?: SlotlockResource['visibility'];
 }): void {
+  assertValidVisibility(params.visibility);
   if (
     params.externalRef !== undefined &&
     (params.externalRef.trim().length === 0 || Buffer.byteLength(params.externalRef, 'utf8') > 500)
@@ -1228,16 +1239,21 @@ async function lockExternalIdentity(
   await tx`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify([tenantRef, externalRef])}, 0))`;
 }
 
-async function resourceBelongsToTenant(
+/**
+ * Whether the resource is the tenant's (`missing` when not), and whether it is archived. The row is
+ * share-locked to the end of the transaction, so it is neither archived nor deleted meanwhile.
+ */
+async function tenantResourceState(
   tx: TransactionSql,
   resourceId: string,
   tenantRef: string,
-): Promise<boolean> {
-  const rows = await tx<{ id: string }[]>`
-    SELECT id FROM slotlock.resources
+): Promise<'missing' | 'archived' | 'active'> {
+  const [row] = await tx<{ archived: boolean }[]>`
+    SELECT archived_at IS NOT NULL AS archived FROM slotlock.resources
      WHERE id = ${resourceId} AND tenant_ref = ${tenantRef}
      FOR SHARE`;
-  return rows.length === 1;
+  if (!row) return 'missing';
+  return row.archived ? 'archived' : 'active';
 }
 
 function pgCode(err: unknown): string | undefined {
@@ -1255,6 +1271,8 @@ type ResourceRow = {
   tenant_ref: string | null;
   timezone: string;
   availability_rules: unknown;
+  visibility: NonNullable<SlotlockResource['visibility']>;
+  archived_at: Date | null;
 };
 
 function toResource(row: ResourceRow): SlotlockResource {
@@ -1263,7 +1281,9 @@ function toResource(row: ResourceRow): SlotlockResource {
     externalRef: row.external_ref,
     tenantRef: row.tenant_ref,
     timezone: row.timezone,
+    visibility: row.visibility,
   };
+  if (row.archived_at !== null) resource.archivedAt = row.archived_at;
   if (row.availability_rules !== null && row.availability_rules !== undefined) {
     // Written through setResourceAvailability, which validates; anything else reads as closed.
     try {
@@ -1290,35 +1310,47 @@ function availabilityParameter(sql: StoreSql, rules: readonly WeeklyAvailability
 
 async function upsertResource(
   executor: StoreSql,
-  params: { externalRef?: string; tenantRef?: string; timezone?: string },
+  params: {
+    externalRef?: string;
+    tenantRef?: string;
+    timezone?: string;
+    visibility?: SlotlockResource['visibility'];
+  },
 ): Promise<SlotlockResource> {
   type ResourceIdentityRow = ResourceRow;
+  const visibility = params.visibility ?? 'shared';
   let rows: ResourceIdentityRow[];
+  // An existing identity is updated only when the visibility asked for is the one it has: creation
+  // never reclassifies a resource, so a private one cannot be made shared by creating it again.
   if (params.tenantRef !== undefined && params.externalRef !== undefined) {
     rows = await executor<ResourceIdentityRow[]>`
-      INSERT INTO slotlock.resources (external_ref, tenant_ref, timezone)
-      VALUES (${params.externalRef}, ${params.tenantRef}, ${params.timezone ?? 'UTC'})
+      INSERT INTO slotlock.resources (external_ref, tenant_ref, timezone, visibility)
+      VALUES (${params.externalRef}, ${params.tenantRef}, ${params.timezone ?? 'UTC'}, ${visibility})
       ON CONFLICT (tenant_ref, external_ref)
         WHERE tenant_ref IS NOT NULL AND external_ref IS NOT NULL
       DO UPDATE SET timezone = EXCLUDED.timezone
-      RETURNING id, external_ref, tenant_ref, timezone, availability_rules`;
+      WHERE slotlock.resources.visibility = EXCLUDED.visibility
+      RETURNING id, external_ref, tenant_ref, timezone, availability_rules, visibility, archived_at`;
   } else if (params.externalRef !== undefined) {
     rows = await executor<ResourceIdentityRow[]>`
-      INSERT INTO slotlock.resources (external_ref, tenant_ref, timezone)
-      VALUES (${params.externalRef}, NULL, ${params.timezone ?? 'UTC'})
+      INSERT INTO slotlock.resources (external_ref, tenant_ref, timezone, visibility)
+      VALUES (${params.externalRef}, NULL, ${params.timezone ?? 'UTC'}, ${visibility})
       ON CONFLICT (external_ref)
         WHERE tenant_ref IS NULL AND external_ref IS NOT NULL
       DO UPDATE SET external_ref = EXCLUDED.external_ref
-      RETURNING id, external_ref, tenant_ref, timezone, availability_rules`;
+      WHERE slotlock.resources.visibility = EXCLUDED.visibility
+      RETURNING id, external_ref, tenant_ref, timezone, availability_rules, visibility, archived_at`;
   } else {
     rows = await executor<ResourceIdentityRow[]>`
-      INSERT INTO slotlock.resources (external_ref, tenant_ref, timezone)
-      VALUES (NULL, NULL, ${params.timezone ?? 'UTC'})
-      RETURNING id, external_ref, tenant_ref, timezone, availability_rules`;
+      INSERT INTO slotlock.resources (external_ref, tenant_ref, timezone, visibility)
+      VALUES (NULL, NULL, ${params.timezone ?? 'UTC'}, ${visibility})
+      RETURNING id, external_ref, tenant_ref, timezone, availability_rules, visibility, archived_at`;
   }
   const row = rows[0];
   if (!row) {
-    throw new Error('slotlock: resource upsert returned no row');
+    throw Object.assign(new Error('Slotlock resource visibility cannot be changed by creating it'), {
+      code: 'resource_visibility_conflict' as const,
+    });
   }
   return toResource(row);
 }
@@ -1543,9 +1575,36 @@ export interface SlotlockStore {
     tenantRef?: string;
     timezone?: string;
     maxTenantResources?: number;
+    /**
+     * `shared` (the default) or `private`, which agents never see. Fixed at creation: creating an
+     * existing reference again with another visibility is refused (`resource_visibility_conflict`).
+     */
+    visibility?: SlotlockResource['visibility'];
   }): Promise<SlotlockResource>;
-  /** Resolve one tenant-owned resource without revealing another tenant's matching id. */
-  getResource(params: { tenantRef: string; id: string }): Promise<SlotlockResource | null>;
+  /**
+   * Resolve one tenant-owned resource without revealing another tenant's matching id. An archived
+   * one is returned (with `archivedAt`); with `visibility`, only one of that visibility.
+   */
+  getResource(params: {
+    tenantRef: string;
+    id: string;
+    visibility?: SlotlockResource['visibility'];
+  }): Promise<SlotlockResource | null>;
+  /**
+   * Archive one of the tenant's resources: no list shows it and it takes no new booking, hold or
+   * event (`resource_archived`), while what is on it stays and can still be cancelled or released.
+   * Archiving it again keeps the first time. Null for an id that is not the tenant's.
+   */
+  archiveResource(params: { tenantRef: string; id: string }): Promise<SlotlockResource | null>;
+  /** Put an archived resource back in use. Null for an id that is not the tenant's. */
+  restoreResource(params: { tenantRef: string; id: string }): Promise<SlotlockResource | null>;
+  /**
+   * Delete one of the tenant's resources with its history (its past bookings, coverage and the
+   * occupation of cancelled events), freeing its place under the resource cap. Refused
+   * (`resource_in_use`) while a booking on it has not ended, a hold on it is live, or a calendar
+   * event (one-off not yet over, or recurring) is on it: cancel or move those first.
+   */
+  deleteResource(params: { tenantRef: string; id: string }): Promise<DeleteResourceResult>;
   /**
    * Set one resource's own weekly bookable hours, or clear them (`null`) so it uses the default;
    * `[]` makes it never bookable. Null for an id that is not the tenant's. Refuses rules Slotlock
@@ -1566,6 +1625,10 @@ export interface SlotlockStore {
     tenantRef: string;
     limit?: number;
     after?: string;
+    /** Only resources of this visibility; omitted, both. */
+    visibility?: SlotlockResource['visibility'];
+    /** Archived resources too; omitted, only those in use. */
+    includeArchived?: boolean;
   }): Promise<SlotlockResource[]>;
   /**
    * Insert a confirmed reservation with the EXCLUDE constraint as the overlap arbiter. Never
@@ -1700,6 +1763,11 @@ export interface SlotlockStore {
     externalRef: string;
     idempotencyKey: string;
     expectedRevision: number;
+    /**
+     * The resource the writer read the event on: `event_not_found` when the stored event is on
+     * another, checked under the event's lock.
+     */
+    expectedResourceId?: string;
   }): Promise<CancelCalendarEventResult>;
   /**
    * Atomically rematerialize due recurring masters into one rolling window without changing their
@@ -2133,15 +2201,17 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
     },
 
     async getResource(params) {
+      assertValidVisibility(params.visibility);
       if (!isValidIdentity(params.tenantRef) || !isValidResourceId(params.id)) {
         throw Object.assign(new Error('Slotlock resource identity is invalid'), {
           code: 'invalid_identity' as const,
         });
       }
       const rows = await sql<ResourceRow[]>`
-        SELECT id, external_ref, tenant_ref, timezone, availability_rules
+        SELECT id, external_ref, tenant_ref, timezone, availability_rules, visibility, archived_at
           FROM slotlock.resources
-         WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}`;
+         WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
+           AND (${params.visibility ?? null}::text IS NULL OR visibility = ${params.visibility ?? null})`;
       const row = rows[0];
       return row ? toResource(row) : null;
     },
@@ -2157,7 +2227,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
         UPDATE slotlock.resources
            SET availability_rules = ${rules}::jsonb
          WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
-        RETURNING id, external_ref, tenant_ref, timezone, availability_rules`;
+        RETURNING id, external_ref, tenant_ref, timezone, availability_rules, visibility, archived_at`;
       const row = rows[0];
       return row ? toResource(row) : null;
     },
@@ -2194,13 +2264,73 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
         });
       }
       const rows = await sql<ResourceRow[]>`
-        SELECT id, external_ref, tenant_ref, timezone, availability_rules
+        SELECT id, external_ref, tenant_ref, timezone, availability_rules, visibility, archived_at
           FROM slotlock.resources
          WHERE tenant_ref = ${params.tenantRef}
+           AND (${params.visibility ?? null}::text IS NULL OR visibility = ${params.visibility ?? null})
+           AND (${params.includeArchived === true} OR archived_at IS NULL)
            AND (${params.after ?? null}::uuid IS NULL OR id > ${params.after ?? null}::uuid)
          ORDER BY id
          LIMIT ${limit}`;
       return rows.map(toResource);
+    },
+
+    async archiveResource(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidResourceId(params.id)) {
+        throw invalidIdentityError('Slotlock resource identity is invalid');
+      }
+      // Its clock time, not the transaction's start: a booking that committed holding the row's
+      // share lock went in before this.
+      const [row] = await sql<ResourceRow[]>`
+        UPDATE slotlock.resources
+           SET archived_at = COALESCE(archived_at, clock_timestamp())
+         WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
+        RETURNING id, external_ref, tenant_ref, timezone, availability_rules, visibility, archived_at`;
+      return row ? toResource(row) : null;
+    },
+
+    async restoreResource(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidResourceId(params.id)) {
+        throw invalidIdentityError('Slotlock resource identity is invalid');
+      }
+      const [row] = await sql<ResourceRow[]>`
+        UPDATE slotlock.resources
+           SET archived_at = NULL
+         WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
+        RETURNING id, external_ref, tenant_ref, timezone, availability_rules, visibility, archived_at`;
+      return row ? toResource(row) : null;
+    },
+
+    async deleteResource(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidResourceId(params.id)) {
+        throw invalidIdentityError('Slotlock resource identity is invalid');
+      }
+      return inTransaction(sql, async (tx): Promise<DeleteResourceResult> => {
+        // The row lock waits for writers holding its share lock and keeps new ones out until done.
+        const [resource] = await tx<{ id: string }[]>`
+          SELECT id FROM slotlock.resources
+           WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
+           FOR UPDATE`;
+        if (!resource) return { ok: true, deleted: false };
+        const [live] = await tx<{ live: boolean }[]>`
+          SELECT EXISTS (
+                   SELECT 1 FROM slotlock.reservations
+                    WHERE resource_id = ${params.id}
+                      AND calendar_event_id IS NULL
+                      AND (CASE WHEN status = 'held' THEN expires_at > now()
+                                ELSE COALESCE(occupied_ends_at, ends_at) > now() END)
+                 )
+                 OR EXISTS (
+                   SELECT 1 FROM slotlock.calendar_events
+                    WHERE tenant_ref = ${params.tenantRef} AND resource_id = ${params.id}
+                      AND (recurrence_rule IS NOT NULL OR ends_at > now())
+                 ) AS live`;
+        if (live?.live) return { ok: false, code: 'resource_in_use' };
+        // Its rows go with it: reservations, events and their children, coverage and hold answers
+        // all cascade from the resource.
+        await tx`DELETE FROM slotlock.resources WHERE id = ${params.id}`;
+        return { ok: true, deleted: true };
+      });
     },
 
     async createReservation(params) {
@@ -2217,13 +2347,14 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
       for (let attempt = 1; ; attempt++) {
         try {
           return await inTransaction(sql, async (tx): Promise<CreateReservationResult> => {
-            const [resource] = await tx<{ tenant_ref: string | null }[]>`
-              SELECT tenant_ref FROM slotlock.resources
+            const [resource] = await tx<{ tenant_ref: string | null; archived: boolean }[]>`
+              SELECT tenant_ref, archived_at IS NOT NULL AS archived FROM slotlock.resources
                WHERE id = ${params.resourceId}
                  AND (${params.tenantRef ?? null}::text IS NULL
                       OR tenant_ref = ${params.tenantRef ?? null})
                FOR SHARE`;
             if (!resource) return { ok: false, code: 'resource_not_found' };
+            if (resource.archived) return { ok: false, code: 'resource_archived' };
             if (
               resource.tenant_ref !== null &&
               !(await recurrenceCoversWrite(tx, {
@@ -2302,9 +2433,9 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
               }
               return { ok: true, reservation: toReservation(found), idempotent: true };
             }
-            if (!(await resourceBelongsToTenant(tx, params.resourceId, params.tenantRef))) {
-              return { ok: false, code: 'resource_tenant_mismatch' };
-            }
+            const resourceState = await tenantResourceState(tx, params.resourceId, params.tenantRef);
+            if (resourceState === 'missing') return { ok: false, code: 'resource_tenant_mismatch' };
+            if (resourceState === 'archived') return { ok: false, code: 'resource_archived' };
             if (
               !(await recurrenceCoversWrite(tx, {
                 tenantRef: params.tenantRef,
@@ -2390,9 +2521,9 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
             if (params.revision !== currentRevision + 1) {
               return { ok: false, code: 'revision_conflict' };
             }
-            if (!(await resourceBelongsToTenant(tx, params.resourceId, params.tenantRef))) {
-              return { ok: false, code: 'resource_tenant_mismatch' };
-            }
+            const resourceState = await tenantResourceState(tx, params.resourceId, params.tenantRef);
+            if (resourceState === 'missing') return { ok: false, code: 'resource_tenant_mismatch' };
+            if (resourceState === 'archived') return { ok: false, code: 'resource_archived' };
             if (
               !(await recurrenceCoversWrite(tx, {
                 tenantRef: params.tenantRef,
@@ -2567,12 +2698,13 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
                   : { ok: false, code: 'idempotency_conflict' };
               }
             }
-            const [resource] = await tx<{ tenant_ref: string | null }[]>`
-              SELECT tenant_ref FROM slotlock.resources
+            const [resource] = await tx<{ tenant_ref: string | null; archived: boolean }[]>`
+              SELECT tenant_ref, archived_at IS NOT NULL AS archived FROM slotlock.resources
                WHERE id = ${params.resourceId}
                  AND (${tenantRef ?? null}::text IS NULL OR tenant_ref = ${tenantRef ?? null})
                FOR SHARE`;
             if (!resource) return { ok: false, code: 'resource_not_found' };
+            if (resource.archived) return { ok: false, code: 'resource_archived' };
             if (
               resource.tenant_ref !== null &&
               !(await recurrenceCoversWrite(tx, {
@@ -2711,8 +2843,9 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
         // The tenant whose booking the hold becomes is its resource's; a hold never changes
         // resource, so it is read before the identity lock, which is taken before the row lock as
         // every booking write takes them.
-        const [owner] = await tx<{ resource_tenant: string | null }[]>`
-          SELECT resource.tenant_ref AS resource_tenant
+        const [owner] = await tx<{ resource_tenant: string | null; archived: boolean }[]>`
+          SELECT resource.tenant_ref AS resource_tenant,
+                 resource.archived_at IS NOT NULL AS archived
             FROM slotlock.reservations hold
             JOIN slotlock.resources resource ON resource.id = hold.resource_id
            WHERE hold.id = ${holdId} AND hold.calendar_event_id IS NULL
@@ -2743,6 +2876,8 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
           return { ok: true, reservation: toReservation(row) };
         }
         if (!row.live) return { ok: false, code: 'hold_expired' };
+        // Archived since the hold was taken: a confirmation would be a new booking on it.
+        if (owner.archived) return { ok: false, code: 'resource_archived' };
         if (bookingTenant !== null) {
           const [retired] = await tx<{ revision: string }[]>`
             SELECT revision FROM slotlock.reservation_tombstones
@@ -2813,6 +2948,9 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
 
     async putCalendarEvent(params) {
       const ownerRef = params.ownerRef ?? SLOTLOCK_INTERNAL_EVENT_OWNER_REF;
+      if (params.expectedResourceId !== undefined && !isValidResourceId(params.expectedResourceId)) {
+        return { ok: false, code: 'invalid_identity' };
+      }
       if (
         !isValidIdentity(params.tenantRef) ||
         !isValidEventOwnerRef(ownerRef) ||
@@ -2910,9 +3048,9 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
                 currentRevision: Number(tombstones[0].revision),
               };
             }
-            if (!(await resourceBelongsToTenant(tx, params.resourceId, params.tenantRef))) {
-              return { ok: false, code: 'resource_tenant_mismatch' };
-            }
+            const resourceState = await tenantResourceState(tx, params.resourceId, params.tenantRef);
+            if (resourceState === 'missing') return { ok: false, code: 'resource_tenant_mismatch' };
+            if (resourceState === 'archived') return { ok: false, code: 'resource_archived' };
             const existing = await tx<CalendarEventRow[]>`
               SELECT id, tenant_ref, owner_ref, external_ref, resource_id, starts_at, ends_at, timezone,
                      summary, description, location, status, transparency, organizer, attendees,
@@ -2925,6 +3063,12 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
                FOR UPDATE`;
             const found = existing[0];
             storedEventId = found?.id;
+            if (
+              params.expectedResourceId !== undefined &&
+              found?.resource_id !== params.expectedResourceId
+            ) {
+              return { ok: false, code: 'resource_tenant_mismatch' };
+            }
             const currentRevision = found ? Number(found.revision) : 0;
             if (params.expectedRevision !== currentRevision) {
               return { ok: false, code: 'revision_conflict', currentRevision };
@@ -3262,6 +3406,9 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
 
     async cancelCalendarEvent(params) {
       const ownerRef = params.ownerRef ?? SLOTLOCK_INTERNAL_EVENT_OWNER_REF;
+      if (params.expectedResourceId !== undefined && !isValidResourceId(params.expectedResourceId)) {
+        return { ok: false, code: 'invalid_identity' };
+      }
       if (
         !isValidIdentity(params.tenantRef) ||
         !isValidEventOwnerRef(ownerRef) ||
@@ -3327,13 +3474,19 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
             currentRevision: Number(tombstones[0].revision),
           };
         }
-        const events = await tx<{ id: string; revision: string | number }[]>`
-          SELECT id, revision FROM slotlock.calendar_events
+        const events = await tx<{ id: string; resource_id: string; revision: string | number }[]>`
+          SELECT id, resource_id, revision FROM slotlock.calendar_events
            WHERE tenant_ref = ${params.tenantRef}
              AND owner_ref = ${ownerRef}
              AND external_ref = ${params.externalRef}
            FOR UPDATE`;
         const found = events[0];
+        if (
+          params.expectedResourceId !== undefined &&
+          found?.resource_id !== params.expectedResourceId
+        ) {
+          return { ok: false, code: 'event_not_found' };
+        }
         const currentRevision = found ? Number(found.revision) : 0;
         if (!found && ownerRef !== SLOTLOCK_INTERNAL_EVENT_OWNER_REF) {
           return { ok: false, code: 'event_not_found' };
@@ -3505,7 +3658,8 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
           params.tenantRef,
           `calendar-coverage:${params.resourceId}:${params.source}`,
         );
-        if (!(await resourceBelongsToTenant(tx, params.resourceId, params.tenantRef))) {
+        // Coverage of an archived resource may still be recorded: it books nothing.
+        if ((await tenantResourceState(tx, params.resourceId, params.tenantRef)) === 'missing') {
           return { ok: false, code: 'resource_tenant_mismatch' };
         }
         const rows = await tx<{ starts_at: Date; ends_at: Date; revision: string | number }[]>`
@@ -3724,7 +3878,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
         });
       if (!isValidResourceId(params.resourceId)) throw notFound();
       const [row] = await sql<ResourceRow[]>`
-        SELECT id, external_ref, tenant_ref, timezone, availability_rules
+        SELECT id, external_ref, tenant_ref, timezone, availability_rules, visibility, archived_at
           FROM slotlock.resources
          WHERE id = ${params.resourceId} AND tenant_ref IS NOT DISTINCT FROM ${tenantRef}`;
       if (!row) throw notFound();
