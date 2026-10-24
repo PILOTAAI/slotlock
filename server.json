@@ -77,8 +77,7 @@
         },
         {
           "name": "SLOTLOCK_CONFIRMATION_SECRET",
-          "description": "Signs pending write confirmations: at least 32 random characters, different from the token. Not needed when SLOTLOCK_CONFIRM_WRITES is none.",
-          "isRequired": true,
+          "description": "Signs pending write confirmations: at least 32 random characters, different from the token. Required when SLOTLOCK_CONFIRM_WRITES is not none.",
           "isSecret": true
         },
         {
@@ -94,8 +93,8 @@
         },
         {
           "name": "SLOTLOCK_CONFIRM_WRITES",
-          "description": "Writes that wait for a person to confirm them: all, none, or a comma-separated list of slotlock_create_event, slotlock_update_event, slotlock_delete_event. Clients without MCP 2026-07-28 form elicitation have guarded writes refused.",
-          "default": "all"
+          "description": "Writes that wait for a person to confirm them: none, all, or a comma-separated list of slotlock_create_event, slotlock_update_event, slotlock_delete_event. Clients without MCP 2026-07-28 form elicitation have guarded writes refused.",
+          "default": "none"
         },
         {
           "name": "SLOTLOCK_AVAILABILITY",

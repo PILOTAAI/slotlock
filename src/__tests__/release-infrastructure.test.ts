@@ -102,12 +102,23 @@ describe('MCP Registry entry', () => {
     const declared = serverPackage?.environmentVariables ?? [];
     const known: readonly string[] = SLOTLOCK_ENVIRONMENT_VARIABLES;
     for (const { name } of declared) expect(known).toContain(name);
-    for (const name of ['DATABASE_URL', 'SLOTLOCK_AUTH_TOKEN', 'SLOTLOCK_CONFIRMATION_SECRET']) {
+    for (const name of ['DATABASE_URL', 'SLOTLOCK_AUTH_TOKEN']) {
       expect(declared.find((variable) => variable.name === name)).toMatchObject({
         isRequired: true,
         isSecret: true,
       });
     }
+    // Writes take effect at once unless SLOTLOCK_CONFIRM_WRITES opts in, and only then is the
+    // confirmation secret needed.
+    expect(declared.find(({ name }) => name === 'SLOTLOCK_CONFIRMATION_SECRET')).toMatchObject({
+      isSecret: true,
+    });
+    expect(declared.find(({ name }) => name === 'SLOTLOCK_CONFIRMATION_SECRET')?.isRequired).not.toBe(
+      true,
+    );
+    expect(declared.find(({ name }) => name === 'SLOTLOCK_CONFIRM_WRITES')).toMatchObject({
+      default: 'none',
+    });
     // The URL's {PORT} is the PORT variable, which is also the published container port.
     expect(serverPackage?.transport.url).toBe('http://localhost:{PORT}/mcp');
     expect(declared.map(({ name }) => name)).toContain('PORT');

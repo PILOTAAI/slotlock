@@ -74,6 +74,8 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       DATABASE_URL: applicationUrl.href,
       SLOTLOCK_MIGRATE_DATABASE_URL: url,
       SLOTLOCK_AUTH_TOKEN: token,
+      // Opted into here (the default is none), so the confirmation round stays covered.
+      SLOTLOCK_CONFIRM_WRITES: 'all',
       SLOTLOCK_CONFIRMATION_SECRET: confirmationSecret,
       SLOTLOCK_TENANT: tenantRef,
       HOST: '127.0.0.1',
@@ -303,7 +305,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       ).structuredContent.resources;
       expect(listed.map(({ external_ref }) => external_ref)).toEqual(['vehicle-42']);
 
-      // Writes are guarded by default, and a 2025 client cannot show the confirmation.
+      // Writes are guarded here, and a 2025 client cannot show the confirmation.
       const write = await mcp(
         {
           jsonrpc: '2.0',

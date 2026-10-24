@@ -44,7 +44,8 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
   `migrate` service applies the schema as the owner.
 - `SLOTLOCK_AVAILABILITY` sets the default bookable hours. A resource can have its own
   (`slotlock hours set`, or the dashboard); with neither, no slot is offered.
-  `SLOTLOCK_CONFIRM_WRITES=all` (the default) makes every write wait for a person.
+  `SLOTLOCK_CONFIRM_WRITES=all` (as `.env.example` sets it; the server's default is `none`) makes
+  every write wait for a person.
 - To serve beyond this machine, put a TLS proxy in front and set `SLOTLOCK_PUBLIC_URL`.
 
 ```sh

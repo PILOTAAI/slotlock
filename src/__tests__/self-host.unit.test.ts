@@ -52,7 +52,7 @@ async function run(argv: string[], env: SlotlockEnv = {}) {
 }
 
 describe('slotlock serve configuration', () => {
-  it('defaults to loopback, port 8080, one tenant, confirmation on every write and REST on', () => {
+  it('defaults to loopback, port 8080, one tenant, no confirmation round and REST on', () => {
     const env = serveEnv();
     const config = readSlotlockServeConfig(env);
     expect(config).toEqual({
@@ -62,11 +62,26 @@ describe('slotlock serve configuration', () => {
       port: 8080,
       publicUrl: 'http://localhost:8080',
       authToken: env.SLOTLOCK_AUTH_TOKEN,
-      confirmWrites: ['slotlock_create_event', 'slotlock_update_event', 'slotlock_delete_event'],
-      confirmationSecret: env.SLOTLOCK_CONFIRMATION_SECRET,
+      confirmWrites: [],
       availability: [],
       restApi: true,
     });
+  });
+
+  it('serves without a confirmation secret unless writes are guarded (SURF-4, PROD-16)', () => {
+    // The owner's hosted policy: every authenticated write takes effect at once. The confirmation
+    // round is a setting a self-hoster opts into.
+    const config = readSlotlockServeConfig({ DATABASE_URL });
+    expect(config.confirmWrites).toEqual([]);
+    expect('confirmationSecret' in config).toBe(false);
+    const optedIn = readSlotlockServeConfig(serveEnv({ SLOTLOCK_CONFIRM_WRITES: 'all' }));
+    expect(optedIn.confirmWrites).toEqual([
+      'slotlock_create_event',
+      'slotlock_update_event',
+      'slotlock_delete_event',
+    ]);
+    expect(optedIn.confirmationSecret).toBeDefined();
+    expect(SLOTLOCK_CLI_HELP).toMatch(/SLOTLOCK_CONFIRM_WRITES +none \(default\), all,/);
   });
 
   it('reads every optional setting', () => {
@@ -136,12 +151,12 @@ describe('slotlock serve configuration', () => {
     ],
     [
       'the confirmation secret is missing while writes are guarded',
-      { SLOTLOCK_CONFIRMATION_SECRET: undefined },
+      { SLOTLOCK_CONFIRM_WRITES: 'all', SLOTLOCK_CONFIRMATION_SECRET: undefined },
       /SLOTLOCK_CONFIRMATION_SECRET is required/,
     ],
     [
       'the confirmation secret is weak',
-      { SLOTLOCK_CONFIRMATION_SECRET: 'x'.repeat(40) },
+      { SLOTLOCK_CONFIRM_WRITES: 'all', SLOTLOCK_CONFIRMATION_SECRET: 'x'.repeat(40) },
       /SLOTLOCK_CONFIRMATION_SECRET is too weak/,
     ],
     [

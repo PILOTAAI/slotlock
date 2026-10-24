@@ -145,7 +145,10 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
    * (`slotlock key create`) authenticate whether or not it is set, each as its own tenant and scopes.
    */
   authToken?: string;
-  /** Writes that wait for a person's confirmation (MCP 2026-07-28) and are refused elsewhere. */
+  /**
+   * Writes that wait for a person's confirmation (MCP 2026-07-28) and are refused elsewhere. None
+   * unless SLOTLOCK_CONFIRM_WRITES opts in: every authenticated write takes effect at once.
+   */
   confirmWrites: readonly SlotlockAgentWriteOperation[];
   /** Set exactly when `confirmWrites` is not empty. */
   confirmationSecret?: string;
@@ -207,7 +210,7 @@ function readTenant(env: SlotlockEnv): string {
 }
 
 function readConfirmWrites(env: SlotlockEnv): SlotlockAgentWriteOperation[] {
-  const value = optional(env, 'SLOTLOCK_CONFIRM_WRITES') ?? 'all';
+  const value = optional(env, 'SLOTLOCK_CONFIRM_WRITES') ?? 'none';
   if (value === 'all') return [...WRITE_OPERATIONS];
   if (value === 'none') return [];
   const operations: SlotlockAgentWriteOperation[] = [];
@@ -251,7 +254,7 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
   const confirmationSecret = readSecret(env, 'SLOTLOCK_CONFIRMATION_SECRET');
   if (confirmWrites.length > 0 && confirmationSecret === undefined) {
     throw new SlotlockConfigError(
-      `SLOTLOCK_CONFIRMATION_SECRET is required while SLOTLOCK_CONFIRM_WRITES guards writes (the default): it signs each pending confirmation; ${SECRET_HINT}, or set SLOTLOCK_CONFIRM_WRITES=none to let agents write without asking a person`,
+      `SLOTLOCK_CONFIRMATION_SECRET is required while SLOTLOCK_CONFIRM_WRITES guards writes: it signs each pending confirmation; ${SECRET_HINT}, or set SLOTLOCK_CONFIRM_WRITES=none (the default) to let agents write without asking a person`,
     );
   }
   if (
@@ -942,8 +945,11 @@ Environment:
   SLOTLOCK_AUTH_TOKEN            Optional bearer token for SLOTLOCK_TENANT with read and write
                                  access (never admin), 32+ random characters (serve); API keys
                                  work with or without it
-  SLOTLOCK_CONFIRMATION_SECRET   Signs pending write confirmations, 32+ random characters (serve)
-  SLOTLOCK_CONFIRM_WRITES        all (default), none, or a comma-separated list of write tools
+  SLOTLOCK_CONFIRMATION_SECRET   Signs pending write confirmations, 32+ random characters (serve;
+                                 required when SLOTLOCK_CONFIRM_WRITES is not none)
+  SLOTLOCK_CONFIRM_WRITES        none (default), all, or a comma-separated list of write tools
+                                 that wait for a person (MCP 2026-07-28 form elicitation; refused
+                                 with confirmation_required on REST, A2A and older MCP)
   SLOTLOCK_PUBLIC_URL            URL clients use (default http://localhost:$PORT)
   SLOTLOCK_TENANT                Tenant of the token, resource and key commands (default "default")
   SLOTLOCK_AVAILABILITY          JSON array of weekly bookable-hours rules (default: none)
