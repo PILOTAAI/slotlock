@@ -43,6 +43,10 @@ versioning.
 - The README says which spelling of an availability rule each surface takes: `startMinutes` and
   `durationMinutes` for `slotlock hours set` and `SLOTLOCK_AVAILABILITY`, `start_minutes` and
   `duration_minutes` over REST. A REST body pasted into `hours set` used to fail with no hint why.
+- **Release a version** takes `dry_run`: it mints the release app's token and prepares the release,
+  checks the token can read the repository and push the release branch
+  (`scripts/release-dry-run.sh`), and stops before pushing, opening, merging or tagging anything, so
+  the app's path can be proven before the first release that depends on it.
 - One aggregate check, "CI passed", gathers every CI job: the suites on each Node.js and
   PostgreSQL, the image, the five language clients and the Compose quickstart.
   `scripts/configure-github.sh` requires it and DCO's "Signed-off-by" on `main`; the client suites

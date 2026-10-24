@@ -99,6 +99,12 @@ once an admin allows it (Settings > Actions > General > Workflow permissions);
 off. By default the script leaves it off, since the same switch lets GITHUB_TOKEN approve pull
 requests.
 
+Before the first release through the app, or after replacing it, run **Release a version** with
+**dry_run**: it mints the app's token and prepares the release as a real run would, checks the token
+can read the repository and push the release branch (`scripts/release-dry-run.sh`), and stops
+without pushing, opening, merging or tagging anything. Its summary says which identity a real run
+would use.
+
 Nobody, the admin included, can merge into `main` past a failing or missing required check ("CI
 passed" and "Signed-off-by"): a change whose checks cannot pass is fixed in another pull request
 first. The npm, `ghcr` and `mcp-registry` environments wait for a maintainer's approval in every
