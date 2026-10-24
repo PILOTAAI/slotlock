@@ -59,7 +59,8 @@ describe('reading iCalendar on worker threads', () => {
   });
 
   it('where a parse on this thread holds every timer until it ends', async () => {
-    // What the pool avoids: one of the slow feeds the parser stops at its one-second limit.
+    // What the pool avoids: one of the slow feeds the parser refuses at the end of its budget, about
+    // a third of a second of work here.
     const slowZone = [
       'BEGIN:VCALENDAR',
       'VERSION:2.0',
@@ -83,7 +84,8 @@ describe('reading iCalendar on worker threads', () => {
     ].join('\r\n');
     const { ticks, ms, outcome } = await ticking(() => parseICalendarChanges(slowZone, 'UTC'));
     expect(outcome).toBeInstanceOf(CalendarExpansionLimitError);
-    expect(ms).toBeGreaterThanOrEqual(900);
+    // Long enough for five ticks, had the thread been free.
+    expect(ms).toBeGreaterThanOrEqual(50);
     expect(ticks).toBe(0);
   });
 

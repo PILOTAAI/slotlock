@@ -1,10 +1,11 @@
 // ical.js looks for a SECONDLY to WEEKLY rule's next occurrence one step at a time with no limit
 // (RecurIterator.next; MONTHLY and YEARLY give up only when whole months or years fail), so a rule
-// that never occurs held the whole process. Every expansion now has a step and time budget: a rule
-// that needs more is refused as invalid_icalendar, quickly, whether it came from a feed, a library
-// call or the store.
+// that never occurs held the whole process. Every expansion now has a budget of steps, a count of
+// ical.js's work that reads no clock: a rule that needs more is refused as invalid_icalendar,
+// quickly and the same way however loaded the machine, whether it came from a feed, a library call
+// or the store.
 import ICAL from 'ical.js';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   CalendarExpansionLimitError,
   expandCalendarEventOccurrences,
@@ -114,24 +115,34 @@ describe('the step budget on recurrence expansion', () => {
   });
 
   it('shares one budget among all the events of a feed', () => {
-    // A yearly date written as a daily rule takes a step a day: from 1950 that is about 28,400
-    // steps, so one fits the budget of 50,000 and two do not.
+    // A yearly date written as a daily rule takes a step a day, and an eighth of one for the day it
+    // walks: from 1950 that is about 32,000 steps, so fifteen fit the budget of 500,000 and
+    // sixteen do not.
     const yearly = (uid: string) => ({
       uid,
       start: '19500101T090000Z',
       rule: 'FREQ=DAILY;BYMONTH=1;BYMONTHDAY=1',
     });
-    expect(parseICalendarChanges(feed(yearly('one')), 'UTC', WINDOW)).toHaveLength(1);
-    const { error } = timed(() =>
-      parseICalendarChanges(feed(yearly('a'), yearly('b')), 'UTC', WINDOW),
-    );
-    expect(error).toEqual(refused);
+    const many = (count: number) =>
+      feed(...Array.from({ length: count }, (_, index) => yearly(`yearly-${index}`)));
+    expect(parseICalendarChanges(many(15), 'UTC', WINDOW)).toHaveLength(15);
+    expect(timed(() => parseICalendarChanges(many(16), 'UTC', WINDOW)).error).toEqual(refused);
   });
 
-  // ical.js moves a SECONDLY to WEEKLY rule a day at a time within one step, uncharged, so a step
-  // may move at most a century: FREQ=DAILY;INTERVAL=1000000000 spent 97 seconds in one step.
+  it('reads a busy feed: thirty series on the fifth Monday of the month since 2000', () => {
+    const fifthMondays = Array.from({ length: 30 }, (_, index) => ({
+      uid: `fifth-${index}`,
+      start: `20000131T${String(index % 24).padStart(2, '0')}0000Z`,
+      rule: 'FREQ=MONTHLY;BYDAY=5MO',
+    }));
+    // 2026-10-01 to 2027-10-01 has four months with a fifth Monday.
+    expect(parseICalendarChanges(feed(...fifthMondays), 'UTC', WINDOW)).toHaveLength(120);
+  });
+
+  // ical.js moves a MINUTELY to WEEKLY rule a day at a time within one step, so a step may move at
+  // most a century: FREQ=DAILY;INTERVAL=1000000000 spent 97 seconds in one step. (FREQ=SECONDLY is
+  // refused whatever its interval: ical-rrule-shapes.test.ts.)
   it.each([
-    ['SECONDLY', 3_162_240_000],
     ['MINUTELY', 52_704_000],
     ['HOURLY', 878_400],
     ['DAILY', 36_600],
@@ -173,29 +184,33 @@ describe('the step budget on recurrence expansion', () => {
     }
   });
 
-  // These take few steps but slow ones, so the count alone would let them run for minutes. The time
-  // limit stops them: a second for a feed (and a stored series as the roll expands it), half of one
-  // for a single event as it is written or asked about.
+  // These take few search steps but slow ones, walked a day at a time: about 4 ms for a century.
+  // Each day walked is charged, so they are refused within the budget: about 0.4 s for a feed (and a
+  // stored series as the roll expands it), 0.02 s for one event as it is written or asked about.
   const slow = [
-    // A step of a century, the most allowed, walked a day at a time: about 4 ms each.
     ['29 February a century at a time', 'FREQ=DAILY;INTERVAL=36600;BYMONTH=2;BYMONTHDAY=29'],
-    // ical.js expands every year's days for each yearly step.
-    [
-      'any weekday on 30 February, yearly',
-      'FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30;BYDAY=MO,TU,WE,TH,FR,SA,SU',
-    ],
+    ['29 February every 9,999 days', 'FREQ=DAILY;INTERVAL=9999;BYMONTH=2;BYMONTHDAY=29'],
   ];
 
-  it.each(slow)('refuses %s in a feed after a second', (_name, rule) => {
+  it.each(slow)('refuses %s in a feed within its budget', (_name, rule) => {
     const { ms, error } = timed(() =>
       parseICalendarChanges(feed({ uid: 'slow', start: '20261020T090000Z', rule }), 'UTC', WINDOW),
     );
     expect(error).toEqual(refused);
-    expect(ms).toBeGreaterThanOrEqual(1_000);
     expect(ms).toBeLessThan(2_500);
   });
 
-  it.each(slow)('refuses %s as one event after half a second', (_name, rule) => {
+  it('refuses any weekday on 30 February, yearly, by its shape, at once', () => {
+    // ical.js scanned every day of every year for it, to the year 20000.
+    const rule = 'FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30;BYDAY=MO,TU,WE,TH,FR,SA,SU';
+    const { ms, error } = timed(() =>
+      parseICalendarChanges(feed({ uid: 'slow', start: '20261020T090000Z', rule }), 'UTC', WINDOW),
+    );
+    expect(error).toEqual(refused);
+    expect(ms).toBeLessThan(100);
+  });
+
+  it.each(slow)('refuses %s as one event within a few hundredths of a second', (_name, rule) => {
     const { ms, error } = timed(() =>
       expandCalendarEventOccurrences(
         {
@@ -209,14 +224,12 @@ describe('the step budget on recurrence expansion', () => {
       ),
     );
     expect(error).toEqual(refused);
-    expect(ms).toBeGreaterThanOrEqual(500);
-    // The time limit is wall-clock time, so it stops here however loaded the machine is.
-    expect(ms).toBeLessThan(1_000);
+    expect(ms).toBeLessThan(250);
   });
 
-  it('gives one event half the steps of a feed, so a series written today keeps rolling', () => {
-    // A yearly date written as a daily rule from 1950: about 28,400 steps, over the 25,000 one event
-    // may take as it is written, within the 50,000 the roll expands a stored series with.
+  it('gives one event a twentieth of the steps of a feed, so a series written today keeps rolling', () => {
+    // A yearly date written as a daily rule from 1950: about 32,000 steps, over the 25,000 one event
+    // may take as it is written, within the 500,000 the roll expands a stored series with.
     const series = {
       start: new Date('1950-01-01T09:00:00Z'),
       end: new Date('1950-01-01T10:00:00Z'),
@@ -441,9 +454,9 @@ describe('the step budget on recurrence expansion', () => {
       expect(ms).toBeLessThan(2_500);
     });
 
-    it('refuses a zone whose rule takes slow steps, after the time limit, in both parsers', () => {
-      // Reading a time is timed like a search: ical.js expands every year's days for each of this
-      // rule's yearly steps, so the step count alone would let it run for seconds.
+    it('refuses a zone whose rule takes slow steps, within the budget, in both parsers', () => {
+      // ical.js expands every day of every year for this rule, which never occurs, to the year
+      // 20000: each year's scan is charged as a hundred steps, so the budget stops it.
       const slowZone = zoned(
         'FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30;BYDAY=MO,TU,WE,TH,FR,SA,SU',
         '20261102T090000',
@@ -453,7 +466,7 @@ describe('the step budget on recurrence expansion', () => {
         () => parseTrustedICalendarEvents(slowZone),
       ]) {
         const { ms, error } = timed(parse);
-        // Refused by the time limit itself: without it ical.js finishes its scan in seconds, and the
+        // Refused by the budget itself: without it ical.js finishes its scan in seconds, and the
         // full-content parser then refuses the private zone name instead.
         expect(error).toBeInstanceOf(CalendarExpansionLimitError);
         expect(ms).toBeLessThan(2_500);
@@ -501,6 +514,67 @@ describe('the step budget on recurrence expansion', () => {
       );
       expect(error).toEqual(refused);
       expect(ms).toBeLessThan(100);
+    });
+  });
+
+  describe('a budget that counts work, not time', () => {
+    const event = (rrule: string) => ({
+      start: new Date('2026-10-20T09:00:00Z'),
+      end: new Date('2026-10-20T10:00:00Z'),
+      timezone: 'UTC',
+      summary: 'Busy',
+      recurrence: { rrule },
+    });
+    // Each write of this rule walked 9,999 days a step, charged once, until the half-second limit
+    // stopped it: fifty of them from one tenant held a hosted server for 23 seconds (SEC-3).
+    const walker = 'FREQ=DAILY;INTERVAL=9999;BYMONTH=2;BYMONTHDAY=29';
+
+    it('reads or refuses the same calendar however slow the clock runs (D21)', () => {
+      let now = 0;
+      const clock = vi.spyOn(performance, 'now').mockImplementation(() => {
+        now += 1_000;
+        return now;
+      });
+      try {
+        expect(parseICalendarChanges(ordinary, 'UTC', WINDOW)).toHaveLength(261);
+        expect(
+          expandCalendarEventOccurrences(event('FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR'), WINDOW),
+        ).toHaveLength(248);
+        const titled = ordinary.replace('UID:standup', 'UID:standup\r\nSUMMARY:Standup');
+        expect(parseTrustedICalendarEvents(titled)).toHaveLength(1);
+        expect(timed(() => expandCalendarEventOccurrences(event(walker), WINDOW)).error).toEqual(
+          refused,
+        );
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it('refuses a rule that walks far between occurrences promptly with the clock stopped', () => {
+      const clock = vi.spyOn(performance, 'now').mockReturnValue(0);
+      try {
+        const started = Date.now();
+        let error: unknown = null;
+        try {
+          expandCalendarEventOccurrences(event(walker), WINDOW);
+        } catch (thrown) {
+          error = thrown;
+        }
+        expect(error).toBeInstanceOf(CalendarExpansionLimitError);
+        expect(Date.now() - started).toBeLessThan(250);
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it('refuses fifty writes of it from one tenant within a few seconds in all (SEC-3)', () => {
+      const started = performance.now();
+      for (let write = 0; write < 50; write++) {
+        expect(timed(() => expandCalendarEventOccurrences(event(walker), WINDOW)).error).toEqual(
+          refused,
+        );
+      }
+      expect(performance.now() - started).toBeLessThan(5_000);
     });
   });
 

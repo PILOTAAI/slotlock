@@ -1,6 +1,6 @@
-// Untrusted iCalendar read on worker threads. The parsers bound ical.js with a step budget, a clock
-// and caps on what a feed may carry, but they still run on the thread that called them: a feed can
-// hold that thread for up to a second, and a loop in ical.js nobody has found yet would hold it for
+// Untrusted iCalendar read on worker threads. The parsers bound ical.js with a step budget and caps
+// on what a feed may carry, but they still run on the thread that called them: a feed can hold that
+// thread for about half a second, and a loop in ical.js nobody has found yet would hold it for
 // good. Here the main thread never runs ical.js on the feed. A worker that runs past its deadline
 // is stopped, one that runs out of its heap ends alone, and either way the feed is refused.
 import type { Worker } from 'node:worker_threads';
@@ -48,8 +48,8 @@ export interface ICalendarWorkerPoolOptions {
   size?: number;
   /**
    * How long one parse may run on its worker, in ms, before the worker is stopped and the feed
-   * refused (CalendarExpansionLimitError), 100-60,000. Defaults to 3,000: three times the parser's
-   * own limit, with room for a new worker to start.
+   * refused (CalendarExpansionLimitError), 100-60,000. Defaults to 3,000: several times what the
+   * parser's step budget takes, with room for a new worker to start.
    */
   deadlineMs?: number;
   /** Parses that may wait for a worker, 0-10,000; more are refused at once. Defaults to 64. */

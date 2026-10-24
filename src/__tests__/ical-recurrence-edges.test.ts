@@ -112,9 +112,10 @@ describe('recurrence edges', () => {
 
   it('an occurrence starting in a DST gap is reported, for its exact length', () => {
     // RFC 5545 3.3.5: 02:00 in the gap is read with the offset before it (01:00Z), and lasts the
-    // series' exact length (3.8.5.3), 1h: on the wall clock it would end as it starts. Any other
-    // occurrence ends on the wall clock, as calendars show it: 01:00-04:00 the night the clocks go
-    // forward is two hours.
+    // series' exact length (3.8.5.3), 1h: on the wall clock it would end as it starts. Every
+    // occurrence ends at the later of its exact end and its wall-clock end (SPEC.md, "Daylight-saving
+    // time"): 01:00-04:00 the night the clocks go forward is three hours, as on any other night,
+    // although the wall clock shows two.
     const W = w('2027-03-01T00:00:00Z', '2027-05-01T00:00:00Z');
     const gap = cal(
       ...ev(
@@ -143,7 +144,7 @@ describe('recurrence edges', () => {
       ],
       [
         ['2027-03-21T00:00:00.000Z', '2027-03-21T03:00:00.000Z'],
-        ['2027-03-28T00:00:00.000Z', '2027-03-28T02:00:00.000Z'],
+        ['2027-03-28T00:00:00.000Z', '2027-03-28T03:00:00.000Z'],
       ],
     ]);
   });
