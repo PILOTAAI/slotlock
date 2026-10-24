@@ -1,7 +1,8 @@
 #!/bin/sh
 # Prepares the release of <version> in a checkout of main, for release-version.yml. It sets the
 # version in package.json and package-lock.json (npm version), in server.json (the version and the
-# image tag) and in slotlock.manifest.json, and turns CHANGELOG.md's "## Unreleased" heading into
+# image tag), in slotlock.manifest.json and in each language client (scripts/client-versions.sh: its
+# manifest and its User-Agent constant), and turns CHANGELOG.md's "## Unreleased" heading into
 # "## <version> - <today, UTC>". Merged to main, that change is a release: tag-release.yml tags it.
 # It refuses a version that is not later than package.json's, one already tagged, and a CHANGELOG.md
 # whose "## Unreleased" section is missing or empty, since the release notes are that section.
@@ -16,8 +17,9 @@ fail() {
   echo "::error::$1" >&2
   exit 1
 }
-# later and is_version, shared with scripts/dist-tag.sh.
+# later and is_version, shared with scripts/dist-tag.sh; the clients' version files.
 . "$(dirname "$0")/semver.sh"
+. "$(dirname "$0")/client-versions.sh"
 new=$1
 is_version "$new" || fail "$new is not a version like 1.2.3 or 1.2.3-rc.1 (no leading v)."
 current=$(jq -r .version package.json)
@@ -32,6 +34,11 @@ grep -q '^## Unreleased$' CHANGELOG.md ||
 notes=$(awk '$0 == "## Unreleased" { found = 1; next } found && /^## / { exit } found && NF { print }' CHANGELOG.md)
 [ -n "$notes" ] ||
   fail "CHANGELOG.md's '## Unreleased' section is empty: add this release's changes under it first."
+# A client behind the package would be published at a version it does not have: refuse before
+# changing anything.
+if lagging=$(client_versions_check "$current"); then :; else
+  fail "$lagging is not at package.json's $current: bring the clients to it first."
+fi
 
 # replace FILE OLD NEW: every OLD in FILE becomes NEW, the rest of the file byte for byte.
 replace() {
@@ -52,6 +59,9 @@ npm version "$new" --no-git-tag-version --ignore-scripts >/dev/null
 replace server.json "\"version\": \"$current\"" "\"version\": \"$new\""
 replace server.json "ghcr.io/pilotaai/slotlock:$current" "ghcr.io/pilotaai/slotlock:$new"
 replace slotlock.manifest.json "\"version\": \"$current\"" "\"version\": \"$new\""
+if lagging=$(client_versions_set "$current" "$new"); then :; else
+  fail "$lagging is not at $new."
+fi
 
 # Every copy of the version moved, or nothing is committed.
 [ "$(jq -r .version package.json)" = "$new" ] || fail "package.json is not at $new."

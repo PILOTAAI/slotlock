@@ -1,8 +1,9 @@
 #!/bin/sh
 # Release guard, run before anything is built or published: the tag is v<package.json version>,
 # names a commit on origin/main, which is the commit checked out, that version has a dated
-# CHANGELOG heading, and server.json publishes the same version and image tag. Every file is read as
-# that commit has it. Needs git history with origin/main, and jq.
+# CHANGELOG heading, server.json publishes the same version and image tag, and every language client
+# carries that version (scripts/client-versions.sh). Every file is read as that commit has it. Needs
+# git history with origin/main, and jq.
 #   scripts/check-release-tag.sh <tag>
 #   scripts/check-release-tag.sh <tag> --commit <rev>
 # With --commit the tag need not exist yet: <rev> is checked as the commit it will name, which is
@@ -53,5 +54,10 @@ at CHANGELOG.md | grep -Eq "^## $escaped - [0-9]{4}-[0-9]{2}-[0-9]{2}\$" \
 [ "$(at server.json | jq -r .version)" = "$version" ] || fail "server.json version is not $version."
 [ "$(at server.json | jq -r '.packages[0].identifier')" = "ghcr.io/pilotaai/slotlock:$version" ] \
   || fail "server.json image is not ghcr.io/pilotaai/slotlock:$version."
+
+. "$(dirname "$0")/client-versions.sh"
+if lagging=$(client_versions_check "$version" "$commit"); then :; else
+  fail "$lagging does not name version $version."
+fi
 
 echo "Release $tag: $commit is on main; package.json, CHANGELOG.md and server.json agree on $version."

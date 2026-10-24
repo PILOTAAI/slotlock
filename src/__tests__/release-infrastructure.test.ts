@@ -645,7 +645,7 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
       (request) => request.path.endsWith('/rulesets') && request.body.target === 'tag',
     );
     expect(tags, 'two tag rulesets').toHaveLength(2);
-    for (const { body } of tags) expect(body.conditions?.ref_name.include).toEqual(['refs/tags/v*']);
+    for (const { body } of tags) expect(body.conditions?.ref_name.include).toContain('refs/tags/v*');
     const byRules = (types: string) =>
       tags.find(({ body }) => body.rules?.map((rule) => rule.type).sort().join() === types)?.body;
     // A DeployKey bypass names no key (the REST docs: its actor_id "should be null"), so it covers
@@ -1454,12 +1454,14 @@ describe('release button', () => {
 describe('release pull request', () => {
   const bot = 'github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>';
   const branch = 'release/v1.2.4';
+  // One client file stands for the eight scripts/client-versions.sh lists.
   const files = [
     'package.json',
     'package-lock.json',
     'server.json',
     'slotlock.manifest.json',
     'CHANGELOG.md',
+    'clients/go/client.go',
   ];
   // A stand-in for gh: pr list answers with the open pull request's number, or nothing; pr create
   // opens #52, or fails with STUB_CREATE_ERROR.
@@ -1506,7 +1508,10 @@ esac
     git('init', '--quiet', '--bare', '--initial-branch=main', origin);
     git('init', '--quiet', '--initial-branch=main');
     const write = (version: string) => {
-      for (const file of files) writeFileSync(join(cwd, file), `${file} ${version}\n`);
+      for (const file of files) {
+        mkdirSync(dirname(join(cwd, file)), { recursive: true });
+        writeFileSync(join(cwd, file), `${file} ${version}\n`);
+      }
     };
     write('1.2.3');
     git('add', '.');

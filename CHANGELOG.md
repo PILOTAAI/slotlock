@@ -65,6 +65,14 @@ versioning.
   `slotlock/openapi.json`.
 - The capability manifest names the 0.2 surfaces: `rest-api`, `application-api`, `api-keys`,
   `dashboard` and `maintenance` (and its schema accepts them), and the package check asserts them.
+- Release jobs for the five language clients: `slotlock` on PyPI and crates.io, `Slotlock.Client` on
+  NuGet, `io.pylota:slotlock` on Maven Central and the Go module's `clients/go/v<version>` tag. Each
+  runs only after the release suite has passed, in its own environment a maintainer approves; PyPI,
+  crates.io and NuGet use trusted publishing, so no token is stored for them, and Maven Central gets
+  a deployment a maintainer publishes in the Central Portal. The clients now carry the package's
+  version (they said 0.1.0 beside a 0.2.0 server): `scripts/prepare-release.sh` moves them with each
+  release and `scripts/check-release-tag.sh` refuses a release where one disagrees.
+  `docs/release/clients.md` has each registry's one-time setup.
 
 ## 0.2.0 - 2026-10-23
 

@@ -29,6 +29,9 @@ bot_email='41898282+github-actions[bot]@users.noreply.github.com'
 
 git switch -q -c "$branch" >&2
 git add package.json package-lock.json server.json slotlock.manifest.json CHANGELOG.md
+# Each language client's version, as scripts/prepare-release.sh moved it.
+. "$(dirname "$0")/client-versions.sh"
+client_version_paths | while IFS= read -r path; do git add -- "$path"; done
 git -c user.name="$bot" -c user.email="$bot_email" commit -q -m "Release $version" \
   -m "Signed-off-by: $bot <$bot_email>" >&2
 commit=$(git rev-parse HEAD)

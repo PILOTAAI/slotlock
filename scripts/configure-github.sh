@@ -397,6 +397,14 @@ configure_environments() {
   # registry version can be published once only; it names the image this tag pushed.
   configure_environment mcp-registry "$reviewers" tag 'v*'
 
+  # The language clients' publish jobs in release.yml, one environment per registry, so each
+  # registry's trusted publisher (PyPI, crates.io, NuGet) can name its own environment and a
+  # maintainer approves each one. maven-central holds the Central Portal token and the signing key
+  # (docs/release/clients.md); go-module pushes the clients/go/v* tag with GITHUB_TOKEN.
+  for name in pypi crates-io nuget maven-central go-module; do
+    configure_environment "$name" "$reviewers" tag 'v*'
+  done
+
   # release-tag: tag-release.yml's job, on a push to main or a manual run on main. It holds the
   # deploy key that job pushes release tags with, so only runs on main can read it. No reviewer:
   # the version already went through a pull request into main.
@@ -594,12 +602,15 @@ configure_tag_ruleset() {
     rules: [{type: "creation"}]
   }')" || die "$RULESET_ERROR"
   verify_bypass "$RULESET_ID" always
+  # The Go client's clients/go/v* tags are module versions, which must never move either. Creating
+  # one is left to write access: release.yml's go-module job pushes it with GITHUB_TOKEN, which a
+  # ruleset could let through only by trusting every workflow's token.
   upsert_ruleset tag "$TAG_KEEP_RULESET" "$(jq -n --arg name "$TAG_KEEP_RULESET" --argjson role "$ADMIN_ROLE_ID" '{
     name: $name,
     target: "tag",
     enforcement: "active",
     bypass_actors: [{actor_id: $role, actor_type: "RepositoryRole", bypass_mode: "always"}],
-    conditions: {ref_name: {include: ["refs/tags/v*"], exclude: []}},
+    conditions: {ref_name: {include: ["refs/tags/v*", "refs/tags/clients/go/v*"], exclude: []}},
     rules: [{type: "update"}, {type: "deletion"}]
   }')" || die "$RULESET_ERROR"
   verify_bypass "$RULESET_ID" always
@@ -720,6 +731,11 @@ EOF
 EOF
   fi
   cat <<EOF
+
+[ ] The language clients' registries, once each: a PyPI pending publisher, the first crates.io
+    version by hand and then its trusted publisher, a NuGet trusted publishing policy and the
+    NUGET_USER variable, and the Maven Central namespace, token and signing key in the
+    maven-central environment. docs/release/clients.md gives every step.
 
 [ ] Before the first site deploy (site/README.md): slotlock.pylota.io must have no CNAME record,
     and the pylota.io zone must have the route slotlock.pylota.io/* with no Worker. Without it
