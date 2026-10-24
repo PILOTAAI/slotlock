@@ -8,15 +8,67 @@ export interface LocalDateTime {
   millisecond?: number;
 }
 
+/**
+ * Which instant a wall time names where the clocks change. RFC 5545 §3.3.5 reads a time in a fold
+ * (an hour the clocks repeat) as its first instant, and a time in a gap (an hour they skip) with the
+ * offset in force before the gap, which moves it forward by the gap: the defaults.
+ */
+export interface WallTimeChoice {
+  /** In a fold: the earlier instant (default), or the later one. */
+  fold?: 'earlier' | 'later';
+  /** In a gap: moved forward by the gap (default), or the instant the gap ends. */
+  gap?: 'shift' | 'end';
+}
+
 export interface TimeZoneConverter {
   /**
    * Convert UTC-framed wall-clock fields to the instant that reads as those fields in this zone.
-   * Compatible disambiguation: first instant for a fold; shift forward by the gap for a hole.
+   * By default the first instant for a fold, and shifted forward by the gap for a hole.
    */
-  wallFrameToUtc(wallFrameMs: number): Date;
+  wallFrameToUtc(wallFrameMs: number, choice?: WallTimeChoice): Date;
 }
 
 const FOURTEEN_HOURS_MS = 14 * 60 * 60 * 1000;
+
+/**
+ * The instant, in ms, that reads as `wallFrameMs` (wall-clock fields framed as UTC) in a zone whose
+ * offset at an instant `offsetAt` gives, in ms. The offsets in force within fourteen hours either
+ * side are the candidates (no zone is further than that from UTC, so they include both sides of any
+ * change the wall time is near); one that maps back to the wall time names it. Two do in a fold,
+ * none in a gap, where the offset before the gap is the smaller one.
+ */
+export function wallFrameToInstant(
+  wallFrameMs: number,
+  offsetAt: (utcMs: number) => number,
+  choice: WallTimeChoice = {},
+): number {
+  const offsets = new Set([
+    offsetAt(wallFrameMs - FOURTEEN_HOURS_MS),
+    offsetAt(wallFrameMs),
+    offsetAt(wallFrameMs + FOURTEEN_HOURS_MS),
+  ]);
+  const valid: number[] = [];
+  for (const offset of offsets) {
+    if (offsetAt(wallFrameMs - offset) === offset) valid.push(offset);
+  }
+  if (valid.length === 1) return wallFrameMs - (valid[0] as number);
+  if (valid.length > 1) {
+    return wallFrameMs - (choice.fold === 'later' ? Math.min(...valid) : Math.max(...valid));
+  }
+  const shifted = wallFrameMs - Math.min(...offsets);
+  if (choice.gap !== 'end') return shifted;
+  // The gap ends at the change: the first whole second after the instant read with the offset
+  // after the gap (which is still before it) whose offset differs from that one's.
+  let before = wallFrameMs - Math.max(...offsets);
+  const offsetBefore = offsetAt(before);
+  let after = shifted;
+  while (after - before > 1000) {
+    const middle = before + Math.floor((after - before) / 2000) * 1000;
+    if (offsetAt(middle) === offsetBefore) before = middle;
+    else after = middle;
+  }
+  return after;
+}
 
 /**
  * Date.UTC remaps years 0..99 to 1900..1999. Slotlock accepts ISO calendar years down to 1,
@@ -97,22 +149,34 @@ export function createTimeZoneConverter(timezone: string): TimeZoneConverter {
     return { wallFrameToUtc: (wallFrameMs) => new Date(wallFrameMs) };
   }
   const formatter = createFormatter(timezone);
+  const offsetIn = (utcMs: number) => offsetAt(utcMs, formatter);
   return {
-    wallFrameToUtc(wallFrameMs) {
-      const offsets = new Set([
-        offsetAt(wallFrameMs - FOURTEEN_HOURS_MS, formatter),
-        offsetAt(wallFrameMs, formatter),
-        offsetAt(wallFrameMs + FOURTEEN_HOURS_MS, formatter),
-      ]);
-      const valid: number[] = [];
-      for (const offset of offsets) {
-        if (offsetAt(wallFrameMs - offset, formatter) === offset) valid.push(offset);
-      }
-      if (valid.length === 1) return new Date(wallFrameMs - (valid[0] as number));
-      if (valid.length > 1) return new Date(wallFrameMs - Math.max(...valid));
-      return new Date(wallFrameMs - Math.min(...offsets));
+    wallFrameToUtc(wallFrameMs, choice) {
+      return new Date(wallFrameToInstant(wallFrameMs, offsetIn, choice));
     },
   };
+}
+
+/**
+ * The spelling Slotlock keeps of an IANA zone name: Intl's, when Intl reads the name as itself in
+ * another case (`europe/london` is `Europe/London`); otherwise the name as given (`US/Eastern` stays,
+ * although this Node's ICU may call it `America/New_York`, so a stored name never depends on the
+ * ICU version that wrote it). A UTC offset (`+05:00`, which Intl accepts as a zone) is not an IANA
+ * name and is refused, as is anything Intl does not know: both with `code: 'invalid_timezone'`.
+ */
+export function canonicalTimeZoneName(timezone: string): string {
+  const name = timezone.trim();
+  const invalid = () =>
+    Object.assign(new Error(`Invalid timezone: ${timezone}`), { code: 'invalid_timezone' });
+  if (!name || /^[+-]/.test(name)) throw invalid();
+  let resolved: string;
+  try {
+    resolved = new Intl.DateTimeFormat('en-US', { timeZone: name }).resolvedOptions().timeZone;
+  } catch {
+    throw invalid();
+  }
+  if (/^[+-]/.test(resolved)) throw invalid();
+  return resolved.toLowerCase() === name.toLowerCase() ? resolved : name;
 }
 
 export interface ZonedCalendarDate {
@@ -230,7 +294,11 @@ function assertLocalDateTime(value: LocalDateTime): void {
   }
 }
 
-export function zonedDateTimeToUtc(value: LocalDateTime, timezone: string): Date {
+export function zonedDateTimeToUtc(
+  value: LocalDateTime,
+  timezone: string,
+  choice?: WallTimeChoice,
+): Date {
   assertLocalDateTime(value);
   const wallFrame = utcFrame(
     value.year,
@@ -241,5 +309,5 @@ export function zonedDateTimeToUtc(value: LocalDateTime, timezone: string): Date
     value.second ?? 0,
     value.millisecond ?? 0,
   ).getTime();
-  return createTimeZoneConverter(timezone).wallFrameToUtc(wallFrame);
+  return createTimeZoneConverter(timezone).wallFrameToUtc(wallFrame, choice);
 }
