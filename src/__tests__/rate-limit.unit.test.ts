@@ -129,6 +129,30 @@ describe('the address limit', () => {
     expect(lookups).toEqual(['Bearer fake-0', 'Bearer fake-1', 'Bearer fake-2']);
   });
 
+  it("never counts the health check, so a flood from the proxy's address cannot fail it (HOST-3)", async () => {
+    // Behind kamal-proxy without a trusted client-address field, its health checks come from the
+    // same address as every proxied request; the check reuses one database query a second anyway.
+    const limiter = createSlotlockRequestLimits({
+      limits: limitsWith({ rates: { address: { perSecond: 1, burst: 2 } } }),
+      basePath: '/slotlock',
+      authenticate: async () => null,
+    });
+    const target = limiter.serve({ fetch: async () => new Response(null, { status: 204 }) });
+    const from = (path: string, method = 'GET') =>
+      target.fetch(new Request(`http://localhost${path}`, { method }), { remoteAddress: '10.0.0.9' });
+    const statuses: number[] = [];
+    for (const path of ['/slotlock/v1/resources', '/slotlock/v1/resources', '/slotlock/v1/resources']) {
+      statuses.push((await from(path)).status);
+    }
+    expect(statuses).toEqual([204, 204, 429]);
+    expect((await from('/slotlock/healthz')).status).toBe(204);
+    expect((await from('/slotlock/healthz')).status).toBe(204);
+    // Only the health check: the same path outside the base path, or another method, is counted.
+    expect((await from('/healthz')).status).toBe(429);
+    expect((await from('/slotlock/healthz', 'POST')).status).toBe(429);
+    limiter.close();
+  });
+
   it('looks a request up once, however often the agent server asks', async () => {
     const lookups: string[] = [];
     const limiter = createSlotlockRequestLimits({
@@ -248,21 +272,21 @@ describe('token buckets', () => {
       now: clock().now,
     });
     const first = { remoteAddress: '10.0.0.1' };
-    expect((await target.fetch(get('/healthz'), first)).status).toBe(401);
-    expect((await target.fetch(get('/healthz'), first)).status).toBe(429);
+    expect((await target.fetch(get('/manifest.json'), first)).status).toBe(401);
+    expect((await target.fetch(get('/manifest.json'), first)).status).toBe(429);
     const address = (index: number) =>
       `10.${(index >> 16) & 255}.${(index >> 8) & 255}.${(index & 255) + 1}`;
     const started = performance.now();
     for (let index = 1; index <= 300_000; index += 1) {
-      await target.fetch(get('/healthz'), { remoteAddress: address(index) });
+      await target.fetch(get('/manifest.json'), { remoteAddress: address(index) });
     }
     // Room is made a tenth at a time, so each new address costs a constant amount: 300,000 new
     // addresses take far less than the quadratic sweep a scan per request would.
     expect(performance.now() - started).toBeLessThan(30_000);
     // The least recently used buckets went: the first client starts afresh rather than the server
     // growing without bound, and a recent one is still counted.
-    expect((await target.fetch(get('/healthz'), first)).status).toBe(401);
-    expect((await target.fetch(get('/healthz'), { remoteAddress: address(300_000) })).status).toBe(
+    expect((await target.fetch(get('/manifest.json'), first)).status).toBe(401);
+    expect((await target.fetch(get('/manifest.json'), { remoteAddress: address(300_000) })).status).toBe(
       429,
     );
   }, 60_000);

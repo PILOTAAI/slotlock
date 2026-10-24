@@ -96,7 +96,7 @@ export interface SlotlockRequestLimits {
   close(): void;
 }
 
-type Route = 'mcp' | 'a2a' | 'rest' | 'sign_in' | 'other';
+type Route = 'mcp' | 'a2a' | 'rest' | 'sign_in' | 'health' | 'other';
 
 interface Policy {
   name: string;
@@ -515,6 +515,7 @@ export function createSlotlockRequestLimits(
     const path = pathname.slice(base.length) || '/';
     if (path === '/mcp') return 'mcp';
     if (path === '/a2a') return 'a2a';
+    if (path === '/healthz' && request.method === 'GET') return 'health';
     if (path.startsWith('/v1/') || path === '/openapi.json') return 'rest';
     // The dashboard routes one trailing slash as the path without it.
     if (signInPaths.has(path.replace(/(.)\/$/, '$1'))) return 'sign_in';
@@ -588,9 +589,11 @@ export function createSlotlockRequestLimits(
           const route = routeOf(request);
           const address = clientOf(request, connection, options.trustedProxyHeader);
           addresses.set(request, address);
-          // Before anything is looked up: every request from the address, and its sign-ins.
+          // Before anything is looked up: every request from the address, and its sign-ins. Not
+          // the health check, which a proxy in front asks from the address its requests share, and
+          // which reuses one database check a second.
           const before = charge([
-            { name: 'address', key: address },
+            ...(route === 'health' ? [] : [{ name: 'address' as const, key: address }]),
             ...(route === 'sign_in' ? [{ name: 'sign_in' as const, key: address }] : []),
           ]);
           if (!before.ok) {
@@ -629,7 +632,7 @@ export function createSlotlockRequestLimits(
           if (state.refusal) count(state.refusal.reason, address);
           const fields =
             state.refusal?.fields ??
-            (state.tightest && route !== 'other' && route !== 'sign_in'
+            (state.tightest && (route === 'mcp' || route === 'a2a' || route === 'rest')
               ? fieldsOf(state.tightest, false)
               : undefined);
           if (!fields) return response;
