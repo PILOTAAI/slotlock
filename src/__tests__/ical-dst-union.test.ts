@@ -326,6 +326,32 @@ describe('a DTSTART inside the gap or the fold (ENG-14)', () => {
     expect(() => parseTrustedICalendarEvents(text)).toThrow(CalendarContractError);
   });
 
+  it.each([
+    // Santiago and Havana move their clocks forward at midnight: 00:00 becomes 01:00.
+    ['America/Santiago', '20270905', '20270906', '2027-09-06T03:00:00.000Z'],
+    ['America/Havana', '20270314', '20270315', '2027-03-15T04:00:00.000Z'],
+  ])(
+    'an all-day series whose first midnight %s skips: read, not stored an hour late',
+    (zone, from, to, secondDay) => {
+      const text = cal(
+        ...ev(
+          'a',
+          `DTSTART;VALUE=DATE:${from}`,
+          `DTEND;VALUE=DATE:${to}`,
+          'RRULE:FREQ=DAILY;COUNT=3',
+        ),
+      );
+      const window = w('2027-01-01T00:00:00Z', '2027-12-01T00:00:00Z');
+      // Its later days start at midnight.
+      expect(
+        parseICalendarChanges(text, zone, window).map((change) => iso(change.start as Date))[1],
+      ).toBe(secondDay);
+      // Stored as an instant and a zone, it would recur at that instant's wall time, 01:00: every
+      // later day's first hour would be free.
+      expect(() => parseTrustedICalendarEvents(text, zone)).toThrow(CalendarContractError);
+    },
+  );
+
   it('a series starting in the fold: its first instance is the two hours written', () => {
     expect(
       feedSpans(
@@ -376,6 +402,125 @@ describe('DTSTART is always the first instance (RFC 5545 §3.8.5.3)', () => {
       ['2027-01-06T09:00:00.000Z', '2027-01-06T10:00:00.000Z'],
       ['2027-01-11T09:00:00.000Z', '2027-01-11T10:00:00.000Z'],
       ['2027-01-18T09:00:00.000Z', '2027-01-18T10:00:00.000Z'],
+    ]);
+  });
+});
+
+describe("a series' occurrences never overlap each other (ENG-18)", () => {
+  /** Each pair of consecutive spans that overlap. */
+  const overlaps = (spans: Spans) =>
+    spans.slice(1).flatMap((span, i) => {
+      const before = spans[i] as [string, string];
+      return before[1] > span[0] ? [`${before.join('..')} overlaps ${span.join('..')}`] : [];
+    });
+  /** The minutes a set of spans covers, as one list of disjoint spans. */
+  const merged = (spans: Spans): Spans => {
+    const out: Spans = [];
+    for (const [from, to] of [...spans].sort((a, b) => a[0].localeCompare(b[0]))) {
+      const last = out.at(-1);
+      if (last && from <= last[1]) last[1] = to > last[1] ? to : last[1];
+      else out.push([from, to]);
+    }
+    return out;
+  };
+  const london24 = [
+    ['2027-03-26T00:00:00.000Z', '2027-03-27T00:00:00.000Z'],
+    ['2027-03-27T00:00:00.000Z', '2027-03-28T00:00:00.000Z'],
+    // The exact 24 hours run to 01:00 BST; the next occurrence starts at midnight BST.
+    ['2027-03-28T00:00:00.000Z', '2027-03-28T23:00:00.000Z'],
+    ['2027-03-28T23:00:00.000Z', '2027-03-29T23:00:00.000Z'],
+    ['2027-03-29T23:00:00.000Z', '2027-03-30T23:00:00.000Z'],
+  ];
+
+  it('a daily 24-hour series across the spring change: each ends where the next starts', () => {
+    const window = w('2027-03-20T00:00:00Z', '2027-04-10T00:00:00Z');
+    const fromFeed = feedSpans(
+      series('Europe/London', '20270326T000000', '20270327T000000', 'FREQ=DAILY;COUNT=5'),
+      window,
+    );
+    expect(fromFeed).toEqual(london24);
+    const stored = storeSpans(
+      {
+        start: new Date('2027-03-26T00:00:00Z'),
+        end: new Date('2027-03-27T00:00:00Z'),
+        timezone: 'Europe/London',
+        summary: 'away',
+        recurrence: { rrule: 'FREQ=DAILY;COUNT=5' },
+      },
+      window,
+    );
+    expect(stored).toEqual(london24);
+    // No minute the union rule holds is lost: the series runs without a break to its last end.
+    expect(merged(stored)).toEqual([['2027-03-26T00:00:00.000Z', '2027-03-30T23:00:00.000Z']]);
+  });
+
+  it('a weekly seven-day series across the spring change in New York', () => {
+    const window = w('2027-03-01T00:00:00Z', '2027-04-01T00:00:00Z');
+    const content: CalendarEventContent = {
+      start: new Date('2027-03-07T05:00:00Z'),
+      end: new Date('2027-03-14T05:00:00Z'),
+      timezone: 'America/New_York',
+      summary: 'lease',
+      recurrence: { rrule: 'FREQ=WEEKLY;COUNT=3' },
+    };
+    const expected = [
+      ['2027-03-07T05:00:00.000Z', '2027-03-14T05:00:00.000Z'],
+      // 168 exact hours from midnight EST end at 01:00 EDT; the next week starts at midnight EDT.
+      ['2027-03-14T05:00:00.000Z', '2027-03-21T04:00:00.000Z'],
+      ['2027-03-21T04:00:00.000Z', '2027-03-28T04:00:00.000Z'],
+    ];
+    expect(storeSpans(content, window)).toEqual(expected);
+    expect(
+      feedSpans(
+        series('America/New_York', '20270307T000000', '20270314T000000', 'FREQ=WEEKLY;COUNT=3'),
+        window,
+      ),
+    ).toEqual(expected);
+  });
+
+  it.each([
+    // The day the clocks go forward is 23 hours long, at local midnight or (Santiago, which skips
+    // midnight) from 01:00.
+    ['Europe/London', '20270326', '2027-03-28T00:00:00.000Z', '2027-03-28T23:00:00.000Z'],
+    ['America/Santiago', '20270903', '2027-09-05T04:00:00.000Z', '2027-09-06T03:00:00.000Z'],
+    ['America/New_York', '20270312', '2027-03-14T05:00:00.000Z', '2027-03-15T04:00:00.000Z'],
+  ])('a daily all-day series in %s is stored as the feed reads it', (zone, from, day, dayEnd) => {
+    const next = new Date(Date.UTC(+from.slice(0, 4), +from.slice(4, 6) - 1, +from.slice(6) + 1));
+    const to = next.toISOString().slice(0, 10).replace(/-/g, '');
+    const text = cal(
+      `X-WR-TIMEZONE:${zone}`,
+      ...ev(
+        'a',
+        `DTSTART;VALUE=DATE:${from}`,
+        `DTEND;VALUE=DATE:${to}`,
+        'RRULE:FREQ=DAILY;COUNT=5',
+      ),
+    );
+    const window = w('2027-03-01T00:00:00Z', '2027-10-01T00:00:00Z');
+    const fromFeed = feedSpans(text, window);
+    expect(fromFeed).toContainEqual([day, dayEnd]);
+    expect(overlaps(fromFeed)).toEqual([]);
+    const [event] = parseTrustedICalendarEvents(text, zone);
+    const stored = storeSpans(event as CalendarEventContent, window);
+    expect(overlaps(stored)).toEqual([]);
+    expect(stored).toEqual(fromFeed);
+  });
+
+  it('a cancelled next occurrence leaves the one before it its whole union', () => {
+    const content: CalendarEventContent = {
+      start: new Date('2027-03-26T00:00:00Z'),
+      end: new Date('2027-03-27T00:00:00Z'),
+      timezone: 'Europe/London',
+      summary: 'away',
+      recurrence: {
+        rrule: 'FREQ=DAILY;COUNT=5',
+        exceptions: [{ recurrenceId: new Date('2027-03-28T23:00:00Z'), cancelled: true }],
+      },
+    };
+    expect(storeSpans(content, w('2027-03-27T12:00:00Z', '2027-03-31T00:00:00Z'))).toEqual([
+      ['2027-03-27T00:00:00.000Z', '2027-03-28T00:00:00.000Z'],
+      ['2027-03-28T00:00:00.000Z', '2027-03-29T00:00:00.000Z'],
+      ['2027-03-29T23:00:00.000Z', '2027-03-30T23:00:00.000Z'],
     ]);
   });
 });

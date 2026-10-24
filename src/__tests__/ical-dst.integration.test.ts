@@ -148,6 +148,64 @@ describe.skipIf(!url)('the daylight-saving corpus in PostgreSQL', () => {
     },
   );
 
+  it('stores a daily 24-hour series across the spring change, each day ending where the next starts', async () => {
+    // Every occurrence is its own reservation under one EXCLUDE constraint: on 2027-03-28 the exact
+    // 24 hours run to 01:00 BST, an hour into the next day's occurrence, which the store must not
+    // be handed as an overlap.
+    const resourceId = await resource();
+    const written = await write(resourceId, {
+      start: new Date('2027-03-26T00:00:00Z'),
+      end: new Date('2027-03-27T00:00:00Z'),
+      timezone: 'Europe/London',
+      summary: 'away',
+      recurrence: { rrule: 'FREQ=DAILY;COUNT=5' },
+    });
+    expect(written).toMatchObject({ ok: true });
+    const expected: Span[] = [
+      ['2027-03-26T00:00Z', '2027-03-27T00:00Z'],
+      ['2027-03-27T00:00Z', '2027-03-28T00:00Z'],
+      ['2027-03-28T00:00Z', '2027-03-28T23:00Z'],
+      ['2027-03-28T23:00Z', '2027-03-29T23:00Z'],
+      ['2027-03-29T23:00Z', '2027-03-30T23:00Z'],
+    ];
+    expect(await occupied(resourceId, expected)).toEqual({ busy: expected, bookable: [] });
+  });
+
+  it('stores a daily all-day series imported across the spring change', async () => {
+    const resourceId = await resource();
+    const [event] = parseTrustedICalendarEvents(
+      [
+        'BEGIN:VCALENDAR',
+        'VERSION:2.0',
+        'PRODID:-//t//EN',
+        'BEGIN:VEVENT',
+        'UID:off',
+        'DTSTAMP:20260101T000000Z',
+        'SUMMARY:off',
+        'DTSTART;VALUE=DATE:20270312',
+        'DTEND;VALUE=DATE:20270313',
+        'RRULE:FREQ=DAILY;COUNT=5',
+        'END:VEVENT',
+        'END:VCALENDAR',
+        '',
+      ].join('\r\n'),
+      'America/New_York',
+    );
+    const { start, end, timezone, summary, recurrence } = event as CalendarEventContent;
+    const content: CalendarEventContent = { start, end, timezone, summary };
+    if (recurrence) content.recurrence = recurrence;
+    expect(await write(resourceId, content)).toMatchObject({ ok: true });
+    const expected: Span[] = [
+      ['2027-03-12T05:00Z', '2027-03-13T05:00Z'],
+      ['2027-03-13T05:00Z', '2027-03-14T05:00Z'],
+      // The day the clocks go forward is 23 hours long.
+      ['2027-03-14T05:00Z', '2027-03-15T04:00Z'],
+      ['2027-03-15T04:00Z', '2027-03-16T04:00Z'],
+      ['2027-03-16T04:00Z', '2027-03-17T04:00Z'],
+    ];
+    expect(await occupied(resourceId, expected)).toEqual({ busy: expected, bookable: [] });
+  });
+
   it('stores most of the corpus, so the comparison above is not vacuous', () => {
     expect(storeCases.length).toBeGreaterThanOrEqual(10);
     expect(importedCases.length).toBeGreaterThanOrEqual(20);

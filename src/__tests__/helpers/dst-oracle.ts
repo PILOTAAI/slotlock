@@ -104,7 +104,11 @@ export interface SimpleSeries {
   count: number;
 }
 
-/** Each occurrence of a DAILY or WEEKLY COUNT series under the rule, as [start, end) ms. */
+/**
+ * Each occurrence of a DAILY or WEEKLY COUNT series under the rule, as [start, end) ms. A series'
+ * occurrences never overlap: where one reaches past the next one's start, it ends there and the
+ * next ends at the later of the two ends.
+ */
 export function occupation(series: SimpleSeries): [number, number][] {
   const n0 = wallFrame(series.start);
   const s0 = resolve(n0, series.zone);
@@ -119,7 +123,44 @@ export function occupation(series: SimpleSeries): [number, number][] {
     const end = Math.max(start + exact, resolve(n + wallLength, series.zone, 'later'));
     if (end > start) out.push([start, end]);
   }
-  return out;
+  return separate(out);
+}
+
+/**
+ * Occurrences in order of their starts, none overlapping: where one reaches past the next one's
+ * start, it ends there and the next ends at the later of the two ends.
+ */
+function separate(spans: [number, number][]): [number, number][] {
+  for (let k = 1; k < spans.length; k++) {
+    const before = spans[k - 1] as [number, number];
+    const span = spans[k] as [number, number];
+    if (before[1] > span[0]) {
+      span[1] = Math.max(span[1], before[1]);
+      before[1] = span[0];
+    }
+  }
+  return spans;
+}
+
+/**
+ * Each occurrence of a DAILY or WEEKLY COUNT series of all-day events from `start`, a DATE
+ * `yyyymmdd`, lasting `days`: from one local midnight to another (RFC 5545 §3.3.5 moves a midnight
+ * the clocks skip forward), as [start, end) ms, made disjoint as a timed series' are.
+ */
+export function allDayOccupation(
+  zone: string,
+  start: string,
+  days: number,
+  everyDays: number,
+  count: number,
+): [number, number][] {
+  const n0 = wallFrame(`${start}T000000`);
+  const out: [number, number][] = [];
+  for (let k = 0; k < count; k++) {
+    const n = n0 + k * everyDays * DAY;
+    out.push([resolve(n, zone), resolve(n + days * DAY, zone)]);
+  }
+  return separate(out);
 }
 
 /** The DST transitions of `zone` between two instants, as the instant each takes effect. */

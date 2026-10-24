@@ -1144,7 +1144,11 @@ describe('a confirmation question a person can trust', () => {
       },
       'slotlock_update_event',
     );
-    expect(message).toContain('4 moved (2027-03-09 12:00:59 to 2027-03-09 03:00–04:00; ');
+    // DTSTART's own 49 hours reach past the rule's 09:00:59 local the same day, so the store ends
+    // them there: the first instance is named too.
+    expect(message).toContain(
+      '5 moved (2027-03-02 09:00:59 to 2027-03-02 09:00:59–12:00:59; 2027-03-09 12:00:59 to 2027-03-09 03:00–04:00; ',
+    );
     expect(message).toContain('; also description, location, attendees, reminders; ');
     expect(message).toContain(`; title to "${'N'.repeat(119)}…"`);
     expect(message.endsWith(`. It is titled "${'T'.repeat(119)}…".`)).toBe(true);

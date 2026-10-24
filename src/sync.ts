@@ -2820,6 +2820,7 @@ function parseCalendarChanges(
       const before = changes.length;
       try {
         readSeries(uid, group);
+        separateOccurrences(changes, before, expansionWindow);
       } catch (error) {
         if (!refused || !(error instanceof CalendarContractError)) throw error;
         changes.length = before;
@@ -2832,6 +2833,42 @@ function parseCalendarChanges(
   } catch (error) {
     if (error instanceof CalendarContractError) throw error;
     throw new CalendarContractError('invalid_icalendar');
+  }
+}
+
+/**
+ * Make one series' busy occurrences, `changes` from `from` on, disjoint without freeing a minute of
+ * them: where one ends after the next starts, it ends where the next starts, and the next ends at
+ * the later of the two ends. The union rule makes an occurrence of about a day or longer reach into
+ * the next one where the clocks go forward (24 exact hours from midnight end at 01:00 the next day),
+ * and the store holds each occurrence as a reservation under one EXCLUDE constraint, which refuses
+ * two that overlap. Two that start at the same instant are left as they are. An occurrence cut to
+ * end before the window is dropped: the next one holds its time there.
+ */
+function separateOccurrences(
+  changes: ExternalCalendarChange[],
+  from: number,
+  window: ICalendarExpansionWindow | undefined,
+): void {
+  const busy = changes
+    .slice(from)
+    .filter((change) => change.busy && change.start !== null && change.end !== null)
+    .sort((left, right) => (left.start as Date).getTime() - (right.start as Date).getTime());
+  const cut = new Set<ExternalCalendarChange>();
+  for (let index = 1; index < busy.length; index++) {
+    const before = busy[index - 1] as ExternalCalendarChange;
+    const change = busy[index] as ExternalCalendarChange;
+    const start = (change.start as Date).getTime();
+    const reach = (before.end as Date).getTime();
+    if (reach <= start || (before.start as Date).getTime() === start) continue;
+    if (reach > (change.end as Date).getTime()) change.end = new Date(reach);
+    before.end = new Date(start);
+    cut.add(before);
+  }
+  if (!window || cut.size === 0) return;
+  for (let index = changes.length - 1; index >= from; index--) {
+    const change = changes[index] as ExternalCalendarChange;
+    if (cut.has(change) && (change.end as Date) <= window.start) changes.splice(index, 1);
   }
 }
 
@@ -3387,10 +3424,12 @@ export function parseTrustedICalendarEvents(
       }
       const rrule = rrules[0]?.getFirstValue();
       if (rrule) {
-        // A timed series is stored as an instant and a zone, and recurs at that instant's wall
-        // time. A DTSTART the clocks skip (02:30 the night 02:00 becomes 03:00) has no instant
-        // that reads as it, so storing it would move every occurrence an hour: it is refused.
-        if (!allDay && own.reader.toWall(own.start) !== own.startWall) {
+        // A series is stored as an instant and a zone, and recurs at that instant's wall time. A
+        // DTSTART the clocks skip (02:30 the night 02:00 becomes 03:00, or an all-day series'
+        // midnight where the clocks go forward at midnight, as in Santiago and Havana) has no
+        // instant that reads as it, so storing it would move every occurrence an hour: it is
+        // refused.
+        if (own.reader.toWall(own.start) !== own.startWall) {
           throw new CalendarContractError('invalid_icalendar');
         }
         const lengthMs = own.end - own.start;
