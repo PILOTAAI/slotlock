@@ -7,6 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Ajv2020 from 'ajv/dist/2020.js';
 import postgres from 'postgres';
+import { checkNotice } from './notice.mjs';
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const artifactRoot = join(packageRoot, 'dist');
@@ -51,19 +52,13 @@ assert.ok(
 assert.deepEqual(manifest.peerDependencies, { postgres: '^3.4.5' });
 assert.equal(manifest.dependencies?.postgres, undefined, 'postgres must be a peer dependency');
 
-const notice = readFileSync(join(artifactRoot, 'NOTICE'), 'utf8');
-assert.match(notice, /^Copyright \d{4} TREFT LTD$/m, 'NOTICE must name the copyright holder');
 assert.match(
   readFileSync(join(artifactRoot, 'LICENSE'), 'utf8'),
   /^ {3}Copyright \d{4} TREFT LTD$/m,
   'the LICENSE appendix must name the copyright holder',
 );
-for (const [name, version] of Object.entries(manifest.dependencies ?? {})) {
-  assert.ok(notice.includes(`${name} ${version},`), `NOTICE must list ${name} ${version}`);
-}
-for (const [name, range] of Object.entries(manifest.peerDependencies)) {
-  assert.ok(notice.includes(`(${name}) ${range},`), `NOTICE must list peer ${name} ${range}`);
-}
+// Every dependency at the exact version the artifact declares, every peer at its range.
+assert.deepEqual(checkNotice(readFileSync(join(artifactRoot, 'NOTICE'), 'utf8'), manifest), []);
 
 const packed = JSON.parse(
   execFileSync(

@@ -3,6 +3,15 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Fixed
+
+- A runtime dependency bump no longer breaks the release checks. The packed NOTICE is written at
+  build time from `package.json` and `package-lock.json` (`scripts/notice.mjs`), naming the exact
+  version of each dependency; the repository's NOTICE names each dependency and its licence, and a
+  dependency under a licence the project has not reviewed stops the build.
+
 ## 0.2.0 - 2026-10-23
 
 ### Added

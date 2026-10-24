@@ -1,6 +1,7 @@
 import { cpSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { renderNotice } from './notice.mjs';
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const artifactRoot = join(packageRoot, 'dist');
@@ -49,11 +50,13 @@ const artifactManifest = {
 };
 
 writeFileSync(join(artifactRoot, 'package.json'), `${JSON.stringify(artifactManifest, null, 2)}\n`);
+// Written, not copied: it names the exact version of each runtime dependency this build installs,
+// so a dependency bump needs no edit to NOTICE.
+writeFileSync(join(artifactRoot, 'NOTICE'), renderNotice(packageRoot, { versions: true }));
 
 for (const file of [
   'README.md',
   'LICENSE',
-  'NOTICE',
   'SECURITY.md',
   'SPEC.md',
   'CHANGELOG.md',
