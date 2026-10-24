@@ -1894,37 +1894,29 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
       if (!isFiniteWindow({ start: params.start, end: params.end })) {
         return { ok: false, code: 'invalid_window' };
       }
+      if (!isValidResourceId(params.resourceId)) return { ok: false, code: 'resource_not_found' };
+      // A booking on a tenant's resource takes the tenant and its own id as reference, so it can be
+      // cancelled and moved like any other; one on a resource with no tenant stays tenantless.
+      const id = randomUUID();
       for (let attempt = 1; ; attempt++) {
         try {
           const rows = await inTransaction(sql, async (tx) => {
             await reapExpiredHolds(tx, params.resourceId, params.start, params.end);
-            return tx<
-              {
-                id: string;
-                resource_id: string;
-                starts_at: Date;
-                ends_at: Date;
-                source: string | null;
-              }[]
-            >`
-              INSERT INTO slotlock.reservations (resource_id, starts_at, ends_at, source)
-              VALUES (${params.resourceId}, ${params.start}, ${params.end}, ${params.source ?? null})
-              RETURNING id, resource_id, starts_at, ends_at, source`;
+            return tx<ReservationRow[]>`
+              INSERT INTO slotlock.reservations (
+                id, resource_id, tenant_ref, external_ref, starts_at, ends_at, source
+              )
+              SELECT ${id}, resource.id, resource.tenant_ref,
+                     CASE WHEN resource.tenant_ref IS NULL THEN NULL ELSE ${id} END,
+                     ${params.start}, ${params.end}, ${params.source ?? null}
+                FROM slotlock.resources resource
+               WHERE resource.id = ${params.resourceId}
+              RETURNING id, resource_id, tenant_ref, external_ref, starts_at, ends_at,
+                        buffer_after_ms, revision, source`;
           });
           const row = rows[0];
-          if (!row) throw new Error('slotlock: reservation insert returned no row');
-          const reservation: SlotlockReservation = {
-            id: row.id,
-            resourceId: row.resource_id,
-            tenantRef: null,
-            externalRef: null,
-            start: row.starts_at,
-            end: row.ends_at,
-            bufferAfterMs: 0,
-            revision: 1,
-            source: row.source,
-          };
-          return { ok: true, reservation };
+          if (!row) return { ok: false, code: 'resource_not_found' };
+          return { ok: true, reservation: toReservation(row) };
         } catch (err) {
           const code = pgCode(err);
           if ((code === DEADLOCK_DETECTED || code === SERIALIZATION_FAILURE) && attempt === 1) {
@@ -2135,6 +2127,18 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
           }
         }
 
+        if (!found) {
+          // A calendar event's occupation row carries this reference: it is the event's, not a
+          // booking's. Nothing is cancelled, and nothing retired: a tombstone would only grow.
+          const [occupation] = await tx<{ id: string }[]>`
+            SELECT id FROM slotlock.reservations
+             WHERE tenant_ref = ${params.tenantRef} AND external_ref = ${params.externalRef}
+               AND calendar_event_id IS NOT NULL
+             LIMIT 1`;
+          if (occupation) return { ok: true, cancelled: false, revision: params.revision };
+        }
+        // A reference no booking holds yet is retired too, so a create delivered after its cancel
+        // cannot bring the booking back.
         await tx`
           INSERT INTO slotlock.reservation_tombstones (tenant_ref, external_ref, revision)
           VALUES (${params.tenantRef}, ${params.externalRef}, ${params.revision})`;
@@ -2209,85 +2213,72 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
 
     async confirmHold(holdId, options = {}) {
       const tenantRef = holdTenantRef(options);
-      const rows = await sql<
-        {
-          id: string;
-          resource_id: string;
-          starts_at: Date;
-          ends_at: Date;
-          source: string | null;
-        }[]
-      >`
-        UPDATE slotlock.reservations
-           SET status = 'confirmed', expires_at = NULL
-         WHERE id = ${holdId} AND status = 'held' AND expires_at > now()
-           AND (${tenantRef}::text IS NULL
-                OR resource_id IN (SELECT id FROM slotlock.resources WHERE tenant_ref = ${tenantRef}))
-         RETURNING id, resource_id, starts_at, ends_at, source`;
-      const row = rows[0];
-      if (row) {
-        return {
-          ok: true,
-          reservation: {
-            id: row.id,
-            resourceId: row.resource_id,
-            tenantRef: null,
-            externalRef: null,
-            start: row.starts_at,
-            end: row.ends_at,
-            bufferAfterMs: 0,
-            revision: 1,
-            source: row.source,
-          },
-        };
-      }
-      const present = await sql<
-        {
-          status: string;
-          expired: boolean;
-          resource_id: string;
-          starts_at: Date;
-          ends_at: Date;
-          source: string | null;
-        }[]
-      >`
-        SELECT status, (status = 'held' AND expires_at <= now()) AS expired,
-               resource_id, starts_at, ends_at, source
-          FROM slotlock.reservations
-         WHERE id = ${holdId}
-           -- A hold has no external identity, before or after it is confirmed; a booking that has
-           -- one is not a hold, and confirming it again would describe it wrongly.
-           AND tenant_ref IS NULL
-           AND (${tenantRef}::text IS NULL
-                OR resource_id IN (SELECT id FROM slotlock.resources WHERE tenant_ref = ${tenantRef}))`;
-      const found = present[0];
-      // Idempotent confirm: a retried confirm (network replay) of an already-confirmed hold is
-      // SUCCESS — the booking exists; reporting failure would make callers double-book elsewhere.
-      if (found && found.status === 'confirmed') {
-        return {
-          ok: true,
-          reservation: {
-            id: holdId,
-            resourceId: found.resource_id,
-            tenantRef: null,
-            externalRef: null,
-            start: found.starts_at,
-            end: found.ends_at,
-            bufferAfterMs: 0,
-            revision: 1,
-            source: found.source,
-          },
-        };
-      }
-      if (found?.expired) return { ok: false, code: 'hold_expired' };
-      // NOTE: a hold reaped mid-flight by a rival (expired while this confirm waited on the
-      // reaper's lock) reads as hold_not_found — the row is gone and the space was legitimately
-      // taken; both refusal codes are terminal for the caller.
-      return { ok: false, code: 'hold_not_found' };
+      // Not an id the store issues: it names no hold (and would be a raw 22P02 in the query).
+      if (!isValidResourceId(holdId)) return { ok: false, code: 'hold_not_found' };
+      return inTransaction(sql, async (tx): Promise<ConfirmHoldResult> => {
+        // The tenant whose booking the hold becomes is its resource's; a hold never changes
+        // resource, so it is read before the identity lock, which is taken before the row lock as
+        // every booking write takes them.
+        const [owner] = await tx<{ resource_tenant: string | null }[]>`
+          SELECT resource.tenant_ref AS resource_tenant
+            FROM slotlock.reservations hold
+            JOIN slotlock.resources resource ON resource.id = hold.resource_id
+           WHERE hold.id = ${holdId} AND hold.calendar_event_id IS NULL
+             AND (${tenantRef}::text IS NULL OR resource.tenant_ref = ${tenantRef})`;
+        if (!owner) return { ok: false, code: 'hold_not_found' };
+        const bookingTenant = owner.resource_tenant;
+        if (bookingTenant !== null) await lockExternalIdentity(tx, bookingTenant, holdId);
+        const [row] = await tx<(ReservationRow & { status: string; live: boolean })[]>`
+          SELECT id, resource_id, tenant_ref, external_ref, starts_at, ends_at, buffer_after_ms,
+                 revision, source, status, (status = 'held' AND expires_at > now()) AS live
+            FROM slotlock.reservations
+           WHERE id = ${holdId}
+           FOR UPDATE`;
+        if (!row) {
+          // NOTE: a hold reaped mid-flight by a rival (expired while this confirm waited on the
+          // reaper's lock) reads as hold_not_found: the row is gone and the space was legitimately
+          // taken; both refusal codes are terminal for the caller.
+          return { ok: false, code: 'hold_not_found' };
+        }
+        if (row.status === 'confirmed') {
+          // Idempotent confirm: a retried confirm (network replay) of an already-confirmed hold is
+          // SUCCESS, the booking as it now is; reporting failure would make callers double-book
+          // elsewhere. A confirmed hold's reference is its own id (none without a tenant); a
+          // booking with another reference was never this hold.
+          if (row.external_ref !== null && row.external_ref !== row.id) {
+            return { ok: false, code: 'hold_not_found' };
+          }
+          return { ok: true, reservation: toReservation(row) };
+        }
+        if (!row.live) return { ok: false, code: 'hold_expired' };
+        if (bookingTenant !== null) {
+          const [retired] = await tx<{ revision: string }[]>`
+            SELECT revision FROM slotlock.reservation_tombstones
+             WHERE tenant_ref = ${bookingTenant} AND external_ref = ${holdId}`;
+          if (retired) return { ok: false, code: 'reservation_cancelled' };
+          const [taken] = await tx<{ id: string }[]>`
+            SELECT id FROM slotlock.reservations
+             WHERE tenant_ref = ${bookingTenant} AND external_ref = ${holdId}
+               AND calendar_event_id IS NULL`;
+          if (taken) return { ok: false, code: 'idempotency_conflict' };
+        }
+        // The occupied end is already the end plus the hold's buffer (the trigger set it); the
+        // tenant and reference make the hold a booking that cancel and reschedule reach.
+        const [confirmed] = await tx<ReservationRow[]>`
+          UPDATE slotlock.reservations
+             SET status = 'confirmed', expires_at = NULL,
+                 tenant_ref = ${bookingTenant}, external_ref = ${bookingTenant === null ? null : holdId}
+           WHERE id = ${holdId}
+          RETURNING id, resource_id, tenant_ref, external_ref, starts_at, ends_at,
+                    buffer_after_ms, revision, source`;
+        if (!confirmed) throw new Error('slotlock: hold confirmation returned no row');
+        return { ok: true, reservation: toReservation(confirmed) };
+      });
     },
 
     async releaseHold(holdId, options = {}) {
       const tenantRef = holdTenantRef(options);
+      if (!isValidResourceId(holdId)) return { ok: true, released: false };
       const rows = await sql<{ id: string }[]>`
         DELETE FROM slotlock.reservations
          WHERE id = ${holdId} AND status = 'held'

@@ -1541,6 +1541,38 @@ CREATE UNIQUE INDEX IF NOT EXISTS slotlock_reservations_booking_external_ref_key
   WHERE tenant_ref IS NOT NULL AND external_ref IS NOT NULL AND calendar_event_id IS NULL;
 DROP INDEX IF EXISTS slotlock.slotlock_reservations_tenant_external_ref_key;
 
+-- Up to 0.2 a confirmed hold, and a createReservation booking, on a tenant's resource kept no tenant
+-- or reference, so no cancel or move could ever reach it. Each takes its resource's tenant and its
+-- own id as reference, as both now do when written. A tombstone already holding that reference was
+-- written by cancelling it as a reference no booking held (the only way to try): it retired nothing
+-- and is dropped, so the booking can be cancelled. A booking another booking's reference already
+-- uses (never written by Slotlock) is left as it was.
+DELETE FROM slotlock.reservation_tombstones tombstone
+ USING slotlock.reservations booking
+  JOIN slotlock.resources resource ON resource.id = booking.resource_id
+ WHERE booking.tenant_ref IS NULL
+   AND booking.status = 'confirmed'
+   AND booking.calendar_event_id IS NULL
+   AND resource.tenant_ref IS NOT NULL
+   AND tombstone.tenant_ref = resource.tenant_ref
+   AND tombstone.external_ref = booking.id::text;
+UPDATE slotlock.reservations booking
+   SET tenant_ref = resource.tenant_ref,
+       external_ref = booking.id::text,
+       occupied_ends_at = booking.ends_at + booking.buffer_after_ms * interval '1 millisecond'
+  FROM slotlock.resources resource
+ WHERE resource.id = booking.resource_id
+   AND booking.tenant_ref IS NULL
+   AND booking.status = 'confirmed'
+   AND booking.calendar_event_id IS NULL
+   AND resource.tenant_ref IS NOT NULL
+   AND NOT EXISTS (
+     SELECT 1 FROM slotlock.reservations taken
+      WHERE taken.tenant_ref = resource.tenant_ref
+        AND taken.external_ref = booking.id::text
+        AND taken.calendar_event_id IS NULL
+   );
+
 -- Materialized occurrences point at reservations created under the SAME exclusion arbiter as
 -- bookings and holds. Transparent events retain occurrence visibility with a NULL reservation.
 CREATE TABLE IF NOT EXISTS slotlock.calendar_event_occurrences (

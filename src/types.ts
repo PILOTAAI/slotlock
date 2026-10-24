@@ -31,9 +31,15 @@ export interface SlotlockResource {
 export interface SlotlockReservation {
   id: string;
   resourceId: string;
-  /** Null only for legacy, hold, and parity-shadow rows. */
+  /**
+   * Null only for live holds, rows on a resource that has no tenant (legacy), and parity-shadow rows.
+   * A booking made by confirming a hold, or by createReservation, on a tenant's resource has one.
+   */
   tenantRef: string | null;
-  /** Stable booking identity inside tenantRef; null for legacy, hold, and shadow rows. */
+  /**
+   * Stable booking identity inside tenantRef; null exactly when tenantRef is. A confirmed hold, and
+   * a createReservation booking, use their own id.
+   */
   externalRef: string | null;
   start: Date;
   end: Date;
@@ -95,6 +101,8 @@ export interface WeeklyAvailabilityRule {
 export type CreateReservationResult =
   | { ok: true; reservation: SlotlockReservation }
   | { ok: false; code: 'invalid_window' }
+  /** No resource with that id, or (under tenant RLS or with `tenantRef`) not one of the tenant's. */
+  | { ok: false; code: 'resource_not_found' }
   | { ok: false; code: 'overlap'; conflictingReservationId: string | null };
 
 /** A hold: occupies exactly like a reservation until its DB-clock expiry, then lazily reaped. */
@@ -116,7 +124,11 @@ export type AcquireHoldResult =
 export type ConfirmHoldResult =
   | { ok: true; reservation: SlotlockReservation }
   | { ok: false; code: 'hold_not_found' }
-  | { ok: false; code: 'hold_expired' };
+  | { ok: false; code: 'hold_expired' }
+  /** A cancellation of the hold's reference (its id) arrived first and retired it. */
+  | { ok: false; code: 'reservation_cancelled' }
+  /** Another booking of the tenant already uses the hold's id as its reference. */
+  | { ok: false; code: 'idempotency_conflict' };
 
 export type ReleaseHoldResult = { ok: true; released: boolean };
 

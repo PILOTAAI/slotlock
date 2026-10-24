@@ -196,7 +196,7 @@ describe.skipIf(!url)('schema version and migration locks (real Postgres)', () =
 
   it('leaves a constraint NOT VALID, and the migration done, when old rows break it', async () => {
     const [resource] = await sql<{ id: string }[]>`
-      INSERT INTO slotlock.resources (tenant_ref, external_ref) VALUES ('legacy', 'van') RETURNING id`;
+      INSERT INTO slotlock.resources (external_ref) VALUES ('legacy-van') RETURNING id`;
     // A row a spike schema wrote before revisions were checked.
     await sql.unsafe(`
       ALTER TABLE slotlock.reservations DROP CONSTRAINT slotlock_reservations_revision_valid;
