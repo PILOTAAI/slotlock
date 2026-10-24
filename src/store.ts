@@ -2,6 +2,7 @@
 // Domain policy (who may reserve, pricing, holds) belongs to future callers; this layer owns the
 // reliable how: idempotent schema apply, EXCLUDE-arbitrated inserts with a structured conflict.
 import { createHash, randomUUID } from 'node:crypto';
+import ICAL from 'ical.js';
 import type { Sql, TransactionSql } from 'postgres';
 import {
   SLOTLOCK_CORE_DDL,
@@ -175,6 +176,100 @@ function rolledWindow(stored: Interval, horizon: Interval): Interval | null {
   if (stored.start <= horizon.start && stored.end >= horizon.end) return null;
   if (stored.end.getTime() - horizon.start.getTime() > MAX_MATERIALIZATION_WINDOW_MS) return null;
   return { start: horizon.start, end: stored.end > horizon.end ? stored.end : horizon.end };
+}
+
+/**
+ * How far past a rule's UNTIL, read as UTC, an occurrence can still end, beyond the series' own
+ * length. UNTIL bounds an occurrence's start (RFC 5545 §3.3.10), but a floating or date-only UNTIL
+ * is a wall time in a zone from UTC-12 to UTC+14, or a whole day; a start in an hour the clocks skip
+ * moves forward; and an occurrence's wall-clock end can pass its exact length by a clock change, a
+ * whole day where a zone moved across the date line. Three days covers them together.
+ */
+const SERIES_UNTIL_SLACK_MS = 3 * DAY_MS;
+/** Stored-series windows a COUNT rule is followed through, from its start, to find its end. */
+const SERIES_COUNT_SEARCH_WINDOWS = 30;
+
+/**
+ * A time by which every occurrence of a recurring series ends, moved ones included, or `null` when
+ * it may go on: its rule has neither UNTIL nor COUNT as ical.js reads it (as the expansion does),
+ * or its COUNT occurrences are not all found within SERIES_COUNT_SEARCH_WINDOWS windows from its
+ * start, or that search is over its budget. A COUNT series ends a day after its last occurrence as
+ * the expansion reads it today, so a later reading of its end may be longer.
+ */
+function seriesEndsBy(event: CalendarEventContent): Date | null {
+  const recurrence = event.recurrence;
+  if (!recurrence) return null;
+  let rule: ICAL.Recur;
+  try {
+    rule = ICAL.Recur.fromString(recurrence.rrule);
+  } catch {
+    return null;
+  }
+  let endsBy: number;
+  if (rule.until) {
+    // ical.js stops at the first occurrence past UNTIL; a floating or date UNTIL reads as UTC.
+    const untilMs = rule.until.toUnixTime() * 1000;
+    endsBy = untilMs + (event.end.getTime() - event.start.getTime()) + SERIES_UNTIL_SLACK_MS;
+  } else if (rule.count) {
+    const last = lastCountedOccurrenceEnd(event, rule.count);
+    if (last === null) return null;
+    endsBy = last + DAY_MS;
+  } else {
+    return null;
+  }
+  for (const exception of recurrence.exceptions ?? []) {
+    if (!exception.cancelled && exception.end && exception.end.getTime() > endsBy) {
+      endsBy = exception.end.getTime();
+    }
+  }
+  const ends = new Date(endsBy);
+  return Number.isFinite(ends.getTime()) ? ends : null;
+}
+
+/**
+ * The latest end among a COUNT series' occurrences, expanded window by window from its start with
+ * exceptions left out (so a cancelled or moved one is still found in its own place), or `null` when
+ * fewer than `count` turn up. ical.js yields at most COUNT occurrences, so once `count` are found
+ * there are no more. An occurrence is counted in the window its start falls in.
+ */
+function lastCountedOccurrenceEnd(event: CalendarEventContent, count: number): number | null {
+  const rrule = event.recurrence?.rrule;
+  if (rrule === undefined) return null;
+  const series: CalendarEventContent = { ...event, recurrence: { rrule } };
+  let cursor: unknown = null;
+  let found = 0;
+  let lastEnd = Number.NEGATIVE_INFINITY;
+  let from = event.start.getTime();
+  try {
+    for (let window = 0; window < SERIES_COUNT_SEARCH_WINDOWS; window++) {
+      const to = from + MAX_MATERIALIZATION_WINDOW_MS;
+      const expansion = expandCalendarEventSeries(
+        series,
+        { start: new Date(from), end: new Date(to) },
+        { cursor, stored: true },
+      );
+      for (const occurrence of expansion.occurrences) {
+        if (occurrence.start.getTime() < from) continue;
+        found += 1;
+        if (occurrence.end.getTime() > lastEnd) lastEnd = occurrence.end.getTime();
+      }
+      if (found >= count) return lastEnd;
+      cursor = expansion.cursor;
+      from = to;
+    }
+  } catch (error) {
+    if (error instanceof CalendarExpansionLimitError || error instanceof CalendarContractError) {
+      return null;
+    }
+    throw error;
+  }
+  return null;
+}
+
+/** The recurrence_ends_by column for an event: NULL for a one-off, 'infinity' for no known end. */
+function recurrenceEndsByColumn(event: CalendarEventContent): string | null {
+  if (!event.recurrence) return null;
+  return seriesEndsBy(event)?.toISOString() ?? 'infinity';
 }
 
 /** The roll's `after`, checked, or `undefined` for a pass's first batch. */
@@ -1435,12 +1530,12 @@ async function rollStoredSeries(
   eventId: string,
   horizon: Interval,
 ): Promise<boolean> {
-  const [row] = await tx<CalendarEventRow[]>`
+  const [row] = await tx<(CalendarEventRow & { ends_by_missing: boolean })[]>`
     SELECT id, tenant_ref, owner_ref, external_ref, resource_id, starts_at, ends_at, timezone,
            summary, description, location, status, transparency, organizer, attendees,
            reminders, recurrence_rule, recurrence_exceptions, materialized_starts_at,
            materialized_ends_at, recurrence_cursor, revision, source, created_at,
-           updated_at
+           updated_at, recurrence_ends_by IS NULL AS ends_by_missing
       FROM slotlock.calendar_events
      WHERE id = ${eventId} AND tenant_ref = ${tenantRef}
      FOR UPDATE`;
@@ -1464,11 +1559,14 @@ async function rollStoredSeries(
     occurrences,
     revision: Number(row.revision),
   });
+  // A series stored before 0.3 learns when it ends at its first roll.
+  const endsBy = row.ends_by_missing ? recurrenceEndsByColumn(event) : null;
   await tx`
     UPDATE slotlock.calendar_events
        SET materialized_starts_at = ${rolled.start},
            materialized_ends_at = ${rolled.end},
            recurrence_cursor = ${seriesCursorJson(tx, cursor)},
+           recurrence_ends_by = COALESCE(recurrence_ends_by, ${endsBy}::timestamptz),
            roll_retry_at = NULL
      WHERE id = ${row.id} AND tenant_ref = ${tenantRef}`;
   return true;
@@ -1486,10 +1584,13 @@ async function deferRoll(executor: StoreSql, tenantRef: string, eventId: string)
  * Whether every opaque recurring series on the resource (but `exceptEventId`) is stored over the
  * part of [start, end) that a roll can ever reach: from the later of `start` and the rolling
  * horizon's start. A write there must not land where such a series is not stored, or the series'
- * next roll would collide with it and stop. A series behind is first rolled to the horizon, in a
- * savepoint of the write's transaction, so the write meets its occurrences under the exclusion
- * arbiter; false when one cannot be (the write reaches past the horizon, the series collides, or its
- * rule is over the budget). Series are locked in id order, as every writer locks them.
+ * next roll would collide with it and stop. A series known to end before that part
+ * (recurrence_ends_by) cannot meet the write and is left out. A series behind is first rolled to
+ * the horizon, in a savepoint of the write's transaction, so the write meets its occurrences under
+ * the exclusion arbiter; false when one cannot be (the write reaches past the horizon, the series
+ * collides, or its rule is over the budget). Series are rolled in id order; an event's update holds
+ * its own row while it rolls the others, so it and a write rolling the same series in that order
+ * can deadlock, which the database breaks (the writer retries once, then answers an overlap).
  */
 async function recurrenceCoversWrite(
   tx: TransactionSql,
@@ -1512,6 +1613,7 @@ async function recurrenceCoversWrite(
        AND event.recurrence_rule IS NOT NULL
        AND event.transparency = 'opaque'
        AND event.id IS DISTINCT FROM ${params.exceptEventId ?? null}::uuid
+       AND (event.recurrence_ends_by IS NULL OR event.recurrence_ends_by > ${from}::timestamptz)
        AND (
          event.materialized_ends_at < ${params.end}
          OR event.materialized_starts_at > GREATEST(
@@ -3443,6 +3545,7 @@ function buildSlotlockStore(
         event,
         window: materializationWindow,
       });
+      const recurrenceEndsBy = recurrenceEndsByColumn(event);
 
       let attempted: CalendarEventOccurrence[] = expanded?.occurrences ?? [];
       let storedEventId: string | undefined;
@@ -3592,6 +3695,7 @@ function buildSlotlockStore(
                        materialized_starts_at = ${materializationWindow.start},
                        materialized_ends_at = ${materializationWindow.end},
                        recurrence_cursor = ${seriesCursorJson(tx, series.cursor)},
+                       recurrence_ends_by = ${recurrenceEndsBy}::timestamptz,
                        roll_retry_at = NULL,
                        revision = ${revision},
                        source = ${params.source ?? null},
@@ -3605,7 +3709,7 @@ function buildSlotlockStore(
                   id, tenant_ref, owner_ref, external_ref, resource_id, starts_at, ends_at, timezone,
                   summary, description, location, status, transparency, organizer, attendees,
                   reminders, recurrence_rule, recurrence_exceptions, materialized_starts_at,
-                  materialized_ends_at, recurrence_cursor, revision, source
+                  materialized_ends_at, recurrence_cursor, recurrence_ends_by, revision, source
                 ) VALUES (
                   ${eventId}, ${params.tenantRef}, ${ownerRef}, ${params.externalRef},
                   ${params.resourceId},
@@ -3618,8 +3722,8 @@ function buildSlotlockStore(
                   ${event.recurrence?.rrule ?? null},
                   ${tx.json(eventExceptionsForJson(event.recurrence?.exceptions))},
                   ${materializationWindow.start}, ${materializationWindow.end},
-                  ${seriesCursorJson(tx, series.cursor)}, ${revision},
-                  ${params.source ?? null}
+                  ${seriesCursorJson(tx, series.cursor)}, ${recurrenceEndsBy}::timestamptz,
+                  ${revision}, ${params.source ?? null}
                 )`;
             }
 

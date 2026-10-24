@@ -1558,6 +1558,10 @@ ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS recurrence_cursor 
 -- the rule is over the expansion budget): until then it waits behind the series that can roll, so
 -- a pile of blocked series never starves a healthy one. NULL: due as usual.
 ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS roll_retry_at timestamptz;
+-- For a recurring series, a time by which every occurrence ends, moved ones included; 'infinity'
+-- when its rule has no end, or none Slotlock could follow it to. NULL: not worked out yet (a series
+-- from before 0.3, until its next roll), and so treated as going on. Unused for a one-off event.
+ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS recurrence_ends_by timestamptz;
 ALTER TABLE slotlock.calendar_events
   DROP CONSTRAINT IF EXISTS slotlock_calendar_events_recurrence_cursor_bounded;
 DO $slotlock_calendar_event_recurrence_cursor$

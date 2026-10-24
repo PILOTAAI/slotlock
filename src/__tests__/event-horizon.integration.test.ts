@@ -5,11 +5,7 @@
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { maintainSlotlockTenant } from '../maintenance.js';
-import {
-  type SlotlockStore,
-  calendarEventRollingHorizon,
-  createSlotlockStore,
-} from '../store.js';
+import { type SlotlockStore, calendarEventRollingHorizon, createSlotlockStore } from '../store.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
 const d = (iso: string) => new Date(iso);
@@ -132,7 +128,11 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
   });
 
   /** A daily 09:00-10:00 UTC series on the resource, stored for `window`. */
-  async function dailySeries(tenantRef: string, resourceId: string, window: { start: Date; end: Date }) {
+  async function dailySeries(
+    tenantRef: string,
+    resourceId: string,
+    window: { start: Date; end: Date },
+  ) {
     const start = new Date(window.start.getTime() + 9 * HOUR);
     const put = await store.putCalendarEvent({
       tenantRef,
@@ -176,9 +176,10 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
           revision: 1,
         }),
       ).resolves.toEqual({ ok: false, code: 'recurrence_not_materialized' });
-      await expect(
-        store.acquireHold({ resourceId, ...window, ttlMs: 60_000 }),
-      ).resolves.toEqual({ ok: false, code: 'recurrence_not_materialized' });
+      await expect(store.acquireHold({ resourceId, ...window, ttlMs: 60_000 })).resolves.toEqual({
+        ok: false,
+        code: 'recurrence_not_materialized',
+      });
       await expect(store.createReservation({ resourceId, ...window })).resolves.toEqual({
         ok: false,
         code: 'recurrence_not_materialized',
@@ -233,6 +234,121 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
           revision: 1,
         }),
       ).resolves.toMatchObject({ ok: true });
+    });
+
+    it('lets a long write past the horizon through when every series on the resource has ended before it', async () => {
+      const { tenantRef, resourceId } = await freshTenant();
+      const horizon = calendarEventRollingHorizon();
+      const earlier = new Date(horizon.start.getTime() - 300 * DAY + 9 * HOUR);
+      const until = (date: Date) => `${date.toISOString().slice(0, 19).replace(/[-:]/g, '')}Z`;
+      const series = (
+        rrule: string,
+        start: Date,
+        exceptions?: { recurrenceId: Date; start: Date; end: Date }[],
+      ) =>
+        store.putCalendarEvent({
+          tenantRef,
+          externalRef: `rota-${crypto.randomUUID()}`,
+          idempotencyKey: `create-${crypto.randomUUID()}`,
+          expectedRevision: 0,
+          resourceId,
+          start,
+          end: new Date(start.getTime() + HOUR),
+          timezone: 'UTC',
+          summary: 'Old rota',
+          recurrence: { rrule, ...(exceptions ? { exceptions } : {}) },
+          materializationWindow: horizon,
+        });
+      // The verifier's repro: one series that ended long ago refused every write ending past the
+      // horizon on its resource, a lease included.
+      expect((await series('FREQ=DAILY;COUNT=3', earlier)).ok).toBe(true);
+      expect(
+        (
+          await series(
+            `FREQ=WEEKLY;UNTIL=${until(new Date(earlier.getTime() + 20 * DAY))}`,
+            new Date(earlier.getTime() + 2 * HOUR),
+          )
+        ).ok,
+      ).toBe(true);
+      const leaseStart = new Date(horizon.start.getTime() + 30 * DAY);
+      const lease = {
+        tenantRef,
+        resourceId,
+        start: leaseStart,
+        end: new Date(leaseStart.getTime() + 730 * DAY),
+        bufferAfterMs: 0,
+        revision: 1,
+      };
+      await expect(
+        store.createExternalReservation({ ...lease, externalRef: `lease-${crypto.randomUUID()}` }),
+      ).resolves.toMatchObject({ ok: true });
+
+      // A finished series whose occurrence was moved past the horizon, into a lease, still refuses
+      // it, as does one whose COUNT runs past it.
+      const moved = await freshTenant();
+      const movedTo = new Date(horizon.end.getTime() + 40 * DAY + 9 * HOUR);
+      expect(
+        (
+          await store.putCalendarEvent({
+            tenantRef: moved.tenantRef,
+            externalRef: `rota-${crypto.randomUUID()}`,
+            idempotencyKey: `create-${crypto.randomUUID()}`,
+            expectedRevision: 0,
+            resourceId: moved.resourceId,
+            start: earlier,
+            end: new Date(earlier.getTime() + HOUR),
+            timezone: 'UTC',
+            summary: 'Moved rota',
+            recurrence: {
+              rrule: 'FREQ=DAILY;COUNT=3',
+              exceptions: [
+                {
+                  recurrenceId: new Date(earlier.getTime() + DAY),
+                  start: movedTo,
+                  end: new Date(movedTo.getTime() + HOUR),
+                },
+              ],
+            },
+            materializationWindow: horizon,
+          })
+        ).ok,
+      ).toBe(true);
+      await expect(
+        store.createExternalReservation({
+          ...lease,
+          tenantRef: moved.tenantRef,
+          resourceId: moved.resourceId,
+          externalRef: `lease-${crypto.randomUUID()}`,
+        }),
+      ).resolves.toEqual({ ok: false, code: 'recurrence_not_materialized' });
+      const counted = await freshTenant();
+      expect(
+        (
+          await store.putCalendarEvent({
+            tenantRef: counted.tenantRef,
+            externalRef: `rota-${crypto.randomUUID()}`,
+            idempotencyKey: `create-${crypto.randomUUID()}`,
+            expectedRevision: 0,
+            resourceId: counted.resourceId,
+            start: earlier,
+            end: new Date(earlier.getTime() + HOUR),
+            timezone: 'UTC',
+            summary: 'Long rota',
+            recurrence: { rrule: 'FREQ=WEEKLY;COUNT=200' },
+            materializationWindow: horizon,
+          })
+        ).ok,
+      ).toBe(true);
+      await expect(
+        store.createExternalReservation({
+          ...lease,
+          tenantRef: counted.tenantRef,
+          resourceId: counted.resourceId,
+          start: new Date(horizon.end.getTime() + DAY),
+          end: new Date(horizon.end.getTime() + 60 * DAY),
+          externalRef: `lease-${crypto.randomUUID()}`,
+        }),
+      ).resolves.toEqual({ ok: false, code: 'recurrence_not_materialized' });
     });
 
     it('extends a series not yet rolled that far before it books, so the overlap is caught', async () => {
@@ -364,7 +480,12 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
         tenantRef,
         window: calendarEventRollingHorizon(),
       });
-      expect(roll).toMatchObject({ examined: 1, extended: 0, conflicts: 1, conflictEventIds: [stuck] });
+      expect(roll).toMatchObject({
+        examined: 1,
+        extended: 0,
+        conflicts: 1,
+        conflictEventIds: [stuck],
+      });
     });
 
     it('puts a series it cannot extend behind the others, so the next pass reaches a healthy one', async () => {
