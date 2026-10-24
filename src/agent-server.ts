@@ -3473,7 +3473,11 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       if (principal instanceof SlotlockAgentOperationError) {
         // As `slotlock serve` answers it: A2A names the reason in an ErrorInfo, as for a rate limit.
         const error = { code: -32603, message: 'Server is busy' };
-        const info = { '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason: 'SERVER_BUSY', domain: 'slotlock' };
+        const info = {
+          '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+          reason: 'SERVER_BUSY',
+          domain: 'slotlock',
+        };
         return json(
           503,
           { jsonrpc: '2.0', id: null, error: path === '/a2a' ? { ...error, data: [info] } : error },
