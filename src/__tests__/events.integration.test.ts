@@ -942,7 +942,7 @@ describe.skipIf(!url)('Slotlock calendar events (real Postgres)', () => {
   });
 
   it('forces, fingerprints and enforces tenant RLS on every new event table', async () => {
-    const role = 'slotlock_events_rls_probe';
+    const role = `slotlock_events_rls_probe_${crypto.randomUUID().replaceAll('-', '').slice(0, 16)}`;
     const tables = [
       'calendar_events',
       'calendar_event_attendees',

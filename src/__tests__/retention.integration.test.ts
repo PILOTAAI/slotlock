@@ -34,7 +34,7 @@ describe('Slotlock event retention arguments', () => {
 });
 
 describe.skipIf(!url)('Slotlock event retention (real Postgres)', () => {
-  const probeRole = 'slotlock_retention_rls_probe';
+  const probeRole = `slotlock_retention_rls_probe_${crypto.randomUUID().replaceAll('-', '').slice(0, 16)}`;
   const tenants: string[] = [];
   let sql: ReturnType<typeof postgres>;
   let store: SlotlockStore;

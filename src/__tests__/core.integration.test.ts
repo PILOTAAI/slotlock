@@ -658,7 +658,7 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
   });
 
   it('strict tenant RLS hides every foreign and unset-context core row from a non-owner role', async () => {
-    const role = 'slotlock_core_rls_probe';
+    const role = `slotlock_core_rls_probe_${crypto.randomUUID().replaceAll('-', '').slice(0, 16)}`;
     const tenantA = `operator-${crypto.randomUUID()}`;
     const tenantB = `operator-${crypto.randomUUID()}`;
     const resourceA = await store.createResource({
