@@ -42,12 +42,23 @@ export keep each event as written. Feeds, the trusted importer and the store rea
 in every zone, including zones whose rules changed in the past and zones a feed defines only by
 its VTIMEZONE.
 
+A series' occurrences never overlap each other. Where one ends after the next starts (24 exact
+hours from midnight run to 01:00 the night the clocks go forward, or an occurrence is longer than
+the series' period), it ends where the next starts, and the next ends at the later of the two ends.
+Together they hold the same time, and the store, which keeps each occurrence as a reservation
+under one EXCLUDE constraint, can hold them. Two that start at the same instant are left as they
+are. An all-day series occupies whole local days, from one local midnight to the next (a midnight
+the clocks skip moves forward).
+
 | Case | Example | Occupies |
 | --- | --- | --- |
 | The clocks go forward inside an occurrence | London, daily 00:00-06:00, 2027-03-28 | six exact hours, 00:00Z-06:00Z |
 | The clocks go back inside an occurrence | London, daily 00:00-06:00, 2026-10-25 | seven wall-clock hours, 2026-10-24 23:00Z-06:00Z |
-| The same, southern hemisphere | Santiago, daily 22:00-04:00, night of 2027-04-03 | seven hours, 2027-04-04 01:00Z-08:00Z |
-| | Auckland, daily 00:00-06:00, 2027-09-26 | six hours, 2027-09-25 12:00Z-18:00Z |
+| The clocks go back, southern hemisphere | Santiago, daily 22:00-04:00, night of 2027-04-03 | seven hours, 2027-04-04 01:00Z-08:00Z |
+| The clocks go forward, southern hemisphere | Auckland, daily 00:00-06:00, 2027-09-26 | six hours, 2027-09-25 12:00Z-18:00Z |
+| A day long, the clocks go forward | London, daily 00:00-00:00 from 2027-03-26 | on 2027-03-28, 00:00Z-23:00Z, where the next day starts |
+| A week long, the clocks go forward | New York, weekly 00:00 for 168 hours from 2027-03-07 | the second week 2027-03-14 05:00Z to 03-21 04:00Z |
+| An all-day series | Santiago, daily from 2027-09-03 | on 2027-09-05, 04:00Z (01:00, midnight being skipped) to 09-06 03:00Z |
 | An occurrence starts in the skipped hour | Berlin, daily 02:30 for 75 minutes, 2027-03-28 | 75 exact minutes from 01:30Z (03:30 CEST) |
 | A half-hour change | Lord Howe, daily 02:00-02:45, 2027-10-03 | 45 minutes from 2027-10-02 15:30Z |
 | DTEND falls in the repeated hour | New York, daily 23:00-01:30 from 2026-10-31 | 2026-11-01 03:00Z to the later 01:30, 06:30Z |
@@ -57,7 +68,11 @@ its VTIMEZONE.
 | A length the clocks reduce to nothing | DTSTART and DTEND both in one skipped hour, the end at its close | refused |
 
 A series whose DTSTART the clocks skip is read from a feed (from the offset before the gap) but is
-not stored: no instant reads back as its wall time.
+not stored: no instant reads back as its wall time. The same holds for an all-day series whose
+first day's midnight the clocks skip (Santiago and Havana go forward at midnight). The trusted
+importer stores an all-day series as a timed one from local midnight to local midnight, which the
+union rule holds to its exact length too: where the clocks go forward on one of its days and the
+next day is not one of its occurrences, it also holds the hour after that midnight.
 
 ## Availability
 
@@ -124,23 +139,29 @@ mandatory for recurring events, must not exceed 367 days, and may produce at mos
 Expansion is bounded by a count of work, never a clock, so an input is accepted or refused the same
 way however loaded the machine: each series may pass 4,000 occurrences from its start, and ical.js
 may take 50,000 steps (three for each step of its search, one for each weekday it compares, an
-eighth of one for each day it walks, a hundred for each year it scans) for an event as it is
-written and 500,000 for a feed or a stored series as maintenance rolls it.
+eighth of one for each day it walks, three for each year it scans and an eighth of one for each
+day that scan lists, and half of one for each weekday of a year it lists) for an event as it is
+written and 500,000 for a feed or a stored series as maintenance rolls it. A zone written the way
+Outlook writes them, from 1601, costs about 6,000.
 
 A stored rule is daily or less frequent, follows RFC 5545 §3.3.10's grammar (every part known and
 given once, `COUNT` at least 1, never `COUNT` with `UNTIL`), and is of a shape the expander reads
 as RFC 5545 does: `BYWEEKNO`, a two-digit `BYDAY` ordinal, `BYSETPOS` other than with
 `FREQ=MONTHLY` and `BYDAY` alone, `BYMONTH` with `FREQ=MONTHLY`, a negative `BYMONTHDAY` other
 than with `FREQ=MONTHLY` and no `BYDAY`, `FREQ=YEARLY` with `BYMONTHDAY` but no `BYMONTH` or with a
-day one of its months can lack, with `BYYEARDAY` and `BYMONTH` or `BYMONTHDAY`, or with a numbered
-`BYDAY` and `BYMONTHDAY`, and time parts with `FREQ=MONTHLY` or `YEARLY` are refused, with a
-reason. A DATE `UNTIL` on a timed series includes its whole day on the series' clock.
+day none of its months has, with `COUNT` or `BYDAY` and a day one of its months can lack, with
+`BYYEARDAY` and `BYMONTH` or `BYMONTHDAY`, or with a numbered `BYDAY` and `BYMONTHDAY`, and time
+parts with `FREQ=MONTHLY` or `YEARLY` are refused, with a reason. A yearly day some years lack (29
+February, or a 31st with April) occurs only in the years that have it (RFC 5545 §3.3.10), so its
+rule must be its series' only source of occurrences, with no RDATE or second RRULE. A DATE `UNTIL`
+on a timed series includes its whole day on the series' clock.
 
 A recurrence exception names the occurrence it changes by that occurrence's instant, exported as a
-UTC `RECURRENCE-ID`; one that names no occurrence is refused. Opaque occurrences are reservations under the same PostgreSQL EXCLUDE
-constraint as bookings and holds. Transparent occurrences remain queryable but occupy no resource.
-An event update replaces its materialized set transactionally, so an overlap rolls the entire mutation
-back and preserves the prior event.
+UTC `RECURRENCE-ID`; one that names no occurrence is refused. Opaque occurrences are reservations
+under the same PostgreSQL EXCLUDE constraint as bookings and holds. Transparent occurrences remain
+queryable but occupy no resource. An event update replaces its materialized set transactionally,
+so an overlap rolls the entire mutation back and preserves the prior event. An exported calendar
+holds a VTIMEZONE (RFC 5545 §3.6.5) for the zone its times name, written from the IANA rules.
 
 Full event content is accepted only by the explicit trusted parser. The provider-normalization parser's
 return type contains only identity, recurrence identity, interval, deletion, busy, and revision. A

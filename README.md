@@ -420,46 +420,55 @@ time as unproven.
 A rule is expanded within a budget of steps, a count of ical.js's work that reads no clock, so the
 same input is accepted or refused however loaded the machine: 500,000 for a feed (the whole read,
 from its text) or for a stored series as maintenance rolls it, and 50,000 for one event as it is
-written, which is refused within a few hundredths of a second. A step is about a microsecond: a
-step of the search costs three, a weekday compared one, eight days walked one, a year scanned a
-hundred. A feed's own time
-zones (VTIMEZONE) count against the same budget. A feed may carry 100 time zones
-and name 100 it does not define, 1,000 observances and 2,000 RDATE values in the zones it carries,
-and 20,000 RDATE and EXDATE values in its events; a property's name and parameters may take 8 KB
-and list 100. A MINUTELY to WEEKLY step, a `DURATION`, or an event's length may be a century at
-most. A calendar that needs more, such as a rule that never occurs
-(`FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30`), is refused: `invalid_event` on a write, `invalid_icalendar`
-from a feed.
+written, which is refused within a few hundredths of a second. A step is about a microsecond: a step
+of the search costs three, a weekday compared one, eight days walked one, a year scanned three (and
+one for each eight days it lists), and two weekdays of a year listed one. A feed's own time zones
+(VTIMEZONE) count against the same budget: one written the way Outlook writes them, from 1601, costs
+about 6,000. A feed may carry 100 time zones and name 100 it does not define, 1,000 observances and
+2,000 RDATE values in the zones it carries, and 20,000 RDATE and EXDATE values in its events; a
+property's name and parameters may take 8 KB and list 100. A MINUTELY to WEEKLY step, a `DURATION`,
+or an event's length may be a century at most. A calendar that needs more, such as a rule that never
+occurs (`FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30`), is refused: `invalid_event` on a write,
+`invalid_icalendar` from a feed.
 
 A feed's rules are expanded from their start, and each series may pass 4,000 occurrences on the way
 (a daily one, about 11 years) whatever the feed's other series take. A feed series with one DAILY or
 WEEKLY rule and no COUNT, RDATE or `RANGE=THISANDFUTURE` override is searched from just before the
-window instead, so a daily standup since 2014 reads like one that began this year. A stored series keeps where
-its last expansion stopped, and the next one resumes there, so a daily series keeps rolling for as
-long as it runs: its budget goes on the window, not on the years before it. A write that changes a
-series searches from its start, and resumes from where it stopped only if that search is over the
-budget. A place serves only the rule, start and time zone it was kept for, read by the same version
-of ical.js, and never lies past an occurrence that could still reach the window (one within the
-event's length and a day of it, or one an exception moves into it). Otherwise the series is searched
-from its start, within the same budget. During maintenance, a stored series that outgrows the budget
-is counted as `refused` (its ids in `refusedEventIds`) and keeps its old coverage.
+window instead, so a daily standup since 2014 reads like one that began this year. A stored series
+keeps where its last expansion stopped, and the next one resumes there, so a daily series keeps
+rolling for as long as it runs: its budget goes on the window, not on the years before it. A write
+that changes a series searches from its start, and resumes from where it stopped only if that
+search is over the budget. A place serves only the rule, start and time zone it was kept for, read
+by the same version of ical.js, and never lies past an occurrence that could still reach the window
+(one within the event's length and a day of it, or one an exception moves into it). Otherwise the
+series is searched from its start, within the same budget. During maintenance, a stored series that
+outgrows the budget, or that this release refuses, is counted as `refused` (its ids in
+`refusedEventIds`) and keeps its old coverage. `storedCalendarEventProblem(event)` says why this
+release would refuse a stored event (a rule shape it no longer expands, `COUNT` with a yearly day
+some years lack, or an exception that names no occurrence), or `null`; run it over your stored
+events before upgrading.
 
 A stored rule is daily or less frequent and follows RFC 5545's grammar: `COUNT=0`, an unknown or
 repeated part, or `COUNT` with `UNTIL` is refused. Shapes ical.js 2.2.1 expands differently from
 RFC 5545 are refused everywhere, a feed included, and `recurrenceRuleProblem(rule)` says why:
 `BYWEEKNO`; a two-digit `BYDAY` ordinal; `BYSETPOS` other than with `FREQ=MONTHLY` and `BYDAY`
 alone; `BYMONTH` with `FREQ=MONTHLY`; a negative `BYMONTHDAY` other than with `FREQ=MONTHLY` and
-no `BYDAY`; `FREQ=YEARLY` with `BYMONTHDAY` but no `BYMONTH`, with a day one of its months can
-lack, with `BYYEARDAY` and `BYMONTH` or `BYMONTHDAY`, or with a numbered `BYDAY` and `BYMONTHDAY`;
-`BYHOUR` with `FREQ=HOURLY`, `BYMINUTE` or `BYSECOND` with `FREQ=MINUTELY`, and any of them with
-`FREQ=MONTHLY` or `YEARLY`; and `FREQ=SECONDLY`. A DATE `UNTIL` on a timed series includes its
-whole day on the series' clock. A time zone is an IANA name, stored in its canonical spelling
-(`europe/london` becomes `Europe/London`); a UTC offset such as `+05:00` is refused.
+no `BYDAY`; `FREQ=YEARLY` with `BYMONTHDAY` but no `BYMONTH`, with a day none of its months has,
+with `COUNT` or `BYDAY` and a day one of its months can lack, with `BYYEARDAY` and `BYMONTH` or
+`BYMONTHDAY`, or with a numbered `BYDAY` and `BYMONTHDAY`; `BYHOUR` with `FREQ=HOURLY`,
+`BYMINUTE` or `BYSECOND` with `FREQ=MINUTELY`, and any of them with `FREQ=MONTHLY` or `YEARLY`;
+and `FREQ=SECONDLY`. A yearly day some years lack (29 February, or a 31st with April) occurs only
+in the years that have it, as RFC 5545 says, so its series may not add an RDATE or a second RRULE.
+A DATE `UNTIL` on a timed series includes its whole day on the series' clock. A time zone is an
+IANA name, stored in its canonical spelling (`europe/london` becomes `Europe/London`); a UTC offset
+such as `+05:00` is refused.
 
 A recurrence exception names the occurrence it cancels or moves by that occurrence's instant, as
 `expandCalendarEventOccurrences` reports it, and is exported as a UTC `RECURRENCE-ID`; one that
 names no occurrence is refused, so a mistyped instant is an error rather than a cancellation that
-frees nothing.
+frees nothing. A series' occurrences never overlap each other: one that reaches past the next one's
+start (a day-long occurrence the night the clocks go forward) ends there, and the next ends at the
+later of the two ends, so the series holds the same time as separate reservations.
 
 ### External calendars
 
@@ -492,16 +501,22 @@ Slotlock gives them neutral boundaries:
   instant of a repeated hour). 00:00-06:00 holds six hours the night the clocks go forward and
   seven the night they go back. A start in a skipped hour moves forward by the gap; one in a
   repeated hour is its first instant. One-off events, overrides and PERIOD RDATEs occupy exactly
-  the times they give. SPEC.md, "Daylight-saving time", lists the cases.
+  the times they give. A series' occurrences never overlap each other, as for stored series. SPEC.md,
+  "Daylight-saving time", lists the cases.
 - An override without DTEND or DURATION lasts its series' length. One whose RECURRENCE-ID names no
   occurrence, or whose occurrence the series also EXDATEs, occupies its own time, as the provider
   shows it. The instances of a CalDAV-expanded series are each read, the first with or without a
   RECURRENCE-ID. An event with both DTEND and DURATION is refused.
 - `parseTrustedICalendarEvents` reads times as `parseICalendarChanges` does, so a series stored from
-  it occupies what the feed reports. It drops an EXDATE that names no occurrence, and refuses what a
-  stored series cannot hold: a zone only the feed defines (a Windows name such as `GMT Standard
-  Time`; map it to an IANA zone first), a DTSTART the clocks skip, an instance whose transparency
+  it occupies what the feed reports; an all-day series, stored from local midnight to local
+  midnight, may also hold the hour after a midnight the clocks go forward on, never less. It drops
+  an EXDATE that names no occurrence, and refuses what a stored series cannot hold: a zone only the
+  feed defines (a Windows name such as `GMT Standard Time`; map it to an IANA zone first), a DTSTART
+  the clocks skip (an all-day series' first midnight included), an instance whose transparency
   differs from its series', or a moved instance that names no occurrence.
+- `emitICalendar` and `emitITipCalendar` write a VTIMEZONE for the zone their times name (RFC 5545
+  §3.6.5), from the IANA rules: every change over the years the event covers, and yearly rules that
+  carry a series on past them.
 - `recordCalendarCoverage` marks how much of a feed is read. Pass the sources a resource depends on as
   `requiredSources`, and any coverage short of `complete` means the time is not proven free.
 
@@ -509,9 +524,9 @@ Read a feed someone else controls with `createICalendarWorkerPool`, which runs t
 worker threads. However costly the feed, the thread that serves requests never runs ical.js on it: a
 worker past its deadline (3 seconds by default) or its heap (128 MB) is stopped, and the feed is
 refused with `CalendarExpansionLimitError`. The pool offers `parseICalendarFeed` too. When every
-worker is busy and the queue is full, the pool answers `ICalendarWorkerBusyError` at once. A worker starts in about 40 ms and is reused; idle
-workers do not keep the process alive. The pool runs from the built package (the worker is
-`ical-worker-thread.js`), not from Slotlock's TypeScript sources.
+worker is busy and the queue is full, the pool answers `ICalendarWorkerBusyError` at once. A worker
+starts in about 40 ms and is reused; idle workers do not keep the process alive. The pool runs from
+the built package (the worker is `ical-worker-thread.js`), not from Slotlock's TypeScript sources.
 
 <!-- example: examples/feeds.ts#feeds -->
 ```ts
