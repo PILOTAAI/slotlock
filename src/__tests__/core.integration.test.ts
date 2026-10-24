@@ -767,6 +767,16 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
         expect(foreignArchiveDelete).toEqual([]);
       });
 
+      // withTenant reads the tenant's suspension through a function PUBLIC may not run: a role
+      // granted table rights alone is told which grant it lacks.
+      await expect(
+        sql.begin(async (tx) => {
+          await tx.unsafe(`SET LOCAL ROLE ${role}`);
+          return createSlotlockStore(tx).withTenant(tenantA, async () => 'ran');
+        }),
+      ).rejects.toMatchObject({ code: 'application_role_not_granted' });
+      await sql.unsafe(`GRANT EXECUTE ON FUNCTION slotlock.tenant_suspended(text) TO ${role}`);
+
       await sql.begin(async (tx) => {
         await tx.unsafe(`SET LOCAL ROLE ${role}`);
         const scopedStore = createSlotlockStore(tx);
@@ -846,7 +856,9 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
         await expect(otherContextStore.applyTenantRls()).rejects.toMatchObject({
           code: 'tenant_context_conflict',
         });
-        await expect(otherContextStore.applyTenantRls({ allowRebind: true })).resolves.toBeUndefined();
+        await expect(
+          otherContextStore.applyTenantRls({ allowRebind: true }),
+        ).resolves.toBeUndefined();
         // Rebound inside this transaction; still bound as before for every other session.
         const [inside] = await tx<{ binding: string }[]>`
           SELECT obj_description(oid, 'pg_policy') AS binding
@@ -857,7 +869,9 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
         await expect(sameContextStore.applyTenantRls()).rejects.toMatchObject({
           code: 'tenant_context_conflict',
         });
-        await expect(sameContextStore.applyTenantRls({ allowRebind: true })).resolves.toBeUndefined();
+        await expect(
+          sameContextStore.applyTenantRls({ allowRebind: true }),
+        ).resolves.toBeUndefined();
         throw rolledBack;
       }),
     ).rejects.toBe(rolledBack);

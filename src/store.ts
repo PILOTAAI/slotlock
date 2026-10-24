@@ -122,7 +122,8 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
 const AGENT_EVENT_OWNER_PATTERN = /^agent:[0-9a-f]{64}$/;
 
 /** Store-owned coverage source for bounded, locally materialized recurring events. */
-export const SLOTLOCK_LOCAL_RECURRENCE_COVERAGE_SOURCE = 'slotlock:local-recurrence-materialization';
+export const SLOTLOCK_LOCAL_RECURRENCE_COVERAGE_SOURCE =
+  'slotlock:local-recurrence-materialization';
 
 /**
  * Stable daily target shared by the event writer, maintenance worker, and readiness proof: from a
@@ -159,7 +160,9 @@ function resumeStoredSeries(
 
 /** A series cursor as the jsonb column takes it. */
 function seriesCursorJson(tx: TransactionSql, cursor: CalendarSeriesCursor | null) {
-  return cursor === null ? null : tx.json(cursor as unknown as Parameters<TransactionSql['json']>[0]);
+  return cursor === null
+    ? null
+    : tx.json(cursor as unknown as Parameters<TransactionSql['json']>[0]);
 }
 
 /**
@@ -175,14 +178,16 @@ function rolledWindow(stored: Interval, horizon: Interval): Interval | null {
 }
 
 /** The roll's `after`, checked, or `undefined` for a pass's first batch. */
-function rollCursor(after: CalendarHorizonRollCursor | undefined): CalendarHorizonRollCursor | undefined {
+function rollCursor(
+  after: CalendarHorizonRollCursor | undefined,
+): CalendarHorizonRollCursor | undefined {
   if (after === undefined) return undefined;
   if (
     !(after.materializedEndsAt instanceof Date) ||
     !Number.isFinite(after.materializedEndsAt.getTime()) ||
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(after.eventId)
   ) {
-    throw Object.assign(new Error('Slotlock horizon cursor must be a previous batch\'s `next`'), {
+    throw Object.assign(new Error("Slotlock horizon cursor must be a previous batch's `next`"), {
       code: 'invalid_cursor' as const,
     });
   }
@@ -1075,7 +1080,8 @@ function oneOffEventWindow(event: Interval, requested: Interval | undefined): In
     !isFiniteWindow(window) ||
     window.start > event.start ||
     window.end < event.end ||
-    window.end.getTime() - window.start.getTime() > Math.max(MAX_MATERIALIZATION_WINDOW_MS, duration)
+    window.end.getTime() - window.start.getTime() >
+      Math.max(MAX_MATERIALIZATION_WINDOW_MS, duration)
   ) {
     throw new CalendarContractError('invalid_icalendar');
   }
@@ -1406,9 +1412,12 @@ async function upsertResource(
   }
   const row = rows[0];
   if (!row) {
-    throw Object.assign(new Error('Slotlock resource visibility cannot be changed by creating it'), {
-      code: 'resource_visibility_conflict' as const,
-    });
+    throw Object.assign(
+      new Error('Slotlock resource visibility cannot be changed by creating it'),
+      {
+        code: 'resource_visibility_conflict' as const,
+      },
+    );
   }
   return toResource(row);
 }
@@ -1606,10 +1615,13 @@ export interface SlotlockStore {
    */
   grantApplicationRole(role: string, options?: SlotlockMigrationOptions): Promise<void>;
   /**
-   * Run store operations with one transaction-local tenant context on the same connection. With
-   * `isolation: 'read committed'` the transaction is READ COMMITTED whatever the role's default (a
-   * capped `createResource` needs it); inside a caller's transaction of another level it refuses
-   * (`invalid_transaction_isolation`).
+   * Run store operations with one transaction-local tenant context on the same connection. On a
+   * client it opens a READ COMMITTED transaction, whatever the role's default. Inside a caller's
+   * transaction of another level its writes are refused (`invalid_transaction_isolation`), since
+   * that snapshot can miss a suspension, and its reads go on; with `isolation: 'read committed'`
+   * such a transaction is refused outright. The serving role needs EXECUTE on
+   * slotlock.tenant_suspended(text): without it this refuses with `application_role_not_granted`
+   * (grantApplicationRole grants it), and on a schema without it with `schema_outdated`.
    */
   withTenant<T>(
     tenantRef: string,
@@ -1758,7 +1770,10 @@ export interface SlotlockStore {
    * The tenant's booking with this reference as it now is (its current revision), or null: none,
    * cancelled, or a calendar event's occupation, which is not a booking.
    */
-  getReservation(params: { tenantRef: string; externalRef: string }): Promise<SlotlockReservation | null>;
+  getReservation(params: {
+    tenantRef: string;
+    externalRef: string;
+  }): Promise<SlotlockReservation | null>;
   /**
    * The tenant's bookings on one resource whose occupied time meets `window` (at most 367 days),
    * by start then id, keyset-paginated: pass the last one's `{ start, id }` as `after`.
@@ -1807,7 +1822,10 @@ export interface SlotlockStore {
    * One of the tenant's active events by id, whichever owner (the tenant itself or an agent key)
    * wrote it: null when there is none, it was cancelled, or it is another tenant's.
    */
-  getCalendarEventById(params: { tenantRef: string; eventId: string }): Promise<SlotlockCalendarEvent | null>;
+  getCalendarEventById(params: {
+    tenantRef: string;
+    eventId: string;
+  }): Promise<SlotlockCalendarEvent | null>;
   /** List active events with at least one materialized occurrence intersecting the window. */
   listCalendarEvents(params: {
     tenantRef: string;
@@ -2070,7 +2088,8 @@ async function tenantLimitCount(
       break;
   }
   const count = Number(rows[0]?.count ?? 0);
-  if (!Number.isSafeInteger(count) || count < 0) throw new Error('slotlock: invalid tenant row count');
+  if (!Number.isSafeInteger(count) || count < 0)
+    throw new Error('slotlock: invalid tenant row count');
   return count;
 }
 
@@ -2153,8 +2172,11 @@ function holdTenantRef(options: SlotlockHoldTenantOptions): string | null {
   return tenantRef;
 }
 
-export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions = {}): SlotlockStore {
-  return buildSlotlockStore(sql, options, false);
+export function createSlotlockStore(
+  sql: StoreSql,
+  options: SlotlockStoreOptions = {},
+): SlotlockStore {
+  return buildSlotlockStore(sql, options, null);
 }
 
 /**
@@ -2187,10 +2209,51 @@ function tenantSuspendedError(): Error & { code: 'tenant_suspended' } {
   });
 }
 
+function staleSuspensionCheckError(): Error & { code: 'invalid_transaction_isolation' } {
+  return Object.assign(
+    new Error(
+      'Slotlock writes for a tenant only in a READ COMMITTED transaction, whose suspension check sees every suspension committed before the tenant lock',
+    ),
+    { code: 'invalid_transaction_isolation' as const },
+  );
+}
+
+/**
+ * Reading a tenant's suspension needs EXECUTE on slotlock.tenant_suspended(text), which PUBLIC does
+ * not hold (SQLSTATE 42501 without it), and a schema this release migrated (42883 before then).
+ * Name the remedy for each; any other failure passes through.
+ */
+function suspensionCheckRefusal(error: unknown): unknown {
+  const code = pgCode(error);
+  if (code === '42501') {
+    return Object.assign(
+      new Error(
+        'Slotlock serving role may not run slotlock.tenant_suspended(text): grant it what this release needs with grantApplicationRole (`slotlock migrate` does), once per release',
+        { cause: error },
+      ),
+      { code: 'application_role_not_granted' as const },
+    );
+  }
+  if (code === '42883') {
+    return Object.assign(
+      new Error(
+        'The slotlock schema predates this release (it has no slotlock.tenant_suspended(text)): run applySchema (`slotlock migrate`) with this release first',
+        { cause: error },
+      ),
+      { code: 'schema_outdated' as const },
+    );
+  }
+  return error;
+}
+
+/**
+ * A store on `sql`. With `refusal`, every method in SLOTLOCK_TENANT_WRITE_METHODS throws what it
+ * returns before any query (a suspended tenant, or a suspension check that could be stale).
+ */
 function buildSlotlockStore(
   sql: StoreSql,
   options: SlotlockStoreOptions,
-  suspended: boolean,
+  refusal: (() => Error) | null,
 ): SlotlockStore {
   const configuredTenantSetting = options.tenantContextSetting ?? SLOTLOCK_TENANT_CONTEXT_SETTING;
   const configuredAgentOwnerEventQuota =
@@ -2443,33 +2506,50 @@ function buildSlotlockStore(
       }
       const isolation = options?.isolation;
       if (isolation !== undefined && isolation !== 'read committed') throw invalidIsolationError();
-      return inTransaction(sql, async (tx) => {
-        if (isolation !== undefined) await assertReadCommitted(tx);
-        // Held shared until the transaction ends: suspension and erasure, which take it exclusively,
-        // wait for this transaction, and one that starts after them reads them below (READ
-        // COMMITTED: a statement after the lock sees what committed before it was granted).
-        const previous = await tx<{ value: string | null }[]>`
-          SELECT current_setting(${configuredTenantSetting}, true) AS value,
-                 pg_advisory_xact_lock_shared(
-                   hashtextextended(${slotlockTenantLockKey(tenantRef)}, 0)
-                 ) AS locked`;
-        const [context] = await tx<{ suspended: boolean }[]>`
-          SELECT set_config(${configuredTenantSetting}, ${tenantRef}, true) AS tenant,
-                 slotlock.tenant_suspended(${tenantRef}) AS suspended`;
-        try {
-          return await callback(
-            buildSlotlockStore(tx, storeOptions, context?.suspended === true) as SlotlockTenantStore,
-          );
-        } finally {
-          await tx`SELECT set_config(${configuredTenantSetting}, ${previous[0]?.value ?? ''}, true)`;
-        }
-      }, isolation);
+      return inTransaction(
+        sql,
+        async (tx) => {
+          if (isolation !== undefined) await assertReadCommitted(tx);
+          // Held shared until the transaction ends: suspension and erasure, which take it
+          // exclusively, wait for this transaction, and one that starts after them reads them below
+          // (READ COMMITTED: a statement after the lock sees what committed before it was granted).
+          const previous = await tx<{ value: string | null; isolation: string }[]>`
+            SELECT current_setting(${configuredTenantSetting}, true) AS value,
+                   current_setting('transaction_isolation') AS isolation,
+                   pg_advisory_xact_lock_shared(
+                     hashtextextended(${slotlockTenantLockKey(tenantRef)}, 0)
+                   ) AS locked`;
+          const [context] = await tx<{ suspended: boolean }[]>`
+            SELECT set_config(${configuredTenantSetting}, ${tenantRef}, true) AS tenant,
+                   slotlock.tenant_suspended(${tenantRef}) AS suspended`.catch((error: unknown) => {
+            throw suspensionCheckRefusal(error);
+          });
+          // A caller's REPEATABLE READ or SERIALIZABLE snapshot was taken before the lock was
+          // granted, so it may not show a suspension that committed while this transaction waited:
+          // its writes are refused, and it may read.
+          const refusal =
+            context?.suspended === true
+              ? tenantSuspendedError
+              : previous[0]?.isolation !== 'read committed'
+                ? staleSuspensionCheckError
+                : null;
+          try {
+            return await callback(
+              buildSlotlockStore(tx, storeOptions, refusal) as SlotlockTenantStore,
+            );
+          } finally {
+            await tx`SELECT set_config(${configuredTenantSetting}, ${previous[0]?.value ?? ''}, true)`;
+          }
+        },
+        'read committed',
+      );
     },
 
     async createResource(params) {
       assertValidResourceInput(params);
       const requested = params.maxTenantResources;
-      const configured = params.tenantRef === undefined ? undefined : configuredTenantLimits.resources;
+      const configured =
+        params.tenantRef === undefined ? undefined : configuredTenantLimits.resources;
       if (requested === undefined && configured === undefined) return upsertResource(sql, params);
       if (
         requested !== undefined &&
@@ -2766,7 +2846,11 @@ function buildSlotlockStore(
               return { ok: true, reservation: toReservation(found), idempotent: true };
             }
             const bookingLimit = await tenantLimitReached(tx, params.tenantRef, 'reservations');
-            const resourceState = await tenantResourceState(tx, params.resourceId, params.tenantRef);
+            const resourceState = await tenantResourceState(
+              tx,
+              params.resourceId,
+              params.tenantRef,
+            );
             if (resourceState === 'missing') return { ok: false, code: 'resource_tenant_mismatch' };
             if (resourceState === 'archived') return { ok: false, code: 'resource_archived' };
             if (bookingLimit !== null) {
@@ -2857,7 +2941,11 @@ function buildSlotlockStore(
             if (params.revision !== currentRevision + 1) {
               return { ok: false, code: 'revision_conflict' };
             }
-            const resourceState = await tenantResourceState(tx, params.resourceId, params.tenantRef);
+            const resourceState = await tenantResourceState(
+              tx,
+              params.resourceId,
+              params.tenantRef,
+            );
             if (resourceState === 'missing') return { ok: false, code: 'resource_tenant_mismatch' };
             if (resourceState === 'archived') return { ok: false, code: 'resource_archived' };
             if (
@@ -2999,7 +3087,9 @@ function buildSlotlockStore(
       const keyed = idempotencyKey !== undefined || principalRef !== undefined;
       if (
         keyed &&
-        (tenantRef === undefined || !isValidIdentity(principalRef) || !isValidIdentity(idempotencyKey))
+        (tenantRef === undefined ||
+          !isValidIdentity(principalRef) ||
+          !isValidIdentity(idempotencyKey))
       ) {
         return { ok: false, code: 'invalid_identity' };
       }
@@ -3049,7 +3139,8 @@ function buildSlotlockStore(
                FOR SHARE`;
             if (!resource) return { ok: false, code: 'resource_not_found' };
             if (resource.archived) return { ok: false, code: 'resource_archived' };
-            if (holdLimit !== null) return { ok: false, code: 'hold_limit_reached', limit: holdLimit };
+            if (holdLimit !== null)
+              return { ok: false, code: 'hold_limit_reached', limit: holdLimit };
             if (
               resource.tenant_ref !== null &&
               !(await recurrenceCoversWrite(tx, {
@@ -3297,7 +3388,10 @@ function buildSlotlockStore(
 
     async putCalendarEvent(params) {
       const ownerRef = params.ownerRef ?? SLOTLOCK_INTERNAL_EVENT_OWNER_REF;
-      if (params.expectedResourceId !== undefined && !isValidResourceId(params.expectedResourceId)) {
+      if (
+        params.expectedResourceId !== undefined &&
+        !isValidResourceId(params.expectedResourceId)
+      ) {
         return { ok: false, code: 'invalid_identity' };
       }
       if (
@@ -3397,7 +3491,11 @@ function buildSlotlockStore(
                 currentRevision: Number(tombstones[0].revision),
               };
             }
-            const resourceState = await tenantResourceState(tx, params.resourceId, params.tenantRef);
+            const resourceState = await tenantResourceState(
+              tx,
+              params.resourceId,
+              params.tenantRef,
+            );
             if (resourceState === 'missing') return { ok: false, code: 'resource_tenant_mismatch' };
             if (resourceState === 'archived') return { ok: false, code: 'resource_archived' };
             const existing = await tx<CalendarEventRow[]>`
@@ -3777,13 +3875,18 @@ function buildSlotlockStore(
         refusedEventIds,
         hasMore,
         next:
-          hasMore && last ? { materializedEndsAt: last.materialized_ends_at, eventId: last.id } : null,
+          hasMore && last
+            ? { materializedEndsAt: last.materialized_ends_at, eventId: last.id }
+            : null,
       };
     },
 
     async cancelCalendarEvent(params) {
       const ownerRef = params.ownerRef ?? SLOTLOCK_INTERNAL_EVENT_OWNER_REF;
-      if (params.expectedResourceId !== undefined && !isValidResourceId(params.expectedResourceId)) {
+      if (
+        params.expectedResourceId !== undefined &&
+        !isValidResourceId(params.expectedResourceId)
+      ) {
         return { ok: false, code: 'invalid_identity' };
       }
       if (
@@ -4424,7 +4527,8 @@ function buildSlotlockStore(
         busy = await this.listBusy(params.resourceId, reach);
       } else {
         busy = [];
-        const parts = bufferAfterMs > 0 ? [window, { start: window.end, end: reach.end }] : [window];
+        const parts =
+          bufferAfterMs > 0 ? [window, { start: window.end, end: reach.end }] : [window];
         for (const part of parts) {
           const freeBusy = await this.getFreeBusy({
             tenantRef,
@@ -4469,7 +4573,9 @@ function buildSlotlockStore(
           }))
       ) {
         throw Object.assign(
-          new Error('Slotlock suspension reason must be 1-500 characters without control characters'),
+          new Error(
+            'Slotlock suspension reason must be 1-500 characters without control characters',
+          ),
           { code: 'invalid_suspension_reason' as const },
         );
       }
@@ -4500,7 +4606,11 @@ function buildSlotlockStore(
         throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
       }
       const [row] = await sql<{ suspended: boolean }[]>`
-        SELECT slotlock.tenant_suspended(${params.tenantRef}::text) AS suspended`;
+        SELECT slotlock.tenant_suspended(${params.tenantRef}::text) AS suspended`.catch(
+        (error: unknown) => {
+          throw suspensionCheckRefusal(error);
+        },
+      );
       return row?.suspended === true;
     },
 
@@ -4520,9 +4630,9 @@ function buildSlotlockStore(
       return { rows, total };
     },
   };
-  if (!suspended) return store;
+  if (refusal === null) return store;
   const refuse = async () => {
-    throw tenantSuspendedError();
+    throw refusal();
   };
   return Object.assign(
     store,

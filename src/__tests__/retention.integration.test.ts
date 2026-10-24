@@ -263,6 +263,8 @@ describe.skipIf(!url)('Slotlock event retention (real Postgres)', () => {
     await sql.unsafe(
       `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA slotlock TO ${probeRole}`,
     );
+    // withTenant reads the tenant's suspension through this function, which PUBLIC may not run.
+    await sql.unsafe(`GRANT EXECUTE ON FUNCTION slotlock.tenant_suspended(text) TO ${probeRole}`);
     const asProbe = async <T>(callback: (probeStore: SlotlockStore) => Promise<T>): Promise<T> =>
       (await sql.begin(async (tx) => {
         await tx.unsafe(`SET LOCAL ROLE ${probeRole}`);
