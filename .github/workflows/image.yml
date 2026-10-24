@@ -1,24 +1,25 @@
-# Image: on a v* tag, build the server image for linux/amd64 and linux/arm64, push it to
+# Image: build the server image for linux/amd64 and linux/arm64, push it to
 # ghcr.io/pilotaai/slotlock, and attest its build provenance (verify with
-# `gh attestation verify oci://ghcr.io/pilotaai/slotlock:<version> --repo PILOTAAI/slotlock`).
-# Its second job runs mcp-registry.yml, which publishes server.json, once the image is pushed.
+# `gh attestation verify oci://ghcr.io/pilotaai/slotlock:<version> --repo PILOTAAI/slotlock
+# --signer-workflow PILOTAAI/slotlock/.github/workflows/image.yml`). Its second job runs
+# mcp-registry.yml, which publishes server.json, once the image is pushed.
+#
+# release.yml calls it for a v* tag once its "Verify, test and pack" job has passed, so an image or a
+# registry entry never goes out for a tag whose tests failed. The push waits in the `ghcr`
+# environment, and the registry entry in `mcp-registry`, for a required reviewer
+# (scripts/configure-github.sh). An attestation made in a reusable workflow is signed by that
+# workflow (gh attestation verify), so the signer stays image.yml, and the source ref is the tag.
 #
 # One-time setup by the repository owner: after the first push, make the ghcr.io/pilotaai/slotlock
 # package public (Package settings > Change visibility; GitHub has no API for it). New GHCR packages
 # start private, and the MCP Registry only accepts images it can pull anonymously.
-# scripts/bootstrap-release.sh <tag> checks it, waits while you change it, and re-runs this
-# workflow's failed job.
+# scripts/bootstrap-release.sh <tag> checks it, waits while you change it, and re-runs the failed job.
 name: Image
 
 on:
-  push:
-    tags: ['v*']
+  workflow_call:
 
 permissions: {}
-
-concurrency:
-  group: image-${{ github.ref }}
-  cancel-in-progress: false
 
 defaults:
   run:
@@ -29,6 +30,7 @@ jobs:
     name: Build, push and attest
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    environment: ghcr
     permissions:
       contents: read
       # Push to ghcr.io/pilotaai/slotlock.

@@ -16,6 +16,12 @@ versioning.
   would have made it what npm installs by default. `scripts/dist-tag.sh` now chooses the tag from
   the registry's current `latest`: a later release takes `latest`, a release on an older line takes
   `latest-<major>.<minor>`, and a prerelease takes `next`.
+- The server image and the MCP Registry entry are published only after the release's own suite has
+  passed. `image.yml` used to start on the tag beside `release.yml`, so a tag whose tests failed
+  still pushed an image and a registry entry. `release.yml` now calls it once its build job passes,
+  and the image push and the registry entry each wait in an environment (`ghcr`, `mcp-registry`)
+  that `scripts/configure-github.sh` sets up. The image's attestation is still signed by
+  `image.yml`, so `gh attestation verify --signer-workflow .../image.yml` keeps working.
 
 ## 0.2.0 - 2026-10-23
 

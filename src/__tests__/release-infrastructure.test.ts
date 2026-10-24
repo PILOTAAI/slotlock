@@ -518,12 +518,45 @@ describe('release automation', () => {
   });
 
   it('starts the release workflows only from a pushed v* tag', () => {
-    for (const file of ['release.yml', 'image.yml']) {
+    const release = workflow('release.yml');
+    expect(release).toMatch(/^on:\n {2}push:\n {4}tags: \['v\*'\]\n\n/m);
+    // The image and the MCP Registry are jobs of that run, never a run of their own.
+    for (const file of ['image.yml', 'mcp-registry.yml']) {
+      expect(workflow(file), file).toMatch(/^on:\n {2}workflow_call:\n\n/m);
+    }
+    for (const file of ['release.yml', 'image.yml', 'mcp-registry.yml']) {
       const text = workflow(file);
-      expect(text, file).toMatch(/^on:\n {2}push:\n {4}tags: \['v\*'\]\n\n/m);
       expect(text, file).not.toContain('workflow_dispatch');
+      expect(text, file).not.toContain('pull_request');
       expect(text, file).toContain('run: scripts/check-release-tag.sh "$GITHUB_REF_NAME"');
     }
+  });
+
+  it('publishes the image and the MCP Registry entry only after the release tests pass, behind a reviewer', () => {
+    const release = workflow('release.yml');
+    const job = (text: string, name: string) => {
+      const start = text.indexOf(`\n  ${name}:\n`);
+      expect(start, name).toBeGreaterThan(0);
+      const next = text.slice(start + 1).search(/\n {2}[\w-]+:\n/);
+      return text.slice(start, next === -1 ? undefined : start + 1 + next);
+    };
+    const image = job(release, 'image');
+    expect(image).toContain('needs: build');
+    expect(image).toContain('uses: ./.github/workflows/image.yml');
+    // A called workflow can only keep or narrow what its caller grants.
+    for (const permission of ['packages: write', 'attestations: write', 'id-token: write']) {
+      expect(image).toContain(permission);
+    }
+    // The build job is the one that runs npm test against PostgreSQL.
+    expect(job(release, 'build')).toContain('run: npm test');
+    const called = workflow('image.yml');
+    expect(job(called, 'image')).toContain('environment: ghcr');
+    expect(job(called, 'registry')).toContain('needs: image');
+    expect(job(workflow('mcp-registry.yml'), 'publish')).toContain('environment: mcp-registry');
+    // Pylota's deploy verifies the image with --signer-workflow image.yml: an attestation made in a
+    // reusable workflow is signed by that workflow (gh attestation verify), so it stays image.yml.
+    expect(called).toContain('uses: actions/attest@');
+    expect(release).not.toContain('uses: actions/attest@');
   });
 
   it('only stages on npm, and asks for the bootstrap when npm refuses the credential', () => {
@@ -637,9 +670,11 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
   it('makes a release wait for no reviewer unless asked to', () => {
     const plain = dryRun();
     expect(environment(plain, 'npm')?.reviewers).toEqual([]);
+    expect(environment(plain, 'ghcr')?.reviewers).toEqual([]);
     expect(environment(plain, 'mcp-registry')?.reviewers).toEqual([]);
     const approved = dryRun('--require-approval');
     expect(environment(approved, 'npm')?.reviewers).toEqual([{ type: 'User', id: 0 }]);
+    expect(environment(approved, 'ghcr')?.reviewers).toEqual([{ type: 'User', id: 0 }]);
     expect(environment(approved, 'mcp-registry')?.reviewers).toEqual([{ type: 'User', id: 0 }]);
   });
 
@@ -840,11 +875,10 @@ esac`,
   'api repos/PILOTAAI/slotlock/git/tags/7a6 '*) echo "commit $STUB_TAG_COMMIT" ;;
   'run list '*'--workflow tag-release.yml '*) echo "$STUB_TAG_RUNS" ;;
   'run list '*'--workflow release.yml '*) [ "$STUB_GH_FAILS" = 1 ] && exit 1; echo "$STUB_RELEASE_RUNS" ;;
-  'run list '*'--workflow image.yml '*) echo "$STUB_IMAGE_RUNS" ;;
   'run download '*) for last; do :; done; cp "$STUB_ARTIFACT"/* "$last" ;;
   'run view '*'--json attempt'*)
     if [ -f "$STUB_LOG/rerun-$3" ] && [ "$STUB_NO_NEW_ATTEMPT" != 1 ]; then echo 2; else echo 1; fi ;;
-  'run view 22 '*) echo "$STUB_IMAGE_JOB" ;;
+  'run view 11 '*'--json jobs'*) echo "$STUB_IMAGE_JOB" ;;
   'run rerun '*)
     touch "$STUB_LOG/rerun-$3"
     if [ "$3" = 5 ] && [ "$STUB_RERUN_TAGS" = 1 ]; then touch "$STUB_LOG/tagged"; fi ;;
@@ -908,7 +942,6 @@ esac`,
         STUB_NPM_VERSION: '11.19.0',
         STUB_TAG_COMMIT: tagCommit,
         STUB_RELEASE_RUNS: JSON.stringify([run(11)]),
-        STUB_IMAGE_RUNS: JSON.stringify([run(22)]),
         STUB_IMAGE_PUBLIC: '1',
         STUB_IMAGE_JOB: 'success',
         STUB_STAGED: '',
@@ -1032,7 +1065,6 @@ esac`,
     // npm expires a trusted publisher that has not published within 2 days.
     expect(result.npm.filter((call) => call.startsWith('trust '))).toEqual([]);
     expect(result.gh).toContain(rerun(11));
-    expect(result.gh).toContain(rerun(22));
   });
 
   it("uses only the run the tag's push started on the tag's commit", () => {
@@ -1132,10 +1164,11 @@ esac`,
       'https://github.com/orgs/PILOTAAI/packages/container/package/slotlock',
     );
     expect(result.stderr).toContain('stopped before the image was public');
-    expect(result.gh).not.toContain(rerun(22));
+    // Only the npm step's re-run: the registry entry is not retried until the image is public.
+    expect(result.gh.filter((call) => call === rerun(11))).toHaveLength(1);
   });
 
-  it('re-runs an Image run whose image job failed, without asking about visibility', () => {
+  it('names a Release run whose image job failed once re-run, without asking about visibility', () => {
     const result = bootstrap({
       STUB_PACKAGE_ON_NPM: '1',
       STUB_VERSION_ON_NPM: '1',
@@ -1143,8 +1176,12 @@ esac`,
       STUB_IMAGE_JOB: 'failure',
     });
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toContain('did not push the image');
-    expect(result.gh).toContain(rerun(22));
+    expect(result.stdout).toContain('Release run 11 did not push the image');
+    expect(result.stdout).not.toContain('Make it public');
+    expect(result.gh.filter((call) => call === rerun(11))).toHaveLength(1);
+    expect(result.gh).toContainEqual(
+      expect.stringMatching(/^run view 11 --repo PILOTAAI\/slotlock --json jobs --jq /),
+    );
   });
 
   it('refuses an npm older than the one it was run with', () => {

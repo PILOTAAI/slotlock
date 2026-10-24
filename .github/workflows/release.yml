@@ -1,7 +1,9 @@
 # Release: on a v* tag, verify the tag, run the suite against PostgreSQL, pack the npm artifact
-# (dist/), STAGE it on npm, and create the GitHub release with the tarball and its checksum.
-# tag-release.yml pushes the tag of a merged version; an admin can push one by hand. Nothing in this
-# workflow can make a version public on npm.
+# (dist/), STAGE it on npm, and create the GitHub release with the tarball and its checksum. Once the
+# suite has passed it also calls image.yml, which pushes the server image to GHCR and then publishes
+# server.json to the MCP Registry, each after a required reviewer approves its environment (ghcr,
+# mcp-registry). tag-release.yml pushes the tag of a merged version; an admin can push one by hand.
+# Nothing in this workflow can make a version public on npm.
 #
 # Staging uses npm trusted publishing: npm exchanges this job's GitHub OIDC token (id-token: write)
 # for a short-lived credential, so no npm token exists anywhere. Provenance is attached. The staged
@@ -191,6 +193,19 @@ jobs:
             echo "Rejecting it instead (npm stage reject) leaves the tag and the GitHub release this run creates; delete"
             echo "the release with gh release delete $GITHUB_REF_NAME."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  image:
+    name: Image
+    # Only a tag whose suite passed publishes an image or a registry entry.
+    needs: build
+    permissions:
+      contents: read
+      # What image.yml's jobs ask for: a called workflow can only keep or narrow these.
+      packages: write
+      attestations: write
+      id-token: write
+      artifact-metadata: write
+    uses: ./.github/workflows/image.yml
 
   github-release:
     name: GitHub release

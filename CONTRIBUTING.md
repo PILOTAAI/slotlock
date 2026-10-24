@@ -78,10 +78,11 @@ that section becomes the release notes.
 To release, run **Actions > Release a version** with the version (for example `0.1.1`). It sets the
 version in `package.json`, `package-lock.json`, `server.json` and `slotlock.manifest.json` and dates
 the `## Unreleased` heading (`scripts/prepare-release.sh`), opens the pull request, merges it once CI
-and DCO pass on it, and `tag-release.yml` tags the release commit. The tag starts `release.yml` (the
-suite, then npm and the GitHub release) and `image.yml` (the image, then the MCP Registry). npm holds
-each staged version until a maintainer approves it with two-factor authentication (GOVERNANCE.md);
-the Release run's summary gives the command. A version merged to `main` by hand, with its heading
+and DCO pass on it, and `tag-release.yml` tags the release commit. The tag starts `release.yml`: the
+suite, then npm and the GitHub release, and, only once the suite has passed, `image.yml` (the image,
+then the MCP Registry). The image and the registry entry each wait for a maintainer to approve their
+environment (`ghcr`, `mcp-registry`), and npm holds each staged version until a maintainer approves
+it with two-factor authentication (GOVERNANCE.md); the Release run's summary gives the command. A version merged to `main` by hand, with its heading
 dated, is released the same way. After a failed run, run it again with the same version: it keeps
 the release branch the failed run left when that already holds this release, so checks already run
 there still count, replaces it otherwise, and reuses its pull request (`scripts/open-release-pr.sh`).

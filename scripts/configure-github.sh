@@ -422,6 +422,10 @@ configure_environments() {
   # short-lived OIDC credential.
   configure_environment npm "$reviewers" tag 'v*'
 
+  # ghcr: image.yml's job that pushes and attests the server image, which release.yml calls for the
+  # v* tag once its suite has passed.
+  configure_environment ghcr "$reviewers" tag 'v*'
+
   # mcp-registry: mcp-registry.yml's publish job, called by image.yml for the same v* tag. A
   # registry version can be published once only; it names the image this tag pushed.
   configure_environment mcp-registry "$reviewers" tag 'v*'
@@ -444,7 +448,7 @@ configure_environments() {
 }
 
 # The deploy key tag-release.yml pushes release tags with: a tag pushed with GITHUB_TOKEN starts no
-# workflow, and one pushed with a deploy key starts release.yml and image.yml. Like every deploy key
+# workflow, and one pushed with a deploy key starts release.yml. Like every deploy key
 # with write access it can do what a repository admin can, so its private half exists only in the
 # release-tag environment secret, which GitHub hands to runs on main alone. It is generated here in
 # a private temporary directory, its public half sent to GitHub and its private half to the secret
@@ -602,7 +606,7 @@ configure_branch_ruleset() {
 # 4. Release tags.
 configure_tag_ruleset() {
   step "4. Ruleset '$TAG_RULESET' (refs/tags/v*)"
-  # A v* tag starts release.yml and image.yml, which stage the npm package and push the image,
+  # A v* tag starts release.yml, which stages the npm package and pushes the image (image.yml),
   # running the workflow files of the tagged commit. GOVERNANCE.md says releases come only from a
   # protected v<version> tag. Only the admin role may create, move or delete one, and deploy keys
   # may create one: tag-release.yml pushes a merged version's tag with the release-tag deploy key
@@ -687,8 +691,8 @@ print_checklist() {
 
 [ ] Releases: run Actions > Release a version with the version. It prepares the release, opens
     its pull request, merges it once CI passes, and tag-release.yml tags it, which starts Release
-    (npm, then the GitHub release) and Image (GHCR, then the MCP Registry). Without the release
-    app, approve the pull request's checks on it ("Approve workflows to run"). Each staged npm
+    (npm, then the GitHub release; GHCR, then the MCP Registry, once the suite passes). Without
+    the release app, approve the pull request's checks on it ("Approve workflows to run"). Each staged npm
     version waits for your two-factor approval (GOVERNANCE.md, Releases); the Release run's
     summary gives the npm stage approve command.
     npm and GitHub keep three first-time steps for a person, and the run that needs one says so:

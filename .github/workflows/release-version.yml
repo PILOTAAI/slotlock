@@ -4,9 +4,9 @@
 # "## Unreleased" heading dated), opens its pull request (scripts/open-release-pr.sh), waits for CI
 # and DCO to pass on it (scripts/wait-for-pr-checks.sh) and squash-merges it, which leads to Tag
 # release. That tags the release commit, and the tag's push starts Release (npm, then the GitHub
-# release) and Image (GHCR, then the MCP Registry). npm then holds the staged version for a
-# maintainer's two-factor approval (GOVERNANCE.md, Releases): the Release run's summary gives the
-# command.
+# release, and GHCR, then the MCP Registry, once its suite passes). npm then holds the staged
+# version for a maintainer's two-factor approval (GOVERNANCE.md, Releases): the Release run's
+# summary gives the command.
 #
 # Who opens and merges the pull request:
 # - The release app, once scripts/create-release-app.mjs has stored it in the release-app
@@ -123,8 +123,8 @@ jobs:
           {
             echo "### Releasing $VERSION"
             echo "Merged #$PR and started Tag release and Site on main. The tag starts Release (npm, then the GitHub"
-            echo "release) and Image (GHCR, then the MCP Registry). Approve the staged npm version with the command"
-            echo "in the Release run's summary."
+            echo "release; GHCR, then the MCP Registry, each once you approve its environment). Approve the staged"
+            echo "npm version with the command in the Release run's summary."
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Say what the merge starts
         if: steps.app.outputs.token != ''
@@ -132,6 +132,6 @@ jobs:
           {
             echo "### Releasing $VERSION"
             echo "Merged #$PR as the release app: its push to main starts Tag release and Site. The tag starts"
-            echo "Release (npm, then the GitHub release) and Image (GHCR, then the MCP Registry). Approve the staged"
-            echo "npm version with the command in the Release run's summary."
+            echo "Release (npm, then the GitHub release; GHCR, then the MCP Registry, each once you approve its"
+            echo "environment). Approve the staged npm version with the command in the Release run's summary."
           } >> "$GITHUB_STEP_SUMMARY"
