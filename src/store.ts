@@ -1157,13 +1157,26 @@ async function calendarOwnerCommandCount(
   return count;
 }
 
+/**
+ * The row an event write lost to. The write was rolled back, so the event's own rows from before
+ * it are still there and are left out: they were to be replaced, and never block the event.
+ */
 async function findCalendarOverlap(
   sql: StoreSql,
   resourceId: string,
   occurrences: Array<{ start: Date; end: Date }>,
+  eventId: string | undefined,
 ): Promise<{ ok: false; code: 'overlap'; conflictingReservationId: string | null }> {
   for (const occurrence of occurrences) {
-    const result = await overlapLoss(sql, resourceId, occurrence.start, occurrence.end);
+    const result = await overlapLoss(
+      sql,
+      resourceId,
+      occurrence.start,
+      occurrence.end,
+      0,
+      undefined,
+      eventId,
+    );
     if (result.conflictingReservationId !== null) return result;
   }
   return { ok: false, code: 'overlap', conflictingReservationId: null };
@@ -1625,11 +1638,14 @@ async function overlapLoss(
   end: Date,
   bufferAfterMs = 0,
   excludeReservationId?: string,
+  excludeCalendarEventId?: string,
 ): Promise<{ ok: false; code: 'overlap'; conflictingReservationId: string | null }> {
   const winners = await sql<{ id: string }[]>`
     SELECT id FROM slotlock.reservations
      WHERE resource_id = ${resourceId}
        AND (${excludeReservationId ?? null}::uuid IS NULL OR id <> ${excludeReservationId ?? null}::uuid)
+       AND (${excludeCalendarEventId ?? null}::uuid IS NULL
+            OR calendar_event_id IS DISTINCT FROM ${excludeCalendarEventId ?? null}::uuid)
        AND tstzrange(
              starts_at,
              COALESCE(occupied_ends_at, ends_at),
@@ -2614,6 +2630,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
       });
 
       let attempted: CalendarEventOccurrence[] = expanded?.occurrences ?? [];
+      let storedEventId: string | undefined;
       for (let attempt = 1; ; attempt++) {
         try {
           return await inTransaction(sql, async (tx): Promise<PutCalendarEventResult> => {
@@ -2678,6 +2695,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
                  AND external_ref = ${params.externalRef}
                FOR UPDATE`;
             const found = existing[0];
+            storedEventId = found?.id;
             const currentRevision = found ? Number(found.revision) : 0;
             if (params.expectedRevision !== currentRevision) {
               return { ok: false, code: 'revision_conflict', currentRevision };
@@ -2804,7 +2822,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
           ) {
             throw error;
           }
-          return findCalendarOverlap(sql, params.resourceId, attempted);
+          return findCalendarOverlap(sql, params.resourceId, attempted, storedEventId);
         }
       }
     },
