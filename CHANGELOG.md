@@ -41,6 +41,11 @@ versioning.
   requests unless `--allow-actions-pull-requests` is given (the release app opens them), and splits
   the release-tag ruleset so the deploy-key bypass covers creating a `v*` tag only; only the admin
   role may move or delete one.
+- Dependabot watches the dashboard Worker's lockfile and the five language clients (Cargo, Go
+  modules, Gradle, NuGet, pip) as well, and a test fails when a manifest is added without an entry.
+  The site's and the dashboard Worker's Wrangler pinned undici 7.29.1 (GHSA-xjj6-f33q-929c, high,
+  development tooling only) through miniflare, which Dependabot could not move; both lockfiles now
+  override it to 7.30.1.
 
 ## 0.2.0 - 2026-10-23
 

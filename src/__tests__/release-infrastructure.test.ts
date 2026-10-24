@@ -2052,3 +2052,71 @@ describe('required checks', () => {
     expect(result.stderr).not.toContain('no longer names its jobs');
   });
 });
+
+describe('dependency updates', () => {
+  const config = read('.github/dependabot.yml');
+  const watched = new Set<string>();
+  for (const block of config.split(/\n(?= {2}- package-ecosystem: )/).slice(1)) {
+    const ecosystem = /package-ecosystem: (\S+)/.exec(block)?.[1];
+    const single = /\n {4}directory: (\S+)/.exec(block)?.[1];
+    const many = /\n {4}directories: \[([^\]]+)\]/.exec(block)?.[1];
+    for (const directory of single ? [single] : (many?.split(',').map((d) => d.trim()) ?? [])) {
+      watched.add(`${ecosystem} ${directory.replace(/^'|'$/g, '')}`);
+    }
+  }
+  /** Every directory below the root, outside dependencies and build output, holding FILE. */
+  function holding(test: (file: string) => boolean, dir = root, out: string[] = []): string[] {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (['node_modules', '.git', 'dist', 'target', 'bin', 'obj', 'build'].includes(entry.name)) {
+        continue;
+      }
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) holding(test, path, out);
+      else if (test(entry.name)) out.push(`/${dirname(path).slice(root.length + 1)}`.replace(/\/$/, ''));
+    }
+    return out;
+  }
+
+  it('watches every lockfile and manifest in the repository', () => {
+    const expected = [
+      ...holding((file) => file === 'package-lock.json').map((dir) => `npm ${dir || '/'}`),
+      ...holding((file) => file === 'Cargo.toml').map((dir) => `cargo ${dir}`),
+      ...holding((file) => file === 'go.mod').map((dir) => `gomod ${dir}`),
+      ...holding((file) => file === 'pyproject.toml').map((dir) => `pip ${dir}`),
+      ...holding((file) => file === 'build.gradle.kts').map((dir) => `gradle ${dir}`),
+      ...holding((file) => file.endsWith('.csproj')).map((dir) => `nuget ${dir}`),
+    ];
+    expect(expected, 'canary: the manifests were found').toEqual(
+      expect.arrayContaining(['npm /', 'npm /site', 'npm /workers/dashboard', 'cargo /clients/rust']),
+    );
+    for (const entry of expected) expect([...watched], entry).toContain(entry);
+    for (const entry of ['github-actions /', 'docker /', 'docker-compose /']) {
+      expect([...watched]).toContain(entry);
+    }
+  });
+
+  it('installs no undici in the range of GHSA-xjj6-f33q-929c (high), in any lockfile', () => {
+    // The advisory's vulnerable ranges (gh api /advisories/GHSA-xjj6-f33q-929c, 2026-10-24).
+    const vulnerable = (version: string) => {
+      const [major = 0, minor = 0, patch = 0] = version.split('.').map(Number);
+      const at = major * 1e6 + minor * 1e3 + patch;
+      return (
+        (at >= 6_023_000 && at < 6_029_001) ||
+        (at >= 7_018_000 && at < 7_030_001) ||
+        (at >= 8_000_000 && at < 8_012_002)
+      );
+    };
+    let found = 0;
+    for (const dir of holding((file) => file === 'package-lock.json')) {
+      const lock = JSON.parse(read(join(dir.slice(1), 'package-lock.json'))) as {
+        packages: Record<string, { version?: string }>;
+      };
+      for (const [path, entry] of Object.entries(lock.packages)) {
+        if (!/(?:^|\/)node_modules\/undici$/.test(path)) continue;
+        found += 1;
+        expect(vulnerable(entry.version ?? ''), `${dir} ${path} ${entry.version}`).toBe(false);
+      }
+    }
+    expect(found, 'canary: undici is in the site and dashboard lockfiles').toBeGreaterThanOrEqual(2);
+  });
+});

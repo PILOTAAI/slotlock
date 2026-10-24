@@ -1,7 +1,9 @@
-# Weekly version updates for npm packages (the library and the site), GitHub Actions (pinned by
-# commit SHA), the Dockerfile's base images and the Compose file's postgres image (pinned by
-# digest). A cooldown keeps a release out until it has been public for a week; security updates
-# are not delayed by it.
+# Weekly version updates for every manifest in the repository: npm (the library, the site and the
+# dashboard Worker), the five language clients (Cargo, Go modules, Gradle, NuGet, pip), GitHub Actions
+# (pinned by commit SHA), the Dockerfile's base images and the Compose file's postgres image (pinned
+# by digest). A cooldown keeps a release out until it has been public for a week; security updates
+# are not delayed by it. src/__tests__/release-infrastructure.test.ts fails when a manifest is added
+# without an entry here.
 # Dependabot's commits carry no Signed-off-by line; scripts/check-dco.sh exempts GitHub bot authors.
 version: 2
 updates:
@@ -26,6 +28,54 @@ updates:
     groups:
       site:
         update-types: [minor, patch]
+
+  # The dashboard Worker's lockfile holds Wrangler only.
+  - package-ecosystem: npm
+    directory: /workers/dashboard
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      dashboard:
+        update-types: [minor, patch]
+
+  - package-ecosystem: cargo
+    directory: /clients/rust
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: gomod
+    directory: /clients/go
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: gradle
+    directory: /clients/java
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: nuget
+    directories: [/clients/dotnet/src/Slotlock, /clients/dotnet/tests/Slotlock.Tests]
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
+  # The build backend (hatchling) in pyproject.toml's build-system; the client has no runtime
+  # dependencies.
+  - package-ecosystem: pip
+    directory: /clients/python
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: github-actions
     directory: /
