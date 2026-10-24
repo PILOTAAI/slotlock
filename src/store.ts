@@ -1558,7 +1558,8 @@ function occurrenceSpan(occurrences: readonly CalendarEventOccurrence[]): Interv
 /**
  * After a write lost to the exclusion arbiter: roll, in a transaction of its own, the series on the
  * resource the write's transaction rolled with it (and lost), so they stay extended and the loss
- * can name the occurrence that blocked it. A resource with no tenant has no series.
+ * can name the occurrence that blocked it. A resource with no tenant has no series. Upkeep only: if
+ * it fails, the series are left to maintenance and the write is still answered as a loss.
  */
 async function rollSeriesBehind(
   executor: StoreSql,
@@ -1567,18 +1568,22 @@ async function rollSeriesBehind(
   end: Date,
   exceptEventId?: string,
 ): Promise<void> {
-  await inTransaction(executor, async (tx) => {
-    const [resource] = await tx<{ tenant_ref: string | null }[]>`
-      SELECT tenant_ref FROM slotlock.resources WHERE id = ${resourceId}`;
-    if (!resource?.tenant_ref) return;
-    await recurrenceCoversWrite(tx, {
-      tenantRef: resource.tenant_ref,
-      resourceId,
-      start,
-      end,
-      ...(exceptEventId !== undefined ? { exceptEventId } : {}),
+  try {
+    await inTransaction(executor, async (tx) => {
+      const [resource] = await tx<{ tenant_ref: string | null }[]>`
+        SELECT tenant_ref FROM slotlock.resources WHERE id = ${resourceId}`;
+      if (!resource?.tenant_ref) return;
+      await recurrenceCoversWrite(tx, {
+        tenantRef: resource.tenant_ref,
+        resourceId,
+        start,
+        end,
+        ...(exceptEventId !== undefined ? { exceptEventId } : {}),
+      });
     });
-  });
+  } catch {
+    // Rolled back whole (its own transaction, or a savepoint of the caller's).
+  }
 }
 
 export interface SlotlockStore {
