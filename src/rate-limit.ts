@@ -83,8 +83,8 @@ export interface SlotlockRequestLimitsOptions {
   onRefusals?: (counts: SlotlockRefusalCounts) => void;
   /**
    * Called once, with the field's name, when a request carries a field a proxy puts the client's
-   * address in while `trustedProxyHeader` is not set: every client behind that proxy is then counted
-   * as the proxy's one address.
+   * address in while `trustedProxyHeader` is not set: every client behind that proxy is then
+   * counted as the proxy's one address.
    */
   onIgnoredClientField?: (field: string) => void;
   /** Milliseconds, for tests; defaults to `performance.now`. */
