@@ -71,7 +71,7 @@ if [ -z "$pr" ]; then
     printf '%s\n' "$out" >&2
     case $out in
       *'not permitted to create or approve pull requests'*)
-        fail "GitHub Actions may not open pull requests in $repository. An admin allows it once: Settings > Actions > General > Workflow permissions > \"Allow GitHub Actions to create and approve pull requests\" ($server/$repository/settings/actions), or scripts/configure-github.sh sets it. If the box cannot be ticked there, the organization holds it: $server/organizations/${repository%%/*}/settings/actions. Then run Release a version again: it replaces the branch this run pushed."
+        fail "GitHub Actions may not open pull requests in $repository. An admin allows it once: Settings > Actions > General > Workflow permissions > \"Allow GitHub Actions to create and approve pull requests\" ($server/$repository/settings/actions), or scripts/configure-github.sh --allow-actions-pull-requests sets it. If the box cannot be ticked there, the organization holds it: $server/organizations/${repository%%/*}/settings/actions. Then run Release a version again: it replaces the branch this run pushed."
         ;;
     esac
     fail "Could not open the pull request for $branch."

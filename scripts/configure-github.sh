@@ -8,11 +8,16 @@
 #   scripts/configure-github.sh                  apply
 #   scripts/configure-github.sh --site-secrets   only replace the Cloudflare secrets, after
 #                                                checking them with Cloudflare
-#   scripts/configure-github.sh --require-approval
-#                                                also make you approve each run of the npm and
-#                                                mcp-registry environments
 #   scripts/configure-github.sh --rotate-tag-key replace the deploy key tag-release.yml pushes
 #                                                release tags with
+#   scripts/configure-github.sh --allow-actions-pull-requests
+#                                                also let GITHUB_TOKEN open (and approve) pull
+#                                                requests, for release-version.yml without the
+#                                                release app
+#
+# The person who runs it becomes the required reviewer of every job that publishes (the npm, ghcr
+# and mcp-registry environments), and nobody, admins included, can merge into main past its pull
+# request rule or its required checks.
 #
 # Needs bash 3.2 or newer, curl, jq 1.6 or newer, ssh-keygen, and gh logged in as an admin of the
 # repository.
@@ -89,6 +94,7 @@ ADMIN_ROLE_ID=5
 
 BRANCH_RULESET='Protect main'
 TAG_RULESET='Release tags'
+TAG_KEEP_RULESET='Release tags are permanent'
 
 # tag-release.yml's deploy key: its title on GitHub, and the release-tag environment secret that
 # holds its private half.
@@ -101,13 +107,13 @@ usage() {
 
 DRY_RUN=0
 SITE_SECRETS_ONLY=0
-REQUIRE_APPROVAL=0
 ROTATE_TAG_KEY=0
+ACTIONS_PULL_REQUESTS=0
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
-    --require-approval) REQUIRE_APPROVAL=1 ;;
     --rotate-tag-key) ROTATE_TAG_KEY=1 ;;
+    --allow-actions-pull-requests) ACTIONS_PULL_REQUESTS=1 ;;
     --site-secrets) SITE_SECRETS_ONLY=1 ;;
     -h | --help)
       usage
@@ -214,8 +220,7 @@ preflight() {
   fi
   command -v gh >/dev/null 2>&1 || die 'gh is required (https://cli.github.com)'
 
-  # With --require-approval, the required reviewer on the npm and mcp-registry environments is
-  # whoever runs this.
+  # The required reviewer on the npm, ghcr and mcp-registry environments is whoever runs this.
   REVIEWER_ID=$(gh api user -H "X-GitHub-Api-Version: $API_VERSION" --jq .id)
   REVIEWER_LOGIN=$(gh api user -H "X-GitHub-Api-Version: $API_VERSION" --jq .login)
   case "$REVIEWER_ID" in
@@ -403,16 +408,14 @@ configure_site_secrets() {
 
 # 2. Deployment environments. Each one is limited to the refs its workflow runs on.
 configure_environments() {
-  local reviewers='[]'
+  local reviewers
   step '2. Environments'
-  # Merging a dated version to main releases it (tag-release.yml), so by default no run waits for
-  # a reviewer: only an admin or tag-release.yml, running on main, can create a v* tag (step 4), and
-  # npm still holds each version until a maintainer approves it with two-factor authentication
-  # (GOVERNANCE.md, Releases). --require-approval adds you as a required reviewer of the npm and
-  # mcp-registry environments anyway.
-  if [ "$REQUIRE_APPROVAL" -eq 1 ]; then
-    reviewers=$(jq -n --argjson id "$REVIEWER_ID" '[{type: "User", id: $id}]')
-  fi
+  # Every job that publishes waits for you: the npm stage, the image push and the MCP Registry entry.
+  # Only an admin or tag-release.yml, running on main, can create a v* tag (step 4), and npm still
+  # holds each staged version until a maintainer approves it with two-factor authentication
+  # (GOVERNANCE.md, Releases); the image and the registry entry have no such second step, so the
+  # environment is their human gate, and npm's is the same.
+  reviewers=$(jq -n --argjson id "$REVIEWER_ID" '[{type: "User", id: $id}]')
 
   # npm: release.yml's "Stage on npm" job. It runs on v* tags and stages the package with a
   # short-lived OIDC credential.
@@ -543,11 +546,11 @@ verify_bypass() {
 # is true.
 branch_ruleset_body() {
   jq -n --arg name "$BRANCH_RULESET" --argjson checks "$REQUIRED_CHECKS" \
-    --argjson app "$ACTIONS_APP_ID" --argjson role "$ADMIN_ROLE_ID" --argjson pin "$1" '{
+    --argjson app "$ACTIONS_APP_ID" --argjson pin "$1" '{
     name: $name,
     target: "branch",
     enforcement: "active",
-    bypass_actors: [{actor_id: $role, actor_type: "RepositoryRole", bypass_mode: "pull_request"}],
+    bypass_actors: [],
     conditions: {ref_name: {include: ["refs/heads/main"], exclude: []}},
     rules: [
       {type: "deletion"},
@@ -580,10 +583,10 @@ configure_branch_ruleset() {
   # The checks must pass on a branch that is up to date with main (strict). Force pushes and
   # deletion of main are blocked.
   #
-  # Bypass: the admin role, for pull requests only. An admin can merge a pull request whose
-  # checks cannot pass or cannot run, such as an initial import whose commits carry no
-  # Signed-off-by line, but cannot push to main directly or force-push it. Every bypass goes
-  # through a pull request, so it stays visible and in the audit log.
+  # Bypass: nobody, the admin role included. GOVERNANCE.md says routine changes need green required
+  # checks, and from 2026-10-23 four merges went in past failing or missing ones (#59 and #61 with
+  # both test checks failing), which left main unable to release. A change whose checks cannot pass
+  # is fixed in another pull request first.
   if ! upsert_ruleset branch "$BRANCH_RULESET" "$(branch_ruleset_body true)"; then
     case "$RULESET_ERROR" in
       *'(HTTP 422)'*)
@@ -596,18 +599,21 @@ configure_branch_ruleset() {
       *) die "$RULESET_ERROR" ;;
     esac
   fi
-  verify_bypass "$RULESET_ID" pull_requests_only
+  verify_bypass "$RULESET_ID" never
 }
 
 # 4. Release tags.
 configure_tag_ruleset() {
-  step "4. Ruleset '$TAG_RULESET' (refs/tags/v*)"
+  step "4. Rulesets '$TAG_RULESET' and '$TAG_KEEP_RULESET' (refs/tags/v*)"
   # A v* tag starts release.yml, which stages the npm package and pushes the image (image.yml),
   # running the workflow files of the tagged commit. GOVERNANCE.md says releases come only from a
-  # protected v<version> tag. Only the admin role may create, move or delete one, and deploy keys
-  # may create one: tag-release.yml pushes a merged version's tag with the release-tag deploy key
-  # (step 2), the only deploy key this script adds. Tag rulesets allow no "pull requests only" mode,
-  # and a deploy key bypass only "always", so both bypasses are "always".
+  # protected v<version> tag. Only the admin role and deploy keys may create one: tag-release.yml
+  # pushes a merged version's tag with the release-tag deploy key (step 2), the only deploy key
+  # this script adds. A DeployKey bypass cannot name that key (the REST docs: its actor_id "should
+  # be null"), so it covers any write deploy key; that is accepted, and kept to creation by a
+  # second ruleset in which only the admin role may move or delete a release tag. Tag rulesets
+  # allow no "pull requests only" mode, and a deploy key bypass only "always", so every bypass is
+  # "always".
   upsert_ruleset tag "$TAG_RULESET" "$(jq -n --arg name "$TAG_RULESET" --argjson role "$ADMIN_ROLE_ID" '{
     name: $name,
     target: "tag",
@@ -617,7 +623,16 @@ configure_tag_ruleset() {
       {actor_id: null, actor_type: "DeployKey", bypass_mode: "always"}
     ],
     conditions: {ref_name: {include: ["refs/tags/v*"], exclude: []}},
-    rules: [{type: "creation"}, {type: "update"}, {type: "deletion"}]
+    rules: [{type: "creation"}]
+  }')" || die "$RULESET_ERROR"
+  verify_bypass "$RULESET_ID" always
+  upsert_ruleset tag "$TAG_KEEP_RULESET" "$(jq -n --arg name "$TAG_KEEP_RULESET" --argjson role "$ADMIN_ROLE_ID" '{
+    name: $name,
+    target: "tag",
+    enforcement: "active",
+    bypass_actors: [{actor_id: $role, actor_type: "RepositoryRole", bypass_mode: "always"}],
+    conditions: {ref_name: {include: ["refs/tags/v*"], exclude: []}},
+    rules: [{type: "update"}, {type: "deletion"}]
   }')" || die "$RULESET_ERROR"
   verify_bypass "$RULESET_ID" always
 }
@@ -650,22 +665,28 @@ configure_repository() {
   gh_api PUT "repos/$OWNER/$REPO/topics" "$(jq -n --argjson names "$TOPICS" '{names: $names}')" >/dev/null
   result "topics: $(printf '%s' "$TOPICS" | jq -r 'join(", ")')"
 
-  # GitHub Actions may open pull requests: release-version.yml opens the release's with
-  # GITHUB_TOKEN. GitHub's one switch for it also lets Actions approve a pull request, which adds
-  # nothing while the "Protect main" ruleset requires no approval. GITHUB_TOKEN stays read-only
-  # unless a workflow asks for more. An organization can hold the switch (GitHub answers 409).
-  if out=$(gh_api PUT "repos/$OWNER/$REPO/actions/permissions/workflow" "$(jq -n '{
+  # GITHUB_TOKEN stays read-only unless a workflow asks for more, and may not open or approve pull
+  # requests: the release app (scripts/create-release-app.mjs) opens and merges release pull
+  # requests, and GitHub's one switch that lets GITHUB_TOKEN open them also lets it approve them.
+  # --allow-actions-pull-requests turns it on for release-version.yml without the app. An
+  # organization can hold the switch (GitHub answers 409).
+  if out=$(gh_api PUT "repos/$OWNER/$REPO/actions/permissions/workflow" "$(jq -n \
+    --argjson allow "$([ "$ACTIONS_PULL_REQUESTS" -eq 1 ] && echo true || echo false)" '{
       default_workflow_permissions: "read",
-      can_approve_pull_request_reviews: true
+      can_approve_pull_request_reviews: $allow
     }')" 2>&1); then
-    result 'GitHub Actions: GITHUB_TOKEN read-only by default; may open pull requests'
+    if [ "$ACTIONS_PULL_REQUESTS" -eq 1 ]; then
+      result 'GitHub Actions: GITHUB_TOKEN read-only by default; may open pull requests'
+    else
+      result 'GitHub Actions: GITHUB_TOKEN read-only by default; may not open or approve pull requests'
+    fi
   else
     ACTIONS_PULL_REQUESTS_SKIPPED=1
     warn "GitHub refused to let Actions open pull requests: $out"
   fi
 
-  # Discussions: on. MAINTAINERS.md sends questions to "an issue or discussion". The documented
-  # "Update a repository" body has no has_discussions field, so it is in the checklist below.
+  # Discussions stay a choice: MAINTAINERS.md and .github/SUPPORT.md send questions to issues. The
+  # documented "Update a repository" body has no has_discussions field, so it is in the checklist.
 }
 
 # 6. What this script cannot do.
@@ -673,24 +694,25 @@ print_checklist() {
   step '6. Left for you to do by hand'
   cat <<EOF
 
-[ ] Turn on Discussions. MAINTAINERS.md points people to them, and the REST "Update a
-    repository" endpoint documents no field for them. Settings > General > Features >
-    Discussions: https://github.com/$OWNER/$REPO/settings
+[ ] Optional: turn on Discussions for questions (MAINTAINERS.md and .github/SUPPORT.md send them
+    to issues until then). The REST "Update a repository" endpoint documents no field for it.
+    Settings > General > Features > Discussions: https://github.com/$OWNER/$REPO/settings
     (gh repo edit $OWNER/$REPO --enable-discussions does it through a has_discussions field
     that gh 2.83.2 sends to the same endpoint, outside the documented body.)
 
-[ ] Create the release app once, so release pull requests run their checks without anyone
-    approving them (GitHub holds the checks of one github-actions[bot] opens):
+[ ] Create the release app once. Release a version opens and merges release pull requests with
+    it, and their checks run without anyone approving them; GITHUB_TOKEN may not open them unless
+    you run this script with --allow-actions-pull-requests:
       node scripts/create-release-app.mjs
     You click "Create GitHub App", then install it on slotlock only; it checks the installation
     and stores the app in the release-app environment.
 
 [ ] Releases: run Actions > Release a version with the version. It prepares the release, opens
     its pull request, merges it once CI passes, and tag-release.yml tags it, which starts Release
-    (npm, then the GitHub release; GHCR, then the MCP Registry, once the suite passes). Without
-    the release app, approve the pull request's checks on it ("Approve workflows to run"). Each staged npm
-    version waits for your two-factor approval (GOVERNANCE.md, Releases); the Release run's
-    summary gives the npm stage approve command.
+    (npm, then the GitHub release; GHCR, then the MCP Registry, once the suite passes). Approve
+    the npm, ghcr and mcp-registry jobs when the Release run waits for you; each staged npm
+    version also waits for your two-factor approval (GOVERNANCE.md, Releases), and the Release
+    run's summary gives the npm stage approve command.
     npm and GitHub keep three first-time steps for a person, and the run that needs one says so:
       scripts/bootstrap-release.sh <tag>
     - first release: puts the first version on npm from your npm session (npm accepts a trusted

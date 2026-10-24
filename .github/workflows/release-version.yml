@@ -17,7 +17,7 @@
 #   2026-06-11), and only those runs count as its required checks. Its merge starts no push
 #   workflow, so this starts Tag release and Site with workflow_dispatch. It can open the pull
 #   request only once an admin allows Actions to (Settings > Actions > General > Workflow
-#   permissions; scripts/configure-github.sh sets it).
+#   permissions; scripts/configure-github.sh --allow-actions-pull-requests sets it).
 # Either way the merge is held to the "Protect main" ruleset like anyone's: the required checks must
 # pass on the branch, up to date with main. The release notes come from CHANGELOG.md's
 # "## Unreleased" section: add to it in the pull requests that make the changes.

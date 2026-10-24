@@ -42,8 +42,10 @@ Releases follow semantic versioning and are built only by the repository release
 protected `v<version>` tag on `main`. The tag must match `package.json` and a `CHANGELOG.md`
 heading. The workflow stages the tested artifact to npm with trusted publishing (short-lived OIDC
 credentials and provenance); a maintainer then approves the staged version with two-factor
-authentication. Long-lived npm tokens are not accepted. Release artifacts must pass the
-package-content and consumer checks.
+authentication. The same run publishes the server image and the MCP Registry entry only after its
+suite has passed, and each waits for a maintainer to approve it. Long-lived npm tokens are not
+accepted. Release artifacts must pass the package-content and consumer checks. Required checks
+apply to maintainers too: nobody merges into `main` past a failing or missing one.
 
 ## Project changes
 

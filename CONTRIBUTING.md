@@ -95,7 +95,14 @@ which only `main` can use. Without the app, the workflow opens the pull request 
 github-actions[bot], whose checks GitHub holds until someone with write access approves them on the
 pull request (**Approve workflows to run**). GitHub lets a workflow open pull requests at all only
 once an admin allows it (Settings > Actions > General > Workflow permissions);
-`scripts/configure-github.sh` sets it, and the run says so when it is off.
+`scripts/configure-github.sh --allow-actions-pull-requests` sets it, and the run says so when it is
+off. By default the script leaves it off, since the same switch lets GITHUB_TOKEN approve pull
+requests.
+
+Nobody, the admin included, can merge into `main` past a failing or missing required check ("CI
+passed" and "Signed-off-by"): a change whose checks cannot pass is fixed in another pull request
+first. The npm, `ghcr` and `mcp-registry` environments wait for a maintainer's approval in every
+Release run.
 
 When a run needs a step npm or GitHub keeps for a person (the first npm version, the npm trusted
 publisher, the image's visibility, and the deploy key `tag-release.yml` pushes tags with), the

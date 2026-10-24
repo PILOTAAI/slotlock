@@ -635,19 +635,30 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
     )?.body;
 
   it('lets only admins and deploy keys create release tags, and only admins move or delete them', () => {
-    const tags = dryRun().find(
+    const tags = dryRun().filter(
       (request) => request.path.endsWith('/rulesets') && request.body.target === 'tag',
-    )?.body;
-    expect(tags?.conditions?.ref_name.include).toEqual(['refs/tags/v*']);
-    expect(tags?.rules?.map((rule) => rule.type).sort()).toEqual([
-      'creation',
-      'deletion',
-      'update',
-    ]);
-    expect(tags?.bypass_actors).toEqual([
+    );
+    expect(tags, 'two tag rulesets').toHaveLength(2);
+    for (const { body } of tags) expect(body.conditions?.ref_name.include).toEqual(['refs/tags/v*']);
+    const byRules = (types: string) =>
+      tags.find(({ body }) => body.rules?.map((rule) => rule.type).sort().join() === types)?.body;
+    // A DeployKey bypass names no key (the REST docs: its actor_id "should be null"), so it covers
+    // every write deploy key; it is kept to creation, where tag-release.yml needs it.
+    expect(byRules('creation')?.bypass_actors).toEqual([
       { actor_id: 5, actor_type: 'RepositoryRole', bypass_mode: 'always' },
       { actor_id: null, actor_type: 'DeployKey', bypass_mode: 'always' },
     ]);
+    expect(byRules('deletion,update')?.bypass_actors).toEqual([
+      { actor_id: 5, actor_type: 'RepositoryRole', bypass_mode: 'always' },
+    ]);
+  });
+
+  it("lets nobody bypass main's pull request and required checks, the admin included", () => {
+    const main = dryRun().find(
+      (request) => request.path.endsWith('/rulesets') && request.body.target === 'branch',
+    )?.body;
+    expect(main?.rules?.map((rule) => rule.type)).toContain('required_status_checks');
+    expect(main?.bypass_actors).toEqual([]);
   });
 
   it('keeps the tag deploy key in an environment only main can use', () => {
@@ -676,15 +687,14 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
     expect(policy).toEqual({ name: 'main', type: 'branch' });
   });
 
-  it('makes a release wait for no reviewer unless asked to', () => {
-    const plain = dryRun();
-    expect(environment(plain, 'npm')?.reviewers).toEqual([]);
-    expect(environment(plain, 'ghcr')?.reviewers).toEqual([]);
-    expect(environment(plain, 'mcp-registry')?.reviewers).toEqual([]);
-    const approved = dryRun('--require-approval');
-    expect(environment(approved, 'npm')?.reviewers).toEqual([{ type: 'User', id: 0 }]);
-    expect(environment(approved, 'ghcr')?.reviewers).toEqual([{ type: 'User', id: 0 }]);
-    expect(environment(approved, 'mcp-registry')?.reviewers).toEqual([{ type: 'User', id: 0 }]);
+  it('makes every publishing job wait for a reviewer, and nothing else', () => {
+    const requests = dryRun();
+    for (const name of ['npm', 'ghcr', 'mcp-registry']) {
+      expect(environment(requests, name)?.reviewers, name).toEqual([{ type: 'User', id: 0 }]);
+    }
+    for (const name of ['release-tag', 'release-app', 'site']) {
+      expect(environment(requests, name)?.reviewers, name).toEqual([]);
+    }
   });
 
   // A stand-in for gh that answers every request configure-github.sh sends, logs each one, and
@@ -760,13 +770,19 @@ esac
     secrets: '{"secrets":[{"name":"TAG_RELEASE_DEPLOY_KEY"}]}',
   };
 
-  it('lets GitHub Actions open pull requests, with GITHUB_TOKEN read-only by default', () => {
-    const permissions = dryRun().find(
-      (request) =>
-        request.method === 'PUT' &&
-        request.path === 'repos/PILOTAAI/slotlock/actions/permissions/workflow',
-    )?.body;
-    expect(permissions).toEqual({
+  it('keeps GITHUB_TOKEN read-only, and Actions from opening or approving pull requests unless asked', () => {
+    const permissions = (...args: string[]) =>
+      dryRun(...args).find(
+        (request) =>
+          request.method === 'PUT' &&
+          request.path === 'repos/PILOTAAI/slotlock/actions/permissions/workflow',
+      )?.body;
+    // The release app opens and merges release pull requests; GITHUB_TOKEN needs neither.
+    expect(permissions()).toEqual({
+      default_workflow_permissions: 'read',
+      can_approve_pull_request_reviews: false,
+    });
+    expect(permissions('--allow-actions-pull-requests')).toEqual({
       default_workflow_permissions: 'read',
       can_approve_pull_request_reviews: true,
     });
@@ -776,11 +792,14 @@ esac
     'carries on when the organization holds that setting, and says where to change it',
     () => {
       const page = 'https://github.com/organizations/PILOTAAI/settings/actions';
-      const allowed = configure(present);
+      const allowed = configure(present, '--allow-actions-pull-requests');
       expect(allowed.status, allowed.stderr).toBe(0);
       expect(allowed.stdout).toContain('may open pull requests');
       expect(allowed.stdout).not.toContain(page);
-      const held = configure({ ...present, workflowPermissions: 'gh: Conflict (HTTP 409)' });
+      const held = configure(
+        { ...present, workflowPermissions: 'gh: Conflict (HTTP 409)' },
+        '--allow-actions-pull-requests',
+      );
       expect(held.status, held.stderr).toBe(0);
       expect(held.stderr).toContain('refused to let Actions open pull requests: gh: Conflict');
       expect(held.stdout).toContain(page);

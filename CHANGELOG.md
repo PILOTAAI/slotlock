@@ -35,6 +35,12 @@ versioning.
   PostgreSQL, the image, the five language clients and the Compose quickstart.
   `scripts/configure-github.sh` requires it and DCO's "Signed-off-by" on `main`; the client suites
   and the deployment smoke check did not gate merges before.
+- `scripts/configure-github.sh` (the owner runs it) no longer lets the admin role bypass `main`'s
+  pull request rule and required checks, makes the person who runs it the required reviewer of the
+  npm, `ghcr` and `mcp-registry` environments, keeps GITHUB_TOKEN from opening or approving pull
+  requests unless `--allow-actions-pull-requests` is given (the release app opens them), and splits
+  the release-tag ruleset so the deploy-key bypass covers creating a `v*` tag only; only the admin
+  role may move or delete one.
 
 ## 0.2.0 - 2026-10-23
 
