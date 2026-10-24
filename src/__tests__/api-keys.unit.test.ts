@@ -2,7 +2,7 @@
 // operation needs, and that the authenticator and the store refuse bad input before any query runs.
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { SlotlockAgentOperationError } from '../agent-server.js';
+import { SlotlockAgentOperationError, createSlotlockAgentServer } from '../agent-server.js';
 import {
   SLOTLOCK_API_KEY_DEFAULT_SCOPES,
   SLOTLOCK_API_KEY_SCOPES,
@@ -200,6 +200,73 @@ describe('API key authentication', () => {
     // Past the queue the fakes were answered busy, never anonymous-then-401 for a real key.
     expect(await Promise.all(flood)).toContain('server_busy');
     expect(looked.filter((entry) => entry === 'valid')).toHaveLength(6);
+  });
+
+  it("answers a full lookup queue 503 with Retry-After on an embedder's REST, MCP and A2A, never 500 or 401 (SEC-2)", async () => {
+    // Wired straight into createSlotlockAgentServer, as an embedder does without `slotlock serve`.
+    // Before the agent server mapped the authenticator's busy error, every call past the queue
+    // rejected `fetch` (a Node listener's 500 internal_error); before that, it was a false 401.
+    const authenticate = createSlotlockApiKeyAuthenticator(
+      { authenticate: () => new Promise<null>(() => {}) },
+      { maxConcurrentLookups: 1, maxWaitingLookups: 0 },
+    );
+    const unused = vi.fn(async () => {
+      throw new Error('no operation runs');
+    });
+    const server = createSlotlockAgentServer({
+      publicBaseUrl: 'http://localhost',
+      allowInsecureLocalhost: true,
+      rest: true,
+      backend: {
+        listResources: unused,
+        getFreeBusy: unused,
+        findNextAvailable: unused,
+        createEvent: unused,
+        getEvent: unused,
+        listEvents: unused,
+        updateEvent: unused,
+        deleteEvent: unused,
+      },
+      authenticate,
+      authorize: async () => true,
+      health: async () => ({ ready: true, checks: [] }),
+    });
+    const call = (path: string, method = 'POST') =>
+      server.fetch(
+        new Request(`http://localhost${path}`, {
+          method,
+          headers: {
+            authorization: `Bearer ${generateSlotlockApiKey().key}`,
+            'content-type': 'application/json',
+          },
+          ...(method === 'POST'
+            ? { body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) }
+            : {}),
+        }),
+      );
+    // The one lookup slot, held for the rest of the test.
+    void call('/v1/resources', 'GET');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const rest = await call('/v1/resources', 'GET');
+    expect([rest.status, rest.headers.get('retry-after'), await rest.json()]).toEqual([
+      503,
+      '1',
+      { error: { code: 'server_busy' } },
+    ]);
+    const mcp = await call('/mcp');
+    expect([mcp.status, mcp.headers.get('retry-after'), await mcp.json()]).toEqual([
+      503,
+      '1',
+      { jsonrpc: '2.0', id: null, error: { code: -32603, message: 'Server is busy' } },
+    ]);
+    const a2a = await call('/a2a');
+    expect([a2a.status, a2a.headers.get('retry-after')]).toEqual([503, '1']);
+    expect(await a2a.json()).toMatchObject({
+      jsonrpc: '2.0',
+      id: null,
+      error: { code: -32603, data: [{ reason: 'SERVER_BUSY', domain: 'slotlock' }] },
+    });
+    expect(unused).not.toHaveBeenCalled();
   });
 
   it('skips the lookup for a request whose client has gone while it waited', async () => {

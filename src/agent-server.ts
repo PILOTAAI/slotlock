@@ -2468,6 +2468,24 @@ function a2aError(
   });
 }
 
+/**
+ * The request's principal, or the error when `authenticate` throws a 503
+ * `SlotlockAgentOperationError`, as createSlotlockApiKeyAuthenticator does when its lookup queue is
+ * full: no answer about the credential, so the client is told to retry rather than that it is
+ * anonymous.
+ */
+async function principalOrBusy(
+  authenticate: SlotlockAgentServerOptions['authenticate'],
+  request: Request,
+): Promise<SlotlockAgentPrincipal | null | SlotlockAgentOperationError> {
+  try {
+    return await authenticate(request);
+  } catch (error) {
+    if (error instanceof SlotlockAgentOperationError && error.status === 503) return error;
+    throw error;
+  }
+}
+
 /** Map a request path onto the server's base path; `null` when it lies outside it. */
 function routePath(pathname: string, basePath: string): string | null {
   if (basePath === '') return pathname;
@@ -3297,7 +3315,10 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
         return refuse(403, 'origin_not_allowed');
       }
     }
-    const principal = await options.authenticate(request);
+    const principal = await principalOrBusy(options.authenticate, request);
+    if (principal instanceof SlotlockAgentOperationError) {
+      return refuse(503, principal.code, { 'Retry-After': '1' });
+    }
     if (
       !principal ||
       !isCanonicalPrincipalIdentity(principal.subject) ||
@@ -3448,7 +3469,17 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
           return json(403, rpcError(null, -32600, 'Origin not allowed'));
         }
       }
-      const principal = await options.authenticate(request);
+      const principal = await principalOrBusy(options.authenticate, request);
+      if (principal instanceof SlotlockAgentOperationError) {
+        // As `slotlock serve` answers it: A2A names the reason in an ErrorInfo, as for a rate limit.
+        const error = { code: -32603, message: 'Server is busy' };
+        const info = { '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason: 'SERVER_BUSY', domain: 'slotlock' };
+        return json(
+          503,
+          { jsonrpc: '2.0', id: null, error: path === '/a2a' ? { ...error, data: [info] } : error },
+          { 'Retry-After': '1' },
+        );
+      }
       if (
         !principal ||
         !isCanonicalPrincipalIdentity(principal.subject) ||
