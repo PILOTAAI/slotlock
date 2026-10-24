@@ -16,7 +16,10 @@ export interface SlotlockMaintenanceResult {
   conflicts: number;
   /** Series over the expansion budget; they keep their old coverage. */
   refused: number;
-  /** Expired holds, and idempotency answers and tombstones past the retention window, deleted. */
+  /**
+   * Expired holds, and past the retention window idempotency answers, agents' event cancellations
+   * and booking references retired with no booking, deleted. A cancelled booking's tombstone stays.
+   */
   pruned: number;
   /** More was left than one pass does: run another. */
   capped: boolean;

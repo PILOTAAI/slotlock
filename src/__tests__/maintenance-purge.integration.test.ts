@@ -1,6 +1,7 @@
 // Maintenance deletes what a tenant no longer needs: holds past their expiry (which nothing else
-// removes unless a rival writes over their time), and keyed hold answers and retired booking
-// references older than the retention window. It deletes only that tenant's, and nothing live.
+// removes unless a rival writes over their time), and keyed hold answers and references retired by
+// a cancel no booking held, older than the retention window. A cancelled booking's tombstone is
+// kept, so its reference is never booked again. It deletes only that tenant's, and nothing live.
 // Skipped without DATABASE_URL.
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -165,7 +166,7 @@ describe.skipIf(!url)('maintenance purge and booking retention (real Postgres)',
     const refs = await sql<{ external_ref: string }[]>`
       SELECT external_ref FROM slotlock.reservation_tombstones WHERE tenant_ref = ${tenantRef}`;
     expect(refs.map((row) => row.external_ref)).toEqual(['new-ref']);
-    // The pruned reference books afresh; the kept one is still retired.
+    // Neither reference held a booking. The pruned one books afresh; the recent one is still retired.
     const book = (externalRef: string, n: number) =>
       store.createExternalReservation({
         tenantRef,
@@ -183,6 +184,39 @@ describe.skipIf(!url)('maintenance purge and booking retention (real Postgres)',
     // The hold itself is untouched: only its answer to a retry is gone.
     if (!keyed.ok) return;
     await expect(store.getHold({ tenantRef, holdId: keyed.hold.id })).resolves.not.toBeNull();
+  });
+
+  it("keeps a cancelled booking's tombstone past the window, so a late create never books it again", async () => {
+    const { tenantRef, resourceId } = await freshTenant();
+    const externalRef = `booking-${crypto.randomUUID()}`;
+    const create = (n: number) =>
+      store.createExternalReservation({
+        tenantRef,
+        externalRef,
+        resourceId,
+        ...slot(n),
+        bufferAfterMs: 0,
+        revision: 1,
+      });
+    await expect(create(0)).resolves.toMatchObject({ ok: true });
+    await expect(
+      store.cancelExternalReservation({ tenantRef, externalRef, revision: 2 }),
+    ).resolves.toEqual({ ok: true, cancelled: true, revision: 2 });
+    // The verifier's repro: aged past the window and pruned, the reference booked again.
+    await sql`
+      UPDATE slotlock.reservation_tombstones SET cancelled_at = now() - interval '400 days'
+       WHERE tenant_ref = ${tenantRef}`;
+    await expect(maintainSlotlockTenant(store, tenantRef)).resolves.toMatchObject({ pruned: 0 });
+    await expect(store.pruneBookingRetention({ tenantRef, retentionDays: 1 })).resolves.toEqual({
+      expiredHoldsDeleted: 0,
+      holdCommandsDeleted: 0,
+      tombstonesDeleted: 0,
+      hasMore: false,
+    });
+    await expect(create(1)).resolves.toEqual({ ok: false, code: 'reservation_cancelled' });
+    await expect(
+      store.cancelExternalReservation({ tenantRef, externalRef, revision: 2 }),
+    ).resolves.toEqual({ ok: true, cancelled: false, revision: 2 });
   });
 
   it('skips a hold a writer holds instead of waiting for it', async () => {

@@ -1063,6 +1063,12 @@ CREATE TABLE IF NOT EXISTS slotlock.reservation_tombstones (
 -- before 0.3 take the time of the upgrade (a constant default: no table rewrite).
 ALTER TABLE slotlock.reservation_tombstones
   ADD COLUMN IF NOT EXISTS cancelled_at timestamptz NOT NULL DEFAULT now();
+-- True when the cancel retired a reference no booking held (its create may still be on the way).
+-- Only those are pruned past the retention window. A cancelled booking's tombstone is kept until
+-- the tenant is erased, so a delayed or replayed create never books it again; rows from before 0.3
+-- are kept too.
+ALTER TABLE slotlock.reservation_tombstones
+  ADD COLUMN IF NOT EXISTS stray boolean NOT NULL DEFAULT false;
 -- Resource identity: one resource per tenant/external_ref namespace (plus one isolated NULL-tenant
 -- legacy namespace). Dedupe first (repoint reservations to the keeper, drop the rest) so the
 -- unique indexes also bind on DBs poisoned by the pre-index
@@ -2047,11 +2053,31 @@ CREATE TABLE IF NOT EXISTS slotlock.hold_commands (
 );
 CREATE INDEX IF NOT EXISTS slotlock_hold_commands_retention_idx
   ON slotlock.hold_commands (tenant_ref, created_at);
-CREATE INDEX IF NOT EXISTS slotlock_reservation_tombstones_retention_idx
-  ON slotlock.reservation_tombstones (tenant_ref, cancelled_at);
+-- References retired with no booking: a tenant's count of them, and maintenance's prune.
+CREATE INDEX IF NOT EXISTS slotlock_reservation_tombstones_stray_idx
+  ON slotlock.reservation_tombstones (tenant_ref, cancelled_at) WHERE stray;
 -- Holds by resource and expiry: a tenant's live-hold count, and maintenance's purge of expired ones.
 CREATE INDEX IF NOT EXISTS slotlock_reservations_held_expiry_idx
   ON slotlock.reservations (resource_id, expires_at) WHERE status = 'held';
+-- What the tenant limits count (store.ts tenantLimitCount), each read as a range so a count stops
+-- at the limit: bookings and events by when they end (one-offs and series apart) and by when they
+-- were made, and cancellations by when they were made.
+CREATE INDEX IF NOT EXISTS slotlock_reservations_booking_end_idx
+  ON slotlock.reservations (tenant_ref, occupied_ends_at)
+  WHERE external_ref IS NOT NULL AND calendar_event_id IS NULL;
+CREATE INDEX IF NOT EXISTS slotlock_reservations_booking_created_idx
+  ON slotlock.reservations (tenant_ref, created_at)
+  WHERE external_ref IS NOT NULL AND calendar_event_id IS NULL;
+CREATE INDEX IF NOT EXISTS slotlock_reservation_tombstones_cancelled_idx
+  ON slotlock.reservation_tombstones (tenant_ref, cancelled_at);
+CREATE INDEX IF NOT EXISTS slotlock_calendar_events_one_off_end_idx
+  ON slotlock.calendar_events (tenant_ref, ends_at) WHERE recurrence_rule IS NULL;
+CREATE INDEX IF NOT EXISTS slotlock_calendar_events_series_end_idx
+  ON slotlock.calendar_events (tenant_ref, recurrence_ends_by) WHERE recurrence_rule IS NOT NULL;
+CREATE INDEX IF NOT EXISTS slotlock_calendar_events_created_idx
+  ON slotlock.calendar_events (tenant_ref, created_at);
+CREATE INDEX IF NOT EXISTS slotlock_calendar_event_tombstones_cancelled_idx
+  ON slotlock.calendar_event_tombstones (tenant_ref, cancelled_at);
 
 CREATE INDEX IF NOT EXISTS slotlock_calendar_events_resource_time_idx
   ON slotlock.calendar_events (tenant_ref, resource_id, starts_at, ends_at);

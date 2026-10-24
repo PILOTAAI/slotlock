@@ -1,15 +1,24 @@
-// Per-tenant limits bound what one tenant can store on a shared database: live holds, bookings
-// (with the cancellations that retire their references), calendar events (with the agent
-// cancellations that count against them), provider coverage and resources. A write that would pass
-// a limit is refused with the limit, racing writers included; what the tenant already has can still
-// be revised, cancelled and released; and other tenants are unaffected. Skipped without DATABASE_URL.
+// Per-tenant limits bound what one tenant can store on a shared database: live holds, bookings still
+// to come (with the cancellations that retire references no booking held), calendar events still to
+// come (with the agent cancellations that count against them), provider coverage and resources. What
+// has ended leaves the limit. A write that would pass a limit is refused with the limit, racing
+// writers included; what the tenant already has can still be revised, cancelled and released; and
+// other tenants are unaffected. Skipped without DATABASE_URL.
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { type SlotlockStore, type SlotlockTenantLimits, createSlotlockStore } from '../store.js';
+import {
+  type SlotlockStore,
+  type SlotlockTenantLimits,
+  calendarEventRollingHorizon,
+  createSlotlockStore,
+} from '../store.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
 const d = (iso: string) => new Date(iso);
 const HOUR = 60 * 60 * 1000;
+const DAY = 24 * HOUR;
+// An RRULE UNTIL in UTC (RFC 5545 §3.3.10 date-time form).
+const until = (date: Date) => `${date.toISOString().slice(0, 19).replace(/[-:]/g, '')}Z`;
 const AGENT = `agent:${'b'.repeat(64)}`;
 // The nth hour of a day well inside the rolling horizon.
 const slot = (n: number) => ({
@@ -51,6 +60,22 @@ describe.skipIf(!url)('per-tenant limits (real Postgres)', () => {
   const limited = (tenantLimits: SlotlockTenantLimits) =>
     createSlotlockStore(sql, { tenantLimits });
 
+  /** Make what the tenant has added 40 days old, older than the 30 days a limit counts it for. */
+  async function age(tenantRef: string) {
+    await sql`
+      UPDATE slotlock.reservations SET created_at = created_at - interval '40 days'
+       WHERE tenant_ref = ${tenantRef}`;
+    await sql`
+      UPDATE slotlock.reservation_tombstones SET cancelled_at = cancelled_at - interval '40 days'
+       WHERE tenant_ref = ${tenantRef}`;
+    await sql`
+      UPDATE slotlock.calendar_events SET created_at = created_at - interval '40 days'
+       WHERE tenant_ref = ${tenantRef}`;
+    await sql`
+      UPDATE slotlock.calendar_event_tombstones SET cancelled_at = cancelled_at - interval '40 days'
+       WHERE tenant_ref = ${tenantRef}`;
+  }
+
   it('refuses limits that are not whole numbers from 1 to 10,000,000', () => {
     for (const bad of [0, -1, 1.5, Number.NaN, 10_000_001]) {
       expect(() => limited({ holds: bad })).toThrow(
@@ -73,7 +98,8 @@ describe.skipIf(!url)('per-tenant limits (real Postgres)', () => {
       });
     const first = await hold(0, { key: 'first' });
     expect(first.ok).toBe(true);
-    expect((await hold(1, { ttlMs: 50 })).ok).toBe(true);
+    const second = await hold(1);
+    if (!second.ok) throw new Error(second.code);
     await expect(hold(2)).resolves.toEqual({ ok: false, code: 'hold_limit_reached', limit: 2 });
     // A retried request answers its hold at the limit too.
     await expect(hold(0, { key: 'first' })).resolves.toMatchObject({ ok: true, idempotent: true });
@@ -87,8 +113,10 @@ describe.skipIf(!url)('per-tenant limits (real Postgres)', () => {
         ttlMs: 60_000,
       }),
     ).resolves.toMatchObject({ ok: true });
-    // The short hold expires: its place is free again.
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // The second hold expires: its place is free again.
+    await sql`
+      UPDATE slotlock.reservations SET expires_at = now() - interval '1 second'
+       WHERE id = ${second.hold.id}`;
     expect((await hold(3)).ok).toBe(true);
     await expect(hold(4)).resolves.toEqual({ ok: false, code: 'hold_limit_reached', limit: 2 });
     if (!first.ok) return;
@@ -151,10 +179,109 @@ describe.skipIf(!url)('per-tenant limits (real Postgres)', () => {
     await expect(
       store.cancelExternalReservation({ tenantRef, externalRef: kept, revision: 3 }),
     ).resolves.toEqual({ ok: true, cancelled: true, revision: 3 });
-    // Its tombstone still counts until maintenance prunes it.
+    // A cancellation counts while it is recent, like every row the tenant adds; the cancelled
+    // booking's tombstone is kept for good, and leaves the limit once it is no longer recent.
     await expect(book(6)).resolves.toEqual({
       ok: false,
       code: 'reservation_limit_reached',
+      limit: 2,
+    });
+    await age(tenantRef);
+    await expect(book(6)).resolves.toMatchObject({ ok: true });
+    await expect(book(7, kept)).resolves.toEqual({ ok: false, code: 'reservation_cancelled' });
+    await expect(book(8)).resolves.toEqual({
+      ok: false,
+      code: 'reservation_limit_reached',
+      limit: 2,
+    });
+  });
+
+  it('counts bookings still to come and bookings made recently; older ended ones leave the limit', async () => {
+    const store = limited({ reservations: 2 });
+    const { tenantRef, resourceId } = await freshTenant(store);
+    const book = (start: Date) =>
+      store.createExternalReservation({
+        tenantRef,
+        externalRef: `booking-${crypto.randomUUID()}`,
+        resourceId,
+        start,
+        end: new Date(start.getTime() + HOUR),
+        bufferAfterMs: 0,
+        revision: 1,
+      });
+    // Bookings dated in the past count while recent, so they cannot grow the tenant's storage
+    // without bound.
+    await expect(book(new Date(Date.UTC(2020, 0, 1, 9)))).resolves.toMatchObject({ ok: true });
+    await expect(book(new Date(Date.UTC(2020, 0, 2, 9)))).resolves.toMatchObject({ ok: true });
+    await expect(book(new Date(Date.UTC(2020, 0, 3, 9)))).resolves.toEqual({
+      ok: false,
+      code: 'reservation_limit_reached',
+      limit: 2,
+    });
+    // The verifier's repro: a tenant whose bookings have all ended could never book again.
+    await age(tenantRef);
+    await expect(book(slot(0).start)).resolves.toMatchObject({ ok: true });
+    const ending = await book(slot(1).start);
+    if (!ending.ok) throw new Error(ending.code);
+    await expect(book(slot(2).start)).resolves.toEqual({
+      ok: false,
+      code: 'reservation_limit_reached',
+      limit: 2,
+    });
+    // One ends (its time is moved into the past) and is no longer recent: its place is free.
+    await sql`
+      UPDATE slotlock.reservations
+         SET starts_at = '2020-02-01T09:00:00Z', ends_at = '2020-02-01T10:00:00Z',
+             created_at = now() - interval '40 days'
+       WHERE id = ${ending.reservation.id}`;
+    await expect(book(slot(2).start)).resolves.toMatchObject({ ok: true });
+  });
+
+  it('counts events still to come and events made recently; older ended ones leave the limit', async () => {
+    const store = limited({ events: 2 });
+    const { tenantRef, resourceId } = await freshTenant(store);
+    const horizon = calendarEventRollingHorizon();
+    const put = (start: Date, rrule?: string) =>
+      store.putCalendarEvent({
+        tenantRef,
+        externalRef: `event-${crypto.randomUUID()}`,
+        idempotencyKey: `put-${crypto.randomUUID()}`,
+        expectedRevision: 0,
+        resourceId,
+        start,
+        end: new Date(start.getTime() + HOUR),
+        timezone: 'UTC',
+        summary: 'Rota',
+        ...(rrule ? { recurrence: { rrule }, materializationWindow: horizon } : {}),
+      });
+    const earlier = new Date(horizon.start.getTime() - 300 * DAY);
+    // Ended ones: a one-off, a series that ran out its COUNT and one past its UNTIL. Made now, they
+    // count.
+    await expect(put(new Date(Date.UTC(2020, 0, 1, 9)))).resolves.toMatchObject({ ok: true });
+    await expect(put(earlier, 'FREQ=DAILY;COUNT=3')).resolves.toMatchObject({ ok: true });
+    await expect(
+      put(
+        new Date(earlier.getTime() + HOUR),
+        `FREQ=WEEKLY;UNTIL=${until(new Date(earlier.getTime() + 14 * DAY))}`,
+      ),
+    ).resolves.toEqual({ ok: false, code: 'event_limit_reached', limit: 2 });
+    await age(tenantRef);
+    await expect(
+      put(
+        new Date(earlier.getTime() + HOUR),
+        `FREQ=WEEKLY;UNTIL=${until(new Date(earlier.getTime() + 14 * DAY))}`,
+      ),
+    ).resolves.toMatchObject({ ok: true });
+    await age(tenantRef);
+    // Two that go on: a series with no end, and a one-off still to come.
+    await expect(put(new Date(earlier.getTime() + 2 * HOUR), 'FREQ=WEEKLY')).resolves.toMatchObject(
+      { ok: true },
+    );
+    await expect(put(slot(0).start)).resolves.toMatchObject({ ok: true });
+    await age(tenantRef);
+    await expect(put(slot(1).start)).resolves.toEqual({
+      ok: false,
+      code: 'event_limit_reached',
       limit: 2,
     });
   });
@@ -211,7 +338,8 @@ describe.skipIf(!url)('per-tenant limits (real Postgres)', () => {
       code: 'event_limit_reached',
       limit: 2,
     });
-    // The tenant's own (provider) cancellation keeps no counted row.
+    // The tenant's own (provider) cancellation counts while it is recent, then leaves the limit;
+    // the agent's counts until maintenance prunes it.
     await expect(
       store.cancelCalendarEvent({
         tenantRef,
@@ -220,7 +348,10 @@ describe.skipIf(!url)('per-tenant limits (real Postgres)', () => {
         expectedRevision: 2,
       }),
     ).resolves.toMatchObject({ ok: true });
+    await expect(put(5)).resolves.toEqual({ ok: false, code: 'event_limit_reached', limit: 2 });
+    await age(tenantRef);
     await expect(put(5)).resolves.toMatchObject({ ok: true });
+    await expect(put(6)).resolves.toEqual({ ok: false, code: 'event_limit_reached', limit: 2 });
   });
 
   it('caps provider coverage rows, and still advances one it has', async () => {

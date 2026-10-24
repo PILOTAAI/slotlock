@@ -404,7 +404,10 @@ export interface BookingRetentionResult {
   expiredHoldsDeleted: number;
   /** Keyed hold answers older than the replay window: a retry with that key makes a new hold. */
   holdCommandsDeleted: number;
-  /** Retired booking references older than the window: a create with one makes a new booking. */
+  /**
+   * References a cancel retired with no booking, older than the window: a create with one makes a
+   * new booking. A cancelled booking's reference stays retired.
+   */
   tombstonesDeleted: number;
   /** True when any class filled its batch, so more rows may already be eligible. */
   hasMore: boolean;

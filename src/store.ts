@@ -2010,9 +2010,10 @@ export interface SlotlockStore {
   }): Promise<CalendarEventRetentionResult>;
   /**
    * Delete one bounded batch of a tenant's dead booking rows: holds past their expiry (at once), and
-   * keyed hold answers and retired booking references older than the retention window, which is
-   * what returns `holds` and `reservations` limit. Rows another transaction holds are skipped, not
-   * waited on. Call until `hasMore` is false.
+   * keyed hold answers and references retired by a cancel no booking held, older than the retention
+   * window. A cancelled booking's tombstone is never deleted here (only by erasing the tenant), so
+   * its reference is never booked again. Rows another transaction holds are skipped, not waited on.
+   * Call until `hasMore` is false.
    */
   pruneBookingRetention(params: {
     tenantRef: string;
@@ -2093,9 +2094,12 @@ export interface SlotlockStoreOptions {
   agentOwnerCommandQuota?: number;
   /**
    * What one tenant may store, for a database tenants share (none by default). A write that would
-   * pass a limit is refused with it (`*_limit_reached`); what the tenant has can still be revised,
-   * cancelled and released. Counted under a lock per tenant and limit, so racing writers never pass
-   * it, in READ COMMITTED transactions only (`invalid_transaction_isolation` otherwise).
+   * pass a limit is refused with it (`*_limit_reached`); what the tenant has can still be revised
+   * (a move adds no booking or event, so it is not refused), cancelled and released. Counted under
+   * a lock per tenant and limit, so racing writers never pass it, in READ COMMITTED transactions
+   * only (`invalid_transaction_isolation` otherwise). Bookings and events count while they are still
+   * to come, and for 30 days after they were made, whatever time they hold; history older than that
+   * does not count, and a count stops reading at the limit.
    */
   tenantLimits?: SlotlockTenantLimits;
 }
@@ -2107,14 +2111,14 @@ export interface SlotlockTenantLimits {
   /** Live holds on the tenant's resources; expired ones (purged by maintenance) do not count. */
   holds?: number;
   /**
-   * Bookings plus the cancellations that retire their references, until maintenance prunes those
-   * past the retention window.
+   * Bookings still to come or made in the last 30 days, cancellations made in the last 30 days,
+   * and references a cancel retired with no booking until maintenance prunes them.
    */
   reservations?: number;
   /**
-   * Calendar events of every owner, plus agent-owned cancellations until they are pruned. The
-   * tenant's own (`internal`) cancellations are kept for good and are not counted. Each event stores
-   * at most 2,000 occurrences.
+   * Calendar events of every owner still to come (a series until it is known to have ended) or made
+   * in the last 30 days, cancellations of every owner made in the last 30 days, and agent-owned
+   * cancellations until maintenance prunes them. Each event stores at most 2,000 occurrences.
    */
   events?: number;
   /** Provider coverage rows: one per resource and source. */
@@ -2155,43 +2159,109 @@ async function lockTenantLimit(
   await tx`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify({ tenantLimit: kind, tenantRef })}, 0))`;
 }
 
-/** The rows a tenant has that its limit of `kind` counts. */
+/**
+ * Rows a tenant added within this many days count against its limits whatever time they hold, so
+ * bookings and events dated in the past, and cancellations, cannot grow its storage without bound.
+ * The same window maintenance keeps idempotency records and stray retirements for.
+ */
+const TENANT_LIMIT_RECENT_DAYS = SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS;
+
+/**
+ * The rows a tenant has that its limit of `kind` counts: what is still to come, and what it added
+ * in the last TENANT_LIMIT_RECENT_DAYS days; what ended before then is history and does not count.
+ * Each part stops at `limit` rows, read through an index, so a count costs no more than the limit
+ * however much history the tenant keeps; the total is at least `limit` exactly when the tenant is
+ * at it.
+ */
 async function tenantLimitCount(
   tx: TransactionSql,
   tenantRef: string,
   kind: TenantLimitKind,
+  limit: number,
 ): Promise<number> {
   let rows: { count: number }[];
   switch (kind) {
     case 'holds':
       rows = await tx<{ count: number }[]>`
-        SELECT count(*)::int AS count
-          FROM slotlock.reservations hold
-          JOIN slotlock.resources resource ON resource.id = hold.resource_id
-         WHERE resource.tenant_ref = ${tenantRef}
-           AND hold.status = 'held' AND hold.expires_at > now()`;
+        SELECT count(*)::int AS count FROM (
+          SELECT 1
+            FROM slotlock.reservations hold
+            JOIN slotlock.resources resource ON resource.id = hold.resource_id
+           WHERE resource.tenant_ref = ${tenantRef}
+             AND hold.status = 'held' AND hold.expires_at > now()
+           LIMIT ${limit}
+        ) live`;
       break;
     case 'reservations':
+      // Bookings still to come; bookings that have ended and cancellations, made recently; and
+      // references retired with no booking, until maintenance prunes them. A cancelled booking's
+      // tombstone is kept for good, and stops counting once it is no longer recent.
       rows = await tx<{ count: number }[]>`
+        WITH recent AS (
+          SELECT now() - ${TENANT_LIMIT_RECENT_DAYS}::int * interval '1 day' AS since
+        )
         SELECT (
-          (SELECT count(*) FROM slotlock.reservations
-            WHERE tenant_ref = ${tenantRef} AND external_ref IS NOT NULL
-              AND calendar_event_id IS NULL)
-          + (SELECT count(*) FROM slotlock.reservation_tombstones WHERE tenant_ref = ${tenantRef})
+          (SELECT count(*) FROM (
+            SELECT 1 FROM slotlock.reservations
+             WHERE tenant_ref = ${tenantRef} AND external_ref IS NOT NULL
+               AND calendar_event_id IS NULL AND occupied_ends_at > now()
+             LIMIT ${limit}) live)
+          + (SELECT count(*) FROM (
+            SELECT 1 FROM slotlock.reservations, recent
+             WHERE tenant_ref = ${tenantRef} AND external_ref IS NOT NULL
+               AND calendar_event_id IS NULL AND created_at > recent.since
+               AND occupied_ends_at <= now()
+             LIMIT ${limit}) ended)
+          + (SELECT count(*) FROM (
+            SELECT 1 FROM slotlock.reservation_tombstones, recent
+             WHERE tenant_ref = ${tenantRef} AND cancelled_at > recent.since
+             LIMIT ${limit}) cancelled)
+          + (SELECT count(*) FROM (
+            SELECT 1 FROM slotlock.reservation_tombstones, recent
+             WHERE tenant_ref = ${tenantRef} AND stray AND cancelled_at <= recent.since
+             LIMIT ${limit}) retired)
         )::int AS count`;
       break;
     case 'events':
+      // One-off events still to come and series not known to have ended; events that have ended
+      // and cancellations of any owner, made recently; and agent cancellations until maintenance
+      // prunes them. The owner identity CHECK makes every owner but 'internal' an 'agent:' one.
       rows = await tx<{ count: number }[]>`
+        WITH recent AS (
+          SELECT now() - ${TENANT_LIMIT_RECENT_DAYS}::int * interval '1 day' AS since
+        )
         SELECT (
-          (SELECT count(*) FROM slotlock.calendar_events WHERE tenant_ref = ${tenantRef})
-          + (SELECT count(*) FROM slotlock.calendar_event_tombstones
-              WHERE tenant_ref = ${tenantRef} AND owner_ref <> ${SLOTLOCK_INTERNAL_EVENT_OWNER_REF})
+          (SELECT count(*) FROM (
+            SELECT 1 FROM slotlock.calendar_events
+             WHERE tenant_ref = ${tenantRef} AND recurrence_rule IS NULL AND ends_at > now()
+             LIMIT ${limit}) one_off)
+          + (SELECT count(*) FROM (
+            SELECT 1 FROM slotlock.calendar_events
+             WHERE tenant_ref = ${tenantRef} AND recurrence_rule IS NOT NULL
+               AND (recurrence_ends_by IS NULL OR recurrence_ends_by > now())
+             LIMIT ${limit}) series)
+          + (SELECT count(*) FROM (
+            SELECT 1 FROM slotlock.calendar_events, recent
+             WHERE tenant_ref = ${tenantRef} AND created_at > recent.since
+               AND CASE WHEN recurrence_rule IS NULL THEN ends_at <= now()
+                        ELSE recurrence_ends_by <= now() END
+             LIMIT ${limit}) ended)
+          + (SELECT count(*) FROM (
+            SELECT 1 FROM slotlock.calendar_event_tombstones, recent
+             WHERE tenant_ref = ${tenantRef} AND cancelled_at > recent.since
+             LIMIT ${limit}) cancelled)
+          + (SELECT count(*) FROM (
+            SELECT 1 FROM slotlock.calendar_event_tombstones, recent
+             WHERE tenant_ref = ${tenantRef} AND owner_ref LIKE 'agent:%'
+               AND cancelled_at <= recent.since
+             LIMIT ${limit}) agent_cancelled)
         )::int AS count`;
       break;
     case 'coverage':
       rows = await tx<{ count: number }[]>`
-        SELECT count(*)::int AS count FROM slotlock.calendar_coverage
-         WHERE tenant_ref = ${tenantRef}`;
+        SELECT count(*)::int AS count FROM (
+          SELECT 1 FROM slotlock.calendar_coverage WHERE tenant_ref = ${tenantRef} LIMIT ${limit}
+        ) kept`;
       break;
   }
   const count = Number(rows[0]?.count ?? 0);
@@ -2414,7 +2484,7 @@ function buildSlotlockStore(
     if (limit === undefined || tenantRef === null) return null;
     await assertReadCommitted(tx);
     await lockTenantLimit(tx, tenantRef, kind);
-    return (await tenantLimitCount(tx, tenantRef, kind)) >= limit ? limit : null;
+    return (await tenantLimitCount(tx, tenantRef, kind, limit)) >= limit ? limit : null;
   }
 
   /**
@@ -3158,10 +3228,10 @@ function buildSlotlockStore(
           if (limit !== null) return { ok: false, code: 'reservation_limit_reached', limit };
         }
         // A reference no booking holds yet is retired too, so a create delivered after its cancel
-        // cannot bring the booking back.
+        // cannot bring the booking back. Only such a stray retirement is pruned past retention.
         await tx`
-          INSERT INTO slotlock.reservation_tombstones (tenant_ref, external_ref, revision)
-          VALUES (${params.tenantRef}, ${params.externalRef}, ${params.revision})`;
+          INSERT INTO slotlock.reservation_tombstones (tenant_ref, external_ref, revision, stray)
+          VALUES (${params.tenantRef}, ${params.externalRef}, ${params.revision}, ${!found})`;
         if (!found) return { ok: true, cancelled: false, revision: params.revision };
         const deleted = await tx<{ id: string }[]>`
           DELETE FROM slotlock.reservations WHERE id = ${found.id} RETURNING id`;
@@ -4241,11 +4311,13 @@ function buildSlotlockStore(
             RETURNING 1
           )
           SELECT count(*)::int AS deleted FROM deleted`;
+        // Only references retired with no booking: a cancelled booking's tombstone is kept.
         const [tombstones] = await tx<{ deleted: number }[]>`
           WITH candidates AS MATERIALIZED (
             SELECT tombstone.external_ref
               FROM slotlock.reservation_tombstones tombstone
              WHERE tombstone.tenant_ref = ${params.tenantRef}
+               AND tombstone.stray
                AND tombstone.cancelled_at <
                    clock_timestamp() - (${retentionDays}::int * interval '1 day')
              ORDER BY tombstone.cancelled_at, tombstone.external_ref
@@ -4256,6 +4328,7 @@ function buildSlotlockStore(
              USING candidates candidate
              WHERE tombstone.tenant_ref = ${params.tenantRef}
                AND tombstone.external_ref = candidate.external_ref
+               AND tombstone.stray
             RETURNING 1
           )
           SELECT count(*)::int AS deleted FROM deleted`;
