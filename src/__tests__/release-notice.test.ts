@@ -84,9 +84,39 @@ describe('NOTICE', () => {
     expect(packed).not.toContain('zod 4.6.7');
     expect(packed).toMatch(/^Copyright \d{4} TREFT LTD$/m);
     expect(packed).toContain('postgres ^3.4.5,');
+    expect(packed).toContain(
+      '  - tslib (via rrule), BSD Zero Clause License (0BSD), https://github.com/Microsoft/tslib',
+    );
     // The repository's own NOTICE needed no edit for the bump.
     const check = copy.node('scripts/notice.mjs', '--check');
     expect(check.status, check.stderr).toBe(0);
+  });
+
+  it('needs no edit to the repository NOTICE when a bump changes what a dependency pulls in', () => {
+    // An rrule release that drops tslib, as Dependabot would bring it: package.json is unchanged.
+    const copy = bumped('4.6.7');
+    const path = join(copy.dir, 'package-lock.json');
+    const lock = JSON.parse(readFileSync(path, 'utf8')) as Lock;
+    const rrule = lock.packages['node_modules/rrule'] as { dependencies?: Record<string, string> };
+    expect(rrule.dependencies, 'canary: rrule pulls in tslib today').toHaveProperty('tslib');
+    delete rrule.dependencies?.tslib;
+    writeFileSync(path, JSON.stringify(lock));
+    const check = copy.node('scripts/notice.mjs', '--check');
+    expect(check.status, check.stderr).toBe(0);
+    // The packed NOTICE still lists everything the release installs, from the lockfile.
+    expect(copy.node('scripts/prepare-package.mjs').status).toBe(0);
+    expect(readFileSync(join(copy.dir, 'dist', 'NOTICE'), 'utf8')).not.toContain('tslib');
+  });
+
+  it('asks for the repository NOTICE to be rewritten when a dependency changes its licence', () => {
+    const copy = bumped('4.6.7');
+    const path = join(copy.dir, 'package-lock.json');
+    const lock = JSON.parse(readFileSync(path, 'utf8')) as Lock;
+    (lock.packages['node_modules/zod'] as { license?: string }).license = 'ISC';
+    writeFileSync(path, JSON.stringify(lock));
+    const check = copy.node('scripts/notice.mjs', '--check');
+    expect(check.status).toBe(1);
+    expect(check.stderr).toContain('run node scripts/notice.mjs --write');
   });
 
   it('still fails verify-package when the packed NOTICE names the wrong version', () => {
@@ -99,17 +129,18 @@ describe('NOTICE', () => {
     expect(verified.stderr).toContain('NOTICE must list zod 4.6.99');
   });
 
-  it('lists every runtime dependency and its licence, and is the file scripts/notice.mjs writes', () => {
+  it('lists every direct runtime dependency and its licence, and is the file scripts/notice.mjs writes', () => {
     const notice = read('NOTICE');
     for (const line of [
-      '- ical.js, Mozilla Public License 2.0, https://github.com/kewisch/ical.js',
-      '- rrule, BSD 3-Clause License, https://github.com/jakubroztocil/rrule',
-      '  - tslib (via rrule), BSD Zero Clause License (0BSD), https://github.com/Microsoft/tslib',
-      '- zod, MIT License, https://github.com/colinhacks/zod',
-      '- postgres ^3.4.5, The Unlicense, https://github.com/porsager/postgres',
+      '- ical.js, Mozilla Public License 2.0',
+      '- rrule, BSD 3-Clause License',
+      '- zod, MIT License',
+      '- postgres ^3.4.5, The Unlicense',
     ]) {
       expect(notice.split('\n')).toContain(line);
     }
+    // What the packages pull in is in each packed NOTICE, from the lockfile it was built with.
+    expect(notice).not.toContain('tslib');
     const check = spawnSync(process.execPath, ['scripts/notice.mjs', '--check'], {
       cwd: root,
       encoding: 'utf8',

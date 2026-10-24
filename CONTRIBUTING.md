@@ -65,6 +65,11 @@ Edit the example, not the README copy: `readme-examples.test.ts` fails when they
 - Run typecheck, tests, build, and package verification.
 - Call out database, tenancy, privacy, sync, or supply-chain risk explicitly.
 - Do not add provider credentials, product-specific authorization, or network calls to the core.
+- `NOTICE` is written by `node scripts/notice.mjs --write`. A dependency bump needs no edit to it,
+  unless it adds or removes a runtime dependency in `package.json` or a dependency changes its
+  licence: then CI fails with "NOTICE is not what scripts/notice.mjs writes". Read the new
+  licence, then run that command. A licence `scripts/notice.mjs` has not reviewed stops the build
+  until it is added to `LICENSE_NAMES` there.
 
 Changes to exclusion constraints, RLS, identity/idempotency, retention, iCalendar trust boundaries,
 protocol error contracts, or release automation require a security review; while the project has

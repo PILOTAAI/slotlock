@@ -9,8 +9,9 @@ versioning.
 
 - A runtime dependency bump no longer breaks the release checks. The packed NOTICE is written at
   build time from `package.json` and `package-lock.json` (`scripts/notice.mjs`), naming the exact
-  version of each dependency; the repository's NOTICE names each dependency and its licence, and a
-  dependency under a licence the project has not reviewed stops the build.
+  version of each dependency and the packages each pulls in; the repository's NOTICE names each
+  direct dependency and its licence, so only a licence change asks for an edit, and a dependency
+  under a licence the project has not reviewed stops the build.
 - A release never moves npm's `latest` dist-tag, or the image's `latest` tag, backwards. Every stable
   release used to be staged as `latest`, so approving a patch to an older line (0.2.1 after 0.3.0)
   would have made it what npm installs by default. `scripts/dist-tag.sh` now chooses the tag from

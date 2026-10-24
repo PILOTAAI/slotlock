@@ -1,13 +1,16 @@
 // NOTICE, written from package.json and package-lock.json so a dependency bump never needs a hand
-// edit. The repository's NOTICE names each runtime dependency and its licence; the NOTICE packed
-// into each release (scripts/prepare-package.mjs) also names the exact version it was built with,
-// and scripts/verify-package.mjs checks that one with checkNotice.
+// edit. The repository's NOTICE names each direct runtime dependency and its licence: a bump that
+// moves a version, a repository URL or what a dependency pulls in leaves it as it is, and only a
+// dependency that changes its licence asks for --write. The NOTICE packed into each release
+// (scripts/prepare-package.mjs) also names the exact version it was built with, where each comes from
+// and the packages each pulls in, and scripts/verify-package.mjs checks that one with checkNotice.
 //
 //   node scripts/notice.mjs --write     rewrite the repository's NOTICE
 //   node scripts/notice.mjs --check     exit 1 when the repository's NOTICE is not what --write writes
 //
 // A licence is printed by name only once it is in LICENSE_NAMES below, so a dependency that arrives
-// under a licence nobody has read stops the build instead of shipping quietly.
+// under a licence nobody has read, however deep, stops the build and --check instead of shipping
+// quietly.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -100,8 +103,9 @@ export function runtimeDependencies(root) {
 }
 
 /**
- * NOTICE for the repository (versions: false) or for a packed release (versions: true), where each
- * direct dependency carries the exact version it was built with.
+ * NOTICE for the repository (versions: false), with each direct dependency and its licence, or for
+ * a packed release (versions: true), where each direct dependency carries the exact version it was
+ * built with, its URL and the packages it pulls in.
  */
 export function renderNotice(root, { versions }) {
   const { direct, peers } = runtimeDependencies(root);
@@ -110,15 +114,20 @@ export function renderNotice(root, { versions }) {
     const indent = '  '.repeat(depth);
     const label =
       depth === 0
-        ? `${dependency.name}${versions ? ` ${dependency.version}` : ''}`
+        ? `${dependency.name} ${dependency.version}`
         : `${dependency.name} (via ${dependency.via})`;
     lines.push(`${indent}- ${label}, ${dependency.licenseName}, ${dependency.url}`);
     for (const child of dependency.dependencies) list(child, depth + 1);
   };
-  for (const dependency of direct) list(dependency, 0);
+  for (const dependency of direct) {
+    if (versions) list(dependency, 0);
+    else lines.push(`- ${dependency.name}, ${dependency.licenseName}`);
+  }
+  const peerLine = (peer) =>
+    `- ${peer.name} ${peer.range}, ${peer.licenseName}${versions ? `, ${peer.url}` : ''}`;
   const versionNote = versions
     ? 'each retains its own license. This release was built with these versions:'
-    : 'each retains its own license. The NOTICE in each published package names the exact versions\nit was built with:';
+    : 'each retains its own license. The NOTICE in each published package lists them with the exact\nversions it was built with, where each comes from, and the packages each pulls in:';
   return `Slotlock
 Copyright ${COPYRIGHT_YEAR} TREFT LTD
 
@@ -132,7 +141,7 @@ ${lines.join('\n')}
 
 Peer dependency, installed and versioned by the application that embeds Slotlock:
 
-${peers.map((peer) => `- ${peer.name} ${peer.range}, ${peer.licenseName}, ${peer.url}`).join('\n')}
+${peers.map(peerLine).join('\n')}
 
 If Slotlock distributes a modified MPL-covered ical.js file in the future, that file and its source
 must remain available under MPL-2.0. Slotlock currently imports the unmodified external dependency.
