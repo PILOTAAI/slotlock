@@ -79,10 +79,10 @@ export interface SlotlockRequestLimits {
     operation: SlotlockAgentOperation | 'protocol';
   }): Promise<boolean>;
   /**
-   * For `authorize`: wait for a slot when the operation may expand a recurring series, holding it
-   * until the request is answered. Throws a `SlotlockAgentOperationError` when none comes:
-   * `rate_limited` (429) while the tenant's own writes fill its slots, `server_busy` (503) while
-   * the server's do.
+   * For `authorize`: when the operation may expand a recurring series, take its write token and
+   * wait for a slot, holding it until the request is answered. Throws a
+   * `SlotlockAgentOperationError` when none comes: `rate_limited` (429) when the write is over its
+   * budget or the tenant's own writes fill its slots, `server_busy` (503) while the server's do.
    */
   admit(args: {
     principal: SlotlockAgentPrincipal;
@@ -511,6 +511,41 @@ export function createSlotlockRequestLimits(
     return tightest ? { ok: true, verdict: tightest } : { ok: true };
   }
 
+  /**
+   * Take the read or write tokens a request has not yet been charged: from its key and tenant, or
+   * its tenant's application buckets, and from the server's. False, with the refusal recorded, when
+   * one is short.
+   */
+  function chargeRequest(
+    state: RequestState,
+    principal: SlotlockAgentPrincipal,
+    classes: Array<'read' | 'write'>,
+  ): boolean {
+    const due = classes.filter((kind) => !state.charged[kind]);
+    if (due.length === 0) return true;
+    const keyOf = `${principal.tenantRef}\0${principal.subject}`;
+    const checks = due.flatMap((kind) => [
+      ...(state.application
+        ? [{ name: `app_${kind}` as SlotlockRateName, key: principal.tenantRef }]
+        : [
+            { name: `key_${kind}` as SlotlockRateName, key: keyOf },
+            { name: `tenant_${kind}` as SlotlockRateName, key: principal.tenantRef },
+          ]),
+      { name: `global_${kind}` as SlotlockRateName, key: '' },
+    ]);
+    const outcome = charge(checks);
+    if (!outcome.ok) {
+      state.refusal = {
+        reason: 'rate_limited',
+        fields: fieldsOf(outcome.verdict as Verdict, true),
+      };
+      return false;
+    }
+    for (const kind of due) state.charged[kind] = true;
+    if (outcome.verdict) state.tightest = outcome.verdict;
+    return true;
+  }
+
   function routeOf(request: Request): Route {
     const pathname = new URL(request.url).pathname;
     const base = options.basePath;
@@ -548,29 +583,7 @@ export function createSlotlockRequestLimits(
       } else if (slotlockAgentOperationScope(operation) === 'write') {
         classes.push('write');
       }
-      const due = classes.filter((kind) => !state.charged[kind]);
-      if (due.length === 0) return true;
-      const keyOf = `${principal.tenantRef}\0${principal.subject}`;
-      const checks = due.flatMap((kind) => [
-        ...(state.application
-          ? [{ name: `app_${kind}` as SlotlockRateName, key: principal.tenantRef }]
-          : [
-              { name: `key_${kind}` as SlotlockRateName, key: keyOf },
-              { name: `tenant_${kind}` as SlotlockRateName, key: principal.tenantRef },
-            ]),
-        { name: `global_${kind}` as SlotlockRateName, key: '' },
-      ]);
-      const outcome = charge(checks);
-      if (!outcome.ok) {
-        state.refusal = {
-          reason: 'rate_limited',
-          fields: fieldsOf(outcome.verdict as Verdict, true),
-        };
-        return false;
-      }
-      for (const kind of due) state.charged[kind] = true;
-      if (outcome.verdict) state.tightest = outcome.verdict;
-      return true;
+      return chargeRequest(state, principal, classes);
     },
 
     async admit({ principal, operation, input }) {
@@ -578,6 +591,13 @@ export function createSlotlockRequestLimits(
       if (!state || !expandsSeries(operation, input)) return;
       // One slot a request: the confirmation round or a retry within it holds the same one.
       if (state.release.length > 0) return;
+      // Each operation that waits here writes. Its token is taken now rather than after authorize,
+      // where consumeRateLimit would take it (on /mcp and /a2a a request is charged a read token
+      // only): a write over its budget is refused at once, not after holding a place in the queue
+      // for a slot it could not use.
+      if (!chargeRequest(state, principal, ['write'])) {
+        throw new SlotlockAgentOperationError('rate_limited', 429);
+      }
       const slot = await gate.acquire(principal.tenantRef, state.signal);
       if (typeof slot === 'function') {
         state.release.push(slot);

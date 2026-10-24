@@ -2,7 +2,14 @@
 // bucket keys, the order of the checks (the address before any lookup), the token arithmetic behind
 // Retry-After and the RateLimit fields, the series-write slots, and the refusal counts.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { type SlotlockAgentPrincipal, SlotlockAgentOperationError } from '../agent-server.js';
+import {
+  SLOTLOCK_A2A_PROTOCOL_VERSION,
+  type SlotlockAgentCalendarBackend,
+  type SlotlockAgentInvocationContext,
+  type SlotlockAgentPrincipal,
+  SlotlockAgentOperationError,
+  createSlotlockAgentServer,
+} from '../agent-server.js';
 import { SLOTLOCK_DEFAULT_LIMITS, type SlotlockLimits } from '../config.js';
 import {
   type SlotlockRefusalCounts,
@@ -492,6 +499,133 @@ describe('series writes', () => {
     expect(statuses).toEqual({ 200: 5, 429: 15 });
     limiter.close();
   });
+
+  it('charges an MCP or A2A write before it waits for a series slot, so one over budget is refused at once (P11)', async () => {
+    // The verifier's probe: on /mcp and /a2a the protocol charge takes a read token only, so tenant
+    // A's recurring create over its key_write budget waited two seconds behind tenant B's slot and
+    // was then answered server_busy, and counted as a busy series write rather than a rate limit.
+    let releaseB: () => void = () => {};
+    const bHolds = new Promise<void>((resolve) => (releaseB = resolve));
+    const counted: SlotlockRefusalCounts[] = [];
+    const limits = createSlotlockRequestLimits({
+      limits: limitsWith({ rates: { address: null, key_write: { perSecond: 0.001, burst: 1 } } }),
+      basePath: '',
+      authenticate: async (request) => {
+        const tenant = request.headers.get('authorization') === 'Bearer b' ? 'b' : 'a';
+        return { subject: `api_key:${tenant}`, tenantRef: `tenant-${tenant}`, scopes: ['read', 'write'] };
+      },
+      onRefusals: (line) => counted.push(line),
+    });
+    const resourceId = '00000000-0000-4000-8000-000000000001';
+    const created = {
+      event: {
+        id: 'e1',
+        resource_id: resourceId,
+        starts_at: '2029-01-01T00:00:00Z',
+        ends_at: '2029-01-01T00:10:00Z',
+        timezone: 'UTC',
+        title: null,
+        description: null,
+        location: null,
+        organizer: null,
+        attendees: [],
+        reminders: [],
+        status: 'confirmed',
+        transparency: 'opaque',
+        sequence: 0,
+        revision: 1,
+        recurrence_rule: 'FREQ=DAILY',
+        recurrence_exceptions: [],
+        recurrence_id: null,
+      },
+      replayed: false,
+    };
+    const agent = createSlotlockAgentServer({
+      publicBaseUrl: 'http://localhost',
+      allowInsecureLocalhost: true,
+      backend: {
+        async createEvent(context: SlotlockAgentInvocationContext) {
+          if (context.principal.tenantRef === 'tenant-b') await bHolds;
+          return created;
+        },
+      } as unknown as SlotlockAgentCalendarBackend,
+      authenticate: limits.authenticate,
+      consumeRateLimit: limits.consumeRateLimit,
+      authorize: async ({ principal, operation, input }) => {
+        await limits.admit({ principal, operation, input });
+        return true;
+      },
+      health: async () => ({ ready: true, checks: [] }),
+    });
+    const target = limits.serve(agent);
+    const create = (key: string, path: '/mcp' | '/a2a', id: number) => {
+      const args = {
+        resource_id: resourceId,
+        starts_at: '2029-01-01T00:00:00Z',
+        ends_at: '2029-01-01T00:10:00Z',
+        timezone: 'UTC',
+        idempotency_key: `k-${id}`,
+        recurrence_rule: 'FREQ=DAILY',
+      };
+      const body =
+        path === '/mcp'
+          ? { jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'slotlock_create_event', arguments: args } }
+          : {
+              jsonrpc: '2.0',
+              id,
+              method: 'SendMessage',
+              params: {
+                message: {
+                  messageId: `message-${id}`,
+                  role: 'ROLE_USER',
+                  parts: [{ data: { skill: 'calendar.create_event', arguments: args }, mediaType: 'application/json' }],
+                },
+              },
+            };
+      return target.fetch(
+        new Request(`http://localhost${path}`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${key}`,
+            'content-type': 'application/json',
+            accept: 'application/json, text/event-stream',
+            ...(path === '/mcp'
+              ? { 'mcp-protocol-version': '2025-06-18' }
+              : { 'a2a-version': SLOTLOCK_A2A_PROTOCOL_VERSION }),
+          },
+          body: JSON.stringify(body),
+        }),
+        { remoteAddress: '127.0.0.1' },
+      );
+    };
+    // A spends its one write token; B takes the server's only series slot and holds it.
+    const first = await create('a', '/mcp', 1);
+    expect(await first.text()).not.toMatch(/rate_limited|server_busy/);
+    const held = create('b', '/mcp', 2);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const answers: Array<{ path: string; ms: number; text: string; rateLimit: string | null }> = [];
+    for (const [path, id] of [['/mcp', 3], ['/a2a', 4]] as const) {
+      const started = performance.now();
+      const response = await create('a', path, id);
+      answers.push({
+        path,
+        ms: performance.now() - started,
+        text: await response.text(),
+        rateLimit: response.headers.get('ratelimit'),
+      });
+    }
+    releaseB();
+    await held;
+    limits.close();
+    for (const answer of answers) {
+      const detail = JSON.stringify(answer);
+      expect(answer.ms, detail).toBeLessThan(500);
+      expect(answer.text, detail).toMatch(/rate_limited|RATE_LIMITED/);
+      expect(answer.text, detail).not.toMatch(/server_busy|SERVER_BUSY/);
+      expect(answer.rateLimit, detail).toMatch(/^"key_write";r=0;t=\d+$/);
+    }
+    expect(counted).toEqual([expect.objectContaining({ rate_limited: 2, series_writes_busy: 0 })]);
+  }, 15_000);
 
   it('answers busy once a write has waited two seconds for the server', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setImmediate'] });
