@@ -250,6 +250,33 @@ describe('the site', () => {
     }
   });
 
+  it('is rebuilt when any document it includes changes', () => {
+    const workflow = read('.github/workflows/site.yml');
+    const filters = [...workflow.matchAll(/^ {6}- "([^"]+)"$/gm)].map(
+      ([, filter]) => filter as string,
+    );
+    const covered = (file: string) =>
+      filters.some((filter) =>
+        filter.endsWith('/**') ? file.startsWith(filter.slice(0, -2)) : filter === file,
+      );
+    const pages = [
+      'hosted',
+      'status',
+      'privacy',
+      'terms',
+      'acceptable-use',
+      'versioning',
+      'known-issues',
+    ];
+    const included = pages.flatMap((page) =>
+      [...read(`site/docs-src/${page}.md`).matchAll(/<!-- include ([^#\s>]+)/g)].map(
+        ([, file]) => file as string,
+      ),
+    );
+    expect(included.length).toBe(pages.length);
+    for (const file of [...included, 'openapi.json']) expect(covered(file), file).toBe(true);
+  });
+
   it('tells agents in llms.txt about hosted Slotlock, and about 0.2 only while it is current', async () => {
     const { llmsDetails } = (await import(path('site/src/data/llms.mjs').href)) as {
       llmsDetails: (pages: string, version: string) => string;
