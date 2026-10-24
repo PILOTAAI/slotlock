@@ -107,6 +107,28 @@ describe('SEC-12: sign-ins are limited per client, under a higher ceiling for al
     ]);
   });
 
+  it('counts an IPv6 client as its /64, so addresses rotated inside it buy no new budget (SEC-12)', async () => {
+    // The verifier's probe: 600 sign-ins from 2001:db8:1:2::1 up to ::258 were each answered 302,
+    // used up the ceiling every client shares, and the next visitor was refused.
+    const signIn = limiter(2);
+    const ceiling = limiter(5);
+    const client = limiter();
+    const env = { ...environment(signIn, ceiling), SLOTLOCK_CLIENT_RATE_LIMIT: client };
+    const worker = createSlotlockDashboardWorker();
+    const statuses: number[] = [];
+    for (let index = 1; index <= 6; index += 1) {
+      statuses.push((await worker.fetch(from(`2001:db8:1:2::${index.toString(16)}`), env, ctx)).status);
+    }
+    // The /64 took two of the ceiling's five, so other clients still sign in.
+    for (const address of ['198.51.100.4', '2001:db8:1:3::1']) {
+      statuses.push((await worker.fetch(from(address), env, ctx)).status);
+    }
+    expect(statuses).toEqual([302, 302, 429, 429, 429, 429, 302, 302]);
+    const clients = ['2001:db8:1:2::/64', '198.51.100.4', '2001:db8:1:3::/64'];
+    expect(new Set(signIn.asked)).toEqual(new Set(clients.map((key) => `sign-in:${key}`)));
+    expect(new Set(client.asked)).toEqual(new Set(clients.map((key) => `client:${key}`)));
+  });
+
   it('still bounds every client together', async () => {
     const ceiling = limiter(3);
     const worker = createSlotlockDashboardWorker();

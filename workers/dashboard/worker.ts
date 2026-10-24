@@ -26,6 +26,7 @@ import {
   createSlotlockDashboardResources,
   createSlotlockDashboardState,
 } from '../../src/dashboard.js';
+import { slotlockClientKey } from '../../src/rate-limit.js';
 import { createSlotlockStore } from '../../src/store.js';
 
 /**
@@ -40,9 +41,9 @@ export interface SlotlockRateLimit {
 /** What wrangler.jsonc and `wrangler secret put` give the Worker. */
 export interface SlotlockDashboardWorkerEnv {
   HYPERDRIVE: { connectionString: string };
-  /** Every dashboard request, counted per client address (CF-Connecting-IP). */
+  /** Every dashboard request, counted per client (see clientOf). */
   SLOTLOCK_CLIENT_RATE_LIMIT?: SlotlockRateLimit;
-  /** GitHub sign-ins and their callbacks, counted per client address. */
+  /** GitHub sign-ins and their callbacks, counted per client. */
   SLOTLOCK_SIGN_IN_RATE_LIMIT?: SlotlockRateLimit;
   /**
    * GitHub sign-ins and their callbacks, counted for every client together: a ceiling well above one
@@ -82,6 +83,15 @@ function perRequest<T extends object>(current: () => T): T {
       return typeof value === 'function' ? value.bind(target) : value;
     },
   });
+}
+
+/**
+ * The client a request is counted as: CF-Connecting-IP, which Cloudflare sets itself, keyed as
+ * `slotlock serve` keys an address, so an IPv6 client is its whole /64 and rotating the rest of its
+ * address buys it no new budget. Undefined without a valid address.
+ */
+function clientOf(request: Request): string | undefined {
+  return slotlockClientKey(request.headers.get('cf-connecting-ip') ?? '') ?? undefined;
 }
 
 function isRateLimit(value: unknown): value is SlotlockRateLimit {
@@ -163,7 +173,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       allowedUsers: config.allowedUsers,
       availability: readAvailability(vars),
       // Cloudflare sets CF-Connecting-IP itself, so one client's sign-ins in flight are capped.
-      clientAddress: (request) => request.headers.get('cf-connecting-ip') ?? undefined,
+      clientAddress: clientOf,
       keys: perRequest(() => current().keys),
       resources: perRequest(() => current().resources),
       state: perRequest(() => current().state),
@@ -214,8 +224,8 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
           headers: { 'content-type': 'text/plain; charset=utf-8' },
         });
       }
-      // Before any database client or GitHub request. Cloudflare sets CF-Connecting-IP itself.
-      const address = request.headers.get('cf-connecting-ip') ?? 'unknown';
+      // Before any database client or GitHub request.
+      const address = clientOf(request) ?? 'unknown';
       if (!(await limits.client.limit({ key: `client:${address}` })).success) {
         return tooManyRequests();
       }
