@@ -37,6 +37,7 @@ import type {
   CalendarEventContent,
   CalendarEventOccurrence,
   CalendarEventRetentionResult,
+  BookingRetentionResult,
   CalendarFreeBusy,
   CalendarHorizonRollCursor,
   CalendarHorizonRollResult,
@@ -1617,9 +1618,10 @@ export interface SlotlockStore {
    * INVARIANT (erasure completeness): a tenant integration must use a stable, erasable business
    * identifier for externalRef and include this schema in its own data-erasure workflow.
    *
-   * With `maxTenantResources` (1-100,000, tenant-owned resources only) a new resource is refused
-   * (`resource_limit_reached`) once the tenant has that many; an existing `externalRef` is still
-   * updated. Capped creates for one tenant run one at a time under a database lock, so racing ones
+   * With `maxTenantResources` (1-100,000, tenant-owned resources only), or the store's `resources`
+   * limit (the lower of the two when both are set), a new resource of a tenant is refused
+   * (`resource_limit_reached`, with the `limit`) once the tenant has that many; an existing
+   * `externalRef` is still updated. Capped creates for one tenant run one at a time under a database lock, so racing ones
    * on any number of servers stop at the cap. The count needs READ COMMITTED: a capped create opens
    * one itself, and inside a caller's transaction of another level it refuses
    * (`invalid_transaction_isolation`). Uncapped creates do not wait for the lock and are not
@@ -1879,6 +1881,19 @@ export interface SlotlockStore {
     /** Replay window in whole days, 1-3650. Defaults to `SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS`. */
     retentionDays?: number;
   }): Promise<CalendarEventRetentionResult>;
+  /**
+   * Delete one bounded batch of a tenant's dead booking rows: holds past their expiry (at once), and
+   * keyed hold answers and retired booking references older than the retention window, which is
+   * what returns `holds` and `reservations` limit. Rows another transaction holds are skipped, not
+   * waited on. Call until `hasMore` is false.
+   */
+  pruneBookingRetention(params: {
+    tenantRef: string;
+    /** Rows per class per call, 1-1000. Defaults to 100. */
+    limit?: number;
+    /** In whole days, 1-3650. Defaults to `SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS`. */
+    retentionDays?: number;
+  }): Promise<BookingRetentionResult>;
   /** Record the bounded, complete source window represented by a provider cursor/revision. */
   recordCalendarCoverage(params: CalendarCoverageCommand): Promise<CalendarCoverageResult>;
   /** Return merged busy intervals plus explicit completeness for caller-required provider sources. */
@@ -1925,6 +1940,112 @@ export interface SlotlockStoreOptions {
   agentOwnerEventQuota?: number;
   /** Hard retained-command ceiling per non-internal owner. Defaults to 10,000; cannot be disabled. */
   agentOwnerCommandQuota?: number;
+  /**
+   * What one tenant may store, for a database tenants share (none by default). A write that would
+   * pass a limit is refused with it (`*_limit_reached`); what the tenant has can still be revised,
+   * cancelled and released. Counted under a lock per tenant and limit, so racing writers never pass
+   * it, in READ COMMITTED transactions only (`invalid_transaction_isolation` otherwise).
+   */
+  tenantLimits?: SlotlockTenantLimits;
+}
+
+/** Per-tenant row limits, each a whole number from 1 to 10,000,000 (resources: to 100,000). */
+export interface SlotlockTenantLimits {
+  /** Resources, archived ones included; the lower of this and a call's `maxTenantResources`. */
+  resources?: number;
+  /** Live holds on the tenant's resources; expired ones (purged by maintenance) do not count. */
+  holds?: number;
+  /**
+   * Bookings plus the cancellations that retire their references, until maintenance prunes those
+   * past the retention window.
+   */
+  reservations?: number;
+  /**
+   * Calendar events of every owner, plus agent-owned cancellations until they are pruned. The
+   * tenant's own (`internal`) cancellations are kept for good and are not counted. Each event stores
+   * at most 2,000 occurrences.
+   */
+  events?: number;
+  /** Provider coverage rows: one per resource and source. */
+  coverage?: number;
+}
+
+type TenantLimitKind = Exclude<keyof SlotlockTenantLimits, 'resources'>;
+
+const MAX_TENANT_LIMIT = 10_000_000;
+
+function tenantLimitsOption(limits: SlotlockTenantLimits | undefined): SlotlockTenantLimits {
+  const valid: SlotlockTenantLimits = {};
+  for (const kind of ['resources', 'holds', 'reservations', 'events', 'coverage'] as const) {
+    const value = limits?.[kind];
+    if (value === undefined) continue;
+    const max = kind === 'resources' ? MAX_TENANT_RESOURCE_LIMIT : MAX_TENANT_LIMIT;
+    if (!Number.isSafeInteger(value) || value < 1 || value > max) {
+      throw Object.assign(
+        new Error(`Slotlock tenant limit ${kind} must be a whole number from 1 to ${max}`),
+        { code: 'invalid_tenant_limits' as const },
+      );
+    }
+    valid[kind] = value;
+  }
+  return valid;
+}
+
+/**
+ * Serialize one tenant's writes that add rows of one limited kind, so each counts what every
+ * earlier one committed. Taken before any row lock, after the write's identity locks.
+ */
+async function lockTenantLimit(
+  tx: TransactionSql,
+  tenantRef: string,
+  kind: TenantLimitKind,
+): Promise<void> {
+  // An object, so the key never equals a [tenantRef, externalRef] identity lock's.
+  await tx`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify({ tenantLimit: kind, tenantRef })}, 0))`;
+}
+
+/** The rows a tenant has that its limit of `kind` counts. */
+async function tenantLimitCount(
+  tx: TransactionSql,
+  tenantRef: string,
+  kind: TenantLimitKind,
+): Promise<number> {
+  let rows: { count: number }[];
+  switch (kind) {
+    case 'holds':
+      rows = await tx<{ count: number }[]>`
+        SELECT count(*)::int AS count
+          FROM slotlock.reservations hold
+          JOIN slotlock.resources resource ON resource.id = hold.resource_id
+         WHERE resource.tenant_ref = ${tenantRef}
+           AND hold.status = 'held' AND hold.expires_at > now()`;
+      break;
+    case 'reservations':
+      rows = await tx<{ count: number }[]>`
+        SELECT (
+          (SELECT count(*) FROM slotlock.reservations
+            WHERE tenant_ref = ${tenantRef} AND external_ref IS NOT NULL
+              AND calendar_event_id IS NULL)
+          + (SELECT count(*) FROM slotlock.reservation_tombstones WHERE tenant_ref = ${tenantRef})
+        )::int AS count`;
+      break;
+    case 'events':
+      rows = await tx<{ count: number }[]>`
+        SELECT (
+          (SELECT count(*) FROM slotlock.calendar_events WHERE tenant_ref = ${tenantRef})
+          + (SELECT count(*) FROM slotlock.calendar_event_tombstones
+              WHERE tenant_ref = ${tenantRef} AND owner_ref <> ${SLOTLOCK_INTERNAL_EVENT_OWNER_REF})
+        )::int AS count`;
+      break;
+    case 'coverage':
+      rows = await tx<{ count: number }[]>`
+        SELECT count(*)::int AS count FROM slotlock.calendar_coverage
+         WHERE tenant_ref = ${tenantRef}`;
+      break;
+  }
+  const count = Number(rows[0]?.count ?? 0);
+  if (!Number.isSafeInteger(count) || count < 0) throw new Error('slotlock: invalid tenant row count');
+  return count;
 }
 
 /**
@@ -2007,6 +2128,10 @@ function holdTenantRef(options: SlotlockHoldTenantOptions): string | null {
 }
 
 export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions = {}): SlotlockStore {
+  return buildSlotlockStore(sql, options);
+}
+
+function buildSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions): SlotlockStore {
   const configuredTenantSetting = options.tenantContextSetting ?? SLOTLOCK_TENANT_CONTEXT_SETTING;
   const configuredAgentOwnerEventQuota =
     options.agentOwnerEventQuota ?? SLOTLOCK_AGENT_OWNER_EVENT_QUOTA;
@@ -2036,8 +2161,50 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
       { code: 'invalid_agent_owner_command_quota' as const },
     );
   }
+  const configuredTenantLimits = tenantLimitsOption(options.tenantLimits);
   createSlotlockTenantRlsDdl(configuredTenantSetting); // Validate once before any scoped query.
-  return {
+  const storeOptions: SlotlockStoreOptions = {
+    tenantContextSetting: configuredTenantSetting,
+    agentOwnerEventQuota: configuredAgentOwnerEventQuota,
+    agentOwnerCommandQuota: configuredAgentOwnerCommandQuota,
+    tenantLimits: configuredTenantLimits,
+  };
+
+  /**
+   * Under the tenant's lock for `kind`: the limit when the tenant is at it, else null. No limit for
+   * `kind`, or no tenant, takes no lock. Writes that only lower the count take no lock, so a count
+   * read early stays an upper bound for the rest of the transaction.
+   */
+  async function tenantLimitReached(
+    tx: TransactionSql,
+    tenantRef: string | null,
+    kind: TenantLimitKind,
+  ): Promise<number | null> {
+    const limit = configuredTenantLimits[kind];
+    if (limit === undefined || tenantRef === null) return null;
+    await assertReadCommitted(tx);
+    await lockTenantLimit(tx, tenantRef, kind);
+    return (await tenantLimitCount(tx, tenantRef, kind)) >= limit ? limit : null;
+  }
+
+  /**
+   * The tenant whose limit a write on the resource counts against: the caller's, else the
+   * resource's (a resource never changes tenant, so it is read before any lock). Null with no limit.
+   */
+  async function limitTenant(
+    tx: TransactionSql,
+    kind: TenantLimitKind,
+    resourceId: string,
+    tenantRef: string | undefined,
+  ): Promise<string | null> {
+    if (configuredTenantLimits[kind] === undefined) return null;
+    if (tenantRef !== undefined) return tenantRef;
+    const [resource] = await tx<{ tenant_ref: string | null }[]>`
+      SELECT tenant_ref FROM slotlock.resources WHERE id = ${resourceId}`;
+    return resource?.tenant_ref ?? null;
+  }
+
+  const store: SlotlockStore = {
     async applySchema(migrationOptions) {
       // PostgreSQL's IF NOT EXISTS DDL is idempotent after commit but not race-free: two fresh
       // application instances can still collide on pg_namespace/pg_extension unique indexes.
@@ -2222,13 +2389,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
           SELECT current_setting(${configuredTenantSetting}, true) AS value`;
         await tx`SELECT set_config(${configuredTenantSetting}, ${tenantRef}, true)`;
         try {
-          return await callback(
-            createSlotlockStore(tx, {
-              tenantContextSetting: configuredTenantSetting,
-              agentOwnerEventQuota: configuredAgentOwnerEventQuota,
-              agentOwnerCommandQuota: configuredAgentOwnerCommandQuota,
-            }) as SlotlockTenantStore,
-          );
+          return await callback(buildSlotlockStore(tx, storeOptions) as SlotlockTenantStore);
         } finally {
           await tx`SELECT set_config(${configuredTenantSetting}, ${previous[0]?.value ?? ''}, true)`;
         }
@@ -2237,14 +2398,16 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
 
     async createResource(params) {
       assertValidResourceInput(params);
-      const max = params.maxTenantResources;
-      if (max === undefined) return upsertResource(sql, params);
+      const requested = params.maxTenantResources;
+      const configured = params.tenantRef === undefined ? undefined : configuredTenantLimits.resources;
+      if (requested === undefined && configured === undefined) return upsertResource(sql, params);
       if (
-        !Number.isSafeInteger(max) ||
-        max < 1 ||
-        max > MAX_TENANT_RESOURCE_LIMIT ||
-        params.tenantRef === undefined ||
-        params.externalRef === undefined
+        requested !== undefined &&
+        (!Number.isSafeInteger(requested) ||
+          requested < 1 ||
+          requested > MAX_TENANT_RESOURCE_LIMIT ||
+          params.tenantRef === undefined ||
+          params.externalRef === undefined)
       ) {
         throw Object.assign(
           new Error(
@@ -2253,7 +2416,14 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
           { code: 'invalid_resource_limit' as const },
         );
       }
-      const { tenantRef, externalRef } = params;
+      const max =
+        requested === undefined
+          ? (configured as number)
+          : configured === undefined
+            ? requested
+            : Math.min(requested, configured);
+      const tenantRef = params.tenantRef as string;
+      const externalRef = params.externalRef ?? null;
       return inTransaction(
         sql,
         async (tx) => {
@@ -2261,9 +2431,13 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
           // An object, so the key never equals a [tenantRef, externalRef] identity lock's.
           await tx`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify({ resourceCount: tenantRef })}, 0))`;
           // READ COMMITTED: each statement below sees every create committed before the lock.
-          const known = await tx<{ id: string }[]>`
-            SELECT id FROM slotlock.resources
-             WHERE tenant_ref = ${tenantRef} AND external_ref = ${externalRef}`;
+          // Re-creating a resource the tenant has (by its reference) adds none.
+          const known =
+            externalRef === null
+              ? []
+              : await tx<{ id: string }[]>`
+                  SELECT id FROM slotlock.resources
+                   WHERE tenant_ref = ${tenantRef} AND external_ref = ${externalRef}`;
           if (known.length === 0) {
             const [counted] = await tx<{ count: string }[]>`
               SELECT count(*) AS count FROM slotlock.resources WHERE tenant_ref = ${tenantRef}`;
@@ -2427,6 +2601,11 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
       for (let attempt = 1; ; attempt++) {
         try {
           return await inTransaction(sql, async (tx): Promise<CreateReservationResult> => {
+            const bookingLimit = await tenantLimitReached(
+              tx,
+              await limitTenant(tx, 'reservations', params.resourceId, params.tenantRef),
+              'reservations',
+            );
             const [resource] = await tx<{ tenant_ref: string | null; archived: boolean }[]>`
               SELECT tenant_ref, archived_at IS NOT NULL AS archived FROM slotlock.resources
                WHERE id = ${params.resourceId}
@@ -2435,6 +2614,9 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
                FOR SHARE`;
             if (!resource) return { ok: false, code: 'resource_not_found' };
             if (resource.archived) return { ok: false, code: 'resource_archived' };
+            if (bookingLimit !== null && resource.tenant_ref !== null) {
+              return { ok: false, code: 'reservation_limit_reached', limit: bookingLimit };
+            }
             if (
               resource.tenant_ref !== null &&
               !(await recurrenceCoversWrite(tx, {
@@ -2513,9 +2695,13 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
               }
               return { ok: true, reservation: toReservation(found), idempotent: true };
             }
+            const bookingLimit = await tenantLimitReached(tx, params.tenantRef, 'reservations');
             const resourceState = await tenantResourceState(tx, params.resourceId, params.tenantRef);
             if (resourceState === 'missing') return { ok: false, code: 'resource_tenant_mismatch' };
             if (resourceState === 'archived') return { ok: false, code: 'resource_archived' };
+            if (bookingLimit !== null) {
+              return { ok: false, code: 'reservation_limit_reached', limit: bookingLimit };
+            }
             if (
               !(await recurrenceCoversWrite(tx, {
                 tenantRef: params.tenantRef,
@@ -2702,6 +2888,9 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
                AND calendar_event_id IS NOT NULL
              LIMIT 1`;
           if (occupation) return { ok: true, cancelled: false, revision: params.revision };
+          // Retiring a reference no booking holds adds a row; cancelling a booking replaces one.
+          const limit = await tenantLimitReached(tx, params.tenantRef, 'reservations');
+          if (limit !== null) return { ok: false, code: 'reservation_limit_reached', limit };
         }
         // A reference no booking holds yet is retired too, so a create delivered after its cancel
         // cannot bring the booking back.
@@ -2778,6 +2967,11 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
                   : { ok: false, code: 'idempotency_conflict' };
               }
             }
+            const holdLimit = await tenantLimitReached(
+              tx,
+              await limitTenant(tx, 'holds', params.resourceId, tenantRef),
+              'holds',
+            );
             const [resource] = await tx<{ tenant_ref: string | null; archived: boolean }[]>`
               SELECT tenant_ref, archived_at IS NOT NULL AS archived FROM slotlock.resources
                WHERE id = ${params.resourceId}
@@ -2785,6 +2979,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
                FOR SHARE`;
             if (!resource) return { ok: false, code: 'resource_not_found' };
             if (resource.archived) return { ok: false, code: 'resource_archived' };
+            if (holdLimit !== null) return { ok: false, code: 'hold_limit_reached', limit: holdLimit };
             if (
               resource.tenant_ref !== null &&
               !(await recurrenceCoversWrite(tx, {
@@ -2933,6 +3128,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
         if (!owner) return { ok: false, code: 'hold_not_found' };
         const bookingTenant = owner.resource_tenant;
         if (bookingTenant !== null) await lockExternalIdentity(tx, bookingTenant, holdId);
+        const bookingLimit = await tenantLimitReached(tx, bookingTenant, 'reservations');
         const [row] = await tx<(ReservationRow & { status: string; live: boolean })[]>`
           SELECT id, resource_id, tenant_ref, external_ref, starts_at, ends_at, buffer_after_ms,
                  revision, source, status, (status = 'held' AND expires_at > now()) AS live
@@ -2968,6 +3164,9 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
              WHERE tenant_ref = ${bookingTenant} AND external_ref = ${holdId}
                AND calendar_event_id IS NULL`;
           if (taken) return { ok: false, code: 'idempotency_conflict' };
+        }
+        if (bookingLimit !== null) {
+          return { ok: false, code: 'reservation_limit_reached', limit: bookingLimit };
         }
         // The occupied end is already the end plus the hold's buffer (the trigger set it); the
         // tenant and reference make the hold a booking that cancel and reschedule reach.
@@ -3177,6 +3376,10 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
                   limit: configuredAgentOwnerEventQuota,
                 };
               }
+            }
+            if (!found) {
+              const limit = await tenantLimitReached(tx, params.tenantRef, 'events');
+              if (limit !== null) return { ok: false, code: 'event_limit_reached', limit };
             }
             const eventId = found?.id ?? randomUUID();
             const revision = currentRevision + 1;
@@ -3696,6 +3899,99 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
       });
     },
 
+    async pruneBookingRetention(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const limit = params.limit ?? 100;
+      if (!Number.isSafeInteger(limit) || limit <= 0 || limit > MAX_CALENDAR_LIST_LIMIT) {
+        throw Object.assign(new Error('Slotlock retention batch limit must be 1-1000'), {
+          code: 'invalid_limit' as const,
+        });
+      }
+      const retentionDays = params.retentionDays ?? SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS;
+      if (
+        !Number.isSafeInteger(retentionDays) ||
+        retentionDays < 1 ||
+        retentionDays > MAX_EVENT_COMMAND_RETENTION_DAYS
+      ) {
+        throw Object.assign(new Error('Slotlock retention window must be 1-3650 days'), {
+          code: 'invalid_retention_window' as const,
+        });
+      }
+      return inTransaction(sql, async (tx): Promise<BookingRetentionResult> => {
+        // A writer reaping or confirming a hold locks it: such a row is skipped, and the delete
+        // repeats the predicate on the row as it now is.
+        const [holds] = await tx<{ deleted: number }[]>`
+          WITH candidates AS MATERIALIZED (
+            SELECT hold.id
+              FROM slotlock.reservations hold
+              JOIN slotlock.resources resource ON resource.id = hold.resource_id
+             WHERE resource.tenant_ref = ${params.tenantRef}
+               AND hold.status = 'held' AND hold.expires_at <= now()
+             ORDER BY hold.expires_at, hold.id
+             LIMIT ${limit}
+             FOR UPDATE OF hold SKIP LOCKED
+          ), deleted AS (
+            DELETE FROM slotlock.reservations hold
+             USING candidates candidate
+             WHERE hold.id = candidate.id
+               AND hold.status = 'held' AND hold.expires_at <= now()
+            RETURNING 1
+          )
+          SELECT count(*)::int AS deleted FROM deleted`;
+        const [commands] = await tx<{ deleted: number }[]>`
+          WITH candidates AS MATERIALIZED (
+            SELECT command.principal_ref, command.idempotency_key
+              FROM slotlock.hold_commands command
+             WHERE command.tenant_ref = ${params.tenantRef}
+               AND command.created_at <
+                   clock_timestamp() - (${retentionDays}::int * interval '1 day')
+             ORDER BY command.created_at, command.principal_ref, command.idempotency_key
+             LIMIT ${limit}
+             FOR UPDATE OF command SKIP LOCKED
+          ), deleted AS (
+            DELETE FROM slotlock.hold_commands command
+             USING candidates candidate
+             WHERE command.tenant_ref = ${params.tenantRef}
+               AND command.principal_ref = candidate.principal_ref
+               AND command.idempotency_key = candidate.idempotency_key
+            RETURNING 1
+          )
+          SELECT count(*)::int AS deleted FROM deleted`;
+        const [tombstones] = await tx<{ deleted: number }[]>`
+          WITH candidates AS MATERIALIZED (
+            SELECT tombstone.external_ref
+              FROM slotlock.reservation_tombstones tombstone
+             WHERE tombstone.tenant_ref = ${params.tenantRef}
+               AND tombstone.cancelled_at <
+                   clock_timestamp() - (${retentionDays}::int * interval '1 day')
+             ORDER BY tombstone.cancelled_at, tombstone.external_ref
+             LIMIT ${limit}
+             FOR UPDATE OF tombstone SKIP LOCKED
+          ), deleted AS (
+            DELETE FROM slotlock.reservation_tombstones tombstone
+             USING candidates candidate
+             WHERE tombstone.tenant_ref = ${params.tenantRef}
+               AND tombstone.external_ref = candidate.external_ref
+            RETURNING 1
+          )
+          SELECT count(*)::int AS deleted FROM deleted`;
+        const expiredHoldsDeleted = Number(holds?.deleted ?? 0);
+        const holdCommandsDeleted = Number(commands?.deleted ?? 0);
+        const tombstonesDeleted = Number(tombstones?.deleted ?? 0);
+        return {
+          expiredHoldsDeleted,
+          holdCommandsDeleted,
+          tombstonesDeleted,
+          hasMore:
+            expiredHoldsDeleted === limit ||
+            holdCommandsDeleted === limit ||
+            tombstonesDeleted === limit,
+        };
+      });
+    },
+
     async pruneCalendarEventRetention(params) {
       if (!isValidIdentity(params.tenantRef)) {
         throw Object.assign(new Error('Slotlock tenant reference must be 1-500 UTF-8 bytes'), {
@@ -3856,6 +4152,8 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
                AND source = ${params.source}`;
         } else {
           if (params.revision !== 1) return { ok: false, code: 'revision_conflict' };
+          const limit = await tenantLimitReached(tx, params.tenantRef, 'coverage');
+          if (limit !== null) return { ok: false, code: 'coverage_limit_reached', limit };
           await tx`
             INSERT INTO slotlock.calendar_coverage (
               tenant_ref, resource_id, source, starts_at, ends_at, revision
@@ -4085,4 +4383,5 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
       });
     },
   };
+  return store;
 }

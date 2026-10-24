@@ -10,7 +10,11 @@ import {
   withSlotlockMaintenanceLock,
 } from '../maintenance.js';
 import type { SlotlockStore } from '../store.js';
-import type { CalendarEventRetentionResult, CalendarHorizonRollResult } from '../types.js';
+import type {
+  BookingRetentionResult,
+  CalendarEventRetentionResult,
+  CalendarHorizonRollResult,
+} from '../types.js';
 
 // The timers a test runs on, before startSlotlockMaintenance's tests fake them.
 const realSetTimeout = globalThis.setTimeout;
@@ -26,13 +30,24 @@ const DONE_ROLL: CalendarHorizonRollResult = {
   next: null,
 };
 const DONE_PRUNE: CalendarEventRetentionResult = { commandsDeleted: 0, tombstonesDeleted: 0, hasMore: false };
+const DONE_PURGE: BookingRetentionResult = {
+  expiredHoldsDeleted: 0,
+  holdCommandsDeleted: 0,
+  tombstonesDeleted: 0,
+  hasMore: false,
+};
 const cursor = (n: number) => ({ materializedEndsAt: new Date(Date.UTC(2027, 0, n)), eventId: `event-${n}` });
 
 /** A store whose tenants answer from queues of results, then with nothing left to do. */
 function fakeStore() {
   const rolls = new Map<string, CalendarHorizonRollResult[]>();
   const prunes = new Map<string, CalendarEventRetentionResult[]>();
-  const calls: { tenantRef: string; task: 'roll' | 'prune'; params: Record<string, unknown> }[] = [];
+  const purges = new Map<string, BookingRetentionResult[]>();
+  const calls: {
+    tenantRef: string;
+    task: 'roll' | 'prune' | 'purge';
+    params: Record<string, unknown>;
+  }[] = [];
   let gate: Promise<void> | null = null;
   const store = {
     async withTenant(tenantRef: string, callback: (tenant: unknown) => Promise<unknown>) {
@@ -48,6 +63,10 @@ function fakeStore() {
           calls.push({ tenantRef, task: 'prune', params });
           return prunes.get(tenantRef)?.shift() ?? DONE_PRUNE;
         },
+        async pruneBookingRetention(params: Record<string, unknown>) {
+          calls.push({ tenantRef, task: 'purge', params });
+          return purges.get(tenantRef)?.shift() ?? DONE_PURGE;
+        },
       });
     },
   } as unknown as SlotlockStore;
@@ -56,6 +75,7 @@ function fakeStore() {
     calls,
     roll: (tenantRef: string, ...results: CalendarHorizonRollResult[]) => rolls.set(tenantRef, results),
     prune: (tenantRef: string, ...results: CalendarEventRetentionResult[]) => prunes.set(tenantRef, results),
+    purge: (tenantRef: string, ...results: BookingRetentionResult[]) => purges.set(tenantRef, results),
     fail: (tenantRef: string, error: Error) =>
       rolls.set(tenantRef, [{ fail: error } as unknown as CalendarHorizonRollResult]),
     /** Hold every pass until the returned function is called. */
@@ -131,6 +151,7 @@ describe('maintainSlotlockTenant', () => {
       ['roll', null],
       ['roll', cursor(1)],
       ['prune', null],
+      ['purge', null],
       ['prune', null],
     ]);
     // One rolling window for the whole pass, and always the tenant it was given.
@@ -138,6 +159,27 @@ describe('maintainSlotlockTenant', () => {
     expect(windows[1]).toBe(windows[0]);
     expect(new Set(fake.calls.map(({ tenantRef, params }) => `${tenantRef}/${params.tenantRef}`))).toEqual(
       new Set(['fleet/fleet']),
+    );
+  });
+
+  it('purges expired holds and prunes booking bookkeeping alongside, counting them as pruned', async () => {
+    const fake = fakeStore();
+    fake.purge(
+      'fleet',
+      { expiredHoldsDeleted: 100, holdCommandsDeleted: 2, tombstonesDeleted: 1, hasMore: true },
+      { expiredHoldsDeleted: 20, holdCommandsDeleted: 0, tombstonesDeleted: 0, hasMore: false },
+    );
+    expect(await maintainSlotlockTenant(fake.store, 'fleet')).toEqual(result({ pruned: 123 }));
+    expect(fake.calls.map(({ task, params }) => [task, params.tenantRef])).toEqual([
+      ['roll', 'fleet'],
+      ['prune', 'fleet'],
+      ['purge', 'fleet'],
+      ['purge', 'fleet'],
+    ]);
+    const capped = fakeStore();
+    capped.purge('fleet', { ...DONE_PURGE, expiredHoldsDeleted: 100, hasMore: true });
+    expect(await maintainSlotlockTenant(capped.store, 'fleet', { batches: 1 })).toEqual(
+      result({ pruned: 100, capped: true }),
     );
   });
 

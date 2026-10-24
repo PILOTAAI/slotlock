@@ -16,16 +16,17 @@ export interface SlotlockMaintenanceResult {
   conflicts: number;
   /** Series over the expansion budget; they keep their old coverage. */
   refused: number;
-  /** Idempotency commands and tombstones deleted. */
+  /** Expired holds, and idempotency answers and tombstones past the retention window, deleted. */
   pruned: number;
   /** More was left than one pass does: run another. */
   capped: boolean;
 }
 
 /**
- * One maintenance pass for a tenant: roll its recurring events to the rolling horizon, then prune
- * past the retention window, each in at most `batches` batches (1-100, default 10), every batch its
- * own transaction. Aborting `signal` stops it between batches with the signal's reason.
+ * One maintenance pass for a tenant: roll its recurring events to the rolling horizon, then purge
+ * its expired holds and prune its events' and bookings' bookkeeping past the retention window, each
+ * in at most `batches` batches (1-100, default 10), every batch its own transaction. Aborting
+ * `signal` stops it between batches with the signal's reason.
  */
 export async function maintainSlotlockTenant(
   store: SlotlockStore,
@@ -58,19 +59,32 @@ export async function maintainSlotlockTenant(
     }
   }
   let pruned = 0;
-  let pruneCapped = true;
-  for (let batch = 0; batch < batches; batch++) {
+  let eventsLeft = true;
+  let bookingsLeft = true;
+  for (let batch = 0; batch < batches && (eventsLeft || bookingsLeft); batch++) {
     options.signal?.throwIfAborted();
-    const prune = await store.withTenant(tenantRef, (tenant) =>
-      tenant.pruneCalendarEventRetention({ tenantRef }),
-    );
-    pruned += prune.commandsDeleted + prune.tombstonesDeleted;
-    if (!prune.hasMore) {
-      pruneCapped = false;
-      break;
+    if (eventsLeft) {
+      const prune = await store.withTenant(tenantRef, (tenant) =>
+        tenant.pruneCalendarEventRetention({ tenantRef }),
+      );
+      pruned += prune.commandsDeleted + prune.tombstonesDeleted;
+      eventsLeft = prune.hasMore;
+    }
+    if (bookingsLeft) {
+      const prune = await store.withTenant(tenantRef, (tenant) =>
+        tenant.pruneBookingRetention({ tenantRef }),
+      );
+      pruned += prune.expiredHoldsDeleted + prune.holdCommandsDeleted + prune.tombstonesDeleted;
+      bookingsLeft = prune.hasMore;
     }
   }
-  return { extended, conflicts, refused, pruned, capped: rollCapped || pruneCapped };
+  return {
+    extended,
+    conflicts,
+    refused,
+    pruned,
+    capped: rollCapped || eventsLeft || bookingsLeft,
+  };
 }
 
 /** The advisory lock key for one tenant's maintenance (64-bit, from the tenant reference). */

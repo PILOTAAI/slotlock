@@ -88,6 +88,8 @@ export type ExternalReservationResult =
    * extended that far (past the rolling horizon, or blocked): the time cannot be proven free.
    */
   | { ok: false; code: 'recurrence_not_materialized' }
+  /** The tenant's bookings and retired references are at its `reservations` limit. */
+  | { ok: false; code: 'reservation_limit_reached'; limit: number }
   | { ok: false; code: 'overlap'; conflictingReservationId: string | null };
 
 export type CancelExternalReservationResult =
@@ -96,7 +98,12 @@ export type CancelExternalReservationResult =
   | { ok: false; code: 'invalid_revision' }
   | { ok: false; code: 'reservation_cancelled' }
   | { ok: false; code: 'stale_revision' }
-  | { ok: false; code: 'revision_conflict' };
+  | { ok: false; code: 'revision_conflict' }
+  /**
+   * Retiring a reference no booking holds would add a row past the tenant's `reservations` limit
+   * (cancelling a booking it has never does).
+   */
+  | { ok: false; code: 'reservation_limit_reached'; limit: number };
 
 /**
  * VAVAILABILITY-style bookable window (RFC 7953 semantics, weekly subset): a weekly-cadence RRULE
@@ -125,6 +132,8 @@ export type CreateReservationResult =
    * extended that far (past the rolling horizon, or blocked): the time cannot be proven free.
    */
   | { ok: false; code: 'recurrence_not_materialized' }
+  /** The booking's tenant is at its `reservations` limit. */
+  | { ok: false; code: 'reservation_limit_reached'; limit: number }
   | { ok: false; code: 'overlap'; conflictingReservationId: string | null };
 
 /** A hold: occupies exactly like a reservation until its DB-clock expiry, then lazily reaped. */
@@ -158,6 +167,8 @@ export type AcquireHoldResult =
    * extended that far (past the rolling horizon, or blocked): the time cannot be proven free.
    */
   | { ok: false; code: 'recurrence_not_materialized' }
+  /** The resource's tenant has as many live holds as its `holds` limit. */
+  | { ok: false; code: 'hold_limit_reached'; limit: number }
   | { ok: false; code: 'overlap'; conflictingReservationId: string | null };
 
 export type ConfirmHoldResult =
@@ -169,7 +180,9 @@ export type ConfirmHoldResult =
   /** Another booking of the tenant already uses the hold's id as its reference. */
   | { ok: false; code: 'idempotency_conflict' }
   /** The hold's resource was archived since: it takes no new booking. */
-  | { ok: false; code: 'resource_archived' };
+  | { ok: false; code: 'resource_archived' }
+  /** The tenant is at its `reservations` limit: the hold stays a hold. */
+  | { ok: false; code: 'reservation_limit_reached'; limit: number };
 
 export type ReleaseHoldResult = { ok: true; released: boolean };
 
@@ -294,6 +307,8 @@ export type PutCalendarEventResult =
   | { ok: false; code: 'idempotency_conflict' }
   | { ok: false; code: 'owner_event_quota_exceeded'; limit: number }
   | { ok: false; code: 'owner_command_quota_exceeded'; limit: number }
+  /** A new event would pass the tenant's `events` limit (revising one it has never does). */
+  | { ok: false; code: 'event_limit_reached'; limit: number }
   | { ok: false; code: 'resource_tenant_mismatch' }
   /** The resource is archived: it takes no new booking (cancel and release still work). */
   | { ok: false; code: 'resource_archived' }
@@ -376,6 +391,17 @@ export interface CalendarEventRetentionResult {
   hasMore: boolean;
 }
 
+export interface BookingRetentionResult {
+  /** Holds past their expiry: they occupy nothing, and only a rival's write would reap them. */
+  expiredHoldsDeleted: number;
+  /** Keyed hold answers older than the replay window: a retry with that key makes a new hold. */
+  holdCommandsDeleted: number;
+  /** Retired booking references older than the window: a create with one makes a new booking. */
+  tombstonesDeleted: number;
+  /** True when any class filled its batch, so more rows may already be eligible. */
+  hasMore: boolean;
+}
+
 export interface CalendarCoverageCommand {
   tenantRef: string;
   resourceId: string;
@@ -389,7 +415,9 @@ export type CalendarCoverageResult =
   | { ok: true; revision: number; idempotent: boolean }
   | { ok: false; code: 'invalid_identity' | 'invalid_window' | 'invalid_revision' }
   | { ok: false; code: 'resource_tenant_mismatch' }
-  | { ok: false; code: 'stale_revision' | 'revision_conflict' | 'idempotency_conflict' };
+  | { ok: false; code: 'stale_revision' | 'revision_conflict' | 'idempotency_conflict' }
+  /** A new source would pass the tenant's `coverage` limit (advancing one it has never does). */
+  | { ok: false; code: 'coverage_limit_reached'; limit: number };
 
 export interface CalendarCoverageAssessment {
   state: 'complete' | 'partial' | 'unknown';

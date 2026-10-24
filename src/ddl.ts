@@ -267,6 +267,7 @@ export const SLOTLOCK_DEFINER_TABLES = Object.freeze([
   ...SLOTLOCK_SCHEMA_TABLES,
 ]);
 
+
 const API_KEY_COLUMNS = `key_id uuid,
   key_tenant_ref text,
   key_name text,
@@ -829,6 +830,10 @@ CREATE TABLE IF NOT EXISTS slotlock.reservation_tombstones (
   ),
   CONSTRAINT slotlock_reservation_tombstones_revision_valid CHECK (revision > 0)
 );
+-- When the reference was retired, so maintenance can prune it past the retention window. Rows from
+-- before 0.3 take the time of the upgrade (a constant default: no table rewrite).
+ALTER TABLE slotlock.reservation_tombstones
+  ADD COLUMN IF NOT EXISTS cancelled_at timestamptz NOT NULL DEFAULT now();
 -- Resource identity: one resource per tenant/external_ref namespace (plus one isolated NULL-tenant
 -- legacy namespace). Dedupe first (repoint reservations to the keeper, drop the rest) so the
 -- unique indexes also bind on DBs poisoned by the pre-index
@@ -1809,6 +1814,11 @@ CREATE TABLE IF NOT EXISTS slotlock.hold_commands (
 );
 CREATE INDEX IF NOT EXISTS slotlock_hold_commands_retention_idx
   ON slotlock.hold_commands (tenant_ref, created_at);
+CREATE INDEX IF NOT EXISTS slotlock_reservation_tombstones_retention_idx
+  ON slotlock.reservation_tombstones (tenant_ref, cancelled_at);
+-- Holds by resource and expiry: a tenant's live-hold count, and maintenance's purge of expired ones.
+CREATE INDEX IF NOT EXISTS slotlock_reservations_held_expiry_idx
+  ON slotlock.reservations (resource_id, expires_at) WHERE status = 'held';
 
 CREATE INDEX IF NOT EXISTS slotlock_calendar_events_resource_time_idx
   ON slotlock.calendar_events (tenant_ref, resource_id, starts_at, ends_at);
