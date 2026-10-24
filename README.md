@@ -7,12 +7,12 @@ TypeScript library.
 
 ## Known issues in 0.2.0
 
-0.2.0, the version npm installs today, can occupy less time than a recurring event was written
-with, so another booking can take the rest: around daylight-saving changes, in any time zone that
-has them, and at the end of some series. The library and `slotlock serve` are affected alike. The
-next changes are on 25 October 2026 in Europe and 1 November 2026 in the United States and Canada.
-The fixes will ship in 0.3.0: upgrade as soon as it is published, and until then do not rely on
-0.2.0 alone to refuse bookings in these cases.
+Slotlock 0.2.0 can occupy less time than a recurring event was written with, so another booking can
+take the rest: around daylight-saving changes, in any time zone that has them, and at the end of
+some series. The library and `slotlock serve` are affected alike; the 0.1 releases are older still
+and unsupported. The fixes are for 0.3.0: upgrade to it once it is published, and until then do not
+rely on 0.2.0 alone to refuse bookings in these cases (the clocks change next on 25 October 2026 in
+Europe and 1 November 2026 in the United States and Canada).
 
 - A recurring event whose first occurrence spans a daylight-saving change gets that occurrence an
   hour short: in spring, an hour of the written time is free to book.
