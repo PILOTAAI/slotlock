@@ -118,7 +118,9 @@ bits) and a 6-character checksum, and the database keeps only its SHA-256. A slo
 238 random bits, so a fast hash
 loses nothing and lets every request look a key up by its digest in one indexed read. Code scanners
 that treat every secret as a password report this as weak hashing (CodeQL
-`js/insufficient-password-hash`); it is the design, as for GitHub's and Stripe's tokens.
+`js/insufficient-password-hash`); it is the design, as for GitHub's and Stripe's tokens. The
+repository's CodeQL configuration (`.github/codeql/codeql-config.yml`) drops that one query with
+this reason beside it, rather than dismissing its alerts one by one.
 
 A key acts only in the tenant it was created for. `read` and `write` cover the agent tools; `admin`
 covers the application API (resources, hours, holds, reservations, coverage, maintenance), which is

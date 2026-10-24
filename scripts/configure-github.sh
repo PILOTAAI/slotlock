@@ -41,7 +41,6 @@
 #   https://docs.github.com/en/rest/secret-scanning/secret-scanning#about-secret-scanning
 #   https://docs.github.com/en/rest/code-scanning/code-scanning#get-a-code-scanning-default-setup-configuration
 #   https://docs.github.com/en/rest/code-scanning/code-scanning#update-a-code-scanning-default-setup-configuration
-#   https://docs.github.com/en/rest/branches/branches#get-a-branch
 #   https://docs.github.com/en/rest/deployments/environments#create-or-update-an-environment
 #   https://docs.github.com/en/rest/deployments/branch-policies (list, create, delete)
 #   https://docs.github.com/en/rest/actions/secrets#list-environment-secrets
@@ -187,26 +186,6 @@ gh_get() {
     "$1"
 }
 
-# branch_exists NAME: true when the branch exists, false on a 404, stops on any other error.
-branch_exists() {
-  local err
-  if [ "$DRY_RUN" -eq 1 ]; then
-    printf '\n> GET /repos/%s/%s/branches/%s\n  (dry run: not sent, assuming it exists)\n' \
-      "$OWNER" "$REPO" "$1" >&3
-    return 0
-  fi
-  if err=$(gh api --method GET \
-    -H 'Accept: application/vnd.github+json' \
-    -H "X-GitHub-Api-Version: $API_VERSION" \
-    --silent "repos/$OWNER/$REPO/branches/$1" 2>&1); then
-    return 0
-  fi
-  case "$err" in
-    *'(HTTP 404)'*) return 1 ;;
-  esac
-  die "could not read branch $1: $err"
-}
-
 preflight() {
   local repo
   command -v jq >/dev/null 2>&1 || die 'jq is required (https://jqlang.org)'
@@ -285,32 +264,21 @@ configure_security() {
   gh_api PUT "repos/$OWNER/$REPO/automated-security-fixes" >/dev/null
   result 'Dependabot alerts and security updates: enabled'
 
-  # CodeQL default setup for the two languages here: TypeScript (src/, site/, scripts/) and the
-  # workflows themselves (actions). The extended suite adds more security queries, which suits a
-  # library that parses untrusted calendar data. Default setup needs code on the default branch.
-  if branch_exists main; then
-    current=$(gh_get "repos/$OWNER/$REPO/code-scanning/default-setup" '{"state":"not-configured"}')
-    if printf '%s' "$current" | jq -e '.state == "configured"
-        and ((.languages // []) | sort) == ["actions", "javascript-typescript"]
-        and .query_suite == "extended"' >/dev/null; then
-      result 'CodeQL default setup: already configured'
-    # A refusal here must not stop the environments and rulesets below. GitHub can refuse a
-    # language main does not contain yet, as when main holds only the README the repository was
-    # created with.
-    elif out=$(gh_api PATCH "repos/$OWNER/$REPO/code-scanning/default-setup" "$(jq -n '{
-        state: "configured",
-        languages: ["actions", "javascript-typescript"],
-        query_suite: "extended",
-        runner_type: "standard"
-      }')" 2>&1); then
-      result 'CodeQL default setup: configured (javascript-typescript, actions)'
-    else
-      CODEQL_SKIPPED=1
-      warn "GitHub refused CodeQL default setup: $out"
-    fi
+  # CodeQL runs from .github/workflows/codeql.yml (advanced setup) over the two languages here,
+  # TypeScript (src/, site/, scripts/) and the workflows themselves (actions), with the extended
+  # suite, which suits a library that parses untrusted calendar data. Its configuration drops one
+  # false positive with the reason beside it (.github/codeql/codeql-config.yml). GitHub runs default
+  # setup or advanced setup, not both, so default setup is turned off. A dry run assumes it is on.
+  current=$(gh_get "repos/$OWNER/$REPO/code-scanning/default-setup" '{"state":"configured"}')
+  if printf '%s' "$current" | jq -e '.state == "not-configured"' >/dev/null; then
+    result 'CodeQL default setup: already off (codeql.yml runs CodeQL)'
+  # A refusal here must not stop the environments and rulesets below.
+  elif out=$(gh_api PATCH "repos/$OWNER/$REPO/code-scanning/default-setup" \
+    "$(jq -n '{state: "not-configured"}')" 2>&1); then
+    result 'CodeQL default setup: turned off (codeql.yml runs CodeQL)'
   else
     CODEQL_SKIPPED=1
-    warn 'main has no commits yet, so CodeQL default setup cannot start. Push main, then run this again.'
+    warn "GitHub refused to turn CodeQL default setup off: $out"
   fi
 }
 
@@ -746,9 +714,9 @@ EOF
   if [ "${CODEQL_SKIPPED:-0}" = 1 ]; then
     cat <<EOF
 
-[ ] CodeQL default setup did not start (see the warning above): main had no commits, or GitHub
-    refused a language main does not contain yet. Merge the initial import into main, then run
-    this script again.
+[ ] CodeQL default setup is still on (see the warning above), so codeql.yml's results cannot be
+    uploaded. Settings > Code security > Code scanning > CodeQL analysis > Disable, or run this
+    script again: https://github.com/$OWNER/$REPO/settings/security_analysis
 EOF
   fi
   cat <<EOF

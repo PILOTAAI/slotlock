@@ -51,6 +51,11 @@ versioning.
   the secret when `SLOTLOCK_CONFIRM_WRITES` is `none`. Its Authorization header takes the token or an
   API key, `SLOTLOCK_TENANT` says API keys act in their own tenant, and the database is PostgreSQL 16
   or newer. `mcp-publisher validate` (v1.8.1) accepts it.
+- CodeQL runs from `.github/workflows/codeql.yml` with the extended security suite, as GitHub's
+  default setup did, and a configuration that drops `js/insufficient-password-hash` with its reason
+  written beside it: API keys are 238 random bits, so their SHA-256 is the design (SECURITY.md),
+  not a weak password hash. `scripts/configure-github.sh` turns default setup off, since GitHub runs
+  one or the other.
 
 ### Added
 

@@ -2126,3 +2126,32 @@ describe('dependency updates', () => {
     expect(found, 'canary: undici is in the site and dashboard lockfiles').toBeGreaterThanOrEqual(2);
   });
 });
+
+describe('code scanning', () => {
+  it('runs CodeQL from a configuration that records why it drops a false positive', () => {
+    const workflow = read('.github/workflows/codeql.yml');
+    expect(workflow).toContain('config-file: ./.github/codeql/codeql-config.yml');
+    expect(workflow).toMatch(/language: \[actions, javascript-typescript\]/);
+    expect(workflow).toContain('security-events: write');
+    const config = read('.github/codeql/codeql-config.yml');
+    // The extended suite, as default setup ran it.
+    expect(config).toMatch(/queries:\n {2}- uses: security-extended\n/);
+    // Exactly one query is dropped, with its reason beside it.
+    const excluded = [...config.matchAll(/^\s+id: (\S+)$/gm)].map(([, id]) => id);
+    expect(excluded).toEqual(['js/insufficient-password-hash']);
+    expect(config).toContain('SECURITY.md');
+    expect(read('SECURITY.md')).toContain('`js/insufficient-password-hash`');
+  });
+
+  it.skipIf(!hasJq)('turns default setup off, which an advanced configuration cannot run beside', () => {
+    const result = spawnSync('bash', [join(root, 'scripts', 'configure-github.sh'), '--dry-run'], {
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH ?? '', SKIP_SITE_SECRETS: '1' },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const setup = /^> PATCH \/repos\/PILOTAAI\/slotlock\/code-scanning\/default-setup\n(\{[\s\S]*?\n\})$/m.exec(
+      result.stdout,
+    )?.[1];
+    expect(JSON.parse(setup ?? '{}')).toEqual({ state: 'not-configured' });
+  });
+});
