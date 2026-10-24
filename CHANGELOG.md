@@ -103,8 +103,9 @@ versioning.
 - A known-issues notice for 0.2.0, in the README ahead of the install instructions, on the site
   (`/docs/known-issues/`, linked from the landing page and llms.txt) and as ready-to-publish text for
   the v0.2.0 release notes, a pinned issue and two security advisories
-  (`docs/release/0.2.0-known-issues.md`): the five ways 0.2.0 can accept a double booking around
-  daylight-saving changes and series ends, the exact zod 4.6.5 pin (GHSA-mrhx-c7xc-m3w5) with the
+  (`docs/release/0.2.0-known-issues.md`): the six ways 0.2.0 can accept a double booking around
+  daylight-saving changes and series ends, one of them for single events read from iCalendar with
+  an hour `DURATION`, the exact zod 4.6.5 pin (GHSA-mrhx-c7xc-m3w5) with the
   `"overrides": {"zod": "4.6.7"}` workaround, and upgrade to 0.3.0. `docs/release/deprecations.md`
   gives the maintainer the `npm deprecate` and `mcp-publisher status` commands for 0.0.0-stage,
   0.1.0, 0.1.1 and 0.2.0.

@@ -42,13 +42,21 @@ const patched = (version: number[]) => {
   return true;
 };
 
-/** The five double-booking classes, each by words only its description uses. */
+/** The six double-booking classes, each by words only its description uses. */
 const CLASSES: [string, RegExp][] = [
-  ['P1 first occurrence across a change', /first occurrence[^.]*spans a daylight-saving change/],
-  ['P2 repeated autumn hour', /repeated hour of an autumn change/],
-  ['P3 skipped-hour exception', /cannot cancel or move an occurrence[^.]*skipped/],
-  ['P4 occurrence longer than the gap', /longer than the skipped hour/],
-  ['P5 date-only UNTIL', /date-only `UNTIL`/],
+  [
+    'P1 first occurrence across a change (ENG-1)',
+    /first occurrence[^.]*spans a daylight-saving change/,
+  ],
+  ['P2 repeated autumn hour (ENG-2)', /repeated hour of an autumn change/],
+  ['P3 skipped-hour exception (ENG-3)', /cannot cancel or move an occurrence[^.]*skipped/],
+  ['P4 occurrence longer than the gap (ENG-5)', /longer than the skipped hour/],
+  ['P5 date-only UNTIL (ENG-7)', /date-only `UNTIL`/],
+  // A one-off event too, so the notice must not say only recurring events are affected.
+  [
+    'P6 hour DURATION (ENG-6)',
+    /`DURATION`[^.]*hours[^.]*single event[^.]*`DURATION:PT48H` occupies 47 hours/,
+  ],
 ];
 
 describe('the 0.2.0 known-issues notice', () => {
@@ -57,6 +65,7 @@ describe('the 0.2.0 known-issues notice', () => {
   it('names every double-booking class, the zod pin and its workaround, and 0.3.0', () => {
     const readme = notice();
     for (const [name, words] of CLASSES) expect(readme, name).toMatch(words);
+    expect(readme).not.toMatch(/less time than a recurring event/);
     expect(readme).toContain('GHSA-mrhx-c7xc-m3w5');
     expect(readme).toContain('zod 4.6.5');
     // The override moves a consumer to a zod past the advisory.
@@ -80,7 +89,8 @@ describe('the 0.2.0 known-issues notice', () => {
   });
 
   it('gives the v0.2.0 release-notes text and the advisory drafts the same facts', () => {
-    const notes = flat(read('docs/release/0.2.0-known-issues.md'));
+    // The notice is quoted there: read it without the quote markers.
+    const notes = flat(read('docs/release/0.2.0-known-issues.md').replace(/^> ?/gm, ''));
     for (const [name, words] of CLASSES) expect(notes, name).toMatch(words);
     // The same override as the README's, wherever the notes give it.
     const workaround = OVERRIDE.exec(notice())?.[0] ?? 'the README override';
@@ -90,6 +100,10 @@ describe('the 0.2.0 known-issues notice', () => {
     ).toBe(true);
     expect(notes).toContain('GHSA-mrhx-c7xc-m3w5');
     expect(notes).toMatch(/gh release edit v0\.2\.0 [^\n]*--notes-file notes\.md/);
+    expect(notes).not.toMatch(/less time than a recurring event/);
+    // The advisory counts the classes the notice lists.
+    expect(CLASSES).toHaveLength(6);
+    expect(notes).toContain('The cases are the six in the notice above');
     // Two advisories: the inherited zod one and the double booking, each for every release so far.
     expect(notes.match(/Affected versions: `<= 0\.2\.0`/g)).toHaveLength(2);
     expect(notes).toContain(ANCHOR);

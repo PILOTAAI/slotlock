@@ -7,10 +7,10 @@ TypeScript library.
 
 ## Known issues in 0.2.0
 
-Slotlock 0.2.0 can occupy less time than a recurring event was written with, so another booking can
-take the rest: around daylight-saving changes, in any time zone that has them, and at the end of
-some series. The library and `slotlock serve` are affected alike; the 0.1 releases are older still
-and unsupported. The fixes are for 0.3.0: upgrade to it once it is published, and until then do not
+Slotlock 0.2.0 can occupy less time than an event was written with, so another booking can take the
+rest: around daylight-saving changes, in any time zone that has them, and at the end of some series.
+The library and `slotlock serve` are both affected (the last case below is in the library's
+iCalendar readers only); the 0.1 releases are older still and unsupported. The fixes are for 0.3.0: upgrade to it once it is published, and until then do not
 rely on 0.2.0 alone to refuse bookings in these cases (the clocks change next on 25 October 2026 in
 Europe and 1 November 2026 in the United States and Canada).
 
@@ -25,6 +25,10 @@ Europe and 1 November 2026 in the United States and Canada).
   a 75-minute occurrence occupies 15 minutes.
 - A timed recurring series with a date-only `UNTIL` ends at midnight UTC, so it can lose its last
   day.
+- An event read from iCalendar (`parseICalendarChanges`, `parseTrustedICalendarEvents` or the
+  worker pool) whose `DURATION` counts hours loses an hour across a spring change, whether it is a
+  single event, a series, an `RDATE` period or a moved occurrence: `DURATION:PT48H` occupies 47
+  hours.
 
 0.1.0, 0.1.1 and 0.2.0 also pin zod 4.6.5 exactly, which has a high advisory
 ([GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5): validating an oversized
