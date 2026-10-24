@@ -31,6 +31,33 @@ describe('hosted safety in the documentation', () => {
     expect(model).toMatch(/`slotlock serve`[^.]*limits requests per client address/);
   });
 
+  it('says which writes wait for a series slot, what the application API counts in, and the stream cap (P11, SURF-1, SURF-3)', () => {
+    const start = readme.indexOf('- The server limits requests per client address');
+    expect(start, 'canary: the limits bullet exists').toBeGreaterThanOrEqual(0);
+    const limits = flat(readme.slice(start, readme.indexOf('\n\n', start)));
+    // Every update waits: an update of a title re-expands a recurring event's series.
+    expect(limits).toMatch(/every event update[^.]*waits? for a slot/i);
+    expect(limits).toContain('tenant_series_writes');
+    expect(limits).toContain('app_write');
+    expect(limits).toMatch(/health check[^.]*not counted/i);
+    const live = flat(section(readme, '### Calendar resources and live updates'));
+    expect(live).toContain('maxPerTenant');
+  });
+
+  it('lists the changes that need an operator or embedder to act under Unreleased', () => {
+    const unreleased = flat(section(read('CHANGELOG.md'), '## Unreleased'));
+    for (const name of [
+      'SLOTLOCK_CONFIRM_WRITES',
+      'server_busy',
+      'SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT',
+      'SLOTLOCK_LIMITS',
+      'SLOTLOCK_TRUSTED_PROXY_HEADER',
+      'maxPerTenant',
+    ]) {
+      expect(unreleased).toContain(name);
+    }
+  });
+
   it('says confirmation is attested by the client, not an authorization boundary', () => {
     const confirm = flat(section(readme, '### Confirm before writing'));
     expect(confirm).toContain('not an authorization boundary');

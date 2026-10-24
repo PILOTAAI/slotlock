@@ -49,9 +49,15 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
 - To serve beyond this machine, put a TLS proxy in front and set `SLOTLOCK_PUBLIC_URL`.
 - The server limits requests per client address (before any key is looked up), per key, per
   tenant and for the whole server, and answers `429 rate_limited` with `Retry-After` and the
-  `RateLimit` fields. `SLOTLOCK_LIMITS` changes the limits; behind a proxy, set
-  `SLOTLOCK_TRUSTED_PROXY_HEADER` to the field it puts the client's address in (`CF-Connecting-IP`
-  behind Cloudflare), or every client shares the proxy's budget.
+  `RateLimit` fields. The application API counts in its tenant's own `app_read` and `app_write`
+  budgets, apart from the agents'. A recurring create and every event update (a new title
+  re-expands a recurring event's series too) waits for a slot: one at a time per tenant
+  (`tenant_series_writes`) and per server (`series_writes`), shared fairly between tenants. Four
+  more of a tenant's may wait and the rest get 429; one that waits two seconds gets 503
+  `server_busy`. The health check is not counted. `SLOTLOCK_LIMITS` changes the limits; behind a
+  proxy, set `SLOTLOCK_TRUSTED_PROXY_HEADER` to the field it puts the client's address in
+  (`CF-Connecting-IP` behind Cloudflare), or every client shares the proxy's budget. A client can
+  send that field itself, so let nothing reach the server except through the proxy.
 
 ```sh
 slotlock hours set '[{"rrule":"FREQ=WEEKLY;BYDAY=SA","startMinutes":600,"durationMinutes":240}]' --resource vehicle-42
@@ -718,8 +724,9 @@ returns busy time and coverage for the next `resourceWindowDays` (30). `subscrip
 - Changes are found by re-reading through your backend every `subscriptions.pollIntervalMs` (10 s),
   re-checking the caller each time.
 - A subscription ends after `maxDurationMs` (15 minutes), on `shutdown()`, or when access is lost.
-- At most 4 open per caller and 256 per server (`maxPerPrincipal`, `maxTotal`).
-  `subscriptions: false` turns them off.
+- At most 4 open per caller and 256 per server (`maxPerPrincipal`, `maxTotal`). `maxPerTenant`
+  caps one tenant's across all its callers (default `maxTotal`; `slotlock serve` sets 16), so a
+  tenant with many keys cannot hold every slot. `subscriptions: false` turns them off.
 
 ### Caching and tracing
 
@@ -1057,7 +1064,8 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
     discovery, MCP, A2A, holds and reservations (in a resource named `slotlock-smoke`, 400 days
     ahead, cancelled after) and the 401, 409, 413 and 415 refusals.
 12. Rate-limit every public server. `slotlock serve` does it per client address, key, tenant and
-    server (`SLOTLOCK_LIMITS`); behind a proxy, set `SLOTLOCK_TRUSTED_PROXY_HEADER`. Embedding the
+    server (`SLOTLOCK_LIMITS`); behind a proxy, set `SLOTLOCK_TRUSTED_PROXY_HEADER` and firewall
+    the server so nothing reaches it except through that proxy. Embedding the
     agent server, give it a `consumeRateLimit`. Watch serve's `refusals` log line for floods.
 
 ## Supported versions

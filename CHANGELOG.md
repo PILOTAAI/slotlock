@@ -3,6 +3,54 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Added
+
+- `slotlock serve` limits requests: per client address before any key is looked up, then per API
+  key, per tenant and for the whole server, with reads and writes counted apart. The application
+  API counts in its tenant's own budget (`app_read`, `app_write`). A refusal answers 429
+  `rate_limited` with `Retry-After` and the `RateLimit` and `RateLimit-Policy` fields.
+  `SLOTLOCK_LIMITS` changes the limits; behind a proxy, `SLOTLOCK_TRUSTED_PROXY_HEADER` names the
+  field holding the client's address (`CF-Connecting-IP` behind Cloudflare). The health check is
+  not counted.
+- `slotlock serve` runs a recurring create and every event update one at a time per tenant and per
+  server (`tenant_series_writes`, `series_writes`), sharing the slot fairly between tenants. Four
+  more of a tenant's may wait and the rest get 429; one that waits two seconds gets 503
+  `server_busy`.
+- `createSlotlockAgentServer` takes `subscriptions.maxPerTenant`; `slotlock serve` caps each tenant
+  at 16 live-update streams (`tenant_subscriptions`).
+- `slotlock serve` logs a `refusals` line each minute there are any, and at shutdown: auth
+  refusals, rate limits, lookup overflows, busy series writes and bodies too large, with clients
+  named only by per-process pseudonyms.
+- `createSlotlockNodeServer` hands the fetch target the connection's remote address as a second
+  argument.
+
+### Changed
+
+- Breaking: `slotlock serve` defaults `SLOTLOCK_CONFIRM_WRITES` to `none`, so an authenticated
+  write takes effect at once. Set `all`, or a list of write tools, to opt into confirmation;
+  `SLOTLOCK_CONFIRMATION_SECRET` is required only then.
+- Breaking for code that calls it directly: when its lookup queue is full,
+  `createSlotlockApiKeyAuthenticator` throws `SlotlockAgentOperationError` `server_busy` (503)
+  instead of answering anonymous, which told a client holding a valid key that its key was bad.
+  `createSlotlockAgentServer` answers it 503 with `Retry-After` on REST, MCP and A2A. Keys that
+  recently authenticated wait in a queue of their own, served first.
+- The dashboard Worker limits sign-ins per client address, under a new binding for every client
+  together, `SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT`. Until it is bound, `SLOTLOCK_SIGN_IN_RATE_LIMIT`
+  counts every client together, as before, and the Worker logs a warning: add the ceiling before
+  lowering that binding's limit to one client's. The dashboard runs at most two sign-ins from one
+  client at once.
+- `slotlock serve`'s `/healthz` reuses one database check a second.
+- `slotlock --help` describes the server token as read and write, never admin.
+
+### Security
+
+- The example dashboard Worker configuration removes query strings, which hold OAuth codes, from
+  the URLs Workers Logs keep.
+- SECURITY.md and the README say write confirmation is attested by the client: it keeps an agent
+  from writing unasked and is not an authorization boundary.
+
 ## 0.2.0 - 2026-10-23
 
 ### Added
