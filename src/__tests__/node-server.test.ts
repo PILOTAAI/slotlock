@@ -56,6 +56,23 @@ describe('Slotlock Node HTTP server adapter', () => {
     expect(fetchTarget.fetch).toHaveBeenCalledTimes(1);
   });
 
+  it("hands the target the connection's address, never one a request field claims", async () => {
+    // A rate limit per client needs the socket's address; a forwarding field is a proxy's to set,
+    // and the target trusts one only when it is configured to.
+    const seen: unknown[] = [];
+    const { address } = await startServer({
+      fetch: async (_request, connection) => {
+        seen.push(connection);
+        return new Response(null, { status: 204 });
+      },
+    });
+    const response = await fetch(`${address.origin}/healthz`, {
+      headers: { 'X-Forwarded-For': '203.0.113.9', 'CF-Connecting-IP': '203.0.113.9' },
+    });
+    expect(response.status).toBe(204);
+    expect(seen).toEqual([{ remoteAddress: '127.0.0.1' }]);
+  });
+
   it('returns a sanitized error and reports the private exception only to the host callback', async () => {
     const onError = vi.fn();
     const { address } = await startServer(
