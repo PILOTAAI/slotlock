@@ -33,10 +33,13 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
   );
 
   function connectAsServer(): ReturnType<typeof postgres> {
-    const pool = postgres(Object.assign(new URL(url as string), { username: role, password }).href, {
-      max: 4,
-      onnotice: () => {},
-    });
+    const pool = postgres(
+      Object.assign(new URL(url as string), { username: role, password }).href,
+      {
+        max: 4,
+        onnotice: () => {},
+      },
+    );
     pools.push(pool);
     return pool;
   }
@@ -114,8 +117,10 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
 
   const formRows = async () =>
     Number(
-      (await admin<{ count: string }[]>`
-        SELECT count(*) AS count FROM slotlock.dashboard_tokens WHERE kind = 'form'`)[0]?.count,
+      (
+        await admin<{ count: string }[]>`
+        SELECT count(*) AS count FROM slotlock.dashboard_tokens WHERE kind = 'form'`
+      )[0]?.count,
     );
   const ownerHash = createHash('sha256').update(`slotlock-dashboard-owner.${githubId}`).digest();
   const MIN = 60_000;
@@ -158,8 +163,10 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
     ).rejects.toMatchObject({ code: '23514' });
     // Outside READ COMMITTED the per-person count would not be exact, so the function refuses.
     await expect(
-      sql.begin('isolation level repeatable read', (tx) =>
-        tx`SELECT slotlock.use_dashboard_token('sign_in', ${randomBytes(32)}, now() + interval '1 hour', NULL)`,
+      sql.begin(
+        'isolation level repeatable read',
+        (tx) =>
+          tx`SELECT slotlock.use_dashboard_token('sign_in', ${randomBytes(32)}, now() + interval '1 hour', NULL)`,
       ),
     ).rejects.toMatchObject({ code: '25000' });
     // A form record always names its owner, so the per-person cap can count it.
@@ -180,9 +187,16 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
     // The database's clock decides: a token it holds expired, or one claiming to outlive a day, is
     // refused and nothing is stored.
     const formsBefore = await formRows();
-    expect(await state.use('form', randomBytes(18).toString('base64url'), Date.now() - 1_000, owner)).toBe(false);
     expect(
-      await state.use('form', randomBytes(18).toString('base64url'), Date.now() + 25 * 3_600_000, owner),
+      await state.use('form', randomBytes(18).toString('base64url'), Date.now() - 1_000, owner),
+    ).toBe(false);
+    expect(
+      await state.use(
+        'form',
+        randomBytes(18).toString('base64url'),
+        Date.now() + 25 * 3_600_000,
+        owner,
+      ),
     ).toBe(false);
     expect(await formRows()).toBe(formsBefore);
 
@@ -192,8 +206,10 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
         FROM generate_series(1, 3)`;
     const expired = async () =>
       Number(
-        (await admin<{ count: string }[]>`
-          SELECT count(*) AS count FROM slotlock.dashboard_tokens WHERE expires_at <= now()`)[0]?.count,
+        (
+          await admin<{ count: string }[]>`
+          SELECT count(*) AS count FROM slotlock.dashboard_tokens WHERE expires_at <= now()`
+        )[0]?.count,
       );
     const before = await expired();
     expect(before).toBeGreaterThanOrEqual(3);
@@ -261,16 +277,31 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
     const before = await formRows();
     const made = `${randomBytes(18).toString('base64url')}.${randomBytes(32).toString('base64url')}`;
     for (const once of [made, theirs.once, 'x'.repeat(40)]) {
-      const sent = await post(target, '/dashboard/keys', { csrf: mine.csrf, once, name: 'Forged', access: 'read', expires: 'never' }, session);
+      const sent = await post(
+        target,
+        '/dashboard/keys',
+        { csrf: mine.csrf, once, name: 'Forged', access: 'read', expires: 'never' },
+        session,
+      );
       expect(sent.status).toBe(409);
     }
-    const nowhere = await post(target, '/dashboard/nowhere', { csrf: mine.csrf, once: mine.once }, session);
+    const nowhere = await post(
+      target,
+      '/dashboard/nowhere',
+      { csrf: mine.csrf, once: mine.once },
+      session,
+    );
     expect(nowhere.status).toBe(404);
     expect(await formRows()).toBe(before);
     const keys = await createSlotlockApiKeyStore(admin).list({ tenantRef });
     expect(keys.filter(({ name }) => name === 'Forged')).toHaveLength(0);
     // The real value still works once.
-    const sent = await post(target, '/dashboard/keys', { csrf: mine.csrf, once: mine.once, name: 'Real', access: 'read', expires: 'never' }, session);
+    const sent = await post(
+      target,
+      '/dashboard/keys',
+      { csrf: mine.csrf, once: mine.once, name: 'Real', access: 'read', expires: 'never' },
+      session,
+    );
     expect(sent.status).toBe(200);
   });
 
@@ -281,7 +312,9 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
       Array.from({ length: 10 }, async () => (await get(first, '/dashboard', session)).text()),
     );
     const csrf = /name="csrf" value="([^"]+)"/.exec(pages[0] as string)?.[1] as string;
-    const onces = pages.flatMap((html) => [...html.matchAll(/name="once" value="([^"]+)"/g)].map((m) => m[1] as string));
+    const onces = pages.flatMap((html) =>
+      [...html.matchAll(/name="once" value="([^"]+)"/g)].map((m) => m[1] as string),
+    );
     expect(onces.length).toBeGreaterThanOrEqual(20);
     // Earlier tests left forms of this person live; fill to exactly five below the cap.
     const [live] = await admin<{ n: number }[]>`
@@ -294,9 +327,16 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
     try {
       // Each spends its form value, then finds no such key (404); past the cap, 429.
       const outcomes = await Promise.all(
-        onces.slice(0, 20).map((once, index) =>
-          post(index % 2 === 0 ? first : second, '/dashboard/keys/revoke', { csrf, once, id: randomUUID() }, session),
-        ),
+        onces
+          .slice(0, 20)
+          .map((once, index) =>
+            post(
+              index % 2 === 0 ? first : second,
+              '/dashboard/keys/revoke',
+              { csrf, once, id: randomUUID() },
+              session,
+            ),
+          ),
       );
       expect(outcomes.filter(({ status }) => status === 404)).toHaveLength(5);
       expect(outcomes.filter(({ status }) => status === 429)).toHaveLength(15);
@@ -316,7 +356,12 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
       const html = await (await get(second, '/dashboard', session)).text();
       const csrf = /name="csrf" value="([^"]+)"/.exec(html)?.[1] as string;
       const once = /name="once" value="([^"]+)"/.exec(html)?.[1] as string;
-      const refused = await post(second, '/dashboard/keys', { csrf, once, name: 'Over', access: 'read', expires: 'never' }, session);
+      const refused = await post(
+        second,
+        '/dashboard/keys',
+        { csrf, once, name: 'Over', access: 'read', expires: 'never' },
+        session,
+      );
       expect(refused.status).toBe(429);
       expect(await refused.text()).toContain('Too many forms');
       // Signing out is never refused.
@@ -328,7 +373,6 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
     }
   });
 
-
   it('finishes a sign-in once, whichever server the callback reaches', async () => {
     const [first, second] = [server(), server()];
     const { state, pending } = await startSignIn(first);
@@ -337,14 +381,18 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
     expect(done.status).toBe(303);
     const replay = await get(second, `/dashboard/callback?code=c&state=${state}`, pending);
     expect(replay.status).toBe(400);
-    expect(github.mock.calls.filter(([input]) => String(input).endsWith('/access_token'))).toHaveLength(1);
+    expect(
+      github.mock.calls.filter(([input]) => String(input).endsWith('/access_token')),
+    ).toHaveLength(1);
   });
 
   it('keeps a signed-out session out on every server', async () => {
     const [first, second] = [server(), server()];
     const session = await signIn(first);
     expect(await (await get(second, '/dashboard', session)).text()).toContain('@two-servers');
-    const csrf = /name="csrf" value="([^"]+)"/.exec(await (await get(first, '/dashboard', session)).text())?.[1] as string;
+    const csrf = /name="csrf" value="([^"]+)"/.exec(
+      await (await get(first, '/dashboard', session)).text(),
+    )?.[1] as string;
     await post(first, '/dashboard/sign-out', { csrf }, session);
     expect(await (await get(second, '/dashboard', session)).text()).not.toContain('@two-servers');
     expect(await (await get(first, '/dashboard', session)).text()).not.toContain('@two-servers');
@@ -362,7 +410,10 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
     const session = await signIn(first);
     const html = await (await get(first, '/dashboard', session)).text();
     const csrf = /name="csrf" value="([^"]+)"/.exec(html)?.[1] as string;
-    const once = /action="\/dashboard\/keys">\s*<input type="hidden" name="csrf" value="[^"]+">\s*<input type="hidden" name="once" value="([^"]+)">/.exec(html)?.[1] as string;
+    const once =
+      /action="\/dashboard\/keys">\s*<input type="hidden" name="csrf" value="[^"]+">\s*<input type="hidden" name="once" value="([^"]+)">/.exec(
+        html,
+      )?.[1] as string;
     const fields = { csrf, once, name: 'Shared', access: 'read', expires: 'never' };
     expect((await post(first, '/dashboard/keys', fields, session)).status).toBe(200);
     expect((await post(second, '/dashboard/keys', fields, session)).status).toBe(409);
@@ -373,7 +424,9 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
   it('holds the resource cap when adds race on two servers', async () => {
     const [first, second] = [server(), server()];
     const session = await signIn(first);
-    const csrf = /name="csrf" value="([^"]+)"/.exec(await (await get(first, '/dashboard', session)).text())?.[1] as string;
+    const csrf = /name="csrf" value="([^"]+)"/.exec(
+      await (await get(first, '/dashboard', session)).text(),
+    )?.[1] as string;
     const store = createSlotlockStore(connectAsServer());
     for (let index = 0; index < SLOTLOCK_DASHBOARD_MAX_RESOURCES - 5; index += 1) {
       await store.withTenant(tenantRef, (tenant) =>
@@ -382,7 +435,12 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
     }
     const outcomes = await Promise.all(
       Array.from({ length: 20 }, (_, index) =>
-        post(index % 2 === 0 ? first : second, '/dashboard/resources', { csrf, reference: `race-${index}`, timezone: 'UTC' }, session),
+        post(
+          index % 2 === 0 ? first : second,
+          '/dashboard/resources',
+          { csrf, reference: `race-${index}`, timezone: 'UTC' },
+          session,
+        ),
       ),
     );
     const [counted] = await admin<{ count: string }[]>`
@@ -392,9 +450,19 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
     expect(outcomes.filter(({ status }) => status === 409)).toHaveLength(15);
 
     // At the cap, an existing reference can still be re-zoned; a new one cannot be added.
-    const rezone = await post(first, '/dashboard/resources', { csrf, reference: 'seed-0', timezone: 'Europe/Paris' }, session);
+    const rezone = await post(
+      first,
+      '/dashboard/resources',
+      { csrf, reference: 'seed-0', timezone: 'Europe/Paris' },
+      session,
+    );
     expect(rezone.status).toBe(303);
-    const added = await post(second, '/dashboard/resources', { csrf, reference: 'one-more', timezone: 'UTC' }, session);
+    const added = await post(
+      second,
+      '/dashboard/resources',
+      { csrf, reference: 'one-more', timezone: 'UTC' },
+      session,
+    );
     expect(added.status).toBe(409);
   });
 });
@@ -416,10 +484,13 @@ describe.skipIf(!url)('capped resource creation in the store (real Postgres)', (
     );
     await owner.grantApplicationRole(role);
     await admin.unsafe(`ALTER ROLE ${role} SET default_transaction_isolation = 'repeatable read'`);
-    repeatable = postgres(Object.assign(new URL(url as string), { username: role, password }).href, {
-      max: 8,
-      onnotice: () => {},
-    });
+    repeatable = postgres(
+      Object.assign(new URL(url as string), { username: role, password }).href,
+      {
+        max: 8,
+        onnotice: () => {},
+      },
+    );
   });
 
   afterAll(async () => {
@@ -436,19 +507,47 @@ describe.skipIf(!url)('capped resource creation in the store (real Postgres)', (
       store.withTenant(
         tenantRef,
         (tenant) =>
-          tenant.createResource({ tenantRef, externalRef, timezone: 'UTC', maxTenantResources: 10 }),
+          tenant.createResource({
+            tenantRef,
+            externalRef,
+            timezone: 'UTC',
+            maxTenantResources: 10,
+          }),
         { isolation: 'read committed' },
       );
     for (let index = 0; index < 8; index += 1) await add(`base-${index}`);
-    const racing = await Promise.allSettled(Array.from({ length: 6 }, (_, index) => add(`race-${index}`)));
+    const racing = await Promise.allSettled(
+      Array.from({ length: 6 }, (_, index) => add(`race-${index}`)),
+    );
     expect(racing.filter(({ status }) => status === 'fulfilled')).toHaveLength(2);
     for (const outcome of racing.filter(({ status }) => status === 'rejected')) {
-      expect((outcome as PromiseRejectedResult).reason).toMatchObject({ code: 'resource_limit_reached' });
+      expect((outcome as PromiseRejectedResult).reason).toMatchObject({
+        code: 'resource_limit_reached',
+      });
     }
-    // A capped create inside a REPEATABLE READ transaction cannot count exactly, so it refuses.
+    // withTenant opens its own transaction READ COMMITTED whatever the role's default, so a capped
+    // create counts exactly there. Inside a caller's REPEATABLE READ transaction it cannot, and its
+    // writes are refused.
     await expect(
       store.withTenant(tenantRef, (tenant) =>
-        tenant.createResource({ tenantRef, externalRef: 'x', timezone: 'UTC', maxTenantResources: 50 }),
+        tenant.createResource({
+          tenantRef,
+          externalRef: 'x',
+          timezone: 'UTC',
+          maxTenantResources: 50,
+        }),
+      ),
+    ).resolves.toMatchObject({ externalRef: 'x' });
+    await expect(
+      repeatable.begin((tx) =>
+        createSlotlockStore(tx).withTenant(tenantRef, (tenant) =>
+          tenant.createResource({
+            tenantRef,
+            externalRef: 'z',
+            timezone: 'UTC',
+            maxTenantResources: 50,
+          }),
+        ),
       ),
     ).rejects.toMatchObject({ code: 'invalid_transaction_isolation' });
   });
@@ -481,7 +580,12 @@ describe.skipIf(!url)('capped resource creation in the store (real Postgres)', (
       store.withTenant(
         tenantRef,
         (tenant) =>
-          tenant.createResource({ tenantRef, externalRef: 'y', timezone: 'UTC', maxTenantResources: max }),
+          tenant.createResource({
+            tenantRef,
+            externalRef: 'y',
+            timezone: 'UTC',
+            maxTenantResources: max,
+          }),
         { isolation: 'read committed' },
       ),
     ).rejects.toMatchObject({ code: 'invalid_resource_limit' });
