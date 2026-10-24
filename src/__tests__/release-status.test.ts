@@ -148,6 +148,17 @@ describe.skipIf(!hasJq)('scripts/status-probe.sh', () => {
 });
 
 describe('the status workflow', () => {
+  it.skipIf(!hasJq)('is on the owner checklist configure-github.sh prints', () => {
+    const result = spawnSync('bash', [join(root, 'scripts', 'configure-github.sh'), '--dry-run'], {
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH ?? '', SKIP_SITE_SECRETS: '1' },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain(
+      'gh variable set SLOTLOCK_STATUS_PROBE --repo PILOTAAI/slotlock --body on',
+    );
+  });
+
   it('runs the probe on a schedule only once the owner turns it on, with issues: write alone', () => {
     const workflow = readFileSync(join(root, '.github', 'workflows', 'status.yml'), 'utf8');
     expect(workflow).toMatch(/schedule:\n\s+- cron: '7-59\/10 \* \* \* \*'/);

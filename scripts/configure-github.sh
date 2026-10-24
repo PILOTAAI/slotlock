@@ -737,6 +737,9 @@ EOF
     NUGET_USER variable, and the Maven Central namespace, token and signing key in the
     maven-central environment. docs/release/clients.md gives every step.
 
+[ ] When hosted Slotlock opens, turn on its public status probe (docs/hosted/status.md):
+      gh variable set SLOTLOCK_STATUS_PROBE --repo $OWNER/$REPO --body on
+
 [ ] Before the first site deploy (site/README.md): slotlock.pylota.io must have no CNAME record,
     and the pylota.io zone must have the route slotlock.pylota.io/* with no Worker. Without it
     the booking Worker's *.pylota.io/* route answers first. The bypass is in PILOTAAI/pylota's
