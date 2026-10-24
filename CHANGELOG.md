@@ -35,6 +35,11 @@ versioning.
   `npm install slotlock postgres` twice, once as "From source" and once "once the first release is
   published". The quickstart no longer says a clone runs exactly the released version, and the
   concepts page says holds are also in the REST application API, as they are since 0.2.0.
+- SPEC.md describes 0.2 and later, not 0.1: it now covers scopes, API keys, the application API,
+  the dashboard and maintenance, and the 7-day hold and 30-day buffer caps. The README's project
+  status names the 0.2 surfaces and the hosted service instead of "0.1 is the core". The site has
+  pages for the language clients and for operations, and an included file's relative links now
+  resolve from its own directory.
 - One aggregate check, "CI passed", gathers every CI job: the suites on each Node.js and
   PostgreSQL, the image, the five language clients and the Compose quickstart.
   `scripts/configure-github.sh` requires it and DCO's "Signed-off-by" on `main`; the client suites

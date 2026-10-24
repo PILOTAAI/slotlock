@@ -14,7 +14,7 @@
 // Any fact it cannot find fails the build: a renamed constant must be looked at, not guessed.
 import { statSync } from 'node:fs';
 import { copyFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readOperations } from './tool-schemas.mjs';
 import { renderToolsPage } from './tools-page.mjs';
@@ -138,7 +138,7 @@ const SECTION_LINKS = {
 const ANCHORS = {
   '#application-api': '/docs/reference/#application-api',
   '#confirm-before-writing': '/docs/security/#confirmation-before-writes',
-  '#operations': '/docs/security/#quotas-and-retention',
+  '#operations': '/docs/operations/',
   '#rest-and-openapi': '/docs/reference/#rest-and-openapi',
 };
 
@@ -166,6 +166,22 @@ function rewriteLinks(markdown) {
 
 function clean(markdown) {
   return rewriteLinks(markdown.replace(/^<!-- example: [^>]+ -->\n/gm, ''));
+}
+
+/**
+ * A file's relative links as paths from the repository root, so an included clients/README.md's
+ * `[python](python)` still names clients/python/ once rewriteLinks reads it. Directories end in `/`.
+ */
+function rebase(markdown, file) {
+  const dir = posix.dirname(file);
+  if (dir === '.') return markdown;
+  return markdown.replace(/\]\((?:\.\/)?([A-Za-z0-9_./-]+?)(#[^)]*)?\)/g, (match, target, hash) => {
+    if (/^(https?:|mailto:|\/|#)/.test(target)) return match;
+    const path = posix.normalize(posix.join(dir, target));
+    if (path.startsWith('..')) return match;
+    const directory = statSync(join(ROOT, path), { throwIfNoEntry: false })?.isDirectory();
+    return `](${path}${directory && !path.endsWith('/') ? '/' : ''}${hash ?? ''})`;
+  });
 }
 
 const sourceCache = new Map();
@@ -203,11 +219,11 @@ async function expand(template, facts, page, toolsPage) {
     const source = await sourceSections(file);
     if (!anchor) {
       // Whole file without its title.
-      parts.push(source.text.replace(/^# .*\n+/, '').trim());
+      parts.push(rebase(source.text.replace(/^# .*\n+/, '').trim(), file));
     } else {
       const section = source.sections.get(anchor);
       if (!section) fail(`${page}: ${file} has no heading #${anchor}`);
-      parts.push(renderSection(section, modifiers));
+      parts.push(rebase(renderSection(section, modifiers), file));
     }
     last = match.index + match[0].length;
   }

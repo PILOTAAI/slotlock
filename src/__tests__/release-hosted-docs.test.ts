@@ -6,6 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { SLOTLOCK_DASHBOARD_MAX_RESOURCES } from '../dashboard.js';
 import { SLOTLOCK_API_KEY_ACTIVE_LIMIT, SLOTLOCK_API_KEY_RETAINED_LIMIT } from '../ddl.js';
+import { SLOTLOCK_API_KEY_MAX_LIFETIME_DAYS } from '../api-keys.js';
 import { SLOTLOCK_CALENDAR_HORIZON_DAYS } from '../rules.js';
 import {
   SLOTLOCK_AGENT_OWNER_COMMAND_QUOTA,
@@ -218,6 +219,28 @@ describe('the versioning policy', () => {
   });
 });
 
+describe('the specification and the README', () => {
+  it('describe the 0.2 surfaces, with the limits the code enforces', () => {
+    const spec = flat(read('SPEC.md'));
+    expect(spec).not.toContain('Slotlock 0.1');
+    expect(spec).toContain('### Scopes, API keys and the application API');
+    expect(spec).toContain('### Maintenance');
+    expect(spec).toContain(`at most ${SLOTLOCK_API_KEY_ACTIVE_LIMIT} active keys and ${thousands(SLOTLOCK_API_KEY_RETAINED_LIMIT)} in all`);
+    expect(spec).toContain(`(at most ${thousands(SLOTLOCK_API_KEY_MAX_LIFETIME_DAYS)} days)`);
+    expect(spec).toContain(`resources (at most ${SLOTLOCK_DASHBOARD_MAX_RESOURCES})`);
+    const holdDays = declared('src/store.ts', /const MAX_HOLD_TTL_MS = ([0-9_ *]+);/) / 86_400_000;
+    expect(spec).toContain(`A hold lasts at most ${holdDays} days`);
+    const bufferDays =
+      declared('src/store.ts', /const MAX_BUFFER_AFTER_MS = ([0-9_ *]+);/) / 86_400_000;
+    expect(spec).toContain(`It is at most ${bufferDays} days`);
+    const status = flat(read('README.md').split('## Project status and boundaries\n')[1] ?? '');
+    expect(status).not.toContain('0.1 is the core');
+    for (const surface of ['application API', 'scoped API keys', 'dashboard', 'maintenance', 'five languages']) {
+      expect(status).toContain(surface);
+    }
+  });
+});
+
 describe('the site', () => {
   it('builds a page from each document and lists it in the sidebar', () => {
     const config = read('site/astro.config.mjs');
@@ -228,6 +251,8 @@ describe('the site', () => {
       ['terms', 'TERMS.md'],
       ['acceptable-use', 'ACCEPTABLE-USE.md'],
       ['versioning', 'VERSIONING.md'],
+      ['clients', 'clients/README.md'],
+      ['operations', 'README.md#operations body'],
     ]) {
       expect(read(`site/docs-src/${page}.md`), page).toContain(`<!-- include ${include} -->`);
       expect(config, page).toContain(`'docs/${page}'`);
@@ -267,6 +292,8 @@ describe('the site', () => {
       'acceptable-use',
       'versioning',
       'known-issues',
+      'clients',
+      'operations',
     ];
     const included = pages.flatMap((page) =>
       [...read(`site/docs-src/${page}.md`).matchAll(/<!-- include ([^#\s>]+)/g)].map(

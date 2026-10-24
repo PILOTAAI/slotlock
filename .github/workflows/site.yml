@@ -3,8 +3,8 @@
 #
 # Pull requests build and check only. A push to main, or a manual run on main, also deploys.
 # The site reads README.md, SPEC.md, SECURITY.md, CHANGELOG.md, the hosted service's documents
-# (PRIVACY.md, TERMS.md, ACCEPTABLE-USE.md, VERSIONING.md, docs/hosted/), src/, openapi.json and the
-# manifest schema at build time, so changes to those rebuild it too.
+# (PRIVACY.md, TERMS.md, ACCEPTABLE-USE.md, VERSIONING.md, docs/hosted/), clients/README.md, src/,
+# openapi.json and the manifest schema at build time, so changes to those rebuild it too.
 #
 # Every action is pinned to a full commit SHA, resolved with
 # `gh api repos/<owner>/<repo>/git/matching-refs/tags/<tag>` on 2026-10-09 (each tag is a
@@ -28,6 +28,7 @@ on:
       - "ACCEPTABLE-USE.md"
       - "VERSIONING.md"
       - "docs/hosted/**"
+      - "clients/README.md"
       - "openapi.json"
       - "package.json"
       - "slotlock-manifest.schema.json"
@@ -47,6 +48,7 @@ on:
       - "ACCEPTABLE-USE.md"
       - "VERSIONING.md"
       - "docs/hosted/**"
+      - "clients/README.md"
       - "openapi.json"
       - "package.json"
       - "slotlock-manifest.schema.json"

@@ -1087,10 +1087,13 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
 
 ## Project status and boundaries
 
-0.1 is the core: availability maths, holds and reservations, events with recurrence, coverage-aware
+Slotlock is availability maths, holds and reservations, events with recurrence, coverage-aware
 free/busy, tenant isolation, iCalendar interchange, MCP and A2A with human confirmation and live
-updates, and an MCP Apps view. Provider sync (Google, Microsoft, CalDAV), notifications to people,
-and a human calendar app are yours to build around it.
+updates, an MCP Apps view, REST with the application API, scoped API keys, a GitHub sign-in
+dashboard, maintenance, and clients for five languages. [Hosted Slotlock](docs/hosted/README.md)
+runs it for you. Provider sync (Google, Microsoft, CalDAV), notifications to people, and a human
+calendar app are yours to build around it. What each version promises is in
+[VERSIONING.md](VERSIONING.md).
 
 Events need a finite duration (all-day events are whole local days; one event may last 3,660 days).
 Open-ended entries are refused rather than guessed.

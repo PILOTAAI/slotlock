@@ -14,6 +14,7 @@ const SIDEBAR_ORDER = [
   'connect',
   'keys',
   'library',
+  'clients',
   'hosted',
   'status',
   'privacy',
@@ -21,6 +22,7 @@ const SIDEBAR_ORDER = [
   'acceptable-use',
   'concepts',
   'security',
+  'operations',
   'tools',
   'reference',
   'specification',
@@ -124,7 +126,14 @@ export default defineConfig({
       sidebar: [
         {
           label: 'Get started',
-          items: ['docs', 'docs/quickstart', 'docs/connect', 'docs/keys', 'docs/library'],
+          items: [
+            'docs',
+            'docs/quickstart',
+            'docs/connect',
+            'docs/keys',
+            'docs/library',
+            'docs/clients',
+          ],
         },
         {
           label: 'Hosted',
@@ -136,7 +145,7 @@ export default defineConfig({
             'docs/acceptable-use',
           ],
         },
-        { label: 'Learn', items: ['docs/concepts', 'docs/security'] },
+        { label: 'Learn', items: ['docs/concepts', 'docs/security', 'docs/operations'] },
         {
           label: 'Reference',
           items: [
