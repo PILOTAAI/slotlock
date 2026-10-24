@@ -65,4 +65,9 @@ describe('the dashboard Worker example configuration', () => {
       20 * perMinute('SLOTLOCK_SIGN_IN_RATE_LIMIT'),
     );
   });
+
+  it('keeps OAuth callback query strings out of Workers Logs (SEC-13)', () => {
+    // A callback URL carries the OAuth code and state; logs keep request URLs for up to 7 days.
+    expect(config.observability).toMatchObject({ enabled: true, redact_query_string: true });
+  });
 });

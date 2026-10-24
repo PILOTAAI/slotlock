@@ -67,5 +67,7 @@
     // Who may sign in: "*" for every GitHub account (each gets its own tenant), or GitHub ids.
     "SLOTLOCK_DASHBOARD_USERS": "*"
   },
-  "observability": { "enabled": true }
+  // Workers Logs keep each request's URL for up to 7 days; a sign-in callback's query holds its
+  // OAuth code and state, so query strings are removed from logged URLs.
+  "observability": { "enabled": true, "redact_query_string": true }
 }
