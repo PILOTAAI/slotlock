@@ -46,6 +46,11 @@ versioning.
   The site's and the dashboard Worker's Wrangler pinned undici 7.29.1 (GHSA-xjj6-f33q-929c, high,
   development tooling only) through miniflare, which Dependabot could not move; both lockfiles now
   override it to 7.30.1.
+- `server.json` (the MCP Registry entry) no longer marks `SLOTLOCK_AUTH_TOKEN` and
+  `SLOTLOCK_CONFIRMATION_SECRET` as required: `slotlock serve` runs with API keys alone, and without
+  the secret when `SLOTLOCK_CONFIRM_WRITES` is `none`. Its Authorization header takes the token or an
+  API key, `SLOTLOCK_TENANT` says API keys act in their own tenant, and the database is PostgreSQL 16
+  or newer. `mcp-publisher validate` (v1.8.1) accepts it.
 
 ## 0.2.0 - 2026-10-23
 

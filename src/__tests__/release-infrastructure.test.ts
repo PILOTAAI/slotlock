@@ -107,24 +107,30 @@ describe('MCP Registry entry', () => {
     expect(/^\s*service="([^"]+)"/m.exec(read('Dockerfile'))?.[1]).toBe('slotlock');
   });
 
-  it('declares only variables the command reads, with the secrets required and secret', () => {
+  it('declares only variables the command reads, required only when serve needs them', () => {
     const declared = serverPackage?.environmentVariables ?? [];
     const known: readonly string[] = SLOTLOCK_ENVIRONMENT_VARIABLES;
     for (const { name } of declared) expect(known).toContain(name);
-    for (const name of ['DATABASE_URL', 'SLOTLOCK_AUTH_TOKEN', 'SLOTLOCK_CONFIRMATION_SECRET']) {
-      expect(declared.find((variable) => variable.name === name)).toMatchObject({
-        isRequired: true,
-        isSecret: true,
-      });
+    const variable = (name: string) => declared.find((entry) => entry.name === name);
+    expect(variable('DATABASE_URL')).toMatchObject({ isRequired: true, isSecret: true });
+    // serve runs with API keys alone (CI's client suites serve without a token), and without a
+    // confirmation secret when SLOTLOCK_CONFIRM_WRITES is none.
+    for (const name of ['SLOTLOCK_AUTH_TOKEN', 'SLOTLOCK_CONFIRMATION_SECRET']) {
+      expect(variable(name)?.isSecret, name).toBe(true);
+      expect(variable(name)?.isRequired ?? false, name).toBe(false);
     }
+    expect(
+      (variable('SLOTLOCK_TENANT') as { description?: string } | undefined)?.description,
+    ).toContain('API keys act in their own tenant');
     // The URL's {PORT} is the PORT variable, which is also the published container port.
     expect(serverPackage?.transport.url).toBe('http://localhost:{PORT}/mcp');
     expect(declared.map(({ name }) => name)).toContain('PORT');
     expect(serverPackage?.runtimeArguments).toContainEqual(
       expect.objectContaining({ name: '-p', value: '127.0.0.1:{PORT}:{PORT}' }),
     );
+    // The bearer is SLOTLOCK_AUTH_TOKEN or an API key, whichever the client was given.
     expect(serverPackage?.transport.headers).toContainEqual(
-      expect.objectContaining({ name: 'Authorization', value: 'Bearer {SLOTLOCK_AUTH_TOKEN}' }),
+      expect.objectContaining({ name: 'Authorization', value: 'Bearer {token}', isRequired: true }),
     );
   });
 });
