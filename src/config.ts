@@ -176,3 +176,157 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
     allowedUsers: users === '*' ? '*' : [...new Set(users.split(','))],
   };
 }
+
+/** A token bucket: `perSecond` tokens come back each second, and it holds at most `burst`. */
+export interface SlotlockRate {
+  perSecond: number;
+  burst: number;
+}
+
+/** The token buckets `slotlock serve` keeps (SLOTLOCK_LIMITS), each counted per its own key. */
+export const SLOTLOCK_RATE_NAMES = Object.freeze([
+  'address',
+  'key_read',
+  'key_write',
+  'tenant_read',
+  'tenant_write',
+  'global_read',
+  'global_write',
+  'sign_in',
+] as const);
+export type SlotlockRateName = (typeof SLOTLOCK_RATE_NAMES)[number];
+
+/** The counts `slotlock serve` caps (SLOTLOCK_LIMITS), with the range each may be set to. */
+const CAP_RANGES = Object.freeze({
+  tenant_series_writes: [1, 100],
+  series_writes: [1, 100],
+  tenant_subscriptions: [1, 10_000],
+  key_lookups: [1, 8],
+  key_lookup_queue: [0, 10_000],
+} as const);
+export type SlotlockCapName = keyof typeof CAP_RANGES;
+export const SLOTLOCK_CAP_NAMES = Object.freeze(Object.keys(CAP_RANGES) as SlotlockCapName[]);
+
+export interface SlotlockLimits {
+  /** Each rate, or null where SLOTLOCK_LIMITS turns it off. */
+  rates: Readonly<Record<SlotlockRateName, SlotlockRate | null>>;
+  caps: Readonly<Record<SlotlockCapName, number>>;
+}
+
+/**
+ * What `slotlock serve` allows unless SLOTLOCK_LIMITS says otherwise, sized for one public server on
+ * one CPU (the 2026-10-24 readiness audit measured the database at about 900 writes a second):
+ * - `address`: every request from one client address, before any credential is looked up.
+ * - `key_*`, `tenant_*`, `global_*`: an authenticated request takes a read token from its key, its
+ *   tenant and the server; a write (a REST method other than GET or HEAD, or a write tool) takes a
+ *   write token from each as well.
+ * - `sign_in`: dashboard sign-ins and their callbacks from one client address.
+ * - `tenant_series_writes` and `series_writes`: writes that may expand a recurring series (a
+ *   recurring create, any update, a maintenance run) running at once in a tenant and in the server.
+ * - `tenant_subscriptions`: MCP live-update streams one tenant may hold open.
+ * - `key_lookups` and `key_lookup_queue`: API key lookups running at once and waiting.
+ */
+export const SLOTLOCK_DEFAULT_LIMITS: SlotlockLimits = Object.freeze({
+  rates: Object.freeze({
+    address: { perSecond: 50, burst: 100 },
+    key_read: { perSecond: 20, burst: 40 },
+    key_write: { perSecond: 5, burst: 20 },
+    tenant_read: { perSecond: 20, burst: 40 },
+    tenant_write: { perSecond: 5, burst: 20 },
+    global_read: { perSecond: 500, burst: 1_000 },
+    global_write: { perSecond: 50, burst: 100 },
+    sign_in: { perSecond: 20 / 60, burst: 20 },
+  }),
+  caps: Object.freeze({
+    tenant_series_writes: 1,
+    series_writes: 1,
+    tenant_subscriptions: 16,
+    key_lookups: 2,
+    key_lookup_queue: 256,
+  }),
+});
+
+const RATE_PERIOD_SECONDS: Readonly<Record<string, number>> = { s: 1, m: 60, h: 3_600 };
+const MAX_RATE_COUNT = 1_000_000;
+
+/** A rate as SLOTLOCK_LIMITS and the `listening` log line write it: `<count>/<s|m|h>:<burst>`. */
+export function formatSlotlockRate(rate: SlotlockRate | null): string {
+  if (rate === null) return 'off';
+  for (const [unit, seconds] of Object.entries(RATE_PERIOD_SECONDS).reverse()) {
+    const count = rate.perSecond * seconds;
+    if (Number.isInteger(Math.round(count * 1e9) / 1e9) && count >= 1) {
+      return `${Math.round(count)}/${unit}:${rate.burst}`;
+    }
+  }
+  return `${rate.perSecond}/s:${rate.burst}`;
+}
+
+/**
+ * SLOTLOCK_LIMITS: comma-separated `name=value` overrides of SLOTLOCK_DEFAULT_LIMITS. A rate is
+ * `<count>/<s|m|h>`, optionally `:<burst>` (default: the count), or `off`; a cap is a whole number.
+ * For example `tenant_write=2/s:10,global_write=30/s,address=off`.
+ */
+export function readLimits(env: SlotlockEnv): SlotlockLimits {
+  const rates: Record<SlotlockRateName, SlotlockRate | null> = { ...SLOTLOCK_DEFAULT_LIMITS.rates };
+  const caps: Record<SlotlockCapName, number> = { ...SLOTLOCK_DEFAULT_LIMITS.caps };
+  const value = optional(env, 'SLOTLOCK_LIMITS');
+  if (value === undefined) return { rates, caps };
+  const invalid = (detail: string) =>
+    new SlotlockConfigError(
+      `SLOTLOCK_LIMITS must be comma-separated name=value settings, rates as <count>/<s|m|h>[:<burst>] or off (${SLOTLOCK_RATE_NAMES.join(', ')}) and caps as whole numbers (${SLOTLOCK_CAP_NAMES.join(', ')}): ${detail}`,
+    );
+  const seen = new Set<string>();
+  for (const entry of value.split(',').map((part) => part.trim())) {
+    const match = /^([a-z_]+)=(\S+)$/.exec(entry);
+    if (!match) throw invalid(`"${entry.slice(0, 40)}" is not name=value`);
+    const [, name, setting] = match as unknown as [string, string, string];
+    if (seen.has(name)) throw invalid(`${name} is set twice`);
+    seen.add(name);
+    if ((SLOTLOCK_RATE_NAMES as readonly string[]).includes(name)) {
+      if (setting === 'off') {
+        rates[name as SlotlockRateName] = null;
+        continue;
+      }
+      const rate = /^(\d{1,7})\/([smh])(?::(\d{1,7}))?$/.exec(setting);
+      const count = Number(rate?.[1]);
+      const burst = rate?.[3] === undefined ? count : Number(rate[3]);
+      if (!rate || count < 1 || count > MAX_RATE_COUNT || burst < 1 || burst > MAX_RATE_COUNT) {
+        throw invalid(`${name} must be <count>/<s|m|h>[:<burst>] with each 1-${MAX_RATE_COUNT}, or off`);
+      }
+      rates[name as SlotlockRateName] = {
+        perSecond: count / (RATE_PERIOD_SECONDS[rate[2] as string] as number),
+        burst,
+      };
+    } else if (Object.hasOwn(CAP_RANGES, name)) {
+      const [minimum, maximum] = CAP_RANGES[name as SlotlockCapName];
+      const cap = /^\d{1,6}$/.test(setting) ? Number(setting) : Number.NaN;
+      if (!(cap >= minimum && cap <= maximum)) {
+        throw invalid(`${name} must be a whole number from ${minimum} to ${maximum}`);
+      }
+      caps[name as SlotlockCapName] = cap;
+    } else {
+      throw invalid(`${name.slice(0, 40)} is not a limit`);
+    }
+  }
+  return { rates, caps };
+}
+
+/** Fields a proxy cannot be trusted to set, because the client sends them to every server. */
+const UNTRUSTABLE_FIELDS = new Set(['authorization', 'cookie', 'host', 'origin', 'content-type']);
+
+/**
+ * SLOTLOCK_TRUSTED_PROXY_HEADER: the request field holding the client's address, set (and
+ * overwritten) by a proxy every request passes through, such as `CF-Connecting-IP` behind
+ * Cloudflare. Unset, the client address is the connection's. A client can send any field, so set it
+ * only when nothing reaches the server except through that proxy.
+ */
+export function readTrustedProxyHeader(env: SlotlockEnv): string | undefined {
+  const value = optional(env, 'SLOTLOCK_TRUSTED_PROXY_HEADER');
+  if (value === undefined) return undefined;
+  if (!/^[A-Za-z0-9-]{1,64}$/.test(value) || UNTRUSTABLE_FIELDS.has(value.toLowerCase())) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_TRUSTED_PROXY_HEADER must be the name of a request field your proxy sets to the client address, such as CF-Connecting-IP',
+    );
+  }
+  return value.toLowerCase();
+}

@@ -342,8 +342,14 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       'confirmation',
       'call',
       'stopping',
+      // The anonymous call's 401, counted.
+      'refusals',
       'stopped',
     ]);
+    expect(stdout.events().find(({ event }) => event === 'refusals')).toMatchObject({
+      auth_refused: 1,
+      rate_limited: 0,
+    });
     // Each tool call logs its operation, outcome and duration; never its arguments.
     expect(stdout.events().filter(({ event }) => event === 'call')).toEqual([
       {

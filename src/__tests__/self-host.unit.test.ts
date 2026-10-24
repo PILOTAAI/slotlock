@@ -3,6 +3,7 @@
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { SLOTLOCK_DEFAULT_LIMITS } from '../config.js';
 import {
   SLOTLOCK_CLI_HELP,
   SLOTLOCK_ENVIRONMENT_VARIABLES,
@@ -65,8 +66,59 @@ describe('slotlock serve configuration', () => {
       confirmWrites: [],
       availability: [],
       restApi: true,
+      limits: SLOTLOCK_DEFAULT_LIMITS,
     });
   });
+
+  it('reads request limits over the defaults, and the trusted client-address field', () => {
+    const config = readSlotlockServeConfig(
+      serveEnv({
+        SLOTLOCK_LIMITS: ' tenant_write=2/s:10, global_read=6000/m ,address=off,sign_in=5/h,key_lookup_queue=0 ',
+        SLOTLOCK_TRUSTED_PROXY_HEADER: 'CF-Connecting-IP',
+      }),
+    );
+    expect(config.trustedProxyHeader).toBe('cf-connecting-ip');
+    expect(config.limits.rates).toEqual({
+      ...SLOTLOCK_DEFAULT_LIMITS.rates,
+      tenant_write: { perSecond: 2, burst: 10 },
+      global_read: { perSecond: 100, burst: 6000 },
+      address: null,
+      sign_in: { perSecond: 5 / 3600, burst: 5 },
+    });
+    expect(config.limits.caps).toEqual({ ...SLOTLOCK_DEFAULT_LIMITS.caps, key_lookup_queue: 0 });
+    // The defaults the owner set for the hosted service (2026-10-24): about 20 reads and 5 writes a
+    // second per tenant with small bursts, 50 writes a second for the whole server.
+    expect(SLOTLOCK_DEFAULT_LIMITS.rates).toMatchObject({
+      tenant_read: { perSecond: 20 },
+      tenant_write: { perSecond: 5 },
+      global_write: { perSecond: 50 },
+    });
+    expect('trustedProxyHeader' in readSlotlockServeConfig(serveEnv())).toBe(false);
+  });
+
+  it.each([
+    ['an unknown limit', 'tenant_reads=1/s', /tenant_reads is not a limit/],
+    ['a rate without a period', 'tenant_read=20', /tenant_read must be <count>\/<s\|m\|h>/],
+    ['a rate of zero', 'tenant_read=0/s', /tenant_read must be/],
+    ['a burst of zero', 'tenant_read=1/s:0', /tenant_read must be/],
+    ['a fractional rate', 'tenant_read=0.5/s', /tenant_read must be/],
+    ['a cap that is a rate', 'series_writes=1/s', /series_writes must be a whole number from 1 to 100/],
+    ['a cap of zero', 'tenant_series_writes=0', /tenant_series_writes must be a whole number/],
+    ['more key lookups than the pool can spare', 'key_lookups=9', /key_lookups must be a whole number from 1 to 8/],
+    ['a limit set twice', 'address=off,address=1/s', /address is set twice/],
+    ['an entry without a value', 'address', /is not name=value/],
+  ])('refuses SLOTLOCK_LIMITS with %s', (_case, value, message) => {
+    expect(refusal(serveEnv({ SLOTLOCK_LIMITS: value })).message).toMatch(message);
+  });
+
+  it.each(['Authorization', 'Host', 'X Forwarded For', 'x'.repeat(65)])(
+    'refuses %s as the trusted client-address field',
+    (value) => {
+      expect(refusal(serveEnv({ SLOTLOCK_TRUSTED_PROXY_HEADER: value })).message).toMatch(
+        /SLOTLOCK_TRUSTED_PROXY_HEADER must be the name of a request field/,
+      );
+    },
+  );
 
   it('serves without a confirmation secret unless writes are guarded (SURF-4, PROD-16)', () => {
     // The owner's hosted policy: every authenticated write takes effect at once. The confirmation
