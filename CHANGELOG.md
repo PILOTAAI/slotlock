@@ -12,17 +12,21 @@ versioning.
   API counts in its tenant's own budget (`app_read`, `app_write`). A refusal answers 429
   `rate_limited` with `Retry-After` and the `RateLimit` and `RateLimit-Policy` fields.
   `SLOTLOCK_LIMITS` changes the limits; behind a proxy, `SLOTLOCK_TRUSTED_PROXY_HEADER` names the
-  field holding the client's address (`CF-Connecting-IP` behind Cloudflare). The health check is
+  field holding the client's address (`CF-Connecting-IP` behind Cloudflare); without it, the first
+  request carrying such a field logs a `client_address_field_ignored` warning. The health check is
   not counted.
 - `slotlock serve` runs a recurring create and every event update one at a time per tenant and per
-  server (`tenant_series_writes`, `series_writes`), sharing the slot fairly between tenants. Four
-  more of a tenant's may wait and the rest get 429; one that waits two seconds gets 503
-  `server_busy`.
+  server (`tenant_series_writes`, `series_writes`), taking the write's token before it waits. A
+  freed slot rests for as long as the write before kept the server busy, up to a second, then goes
+  to the waiting tenant that has had one least recently. Four more of a tenant's writes may wait
+  and the rest get 429; one that has waited two seconds gets 429 while its tenant's own write is
+  still running, otherwise 503 `server_busy`. An application API maintenance run waits the same
+  way for slots of its own: one per tenant, `maintenance_runs` (1) per server.
 - `createSlotlockAgentServer` takes `subscriptions.maxPerTenant`; `slotlock serve` caps each tenant
   at 16 live-update streams (`tenant_subscriptions`).
 - `slotlock serve` logs a `refusals` line each minute there are any, and at shutdown: auth
-  refusals, rate limits, lookup overflows, busy series writes and bodies too large, with clients
-  named only by per-process pseudonyms.
+  refusals, rate limits, lookup overflows, busy series writes, busy maintenance runs and bodies too
+  large, with clients named only by per-process pseudonyms.
 - `createSlotlockNodeServer` hands the fetch target the connection's remote address as a second
   argument.
 
@@ -40,7 +44,7 @@ versioning.
   together, `SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT`. Until it is bound, `SLOTLOCK_SIGN_IN_RATE_LIMIT`
   counts every client together, as before, and the Worker logs a warning: add the ceiling before
   lowering that binding's limit to one client's. The dashboard runs at most two sign-ins from one
-  client at once.
+  client at once. The Worker counts a client as `slotlock serve` does: an IPv6 client is its /64.
 - `slotlock serve`'s `/healthz` reuses one database check a second.
 - `slotlock --help` describes the server token as read and write, never admin.
 

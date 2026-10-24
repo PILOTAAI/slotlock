@@ -51,13 +51,19 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
   tenant and for the whole server, and answers `429 rate_limited` with `Retry-After` and the
   `RateLimit` fields. The application API counts in its tenant's own `app_read` and `app_write`
   budgets, apart from the agents'. A recurring create and every event update (a new title
-  re-expands a recurring event's series too) waits for a slot: one at a time per tenant
-  (`tenant_series_writes`) and per server (`series_writes`), shared fairly between tenants. Four
-  more of a tenant's may wait and the rest get 429; one that waits two seconds gets 503
-  `server_busy`. The health check is not counted. `SLOTLOCK_LIMITS` changes the limits; behind a
-  proxy, set `SLOTLOCK_TRUSTED_PROXY_HEADER` to the field it puts the client's address in
-  (`CF-Connecting-IP` behind Cloudflare), or every client shares the proxy's budget. A client can
-  send that field itself, so let nothing reach the server except through the proxy.
+  re-expands a recurring event's series too) takes its write token, then waits for a slot: one at
+  a time per tenant (`tenant_series_writes`) and per server (`series_writes`). A freed slot rests
+  for as long as the write before kept the server busy (at most a second), so with one slot these
+  writes keep it busy at most about half the time; it then goes to the waiting tenant that has had
+  one least recently. Four more of a tenant's writes may wait and the rest get 429. A write that
+  has waited two seconds gets 429 while its tenant's own write is still running, otherwise 503
+  `server_busy`. An application API maintenance run waits the same way for slots of its own: one
+  per tenant, `maintenance_runs` per server. The health check is not counted. `SLOTLOCK_LIMITS`
+  changes the limits; behind a proxy, set `SLOTLOCK_TRUSTED_PROXY_HEADER` to the field it puts the
+  client's address in (`CF-Connecting-IP` behind Cloudflare), or every client shares the proxy's
+  budget: the server logs a `client_address_field_ignored` warning when such a field arrives
+  without the setting. A client can send that field itself, so let nothing reach the server except
+  through the proxy.
 
 ```sh
 slotlock hours set '[{"rrule":"FREQ=WEEKLY;BYDAY=SA","startMinutes":600,"durationMinutes":240}]' --resource vehicle-42
@@ -198,7 +204,8 @@ this one and read its session secret, which signs in as any tenant.
 - Anyone may start a sign-in, and each callback costs a database write and a request to GitHub
   with the app's client secret. An isolate runs at most eight at once, but Workers run many
   isolates, so three rate limiting bindings bound them all:
-  - `SLOTLOCK_CLIENT_RATE_LIMIT` counts every dashboard request per client address;
+  - `SLOTLOCK_CLIENT_RATE_LIMIT` counts every dashboard request per client address (an IPv6
+    client's /64, as `slotlock serve` counts it);
   - `SLOTLOCK_SIGN_IN_RATE_LIMIT` counts sign-ins and callbacks per client address;
   - `SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT` counts them from every client together, set far above one
     client's limit so a few clients cannot use it up for everyone.

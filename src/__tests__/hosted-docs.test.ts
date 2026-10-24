@@ -44,6 +44,26 @@ describe('hosted safety in the documentation', () => {
     expect(live).toContain('maxPerTenant');
   });
 
+  it('says what a write that waits gets, how a freed slot is shared, and where maintenance waits (P11)', () => {
+    const start = readme.indexOf('- The server limits requests per client address');
+    expect(start, 'canary: the limits bullet exists').toBeGreaterThanOrEqual(0);
+    const limits = flat(readme.slice(start, readme.indexOf('\n\n', start)));
+    // seriesGate answers a timed-out wait 429 while the tenant's own write runs, else 503.
+    expect(limits).toMatch(
+      /waited two seconds gets 429 while its tenant's own write is still running, otherwise 503 `server_busy`/,
+    );
+    expect(limits).toMatch(/rests for as long as[^.]*busy/);
+    expect(limits).toMatch(/maintenance run[^.]*`maintenance_runs`/);
+    expect(limits).toContain('client_address_field_ignored');
+    expect(limits).not.toMatch(/one that waits two seconds gets 503/);
+    expect(read('CHANGELOG.md')).not.toMatch(/one that waits two seconds gets 503/);
+  });
+
+  it('says a key unused for 15 minutes may be told busy during a flood of made-up keys (SEC-2)', () => {
+    const model = flat(section(security, '## Security model'));
+    expect(model).toMatch(/not authenticated in the last 15 minutes[^.]*503/);
+  });
+
   it('lists the changes that need an operator or embedder to act under Unreleased', () => {
     const unreleased = flat(section(read('CHANGELOG.md'), '## Unreleased'));
     for (const name of [
@@ -53,6 +73,8 @@ describe('hosted safety in the documentation', () => {
       'SLOTLOCK_LIMITS',
       'SLOTLOCK_TRUSTED_PROXY_HEADER',
       'maxPerTenant',
+      'maintenance_runs',
+      'client_address_field_ignored',
     ]) {
       expect(unreleased).toContain(name);
     }

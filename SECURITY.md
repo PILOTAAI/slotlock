@@ -110,10 +110,13 @@ bearer-token verification, per-principal authorization, distributed rate limitin
 and a readiness check. Do not place provider credentials or raw calendar content in authentication,
 authorization, rate-limit, or health callbacks. `slotlock serve`, its own embedder, limits requests
 per client address before any credential is looked up, then per key, per tenant and for the whole
-server, caps writes that expand a recurring series and live-update streams per tenant, answers a
-full key-lookup queue as busy rather than unauthenticated, and logs counts of refusals with each
-client as a pseudonym (`SLOTLOCK_LIMITS`, `SLOTLOCK_TRUSTED_PROXY_HEADER`). Its counts are one
-process's: several instances each limit alone.
+server, caps writes that expand a recurring series, maintenance runs and live-update streams per
+tenant, answers a full key-lookup queue as busy rather than unauthenticated, and logs counts of
+refusals with each client as a pseudonym (`SLOTLOCK_LIMITS`, `SLOTLOCK_TRUSTED_PROXY_HEADER`). A
+key that authenticated in the last 15 minutes waits in a lookup queue of its own, served first; a
+valid key that has not authenticated in the last 15 minutes (any key, after a restart) waits with
+made-up keys and may be answered busy (503 with `Retry-After`) while a flood of them lasts, never
+401. Its counts are one process's: several instances each limit alone.
 
 Write confirmation (MCP 2026-07-28 form elicitation) seals the pending write to the caller, the tool
 and its exact arguments, but the answer comes from the client: Slotlock relies on the MCP client to
