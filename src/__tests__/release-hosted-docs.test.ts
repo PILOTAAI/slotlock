@@ -252,9 +252,7 @@ describe('the specification and the README', () => {
     expect(spec).not.toContain('Slotlock 0.1');
     expect(spec).toContain('### Scopes, API keys and the application API');
     expect(spec).toContain('### Maintenance');
-    expect(spec).toContain(
-      `at most ${SLOTLOCK_API_KEY_ACTIVE_LIMIT} active keys and ${thousands(SLOTLOCK_API_KEY_RETAINED_LIMIT)} in all`,
-    );
+    expect(spec).toContain(`at most ${SLOTLOCK_API_KEY_ACTIVE_LIMIT} active keys and ${thousands(SLOTLOCK_API_KEY_RETAINED_LIMIT)} in all`);
     expect(spec).toContain(`(at most ${thousands(SLOTLOCK_API_KEY_MAX_LIFETIME_DAYS)} days)`);
     expect(spec).toContain(`resources (at most ${SLOTLOCK_DASHBOARD_MAX_RESOURCES})`);
     const holdDays = declared('src/store.ts', /const MAX_HOLD_TTL_MS = ([0-9_ *]+);/) / 86_400_000;
@@ -264,13 +262,7 @@ describe('the specification and the README', () => {
     expect(spec).toContain(`It is at most ${bufferDays} days`);
     const status = flat(read('README.md').split('## Project status and boundaries\n')[1] ?? '');
     expect(status).not.toContain('0.1 is the core');
-    for (const surface of [
-      'application API',
-      'scoped API keys',
-      'dashboard',
-      'maintenance',
-      'five languages',
-    ]) {
+    for (const surface of ['application API', 'scoped API keys', 'dashboard', 'maintenance', 'five languages']) {
       expect(status).toContain(surface);
     }
   });
@@ -284,18 +276,14 @@ describe('availability rule spellings (W24)', () => {
     // The CLI and SLOTLOCK_AVAILABILITY parse the README's camelCase example.
     expect(parseAvailabilityRules(JSON.parse(rules ?? '[]'))).toHaveLength(1);
     expect(() =>
-      parseAvailabilityRules([
-        { rrule: 'FREQ=WEEKLY;BYDAY=SA', start_minutes: 600, duration_minutes: 240 },
-      ]),
+      parseAvailabilityRules([{ rrule: 'FREQ=WEEKLY;BYDAY=SA', start_minutes: 600, duration_minutes: 240 }]),
     ).toThrow();
     // REST publishes snake_case in its OpenAPI document.
     const openApi = read('openapi.json');
     expect(openApi).toContain('"start_minutes"');
     expect(openApi).not.toContain('"startMinutes"');
     const said = flat(readme);
-    expect(said).toContain(
-      'A rule is `rrule`, `startMinutes` and `durationMinutes` here and in `SLOTLOCK_AVAILABILITY`.',
-    );
+    expect(said).toContain('A rule is `rrule`, `startMinutes` and `durationMinutes` here and in `SLOTLOCK_AVAILABILITY`.');
     expect(said).toContain('`rrule`, `start_minutes` and `duration_minutes`.');
   });
 });

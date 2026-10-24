@@ -180,10 +180,7 @@ describe('Compose quickstart', () => {
   });
 
   it('hands the server every setting serve reads, so .env can set each one', () => {
-    const service = compose.slice(
-      compose.indexOf('\n  slotlock:\n'),
-      compose.indexOf('\nvolumes:'),
-    );
+    const service = compose.slice(compose.indexOf('\n  slotlock:\n'), compose.indexOf('\nvolumes:'));
     const passed = new Set(
       [...service.matchAll(/^ {6}([A-Z][A-Z0-9_]*):/gm)].map(([, name]) => name),
     );
@@ -199,15 +196,10 @@ describe('Compose quickstart', () => {
   it("mounts Postgres's volume where its image keeps the data", () => {
     // From 18 the official image keeps its data in a version directory under /var/lib/postgresql,
     // and refuses to start (exit 1, even on a new empty volume) with a mount at .../data.
-    const service = compose.slice(
-      compose.indexOf('\n  postgres:\n'),
-      compose.indexOf('\n  db-roles:\n'),
-    );
+    const service = compose.slice(compose.indexOf('\n  postgres:\n'), compose.indexOf('\n  db-roles:\n'));
     const major = Number(/image:\s*postgres:(\d+)/.exec(service)?.[1]);
     expect(major, 'canary: the postgres service and its image were found').toBeGreaterThan(0);
-    const mounts = [...service.matchAll(/^\s+-\s*postgres-data:(\S+)\s*$/gm)].map(
-      ([, path]) => path,
-    );
+    const mounts = [...service.matchAll(/^\s+-\s*postgres-data:(\S+)\s*$/gm)].map(([, path]) => path);
     expect(mounts).toEqual([major >= 18 ? '/var/lib/postgresql' : '/var/lib/postgresql/data']);
   });
 
@@ -672,16 +664,9 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
       (request) => request.path.endsWith('/rulesets') && request.body.target === 'tag',
     );
     expect(tags, 'two tag rulesets').toHaveLength(2);
-    for (const { body } of tags)
-      expect(body.conditions?.ref_name.include).toContain('refs/tags/v*');
+    for (const { body } of tags) expect(body.conditions?.ref_name.include).toContain('refs/tags/v*');
     const byRules = (types: string) =>
-      tags.find(
-        ({ body }) =>
-          body.rules
-            ?.map((rule) => rule.type)
-            .sort()
-            .join() === types,
-      )?.body;
+      tags.find(({ body }) => body.rules?.map((rule) => rule.type).sort().join() === types)?.body;
     // A DeployKey bypass names no key (the REST docs: its actor_id "should be null"), so it covers
     // every write deploy key; it is kept to creation, where tag-release.yml needs it.
     expect(byRules('creation')?.bypass_actors).toEqual([
@@ -830,22 +815,25 @@ esac
     secrets: '{"secrets":[{"name":"TAG_RELEASE_DEPLOY_KEY"}]}',
   };
 
-  it('locks main behind "CI passed" only once that check has succeeded on main', () => {
-    // With no bypass, a required check that cannot pass blocks every pull request, its own fix
-    // included, so the ruleset waits for a green run of every CI job (PostgreSQL 17 and 18 and the
-    // Compose quickstart among them) on main.
+  // With no bypass, a required check that cannot pass blocks every pull request, its own fix
+  // included, so the ruleset waits for a green run of every CI job (PostgreSQL 17 and 18 and the
+  // Compose quickstart among them) on main.
+  it.each([
+    ['failed', ciPassed('failure')],
+    ['not run', ciPassed()],
+    ['failed in one of its runs', ciPassed('success', 'failure')],
+  ])('leaves main\'s ruleset as it is while "CI passed" has %s there', (_, checkRuns) => {
+    const waiting = configure({ ...present, checkRuns });
+    expect(waiting.status, waiting.stderr).toBe(0);
     const checks = 'commits/main/check-runs?check_name=CI%20passed&app_id=15368';
-    for (const checkRuns of [ciPassed('failure'), ciPassed(), ciPassed('success', 'failure')]) {
-      const waiting = configure({ ...present, checkRuns });
-      expect(waiting.status, waiting.stderr).toBe(0);
-      expect(waiting.calls.some((call) => call.endsWith(`repos/PILOTAAI/slotlock/${checks}`))).toBe(
-        true,
-      );
-      expect(waiting.rulesets, checkRuns).not.toContain('Protect main');
-      expect(waiting.rulesets, 'the tag rulesets still apply').toHaveLength(2);
-      expect(waiting.stderr).toContain(`"CI passed" has not succeeded on main`);
-      expect(waiting.stdout).toContain("[ ] Apply the ruleset 'Protect main'");
-    }
+    expect(waiting.calls.some((call) => call.endsWith(`repos/PILOTAAI/slotlock/${checks}`))).toBe(true);
+    expect(waiting.rulesets).not.toContain('Protect main');
+    expect(waiting.rulesets, 'the tag rulesets still apply').toHaveLength(2);
+    expect(waiting.stderr).toContain(`"CI passed" has not succeeded on main`);
+    expect(waiting.stdout).toContain("[ ] Apply the ruleset 'Protect main'");
+  });
+
+  it('locks main behind "CI passed" once that check has succeeded on main', () => {
     const green = configure(present);
     expect(green.status, green.stderr).toBe(0);
     expect(green.rulesets).toContain('Protect main');
@@ -1102,8 +1090,7 @@ esac`,
     const rerunAt = result.gh.indexOf(rerun(5));
     // Right after a re-run GitHub still shows the finished attempt: it waits for the next one first.
     const attemptAt = result.gh.findIndex(
-      (call, index) =>
-        index > rerunAt && call.startsWith('run view 5 ') && call.includes('--json attempt'),
+      (call, index) => index > rerunAt && call.startsWith('run view 5 ') && call.includes('--json attempt'),
     );
     const watchAt = result.gh.findIndex((call) => call.startsWith('run watch 5 '));
     expect(rerunAt).toBeGreaterThanOrEqual(0);
@@ -1130,9 +1117,9 @@ esac`,
       const result = bootstrap({ STUB_TAG_TYPE: type });
       expect(result.status, `${type}: ${result.stderr}`).toBe(0);
       expect(result.stdout).toContain(`v1.2.3 names ${tagCommit}`);
-      expect(
-        result.gh.some((call) => call.startsWith('api repos/PILOTAAI/slotlock/git/tags/')),
-      ).toBe(type === 'tag');
+      expect(result.gh.some((call) => call.startsWith('api repos/PILOTAAI/slotlock/git/tags/'))).toBe(
+        type === 'tag',
+      );
     }
   });
 
@@ -1374,9 +1361,7 @@ describe.skipIf(!hasJq)('release preparation', () => {
     expect([lock.version, lock.packages[''].version]).toEqual(['1.2.4', '1.2.4']);
     // Byte for byte apart from the version: no reformatting rides along.
     expect(contents(repo, 'server.json')).toBe(before.server.replaceAll('1.2.3', '1.2.4'));
-    expect(contents(repo, 'slotlock.manifest.json')).toBe(
-      before.manifest.replace('1.2.3', '1.2.4'),
-    );
+    expect(contents(repo, 'slotlock.manifest.json')).toBe(before.manifest.replace('1.2.3', '1.2.4'));
     expect(contents(repo, 'CHANGELOG.md')).toBe(
       before.changelog.replace('## Unreleased', `## 1.2.4 - ${today}`),
     );
@@ -1404,8 +1389,7 @@ describe.skipIf(!hasJq)('release preparation', () => {
   });
 
   it('orders prereleases below their release and by name', () => {
-    const prepare = (from: string, to: string) =>
-      project({}, from).script('prepare-release.sh', to);
+    const prepare = (from: string, to: string) => project({}, from).script('prepare-release.sh', to);
     for (const [from, to, later] of [
       ['1.2.4-rc.1', '1.2.4', true],
       ['1.2.4-rc.1', '1.2.4-rc.2', true],
@@ -1681,7 +1665,10 @@ esac
   });
 
   it.each([
-    ['a commit someone else made', [{ author: 'Ada <ada@example.com>', message: 'Release 1.2.4' }]],
+    [
+      'a commit someone else made',
+      [{ author: 'Ada <ada@example.com>', message: 'Release 1.2.4' }],
+    ],
     ["another version's release commit", [{ author: bot, message: 'Release 1.2.3' }]],
     [
       'a commit on top of a release commit',
@@ -1695,7 +1682,9 @@ esac
     const left = repo.remote();
     const result = repo.run();
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain(`::error::${branch} holds commits this workflow did not make.`);
+    expect(result.stderr).toContain(
+      `::error::${branch} holds commits this workflow did not make.`,
+    );
     expect(result.stdout).toBe('');
     expect(repo.remote()).toBe(left);
     expect(repo.calls()).toBe('');
@@ -2040,10 +2029,7 @@ describe('release channel', () => {
 
   it('stages on npm with the tag the registry calls for, and the image tags latest the same way', () => {
     const release = read('.github/workflows/release.yml');
-    const stage = release.slice(
-      release.indexOf('\n  stage:\n'),
-      release.indexOf('\n  github-release:\n'),
-    );
+    const stage = release.slice(release.indexOf('\n  stage:\n'), release.indexOf('\n  github-release:\n'));
     // The registry lookup is dist-tag.sh's own, which fails closed (the tests above).
     expect(stage).toContain('dist_tag=$(../scripts/dist-tag.sh "$version" --npm)');
     expect(stage).not.toContain('dist-tags.latest');
@@ -2189,12 +2175,9 @@ describe('required checks', () => {
     expect(passed).toContain('name: CI passed');
     // Without always() a failed job would skip this one, and a skipped required check passes.
     expect(passed).toContain('if: always()');
-    const needs = /needs: \[([^\]]+)\]/
-      .exec(passed)?.[1]
-      ?.split(',')
-      .map((id) => id.trim());
+    const needs = /needs: \[([^\]]+)\]/.exec(passed)?.[1]?.split(',').map((id) => id.trim());
     expect(needs?.sort()).toEqual(jobIds.filter((id) => id !== 'passed').sort());
-    expect(passed).toContain('jq -e \'all(. == "success")\'');
+    expect(passed).toContain("jq -e 'all(. == \"success\")'");
   });
 
   it.skipIf(!hasJq)('is what the main ruleset requires, with DCO', () => {
@@ -2206,8 +2189,7 @@ describe('required checks', () => {
     const body = [...result.stdout.matchAll(/^> (?:PUT|POST) \/\S+\n(\{[\s\S]*?\n\})$/gm)]
       .map(([, json]) => JSON.parse(json as string))
       .find((request) => request.target === 'branch');
-    const checks = body.rules
-      .find((rule: { type: string }) => rule.type === 'required_status_checks')
+    const checks = body.rules.find((rule: { type: string }) => rule.type === 'required_status_checks')
       .parameters.required_status_checks.map((check: { context: string }) => check.context);
     expect(checks).toEqual(['CI passed', 'Signed-off-by']);
     expect(result.stderr).not.toContain('no longer names its jobs');
@@ -2233,8 +2215,7 @@ describe('dependency updates', () => {
       }
       const path = join(dir, entry.name);
       if (entry.isDirectory()) holding(test, path, out);
-      else if (test(entry.name))
-        out.push(`/${dirname(path).slice(root.length + 1)}`.replace(/\/$/, ''));
+      else if (test(entry.name)) out.push(`/${dirname(path).slice(root.length + 1)}`.replace(/\/$/, ''));
     }
     return out;
   }
@@ -2249,12 +2230,7 @@ describe('dependency updates', () => {
       ...holding((file) => file.endsWith('.csproj')).map((dir) => `nuget ${dir}`),
     ];
     expect(expected, 'canary: the manifests were found').toEqual(
-      expect.arrayContaining([
-        'npm /',
-        'npm /site',
-        'npm /workers/dashboard',
-        'cargo /clients/rust',
-      ]),
+      expect.arrayContaining(['npm /', 'npm /site', 'npm /workers/dashboard', 'cargo /clients/rust']),
     );
     for (const entry of expected) expect([...watched], entry).toContain(entry);
     for (const entry of ['github-actions /', 'docker /', 'docker-compose /']) {
@@ -2325,23 +2301,15 @@ describe('code scanning', () => {
     expect(read('SECURITY.md')).toContain('`js/insufficient-password-hash`');
   });
 
-  it.skipIf(!hasJq)(
-    'turns default setup off, which an advanced configuration cannot run beside',
-    () => {
-      const result = spawnSync(
-        'bash',
-        [join(root, 'scripts', 'configure-github.sh'), '--dry-run'],
-        {
-          encoding: 'utf8',
-          env: { PATH: process.env.PATH ?? '', SKIP_SITE_SECRETS: '1' },
-        },
-      );
-      expect(result.status, result.stderr).toBe(0);
-      const setup =
-        /^> PATCH \/repos\/PILOTAAI\/slotlock\/code-scanning\/default-setup\n(\{[\s\S]*?\n\})$/m.exec(
-          result.stdout,
-        )?.[1];
-      expect(JSON.parse(setup ?? '{}')).toEqual({ state: 'not-configured' });
-    },
-  );
+  it.skipIf(!hasJq)('turns default setup off, which an advanced configuration cannot run beside', () => {
+    const result = spawnSync('bash', [join(root, 'scripts', 'configure-github.sh'), '--dry-run'], {
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH ?? '', SKIP_SITE_SECRETS: '1' },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const setup = /^> PATCH \/repos\/PILOTAAI\/slotlock\/code-scanning\/default-setup\n(\{[\s\S]*?\n\})$/m.exec(
+      result.stdout,
+    )?.[1];
+    expect(JSON.parse(setup ?? '{}')).toEqual({ state: 'not-configured' });
+  });
 });
