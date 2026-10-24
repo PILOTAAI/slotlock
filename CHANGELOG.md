@@ -5,6 +5,14 @@ versioning.
 
 ## Unreleased
 
+### Security
+
+- zod moves from 4.6.5 to 4.6.7 (#59), past GHSA-mrhx-c7xc-m3w5 (high): when validating an
+  oversized array, zod 4.6.5 collects an issue for every failing element with no cap, so one
+  authenticated tool or REST call could hold far more memory than its body. 0.1.0, 0.1.1 and 0.2.0
+  pin zod 4.6.5 exactly; their users can add `"overrides": {"zod": "4.6.7"}` to their own
+  `package.json` (README, Known issues in 0.2.0).
+
 ### Fixed
 
 - A runtime dependency bump no longer breaks the release checks. The packed NOTICE is written at

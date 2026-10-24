@@ -120,6 +120,21 @@ describe('the 0.2.0 known-issues notice', () => {
   });
 });
 
+describe('the zod fix', () => {
+  it('ships a zod past GHSA-mrhx-c7xc-m3w5, and the release notes after 0.2.0 say so', () => {
+    const zod = (JSON.parse(read('package.json')) as { dependencies: Record<string, string> })
+      .dependencies.zod as string;
+    expect(patched(zod.split('.').map(Number)), `zod ${zod}`).toBe(true);
+    // Everything above 0.2.0's heading: Unreleased now, the release that shipped the fix later.
+    const changelog = read('CHANGELOG.md');
+    const later = changelog.slice(0, changelog.search(/^## 0\.2\.0 - /m));
+    expect(later, 'canary: 0.2.0 has a heading').not.toBe(changelog);
+    const security = flat(section(later, '### Security'));
+    expect(security).toContain('GHSA-mrhx-c7xc-m3w5');
+    expect(security).toMatch(/zod[^.]*4\.6\.5[^.]*4\.6\.7/);
+  });
+});
+
 describe('the deprecation runbook', () => {
   // Read once; a missing runbook reads as empty, so each test fails on what it checks.
   const runbook = existsSync(new URL('../../docs/release/deprecations.md', import.meta.url))
