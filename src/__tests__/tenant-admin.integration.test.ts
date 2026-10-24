@@ -75,6 +75,53 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
     await admin?.end();
   });
 
+  /**
+   * As the serving role, issue a key (create_api_key) or a new secret for one (rotate_api_key) in a
+   * READ COMMITTED transaction held open until `release` is called; `inFlight` resolves once the
+   * function has returned inside it.
+   */
+  function keyInFlight(tenantRef: string, rotateId?: string) {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started = () => {};
+    const inFlight = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const prefix = `slk_${randomBytes(4).toString('hex')}`;
+    const committed = application.begin('isolation level read committed', async (tx) => {
+      if (rotateId === undefined) {
+        await tx`
+          SELECT id FROM slotlock.create_api_key(
+            ${tenantRef}::text, 'Racing key', ${prefix}::text, ${randomBytes(32)}::bytea,
+            pg_catalog.string_to_array('read', ','), NULL::timestamptz, NULL::text)`;
+      } else {
+        await tx`
+          SELECT id FROM slotlock.rotate_api_key(
+            ${tenantRef}::text, ${rotateId}::uuid, ${prefix}::text, ${randomBytes(32)}::bytea)`;
+      }
+      started();
+      await gate;
+    });
+    return { committed, inFlight, release };
+  }
+
+  /** Whether `pending` is still unsettled after `ms`. */
+  async function stillWaiting(pending: Promise<unknown>, ms = 300): Promise<boolean> {
+    let settled = false;
+    pending.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, ms));
+    return !settled;
+  }
+
   async function freshTenant(prefix = 'tenant') {
     const tenantRef = `${prefix}-${randomUUID()}`;
     const resource = await app.withTenant(tenantRef, (tenant) =>
@@ -123,8 +170,14 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
 
       // No new key; one it has still authenticates (reads go on).
       const keys = createSlotlockApiKeyStore(application);
-      await expect(keys.create({ tenantRef, name: 'New key', scopes: ['read'] })).rejects.toThrow(/suspended/);
-      const kept = await keys.create({ tenantRef: other.tenantRef, name: 'Kept key', scopes: ['read'] });
+      await expect(keys.create({ tenantRef, name: 'New key', scopes: ['read'] })).rejects.toThrow(
+        /suspended/,
+      );
+      const kept = await keys.create({
+        tenantRef: other.tenantRef,
+        name: 'Kept key',
+        scopes: ['read'],
+      });
       await asOwner((store) => store.suspendTenant({ tenantRef: other.tenantRef }));
       await expect(keys.authenticate(kept.key)).resolves.toMatchObject({
         tenantRef: other.tenantRef,
@@ -193,6 +246,39 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
           tenant.acquireHold({ tenantRef, resourceId, ...slot(1), ttlMs: 60_000 }),
         ),
       ).rejects.toMatchObject({ code: 'tenant_suspended' });
+    });
+
+    it('waits for a key or a secret being issued, and none is issued after it', async () => {
+      const { tenantRef } = await freshTenant();
+      const keys = createSlotlockApiKeyStore(application);
+
+      const creating = keyInFlight(tenantRef);
+      await creating.inFlight;
+      const suspension = asOwner((store) => store.suspendTenant({ tenantRef }));
+      expect(await stillWaiting(suspension)).toBe(true);
+      creating.release();
+      await creating.committed;
+      await expect(suspension).resolves.toEqual({ suspended: true });
+      await expect(keys.create({ tenantRef, name: 'Late key', scopes: ['read'] })).rejects.toThrow(
+        /suspended/,
+      );
+
+      const other = await freshTenant();
+      const kept = await keys.create({
+        tenantRef: other.tenantRef,
+        name: 'Kept',
+        scopes: ['read'],
+      });
+      const rotating = keyInFlight(other.tenantRef, kept.apiKey.id);
+      await rotating.inFlight;
+      const second = asOwner((store) => store.suspendTenant({ tenantRef: other.tenantRef }));
+      expect(await stillWaiting(second)).toBe(true);
+      rotating.release();
+      await rotating.committed;
+      await expect(second).resolves.toEqual({ suspended: true });
+      await expect(keys.rotate({ tenantRef: other.tenantRef, id: kept.apiKey.id })).rejects.toThrow(
+        /suspended/,
+      );
     });
 
     it('lets racing writes either commit before it or be refused, nothing else', async () => {
@@ -458,6 +544,20 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
       await writer;
       // The hold committed before the erasure began deleting, so it went with the rest.
       await expect(erasure).resolves.toMatchObject({ rows: { reservations: 1, resources: 1 } });
+    });
+
+    it('waits for a key being issued, so the erased tenant keeps none', async () => {
+      const { tenantRef } = await freshTenant();
+      const creating = keyInFlight(tenantRef);
+      await creating.inFlight;
+      const erasure = app.eraseTenant({ tenantRef });
+      expect(await stillWaiting(erasure)).toBe(true);
+      creating.release();
+      await creating.committed;
+      await expect(erasure).resolves.toMatchObject({ rows: { api_keys: 1 } });
+      const [left] = await superuser<{ count: number }[]>`
+        SELECT count(*)::int AS count FROM slotlock.api_keys WHERE tenant_ref = ${tenantRef}`;
+      expect(left?.count).toBe(0);
     });
   });
 });

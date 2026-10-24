@@ -245,7 +245,6 @@ export const SLOTLOCK_DASHBOARD_FUNCTIONS = Object.freeze([
 /** Live form records one person may leave in the dashboard's records (12 hours of forms). */
 export const SLOTLOCK_DASHBOARD_FORM_LIMIT = 1_000;
 
-/** Every SECURITY DEFINER function the serving role may execute, by signature. */
 /** The table that records which release migrated the schema (SLOTLOCK_SCHEMA_VERSION). */
 export const SLOTLOCK_SCHEMA_TABLES = Object.freeze(['schema_version'] as const);
 
@@ -275,6 +274,7 @@ export const SLOTLOCK_OPERATOR_FUNCTIONS = Object.freeze([
   'slotlock.unsuspend_tenant(text)',
 ] as const);
 
+/** Every SECURITY DEFINER function the serving role may execute, by signature. */
 export const SLOTLOCK_DEFINER_FUNCTIONS = Object.freeze([
   ...SLOTLOCK_API_KEY_FUNCTIONS,
   ...SLOTLOCK_DASHBOARD_FUNCTIONS,
@@ -475,6 +475,8 @@ AS $slotlock_rotate_api_key$
 DECLARE
   retiring bytea;
 BEGIN
+  -- Ordered with suspension, which takes this lock too.
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || requested_tenant_ref, 0));
   IF EXISTS (SELECT 1 FROM slotlock.tenant_suspensions suspended
               WHERE suspended.tenant_ref = requested_tenant_ref) THEN
     RAISE EXCEPTION 'Slotlock tenant is suspended: it gets no new API key secret'
@@ -759,6 +761,9 @@ SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_suspend_tenant$
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:tenant:' || requested_tenant_ref, 0));
+  -- The tenant's key lock too: a key or secret being issued commits first, and one issued after
+  -- this commits sees the suspension and is refused.
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || requested_tenant_ref, 0));
   INSERT INTO slotlock.tenant_suspensions (tenant_ref, reason)
   VALUES (requested_tenant_ref, requested_reason)
   ON CONFLICT (tenant_ref) DO NOTHING;
@@ -804,6 +809,8 @@ BEGIN
       USING ERRCODE = 'invalid_parameter_value';
   END IF;
   PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:tenant:' || requested_tenant_ref, 0));
+  -- A key being issued commits first, so its row is deleted below with the rest.
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || requested_tenant_ref, 0));
   FOR setting IN
     SELECT DISTINCT contract.tenant_context_setting FROM slotlock.rls_policy_contracts contract
   LOOP
