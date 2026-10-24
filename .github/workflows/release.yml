@@ -36,8 +36,8 @@ defaults:
     shell: bash
 
 env:
-  # The suite runs on the Node.js the image ships.
-  NODE_VERSION: '22.23.3'
+  # The suite runs on the Node.js the image ships (the Dockerfile's FROM lines).
+  NODE_VERSION: '24.22.1'
   # Staging needs npm >= 11.15.0 (npm stage) on Node.js >= 22.14.0. Node.js 24.21.0 bundles npm
   # 11.19.0, whose engines.node is "^20.17.0 || >=22.9.0", so nothing is installed outside a
   # lockfile; the publish job checks the version before it uses it.

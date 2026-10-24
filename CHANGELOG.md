@@ -22,6 +22,9 @@ versioning.
   and the image push and the registry entry each wait in an environment (`ghcr`, `mcp-registry`)
   that `scripts/configure-github.sh` sets up. The image's attestation is still signed by
   `image.yml`, so `gh attestation verify --signer-workflow .../image.yml` keeps working.
+- The server image runs Node.js 24 LTS (24.22.1), the version the release suite runs on and a major
+  CI tests. It shipped Node.js 26.11.1, which CI never ran and which is not yet an LTS release,
+  while its header said 22.
 
 ## 0.2.0 - 2026-10-23
 

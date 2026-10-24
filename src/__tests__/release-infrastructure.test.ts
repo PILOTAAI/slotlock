@@ -1875,3 +1875,30 @@ describe('release channel', () => {
     );
   });
 });
+
+describe('the Node.js the image ships', () => {
+  const dockerfile = read('Dockerfile');
+  const froms = [...dockerfile.matchAll(/^FROM node:(\d+)\.(\d+)\.(\d+)-[\w-]+@sha256:/gm)].map(
+    ([, major, minor, patch]) => `${major}.${minor}.${patch}`,
+  );
+  const image = froms[0] as string;
+  const major = image.split('.')[0];
+
+  it('is one Node.js release in every stage, named in the header', () => {
+    expect(froms, 'canary: the three node stages were found').toHaveLength(3);
+    expect(new Set(froms)).toEqual(new Set([image]));
+    expect(dockerfile.split('\n')[0]).toContain(`on Node.js ${major} LTS`);
+  });
+
+  it('is the Node.js the release suite runs on, and one CI tests on every pull request', () => {
+    // release.yml: "The suite runs on the Node.js the image ships."
+    expect(read('.github/workflows/release.yml')).toContain(`NODE_VERSION: '${image}'`);
+    const matrix = /node: \[([^\]]+)\]/.exec(read('.github/workflows/ci.yml'))?.[1] ?? '';
+    const versions = [...matrix.matchAll(/'(\d+)'/g)].map(([, version]) => version);
+    expect(versions, 'canary: the CI matrix was found').not.toHaveLength(0);
+    expect(versions).toContain(major);
+    // The engines floor is a major CI runs too.
+    const floor = /^>=(\d+)\./.exec(JSON.parse(read('package.json')).engines.node)?.[1];
+    expect(versions).toContain(floor);
+  });
+});
