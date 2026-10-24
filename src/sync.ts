@@ -3690,6 +3690,51 @@ function unmatchedExceptions(event: CalendarEventContent, budget: RecurrenceBudg
 }
 
 /**
+ * Why this Slotlock refuses an event an earlier one stored, in words, or null when it expands it.
+ * Maintenance counts such a series as refused on every roll and leaves it its old coverage: a rule
+ * shape ical.js expands wrongly (recurrenceRuleProblem), COUNT with a yearly day some years lack, a
+ * rule it no longer stores at all, or exceptions that name no occurrence (searched from the series'
+ * start to the last of them, within a roll's budget). It writes nothing, so it can be run over
+ * stored events before an upgrade.
+ */
+export function storedCalendarEventProblem(event: CalendarEventContent): string | null {
+  const rule = event.recurrence?.rrule;
+  const shape = rule === undefined ? null : recurrenceRuleProblem(rule);
+  if (shape !== null) return shape;
+  let content: CalendarEventContent;
+  try {
+    if (rule !== undefined) {
+      const recur = ICAL.Recur.fromString(canonicalRecurrenceRule(rule) as string);
+      const start = zonedDateTimeFields(event.start, validTimezone(event.timezone));
+      const series = seriesShapeProblem(recur, start);
+      if (series !== null) return series;
+    }
+    content = normalizeCalendarEventContent(event);
+  } catch (error) {
+    if (!(error instanceof CalendarContractError)) throw error;
+    return rule === undefined
+      ? 'not an event Slotlock stores'
+      : 'not a rule Slotlock stores: daily or less often, able to occur, in an IANA time zone';
+  }
+  if (!content.recurrence?.exceptions?.length) return null;
+  let unmatched: Set<number>;
+  try {
+    unmatched = unmatchedExceptions(content, new RecurrenceBudget(FEED_LIMITS));
+  } catch (error) {
+    if (error instanceof CalendarExpansionLimitError) {
+      return 'its exceptions take more work to check than a roll may spend';
+    }
+    if (error instanceof CalendarContractError) return 'a series Slotlock cannot expand';
+    throw error;
+  }
+  if (unmatched.size === 0) return null;
+  const named = [...unmatched].sort((a, b) => a - b).map((at) => new Date(at).toISOString());
+  const which =
+    named.length === 1 ? 'an exception that names' : `${named.length} exceptions that name`;
+  return `${which} no occurrence: ${named.join(', ')}`;
+}
+
+/**
  * The text a stored series is expanded from: its DTSTART's wall time in its zone and its rule, for
  * the iterator. Its first occurrence and its exceptions are not read back from text: a wall time
  * in an hour the clocks repeat names its first instant (RFC 5545 §3.3.5) whichever one was stored,

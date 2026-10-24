@@ -164,6 +164,7 @@ export {
   parseICalendarFeed,
   parseTrustedICalendarEvents,
   recurrenceRuleProblem,
+  storedCalendarEventProblem,
 } from './sync.js';
 export type {
   ExternalCalendarChange,
