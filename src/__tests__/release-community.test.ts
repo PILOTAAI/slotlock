@@ -34,6 +34,23 @@ describe('support routes', () => {
     expect(support.toLowerCase()).not.toContain('discussion');
   });
 
+  it('says in SECURITY.md how the hosted service may be tested, as the terms promise', () => {
+    const security = flat(read('SECURITY.md'));
+    expect(security).toContain('## Testing hosted Slotlock');
+    for (const rule of [
+      'Test only against an account of your own',
+      'Never read, change or keep',
+      'Run no denial of service',
+      'stop and report',
+    ]) {
+      expect(security, rule).toContain(rule);
+    }
+    // TERMS.md and ACCEPTABLE-USE.md send researchers here.
+    for (const file of ['TERMS.md', 'ACCEPTABLE-USE.md']) {
+      expect(flat(read(file)), file).toContain('as [SECURITY.md](SECURITY.md) describes');
+    }
+  });
+
   it('offers the private routes on the new-issue page', () => {
     const config = read('.github/ISSUE_TEMPLATE/config.yml');
     expect(config).toMatch(/^blank_issues_enabled: true$/m);

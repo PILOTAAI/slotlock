@@ -120,6 +120,9 @@ versioning.
   questions and bugs, `support@pylota.io`, `abuse@pylota.io` and `privacy@pylota.io` for the hosted
   service, private vulnerability reporting for security, and the `status` issues. MAINTAINERS.md no
   longer sends questions to Discussions, which are off.
+- SECURITY.md says how hosted Slotlock may be tested: only against your own account, never another
+  account's data, no load or denial of service, and reports through private vulnerability reporting,
+  as the Terms of Service and Acceptable Use Policy refer to.
 
 ## 0.2.0 - 2026-10-23
 
