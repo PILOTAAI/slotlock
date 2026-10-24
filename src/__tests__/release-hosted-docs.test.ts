@@ -188,6 +188,25 @@ describe('the hosted service page', () => {
     );
   });
 
+  // Hosted serve logs the requests it refuses with each client address as a keyed pseudonym
+  // (src/rate-limit.ts, from the hosted track). A pseudonymised address is still personal data, so
+  // the privacy notice says so; the code it describes is checked once that file is in this tree.
+  const PSEUDONYM =
+    "each named only by a pseudonym: a hash of its IP address, keyed by a secret held only in the running server's memory and replaced when it restarts";
+  it('tells the privacy notice how refused requests are logged', () => {
+    expect(flat(read('PRIVACY.md'))).toContain(PSEUDONYM);
+  });
+  it.runIf(existsSync(path('src/rate-limit.ts')))(
+    'logs refused requests as the privacy notice says',
+    () => {
+      const limits = read('src/rate-limit.ts');
+      expect(limits).toContain('const pseudonymKey = randomBytes(32);');
+      expect(limits).toContain("createHmac('sha256', pseudonymKey).update(address)");
+      expect(limits).toMatch(/const MAX_LOGGED_CLIENTS = 10;/);
+      expect(limits).toMatch(/const REFUSAL_LOG_INTERVAL_MS = 60_000;/);
+    },
+  );
+
   // The request rate limits are serve's own (src/rate-limit.ts, from the hosted track): checked
   // once that file is in this tree.
   it.runIf(existsSync(path('src/rate-limit.ts')))(
