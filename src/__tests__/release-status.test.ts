@@ -125,9 +125,18 @@ describe.skipIf(!hasJq)('scripts/status-probe.sh', () => {
     );
   });
 
-  it('counts a 200 that is not ready as down', () => {
+  it('counts a 200 that is not ready as down, and says what it answered', () => {
     const result = probe({ api: ['200', '{"status":"not_ready"}'] });
     expect(result.issues.map(({ title }) => title)).toEqual(['Hosted Slotlock API is down']);
+    expect(result.stdout).toContain(
+      'api: down (https://slotlock-api.pylota.io/healthz: not ready: not_ready)',
+    );
+    expect(result.log('gh.log')).not.toContain('HTTP 200');
+    // A 200 whose body is not the health document at all.
+    const other = probe({ api: ['200', '<!doctype html>'] });
+    expect(other.stdout).toContain(
+      'api: down (https://slotlock-api.pylota.io/healthz: not ready: no status in the answer)',
+    );
   });
 
   it('closes the issue once the part answers again, leaving the other part alone', () => {

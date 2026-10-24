@@ -27,6 +27,11 @@ probe() {
   esac
   if [ "$code" = 000 ]; then
     printf 'no answer: %s' "$(head -c 200 "$work/$1.err")" >"$work/$1.why"
+  elif [ "$code" = 200 ]; then
+    # The API answered, but not ready: say what it said rather than "HTTP 200".
+    status=$(jq -r 'if (.status | type) == "string" then .status else empty end' "$work/$1.body" \
+      2>/dev/null | head -c 100) || status=''
+    printf 'not ready: %s' "${status:-no status in the answer}" >"$work/$1.why"
   else
     printf 'HTTP %s' "$code" >"$work/$1.why"
   fi
