@@ -85,7 +85,9 @@ slotlock hours set '[{"rrule":"FREQ=WEEKLY;BYDAY=SA","startMinutes":600,"duratio
 slotlock hours clear --all    # back to SLOTLOCK_AVAILABILITY
 ```
 
-`slotlock --help` lists every setting.
+A rule is `rrule`, `startMinutes` and `durationMinutes` here and in `SLOTLOCK_AVAILABILITY`. The
+REST application API spells every field in snake_case, so there it is `rrule`, `start_minutes` and
+`duration_minutes`. `slotlock --help` lists every setting.
 
 ### Without Docker
 

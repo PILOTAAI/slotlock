@@ -40,6 +40,9 @@ versioning.
   status names the 0.2 surfaces and the hosted service instead of "0.1 is the core". The site has
   pages for the language clients and for operations, and an included file's relative links now
   resolve from its own directory.
+- The README says which spelling of an availability rule each surface takes: `startMinutes` and
+  `durationMinutes` for `slotlock hours set` and `SLOTLOCK_AVAILABILITY`, `start_minutes` and
+  `duration_minutes` over REST. A REST body pasted into `hours set` used to fail with no hint why.
 - One aggregate check, "CI passed", gathers every CI job: the suites on each Node.js and
   PostgreSQL, the image, the five language clients and the Compose quickstart.
   `scripts/configure-github.sh` requires it and DCO's "Signed-off-by" on `main`; the client suites

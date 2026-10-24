@@ -8,6 +8,7 @@ import { SLOTLOCK_DASHBOARD_MAX_RESOURCES } from '../dashboard.js';
 import { SLOTLOCK_API_KEY_ACTIVE_LIMIT, SLOTLOCK_API_KEY_RETAINED_LIMIT } from '../ddl.js';
 import { SLOTLOCK_API_KEY_MAX_LIFETIME_DAYS } from '../api-keys.js';
 import { SLOTLOCK_CALENDAR_HORIZON_DAYS } from '../rules.js';
+import { parseAvailabilityRules } from '../weekly-hours.js';
 import {
   SLOTLOCK_AGENT_OWNER_COMMAND_QUOTA,
   SLOTLOCK_AGENT_OWNER_EVENT_QUOTA,
@@ -238,6 +239,26 @@ describe('the specification and the README', () => {
     for (const surface of ['application API', 'scoped API keys', 'dashboard', 'maintenance', 'five languages']) {
       expect(status).toContain(surface);
     }
+  });
+});
+
+describe('availability rule spellings (W24)', () => {
+  it('names the spelling each surface takes, as their parsers read it', () => {
+    const readme = read('README.md');
+    const rules = /slotlock hours set '(\[[^']+\])'/.exec(readme)?.[1];
+    expect(rules, 'canary: the README hours set example').toBeDefined();
+    // The CLI and SLOTLOCK_AVAILABILITY parse the README's camelCase example.
+    expect(parseAvailabilityRules(JSON.parse(rules ?? '[]'))).toHaveLength(1);
+    expect(() =>
+      parseAvailabilityRules([{ rrule: 'FREQ=WEEKLY;BYDAY=SA', start_minutes: 600, duration_minutes: 240 }]),
+    ).toThrow();
+    // REST publishes snake_case in its OpenAPI document.
+    const openApi = read('openapi.json');
+    expect(openApi).toContain('"start_minutes"');
+    expect(openApi).not.toContain('"startMinutes"');
+    const said = flat(readme);
+    expect(said).toContain('A rule is `rrule`, `startMinutes` and `durationMinutes` here and in `SLOTLOCK_AVAILABILITY`.');
+    expect(said).toContain('`rrule`, `start_minutes` and `duration_minutes`.');
   });
 });
 
