@@ -390,16 +390,12 @@ describe.skipIf(!url)('Slotlock calendar events (real Postgres)', () => {
       materializationWindow: initialWindow,
     });
     if (!created.ok) throw new Error('rolling conflict fixture failed');
-    const blocker = await store.createExternalReservation({
-      tenantRef: rollingTenant,
-      externalRef: `rolling-blocker-${crypto.randomUUID()}`,
-      resourceId: rollingResource.id,
-      start: d('2027-09-03T09:30:00Z'),
-      end: d('2027-09-03T10:30:00Z'),
-      bufferAfterMs: 0,
-      revision: 1,
-    });
-    if (!blocker.ok) throw new Error('rolling blocker fixture failed');
+    // A booking where the series is not stored, as releases before 0.3 accepted one: a write there
+    // now extends the series first (and here would be refused as an overlap).
+    await sql`
+      INSERT INTO slotlock.reservations (resource_id, tenant_ref, external_ref, starts_at, ends_at)
+      VALUES (${rollingResource.id}, ${rollingTenant}, ${`rolling-blocker-${crypto.randomUUID()}`},
+              '2027-09-03T09:30:00Z', '2027-09-03T10:30:00Z')`;
 
     await expect(
       store.rollCalendarEventHorizon({
@@ -630,7 +626,7 @@ describe.skipIf(!url)('Slotlock calendar events (real Postgres)', () => {
             ADD CONSTRAINT ${name} CHECK (
               materialized_ends_at > materialized_starts_at
               AND (materialized_ends_at - materialized_starts_at <= ${bound})
-            );`);
+            ) NOT VALID;`);
         await createSlotlockStore(tx).applySchema();
         const constraints = await tx<{ conname: string; validated: boolean }[]>`
           SELECT conname, convalidated AS validated FROM pg_constraint

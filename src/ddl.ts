@@ -1307,6 +1307,10 @@ ALTER TABLE slotlock.calendar_events
 -- not tie the cursor to a rule: a release from before cursors may turn a series into a one-off and
 -- leave its cursor, which is then never read.
 ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS recurrence_cursor jsonb;
+-- When the horizon roll may next examine a series it could not extend (an occurrence collided, or
+-- the rule is over the expansion budget): until then it waits behind the series that can roll, so
+-- a pile of blocked series never starves a healthy one. NULL: due as usual.
+ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS roll_retry_at timestamptz;
 ALTER TABLE slotlock.calendar_events
   DROP CONSTRAINT IF EXISTS slotlock_calendar_events_recurrence_cursor_bounded;
 DO $slotlock_calendar_event_recurrence_cursor$

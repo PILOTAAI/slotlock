@@ -19,6 +19,7 @@ const DONE_ROLL: CalendarHorizonRollResult = {
   examined: 0,
   extended: 0,
   conflicts: 0,
+  conflictEventIds: [],
   refused: 0,
   refusedEventIds: [],
   hasMore: false,
@@ -284,7 +285,9 @@ describe('startSlotlockMaintenance', () => {
     const fake = fakeStore();
     // Ten batches of one extended series, then the rest: two passes back to back.
     fake.roll('fleet', ...Array.from({ length: 12 }, (_, n) => ({ ...DONE_ROLL, extended: 1, hasMore: true, next: cursor(n + 1) })));
-    // Another tenant whose only due series are ones it cannot extend: capped, but no progress.
+    // Another tenant whose only due series are ones it cannot extend: capped, but no progress. The
+    // store puts those behind the rest, so it goes round once more to reach what lies behind them,
+    // and then waits: a store that kept answering the same ones never loops.
     fake.roll('stuck', ...Array.from({ length: 30 }, (_, n) => ({ ...DONE_ROLL, refused: 1, hasMore: true, next: cursor(n + 1) })));
     const onPass = vi.fn();
     const scheduler = startSlotlockMaintenance({
@@ -300,7 +303,10 @@ describe('startSlotlockMaintenance', () => {
       result({ extended: 10, capped: true }),
       result({ refused: 10, capped: true }),
       result({ extended: 2 }),
+      result({ refused: 10, capped: true }),
     ]);
+    await settle();
+    expect(onPass).toHaveBeenCalledTimes(4);
     await scheduler.close();
   });
 

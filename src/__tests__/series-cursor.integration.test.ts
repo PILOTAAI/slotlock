@@ -179,8 +179,16 @@ describe.skipIf(!url)('a stored series resumed from its cursor (real Postgres)',
 
   it('keeps no cursor for a one-off event', async () => {
     const oneOff = `one-off-${crypto.randomUUID()}`;
+    // On a resource of its own: the long-running series is now stored for a year from 2027, and a
+    // write on its resource before that, where it is not stored, is refused.
+    const own = await store.createResource({
+      externalRef: `one-off-resource-${crypto.randomUUID()}`,
+      tenantRef,
+      timezone: 'Europe/London',
+    });
     const result = await store.putCalendarEvent({
       ...handover(oneOff),
+      resourceId: own.id,
       recurrence: undefined,
       start: d('2026-11-02T13:00:00Z'),
       end: d('2026-11-02T14:00:00Z'),
@@ -260,10 +268,6 @@ describe.skipIf(!url)(
       expect(first).toMatchObject({ examined: 2, extended: 0, refused: 2, hasMore: true });
       expect(first.next).not.toBeNull();
 
-      // Without `after`, the next batch is the same two refused series.
-      const again = await store.rollCalendarEventHorizon({ tenantRef, window, limit: 2 });
-      expect(again).toMatchObject({ examined: 2, refused: 2 });
-
       const second = await store.rollCalendarEventHorizon({
         tenantRef,
         window,
@@ -280,6 +284,15 @@ describe.skipIf(!url)(
       await expect(
         store.getCalendarEvent({ tenantRef, externalRef: ordinary }),
       ).resolves.toMatchObject({ materializationWindow: window });
+
+      // Without `after` too, a batch does not examine the refused series again for an hour.
+      const again = await store.rollCalendarEventHorizon({ tenantRef, window, limit: 2 });
+      expect(again).toMatchObject({ examined: 0, refused: 0, hasMore: false });
+      const retries = await sql<{ waits: boolean }[]>`
+        SELECT roll_retry_at > now() + interval '59 minutes' AS waits
+          FROM slotlock.calendar_events
+         WHERE tenant_ref = ${tenantRef} AND external_ref IN ${sql(stuck)}`;
+      expect(retries).toEqual([{ waits: true }, { waits: true }]);
     });
 
     it('refuses an `after` that is not a batch’s `next`', async () => {

@@ -148,6 +148,8 @@ export function startSlotlockMaintenance(
   const queue: string[] = [];
   /** Tenants waiting or in a pass: a tenant served during its own pass is not queued again. */
   const queued = new Set<string>();
+  /** Tenants whose last pass only met series it could not extend, and went round once more. */
+  const blockedOnly = new Set<string>();
   const controller = new AbortController();
   let working: Promise<void> | null = null;
 
@@ -183,9 +185,15 @@ export function startSlotlockMaintenance(
             } catch {
               // Reporting must never stop maintenance, or make a pass that ran look failed.
             }
-            // A capped pass that got somewhere goes round again at once; one that only met series it
-            // cannot extend waits for the next interval rather than examine them again and again.
-            again = result.capped && result.extended + result.pruned > 0;
+            // A capped pass that got somewhere goes round again at once. One that only met series
+            // it cannot extend has put them behind the others for an hour (the store does), so it
+            // goes round once more to reach the series behind them; twice in a row, it waits for
+            // the next interval rather than examine the same ones again and again.
+            const progressed = result.extended + result.pruned > 0;
+            const blocked = !progressed && result.conflicts + result.refused > 0;
+            again = result.capped && (progressed || (blocked && !blockedOnly.has(tenantRef)));
+            if (result.capped && blocked) blockedOnly.add(tenantRef);
+            else blockedOnly.delete(tenantRef);
           }
         } catch (error) {
           if (controller.signal.aborted) return;
@@ -223,7 +231,11 @@ export function startSlotlockMaintenance(
       const previous = served.get(tenantRef);
       served.delete(tenantRef);
       served.set(tenantRef, previous ?? 0);
-      while (served.size > maxTenants) served.delete(served.keys().next().value as string);
+      while (served.size > maxTenants) {
+        const forgotten = served.keys().next().value as string;
+        served.delete(forgotten);
+        blockedOnly.delete(forgotten);
+      }
       if (due(tenantRef)) enqueue(tenantRef);
     },
     async close() {

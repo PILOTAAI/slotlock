@@ -1323,6 +1323,165 @@ async function upsertResource(
   return toResource(row);
 }
 
+/**
+ * Rematerialize one stored recurring master over the window a roll to `horizon` gives it
+ * (rolledWindow): from where its last expansion stopped when that can be trusted, else its start.
+ * False when there is no such master or nothing to roll. A collision throws the database's 23P01,
+ * and a rule over the expansion budget CalendarExpansionLimitError; run it in a savepoint, which
+ * either rolls back whole.
+ */
+async function rollStoredSeries(
+  tx: TransactionSql,
+  tenantRef: string,
+  eventId: string,
+  horizon: Interval,
+): Promise<boolean> {
+  const [row] = await tx<CalendarEventRow[]>`
+    SELECT id, tenant_ref, owner_ref, external_ref, resource_id, starts_at, ends_at, timezone,
+           summary, description, location, status, transparency, organizer, attendees,
+           reminders, recurrence_rule, recurrence_exceptions, materialized_starts_at,
+           materialized_ends_at, recurrence_cursor, revision, source, created_at,
+           updated_at
+      FROM slotlock.calendar_events
+     WHERE id = ${eventId} AND tenant_ref = ${tenantRef}
+     FOR UPDATE`;
+  if (!row || row.recurrence_rule === null) return false;
+  const rolled = rolledWindow(
+    { start: row.materialized_starts_at, end: row.materialized_ends_at },
+    horizon,
+  );
+  if (!rolled) return false;
+  const childMap = await loadCalendarEventChildren(tx, [row.id]);
+  const event = toCalendarEvent(row, childMap.get(row.id));
+  const { occurrences, cursor } = expandCalendarEventSeries(event, rolled, {
+    cursor: row.recurrence_cursor ?? null,
+    stored: true,
+  });
+  await replaceCalendarEventOccurrences(tx, {
+    tenantRef,
+    eventId: row.id,
+    resourceId: row.resource_id,
+    event,
+    occurrences,
+    revision: Number(row.revision),
+  });
+  await tx`
+    UPDATE slotlock.calendar_events
+       SET materialized_starts_at = ${rolled.start},
+           materialized_ends_at = ${rolled.end},
+           recurrence_cursor = ${seriesCursorJson(tx, cursor)},
+           roll_retry_at = NULL
+     WHERE id = ${row.id} AND tenant_ref = ${tenantRef}`;
+  return true;
+}
+
+/** Put a master the roll could not extend behind the others for an hour. */
+async function deferRoll(executor: StoreSql, tenantRef: string, eventId: string): Promise<void> {
+  await executor`
+    UPDATE slotlock.calendar_events
+       SET roll_retry_at = now() + interval '1 hour'
+     WHERE id = ${eventId} AND tenant_ref = ${tenantRef}`;
+}
+
+/**
+ * Whether every opaque recurring series on the resource (but `exceptEventId`) is stored over the
+ * part of [start, end) that a roll can ever reach: from the later of `start` and the rolling
+ * horizon's start. A write there must not land where such a series is not stored, or the series'
+ * next roll would collide with it and stop. A series behind is first rolled to the horizon, in a
+ * savepoint of the write's transaction, so the write meets its occurrences under the exclusion
+ * arbiter; false when one cannot be (the write reaches past the horizon, the series collides, or its
+ * rule is over the budget). Series are locked in id order, as every writer locks them.
+ */
+async function recurrenceCoversWrite(
+  tx: TransactionSql,
+  params: {
+    tenantRef: string;
+    resourceId: string;
+    start: Date;
+    end: Date;
+    exceptEventId?: string;
+  },
+): Promise<boolean> {
+  const horizon = calendarEventRollingHorizon();
+  if (params.end <= horizon.start) return true;
+  const from = params.start > horizon.start ? params.start : horizon.start;
+  const behind = () => tx<{ id: string }[]>`
+    SELECT event.id
+      FROM slotlock.calendar_events event
+     WHERE event.tenant_ref = ${params.tenantRef}
+       AND event.resource_id = ${params.resourceId}
+       AND event.recurrence_rule IS NOT NULL
+       AND event.transparency = 'opaque'
+       AND event.id IS DISTINCT FROM ${params.exceptEventId ?? null}::uuid
+       AND (
+         event.materialized_ends_at < ${params.end}
+         OR event.materialized_starts_at > GREATEST(
+              ${from}::timestamptz,
+              LEAST(event.starts_at, COALESCE((
+                SELECT min(exception.starts_at)
+                  FROM slotlock.calendar_event_exceptions exception
+                 WHERE exception.tenant_ref = event.tenant_ref
+                   AND exception.event_id = event.id
+                   AND exception.cancelled = false
+              ), event.starts_at))
+            )
+       )
+     ORDER BY event.id`;
+  const due = await behind();
+  if (due.length === 0) return true;
+  if (params.end > horizon.end) return false;
+  for (const { id } of due) {
+    try {
+      await tx.savepoint((sp) => rollStoredSeries(sp, params.tenantRef, id, horizon));
+    } catch (error) {
+      if (error instanceof CalendarExpansionLimitError || pgCode(error) === EXCLUSION_VIOLATION) {
+        return false;
+      }
+      throw error;
+    }
+  }
+  return (await behind()).length === 0;
+}
+
+/** From the earliest start to the latest end of an event's occurrences, or null for none. */
+function occurrenceSpan(occurrences: readonly CalendarEventOccurrence[]): Interval | null {
+  const [first] = occurrences;
+  if (!first) return null;
+  let start = first.start;
+  let end = first.end;
+  for (const occurrence of occurrences) {
+    if (occurrence.start < start) start = occurrence.start;
+    if (occurrence.end > end) end = occurrence.end;
+  }
+  return { start, end };
+}
+
+/**
+ * After a write lost to the exclusion arbiter: roll, in a transaction of its own, the series on the
+ * resource the write's transaction rolled with it (and lost), so they stay extended and the loss
+ * can name the occurrence that blocked it. A resource with no tenant has no series.
+ */
+async function rollSeriesBehind(
+  executor: StoreSql,
+  resourceId: string,
+  start: Date,
+  end: Date,
+  exceptEventId?: string,
+): Promise<void> {
+  await inTransaction(executor, async (tx) => {
+    const [resource] = await tx<{ tenant_ref: string | null }[]>`
+      SELECT tenant_ref FROM slotlock.resources WHERE id = ${resourceId}`;
+    if (!resource?.tenant_ref) return;
+    await recurrenceCoversWrite(tx, {
+      tenantRef: resource.tenant_ref,
+      resourceId,
+      start,
+      end,
+      ...(exceptEventId !== undefined ? { exceptEventId } : {}),
+    });
+  });
+}
+
 export interface SlotlockStore {
   /**
    * Apply the Slotlock DDL (idempotent). Owns the `slotlock` schema on the connected DB. Refuses
@@ -2057,25 +2216,39 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
       const id = randomUUID();
       for (let attempt = 1; ; attempt++) {
         try {
-          const rows = await inTransaction(sql, async (tx) => {
+          return await inTransaction(sql, async (tx): Promise<CreateReservationResult> => {
+            const [resource] = await tx<{ tenant_ref: string | null }[]>`
+              SELECT tenant_ref FROM slotlock.resources
+               WHERE id = ${params.resourceId}
+                 AND (${params.tenantRef ?? null}::text IS NULL
+                      OR tenant_ref = ${params.tenantRef ?? null})
+               FOR SHARE`;
+            if (!resource) return { ok: false, code: 'resource_not_found' };
+            if (
+              resource.tenant_ref !== null &&
+              !(await recurrenceCoversWrite(tx, {
+                tenantRef: resource.tenant_ref,
+                resourceId: params.resourceId,
+                start: params.start,
+                end: params.end,
+              }))
+            ) {
+              return { ok: false, code: 'recurrence_not_materialized' };
+            }
             await reapExpiredHolds(tx, params.resourceId, params.start, params.end);
-            return tx<ReservationRow[]>`
+            const [row] = await tx<ReservationRow[]>`
               INSERT INTO slotlock.reservations (
                 id, resource_id, tenant_ref, external_ref, starts_at, ends_at, source
+              ) VALUES (
+                ${id}, ${params.resourceId}, ${resource.tenant_ref},
+                ${resource.tenant_ref === null ? null : id},
+                ${params.start}, ${params.end}, ${params.source ?? null}
               )
-              SELECT ${id}, resource.id, resource.tenant_ref,
-                     CASE WHEN resource.tenant_ref IS NULL THEN NULL ELSE ${id} END,
-                     ${params.start}, ${params.end}, ${params.source ?? null}
-                FROM slotlock.resources resource
-               WHERE resource.id = ${params.resourceId}
-                 AND (${params.tenantRef ?? null}::text IS NULL
-                      OR resource.tenant_ref = ${params.tenantRef ?? null})
               RETURNING id, resource_id, tenant_ref, external_ref, starts_at, ends_at,
                         buffer_after_ms, revision, source`;
+            if (!row) throw new Error('slotlock: reservation insert returned no row');
+            return { ok: true, reservation: toReservation(row) };
           });
-          const row = rows[0];
-          if (!row) return { ok: false, code: 'resource_not_found' };
-          return { ok: true, reservation: toReservation(row) };
         } catch (err) {
           const code = pgCode(err);
           if ((code === DEADLOCK_DETECTED || code === SERIALIZATION_FAILURE) && attempt === 1) {
@@ -2090,6 +2263,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
           }
           // A SECOND contention abort is treated as a loss too (structured, possibly with a null
           // winner if both rivals rolled back) — symmetric with 40P01, never a raw throw.
+          await rollSeriesBehind(sql, params.resourceId, params.start, params.end);
           return overlapLoss(sql, params.resourceId, params.start, params.end);
         }
       }
@@ -2131,6 +2305,16 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
             if (!(await resourceBelongsToTenant(tx, params.resourceId, params.tenantRef))) {
               return { ok: false, code: 'resource_tenant_mismatch' };
             }
+            if (
+              !(await recurrenceCoversWrite(tx, {
+                tenantRef: params.tenantRef,
+                resourceId: params.resourceId,
+                start: params.start,
+                end: occupiedEnd(params),
+              }))
+            ) {
+              return { ok: false, code: 'recurrence_not_materialized' };
+            }
             await reapExpiredHolds(tx, params.resourceId, params.start, occupiedEnd(params));
             const rows = await tx<ReservationRow[]>`
               INSERT INTO slotlock.reservations (
@@ -2158,6 +2342,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
           ) {
             throw err;
           }
+          await rollSeriesBehind(sql, params.resourceId, params.start, occupiedEnd(params));
           return overlapLoss(
             sql,
             params.resourceId,
@@ -2208,6 +2393,16 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
             if (!(await resourceBelongsToTenant(tx, params.resourceId, params.tenantRef))) {
               return { ok: false, code: 'resource_tenant_mismatch' };
             }
+            if (
+              !(await recurrenceCoversWrite(tx, {
+                tenantRef: params.tenantRef,
+                resourceId: params.resourceId,
+                start: params.start,
+                end: occupiedEnd(params),
+              }))
+            ) {
+              return { ok: false, code: 'recurrence_not_materialized' };
+            }
             await reapExpiredHolds(tx, params.resourceId, params.start, occupiedEnd(params));
             const rows = await tx<ReservationRow[]>`
               UPDATE slotlock.reservations
@@ -2236,6 +2431,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
           ) {
             throw err;
           }
+          await rollSeriesBehind(sql, params.resourceId, params.start, occupiedEnd(params));
           return overlapLoss(
             sql,
             params.resourceId,
@@ -2371,12 +2567,23 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
                   : { ok: false, code: 'idempotency_conflict' };
               }
             }
-            const [resource] = await tx<{ id: string }[]>`
-              SELECT id FROM slotlock.resources
+            const [resource] = await tx<{ tenant_ref: string | null }[]>`
+              SELECT tenant_ref FROM slotlock.resources
                WHERE id = ${params.resourceId}
                  AND (${tenantRef ?? null}::text IS NULL OR tenant_ref = ${tenantRef ?? null})
                FOR SHARE`;
             if (!resource) return { ok: false, code: 'resource_not_found' };
+            if (
+              resource.tenant_ref !== null &&
+              !(await recurrenceCoversWrite(tx, {
+                tenantRef: resource.tenant_ref,
+                resourceId: params.resourceId,
+                start: params.start,
+                end: occupied,
+              }))
+            ) {
+              return { ok: false, code: 'recurrence_not_materialized' };
+            }
             await reapExpiredHolds(tx, params.resourceId, params.start, occupied);
             const [row] = await tx<HoldRow[]>`
               INSERT INTO slotlock.reservations (
@@ -2414,6 +2621,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
           }
           // A SECOND contention abort is treated as a loss too (structured, possibly with a null
           // winner if both rivals rolled back) — symmetric with 40P01, never a raw throw.
+          await rollSeriesBehind(sql, params.resourceId, params.start, occupied);
           return overlapLoss(sql, params.resourceId, params.start, params.end, bufferAfterMs);
         }
       }
@@ -2748,6 +2956,19 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
             }
             const eventId = found?.id ?? randomUUID();
             const revision = currentRevision + 1;
+            const reach = occurrenceSpan(occurrences);
+            if ((event.transparency ?? 'opaque') === 'opaque' && reach) {
+              if (
+                !(await recurrenceCoversWrite(tx, {
+                  tenantRef: params.tenantRef,
+                  resourceId: params.resourceId,
+                  ...reach,
+                  ...(found ? { exceptEventId: found.id } : {}),
+                }))
+              ) {
+                return { ok: false, code: 'recurrence_not_materialized' };
+              }
+            }
 
             if (found) {
               await tx`
@@ -2771,6 +2992,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
                        materialized_starts_at = ${materializationWindow.start},
                        materialized_ends_at = ${materializationWindow.end},
                        recurrence_cursor = ${seriesCursorJson(tx, series.cursor)},
+                       roll_retry_at = NULL,
                        revision = ${revision},
                        source = ${params.source ?? null},
                        updated_at = now()
@@ -2842,6 +3064,10 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
             code !== SERIALIZATION_FAILURE
           ) {
             throw error;
+          }
+          const reach = occurrenceSpan(attempted);
+          if (reach) {
+            await rollSeriesBehind(sql, params.resourceId, reach.start, reach.end, storedEventId);
           }
           return findCalendarOverlap(sql, params.resourceId, attempted, storedEventId);
         }
@@ -2965,6 +3191,8 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
              OR materialized_ends_at < ${window.end}
            )
            AND materialized_ends_at <= ${new Date(window.start.getTime() + MAX_MATERIALIZATION_WINDOW_MS)}
+           -- One it could not extend waits its turn behind the ones it can.
+           AND (roll_retry_at IS NULL OR roll_retry_at <= now())
            AND (
              ${after?.materializedEndsAt ?? null}::timestamptz IS NULL
              OR (materialized_ends_at, id) >
@@ -2977,49 +3205,14 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
       let conflicts = 0;
       let refused = 0;
       const refusedEventIds: string[] = [];
+      const conflictEventIds: string[] = [];
 
       for (const candidate of due) {
         for (let attempt = 1; attempt <= 2; attempt++) {
           try {
-            const changed = await inTransaction(sql, async (tx) => {
-              const [row] = await tx<CalendarEventRow[]>`
-                SELECT id, tenant_ref, owner_ref, external_ref, resource_id, starts_at, ends_at, timezone,
-                       summary, description, location, status, transparency, organizer, attendees,
-                       reminders, recurrence_rule, recurrence_exceptions, materialized_starts_at,
-                       materialized_ends_at, recurrence_cursor, revision, source, created_at,
-                       updated_at
-                  FROM slotlock.calendar_events
-                 WHERE id = ${candidate.id} AND tenant_ref = ${params.tenantRef}
-                 FOR UPDATE`;
-              if (!row || row.recurrence_rule === null) return false;
-              const rolled = rolledWindow(
-                { start: row.materialized_starts_at, end: row.materialized_ends_at },
-                window,
-              );
-              if (!rolled) return false;
-              const childMap = await loadCalendarEventChildren(tx, [row.id]);
-              const event = toCalendarEvent(row, childMap.get(row.id));
-              // From where its last expansion stopped, when that can be trusted; else its start.
-              const { occurrences, cursor } = expandCalendarEventSeries(event, rolled, {
-                cursor: row.recurrence_cursor ?? null,
-                stored: true,
-              });
-              await replaceCalendarEventOccurrences(tx, {
-                tenantRef: params.tenantRef,
-                eventId: row.id,
-                resourceId: row.resource_id,
-                event,
-                occurrences,
-                revision: Number(row.revision),
-              });
-              await tx`
-                UPDATE slotlock.calendar_events
-                   SET materialized_starts_at = ${rolled.start},
-                       materialized_ends_at = ${rolled.end},
-                       recurrence_cursor = ${seriesCursorJson(tx, cursor)}
-                 WHERE id = ${row.id} AND tenant_ref = ${params.tenantRef}`;
-              return true;
-            });
+            const changed = await inTransaction(sql, (tx) =>
+              rollStoredSeries(tx, params.tenantRef, candidate.id, window),
+            );
             if (changed) extended += 1;
             break;
           } catch (error) {
@@ -3029,6 +3222,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
               // was written; its old coverage stays, and the masters after it still roll.
               refused += 1;
               refusedEventIds.push(candidate.id);
+              await deferRoll(sql, params.tenantRef, candidate.id);
               break;
             }
             const code = pgCode(error);
@@ -3043,6 +3237,8 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
               // The savepoint rolled every delete/insert back, so the previous materialized
               // coverage remains truthful and callers will fail closed beyond it.
               conflicts += 1;
+              conflictEventIds.push(candidate.id);
+              await deferRoll(sql, params.tenantRef, candidate.id);
               break;
             }
             throw error;
@@ -3055,6 +3251,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
         examined: due.length,
         extended,
         conflicts,
+        conflictEventIds,
         refused,
         refusedEventIds,
         hasMore,

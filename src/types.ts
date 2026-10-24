@@ -73,6 +73,11 @@ export type ExternalReservationResult =
   | { ok: false; code: 'stale_revision' }
   | { ok: false; code: 'revision_conflict' }
   | { ok: false; code: 'idempotency_conflict' }
+  /**
+   * A recurring event on the resource is not stored as far as this write reaches, and cannot be
+   * extended that far (past the rolling horizon, or blocked): the time cannot be proven free.
+   */
+  | { ok: false; code: 'recurrence_not_materialized' }
   | { ok: false; code: 'overlap'; conflictingReservationId: string | null };
 
 export type CancelExternalReservationResult =
@@ -103,6 +108,11 @@ export type CreateReservationResult =
   | { ok: false; code: 'invalid_window' }
   /** No resource with that id, or (under tenant RLS or with `tenantRef`) not one of the tenant's. */
   | { ok: false; code: 'resource_not_found' }
+  /**
+   * A recurring event on the resource is not stored as far as this write reaches, and cannot be
+   * extended that far (past the rolling horizon, or blocked): the time cannot be proven free.
+   */
+  | { ok: false; code: 'recurrence_not_materialized' }
   | { ok: false; code: 'overlap'; conflictingReservationId: string | null };
 
 /** A hold: occupies exactly like a reservation until its DB-clock expiry, then lazily reaped. */
@@ -129,6 +139,11 @@ export type AcquireHoldResult =
   | { ok: false; code: 'resource_not_found' }
   /** The idempotency key already made a hold with another resource, window, ttl, buffer or source. */
   | { ok: false; code: 'idempotency_conflict' }
+  /**
+   * A recurring event on the resource is not stored as far as this write reaches, and cannot be
+   * extended that far (past the rolling horizon, or blocked): the time cannot be proven free.
+   */
+  | { ok: false; code: 'recurrence_not_materialized' }
   | { ok: false; code: 'overlap'; conflictingReservationId: string | null };
 
 export type ConfirmHoldResult =
@@ -261,6 +276,11 @@ export type PutCalendarEventResult =
   | { ok: false; code: 'resource_tenant_mismatch' }
   | { ok: false; code: 'event_cancelled'; currentRevision: number }
   | { ok: false; code: 'revision_conflict'; currentRevision: number }
+  /**
+   * A recurring event on the resource is not stored as far as this write reaches, and cannot be
+   * extended that far (past the rolling horizon, or blocked): the time cannot be proven free.
+   */
+  | { ok: false; code: 'recurrence_not_materialized' }
   | { ok: false; code: 'overlap'; conflictingReservationId: string | null };
 
 export type CancelCalendarEventResult =
@@ -293,11 +313,17 @@ export interface CalendarHorizonRollResult {
    * stored end and the window's: a roll never moves a series' end back.
    */
   extended: number;
-  /** Masters whose new occurrence collided; their previous coverage remains intact. */
+  /**
+   * Masters whose new occurrence collided; their previous coverage remains intact, and they wait an
+   * hour before a roll examines them again, behind the masters it can extend.
+   */
   conflicts: number;
+  /** The ids of those masters: what blocks each is a booking or hold on its new occurrences. */
+  conflictEventIds: string[];
   /**
    * Masters whose rule takes more than the expansion budget to reach the window (one that never
-   * occurs again, or almost never); their previous coverage remains intact.
+   * occurs again, or almost never); their previous coverage remains intact, and they wait an hour
+   * before a roll examines them again.
    */
   refused: number;
   /** The ids of those masters, to find and fix them. */

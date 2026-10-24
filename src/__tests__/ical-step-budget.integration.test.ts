@@ -93,6 +93,7 @@ describe.skipIf(!url)('the expansion budget in the store (real Postgres)', () =>
       examined: 2,
       extended: 1,
       conflicts: 0,
+      conflictEventIds: [],
       refused: 1,
       refusedEventIds: [stuckId],
       hasMore: false,
