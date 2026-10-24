@@ -9,6 +9,10 @@ import {
   SLOTLOCK_DASHBOARD_TABLES,
   SLOTLOCK_DEFINER_FUNCTIONS,
   SLOTLOCK_DEFINER_TABLES,
+  SLOTLOCK_DEPLOYMENT_CHECKS,
+  SLOTLOCK_SCHEMA_FUNCTIONS,
+  SLOTLOCK_SCHEMA_TABLES,
+  SLOTLOCK_SCHEMA_VERSION,
   SLOTLOCK_TENANT_CONTEXT_SETTING,
   SLOTLOCK_TENANT_RLS_DDL,
   SLOTLOCK_TENANT_TABLES,
@@ -120,6 +124,24 @@ describe('deployment DDL name resolution', () => {
     expect(SLOTLOCK_CORE_DDL).not.toContain('pgcrypto');
   });
 
+  // pg_input_is_valid (PostgreSQL 16) is the newest function the DDL calls: on an older server it
+  // must stop with a message naming the version, before anything is created or changed.
+  it('refuses a server older than PostgreSQL 16, and a newer schema, before it changes anything', () => {
+    expect(SLOTLOCK_CORE_DDL).toContain('pg_input_is_valid(');
+    expect(SLOTLOCK_DEPLOYMENT_CHECKS).toContain(
+      "IF pg_catalog.current_setting('server_version_num')::integer < 160000 THEN",
+    );
+    expect(SLOTLOCK_DEPLOYMENT_CHECKS).toContain(`IF installed > ${SLOTLOCK_SCHEMA_VERSION} THEN`);
+    for (const ddl of [SLOTLOCK_CORE_DDL, SLOTLOCK_TENANT_RLS_DDL]) {
+      const checks = ddl.indexOf(SLOTLOCK_DEPLOYMENT_CHECKS);
+      expect(checks).toBeGreaterThan(0);
+      for (const change of ['CREATE EXTENSION', 'CREATE TABLE', 'ALTER TABLE', 'CREATE OR REPLACE']) {
+        const first = ddl.indexOf(change);
+        if (first >= 0) expect(first).toBeGreaterThan(checks);
+      }
+    }
+  });
+
   it('fingerprints policies with core sha256, not an extension function found by name', () => {
     expect(SLOTLOCK_TENANT_RLS_DDL).not.toMatch(/\bdigest\(/);
     expect(SLOTLOCK_TENANT_RLS_DDL).toContain('pg_catalog.sha256(');
@@ -139,10 +161,11 @@ describe('deployment DDL name resolution', () => {
   });
 
   // A function is executable by PUBLIC unless revoked, and a SECURITY DEFINER one runs as the owner.
-  it('defines the API key and dashboard functions as SECURITY DEFINER, executable by no one by default', () => {
+  it('defines the API key, dashboard and schema version functions as SECURITY DEFINER, executable by no one by default', () => {
     expect([...SLOTLOCK_DEFINER_FUNCTIONS]).toEqual([
       ...SLOTLOCK_API_KEY_FUNCTIONS,
       ...SLOTLOCK_DASHBOARD_FUNCTIONS,
+      ...SLOTLOCK_SCHEMA_FUNCTIONS,
     ]);
     const definers = functions.filter(([, , , header]) => header?.includes('SECURITY DEFINER'));
     expect(definers.map(([, name]) => name).sort()).toEqual(
@@ -163,8 +186,12 @@ describe('deployment DDL name resolution', () => {
     }
   });
 
-  it('keeps API keys and dashboard records in tables no role but their owner reads or writes', () => {
-    expect([...SLOTLOCK_DEFINER_TABLES]).toEqual([...SLOTLOCK_API_KEY_TABLES, ...SLOTLOCK_DASHBOARD_TABLES]);
+  it('keeps API keys, dashboard records and the schema version in tables no role but their owner reads or writes', () => {
+    expect([...SLOTLOCK_DEFINER_TABLES]).toEqual([
+      ...SLOTLOCK_API_KEY_TABLES,
+      ...SLOTLOCK_DASHBOARD_TABLES,
+      ...SLOTLOCK_SCHEMA_TABLES,
+    ]);
     for (const table of SLOTLOCK_DEFINER_TABLES) {
       expect(SLOTLOCK_CORE_DDL).toContain(`CREATE TABLE IF NOT EXISTS slotlock.${table} (`);
       expect(SLOTLOCK_CORE_DDL).toContain(`ALTER TABLE slotlock.${table} ENABLE ROW LEVEL SECURITY;`);

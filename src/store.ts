@@ -5,8 +5,12 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Sql, TransactionSql } from 'postgres';
 import {
   SLOTLOCK_CORE_DDL,
+  SLOTLOCK_DEPLOYMENT_CHECKS,
   SLOTLOCK_SCHEMA_CONTROL_REFUSAL,
+  SLOTLOCK_SCHEMA_NEWER_REFUSAL,
+  SLOTLOCK_SCHEMA_VERSION,
   SLOTLOCK_TENANT_CONTEXT_SETTING,
+  SLOTLOCK_TENANT_TABLES,
   createSlotlockApplicationRoleGrantsDdl,
   createSlotlockTenantRlsDdl,
 } from './ddl.js';
@@ -230,10 +234,20 @@ async function withPinnedSearchPath<T>(
 /**
  * The deployment DDL refuses a `slotlock` schema that another role controls with SQLSTATE 42501 and
  * its findings as a JSON array in DETAIL. Surface that as `unsafe_slotlock_schema` with `reasons`,
- * keeping the database's error (and its HINT) as `cause`; any other failure passes through unchanged.
+ * keeping the database's error (and its HINT) as `cause`. It refuses a schema a newer release
+ * migrated with SQLSTATE 55000: surface that as `schema_newer`. Any other failure passes through.
  */
 function schemaControlRefusal(error: unknown): unknown {
   const failure = error as { code?: unknown; message?: unknown; detail?: unknown } | null;
+  if (
+    failure?.code === '55000' &&
+    typeof failure.message === 'string' &&
+    failure.message.startsWith(SLOTLOCK_SCHEMA_NEWER_REFUSAL)
+  ) {
+    return Object.assign(new Error(failure.message, { cause: error }), {
+      code: 'schema_newer' as const,
+    });
+  }
   if (
     failure?.code !== '42501' ||
     typeof failure.message !== 'string' ||
@@ -253,6 +267,271 @@ function schemaControlRefusal(error: unknown): unknown {
     code: 'unsafe_slotlock_schema' as const,
     reasons,
   });
+}
+
+/** How a migration (applySchema, applyTenantRls, grantApplicationRole) waits and how long it runs. */
+export interface SlotlockMigrationOptions {
+  /**
+   * The longest it waits for any one lock, in milliseconds (1-600,000; default 1,000). While a
+   * migration waits for a lock on a table, every query that comes after it on that table waits
+   * behind it; past this it gives up, lets them through, and tries again.
+   */
+  lockTimeoutMs?: number;
+  /** The longest any one of its statements runs, in milliseconds (1-86,400,000; default 900,000). */
+  statementTimeoutMs?: number;
+  /** How many times it tries in all (1-20; default 5) before refusing with `schema_lock_timeout`. */
+  attempts?: number;
+}
+
+/** PostgreSQL lock_not_available: a lock wait passed lock_timeout. */
+const LOCK_NOT_AVAILABLE = '55P03';
+const DEFAULT_MIGRATION_LOCK_TIMEOUT_MS = 1_000;
+const DEFAULT_MIGRATION_STATEMENT_TIMEOUT_MS = 15 * 60 * 1000;
+const DEFAULT_MIGRATION_ATTEMPTS = 5;
+const SLOTLOCK_CORE_DDL_SHA256 = createHash('sha256').update(SLOTLOCK_CORE_DDL).digest('hex');
+
+function migrationSettings(options: SlotlockMigrationOptions | undefined) {
+  const lockTimeoutMs = options?.lockTimeoutMs ?? DEFAULT_MIGRATION_LOCK_TIMEOUT_MS;
+  const statementTimeoutMs = options?.statementTimeoutMs ?? DEFAULT_MIGRATION_STATEMENT_TIMEOUT_MS;
+  const attempts = options?.attempts ?? DEFAULT_MIGRATION_ATTEMPTS;
+  const whole = (value: number, max: number) =>
+    Number.isSafeInteger(value) && value >= 1 && value <= max;
+  if (
+    !whole(lockTimeoutMs, 600_000) ||
+    !whole(statementTimeoutMs, 86_400_000) ||
+    !whole(attempts, 20)
+  ) {
+    throw Object.assign(
+      new Error(
+        'Slotlock migration lockTimeoutMs must be 1-600000, statementTimeoutMs 1-86400000 and attempts 1-20, whole numbers',
+      ),
+      { code: 'invalid_migration_options' as const },
+    );
+  }
+  return { lockTimeoutMs, statementTimeoutMs, attempts };
+}
+
+/**
+ * Run one migration step: in a transaction (or a savepoint of the caller's), with names resolved
+ * in pg_catalog only, serialized with every other migration of this database, and with the lock and
+ * statement timeouts set. A step that waits past its lock timeout is rolled back and tried again
+ * after a pause, up to `attempts` times. The caller's own timeouts are put back afterwards.
+ */
+async function inMigration<T>(
+  executor: StoreSql,
+  options: SlotlockMigrationOptions | undefined,
+  step: (tx: TransactionSql) => Promise<T>,
+): Promise<T> {
+  const settings = migrationSettings(options);
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await inTransaction(executor, (tx) =>
+        withPinnedSearchPath(tx, async () => {
+          // Taken before the timeouts are set: waiting for another migration holds up no query.
+          await tx`SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${SCHEMA_APPLY_LOCK}, 0))`;
+          const [caller] = await tx<{ lock: string; statement: string }[]>`
+            SELECT pg_catalog.current_setting('lock_timeout') AS lock,
+                   pg_catalog.current_setting('statement_timeout') AS statement`;
+          await tx`
+            SELECT pg_catalog.set_config('lock_timeout', ${`${settings.lockTimeoutMs}ms`}, true),
+                   pg_catalog.set_config('statement_timeout', ${`${settings.statementTimeoutMs}ms`}, true)`;
+          const result = await step(tx);
+          await tx`
+            SELECT pg_catalog.set_config('lock_timeout', ${caller?.lock ?? '0'}, true),
+                   pg_catalog.set_config('statement_timeout', ${caller?.statement ?? '0'}, true)`;
+          return result;
+        }),
+      );
+    } catch (error) {
+      if (pgCode(error) !== LOCK_NOT_AVAILABLE) throw error;
+      if (attempt >= settings.attempts) {
+        throw Object.assign(
+          new Error(
+            `Slotlock migration gave up after ${attempt} attempts to take its locks within ${settings.lockTimeoutMs} ms: a long transaction holds a slotlock table. Run it again once that transaction ends`,
+            { cause: error },
+          ),
+          { code: 'schema_lock_timeout' as const },
+        );
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(attempt * 250, 2_000) + Math.floor(Math.random() * 250)),
+      );
+    }
+  }
+}
+
+/**
+ * A digest of what the migration defines in the `slotlock` schema: its tables and columns,
+ * constraints (and whether each is validated), indexes, triggers and functions, and whether PUBLIC
+ * holds any right on them. Grants to other roles, ownership and row-level security are left out:
+ * applyTenantRls and grantApplicationRole change those after applySchema has recorded the digest.
+ * Objects of an extension are left out too. Deparsed definitions depend on search_path, so this runs
+ * with it pinned, as the migration does.
+ */
+async function slotlockCatalogDigest(tx: TransactionSql): Promise<string> {
+  const [row] = await tx<{ digest: string }[]>`
+    WITH schema AS (
+      SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = 'slotlock'
+    ), members AS (
+      SELECT objid FROM pg_catalog.pg_depend WHERE deptype = 'e'
+    ), items (item) AS (
+      SELECT 'relation ' || rel.relname || ' ' || rel.relkind::text || ' '
+             || EXISTS (SELECT 1 FROM pg_catalog.aclexplode(rel.relacl) acl WHERE acl.grantee = 0)::text
+        FROM pg_catalog.pg_class rel, schema
+       WHERE rel.relnamespace = schema.oid AND rel.oid NOT IN (SELECT objid FROM members)
+      UNION ALL
+      SELECT 'column ' || rel.relname || '.' || att.attname || ' '
+             || pg_catalog.format_type(att.atttypid, att.atttypmod) || ' ' || att.attnotnull::text || ' '
+             || COALESCE(pg_catalog.pg_get_expr(def.adbin, def.adrelid), '')
+        FROM pg_catalog.pg_attribute att
+        JOIN pg_catalog.pg_class rel ON rel.oid = att.attrelid
+        JOIN schema ON rel.relnamespace = schema.oid
+        LEFT JOIN pg_catalog.pg_attrdef def ON def.adrelid = att.attrelid AND def.adnum = att.attnum
+       WHERE rel.relkind IN ('r', 'p') AND att.attnum > 0 AND NOT att.attisdropped
+      UNION ALL
+      SELECT 'constraint ' || rel.relname || '.' || con.conname || ' '
+             || pg_catalog.pg_get_constraintdef(con.oid) || ' ' || con.convalidated::text
+        FROM pg_catalog.pg_constraint con
+        JOIN pg_catalog.pg_class rel ON rel.oid = con.conrelid
+        JOIN schema ON rel.relnamespace = schema.oid
+      UNION ALL
+      SELECT 'index ' || pg_catalog.pg_get_indexdef(idx.indexrelid)
+        FROM pg_catalog.pg_index idx
+        JOIN pg_catalog.pg_class rel ON rel.oid = idx.indrelid
+        JOIN schema ON rel.relnamespace = schema.oid
+      UNION ALL
+      SELECT 'trigger ' || pg_catalog.pg_get_triggerdef(trg.oid) || ' ' || trg.tgenabled::text
+        FROM pg_catalog.pg_trigger trg
+        JOIN pg_catalog.pg_class rel ON rel.oid = trg.tgrelid
+        JOIN schema ON rel.relnamespace = schema.oid
+       WHERE NOT trg.tgisinternal
+      UNION ALL
+      SELECT 'function ' || fn.oid::pg_catalog.regprocedure::text || ' ' || fn.prosecdef::text || ' '
+             || fn.provolatile::text || ' ' || COALESCE(fn.proconfig::text, '') || ' '
+             || pg_catalog.md5(fn.prosrc) || ' '
+             || EXISTS (SELECT 1 FROM pg_catalog.aclexplode(
+                          COALESCE(fn.proacl, pg_catalog.acldefault('f', fn.proowner))) acl
+                         WHERE acl.grantee = 0)::text
+        FROM pg_catalog.pg_proc fn, schema
+       WHERE fn.pronamespace = schema.oid AND fn.oid NOT IN (SELECT objid FROM members)
+      UNION ALL
+      SELECT 'extension ' || ext.extname || ' ' || ext.extnamespace::pg_catalog.regnamespace::text
+        FROM pg_catalog.pg_extension ext
+       WHERE ext.extname = 'btree_gist'
+    )
+    SELECT pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+             COALESCE(pg_catalog.string_agg(item, pg_catalog.chr(10) ORDER BY item), ''),
+             'UTF8')), 'hex') AS digest
+      FROM items`;
+  return row?.digest ?? '';
+}
+
+/**
+ * Whether the schema is exactly what this release's applySchema last left: the same version, DDL
+ * and catalog digest, and no table left without FORCE by an interrupted migration. Reading needs
+ * the right to (the deployment role owns the table); without it the full migration runs and refuses
+ * what it must.
+ */
+async function slotlockSchemaUpToDate(tx: TransactionSql): Promise<boolean> {
+  const [present] = await tx<{ versioned: boolean; lifted: boolean }[]>`
+    SELECT COALESCE(pg_catalog.has_table_privilege(
+             pg_catalog.to_regclass('slotlock.schema_version'), 'SELECT'), false) AS versioned,
+           COALESCE(pg_catalog.has_table_privilege(
+             pg_catalog.to_regclass('slotlock.deployment_lifted_row_security'), 'SELECT'), false)
+             AS lifted`;
+  if (!present?.versioned || !present.lifted) return false;
+  const [recorded] = await tx<
+    { version: number; ddl_sha256: string | null; catalog_sha256: string | null; lifted: boolean }[]
+  >`
+    SELECT version, ddl_sha256, catalog_sha256,
+           EXISTS (SELECT 1 FROM slotlock.deployment_lifted_row_security) AS lifted
+      FROM slotlock.schema_version
+     WHERE singleton`;
+  if (
+    !recorded ||
+    recorded.lifted ||
+    recorded.version !== SLOTLOCK_SCHEMA_VERSION ||
+    recorded.ddl_sha256 !== SLOTLOCK_CORE_DDL_SHA256 ||
+    recorded.catalog_sha256 === null
+  ) {
+    return false;
+  }
+  return recorded.catalog_sha256 === (await slotlockCatalogDigest(tx));
+}
+
+/**
+ * Whether every tenant table has forced RLS and only its tenant policy, bound to `setting`, whose
+ * live fingerprint (computed as the RLS DDL computes it) matches the contract the DDL recorded.
+ */
+async function tenantRlsUpToDate(tx: TransactionSql, setting: string): Promise<boolean> {
+  const [present] = await tx<{ readable: boolean }[]>`
+    SELECT COALESCE(pg_catalog.has_table_privilege(
+             pg_catalog.to_regclass('slotlock.rls_policy_contracts'), 'SELECT'), false) AS readable`;
+  if (!present?.readable) return false;
+  const tables = [...SLOTLOCK_TENANT_TABLES];
+  const [state] = await tx<{ current: boolean | null; matched: number }[]>`
+    SELECT pg_catalog.bool_and(
+             rel.relrowsecurity AND rel.relforcerowsecurity
+             AND (SELECT pg_catalog.count(*) FROM pg_catalog.pg_policy every
+                   WHERE every.polrelid = rel.oid) = 1
+             AND pg_catalog.obj_description(pol.oid, 'pg_policy') = ${`slotlock:tenant-context:${setting}`}
+             AND contract.tenant_context_setting = ${setting}
+             AND contract.policy_fingerprint = pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+                   pg_catalog.concat_ws(
+                     pg_catalog.chr(31), live.policyname, live.permissive, live.roles::text, live.cmd,
+                     COALESCE(live.qual, ''), COALESCE(live.with_check, '')
+                   ),
+                   'UTF8')), 'hex')
+           ) AS current,
+           pg_catalog.count(*)::int AS matched
+      FROM pg_catalog.unnest(${tables}::text[]) AS wanted(name)
+      JOIN pg_catalog.pg_namespace ns ON ns.nspname = 'slotlock'
+      JOIN pg_catalog.pg_class rel ON rel.relnamespace = ns.oid AND rel.relname = wanted.name
+      JOIN pg_catalog.pg_policy pol ON pol.polrelid = rel.oid AND pol.polname = 'tenant_isolation_v1'
+      JOIN pg_catalog.pg_policies live
+        ON live.schemaname = 'slotlock' AND live.tablename = wanted.name
+       AND live.policyname = 'tenant_isolation_v1'
+      JOIN slotlock.rls_policy_contracts contract ON contract.table_name = wanted.name`;
+  return state?.current === true && state.matched === tables.length;
+}
+
+/**
+ * The schema version recorded by the last migration, or `null` when there is none this role can
+ * read: no schema, a schema from 0.2 or earlier, or a role not yet granted the function (run
+ * `slotlock migrate`, which grants it).
+ */
+export async function readSlotlockSchemaVersion(sql: SlotlockSql): Promise<number | null> {
+  const [readable] = await sql<{ readable: boolean }[]>`
+    SELECT COALESCE(pg_catalog.has_function_privilege(
+             pg_catalog.to_regprocedure('slotlock.installed_schema_version()'), 'EXECUTE'), false)
+             AS readable`;
+  if (!readable?.readable) return null;
+  const [row] = await sql<{ version: number | null }[]>`
+    SELECT slotlock.installed_schema_version() AS version`;
+  return row?.version ?? null;
+}
+
+/**
+ * Refuse to serve a schema another release migrated: `schema_outdated` when it is older than this
+ * release (or unversioned), so `slotlock migrate` must run first; `schema_newer` when a newer release
+ * migrated it, whose schema this release's code does not know. Both carry `installed` and `expected`.
+ */
+export async function assertSlotlockSchemaCurrent(sql: SlotlockSql): Promise<void> {
+  const installed = await readSlotlockSchemaVersion(sql);
+  if (installed === SLOTLOCK_SCHEMA_VERSION) return;
+  const newer = installed !== null && installed > SLOTLOCK_SCHEMA_VERSION;
+  throw Object.assign(
+    new Error(
+      newer
+        ? `The slotlock schema is version ${installed}, migrated by a newer release; this release serves version ${SLOTLOCK_SCHEMA_VERSION}. Serve it with that release or a later one`
+        : `The slotlock schema is ${installed === null ? 'unversioned (0.2 or earlier)' : `version ${installed}`}; this release serves version ${SLOTLOCK_SCHEMA_VERSION}. Run \`slotlock migrate\` with this release first`,
+    ),
+    {
+      code: newer ? ('schema_newer' as const) : ('schema_outdated' as const),
+      installed,
+      expected: SLOTLOCK_SCHEMA_VERSION,
+    },
+  );
 }
 
 interface ReservationRow {
@@ -965,14 +1244,19 @@ export interface SlotlockStore {
    * connected one (superusers aside) owns or can create objects in, that holds an object such a
    * role owns (an extension included), or whose tables such a role may add triggers to or have a
    * trigger running a function such a role owns. Ownership through a group role counts as another
-   * role's: deploy as the owning role itself (`SET ROLE`).
+   * role's: deploy as the owning role itself (`SET ROLE`). Refuses (`schema_newer`) a schema a newer
+   * release migrated, changing nothing. Records SLOTLOCK_SCHEMA_VERSION. A schema this release
+   * already migrated, unchanged since, is left as it is without a lock on any table. Each lock it
+   * waits for is bounded by `lockTimeoutMs`, after which it tries again (`schema_lock_timeout` once
+   * out of attempts).
    */
-  applySchema(): Promise<void>;
+  applySchema(options?: SlotlockMigrationOptions): Promise<void>;
   /**
    * Atomically enable forced tenant RLS using this store's configured context setting. Refuses the
-   * same `slotlock` schemas as `applySchema()`.
+   * same `slotlock` schemas as `applySchema()`. Tables already forced under exactly the policies it
+   * installs, bound to this setting, are left as they are without a lock on any table.
    */
-  applyTenantRls(options?: { allowRebind?: boolean }): Promise<void>;
+  applyTenantRls(options?: { allowRebind?: boolean } & SlotlockMigrationOptions): Promise<void>;
   /**
    * Grant an existing application role exactly what the store needs at runtime: USAGE on the
    * `slotlock` schema and DML on its tables. Run as the deployment role after every `applySchema()`.
@@ -985,7 +1269,7 @@ export interface SlotlockStore {
    * setting. The check runs when the grant is made, so a right added later is not
    * detected until it runs again, and it is not exhaustive (SECURITY.md lists what it does not read).
    */
-  grantApplicationRole(role: string): Promise<void>;
+  grantApplicationRole(role: string, options?: SlotlockMigrationOptions): Promise<void>;
   /**
    * Run store operations with one transaction-local tenant context on the same connection. With
    * `isolation: 'read committed'` the transaction is READ COMMITTED whatever the role's default (a
@@ -1293,68 +1577,64 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
   }
   createSlotlockTenantRlsDdl(configuredTenantSetting); // Validate once before any scoped query.
   return {
-    async applySchema() {
+    async applySchema(migrationOptions) {
       // PostgreSQL's IF NOT EXISTS DDL is idempotent after commit but not race-free: two fresh
       // application instances can still collide on pg_namespace/pg_extension unique indexes.
-      // Serialize bootstrap per database and let the transaction release the lock on crashes.
-      await inTransaction(sql, (tx) =>
-        withPinnedSearchPath(tx, async () => {
-          await tx`SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${SCHEMA_APPLY_LOCK}, 0))`;
-          await tx.unsafe(SLOTLOCK_CORE_DDL).catch((error: unknown) => {
-            throw schemaControlRefusal(error);
-          });
-        }),
-      );
+      // inMigration serializes bootstrap per database and the transaction releases the lock on
+      // crashes. A schema this release already left as it is changes nothing and locks no table.
+      await inMigration(sql, migrationOptions, async (tx) => {
+        await tx.unsafe(SLOTLOCK_DEPLOYMENT_CHECKS).catch((error: unknown) => {
+          throw schemaControlRefusal(error);
+        });
+        if (await slotlockSchemaUpToDate(tx)) return;
+        await tx.unsafe(SLOTLOCK_CORE_DDL).catch((error: unknown) => {
+          throw schemaControlRefusal(error);
+        });
+        await tx`
+          UPDATE slotlock.schema_version
+             SET ddl_sha256 = ${SLOTLOCK_CORE_DDL_SHA256},
+                 catalog_sha256 = ${await slotlockCatalogDigest(tx)}
+           WHERE singleton`;
+      });
     },
 
     async applyTenantRls(applyOptions) {
       const ddl = createSlotlockTenantRlsDdl(configuredTenantSetting);
-      await inTransaction(sql, (tx) =>
-        withPinnedSearchPath(tx, async () => {
-          await tx`SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${SCHEMA_APPLY_LOCK}, 0))`;
-          const bindings = await tx<{ binding: string }[]>`
-            SELECT DISTINCT obj_description(policy.oid, 'pg_policy') AS binding
-              FROM pg_policy policy
-              JOIN pg_class table_class ON table_class.oid = policy.polrelid
-              JOIN pg_namespace namespace ON namespace.oid = table_class.relnamespace
-             WHERE namespace.nspname = 'slotlock'
-               AND table_class.relname IN (
-                 'resources',
-                 'reservations',
-                 'reservation_tombstones',
-                 'reservation_conflict_archive',
-                 'calendar_events',
-                 'calendar_event_attendees',
-                 'calendar_event_reminders',
-                 'calendar_event_exceptions',
-                 'calendar_event_occurrences',
-                 'calendar_event_tombstones',
-                 'calendar_event_commands',
-                 'calendar_coverage'
-               )
-               AND obj_description(policy.oid, 'pg_policy') LIKE 'slotlock:tenant-context:%'`;
-          const conflictingBinding = bindings.find(
-            ({ binding }) => binding !== `slotlock:tenant-context:${configuredTenantSetting}`,
+      const { allowRebind, ...migrationOptions } = applyOptions ?? {};
+      await inMigration(sql, migrationOptions, async (tx) => {
+        await tx.unsafe(SLOTLOCK_DEPLOYMENT_CHECKS).catch((error: unknown) => {
+          throw schemaControlRefusal(error);
+        });
+        if (await tenantRlsUpToDate(tx, configuredTenantSetting)) return;
+        const bindings = await tx<{ binding: string }[]>`
+          SELECT DISTINCT obj_description(policy.oid, 'pg_policy') AS binding
+            FROM pg_policy policy
+            JOIN pg_class table_class ON table_class.oid = policy.polrelid
+            JOIN pg_namespace namespace ON namespace.oid = table_class.relnamespace
+           WHERE namespace.nspname = 'slotlock'
+             AND table_class.relname IN ${tx([...SLOTLOCK_TENANT_TABLES])}
+             AND obj_description(policy.oid, 'pg_policy') LIKE 'slotlock:tenant-context:%'`;
+        const conflictingBinding = bindings.find(
+          ({ binding }) => binding !== `slotlock:tenant-context:${configuredTenantSetting}`,
+        );
+        if (conflictingBinding && allowRebind !== true) {
+          throw Object.assign(
+            new Error(
+              `Slotlock tenant RLS is already bound to ${conflictingBinding.binding.slice('slotlock:tenant-context:'.length)}`,
+            ),
+            { code: 'tenant_context_conflict' as const },
           );
-          if (conflictingBinding && applyOptions?.allowRebind !== true) {
-            throw Object.assign(
-              new Error(
-                `Slotlock tenant RLS is already bound to ${conflictingBinding.binding.slice('slotlock:tenant-context:'.length)}`,
-              ),
-              { code: 'tenant_context_conflict' as const },
-            );
-          }
-          await tx.unsafe(ddl).catch((error: unknown) => {
-            throw schemaControlRefusal(error);
-          });
-        }),
-      );
+        }
+        await tx.unsafe(ddl).catch((error: unknown) => {
+          throw schemaControlRefusal(error);
+        });
+      });
     },
 
-    async grantApplicationRole(role) {
+    async grantApplicationRole(role, migrationOptions) {
       const ddl = createSlotlockApplicationRoleGrantsDdl(role);
-      await inTransaction(sql, (tx) =>
-        withPinnedSearchPath(tx, async () => {
+      await inMigration(sql, migrationOptions, (tx) =>
+        (async () => {
           // Every role the target belongs to counts, not only the target: a member can SET ROLE to
           // it or use its privileges, and one holding only ADMIN OPTION can grant itself either.
           // MEMBER also counts a PostgreSQL 16 grant made with none of ADMIN, INHERIT or SET, which
@@ -1463,7 +1743,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
             );
           }
           await tx.unsafe(ddl);
-        }),
+        })(),
       );
     },
 

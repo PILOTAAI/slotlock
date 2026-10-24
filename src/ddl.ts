@@ -76,6 +76,43 @@ $slotlock_restore_forced_row_security$;
 /** The start of the message with which the deployment DDL refuses a `slotlock` schema. */
 export const SLOTLOCK_SCHEMA_CONTROL_REFUSAL = 'Slotlock will not deploy into schema slotlock';
 
+/**
+ * The version of the schema this release creates, recorded in `slotlock.schema_version` by every
+ * migration. Releases up to 0.2 recorded nothing; 0.1 was version 1 and 0.2 version 2.
+ */
+export const SLOTLOCK_SCHEMA_VERSION = 3;
+
+/** The start of the message with which the deployment DDL refuses a schema a newer release migrated. */
+export const SLOTLOCK_SCHEMA_NEWER_REFUSAL =
+  'Slotlock will not migrate a schema a newer release migrated';
+
+/** The oldest PostgreSQL the DDL runs on (`server_version_num`): it uses pg_input_is_valid. */
+const MIN_SERVER_VERSION_NUM = 160000;
+
+// Before anything changes: a server too old for the DDL fails here, with a message that names the
+// version, rather than part way through on a function it lacks; and a schema a newer release
+// migrated is refused, since this release's DDL would put back what that release replaced.
+const SLOTLOCK_SCHEMA_PRECONDITIONS = `DO $slotlock_schema_preconditions$
+DECLARE
+  installed integer;
+BEGIN
+  IF pg_catalog.current_setting('server_version_num')::integer < ${MIN_SERVER_VERSION_NUM} THEN
+    RAISE EXCEPTION 'Slotlock needs PostgreSQL 16 or later; this server is %',
+      pg_catalog.current_setting('server_version')
+      USING ERRCODE = 'feature_not_supported';
+  END IF;
+  IF pg_catalog.to_regclass('slotlock.schema_version') IS NOT NULL THEN
+    EXECUTE 'SELECT version FROM slotlock.schema_version WHERE singleton' INTO installed;
+    IF installed > ${SLOTLOCK_SCHEMA_VERSION} THEN
+      RAISE EXCEPTION '${SLOTLOCK_SCHEMA_NEWER_REFUSAL} (version %; this release is version ${SLOTLOCK_SCHEMA_VERSION})', installed
+        USING ERRCODE = 'object_not_in_prerequisite_state',
+              HINT = 'Migrate and serve it with the release that migrated it, or a later one.';
+    END IF;
+  END IF;
+END
+$slotlock_schema_preconditions$;
+`;
+
 // Every slotlock.<name> the deployment uses resolves in that schema, and the deployment writes rows
 // into its tables, firing their triggers, as the owner of every table. A role that owns the schema,
 // can create objects in it, owns an object in it, owns the function a trigger on its tables runs, or
@@ -159,6 +196,13 @@ END
 $slotlock_schema_control$;
 `;
 
+/**
+ * What every migration checks before it changes anything, applySchema and applyTenantRls included
+ * when they find nothing to change: that no other role controls the schema, then the server version
+ * and the schema version. Run with search_path pinned, as the DDL pins it.
+ */
+export const SLOTLOCK_DEPLOYMENT_CHECKS = `${SLOTLOCK_SCHEMA_CONTROL_CHECK}${SLOTLOCK_SCHEMA_PRECONDITIONS}`;
+
 /** Active (unrevoked, unexpired) API keys one tenant may hold. */
 export const SLOTLOCK_API_KEY_ACTIVE_LIMIT = 100;
 /** API keys one tenant may hold in all, revoked and expired ones included, so lists stay bounded. */
@@ -202,15 +246,25 @@ export const SLOTLOCK_DASHBOARD_FUNCTIONS = Object.freeze([
 export const SLOTLOCK_DASHBOARD_FORM_LIMIT = 1_000;
 
 /** Every SECURITY DEFINER function the serving role may execute, by signature. */
+/** The table that records which release migrated the schema (SLOTLOCK_SCHEMA_VERSION). */
+export const SLOTLOCK_SCHEMA_TABLES = Object.freeze(['schema_version'] as const);
+
+/** The SECURITY DEFINER function through which a server reads the version it is serving. */
+export const SLOTLOCK_SCHEMA_FUNCTIONS = Object.freeze([
+  'slotlock.installed_schema_version()',
+] as const);
+
 export const SLOTLOCK_DEFINER_FUNCTIONS = Object.freeze([
   ...SLOTLOCK_API_KEY_FUNCTIONS,
   ...SLOTLOCK_DASHBOARD_FUNCTIONS,
+  ...SLOTLOCK_SCHEMA_FUNCTIONS,
 ]);
 
 /** Tables no role but their owner reads or writes, reached only through SLOTLOCK_DEFINER_FUNCTIONS. */
 export const SLOTLOCK_DEFINER_TABLES = Object.freeze([
   ...SLOTLOCK_API_KEY_TABLES,
   ...SLOTLOCK_DASHBOARD_TABLES,
+  ...SLOTLOCK_SCHEMA_TABLES,
 ]);
 
 const API_KEY_COLUMNS = `key_id uuid,
@@ -587,11 +641,75 @@ $slotlock_dashboard_session_ended$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[1]} FROM PUBLIC;
 `;
 
+// The schema's version. One row, written by the DDL itself at its end, so a schema migrated by
+// running SLOTLOCK_CORE_DDL directly is versioned too. applySchema adds digests of the DDL and of the
+// catalog it left, so that a later migration with nothing to change can tell, and take no lock on
+// any table. Nothing here names a tenant; RLS is enabled with no policy and no role is granted
+// anything, so a server reads the version only through installed_schema_version().
+const SLOTLOCK_SCHEMA_VERSION_DDL = `
+CREATE TABLE IF NOT EXISTS slotlock.schema_version (
+  singleton boolean PRIMARY KEY DEFAULT true,
+  version integer NOT NULL,
+  ddl_sha256 text,
+  catalog_sha256 text,
+  applied_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT slotlock_schema_version_singleton CHECK (singleton),
+  CONSTRAINT slotlock_schema_version_valid CHECK (version > 0)
+);
+ALTER TABLE slotlock.schema_version ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.schema_version FROM PUBLIC;
+
+-- NULL when no migration has recorded a version (a schema from 0.2 or earlier).
+CREATE OR REPLACE FUNCTION slotlock.installed_schema_version()
+RETURNS integer
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_installed_schema_version$
+  SELECT version FROM slotlock.schema_version WHERE singleton;
+$slotlock_installed_schema_version$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_SCHEMA_FUNCTIONS[0]} FROM PUBLIC;
+`;
+
+// A constraint an upgrade added NOT VALID (no table scan under its ACCESS EXCLUSIVE lock) is checked
+// here, under SHARE UPDATE EXCLUSIVE, which lets reads and writes go on. One that old rows still
+// break stays NOT VALID, with a notice, rather than stopping the migration: it binds every new row
+// either way. Once valid, a constraint is never checked again.
+const DEPLOYMENT_VALIDATE_CONSTRAINTS = `DO $slotlock_validate_constraints$
+DECLARE
+  unchecked record;
+BEGIN
+  FOR unchecked IN
+    SELECT rel.relname::text AS table_name, con.conname::text AS constraint_name
+      FROM pg_catalog.pg_constraint con
+      JOIN pg_catalog.pg_class rel ON rel.oid = con.conrelid
+      JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+     WHERE ns.nspname = 'slotlock' AND NOT con.convalidated
+     ORDER BY rel.relname, con.conname
+  LOOP
+    BEGIN
+      EXECUTE pg_catalog.format('ALTER TABLE slotlock.%I VALIDATE CONSTRAINT %I',
+                                unchecked.table_name, unchecked.constraint_name);
+    EXCEPTION WHEN check_violation OR foreign_key_violation OR not_null_violation THEN
+      RAISE NOTICE 'Slotlock left %.% NOT VALID: existing rows break it',
+        unchecked.table_name, unchecked.constraint_name;
+    END;
+  END LOOP;
+END
+$slotlock_validate_constraints$;
+INSERT INTO slotlock.schema_version (singleton, version, applied_at)
+VALUES (true, ${SLOTLOCK_SCHEMA_VERSION}, now())
+ON CONFLICT (singleton) DO UPDATE
+SET version = EXCLUDED.version, ddl_sha256 = NULL, catalog_sha256 = NULL,
+    applied_at = EXCLUDED.applied_at;
+`;
+
 // btree_gist is created in slotlock when it is missing; one installed elsewhere stays where it is.
 export const SLOTLOCK_CORE_DDL: string = `
 ${DEPLOYMENT_SEARCH_PATH_PIN}CREATE SCHEMA IF NOT EXISTS slotlock;
-${SLOTLOCK_SCHEMA_CONTROL_CHECK}CREATE EXTENSION IF NOT EXISTS btree_gist SCHEMA slotlock;
-${DEPLOYMENT_LIFT_FORCED_ROW_SECURITY}
+${SLOTLOCK_DEPLOYMENT_CHECKS}CREATE EXTENSION IF NOT EXISTS btree_gist SCHEMA slotlock;
+${DEPLOYMENT_LIFT_FORCED_ROW_SECURITY}${SLOTLOCK_SCHEMA_VERSION_DDL}
 -- Records the exact catalog representation installed for each owned RLS policy. Health checks
 -- compare live policy fingerprints with this contract so ALTER POLICY drift cannot hide behind a
 -- retained name/comment. This table contains configuration only, never tenant or calendar data.
@@ -1598,7 +1716,7 @@ CREATE INDEX IF NOT EXISTS slotlock_calendar_event_occurrences_resource_time_idx
   ON slotlock.calendar_event_occurrences (tenant_ref, starts_at, ends_at);
 CREATE INDEX IF NOT EXISTS slotlock_reservations_calendar_event_idx
   ON slotlock.reservations (calendar_event_id) WHERE calendar_event_id IS NOT NULL;
-${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_DASHBOARD_DDL}${DEPLOYMENT_RESTORE_FORCED_ROW_SECURITY}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
+${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_DASHBOARD_DDL}${DEPLOYMENT_VALIDATE_CONSTRAINTS}${DEPLOYMENT_RESTORE_FORCED_ROW_SECURITY}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
 
 export const SLOTLOCK_TENANT_CONTEXT_SETTING = 'slotlock.tenant_ref';
 
@@ -1670,7 +1788,7 @@ export function createSlotlockTenantRlsDdl(
     );
   }
   return `
-${DEPLOYMENT_SEARCH_PATH_PIN}${SLOTLOCK_SCHEMA_CONTROL_CHECK}ALTER TABLE slotlock.resources ENABLE ROW LEVEL SECURITY;
+${DEPLOYMENT_SEARCH_PATH_PIN}${SLOTLOCK_DEPLOYMENT_CHECKS}ALTER TABLE slotlock.resources ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.resources FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.reservations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.reservations FORCE ROW LEVEL SECURITY;
