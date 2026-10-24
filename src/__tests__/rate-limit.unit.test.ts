@@ -365,6 +365,38 @@ describe('refusal counts', () => {
     expect(refusals).toHaveLength(1);
   });
 
+  it('counts a full lookup queue and a body too large, each under its own reason', async () => {
+    let busy = true;
+    const counted: SlotlockRefusalCounts[] = [];
+    const limiter = createSlotlockRequestLimits({
+      limits: SLOTLOCK_DEFAULT_LIMITS,
+      basePath: '',
+      authenticate: async () => {
+        if (busy) throw new SlotlockAgentOperationError('server_busy', 503);
+        return PRINCIPAL;
+      },
+      onRefusals: (line) => counted.push(line),
+    });
+    const target = limiter.serve({
+      fetch: async () => Response.json({ error: { code: 'request_too_large' } }, { status: 413 }),
+    });
+    const post = () =>
+      target.fetch(
+        new Request('http://localhost/v1/events', {
+          method: 'POST',
+          headers: { authorization: 'Bearer slk_x' },
+        }),
+        { remoteAddress: '192.0.2.1' },
+      );
+    expect((await post()).status).toBe(503);
+    busy = false;
+    expect((await post()).status).toBe(413);
+    limiter.close();
+    expect(counted).toEqual([
+      expect.objectContaining({ lookup_overflow: 1, request_too_large: 1, auth_refused: 0 }),
+    ]);
+  });
+
   it('answers through a response whose headers are immutable', async () => {
     const limiter = createSlotlockRequestLimits({
       limits: limitsWith({ rates: { address: { perSecond: 1, burst: 1 } } }),

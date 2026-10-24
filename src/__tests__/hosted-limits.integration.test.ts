@@ -441,11 +441,13 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
       SLOTLOCK_TRUSTED_PROXY_HEADER: 'CF-Connecting-IP',
       SLOTLOCK_LIMITS: 'key_lookup_queue=16',
     });
-    // Below the listen backlog macOS allows (somaxconn 128), so every connection is accepted.
+    // Below the listen backlog macOS allows (somaxconn 128), so every connection is accepted. The
+    // valid key's client has connections of its own, as another client would.
     const agent = new Agent({ keepAlive: true, maxSockets: 100 });
+    const validAgent = new Agent({ keepAlive: true, maxSockets: 4 });
     try {
       const valid = { Authorization: `Bearer ${keys['a-admin']}`, 'CF-Connecting-IP': '192.0.2.10' };
-      expect((await rawGet(agent, server.origin, '/v1/resources', valid)).status).toBe(200);
+      expect((await rawGet(validAgent, server.origin, '/v1/resources', valid)).status).toBe(200);
       const fakes = await Promise.all(
         Array.from({ length: 1_500 }, (_, index) => madeUpKey().then((key) => ({ key, index }))),
       );
@@ -459,13 +461,19 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
       );
       const asked: Promise<{ status: number; retryAfter: string | null }>[] = [];
       for (let round = 0; round < 20; round += 1) {
-        asked.push(rawGet(agent, server.origin, '/v1/resources', valid));
+        asked.push(rawGet(validAgent, server.origin, '/v1/resources', valid));
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
-      const validStatuses = (await Promise.all(asked)).map(({ status }) => status);
+      const validAnswers = await Promise.all(asked);
       const floodAnswers = await Promise.all(flood);
       const floodStatuses = tally(floodAnswers.map(({ status }) => status));
-      expect(validStatuses).toEqual(Array(20).fill(200));
+      // Before: 401 authentication_required for nearly every call, as if the key were revoked. A
+      // key that authenticated waits ahead of the made-up ones, and an overloaded server says busy.
+      expect(validAnswers.map(({ status }) => status)).not.toContain(401);
+      expect(validAnswers.filter(({ status }) => status === 200).length).toBeGreaterThanOrEqual(18);
+      expect(
+        validAnswers.every(({ status, retryAfter }) => status === 200 || (status === 503 && retryAfter === '1')),
+      ).toBe(true);
       // Canary: the flood did overflow the queue, and overflow is busy with Retry-After, never 401.
       expect(floodStatuses['503'] ?? 0, JSON.stringify(floodStatuses)).toBeGreaterThan(0);
       expect(Object.keys(floodStatuses).sort()).toEqual(['401', '503']);
@@ -474,8 +482,14 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
       ).toBe(true);
     } finally {
       agent.destroy();
+      validAgent.destroy();
       await server.stop();
     }
+    // The overflow was counted (SEC-4), apart from the made-up keys' 401s.
+    const counted = server.stdout.events().filter(({ event }) => event === 'refusals');
+    const sum = (reason: string) => counted.reduce((total, line) => total + Number(line[reason] ?? 0), 0);
+    expect(sum('lookup_overflow')).toBeGreaterThan(0);
+    expect(sum('auth_refused')).toBeGreaterThan(0);
   }, 60_000);
 
   it("keeps another tenant's reads fast while one tenant fires 50 costly recurring writes (SEC-3)", async () => {
