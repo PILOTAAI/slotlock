@@ -118,6 +118,41 @@ describe('client addresses', () => {
     expect(await from({ 'cf-connecting-ip': '192.0.2.1' })).toBe(200);
     expect(await from({ 'cf-connecting-ip': '192.0.2.2' })).toBe(429);
   });
+
+  it("says once when a proxy's client-address field arrives while none is trusted (HOST-3)", async () => {
+    // Deployed behind cloudflared and kamal-proxy without SLOTLOCK_TRUSTED_PROXY_HEADER, every client
+    // is counted as the proxy's address and shares one budget: the field in each request says so.
+    const ignored: string[] = [];
+    const limiter = createSlotlockRequestLimits({
+      limits: SLOTLOCK_DEFAULT_LIMITS,
+      basePath: '',
+      authenticate: async () => null,
+      onIgnoredClientField: (field) => ignored.push(field),
+    });
+    const target = limiter.serve({ fetch: async () => new Response(null, { status: 204 }) });
+    const from = (headers: Record<string, string>) =>
+      target.fetch(get('/v1/resources', headers), { remoteAddress: '10.0.0.1' });
+    await from({});
+    expect(ignored).toEqual([]);
+    await from({ 'cf-connecting-ip': '203.0.113.7' });
+    await from({ 'x-forwarded-for': '203.0.113.8' });
+    expect(ignored).toEqual(['cf-connecting-ip']);
+    limiter.close();
+
+    // With a field trusted, another one in a request is the client's own and nothing is said.
+    const trusted = createSlotlockRequestLimits({
+      limits: SLOTLOCK_DEFAULT_LIMITS,
+      trustedProxyHeader: 'cf-connecting-ip',
+      basePath: '',
+      authenticate: async () => null,
+      onIgnoredClientField: (field) => ignored.push(field),
+    });
+    await trusted
+      .serve({ fetch: async () => new Response(null, { status: 204 }) })
+      .fetch(get('/v1/resources', { 'x-forwarded-for': '203.0.113.9' }), { remoteAddress: '10.0.0.1' });
+    expect(ignored).toEqual(['cf-connecting-ip']);
+    trusted.close();
+  });
 });
 
 describe('the address limit', () => {

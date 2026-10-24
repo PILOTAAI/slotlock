@@ -364,6 +364,7 @@ export interface SlotlockCliIo {
 
 export interface SlotlockLogger {
   info(event: string, fields?: Record<string, unknown>): void;
+  warn(event: string, fields?: Record<string, unknown>): void;
   error(event: string, fields?: Record<string, unknown>): void;
 }
 
@@ -394,7 +395,10 @@ function secretsIn(env: SlotlockEnv): string[] {
   return [...new Set(secrets)].sort((a, b) => b.length - a.length);
 }
 
-/** One JSON object per line: info on stdout, errors on stderr, secrets replaced by `[redacted]`. */
+/**
+ * One JSON object per line: info on stdout, warnings and errors on stderr, secrets replaced by
+ * `[redacted]`.
+ */
 function createLogger(io: SlotlockCliIo): SlotlockLogger {
   const secrets = secretsIn(io.env);
   const write = (stream: OutputStream, level: string, event: string, fields = {}) => {
@@ -404,6 +408,7 @@ function createLogger(io: SlotlockCliIo): SlotlockLogger {
   };
   return {
     info: (event, fields) => write(io.stdout, 'info', event, fields),
+    warn: (event, fields) => write(io.stderr, 'warn', event, fields),
     error: (event, fields) => write(io.stderr, 'error', event, fields),
   };
 }
@@ -606,6 +611,9 @@ export async function startSlotlockServer(
       },
       // Counts and pseudonyms only: never an address, a credential or a tenant.
       onRefusals: (counts) => log.info('refusals', { ...counts }),
+      // Behind a proxy without the setting, every client shares the proxy's address budget.
+      onIgnoredClientField: (field) =>
+        log.warn('client_address_field_ignored', { field, setting: 'SLOTLOCK_TRUSTED_PROXY_HEADER' }),
     });
     let health: { at: number; ready: Promise<boolean> } | undefined;
     const agentServer = createSlotlockAgentServer({

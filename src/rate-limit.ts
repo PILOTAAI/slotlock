@@ -36,6 +36,18 @@ const MAX_SERIES_WAIT_MS = 2_000;
 const MAX_TENANT_SERIES_WAITING = 4;
 /** The longest a freed slot rests, however long its write kept the event loop busy. */
 const MAX_SLOT_REST_MS = 1_000;
+/**
+ * Fields a proxy puts the client's address in: CF-Connecting-IP, True-Client-IP and X-Forwarded-For
+ * (developers.cloudflare.com/fundamentals/reference/http-headers, read 2026-10-24), X-Real-IP, and
+ * RFC 7239's Forwarded.
+ */
+const PROXY_CLIENT_FIELDS = [
+  'cf-connecting-ip',
+  'true-client-ip',
+  'x-forwarded-for',
+  'x-real-ip',
+  'forwarded',
+];
 /** How often the refusal counts are logged when there are any. */
 const REFUSAL_LOG_INTERVAL_MS = 60_000;
 /** Clients named in one refusal log line, most refused first. */
@@ -69,6 +81,12 @@ export interface SlotlockRequestLimitsOptions {
   /** Resolve a request's credential: an API key lookup or the server token. Called once a request. */
   authenticate(request: Request): Promise<SlotlockAgentPrincipal | null>;
   onRefusals?: (counts: SlotlockRefusalCounts) => void;
+  /**
+   * Called once, with the field's name, when a request carries a field a proxy puts the client's
+   * address in while `trustedProxyHeader` is not set: every client behind that proxy is then counted
+   * as the proxy's one address.
+   */
+  onIgnoredClientField?: (field: string) => void;
   /** Milliseconds, for tests; defaults to `performance.now`. */
   now?: () => number;
 }
@@ -470,6 +488,7 @@ export function createSlotlockRequestLimits(
     },
   } as const;
   const signInPaths = new Set(options.signInPaths ?? []);
+  let fieldIgnored = false;
 
   // Refusal counts, logged with each client keyed by a secret this process alone holds.
   const pseudonymKey = randomBytes(32);
@@ -671,6 +690,17 @@ export function createSlotlockRequestLimits(
           const route = routeOf(request);
           const address = clientOf(request, connection, options.trustedProxyHeader);
           addresses.set(request, address);
+          if (options.trustedProxyHeader === undefined && !fieldIgnored) {
+            const field = PROXY_CLIENT_FIELDS.find((name) => request.headers.has(name));
+            if (field !== undefined) {
+              fieldIgnored = true;
+              try {
+                options.onIgnoredClientField?.(field);
+              } catch {
+                // Observability must never change an answer.
+              }
+            }
+          }
           // Before anything is looked up: every request from the address, and its sign-ins. Not
           // the health check, which a proxy in front asks from the address its requests share, and
           // which reuses one database check a second.
