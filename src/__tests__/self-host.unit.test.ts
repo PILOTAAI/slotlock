@@ -1,6 +1,7 @@
 // The `slotlock` command's configuration: defaults, every refusal, and that no refusal or usage error
 // echoes a secret. Nothing here connects to a database; a refused configuration never gets that far.
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   SLOTLOCK_CLI_HELP,
@@ -348,6 +349,17 @@ describe('slotlock command line', () => {
     const version = await run(['--version']);
     expect(version.code).toBe(0);
     expect(version.stdout).toMatch(/^\d+\.\d+\.\d+\n$/);
+  });
+
+  it('describes the server token as read and write, never as every scope (SEC-16)', () => {
+    // The token is granted SLOTLOCK_API_KEY_DEFAULT_SCOPES: an operator reading "every scope" would
+    // believe it reaches the application API, which needs admin.
+    const entry = /^ {2}SLOTLOCK_AUTH_TOKEN +([\s\S]*?)\n {2}[A-Z]/m.exec(SLOTLOCK_CLI_HELP)?.[1];
+    expect(entry, 'canary: the token is listed in --help').toBeDefined();
+    expect(entry?.replace(/\s+/g, ' ')).toMatch(/with read and write access/);
+    const source = readFileSync(new URL('../self-host.ts', import.meta.url), 'utf8');
+    expect(source).toContain('SLOTLOCK_AUTH_TOKEN');
+    expect(source).not.toMatch(/every\s+scope/);
   });
 
   it('lists every variable the commands read in --help', () => {

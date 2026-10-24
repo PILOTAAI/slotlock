@@ -86,7 +86,7 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8080;
 const DEFAULT_TENANT = 'default';
-/** The principal the server token resolves to: it acts in SLOTLOCK_TENANT with every scope. */
+/** The principal the server token resolves to: it acts in SLOTLOCK_TENANT with read and write. */
 const SELF_HOST_SUBJECT = 'self-host';
 /** Who `key create` records as a key's creator. */
 const CLI_KEY_CREATOR = 'cli';
@@ -141,8 +141,8 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
   /** Where clients reach the server; Slotlock publishes its endpoints under this URL. */
   publicUrl: string;
   /**
-   * A bearer token for SLOTLOCK_TENANT with every scope. Optional: API keys (`slotlock key create`)
-   * authenticate whether or not it is set, each as its own tenant and scopes.
+   * A bearer token for SLOTLOCK_TENANT with read and write, never admin. Optional: API keys
+   * (`slotlock key create`) authenticate whether or not it is set, each as its own tenant and scopes.
    */
   authToken?: string;
   /** Writes that wait for a person's confirmation (MCP 2026-07-28) and are refused elsewhere. */
@@ -318,8 +318,8 @@ export function createSlotlockTokenAuthenticator(
 
 /**
  * What `serve` lets a principal call: a served operation its scopes cover. The server token's
- * principal carries every scope; a principal without scopes is refused everything here, though the
- * agent server alone would leave it to this function.
+ * principal carries read and write, never admin; a principal without scopes is refused everything
+ * here, though the agent server alone would leave it to this function.
  */
 export function authorizeSlotlockServeOperation(args: {
   principal: SlotlockAgentPrincipal;
@@ -939,8 +939,9 @@ Environment:
   DATABASE_URL                   postgres:// URL of the role Slotlock serves as (required); serve
                                  refuses a superuser or a role with BYPASSRLS
   SLOTLOCK_MIGRATE_DATABASE_URL  postgres:// URL of the schema owner, for migrate (optional)
-  SLOTLOCK_AUTH_TOKEN            Optional bearer token for SLOTLOCK_TENANT with every scope,
-                                 32+ random characters (serve); API keys work with or without it
+  SLOTLOCK_AUTH_TOKEN            Optional bearer token for SLOTLOCK_TENANT with read and write
+                                 access (never admin), 32+ random characters (serve); API keys
+                                 work with or without it
   SLOTLOCK_CONFIRMATION_SECRET   Signs pending write confirmations, 32+ random characters (serve)
   SLOTLOCK_CONFIRM_WRITES        all (default), none, or a comma-separated list of write tools
   SLOTLOCK_PUBLIC_URL            URL clients use (default http://localhost:$PORT)
