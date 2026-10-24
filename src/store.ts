@@ -268,7 +268,11 @@ function lastCountedOccurrenceEnd(event: CalendarEventContent, count: number): n
   return null;
 }
 
-/** The recurrence_ends_by column for an event: NULL for a one-off, 'infinity' for no known end. */
+/**
+ * The recurrence_ends_by column for an event, as text: NULL for a one-off, 'infinity' for no known
+ * end. Bind it as text (`::text::timestamptz`): postgres.js serializes a timestamptz parameter
+ * through Date, which cannot hold 'infinity'.
+ */
 function recurrenceEndsByColumn(event: CalendarEventContent): string | null {
   if (!event.recurrence) return null;
   return seriesEndsBy(event)?.toISOString() ?? 'infinity';
@@ -1568,7 +1572,7 @@ async function rollStoredSeries(
        SET materialized_starts_at = ${rolled.start},
            materialized_ends_at = ${rolled.end},
            recurrence_cursor = ${seriesCursorJson(tx, cursor)},
-           recurrence_ends_by = COALESCE(recurrence_ends_by, ${endsBy}::timestamptz),
+           recurrence_ends_by = COALESCE(recurrence_ends_by, ${endsBy}::text::timestamptz),
            roll_retry_at = NULL
      WHERE id = ${row.id} AND tenant_ref = ${tenantRef}`;
   return true;
@@ -3784,7 +3788,7 @@ function buildSlotlockStore(
                        materialized_starts_at = ${materializationWindow.start},
                        materialized_ends_at = ${materializationWindow.end},
                        recurrence_cursor = ${seriesCursorJson(tx, series.cursor)},
-                       recurrence_ends_by = ${recurrenceEndsBy}::timestamptz,
+                       recurrence_ends_by = ${recurrenceEndsBy}::text::timestamptz,
                        roll_retry_at = NULL,
                        revision = ${revision},
                        source = ${params.source ?? null},
@@ -3811,7 +3815,7 @@ function buildSlotlockStore(
                   ${event.recurrence?.rrule ?? null},
                   ${tx.json(eventExceptionsForJson(event.recurrence?.exceptions))},
                   ${materializationWindow.start}, ${materializationWindow.end},
-                  ${seriesCursorJson(tx, series.cursor)}, ${recurrenceEndsBy}::timestamptz,
+                  ${seriesCursorJson(tx, series.cursor)}, ${recurrenceEndsBy}::text::timestamptz,
                   ${revision}, ${params.source ?? null}
                 )`;
             }
