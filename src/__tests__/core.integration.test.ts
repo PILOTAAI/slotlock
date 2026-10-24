@@ -981,6 +981,7 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
     ).rejects.toMatchObject({ code: 'invalid_window' });
     await expect(
       store.findNextAvailableFor({
+        tenantRef: null,
         resourceId,
         rules: [],
         searchWindow: { start: d('2027-02-02T10:00:00Z'), end: invalid },
@@ -1055,6 +1056,7 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
 
     // The convenience wrapper agrees with the composed pure calls.
     const viaStore = await store.findNextAvailableFor({
+      tenantRef: null,
       resourceId: res.id,
       rules,
       searchWindow,
@@ -1068,6 +1070,7 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
 
   it('empty rules → findNextAvailableFor suggests nothing', async () => {
     const viaStore = await store.findNextAvailableFor({
+      tenantRef: null,
       resourceId,
       rules: [],
       searchWindow: { start: d('2027-01-04T00:00:00Z'), end: d('2027-01-11T00:00:00Z') },
@@ -1276,6 +1279,7 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
       if (!live.ok) throw new Error('hold failed');
 
       const withLive = await store.findNextAvailableFor({
+        tenantRef: null,
         resourceId: res.id,
         rules,
         searchWindow,
@@ -1297,6 +1301,7 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
       await sleep(200);
 
       const afterExpiry = await store.findNextAvailableFor({
+        tenantRef: null,
         resourceId: res.id,
         rules,
         searchWindow,
@@ -1335,6 +1340,7 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
     // finds the slot.
     const resource = await store.createResource({ timezone: 'Pacific/Auckland' });
     const slot = await store.findNextAvailableFor({
+      tenantRef: null,
       resourceId: resource.id,
       rules: [{ rrule: 'FREQ=WEEKLY;BYDAY=MO', startMinutes: 9 * 60, durationMinutes: 120 }],
       searchWindow: {

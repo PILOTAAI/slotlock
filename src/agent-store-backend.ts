@@ -770,6 +770,16 @@ function reservationOutput(reservation: SlotlockReservation) {
 }
 
 /**
+ * The namespace an application caller's idempotency keys live in: a digest of its tenant and
+ * subject, so the authenticated subject never lands in a durable row.
+ */
+function applicationPrincipalRef(context: SlotlockApplicationInvocationContext): string {
+  return `application:${createHash('sha256')
+    .update(`${context.principal.tenantRef}\0${context.principal.subject}`)
+    .digest('hex')}`;
+}
+
+/**
  * Serve the application API (application-api.ts) from the production store, in the principal's
  * tenant. Every resource an operation names must be the tenant's, or it is not found; holds are
  * reservations under the tenant's row-level security, so another tenant's hold is not found either.
@@ -855,11 +865,22 @@ export function createSlotlockStoreApplicationBackend(
       return withTenant(store, context, async (tenant) => {
         const resource = await requireResource(tenant, tenantOf(context), input.resource_id as string);
         const result = await tenant.acquireHold({
+          tenantRef: tenantOf(context),
           resourceId: resource.id,
           start: new Date(input.start as string),
           end: new Date(input.end as string),
           ttlMs: (input.ttl_seconds as number) * 1_000,
           ...(input.source !== undefined ? { source: input.source as string } : {}),
+          ...(input.buffer_after_minutes !== undefined
+            ? { bufferAfterMs: (input.buffer_after_minutes as number) * 60_000 }
+            : {}),
+          // A retried request with the caller's key answers the hold the first one made.
+          ...(input.idempotency_key !== undefined
+            ? {
+                idempotencyKey: input.idempotency_key as string,
+                principalRef: applicationPrincipalRef(context),
+              }
+            : {}),
         });
         if (!result.ok) throw applicationRefusal(result.code);
         return { hold: holdOutput(result.hold) };

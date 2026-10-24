@@ -111,14 +111,24 @@ export interface SlotlockHold {
   resourceId: string;
   start: Date;
   end: Date;
+  /** Turnaround kept busy after `end`; the booking the hold is confirmed into keeps it. */
+  bufferAfterMs: number;
   expiresAt: Date;
   source: string | null;
 }
 
 export type AcquireHoldResult =
-  | { ok: true; hold: SlotlockHold }
+  /** `idempotent`: a retry of a keyed hold, answered with the hold the first request made. */
+  | { ok: true; hold: SlotlockHold; idempotent: boolean }
   | { ok: false; code: 'invalid_window' }
   | { ok: false; code: 'invalid_ttl' }
+  | { ok: false; code: 'invalid_buffer' }
+  /** A tenant, principal or idempotency key that is malformed, or a key without both of the others. */
+  | { ok: false; code: 'invalid_identity' }
+  /** No resource with that id, or (under tenant RLS or with `tenantRef`) not one of the tenant's. */
+  | { ok: false; code: 'resource_not_found' }
+  /** The idempotency key already made a hold with another resource, window, ttl, buffer or source. */
+  | { ok: false; code: 'idempotency_conflict' }
   | { ok: false; code: 'overlap'; conflictingReservationId: string | null };
 
 export type ConfirmHoldResult =

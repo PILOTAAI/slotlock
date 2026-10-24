@@ -1733,6 +1733,36 @@ CREATE TABLE IF NOT EXISTS slotlock.calendar_coverage (
   CONSTRAINT slotlock_calendar_coverage_revision_valid CHECK (revision > 0)
 );
 
+-- A keyed hold's first answer, by the key its caller gave inside its tenant and principal, so a
+-- retried request answers the same hold instead of overlapping it. The answer stays as given even
+-- after the hold is confirmed, released or reaped; maintenance deletes it after the retention window.
+CREATE TABLE IF NOT EXISTS slotlock.hold_commands (
+  tenant_ref text NOT NULL,
+  principal_ref text NOT NULL,
+  idempotency_key text NOT NULL,
+  payload_hash text NOT NULL,
+  hold_id uuid NOT NULL,
+  resource_id uuid NOT NULL,
+  starts_at timestamptz NOT NULL,
+  ends_at timestamptz NOT NULL,
+  buffer_after_ms bigint NOT NULL,
+  expires_at timestamptz NOT NULL,
+  source text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT slotlock_hold_commands_key PRIMARY KEY (tenant_ref, principal_ref, idempotency_key),
+  CONSTRAINT slotlock_hold_commands_resource_tenant_fkey
+    FOREIGN KEY (resource_id, tenant_ref)
+    REFERENCES slotlock.resources (id, tenant_ref) ON DELETE CASCADE,
+  CONSTRAINT slotlock_hold_commands_identity_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND octet_length(principal_ref) BETWEEN 1 AND 500
+    AND octet_length(idempotency_key) BETWEEN 1 AND 500
+    AND octet_length(payload_hash) = 64
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_hold_commands_retention_idx
+  ON slotlock.hold_commands (tenant_ref, created_at);
+
 CREATE INDEX IF NOT EXISTS slotlock_calendar_events_resource_time_idx
   ON slotlock.calendar_events (tenant_ref, resource_id, starts_at, ends_at);
 CREATE INDEX IF NOT EXISTS slotlock_calendar_events_owner_resource_time_idx
@@ -1770,6 +1800,7 @@ export const SLOTLOCK_TENANT_TABLES = Object.freeze([
   'calendar_event_tombstones',
   'calendar_event_commands',
   'calendar_coverage',
+  'hold_commands',
 ] as const);
 
 const POSTGRES_SETTING_NAME = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/;
@@ -1844,6 +1875,8 @@ ALTER TABLE slotlock.calendar_event_commands ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.calendar_event_commands FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.calendar_coverage ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.calendar_coverage FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.hold_commands ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.hold_commands FORCE ROW LEVEL SECURITY;
 
 -- One database must have one tenant-context contract. Re-applying with an adapter-specific
 -- setting deliberately rebinds the stable policies instead of silently keeping a prior setting.
@@ -1867,7 +1900,8 @@ BEGIN
          'calendar_event_occurrences',
          'calendar_event_tombstones',
          'calendar_event_commands',
-         'calendar_coverage'
+         'calendar_coverage',
+         'hold_commands'
        )
   LOOP
     EXECUTE format(
@@ -2028,6 +2062,16 @@ BEGIN
       USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
       WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
   END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'hold_commands'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.hold_commands
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
 END
 $slotlock_rls$;
 
@@ -2054,6 +2098,8 @@ COMMENT ON POLICY tenant_isolation_v1 ON slotlock.calendar_event_tombstones
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.calendar_event_commands
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.calendar_coverage
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.hold_commands
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 
 INSERT INTO slotlock.rls_policy_contracts (
@@ -2089,7 +2135,8 @@ WHERE schemaname = 'slotlock'
     'calendar_event_occurrences',
     'calendar_event_tombstones',
     'calendar_event_commands',
-    'calendar_coverage'
+    'calendar_coverage',
+    'hold_commands'
   )
   AND policyname = 'tenant_isolation_v1'
 ON CONFLICT (table_name) DO UPDATE
