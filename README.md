@@ -759,8 +759,8 @@ curl "http://localhost:8080/v1/resources" -H "Authorization: Bearer $SLOTLOCK_AP
 - There are no CORS headers: call it from a server, not a browser.
 - From Python, Go, Rust, Java or .NET, use the [clients](clients/README.md): one method per
   operation, the application API included, each tested against the server in CI. For another
-  language, generate one from [`openapi.json`](openapi.json) (or a server's `/openapi.json`) with any
-  OpenAPI 3.1 generator.
+  language, generate one from [`openapi.json`](openapi.json) (or a server's `/openapi.json`, or
+  `slotlock/openapi.json` in the npm package) with any OpenAPI 3.1 generator.
 
 ### Application API
 

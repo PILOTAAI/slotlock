@@ -127,3 +127,54 @@ describe('NOTICE', () => {
     expect(prepared.stderr).toContain('zod is under SSPL-1.0');
   });
 });
+
+describe('packed artifact', () => {
+  it('ships the OpenAPI document, exported as slotlock/openapi.json', () => {
+    const copy = bumped('4.6.7');
+    const prepared = copy.node('scripts/prepare-package.mjs');
+    expect(prepared.status, prepared.stderr).toBe(0);
+    const packed = JSON.parse(readFileSync(join(copy.dir, 'dist', 'package.json'), 'utf8'));
+    expect(packed.exports['./openapi.json']).toBe('./openapi.json');
+    expect(readFileSync(join(copy.dir, 'dist', 'openapi.json'), 'utf8')).toBe(read('openapi.json'));
+    // verify-package's reviewed file list names it, so it cannot drop out unnoticed.
+    expect(read('scripts/verify-package.mjs')).toMatch(/^ {2}'openapi\.json',$/m);
+  });
+
+  it('builds in the image too: .dockerignore admits every file the packing step copies', () => {
+    const prepare = read('scripts/prepare-package.mjs');
+    const copied = [
+      ...(/for \(const file of \[([\s\S]*?)\]\)/.exec(prepare)?.[1] ?? '').matchAll(/'([^']+)'/g),
+    ].map(([, file]) => file as string);
+    expect(copied, 'canary: the copy list was found').toContain('README.md');
+    const admitted = read('.dockerignore')
+      .split('\n')
+      .filter((line) => line.startsWith('!'))
+      .map((line) => line.slice(1));
+    // The image build reads package-lock.json for NOTICE too.
+    for (const file of [...copied, 'package-lock.json']) {
+      const ok = admitted.some(
+        (pattern) => pattern === file || (pattern === '*.md' && file.endsWith('.md')),
+      );
+      expect(ok, file).toBe(true);
+    }
+  });
+
+  it('declares the 0.2 surfaces in the capability manifest and its schema', () => {
+    const manifest = JSON.parse(read('slotlock.manifest.json')) as { capabilities: string[] };
+    const schema = JSON.parse(read('slotlock-manifest.schema.json')) as {
+      properties: { capabilities: { items: { enum: string[] } } };
+    };
+    for (const capability of [
+      'rest-api',
+      'application-api',
+      'api-keys',
+      'dashboard',
+      'maintenance',
+    ]) {
+      expect(manifest.capabilities, capability).toContain(capability);
+      expect(schema.properties.capabilities.items.enum, capability).toContain(capability);
+      // verify-package asserts the packed manifest keeps each one.
+      expect(read('scripts/verify-package.mjs'), capability).toContain(`'${capability}',`);
+    }
+  });
+});

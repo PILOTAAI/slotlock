@@ -30,6 +30,8 @@ const artifactManifest = {
     },
     './manifest': './slotlock.manifest.json',
     './manifest.schema': './slotlock-manifest.schema.json',
+    // The REST API's OpenAPI 3.1 document, the one /openapi.json serves and the clients come from.
+    './openapi.json': './openapi.json',
     './package.json': './package.json',
   },
   // The root manifest names the built executable (`./dist/cli.js`); in the artifact it sits at the
@@ -66,6 +68,7 @@ for (const file of [
   'MAINTAINERS.md',
   'slotlock.manifest.json',
   'slotlock-manifest.schema.json',
+  'openapi.json',
 ]) {
   cpSync(join(packageRoot, file), join(artifactRoot, file));
 }

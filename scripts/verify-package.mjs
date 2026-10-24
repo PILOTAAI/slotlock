@@ -33,6 +33,7 @@ assert.equal(manifest.exports?.['./node-server']?.types, './node-server.d.ts');
 assert.equal(manifest.exports?.['./node-server']?.import, './node-server.js');
 assert.equal(manifest.exports?.['./manifest'], './slotlock.manifest.json');
 assert.equal(manifest.exports?.['./manifest.schema'], './slotlock-manifest.schema.json');
+assert.equal(manifest.exports?.['./openapi.json'], './openapi.json');
 assert.deepEqual(sourceManifest.bin, { slotlock: './dist/cli.js' });
 assert.deepEqual(manifest.bin, { slotlock: 'cli.js' }, 'the artifact must carry the slotlock bin');
 assert.match(
@@ -84,6 +85,7 @@ const expectedFiles = new Set([
   'MAINTAINERS.md',
   'slotlock.manifest.json',
   'slotlock-manifest.schema.json',
+  'openapi.json',
   'agent-server.js',
   'agent-server.d.ts',
   'agent-store-backend.js',
@@ -217,9 +219,20 @@ for (const capability of [
   'mcp-calendar-resources',
   'mcp-live-updates',
   'trace-context-propagation',
+  'rest-api',
+  'application-api',
+  'api-keys',
+  'dashboard',
+  'maintenance',
 ]) {
   assert.ok(capabilityManifest.capabilities.includes(capability), capability);
 }
+// The packed OpenAPI document is the repository's, byte for byte.
+assert.equal(
+  readFileSync(join(artifactRoot, 'openapi.json'), 'utf8'),
+  readFileSync(join(packageRoot, 'openapi.json'), 'utf8'),
+);
+assert.equal(JSON.parse(readFileSync(join(artifactRoot, 'openapi.json'), 'utf8')).openapi, '3.1.0');
 
 writeFileSync(
   join(consumerRoot, 'package.json'),

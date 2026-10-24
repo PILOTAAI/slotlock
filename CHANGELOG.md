@@ -52,6 +52,13 @@ versioning.
   API key, `SLOTLOCK_TENANT` says API keys act in their own tenant, and the database is PostgreSQL 16
   or newer. `mcp-publisher validate` (v1.8.1) accepts it.
 
+### Added
+
+- The npm package ships `openapi.json`, the REST API's OpenAPI 3.1 document, exported as
+  `slotlock/openapi.json`.
+- The capability manifest names the 0.2 surfaces: `rest-api`, `application-api`, `api-keys`,
+  `dashboard` and `maintenance` (and its schema accepts them), and the package check asserts them.
+
 ## 0.2.0 - 2026-10-23
 
 ### Added
