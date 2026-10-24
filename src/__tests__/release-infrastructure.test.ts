@@ -817,6 +817,7 @@ describe.skipIf(!hasJq)('release bootstrap', () => {
   --version) echo "$STUB_NPM_VERSION" ;;
   'view slotlock@1.2.3 version') [ "$STUB_VERSION_ON_NPM" = 1 ] && echo 1.2.3 || exit 1 ;;
   'view slotlock version') [ "$STUB_PACKAGE_ON_NPM" = 1 ] && echo 1.2.2 || exit 1 ;;
+  'view slotlock dist-tags.latest') [ "$STUB_PACKAGE_ON_NPM" = 1 ] && echo 1.2.2 || exit 1 ;;
   whoami) echo ada ;;
   'stage list slotlock') printf '%s' "$STUB_STAGED" ;;
   'stage publish '*) echo '+ slotlock@1.2.3 (staged with id stage-1)' ;;
@@ -1769,5 +1770,71 @@ describe('release version and merge', () => {
     expect(merges).toEqual([
       '        run: gh pr merge "$PR" --squash --delete-branch --match-head-commit "$SHA"',
     ]);
+  });
+});
+
+describe('release channel', () => {
+  // npm installs the `latest` dist-tag, and an explicit --tag latest skips npm's own refusal to move
+  // it to a lower version (npm 11 lib/commands/publish.js), so the tag is chosen from the registry.
+  const channel = (...args: string[]) => repository().script('dist-tag.sh', ...args);
+
+  it.each([
+    ['0.3.0', '0.2.0', 'latest'],
+    ['0.3.0', '', 'latest'],
+    ['0.10.0', '0.9.3', 'latest'],
+    ['1.0.0', '0.10.0', 'latest'],
+    ['0.2.1', '0.3.0', 'latest-0.2'],
+    ['0.2.1', '0.2.1', 'latest-0.2'],
+    ['1.4.7', '2.0.0', 'latest-1.4'],
+    ['0.3.0-rc.1', '0.2.0', 'next'],
+    ['0.3.0-rc.1', '', 'next'],
+  ])('tags %s, with latest at "%s", as %s', (version, latest, tag) => {
+    const result = channel(version, latest);
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe(`${tag}\n`);
+  });
+
+  it('never names a tag npm would read as a version range', () => {
+    // npm dist-tag: "Tags that can be interpreted as valid semver ranges will be rejected."
+    const result = channel('0.2.1', '0.3.0');
+    expect(result.stdout.trim()).not.toMatch(/^v?\d+(?:\.\d+)?$/);
+  });
+
+  it('compares with the highest release tag in git when asked to, for the image', () => {
+    const repo = repository();
+    for (const tag of ['v0.1.1', 'v0.2.0', 'v0.3.0', 'v0.4.0-rc.1']) {
+      repo.commit(tag);
+      repo.git('tag', tag);
+    }
+    const tagFor = (version: string) => repo.script('dist-tag.sh', version, '--git-tags');
+    expect(tagFor('0.2.1').stdout).toBe('latest-0.2\n');
+    expect(tagFor('0.3.1').stdout).toBe('latest\n');
+    // Its own tag is not a rival, and a prerelease tag never holds latest.
+    expect(tagFor('0.3.0').stdout).toBe('latest\n');
+    expect(tagFor('0.4.0').stdout).toBe('latest\n');
+  });
+
+  it('refuses a version that is not semver', () => {
+    for (const version of ['v1.2.3', '1.2', 'latest']) {
+      const result = channel(version, '0.2.0');
+      expect(result.status, version).toBe(2);
+      expect(result.stdout, version).toBe('');
+    }
+  });
+
+  it('stages on npm with the tag the registry calls for, and the image tags latest the same way', () => {
+    const release = read('.github/workflows/release.yml');
+    const stage = release.slice(release.indexOf('\n  stage:\n'), release.indexOf('\n  github-release:\n'));
+    expect(stage).toContain('current=$(npm view slotlock dist-tags.latest 2>/dev/null || true)');
+    expect(stage).toContain('dist_tag=$(../scripts/dist-tag.sh "$version" "$current")');
+    expect(stage).not.toMatch(/dist_tag=latest\b/);
+    expect(read('scripts/bootstrap-release.sh')).not.toMatch(/dist_tag=latest\b/);
+    const image = read('.github/workflows/image.yml');
+    expect(image).toContain('scripts/dist-tag.sh "${GITHUB_REF_NAME#v}" --git-tags');
+    expect(image).toMatch(/flavor: \|\n\s+latest=false\n/);
+    expect(image).toContain(
+      "type=raw,value=latest,enable=${{ steps.channel.outputs.tag == 'latest' }}",
+    );
   });
 });

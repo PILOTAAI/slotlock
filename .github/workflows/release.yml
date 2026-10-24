@@ -114,6 +114,10 @@ jobs:
       # Trusted publishing and provenance: npm exchanges this job's OIDC token.
       id-token: write
     steps:
+      # For scripts/dist-tag.sh, from the tagged commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ env.STAGE_NODE_VERSION }}
@@ -158,9 +162,10 @@ jobs:
             bootstrap "slotlock is not on npm yet" \
               "npm accepts a trusted publisher only for a package that exists, so the first version comes from a maintainer's own npm session."
           fi
-          # A prerelease (1.2.0-rc.1) must not move `latest`; the tag is fixed once staged.
-          dist_tag=latest
-          case "$version" in *-*) dist_tag=next ;; esac
+          # The tag is fixed once staged. `latest` only moves forward: a prerelease goes to `next`,
+          # and a release on an older line (0.2.1 after 0.3.0) to latest-0.2.
+          current=$(npm view slotlock dist-tags.latest 2>/dev/null || true)
+          dist_tag=$(../scripts/dist-tag.sh "$version" "$current")
           if ! npm stage publish "./$TARBALL" --provenance --access public --tag "$dist_tag" 2>&1 | tee stage.log; then
             # npm answers an OIDC token it cannot match to a trusted publisher with ENEEDAUTH.
             if grep -Eq 'ENEEDAUTH|E401' stage.log; then

@@ -49,6 +49,8 @@ IMAGE_JOB='Build, push and attest'
 TAG_KEY_SECRET=TAG_RELEASE_DEPLOY_KEY
 # The script that sets GitHub up; a test points this at a stand-in.
 CONFIGURE_GITHUB=${SLOTLOCK_CONFIGURE_GITHUB:-"$(cd "$(dirname "$0")" && pwd)/configure-github.sh"}
+# Chooses the dist-tag from the registry's current latest, as release.yml does.
+DIST_TAG="$(cd "$(dirname "$0")" && pwd)/dist-tag.sh"
 # Seconds between checks while waiting for a run to appear.
 POLL_SECONDS=${SLOTLOCK_POLL_SECONDS:-5}
 
@@ -326,8 +328,8 @@ first_publish() {
   [ "$spec" = "$PACKAGE@$VERSION" ] || die "$tarball holds $spec, not $PACKAGE@$VERSION"
   say "  $tarball: Release run $id's tested artifact, checksum verified"
 
-  dist_tag=latest
-  case "$VERSION" in *-*) dist_tag=next ;; esac
+  dist_tag=$(sh "$DIST_TAG" "$VERSION" "$(npm view "$PACKAGE" dist-tags.latest 2>/dev/null || true)") ||
+    die "could not choose the dist-tag for $VERSION"
   npm_login
   # A version already staged cannot be staged again; approve that one instead. 1.2.3 is not
   # 1.2.3-rc.1: the version must not run on into more version characters.
