@@ -20,15 +20,15 @@ TypeScript library.
 npm install slotlock postgres
 ```
 
-Node.js 22.12+, PostgreSQL 16 with `btree_gist` (created for you if missing), and `postgres` ^3.4.5
-as a peer dependency. TypeScript declarations are included.
+Node.js 22.12+, PostgreSQL 16 or newer with `btree_gist` (created for you if missing; CI runs 16,
+17 and 18), and `postgres` ^3.4.5 as a peer dependency. TypeScript declarations are included.
 
 ## Self-host with Docker
 
 From a clone of this repository:
 
 ```sh
-cp .env.example .env    # set the four empty secrets: openssl rand -hex 32
+scripts/quickstart-env.sh > .env    # .env.example, its four secrets set to openssl rand -hex 32
 docker compose up --build --detach
 docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/London
 ```
@@ -56,7 +56,7 @@ slotlock hours clear --all    # back to SLOTLOCK_AVAILABILITY
 
 ### Without Docker
 
-With Node.js 22.12+ and PostgreSQL 16, run each command as `npx slotlock` after
+With Node.js 22.12+ and PostgreSQL 16 or newer, run each command as `npx slotlock` after
 `npm install slotlock postgres`, or from a clone, built once, as `node dist/cli.js` (a clone does not
 put `slotlock` on your `PATH`). Use two roles, as Compose does:
 the server connects as a role that owns nothing and cannot bypass row-level security, and `migrate`
@@ -1048,8 +1048,8 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
 | MCP | 2026-07-28 (stateless), 2025-11-25, 2025-06-18 |
 | A2A | 1.0, JSON-RPC binding |
 | MCP Apps | `io.modelcontextprotocol/ui` 2026-01-26 |
-| Node.js | ≥ 22.12 (CI: 22 and 24) |
-| PostgreSQL | 16 |
+| Node.js | ≥ 22.12 (CI: 22 and 24; the image runs 24) |
+| PostgreSQL | 16, 17 and 18 (CI runs the database suites on each; Compose ships 18) |
 | postgres (peer) | ^3.4.5 |
 
 ## Project status and boundaries

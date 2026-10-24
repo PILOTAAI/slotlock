@@ -71,12 +71,21 @@ describe('pinned dependencies', () => {
       .filter((line) => line.startsWith('FROM '));
     expect(fromLines).toHaveLength(3);
     for (const line of fromLines) expect(line).toMatch(/^FROM \S+:\S+@sha256:[0-9a-f]{64} AS \w+$/);
+    // A service whose image is a matrix value names it in the matrix, as postgres-image.
     const images = [
       ...read('docker-compose.yml').matchAll(/^[ \t]+image:[ \t]*(\S+)/gm),
-      ...workflows.flatMap(({ text }) => [...text.matchAll(/^[ \t]+image:[ \t]*(\S+)/gm)]),
+      ...workflows.flatMap(({ text }) => [
+        ...text.matchAll(/^[ \t]+(?:image|postgres-image):[ \t]*(\S+)/gm),
+      ]),
     ].map(([, image]) => image as string);
     expect(images.length).toBeGreaterThanOrEqual(4);
-    for (const image of images.filter((name) => name !== 'slotlock:local')) {
+    const local = new Set(['slotlock:local', '${{']);
+    for (const workflow of workflows) {
+      for (const [line] of workflow.text.matchAll(/^[ \t]+image:[ \t]*\$\{\{.*$/gm)) {
+        expect(line.trim(), workflow.file).toBe('image: ${{ matrix.postgres-image }}');
+      }
+    }
+    for (const image of images.filter((name) => !local.has(name))) {
       expect(image).toMatch(/^[\w./-]+:[\w.-]+@sha256:[0-9a-f]{64}$/);
     }
   });
@@ -1900,5 +1909,94 @@ describe('the Node.js the image ships', () => {
     // The engines floor is a major CI runs too.
     const floor = /^>=(\d+)\./.exec(JSON.parse(read('package.json')).engines.node)?.[1];
     expect(versions).toContain(floor);
+  });
+});
+
+describe('PostgreSQL versions', () => {
+  const ci = read('.github/workflows/ci.yml');
+  const compose = read('docker-compose.yml');
+  const composeImage = /^ {4}image: (postgres:\S+)$/m.exec(compose)?.[1] ?? '';
+  const major = (image: string) => /^postgres:(\d+)\./.exec(image)?.[1];
+  const ciImages = [...ci.matchAll(/^\s+(?:image|postgres-image): (postgres:\S+)$/gm)].map(
+    ([, image]) => image as string,
+  );
+
+  it('runs the database suites on 16, 17 and the Compose image itself', () => {
+    expect(major(composeImage), 'canary: the compose postgres image was found').toBe('18');
+    expect(new Set(ciImages.map(major))).toEqual(new Set(['16', '17', '18']));
+    // The 18 that CI runs is the very image the quickstart pulls.
+    expect(ciImages).toContain(composeImage);
+    const suites = ci.slice(ci.indexOf('\n  postgres:\n'), ci.indexOf('\n  image:\n'));
+    expect(suites).toContain('name: Database suites (PostgreSQL ${{ matrix.postgres }})');
+    expect(suites).toContain('image: ${{ matrix.postgres-image }}');
+    expect(suites).toContain('npx vitest run .integration.test.ts');
+  });
+
+  it('runs the Compose quickstart in CI, from .env.example, and across a restart', () => {
+    const job = ci.slice(ci.indexOf('\n  compose:\n'));
+    expect(job, 'canary: the compose job').toContain('name: Compose quickstart');
+    expect(job).toContain('run: scripts/quickstart-env.sh > .env');
+    expect(job).toContain('run: scripts/compose-smoke.sh');
+    const smoke = read('scripts/compose-smoke.sh');
+    expect(smoke).toContain('compose() { docker compose --env-file "$ENV_FILE" "$@"; }');
+    for (const step of [
+      'compose up --build --detach',
+      'node scripts/smoke-deployment.mjs',
+      'compose down\n',
+      'compose down --volumes',
+    ]) {
+      expect(smoke).toContain(step);
+    }
+  });
+
+  it('names only the PostgreSQL versions CI runs', () => {
+    expect(compose.split('\n')[0]).toContain('PostgreSQL 18');
+    const claims = [
+      ['README.md', read('README.md')],
+      ['server.json', read('server.json')],
+      ['CONTRIBUTING.md', read('CONTRIBUTING.md')],
+      ['site/src/data/landing.ts', read('site/src/data/landing.ts')],
+      ['site/docs-src/quickstart.md', read('site/docs-src/quickstart.md')],
+      ['site/docs-src/index.md', read('site/docs-src/index.md')],
+      ['site/astro.config.mjs (llms.txt)', read('site/astro.config.mjs')],
+    ] as const;
+    expect(read('README.md')).toMatch(/^\| PostgreSQL \| 16, 17 and 18 /m);
+    for (const [file, text] of claims) {
+      // "PostgreSQL 16" alone reads as the only version; the supported range is 16 to 18.
+      expect(text, file).not.toMatch(/PostgreSQL 16(?! or newer|, 17 and 18|, 17 or 18| to 18)/);
+    }
+  });
+});
+
+describe.skipIf(!hasJq)('quickstart .env', () => {
+  it('fills every secret .env.example leaves empty, keeps every other line, and leaves the dashboard off', () => {
+    const result = spawnSync('sh', [join(root, 'scripts', 'quickstart-env.sh')], {
+      cwd: root,
+      encoding: 'utf8',
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const example = read('.env.example').split('\n');
+    const written = result.stdout.split('\n');
+    expect(written).toHaveLength(example.length);
+    const secrets = [
+      'POSTGRES_PASSWORD',
+      'SLOTLOCK_APP_DB_PASSWORD',
+      'SLOTLOCK_AUTH_TOKEN',
+      'SLOTLOCK_CONFIRMATION_SECRET',
+    ];
+    const values = new Set<string>();
+    written.forEach((line, index) => {
+      const key = /^([A-Z_]+)=/.exec(line)?.[1];
+      if (key && secrets.includes(key)) {
+        const value = line.slice(key.length + 1);
+        expect(value, key).toMatch(/^[0-9a-f]{64}$/);
+        values.add(value);
+      } else {
+        expect(line).toBe(example[index]);
+      }
+    });
+    expect(values.size, 'each secret is its own').toBe(secrets.length);
+    expect(written).toContain('SLOTLOCK_GITHUB_CLIENT_SECRET=');
+    expect(written).toContain('SLOTLOCK_REST_API=on');
   });
 });

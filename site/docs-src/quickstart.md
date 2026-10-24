@@ -1,6 +1,6 @@
 ---
 title: Quickstart
-description: Run Slotlock and PostgreSQL 16 with Docker, connect Claude Code, and have an agent find and book a free slot.
+description: Run Slotlock and PostgreSQL 18 with Docker, connect Claude Code, and have an agent find and book a free slot.
 ---
 
 You need Docker with Compose v2, `git`, `openssl` and Claude Code ([other clients](/docs/connect/)).
@@ -25,15 +25,13 @@ cd slotlock
 
 ## 2. Configure it
 
-Fill the four empty secrets in `.env` with random values:
+Write `.env` from `.env.example`, with each of its four empty secrets filled with a random value:
 
 ```sh
-cp .env.example .env
-for name in POSTGRES_PASSWORD SLOTLOCK_APP_DB_PASSWORD \
-            SLOTLOCK_AUTH_TOKEN SLOTLOCK_CONFIRMATION_SECRET; do
-  sed -i.bak "s/^$name=$/$name=$(openssl rand -hex 32)/" .env
-done && rm .env.bak
+scripts/quickstart-env.sh > .env
 ```
+
+CI runs this quickstart from the same script on every pull request.
 
 The defaults make every resource bookable on weekdays 09:00 to 17:00 (`SLOTLOCK_AVAILABILITY`,
 unless the resource has hours of its own: `slotlock hours set`) and make every write wait for a

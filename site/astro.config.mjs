@@ -42,7 +42,7 @@ function markdownPageList() {
     .join('\n');
 }
 
-const llmsDetails = `Slotlock is an early (0.x) TypeScript library and MCP/A2A server, on npm as \`slotlock\`. It has no hosted service; you run it against your own PostgreSQL 16.
+const llmsDetails = `Slotlock is an early (0.x) TypeScript library and MCP/A2A server, on npm as \`slotlock\`. It has no hosted service; you run it against your own PostgreSQL 16 or newer.
 
 Instructions for AI agents:
 

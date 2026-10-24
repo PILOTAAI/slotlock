@@ -6,8 +6,8 @@ listed in [MAINTAINERS.md](./MAINTAINERS.md).
 
 ## Development
 
-You need Node.js 22.12 or newer and, for the database suites, PostgreSQL 16. From the repository
-root:
+You need Node.js 22.12 or newer and, for the database suites, PostgreSQL 16 or newer (CI runs them
+on 16, 17 and 18). From the repository root:
 
 ```sh
 npm ci
@@ -15,7 +15,7 @@ npm run typecheck   # the package, then examples/ as a consumer compiles them
 npm test            # tests, build, then the packed-artifact verification
 ```
 
-Database suites (`*.integration.test.ts`) run when `DATABASE_URL` points at a PostgreSQL 16
+Database suites (`*.integration.test.ts`) run when `DATABASE_URL` points at a PostgreSQL 16 or newer
 database whose connecting role can create roles, databases and extensions, and are skipped
 otherwise (the upgrade suite builds a database of its own and drops it):
 

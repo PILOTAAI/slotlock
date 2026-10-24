@@ -25,6 +25,12 @@ versioning.
 - The server image runs Node.js 24 LTS (24.22.1), the version the release suite runs on and a major
   CI tests. It shipped Node.js 26.11.1, which CI never ran and which is not yet an LTS release,
   while its header said 22.
+- CI runs the database suites on PostgreSQL 17 and on the PostgreSQL 18 image the Compose
+  quickstart pulls, as well as 16, and runs the quickstart itself end to end: `.env` from
+  `.env.example` (`scripts/quickstart-env.sh`), `docker compose up --build`, the deployment smoke
+  check, and a restart on the same volume (`scripts/compose-smoke.sh`). The docs now say PostgreSQL
+  16 or newer, and that Compose ships 18; they said 16 while Compose ran 18.
+- `.env.example` turns the REST API on, as `slotlock serve` and Compose already do by default.
 
 ## 0.2.0 - 2026-10-23
 

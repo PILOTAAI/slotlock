@@ -27,7 +27,7 @@ export const hero = {
   // The site deploys when a release merges, but npm serves that version only once a maintainer
   // approves it, so the pill names the version and claims nothing about where it is published.
   pill: { label: `Version ${facts.version}`, link: 'Release notes', href: '/docs/changelog/' },
-  eyebrow: `Open source · ${facts.license} · PostgreSQL 16`,
+  eyebrow: `Open source · ${facts.license} · PostgreSQL 16 to 18`,
   heading: {
     soft: 'Slotlock is a calendar for AI agents.',
     strong: 'Two agents, one slot, one booking.',
@@ -302,9 +302,9 @@ export const steps = {
   diagram: {
     inputs: ['Your provider adapters', 'iCalendar feeds'],
     core: 'Slotlock engine',
-    store: 'PostgreSQL 16 · schema slotlock',
+    store: 'PostgreSQL · schema slotlock',
     outputs: ['MCP', 'A2A', 'TypeScript'],
-    aria: 'Diagram: your provider adapters and iCalendar feeds send busy time into the Slotlock engine, which stores everything in the slotlock schema of PostgreSQL 16 and serves agents over MCP, A2A and TypeScript.',
+    aria: 'Diagram: your provider adapters and iCalendar feeds send busy time into the Slotlock engine, which stores everything in the slotlock schema of PostgreSQL and serves agents over MCP, A2A and TypeScript.',
   },
 };
 
@@ -507,8 +507,8 @@ export const openSource = {
     'GOVERNANCE.md commits the engine, the spec and the server to Apache-2.0 or another OSI-approved licence.',
     'Contributions are signed off under the Developer Certificate of Origin. There is no CLA.',
     facts.composeUp
-      ? 'Docker Compose runs PostgreSQL 16 and the server on 127.0.0.1; writes wait for a person by default.'
-      : 'Needs Node.js 22.12 or newer and PostgreSQL 16 with btree_gist.',
+      ? 'Docker Compose runs PostgreSQL 18 and the server on 127.0.0.1; writes wait for a person by default.'
+      : 'Needs Node.js 22.12 or newer and PostgreSQL 16 or newer with btree_gist.',
     'There is no hosted service. You run it, next to your own data.',
     'Report vulnerabilities privately through the repository’s Security tab.',
   ],
