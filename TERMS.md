@@ -55,8 +55,10 @@ are the contract UK GDPR Article 28(3) requires.
 We will:
 
 1. process that data only on your documented instructions, which are these terms and your use of
-   the service, unless the law requires otherwise, in which case we will tell you first unless the
-   law forbids it;
+   the service, including any transfer of it outside the United Kingdom (the
+   [privacy notice](PRIVACY.md#international-transfers) says which transfers the service makes),
+   unless the law requires otherwise, in which case we will tell you first unless the law forbids
+   it;
 2. make sure everyone who can access it is bound to confidentiality;
 3. keep it secure, as described in [SECURITY.md](SECURITY.md): every tenant's data is kept apart by
    PostgreSQL row-level security, API keys are stored only as digests, and traffic is encrypted in
@@ -72,8 +74,9 @@ We will:
    without undue delay after we become aware of a personal data breach affecting your content;
 7. erase your content when your account ends, or when you ask, unless the law requires us to keep
    it; and
-8. give you the information you need to show these terms are met, answer reasonable audit
-   questions, and tell you at once if we think an instruction of yours breaks data protection law.
+8. give you the information you need to show these terms are met, allow for and contribute to
+   audits, including inspections, by you or an auditor you mandate, and tell you at once if we think
+   an instruction of yours breaks data protection law.
 
 ## Security research
 
