@@ -125,6 +125,8 @@ const expectedFiles = new Set([
   'node-server.d.ts',
   'package-version.js',
   'package-version.d.ts',
+  'rate-limit.js',
+  'rate-limit.d.ts',
   'rest-api.js',
   'rest-api.d.ts',
   'rules.js',
