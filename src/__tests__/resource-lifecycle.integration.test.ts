@@ -89,9 +89,7 @@ describe.skipIf(!url)('resource visibility, archive and delete (real Postgres)',
         resources: { external_ref: string }[];
       };
       expect(listed.resources.map((resource) => resource.external_ref)).toEqual(['vehicle-1']);
-      const describeResource = agent.describeResource as NonNullable<
-        typeof agent.describeResource
-      >;
+      const describeResource = agent.describeResource as NonNullable<typeof agent.describeResource>;
       await expect(describeResource(agentContext(tenantRef), hmrc.id)).resolves.toBeNull();
       const window = { start: '2027-03-01T00:00:00.000Z', end: '2027-03-08T00:00:00.000Z' };
       const notFound = { code: 'resource_not_found' };
@@ -364,6 +362,49 @@ describe.skipIf(!url)('resource visibility, archive and delete (real Postgres)',
           expect(booked).toEqual({ ok: false, code: 'resource_archived' });
         }
       }
+    });
+
+    it('a hold confirmed while an archive commits becomes no booking on the archived resource', async () => {
+      const tenantRef = freshTenant();
+      const van = await store.createResource({
+        tenantRef,
+        externalRef: 'van-confirm',
+        timezone: 'UTC',
+      });
+      const hold = await store.acquireHold({
+        tenantRef,
+        resourceId: van.id,
+        start: d('2027-05-11T09:00:00Z'),
+        end: d('2027-05-11T10:00:00Z'),
+        ttlMs: 600_000,
+      });
+      if (!hold.ok) throw new Error(hold.code);
+      // The archive's row lock is held open while the confirm runs.
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let locked = () => {};
+      const archiving = new Promise<void>((resolve) => {
+        locked = resolve;
+      });
+      const archive = sql.begin(async (tx) => {
+        await tx`
+          UPDATE slotlock.resources SET archived_at = clock_timestamp()
+           WHERE id = ${van.id} AND tenant_ref = ${tenantRef}`;
+        locked();
+        await gate;
+      });
+      await archiving;
+      const confirm = store.confirmHold(hold.hold.id, { tenantRef });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      release();
+      await archive;
+      // The verifier's repro: the confirm read the resource before the archive committed, and booked.
+      await expect(confirm).resolves.toEqual({ ok: false, code: 'resource_archived' });
+      const [row] = await sql<{ status: string }[]>`
+        SELECT status FROM slotlock.reservations WHERE id = ${hold.hold.id}`;
+      expect(row?.status).toBe('held');
     });
   });
 

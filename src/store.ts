@@ -3456,9 +3456,8 @@ function buildSlotlockStore(
         // The tenant whose booking the hold becomes is its resource's; a hold never changes
         // resource, so it is read before the identity lock, which is taken before the row lock as
         // every booking write takes them.
-        const [owner] = await tx<{ resource_tenant: string | null; archived: boolean }[]>`
-          SELECT resource.tenant_ref AS resource_tenant,
-                 resource.archived_at IS NOT NULL AS archived
+        const [owner] = await tx<{ resource_id: string; resource_tenant: string | null }[]>`
+          SELECT hold.resource_id, resource.tenant_ref AS resource_tenant
             FROM slotlock.reservations hold
             JOIN slotlock.resources resource ON resource.id = hold.resource_id
            WHERE hold.id = ${holdId} AND hold.calendar_event_id IS NULL
@@ -3467,6 +3466,12 @@ function buildSlotlockStore(
         const bookingTenant = owner.resource_tenant;
         if (bookingTenant !== null) await lockExternalIdentity(tx, bookingTenant, holdId);
         const bookingLimit = await tenantLimitReached(tx, bookingTenant, 'reservations');
+        // The resource's share lock, as every booking write takes it: an archive waits for this
+        // confirmation, and one that committed first is read here.
+        const [resource] = await tx<{ archived: boolean }[]>`
+          SELECT archived_at IS NOT NULL AS archived FROM slotlock.resources
+           WHERE id = ${owner.resource_id}
+           FOR SHARE`;
         const [row] = await tx<(ReservationRow & { status: string; live: boolean })[]>`
           SELECT id, resource_id, tenant_ref, external_ref, starts_at, ends_at, buffer_after_ms,
                  revision, source, status, (status = 'held' AND expires_at > now()) AS live
@@ -3491,7 +3496,7 @@ function buildSlotlockStore(
         }
         if (!row.live) return { ok: false, code: 'hold_expired' };
         // Archived since the hold was taken: a confirmation would be a new booking on it.
-        if (owner.archived) return { ok: false, code: 'resource_archived' };
+        if (resource?.archived !== false) return { ok: false, code: 'resource_archived' };
         if (bookingTenant !== null) {
           const [retired] = await tx<{ revision: string }[]>`
             SELECT revision FROM slotlock.reservation_tombstones
