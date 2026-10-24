@@ -192,6 +192,8 @@ export const SLOTLOCK_RATE_NAMES = Object.freeze([
   'tenant_write',
   'global_read',
   'global_write',
+  'app_read',
+  'app_write',
   'sign_in',
 ] as const);
 export type SlotlockRateName = (typeof SLOTLOCK_RATE_NAMES)[number];
@@ -220,6 +222,9 @@ export interface SlotlockLimits {
  * - `key_*`, `tenant_*`, `global_*`: an authenticated request takes a read token from its key, its
  *   tenant and the server; a write (a REST method other than GET or HEAD, or a write tool) takes a
  *   write token from each as well.
+ * - `app_*`: a request to the application API (application-api.ts) takes its read and write tokens
+ *   from its tenant's application buckets instead of the key and tenant ones, so the application
+ *   and the tenant's agents cannot use up each other's budget; `global_*` counts it as well.
  * - `sign_in`: dashboard sign-ins and their callbacks from one client address.
  * - `tenant_series_writes` and `series_writes`: writes that may expand a recurring series (a
  *   recurring create, any update, a maintenance run) running at once in a tenant and in the server.
@@ -235,6 +240,8 @@ export const SLOTLOCK_DEFAULT_LIMITS: SlotlockLimits = Object.freeze({
     tenant_write: { perSecond: 5, burst: 20 },
     global_read: { perSecond: 500, burst: 1_000 },
     global_write: { perSecond: 50, burst: 100 },
+    app_read: { perSecond: 20, burst: 40 },
+    app_write: { perSecond: 5, burst: 20 },
     sign_in: { perSecond: 20 / 60, burst: 20 },
   }),
   caps: Object.freeze({

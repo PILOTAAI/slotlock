@@ -25,6 +25,7 @@ import { slotlockBearerCredential } from './api-keys.js';
 import type { SlotlockApplicationOperation } from './application-api.js';
 import type { SlotlockLimits, SlotlockRate, SlotlockRateName } from './config.js';
 import type { SlotlockNodeServerConnection, SlotlockNodeServerFetchTarget } from './node-server.js';
+import { SLOTLOCK_APPLICATION_REST_ROUTES, matchSlotlockRestRoute } from './rest-api.js';
 
 /** Keys one policy remembers; past this, the least recently used tenth is dropped at once. */
 const MAX_BUCKET_KEYS = 100_000;
@@ -122,6 +123,8 @@ interface RequestState {
   address: string;
   /** A REST method other than GET or HEAD. */
   write: boolean;
+  /** A route of the application API, counted in its tenant's `app_*` buckets. */
+  application: boolean;
   /** Aborted when the client goes, which ends a wait for a series slot. */
   signal: AbortSignal;
   charged: { read: boolean; write: boolean };
@@ -522,6 +525,13 @@ export function createSlotlockRequestLimits(
     return 'other';
   }
 
+  /** Whether a REST request is to a route of the application API rather than an agent tool. */
+  function isApplicationRoute(request: Request): boolean {
+    const path = new URL(request.url).pathname.slice(options.basePath.length);
+    const match = matchSlotlockRestRoute(request.method, path, SLOTLOCK_APPLICATION_REST_ROUTES);
+    return match !== null && 'route' in match;
+  }
+
   return {
     async authenticate(request) {
       if (looked.has(request)) return looked.get(request) ?? null;
@@ -542,8 +552,12 @@ export function createSlotlockRequestLimits(
       if (due.length === 0) return true;
       const keyOf = `${principal.tenantRef}\0${principal.subject}`;
       const checks = due.flatMap((kind) => [
-        { name: `key_${kind}` as SlotlockRateName, key: keyOf },
-        { name: `tenant_${kind}` as SlotlockRateName, key: principal.tenantRef },
+        ...(state.application
+          ? [{ name: `app_${kind}` as SlotlockRateName, key: principal.tenantRef }]
+          : [
+              { name: `key_${kind}` as SlotlockRateName, key: keyOf },
+              { name: `tenant_${kind}` as SlotlockRateName, key: principal.tenantRef },
+            ]),
         { name: `global_${kind}` as SlotlockRateName, key: '' },
       ]);
       const outcome = charge(checks);
@@ -604,6 +618,7 @@ export function createSlotlockRequestLimits(
             route,
             address,
             write: route === 'rest' && request.method !== 'GET' && request.method !== 'HEAD',
+            application: route === 'rest' && isApplicationRoute(request),
             signal: request.signal,
             charged: { read: false, write: false },
             release: [],

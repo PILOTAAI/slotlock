@@ -1018,8 +1018,10 @@ Environment:
                                  rates as <count>/<s|m|h>[:<burst>] or off for address (50/s:100,
                                  every request per client, before any key lookup), key_read,
                                  tenant_read (20/s:40), key_write, tenant_write (5/s:20),
-                                 global_read (500/s:1000), global_write (50/s:100), sign_in
-                                 (20/m:20); counts for tenant_series_writes and series_writes
+                                 global_read (500/s:1000), global_write (50/s:100), app_read
+                                 (20/s:40) and app_write (5/s:20) per tenant for the
+                                 application API, sign_in (20/m:20); counts for
+                                 tenant_series_writes and series_writes
                                  (1: writes that may expand a recurring series at once),
                                  tenant_subscriptions (16), key_lookups (2), key_lookup_queue (256)
   SLOTLOCK_TRUSTED_PROXY_HEADER  The request field a proxy in front sets to the client address,

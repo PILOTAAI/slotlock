@@ -258,7 +258,7 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
     }
   }, 120_000);
 
-  it('answers a flood of 300 application writes with 429 from the write budget (SEC-1, PROD-8)', async () => {
+  it("answers a flood of 300 application writes with 429 from the application's own write budget (SEC-1, SURF-1, PROD-8)", async () => {
     const server = await serve({ SLOTLOCK_LIMITS: 'address=off' });
     try {
       const statuses: number[] = [];
@@ -278,9 +278,19 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
       const counts = tally(statuses);
       expect(counts['200'] ?? 0).toBeLessThanOrEqual(20 + Math.ceil(5 * seconds) + 1);
       expect(counts['429']).toBeGreaterThan(200);
-      expect([...policies].every((policy) => ['key_write', 'tenant_write'].includes(policy))).toBe(
-        true,
-      );
+      expect([...policies]).toEqual(['app_write']);
+      // The tenant's agents keep their own budget while the application's is spent.
+      const agentWrite = await call(server.origin, 'POST', '/v1/events', {
+        key: keys['a-admin'],
+        body: {
+          resource_id: resources.a,
+          starts_at: '2032-05-03T09:00:00Z',
+          ends_at: '2032-05-03T10:00:00Z',
+          timezone: 'UTC',
+          idempotency_key: `after-flood-${randomUUID()}`,
+        },
+      });
+      expect(agentWrite.status).toBe(200);
     } finally {
       await server.stop();
     }

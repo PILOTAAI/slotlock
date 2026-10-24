@@ -112,6 +112,8 @@ describe('slotlock serve configuration', () => {
       tenant_write: '5/s:20',
       global_read: '500/s:1000',
       global_write: '50/s:100',
+      app_read: '20/s:40',
+      app_write: '5/s:20',
       sign_in: '20/m:20',
     });
     expect(formatSlotlockRate({ perSecond: 5 / 3600, burst: 5 })).toBe('5/h:5');

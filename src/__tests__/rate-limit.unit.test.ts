@@ -267,6 +267,52 @@ describe('token buckets', () => {
     expect(fourth.headers.get('ratelimit')).toBe('"tenant_read";r=0;t=8');
   });
 
+  it("counts the application API in its tenant's buckets of its own, apart from the agent tools (SURF-1)", async () => {
+    const { target } = setup(
+      limitsWith({
+        rates: {
+          address: null,
+          key_read: { perSecond: 1, burst: 2 },
+          key_write: { perSecond: 1, burst: 1 },
+          tenant_read: { perSecond: 1, burst: 2 },
+          tenant_write: { perSecond: 1, burst: 1 },
+          app_read: { perSecond: 1, burst: 3 },
+          app_write: { perSecond: 1, burst: 2 },
+        },
+      }),
+      { now: clock().now },
+    );
+    const ask = (method: string, path: string) =>
+      target.fetch(
+        new Request(`http://localhost${path}`, { method, headers: { authorization: 'Bearer good' } }),
+        { remoteAddress: '127.0.0.1' },
+      );
+    const answers: string[] = [];
+    const record = async (method: string, path: string) => {
+      const response = await ask(method, path);
+      answers.push(`${method} ${path} ${response.status} ${response.headers.get('ratelimit')}`);
+    };
+    // Holds are the application's: they use its write budget, not the agents'.
+    await record('POST', '/v1/holds');
+    await record('POST', '/v1/holds');
+    await record('POST', '/v1/holds');
+    // An agent's write and reads still have all of theirs.
+    await record('POST', '/v1/events');
+    await record('GET', '/v1/resources');
+    await record('GET', '/v1/resources');
+    // The application's own read of a resource is not the agents' list of them.
+    await record('GET', '/v1/resources/r1');
+    expect(answers).toEqual([
+      'POST /v1/holds 200 "app_write";r=1;t=1',
+      'POST /v1/holds 200 "app_write";r=0;t=2',
+      'POST /v1/holds 429 "app_write";r=0;t=1',
+      'POST /v1/events 200 "key_write";r=0;t=1',
+      'GET /v1/resources 200 "key_read";r=0;t=2',
+      'GET /v1/resources 429 "key_read";r=0;t=1',
+      'GET /v1/resources/r1 200 "app_read";r=0;t=3',
+    ]);
+  });
+
   it('keeps its memory bounded under a flood from ever new addresses', async () => {
     const { target } = setup(limitsWith({ rates: { address: { perSecond: 1, burst: 1 } } }), {
       now: clock().now,
