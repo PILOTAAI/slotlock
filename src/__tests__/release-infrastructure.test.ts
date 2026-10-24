@@ -738,9 +738,10 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
   });
 
   // A stand-in for gh that answers every request configure-github.sh sends, logs each one, and
-  // keeps the deploy key it is sent and the secret value it receives on stdin. With
-  // STUB_WORKFLOW_PERMISSIONS set, it refuses the Actions workflow permissions with that message,
-  // as GitHub does (409) when the organization holds the setting.
+  // keeps the deploy key it is sent, each ruleset it writes and the secret value it receives on
+  // stdin. With STUB_WORKFLOW_PERMISSIONS set, it refuses the Actions workflow permissions with that
+  // message, as GitHub does (409) when the organization holds the setting. STUB_CHECK_RUNS is what
+  // GitHub lists for main's "CI passed".
   const gh = `#!/bin/sh
 printf '%s\\n' "$*" >> "$STUB_LOG/gh.log"
 case "$1 $2" in
@@ -764,11 +765,13 @@ if [ "$method" != GET ]; then
     exit 1
   fi
   [ "$method $path" = 'POST repos/PILOTAAI/slotlock/keys' ] && printf '%s' "$body" > "$STUB_LOG/key.json"
+  case "$path" in */rulesets | */rulesets/*) printf '%s' "$body" | jq -c . >> "$STUB_LOG/rulesets.jsonl" ;; esac
   echo '{"id":1}'
   exit 0
 fi
 case "$path" in
   repos/PILOTAAI/slotlock) echo '{"permissions":{"admin":true},"visibility":"public","default_branch":"main"}' ;;
+  */commits/main/check-runs\\?*) echo "$STUB_CHECK_RUNS" ;;
   */code-scanning/default-setup) echo '{"state":"configured","languages":["actions","javascript-typescript"],"query_suite":"extended"}' ;;
   */deployment-branch-policies*) echo '{"branch_policies":[]}' ;;
   */environments/release-tag/secrets*) echo "$STUB_SECRETS" ;;
@@ -778,8 +781,18 @@ case "$path" in
 esac
 `;
 
+  const ciPassed = (...conclusions: string[]) =>
+    JSON.stringify({
+      total_count: conclusions.length,
+      check_runs: conclusions.map((conclusion) => ({
+        name: 'CI passed',
+        status: 'completed',
+        conclusion,
+      })),
+    });
+
   function configure(
-    scenario: { keys: string; secrets: string; workflowPermissions?: string },
+    scenario: { keys: string; secrets: string; workflowPermissions?: string; checkRuns?: string },
     ...args: string[]
   ) {
     const dir = mkdtempSync(join(tmpdir(), 'slotlock-configure-'));
@@ -799,16 +812,45 @@ esac
         STUB_KEYS: scenario.keys,
         STUB_SECRETS: scenario.secrets,
         STUB_WORKFLOW_PERMISSIONS: scenario.workflowPermissions ?? '',
+        STUB_CHECK_RUNS: scenario.checkRuns ?? ciPassed('success'),
       },
     });
     const calls = readFileSync(join(log, 'gh.log'), 'utf8').trim().split('\n');
-    return { ...result, dir, log, temp, calls };
+    const rulesets = existsSync(join(log, 'rulesets.jsonl'))
+      ? readFileSync(join(log, 'rulesets.jsonl'), 'utf8')
+          .trim()
+          .split('\n')
+          .map((line) => (JSON.parse(line) as { name: string }).name)
+      : [];
+    return { ...result, dir, log, temp, calls, rulesets };
   }
   const none = { keys: '[]', secrets: '{"secrets":[]}' };
   const present = {
     keys: '[{"id":7,"title":"slotlock tag-release (GitHub Actions)"}]',
     secrets: '{"secrets":[{"name":"TAG_RELEASE_DEPLOY_KEY"}]}',
   };
+
+  it('locks main behind "CI passed" only once that check has succeeded on main', () => {
+    // With no bypass, a required check that cannot pass blocks every pull request, its own fix
+    // included, so the ruleset waits for a green run of every CI job (PostgreSQL 17 and 18 and the
+    // Compose quickstart among them) on main.
+    const checks = 'commits/main/check-runs?check_name=CI%20passed&app_id=15368';
+    for (const checkRuns of [ciPassed('failure'), ciPassed(), ciPassed('success', 'failure')]) {
+      const waiting = configure({ ...present, checkRuns });
+      expect(waiting.status, waiting.stderr).toBe(0);
+      expect(waiting.calls.some((call) => call.endsWith(`repos/PILOTAAI/slotlock/${checks}`))).toBe(
+        true,
+      );
+      expect(waiting.rulesets, checkRuns).not.toContain('Protect main');
+      expect(waiting.rulesets, 'the tag rulesets still apply').toHaveLength(2);
+      expect(waiting.stderr).toContain(`"CI passed" has not succeeded on main`);
+      expect(waiting.stdout).toContain("[ ] Apply the ruleset 'Protect main'");
+    }
+    const green = configure(present);
+    expect(green.status, green.stderr).toBe(0);
+    expect(green.rulesets).toContain('Protect main');
+    expect(green.stdout).not.toContain("[ ] Apply the ruleset 'Protect main'");
+  });
 
   it('keeps GITHUB_TOKEN read-only, and Actions from opening or approving pull requests unless asked', () => {
     const permissions = (...args: string[]) =>

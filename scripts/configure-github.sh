@@ -16,8 +16,8 @@
 #                                                release app
 #
 # The person who runs it becomes the required reviewer of every job that publishes (the npm, ghcr
-# and mcp-registry environments), and nobody, admins included, can merge into main past its pull
-# request rule or its required checks.
+# and mcp-registry environments), and, once "CI passed" has succeeded on main, nobody, admins
+# included, can merge into main past its pull request rule or its required checks.
 #
 # Needs bash 3.2 or newer, curl, jq 1.6 or newer, ssh-keygen, and gh logged in as an admin of the
 # repository.
@@ -549,6 +549,18 @@ branch_ruleset_body() {
   }'
 }
 
+# main_ci_passed: true when GitHub Actions' "CI passed" has run on main's latest commit and every
+# latest run of it succeeded. GET /repos/{owner}/{repo}/commits/{ref}/check-runs takes check_name
+# and app_id, and its filter defaults to `latest`, "the most recent check runs" (REST docs, "List
+# check runs for a Git reference", read 2026-10-24).
+main_ci_passed() {
+  local runs
+  runs=$(gh_get "repos/$OWNER/$REPO/commits/main/check-runs?check_name=CI%20passed&app_id=$ACTIONS_APP_ID" \
+    '{"total_count":1,"check_runs":[{"conclusion":"success"}]}') || return 1
+  printf '%s' "$runs" |
+    jq -e '(.check_runs | length) > 0 and all(.check_runs[]; .conclusion == "success")' >/dev/null
+}
+
 # 3. The main branch.
 configure_branch_ruleset() {
   step "3. Ruleset '$BRANCH_RULESET' (refs/heads/main)"
@@ -563,6 +575,16 @@ configure_branch_ruleset() {
   # checks, and from 2026-10-23 four merges went in past failing or missing ones (#59 and #61 with
   # both test checks failing), which left main unable to release. A change whose checks cannot pass
   # is fixed in another pull request first.
+  #
+  # So it is applied only once "CI passed" has succeeded on main's latest commit: with no bypass, a
+  # CI job that cannot pass (one that has never run anywhere, say) would block every pull request,
+  # the one that fixes it included, until an admin edited the ruleset by hand. Until then the
+  # ruleset is left as it is and the checklist asks for this script to be run again.
+  if ! main_ci_passed; then
+    BRANCH_RULESET_SKIPPED=1
+    warn "\"CI passed\" has not succeeded on main's latest commit, so '$BRANCH_RULESET' is left as it is"
+    return 0
+  fi
   if ! upsert_ruleset branch "$BRANCH_RULESET" "$(branch_ruleset_body true)"; then
     case "$RULESET_ERROR" in
       *'(HTTP 422)'*)
@@ -703,6 +725,15 @@ print_checklist() {
     The deploy key tag-release.yml pushes v* tags with is created here. scripts/bootstrap-release.sh
     runs this script when it is missing, re-runs the failed job and finishes the release.
 EOF
+  if [ "${BRANCH_RULESET_SKIPPED:-0}" = 1 ]; then
+    cat <<EOF
+
+[ ] Apply the ruleset '$BRANCH_RULESET': it lets nobody merge past a failing "CI passed", so it waits
+    until that check has succeeded on main's latest commit (see the warning above). Get CI green
+    on main, the PostgreSQL 17 and 18 suites and the Compose quickstart included, then run this
+    script again: https://github.com/$OWNER/$REPO/actions/workflows/ci.yml?query=branch%3Amain
+EOF
+  fi
   if [ "${SITE_SECRETS_SKIPPED:-0}" = 1 ]; then
     cat <<EOF
 
@@ -751,6 +782,7 @@ EOF
 }
 
 SITE_SECRETS_SKIPPED=0
+BRANCH_RULESET_SKIPPED=0
 CODEQL_SKIPPED=0
 ACTIONS_PULL_REQUESTS_SKIPPED=0
 # The temporary directory holding a new deploy key, removed however the script ends.

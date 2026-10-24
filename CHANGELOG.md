@@ -65,7 +65,8 @@ versioning.
   npm, `ghcr` and `mcp-registry` environments, keeps GITHUB_TOKEN from opening or approving pull
   requests unless `--allow-actions-pull-requests` is given (the release app opens them), and splits
   the release-tag ruleset so the deploy-key bypass covers creating a `v*` tag only; only the admin
-  role may move or delete one.
+  role may move or delete one. It applies the no-bypass rule only once "CI passed" has succeeded on
+  `main`, so CI jobs that have never passed cannot lock every pull request out.
 - Dependabot watches the dashboard Worker's lockfile and the five language clients (Cargo, Go
   modules, Gradle, NuGet, pip) as well, and a test fails when a manifest is added without an entry.
   The site's and the dashboard Worker's Wrangler pinned undici 7.29.1 (GHSA-xjj6-f33q-929c, high,
