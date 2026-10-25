@@ -1620,12 +1620,13 @@ async function deferRoll(executor: StoreSql, tenantRef: string, eventId: string)
  * part of [start, end) that a roll can ever reach: from the later of `start` and the rolling
  * horizon's start. A write there must not land where such a series is not stored, or the series'
  * next roll would collide with it and stop. A series known to end before that part
- * (recurrence_ends_by) cannot meet the write and is left out. A series behind is first rolled to
- * the horizon, in a savepoint of the write's transaction, so the write meets its occurrences under
- * the exclusion arbiter; false when one cannot be (the write reaches past the horizon, the series
- * collides, or its rule is over the budget). Series are rolled in id order; an event's update holds
- * its own row while it rolls the others, so it and a write rolling the same series in that order
- * can deadlock, which the database breaks (the writer retries once, then answers an overlap).
+ * (recurrence_ends_by) cannot meet the write and is left out, as is one stored through its end. A
+ * series behind is first rolled to the horizon, in a savepoint of the write's transaction, so the
+ * write meets its occurrences under the exclusion arbiter; false when one cannot be (it goes on
+ * past the horizon and so does the write, it collides, or its rule is over the budget). Series are
+ * rolled in id order; an event's update holds its own row while it rolls the others, so it and a
+ * write rolling the same series in that order can deadlock, which the database breaks (the writer
+ * retries once, then answers an overlap).
  */
 async function recurrenceCoversWrite(
   tx: TransactionSql,
@@ -1640,8 +1641,12 @@ async function recurrenceCoversWrite(
   const horizon = calendarEventRollingHorizon();
   if (params.end <= horizon.start) return true;
   const from = params.start > horizon.start ? params.start : horizon.start;
-  const behind = () => tx<{ id: string; ends_by_unknown: boolean }[]>`
-    SELECT event.id, event.recurrence_ends_by IS NULL AS ends_by_unknown
+  // LEAST and GREATEST ignore a NULL argument (PostgreSQL 16, Conditional Expressions): a series
+  // with no known end is behind wherever it is stored short of the write's end.
+  const behind = () => tx<{ id: string; ends_by_unknown: boolean; ends_in_horizon: boolean }[]>`
+    SELECT event.id, event.recurrence_ends_by IS NULL AS ends_by_unknown,
+           COALESCE(event.recurrence_ends_by <= ${horizon.end}::timestamptz, false)
+             AS ends_in_horizon
       FROM slotlock.calendar_events event
      WHERE event.tenant_ref = ${params.tenantRef}
        AND event.resource_id = ${params.resourceId}
@@ -1650,7 +1655,7 @@ async function recurrenceCoversWrite(
        AND event.id IS DISTINCT FROM ${params.exceptEventId ?? null}::uuid
        AND (event.recurrence_ends_by IS NULL OR event.recurrence_ends_by > ${from}::timestamptz)
        AND (
-         event.materialized_ends_at < ${params.end}
+         event.materialized_ends_at < LEAST(${params.end}::timestamptz, event.recurrence_ends_by)
          OR event.materialized_starts_at > GREATEST(
               ${from}::timestamptz,
               LEAST(event.starts_at, COALESCE((
@@ -1663,14 +1668,20 @@ async function recurrenceCoversWrite(
             )
        )
      ORDER BY event.id`;
-  const due = await behind();
+  let due = await behind();
   if (due.length === 0) return true;
   if (params.end > horizon.end) {
-    // No roll stores a series past the horizon. One stored before 0.3 has not worked out when it
-    // ends; it does so now, and is left out if it ends before the write.
-    if (due.some((row) => !row.ends_by_unknown)) return false;
-    for (const { id } of due) await learnSeriesEnd(tx, params.tenantRef, id);
-    return (await behind()).length === 0;
+    // A series stored before 0.3 has not worked out when it ends; it does so now, and is left out
+    // if it ends before the write or is stored through its end.
+    if (due.some((row) => row.ends_by_unknown)) {
+      for (const { id, ends_by_unknown } of due) {
+        if (ends_by_unknown) await learnSeriesEnd(tx, params.tenantRef, id);
+      }
+      due = await behind();
+      if (due.length === 0) return true;
+    }
+    // No roll stores a series past the horizon: one going on past it stays behind such a write.
+    if (due.some((row) => !row.ends_in_horizon)) return false;
   }
   for (const { id } of due) {
     try {

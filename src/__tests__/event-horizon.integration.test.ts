@@ -397,6 +397,65 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
       expect(goesOn.endsBy).toBe('infinity');
     });
 
+    it('lets a long write through just after a series it reaches ends, once every occurrence is stored', async () => {
+      const horizon = calendarEventRollingHorizon();
+      const until = (date: Date) => `${date.toISOString().slice(0, 19).replace(/[-:]/g, '')}Z`;
+      const twoDays = async (stored: { start: Date; end: Date }) => {
+        const { tenantRef, resourceId } = await freshTenant();
+        const first = new Date(horizon.start.getTime() + 2 * DAY + 9 * HOUR);
+        const put = await store.putCalendarEvent({
+          tenantRef,
+          externalRef: `rota-${crypto.randomUUID()}`,
+          idempotencyKey: `create-${crypto.randomUUID()}`,
+          expectedRevision: 0,
+          resourceId,
+          start: first,
+          end: new Date(first.getTime() + HOUR),
+          timezone: 'UTC',
+          summary: 'Two-day rota',
+          recurrence: { rrule: `FREQ=DAILY;UNTIL=${until(new Date(first.getTime() + DAY))}` },
+          materializationWindow: stored,
+        });
+        if (!put.ok) throw new Error(put.code);
+        const lastEnd = new Date(first.getTime() + DAY + HOUR);
+        const lease = (start: Date) =>
+          store.createExternalReservation({
+            tenantRef,
+            externalRef: `lease-${crypto.randomUUID()}`,
+            resourceId,
+            start,
+            end: new Date(start.getTime() + 400 * DAY),
+            bufferAfterMs: 0,
+            revision: 1,
+          });
+        return { eventId: put.eventId, lastEnd, lease };
+      };
+      // Stored to the horizon. Before, a lease starting within three days of UNTIL was refused,
+      // though nothing of the series is left to store.
+      const rolled = await twoDays(horizon);
+      await expect(rolled.lease(new Date(rolled.lastEnd.getTime() + HOUR))).resolves.toMatchObject({
+        ok: true,
+      });
+      // One overlapping the last occurrence meets it.
+      const overlapping = await twoDays(horizon);
+      await expect(
+        overlapping.lease(new Date(overlapping.lastEnd.getTime() - 30 * 60_000)),
+      ).resolves.toMatchObject({ ok: false, code: 'overlap' });
+      // Stored for its first day only, as if maintenance had stopped: the series is caught up first.
+      const behind = await twoDays({
+        start: horizon.start,
+        end: new Date(horizon.start.getTime() + 3 * DAY),
+      });
+      await expect(behind.lease(new Date(behind.lastEnd.getTime() - 30 * 60_000))).resolves.toMatchObject({
+        ok: false,
+        code: 'overlap',
+      });
+      await expect(behind.lease(new Date(behind.lastEnd.getTime() + HOUR))).resolves.toMatchObject({
+        ok: true,
+      });
+      expect(await storedWindow(behind.eventId)).toEqual(horizon);
+    });
+
     it('extends a series not yet rolled that far before it books, so the overlap is caught', async () => {
       const { tenantRef, resourceId } = await freshTenant();
       const horizon = calendarEventRollingHorizon();
