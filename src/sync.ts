@@ -3902,18 +3902,54 @@ function expandOccurrences(
     return expandEventOccurrences(input, window, limits, cursor, resumeOnly);
   } catch (error) {
     // A series stored by an earlier Slotlock that this one refuses (a rule shape it no longer
-    // expands, an exception that names no occurrence) is refused as maintenance rolls it, so the
-    // roll counts it and the series keeps its old coverage, rather than stopping every series after
-    // it.
+    // expands, an exception that names no occurrence, a zone written as a UTC offset) is refused as
+    // maintenance rolls it, so the roll counts it and the series keeps its old coverage, rather than
+    // stopping every series after it. One no Slotlock stored is an error, as it always was.
     if (
       limits === FEED_LIMITS &&
       error instanceof CalendarContractError &&
-      !(error instanceof CalendarExpansionLimitError)
+      !(error instanceof CalendarExpansionLimitError) &&
+      storedByAnEarlierRelease(input)
     ) {
       throw new CalendarExpansionLimitError();
     }
     throw error;
   }
+}
+
+/**
+ * Whether a Slotlock before this one could have stored `event`. Slotlock 0.2.0 kept any rule
+ * ical.js reads that starts with FREQ= (`FREQ=DAILY;COUNT=0`, `FREQ=HOURLY`), in any zone Intl
+ * knows (`+05:00` included), and checked the rest of an event as this release does; a rule such as
+ * `FREQ=NEVERLY`, which ical.js cannot read, it refused.
+ */
+function storedByAnEarlierRelease(event: CalendarEventContent): boolean {
+  const rule = event.recurrence?.rrule;
+  if (rule !== undefined) {
+    if (typeof rule !== 'string') return false;
+    const written = rule.trim().toUpperCase();
+    if (
+      !written.startsWith('FREQ=') ||
+      Buffer.byteLength(written, 'utf8') > 4_096 ||
+      /[\r\n]/.test(written)
+    ) {
+      return false;
+    }
+    try {
+      ICAL.Recur.fromString(written);
+    } catch {
+      return false;
+    }
+  }
+  if (typeof event.timezone !== 'string' || !isKnownTimezone(event.timezone)) return false;
+  const { recurrence: _rule, ...rest } = event;
+  try {
+    normalizeCalendarEventContent({ ...rest, timezone: 'UTC' });
+    normalizeExceptions(event.recurrence?.exceptions);
+  } catch {
+    return false;
+  }
+  return true;
 }
 
 /** The UID a stored series is expanded under: the store's series carry none of their own. */
