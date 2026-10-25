@@ -217,6 +217,48 @@ describe.skipIf(!url)('schema version and migration locks (real Postgres)', () =
     expect((await revision())?.validated).toBe(true);
   });
 
+  it('dates no tombstone from before 0.3 to the upgrade, so none counts as a recent cancellation', async () => {
+    const tenantRef = `upgrade-${randomBytes(6).toString('hex')}`;
+    // 0.2's tombstones: no time of cancellation, and no stray mark.
+    await sql.unsafe(`
+      ALTER TABLE slotlock.reservation_tombstones DROP COLUMN cancelled_at CASCADE;
+      ALTER TABLE slotlock.reservation_tombstones DROP COLUMN stray CASCADE;
+    `);
+    for (let n = 0; n < 3; n++) {
+      await sql`
+        INSERT INTO slotlock.reservation_tombstones (tenant_ref, external_ref, revision)
+        VALUES (${tenantRef}, ${`old-booking-${n}`}, 2)`;
+    }
+    await store.applySchema();
+    const limited = createSlotlockStore(sql, { tenantLimits: { reservations: 3 } });
+    const resource = await limited.createResource({
+      tenantRef,
+      externalRef: 'van-1',
+      timezone: 'UTC',
+    });
+    // Before, the three counted as made at the upgrade, and the tenant could book nothing for 30 days.
+    await expect(
+      limited.createExternalReservation({
+        tenantRef,
+        externalRef: 'new-booking',
+        resourceId: resource.id,
+        start: new Date('2027-01-01T09:00:00Z'),
+        end: new Date('2027-01-01T10:00:00Z'),
+        bufferAfterMs: 0,
+        revision: 1,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    // An old tombstone still retires its reference; a cancellation from now on is dated when made.
+    await expect(
+      limited.cancelExternalReservation({ tenantRef, externalRef: 'old-booking-0', revision: 2 }),
+    ).resolves.toEqual({ ok: true, cancelled: false, revision: 2 });
+    await limited.cancelExternalReservation({ tenantRef, externalRef: 'never-booked', revision: 1 });
+    const [recent] = await sql<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM slotlock.reservation_tombstones
+       WHERE tenant_ref = ${tenantRef} AND cancelled_at > now() - interval '1 minute'`;
+    expect(recent?.count).toBe(1);
+  });
+
   it('serve refuses a database migrated by an older or a newer release, naming which', async () => {
     const role = `slotlock_version_${randomBytes(8).toString('hex')}`;
     const password = randomBytes(24).toString('hex');

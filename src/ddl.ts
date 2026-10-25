@@ -1072,9 +1072,13 @@ CREATE TABLE IF NOT EXISTS slotlock.reservation_tombstones (
   CONSTRAINT slotlock_reservation_tombstones_revision_valid CHECK (revision > 0)
 );
 -- When the reference was retired, so maintenance can prune it past the retention window. Rows from
--- before 0.3 take the time of the upgrade (a constant default: no table rewrite).
+-- before 0.3 read '-infinity', earlier than every time, so none counts as a recent cancellation
+-- against the tenant's limits; new rows take now(). An ADD COLUMN default is evaluated once and
+-- kept for the rows already there, with no table rewrite, and SET DEFAULT changes only later
+-- inserts (PostgreSQL 16, ALTER TABLE notes; Date/Time Types, special values).
 ALTER TABLE slotlock.reservation_tombstones
-  ADD COLUMN IF NOT EXISTS cancelled_at timestamptz NOT NULL DEFAULT now();
+  ADD COLUMN IF NOT EXISTS cancelled_at timestamptz NOT NULL DEFAULT '-infinity';
+ALTER TABLE slotlock.reservation_tombstones ALTER COLUMN cancelled_at SET DEFAULT now();
 -- True when the cancel retired a reference no booking held (its create may still be on the way).
 -- Only those are pruned past the retention window. A cancelled booking's tombstone is kept until
 -- the tenant is erased, so a delayed or replayed create never books it again; rows from before 0.3
