@@ -84,28 +84,27 @@ describe('NOTICE', () => {
     expect(packed).not.toContain('zod 4.6.7');
     expect(packed).toMatch(/^Copyright \d{4} TREFT LTD$/m);
     expect(packed).toContain('postgres ^3.4.5,');
-    expect(packed).toContain(
-      '  - tslib (via rrule), BSD Zero Clause License (0BSD), https://github.com/Microsoft/tslib',
-    );
     // The repository's own NOTICE needed no edit for the bump.
     const check = copy.node('scripts/notice.mjs', '--check');
     expect(check.status, check.stderr).toBe(0);
   });
 
   it('needs no edit to the repository NOTICE when a bump changes what a dependency pulls in', () => {
-    // An rrule release that drops tslib, as Dependabot would bring it: package.json is unchanged.
+    // An rrule release that pulls in one more package, as Dependabot would bring it: package.json
+    // is unchanged. postgres stands in for the new package because it is installed here.
     const copy = bumped('4.6.7');
     const path = join(copy.dir, 'package-lock.json');
     const lock = JSON.parse(readFileSync(path, 'utf8')) as Lock;
     const rrule = lock.packages['node_modules/rrule'] as { dependencies?: Record<string, string> };
-    expect(rrule.dependencies, 'canary: rrule pulls in tslib today').toHaveProperty('tslib');
-    delete rrule.dependencies?.tslib;
+    rrule.dependencies = { ...rrule.dependencies, postgres: '^3.4.5' };
     writeFileSync(path, JSON.stringify(lock));
     const check = copy.node('scripts/notice.mjs', '--check');
     expect(check.status, check.stderr).toBe(0);
-    // The packed NOTICE still lists everything the release installs, from the lockfile.
+    // The packed NOTICE lists what the release installs, from the lockfile it was built with.
     expect(copy.node('scripts/prepare-package.mjs').status).toBe(0);
-    expect(readFileSync(join(copy.dir, 'dist', 'NOTICE'), 'utf8')).not.toContain('tslib');
+    expect(readFileSync(join(copy.dir, 'dist', 'NOTICE'), 'utf8')).toMatch(
+      /^ {2}- postgres \(via rrule\), The Unlicense, https:\/\/\S+$/m,
+    );
   });
 
   it('asks for the repository NOTICE to be rewritten when a dependency changes its licence', () => {
@@ -140,7 +139,7 @@ describe('NOTICE', () => {
       expect(notice.split('\n')).toContain(line);
     }
     // What the packages pull in is in each packed NOTICE, from the lockfile it was built with.
-    expect(notice).not.toContain('tslib');
+    expect(notice).not.toContain('(via ');
     const check = spawnSync(process.execPath, ['scripts/notice.mjs', '--check'], {
       cwd: root,
       encoding: 'utf8',
