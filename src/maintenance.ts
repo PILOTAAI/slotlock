@@ -17,8 +17,9 @@ export interface SlotlockMaintenanceResult {
   /** Series over the expansion budget; they keep their old coverage. */
   refused: number;
   /**
-   * Expired holds, and past the retention window idempotency answers, agents' event cancellations
-   * and booking references retired with no booking, deleted. A cancelled booking's tombstone stays.
+   * Expired holds and the answers kept for keyed ones, and past the retention window event
+   * idempotency answers, agents' event cancellations and booking references retired with no
+   * booking, deleted. A cancelled booking's tombstone stays.
    */
   pruned: number;
   /** More was left than one pass does: run another. */
@@ -27,9 +28,9 @@ export interface SlotlockMaintenanceResult {
 
 /**
  * One maintenance pass for a tenant: roll its recurring events to the rolling horizon, then purge
- * its expired holds and prune its events' and bookings' bookkeeping past the retention window, each
- * in at most `batches` batches (1-100, default 10), every batch its own transaction. Aborting
- * `signal` stops it between batches with the signal's reason.
+ * its expired holds with their answers and prune its events' and bookings' bookkeeping past the
+ * retention window, each in at most `batches` batches (1-100, default 10), every batch its own
+ * transaction. Aborting `signal` stops it between batches with the signal's reason.
  */
 export async function maintainSlotlockTenant(
   store: SlotlockStore,

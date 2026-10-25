@@ -6,6 +6,7 @@
 // revised, cancelled and released; and other tenants are unaffected. Skipped without DATABASE_URL.
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { maintainSlotlockTenant } from '../maintenance.js';
 import {
   type SlotlockStore,
   type SlotlockTenantLimits,
@@ -117,11 +118,100 @@ describe.skipIf(!url)('per-tenant limits (real Postgres)', () => {
     await sql`
       UPDATE slotlock.reservations SET expires_at = now() - interval '1 second'
        WHERE id = ${second.hold.id}`;
-    expect((await hold(3)).ok).toBe(true);
+    const third = await hold(3);
+    if (!third.ok) throw new Error(third.code);
     await expect(hold(4)).resolves.toEqual({ ok: false, code: 'hold_limit_reached', limit: 2 });
-    if (!first.ok) return;
-    await store.releaseHold(first.hold.id, { tenantRef });
+    await store.releaseHold(third.hold.id, { tenantRef });
     expect((await hold(5)).ok).toBe(true);
+  });
+
+  it('keeps at most the limit of keyed hold answers, however short the holds', async () => {
+    const store = limited({ holds: 5 });
+    const { tenantRef, resourceId } = await freshTenant(store);
+    const answers = async () => {
+      const [row] = await sql<{ count: number }[]>`
+        SELECT count(*)::int AS count FROM slotlock.hold_commands WHERE tenant_ref = ${tenantRef}`;
+      return row?.count ?? 0;
+    };
+    // Before, each kept its answer for 30 days uncounted: 40 of them under a limit of 5.
+    for (let n = 0; n < 40; n++) {
+      const hold = await store.acquireHold({
+        tenantRef,
+        resourceId,
+        ...slot(n),
+        ttlMs: 1,
+        idempotencyKey: `short-${n}`,
+        principalRef: 'key-1',
+      });
+      // A write at the limit forgets the answers of holds that have expired, and takes a place.
+      expect(hold.ok).toBe(true);
+      expect(await answers()).toBeLessThanOrEqual(5);
+    }
+    // Maintenance forgets the rest at once, since their holds have expired.
+    await maintainSlotlockTenant(store, tenantRef);
+    expect(await answers()).toBe(0);
+  });
+
+  it("keeps a keyed hold's place until it would have expired, released or confirmed, so a retry still answers", async () => {
+    const store = limited({ holds: 2 });
+    const { tenantRef, resourceId } = await freshTenant(store);
+    const keyed = (n: number, key: string) =>
+      store.acquireHold({
+        tenantRef,
+        resourceId,
+        ...slot(n),
+        ttlMs: 60_000,
+        idempotencyKey: key,
+        principalRef: 'key-1',
+      });
+    const unkeyed = (n: number) =>
+      store.acquireHold({ tenantRef, resourceId, ...slot(n), ttlMs: 60_000 });
+    const expire = (key: string) => sql`
+      UPDATE slotlock.hold_commands SET expires_at = now() - interval '1 second'
+       WHERE tenant_ref = ${tenantRef} AND idempotency_key = ${key}`;
+    const released = await keyed(0, 'released');
+    if (!released.ok) throw new Error(released.code);
+    await store.releaseHold(released.hold.id, { tenantRef });
+    await expect(keyed(0, 'released')).resolves.toEqual({ ...released, idempotent: true });
+    const live = await unkeyed(1);
+    if (!live.ok) throw new Error(live.code);
+    // Before, a released keyed hold left its answer behind uncounted.
+    await expect(unkeyed(2)).resolves.toEqual({ ok: false, code: 'hold_limit_reached', limit: 2 });
+    await expire('released');
+    expect((await unkeyed(2)).ok).toBe(true);
+
+    const booked = await freshTenant(store);
+    const confirmedHold = await store.acquireHold({
+      tenantRef: booked.tenantRef,
+      resourceId: booked.resourceId,
+      ...slot(0),
+      ttlMs: 60_000,
+      idempotencyKey: 'confirmed',
+      principalRef: 'key-1',
+    });
+    if (!confirmedHold.ok) throw new Error(confirmedHold.code);
+    expect(
+      (await store.confirmHold(confirmedHold.hold.id, { tenantRef: booked.tenantRef })).ok,
+    ).toBe(true);
+    const second = await store.acquireHold({
+      tenantRef: booked.tenantRef,
+      resourceId: booked.resourceId,
+      ...slot(1),
+      ttlMs: 60_000,
+    });
+    expect(second.ok).toBe(true);
+    await expect(
+      store.acquireHold({
+        tenantRef: booked.tenantRef,
+        resourceId: booked.resourceId,
+        ...slot(2),
+        ttlMs: 60_000,
+      }),
+    ).resolves.toEqual({ ok: false, code: 'hold_limit_reached', limit: 2 });
+    const [row] = await sql<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM slotlock.hold_commands
+       WHERE tenant_ref = ${tenantRef} AND idempotency_key = 'released'`;
+    expect(row?.count).toBe(0);
   });
 
   it('caps bookings with their cancellations, on every path that adds one', async () => {

@@ -402,7 +402,7 @@ export interface SlotlockTenantErasure {
 export interface BookingRetentionResult {
   /** Holds past their expiry: they occupy nothing, and only a rival's write would reap them. */
   expiredHoldsDeleted: number;
-  /** Keyed hold answers older than the replay window: a retry with that key makes a new hold. */
+  /** Keyed hold answers whose hold has expired: a retry with that key makes a new hold. */
   holdCommandsDeleted: number;
   /**
    * References a cancel retired with no booking, older than the window: a create with one makes a

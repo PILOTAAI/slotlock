@@ -1,6 +1,6 @@
 // Maintenance deletes what a tenant no longer needs: holds past their expiry (which nothing else
-// removes unless a rival writes over their time), and keyed hold answers and references retired by
-// a cancel no booking held, older than the retention window. A cancelled booking's tombstone is
+// removes unless a rival writes over their time) and the answers kept for keyed ones, and references
+// retired by a cancel no booking held, older than the retention window. A cancelled booking's tombstone is
 // kept, so its reference is never booked again. It deletes only that tenant's, and nothing live.
 // Skipped without DATABASE_URL.
 import postgres from 'postgres';
@@ -119,25 +119,21 @@ describe.skipIf(!url)('maintenance purge and booking retention (real Postgres)',
     });
   });
 
-  it('prunes hold answers and retired references past the window, and keeps recent ones', async () => {
+  it('forgets the answers of expired keyed holds, prunes retired references past the window, and keeps the rest', async () => {
     const { tenantRef, resourceId } = await freshTenant();
-    const keyed = await store.acquireHold({
-      tenantRef,
-      resourceId,
-      ...slot(0),
-      ttlMs: 600_000,
-      idempotencyKey: 'old-key',
-      principalRef: 'key-1',
-    });
-    expect(keyed.ok).toBe(true);
-    await store.acquireHold({
-      tenantRef,
-      resourceId,
-      ...slot(1),
-      ttlMs: 600_000,
-      idempotencyKey: 'new-key',
-      principalRef: 'key-1',
-    });
+    const keyedHold = (n: number, idempotencyKey: string) =>
+      store.acquireHold({
+        tenantRef,
+        resourceId,
+        ...slot(n),
+        ttlMs: 600_000,
+        idempotencyKey,
+        principalRef: 'key-1',
+      });
+    const expired = await keyedHold(0, 'expired-key');
+    if (!expired.ok) throw new Error(expired.code);
+    const live = await keyedHold(1, 'live-key');
+    if (!live.ok) throw new Error(live.code);
     for (const externalRef of ['old-ref', 'new-ref']) {
       const cancelled = await store.cancelExternalReservation({
         tenantRef,
@@ -150,15 +146,19 @@ describe.skipIf(!url)('maintenance purge and booking retention (real Postgres)',
       SELECT cancelled_at FROM slotlock.reservation_tombstones
        WHERE tenant_ref = ${tenantRef} AND external_ref = 'new-ref'`;
     expect(Date.now() - (tombstone?.cancelled_at.getTime() ?? 0)).toBeLessThan(60_000);
+    // The first hold expires a minute ago. Before, its answer was kept for 30 days after it was made.
     await sql`
-      UPDATE slotlock.hold_commands SET created_at = now() - interval '31 days'
-       WHERE tenant_ref = ${tenantRef} AND idempotency_key = 'old-key'`;
+      UPDATE slotlock.reservations SET expires_at = now() - interval '1 minute'
+       WHERE id = ${expired.hold.id}`;
+    await sql`
+      UPDATE slotlock.hold_commands SET expires_at = now() - interval '1 minute'
+       WHERE tenant_ref = ${tenantRef} AND idempotency_key = 'expired-key'`;
     await sql`
       UPDATE slotlock.reservation_tombstones SET cancelled_at = now() - interval '31 days'
        WHERE tenant_ref = ${tenantRef} AND external_ref = 'old-ref'`;
 
     await expect(store.pruneBookingRetention({ tenantRef })).resolves.toEqual({
-      expiredHoldsDeleted: 0,
+      expiredHoldsDeleted: 1,
       holdCommandsDeleted: 1,
       tombstonesDeleted: 1,
       hasMore: false,
@@ -181,9 +181,8 @@ describe.skipIf(!url)('maintenance purge and booking retention (real Postgres)',
       ok: false,
       code: 'reservation_cancelled',
     });
-    // The hold itself is untouched: only its answer to a retry is gone.
-    if (!keyed.ok) return;
-    await expect(store.getHold({ tenantRef, holdId: keyed.hold.id })).resolves.not.toBeNull();
+    // The live hold still answers its retry.
+    await expect(keyedHold(1, 'live-key')).resolves.toEqual({ ...live, idempotent: true });
   });
 
   it("keeps a cancelled booking's tombstone past the window, so a late create never books it again", async () => {

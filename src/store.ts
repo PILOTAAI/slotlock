@@ -1887,7 +1887,9 @@ export interface SlotlockStore {
     /**
      * A retry identity, 1-500 UTF-8 bytes, unique inside `tenantRef` and `principalRef` (both
      * required with it): a request repeated with the same key and body answers the hold the first
-     * made (`idempotent: true`), and one with another body is `idempotency_conflict`.
+     * made (`idempotent: true`), and one with another body is `idempotency_conflict`. The answer is
+     * kept until the hold would have expired, released or confirmed; a retry after that makes a new
+     * hold.
      */
     idempotencyKey?: string;
     /** Whose keys `idempotencyKey` is among, 1-500 UTF-8 bytes (an API key's subject, say). */
@@ -2032,18 +2034,21 @@ export interface SlotlockStore {
     retentionDays?: number;
   }): Promise<CalendarEventRetentionResult>;
   /**
-   * Delete one bounded batch of a tenant's dead booking rows: holds past their expiry (at once), and
-   * keyed hold answers and references retired by a cancel no booking held, older than the retention
-   * window. A cancelled booking's tombstone is never deleted here (only by erasing the tenant), so
-   * its reference is never booked again. Rows another transaction holds are skipped, not waited on.
-   * It also gives a confirmed booking a 0.2 server wrote without its tenant the tenant and its own
-   * id as reference, as the migration does. Call until `hasMore` is false.
+   * Delete one bounded batch of a tenant's dead booking rows: holds past their expiry and the answers
+   * kept for keyed ones (at once), and references retired by a cancel no booking held, older than
+   * the retention window. A cancelled booking's tombstone is never deleted here (only by erasing
+   * the tenant), so its reference is never booked again. Rows another transaction holds are
+   * skipped, not waited on. It also gives a confirmed booking a 0.2 server wrote without its tenant
+   * the tenant and its own id as reference, as the migration does. Call until `hasMore` is false.
    */
   pruneBookingRetention(params: {
     tenantRef: string;
     /** Rows per class per call, 1-1000. Defaults to 100. */
     limit?: number;
-    /** In whole days, 1-3650. Defaults to `SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS`. */
+    /**
+     * How long a stray retirement is kept, in whole days, 1-3650. Defaults to
+     * `SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS`.
+     */
     retentionDays?: number;
   }): Promise<BookingRetentionResult>;
   /**
@@ -2132,7 +2137,11 @@ export interface SlotlockStoreOptions {
 export interface SlotlockTenantLimits {
   /** Resources, archived ones included; the lower of this and a call's `maxTenantResources`. */
   resources?: number;
-  /** Live holds on the tenant's resources; expired ones (purged by maintenance) do not count. */
+  /**
+   * Live holds on the tenant's resources; expired ones (purged by maintenance) do not count. A keyed
+   * hold keeps its place until it would have expired, released or confirmed, while its answer is
+   * kept for retries; a hold at the limit first forgets the answers of holds that have expired.
+   */
   holds?: number;
   /**
    * Bookings still to come or made in the last 30 days, cancellations made in the last 30 days,
@@ -2207,15 +2216,27 @@ async function tenantLimitCount(
   let rows: { count: number }[];
   switch (kind) {
     case 'holds':
+      // Live holds, and the answer kept for each keyed hold no longer live (released, confirmed or
+      // expired) until it is forgotten. An answer whose hold is live is left out: that hold counts.
       rows = await tx<{ count: number }[]>`
-        SELECT count(*)::int AS count FROM (
-          SELECT 1
-            FROM slotlock.reservations hold
-            JOIN slotlock.resources resource ON resource.id = hold.resource_id
-           WHERE resource.tenant_ref = ${tenantRef}
-             AND hold.status = 'held' AND hold.expires_at > now()
-           LIMIT ${limit}
-        ) live`;
+        SELECT (
+          (SELECT count(*) FROM (
+            SELECT 1
+              FROM slotlock.reservations hold
+              JOIN slotlock.resources resource ON resource.id = hold.resource_id
+             WHERE resource.tenant_ref = ${tenantRef}
+               AND hold.status = 'held' AND hold.expires_at > now()
+             LIMIT ${limit}) live)
+          + (SELECT count(*) FROM (
+            SELECT 1 FROM slotlock.hold_commands answer
+             WHERE answer.tenant_ref = ${tenantRef}
+               AND NOT EXISTS (
+                 SELECT 1 FROM slotlock.reservations hold
+                  WHERE hold.id = answer.hold_id
+                    AND hold.status = 'held' AND hold.expires_at > now()
+               )
+             LIMIT ${limit}) kept)
+        )::int AS count`;
       break;
     case 'reservations':
       // Bookings still to come; bookings that have ended and cancellations, made recently; and
@@ -2292,6 +2313,35 @@ async function tenantLimitCount(
   const count = Number(rows[0]?.count ?? 0);
   if (!Number.isSafeInteger(count) || count < 0) throw new Error('slotlock: invalid tenant row count');
   return count;
+}
+
+/**
+ * Delete up to `limit` of a tenant's keyed hold answers whose hold has expired, so a retry with one
+ * of their keys makes a new hold; answers another transaction holds are skipped. The number deleted.
+ */
+async function forgetExpiredHoldAnswers(
+  tx: TransactionSql,
+  tenantRef: string,
+  limit: number,
+): Promise<number> {
+  const [row] = await tx<{ deleted: number }[]>`
+    WITH candidates AS MATERIALIZED (
+      SELECT answer.principal_ref, answer.idempotency_key
+        FROM slotlock.hold_commands answer
+       WHERE answer.tenant_ref = ${tenantRef} AND answer.expires_at <= now()
+       ORDER BY answer.expires_at, answer.principal_ref, answer.idempotency_key
+       LIMIT ${limit}
+       FOR UPDATE OF answer SKIP LOCKED
+    ), deleted AS (
+      DELETE FROM slotlock.hold_commands answer
+       USING candidates candidate
+       WHERE answer.tenant_ref = ${tenantRef}
+         AND answer.principal_ref = candidate.principal_ref
+         AND answer.idempotency_key = candidate.idempotency_key
+      RETURNING 1
+    )
+    SELECT count(*)::int AS deleted FROM deleted`;
+  return Number(row?.deleted ?? 0);
 }
 
 /**
@@ -2505,6 +2555,12 @@ function buildSlotlockStore(
     if (limit === undefined || tenantRef === null) return null;
     await assertReadCommitted(tx);
     await lockTenantLimit(tx, tenantRef, kind);
+    if ((await tenantLimitCount(tx, tenantRef, kind, limit)) < limit) return null;
+    // A keyed hold's answer keeps its place only until the hold would have expired; at the limit,
+    // the answers past that are forgotten, as maintenance would, and the count is read again.
+    if (kind !== 'holds' || (await forgetExpiredHoldAnswers(tx, tenantRef, limit)) === 0) {
+      return limit;
+    }
     return (await tenantLimitCount(tx, tenantRef, kind, limit)) >= limit ? limit : null;
   }
 
@@ -4342,25 +4398,7 @@ function buildSlotlockStore(
             RETURNING 1
           )
           SELECT count(*)::int AS deleted FROM deleted`;
-        const [commands] = await tx<{ deleted: number }[]>`
-          WITH candidates AS MATERIALIZED (
-            SELECT command.principal_ref, command.idempotency_key
-              FROM slotlock.hold_commands command
-             WHERE command.tenant_ref = ${params.tenantRef}
-               AND command.created_at <
-                   clock_timestamp() - (${retentionDays}::int * interval '1 day')
-             ORDER BY command.created_at, command.principal_ref, command.idempotency_key
-             LIMIT ${limit}
-             FOR UPDATE OF command SKIP LOCKED
-          ), deleted AS (
-            DELETE FROM slotlock.hold_commands command
-             USING candidates candidate
-             WHERE command.tenant_ref = ${params.tenantRef}
-               AND command.principal_ref = candidate.principal_ref
-               AND command.idempotency_key = candidate.idempotency_key
-            RETURNING 1
-          )
-          SELECT count(*)::int AS deleted FROM deleted`;
+        const holdCommandsDeleted = await forgetExpiredHoldAnswers(tx, params.tenantRef, limit);
         // Only references retired with no booking: a cancelled booking's tombstone is kept.
         const [tombstones] = await tx<{ deleted: number }[]>`
           WITH candidates AS MATERIALIZED (
@@ -4383,7 +4421,6 @@ function buildSlotlockStore(
           )
           SELECT count(*)::int AS deleted FROM deleted`;
         const expiredHoldsDeleted = Number(holds?.deleted ?? 0);
-        const holdCommandsDeleted = Number(commands?.deleted ?? 0);
         const tombstonesDeleted = Number(tombstones?.deleted ?? 0);
         return {
           expiredHoldsDeleted,

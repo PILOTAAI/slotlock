@@ -2036,8 +2036,10 @@ CREATE TABLE IF NOT EXISTS slotlock.calendar_coverage (
 );
 
 -- A keyed hold's first answer, by the key its caller gave inside its tenant and principal, so a
--- retried request answers the same hold instead of overlapping it. The answer stays as given even
--- after the hold is confirmed, released or reaped; maintenance deletes it after the retention window.
+-- retried request answers the same hold instead of overlapping it. The answer stays as given until
+-- the hold would have expired, even once it is confirmed, released or reaped, and counts against
+-- the tenant's hold limit while its hold is not live; then maintenance, or a hold at that limit,
+-- deletes it (store.ts forgetExpiredHoldAnswers).
 CREATE TABLE IF NOT EXISTS slotlock.hold_commands (
   tenant_ref text NOT NULL,
   principal_ref text NOT NULL,
@@ -2062,8 +2064,8 @@ CREATE TABLE IF NOT EXISTS slotlock.hold_commands (
     AND octet_length(payload_hash) = 64
   )
 );
-CREATE INDEX IF NOT EXISTS slotlock_hold_commands_retention_idx
-  ON slotlock.hold_commands (tenant_ref, created_at);
+CREATE INDEX IF NOT EXISTS slotlock_hold_commands_expiry_idx
+  ON slotlock.hold_commands (tenant_ref, expires_at);
 -- References retired with no booking: a tenant's count of them, and maintenance's prune.
 CREATE INDEX IF NOT EXISTS slotlock_reservation_tombstones_stray_idx
   ON slotlock.reservation_tombstones (tenant_ref, cancelled_at) WHERE stray;
