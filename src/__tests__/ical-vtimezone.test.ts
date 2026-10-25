@@ -86,6 +86,33 @@ describe('an exported calendar defines every zone it names', () => {
     60_000,
   );
 
+  it.each([
+    ['Asia/Gaza', '2040-10-15'],
+    ['Asia/Gaza', '2054-03-20'],
+    ['Asia/Hebron', '2040-10-15'],
+    ['Asia/Hebron', '2054-03-20'],
+  ])('%s, a daily series from 2026, read by its VTIMEZONE alone from %s, as Intl', (zone, day) => {
+    // Daylight time here stops for Ramadan and comes back: in 2040 the clocks go forward on 20
+    // October and back six days later, which a search for changes a week at a time missed.
+    const start = new Date('2026-01-10T07:00:00Z');
+    const text = emitITipCalendar(
+      {
+        uid: 'series@slotlock.test',
+        start,
+        end: new Date(start.getTime() + HOUR),
+        timezone: zone,
+        summary: 'Daily',
+        recurrence: { rrule: 'FREQ=DAILY' },
+      },
+      'PUBLISH',
+    );
+    const from = new Date(`${day}T00:00:00Z`);
+    const window = { start: from, end: new Date(from.getTime() + 21 * DAY) };
+    const intl = spans(text, window);
+    expect(intl).toHaveLength(21);
+    expect(spans(renamed(text, zone), window)).toEqual(intl);
+  });
+
   it.each(ZONES)('%s, a one-off, read by its VTIMEZONE alone, as Intl reads it', (zone) => {
     const start = new Date('2027-07-01T09:00:00Z');
     const text = emitITipCalendar(

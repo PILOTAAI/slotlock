@@ -107,6 +107,154 @@ function createFormatter(timezone: string): Intl.DateTimeFormat {
   return formatter;
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** The furthest from 1970 a Date may be, in ms (ECMA-262 §21.4.1.22, "Time Values and Time Range"). */
+const MAX_TIME_MS = 8.64e15;
+
+/** The UTC day an instant falls in, as ZoneOffsets reads a zone's offsets: days since 1970. */
+export function zoneOffsetDay(utcMs: number): number {
+  return Math.floor(utcMs / DAY_MS);
+}
+
+/**
+ * How far either side of a wall time converting it to its instant reads the zone's offsets: no zone
+ * is further than this from UTC. The days from one end to the other hold every offset it reads.
+ */
+export const ZONE_OFFSET_REACH_MS = FOURTEEN_HOURS_MS;
+
+/** How many midnights one block of a zone's offsets holds. */
+const BLOCK_DAYS = 512;
+const NO_CHANGES: readonly ZoneTransition[] = [];
+
+/**
+ * A zone's offsets, read from Intl a UTC day at a time and kept. Intl's formatToParts takes about
+ * two microseconds and a conversion asks for four to six offsets, so a series that converts a time
+ * at each of thousands of occurrences spent most of its time there (forty daily London series from
+ * 2016, 35 seconds). Each UTC midnight's offset is read once; a day whose two midnights agree has
+ * that offset throughout, and one whose midnights differ has each change in it narrowed to the
+ * second (scanTransitions). A change and its reversal within one day would be missed; the tests
+ * compare the zones whose clocks change most with an hourly search.
+ */
+class ZoneOffsets {
+  /** The offset at each UTC midnight read (NaN where none is), BLOCK_DAYS days to a block. */
+  readonly midnights = new Map<number, Float64Array>();
+  /** The changes of each day whose midnights differ. */
+  readonly changes = new Map<number, readonly ZoneTransition[]>();
+  private readonly formatter: Intl.DateTimeFormat;
+
+  constructor(formatter: Intl.DateTimeFormat) {
+    this.formatter = formatter;
+  }
+
+  offsetAt(utcMs: number): number {
+    const day = zoneOffsetDay(utcMs);
+    // Not a time value: Intl refuses it, as it always has.
+    if (!Number.isFinite(day)) return offsetAt(utcMs, this.formatter);
+    let offset = this.midnight(day);
+    for (const change of this.changesOn(day)) {
+      if (utcMs < change.at) break;
+      offset = change.after;
+    }
+    return offset;
+  }
+
+  /** The changes on UTC day `day`, in order. */
+  changesOn(day: number): readonly ZoneTransition[] {
+    const offset = this.midnight(day);
+    if (offset === this.midnight(day + 1)) return NO_CHANGES;
+    let found = this.changes.get(day);
+    if (!found) {
+      found = scanTransitions(
+        (utcMs) => offsetAt(utcMs, this.formatter),
+        dayStart(day),
+        dayStart(day + 1),
+        DAY_MS,
+      );
+      if (cachedChangeDays >= MAX_CACHED_CHANGE_DAYS) {
+        for (const zone of zoneOffsetTables.values()) zone.changes.clear();
+        cachedChangeDays = 0;
+      }
+      this.changes.set(day, found);
+      cachedChangeDays += 1;
+    }
+    return found;
+  }
+
+  /** The changes from `fromMs` (exclusive) to `toMs` (inclusive), day by day. */
+  transitions(fromMs: number, toMs: number): ZoneTransition[] {
+    const found: ZoneTransition[] = [];
+    const last = zoneOffsetDay(toMs);
+    for (let day = zoneOffsetDay(fromMs); day <= last; day++) {
+      for (const change of this.changesOn(day)) {
+        if (change.at > fromMs && change.at <= toMs) found.push(change);
+      }
+    }
+    return found;
+  }
+
+  private midnight(day: number): number {
+    const block = Math.floor(day / BLOCK_DAYS);
+    let offsets = this.midnights.get(block);
+    if (!offsets) {
+      if (cachedBlocks >= MAX_CACHED_BLOCKS) {
+        for (const zone of zoneOffsetTables.values()) zone.midnights.clear();
+        cachedBlocks = 0;
+      }
+      offsets = new Float64Array(BLOCK_DAYS).fill(Number.NaN);
+      this.midnights.set(block, offsets);
+      cachedBlocks += 1;
+    }
+    const index = day - block * BLOCK_DAYS;
+    let offset = offsets[index] as number;
+    if (Number.isNaN(offset)) {
+      offset = offsetAt(dayStart(day), this.formatter);
+      offsets[index] = offset;
+    }
+    return offset;
+  }
+}
+
+/** A UTC day's first instant, as far as a Date reaches. */
+function dayStart(day: number): number {
+  return Math.min(Math.max(day * DAY_MS, -MAX_TIME_MS), MAX_TIME_MS);
+}
+
+/**
+ * Each zone's offsets, by name, as createFormatter keeps formatters. A block of midnights takes 4
+ * KB; once there are this many (16 MB, about 57 zone-centuries), every zone's are emptied, and so
+ * are the days with changes once there are this many of those (zones change twice a year at most
+ * but for a few).
+ */
+const zoneOffsetTables = new Map<string, ZoneOffsets>();
+const MAX_CACHED_BLOCKS = 4_096;
+const MAX_CACHED_CHANGE_DAYS = 20_000;
+let cachedBlocks = 0;
+let cachedChangeDays = 0;
+
+function zoneOffsets(timezone: string): ZoneOffsets {
+  const cached = zoneOffsetTables.get(timezone);
+  if (cached) return cached;
+  const offsets = new ZoneOffsets(createFormatter(timezone));
+  if (zoneOffsetTables.size >= MAX_CACHED_FORMATTERS) {
+    zoneOffsetTables.clear();
+    cachedBlocks = 0;
+    cachedChangeDays = 0;
+  }
+  zoneOffsetTables.set(timezone, offsets);
+  return offsets;
+}
+
+/**
+ * How many instants reading `timezone`'s offsets on UTC day `day` asks Intl for with none of them
+ * kept, beyond the day's two midnights (one each): about twenty to find each change between them.
+ * A caller that must charge the same for an input however much the process has kept charges each
+ * midnight and this the first time it reads them.
+ */
+export function zoneOffsetChangeReads(timezone: string, day: number): number {
+  if (timezone === 'UTC') return 0;
+  return 20 * zoneOffsets(timezone).changesOn(day).length;
+}
+
 function buildFormatter(timezone: string): Intl.DateTimeFormat {
   try {
     return new Intl.DateTimeFormat('en-US', {
@@ -148,8 +296,8 @@ export function createTimeZoneConverter(timezone: string): TimeZoneConverter {
   if (timezone === 'UTC') {
     return { wallFrameToUtc: (wallFrameMs) => new Date(wallFrameMs) };
   }
-  const formatter = createFormatter(timezone);
-  const offsetIn = (utcMs: number) => offsetAt(utcMs, formatter);
+  const offsets = zoneOffsets(timezone);
+  const offsetIn = (utcMs: number) => offsets.offsetAt(utcMs);
   return {
     wallFrameToUtc(wallFrameMs, choice) {
       return new Date(wallFrameToInstant(wallFrameMs, offsetIn, choice));
@@ -253,7 +401,7 @@ function wallFrame(instant: Date, timezone: string): Date {
   if (!Number.isFinite(ms)) {
     throw Object.assign(new Error('Invalid instant'), { code: 'invalid_instant' });
   }
-  const offset = timezone === 'UTC' ? 0 : offsetAt(ms, createFormatter(timezone));
+  const offset = timezone === 'UTC' ? 0 : zoneOffsets(timezone).offsetAt(ms);
   return new Date(ms + offset);
 }
 
@@ -321,23 +469,35 @@ export interface ZoneTransition {
   after: number;
 }
 
-const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-
 /**
- * Every change of `timezone`'s offset from `fromMs` to `toMs`, as Intl reads the zone: its offset
- * is compared a week apart and each change narrowed to the second. A change and its reversal both
- * within one week, which no zone Intl knows makes from 2020 to 2032 (a test compares a day-by-day
- * search), would be missed.
+ * Every change of `timezone`'s offset from `fromMs` to `toMs`, as Intl reads the zone, from its
+ * offsets a day at a time (ZoneOffsets): Gaza's clocks go forward on 20 October 2040 and back six
+ * days later, which a search a week at a time missed.
  */
 export function zoneTransitions(timezone: string, fromMs: number, toMs: number): ZoneTransition[] {
   if (timezone === 'UTC') return [];
-  const formatter = createFormatter(timezone);
-  const offsetIn = (utcMs: number) => offsetAt(utcMs, formatter);
+  return zoneOffsets(timezone).transitions(
+    Math.floor(fromMs / 1000) * 1000,
+    Math.ceil(toMs / 1000) * 1000,
+  );
+}
+
+/**
+ * The changes of the offset `offsetIn` reads from `fromMs` to `toMs`, found by comparing offsets
+ * `stepMs` apart and narrowing each change to the second: a change and its reversal both within
+ * one step are missed.
+ */
+function scanTransitions(
+  offsetIn: (utcMs: number) => number,
+  fromMs: number,
+  toMs: number,
+  stepMs: number,
+): ZoneTransition[] {
   const found: ZoneTransition[] = [];
   let at = Math.floor(fromMs / 1000) * 1000;
   let offset = offsetIn(at);
   while (at < toMs) {
-    const next = Math.min(at + WEEK_MS, Math.ceil(toMs / 1000) * 1000);
+    const next = Math.min(at + stepMs, Math.ceil(toMs / 1000) * 1000);
     if (offsetIn(next) === offset) {
       at = next;
       continue;
