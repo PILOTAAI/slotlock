@@ -119,9 +119,9 @@ const FEED_LIMITS: ExpansionLimits = { steps: MAX_ICAL_STEPS };
 
 /**
  * One event as it is written or asked about (expandCalendarEventOccurrences): a tenth of a feed's,
- * so a write is refused within a few hundredths of a second whatever its rule (fifty writes
- * of one that walks 9,999 days a step held a hosted server for 23 seconds when a write could search
- * for half of one), and a series written today still fits when the roll searches it again from its
+ * so a write is refused within a tenth of a second whatever its rule or zone (fifty writes of one
+ * that walks 9,999 days a step held a hosted server for 23 seconds when a write could search for
+ * half of one), and a series written today still fits when the roll searches it again from its
  * start for decades (that search grows as the window moves; the roll resumes from a cursor instead
  * whenever it has one). A yearly date written as a daily rule fits from 1990, and from 1950 does
  * not, but rolls.
