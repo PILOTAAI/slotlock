@@ -125,8 +125,7 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
 const AGENT_EVENT_OWNER_PATTERN = /^agent:[0-9a-f]{64}$/;
 
 /** Store-owned coverage source for bounded, locally materialized recurring events. */
-export const SLOTLOCK_LOCAL_RECURRENCE_COVERAGE_SOURCE =
-  'slotlock:local-recurrence-materialization';
+export const SLOTLOCK_LOCAL_RECURRENCE_COVERAGE_SOURCE = 'slotlock:local-recurrence-materialization';
 
 /**
  * Stable daily target shared by the event writer, maintenance worker, and readiness proof: from a
@@ -163,9 +162,7 @@ function resumeStoredSeries(
 
 /** A series cursor as the jsonb column takes it. */
 function seriesCursorJson(tx: TransactionSql, cursor: CalendarSeriesCursor | null) {
-  return cursor === null
-    ? null
-    : tx.json(cursor as unknown as Parameters<TransactionSql['json']>[0]);
+  return cursor === null ? null : tx.json(cursor as unknown as Parameters<TransactionSql['json']>[0]);
 }
 
 /**
@@ -279,16 +276,14 @@ function recurrenceEndsByColumn(event: CalendarEventContent): string | null {
 }
 
 /** The roll's `after`, checked, or `undefined` for a pass's first batch. */
-function rollCursor(
-  after: CalendarHorizonRollCursor | undefined,
-): CalendarHorizonRollCursor | undefined {
+function rollCursor(after: CalendarHorizonRollCursor | undefined): CalendarHorizonRollCursor | undefined {
   if (after === undefined) return undefined;
   if (
     !(after.materializedEndsAt instanceof Date) ||
     !Number.isFinite(after.materializedEndsAt.getTime()) ||
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(after.eventId)
   ) {
-    throw Object.assign(new Error("Slotlock horizon cursor must be a previous batch's `next`"), {
+    throw Object.assign(new Error('Slotlock horizon cursor must be a previous batch\'s `next`'), {
       code: 'invalid_cursor' as const,
     });
   }
@@ -1181,8 +1176,7 @@ function oneOffEventWindow(event: Interval, requested: Interval | undefined): In
     !isFiniteWindow(window) ||
     window.start > event.start ||
     window.end < event.end ||
-    window.end.getTime() - window.start.getTime() >
-      Math.max(MAX_MATERIALIZATION_WINDOW_MS, duration)
+    window.end.getTime() - window.start.getTime() > Math.max(MAX_MATERIALIZATION_WINDOW_MS, duration)
   ) {
     throw new CalendarContractError('invalid_icalendar');
   }
@@ -1513,12 +1507,9 @@ async function upsertResource(
   }
   const row = rows[0];
   if (!row) {
-    throw Object.assign(
-      new Error('Slotlock resource visibility cannot be changed by creating it'),
-      {
-        code: 'resource_visibility_conflict' as const,
-      },
-    );
+    throw Object.assign(new Error('Slotlock resource visibility cannot be changed by creating it'), {
+      code: 'resource_visibility_conflict' as const,
+    });
   }
   return toResource(row);
 }
@@ -1885,10 +1876,7 @@ export interface SlotlockStore {
    * The tenant's booking with this reference as it now is (its current revision), or null: none,
    * cancelled, or a calendar event's occupation, which is not a booking.
    */
-  getReservation(params: {
-    tenantRef: string;
-    externalRef: string;
-  }): Promise<SlotlockReservation | null>;
+  getReservation(params: { tenantRef: string; externalRef: string }): Promise<SlotlockReservation | null>;
   /**
    * The tenant's bookings on one resource whose occupied time meets `window` (at most 367 days),
    * by start then id, keyset-paginated: pass the last one's `{ start, id }` as `after`.
@@ -1937,10 +1925,7 @@ export interface SlotlockStore {
    * One of the tenant's active events by id, whichever owner (the tenant itself or an agent key)
    * wrote it: null when there is none, it was cancelled, or it is another tenant's.
    */
-  getCalendarEventById(params: {
-    tenantRef: string;
-    eventId: string;
-  }): Promise<SlotlockCalendarEvent | null>;
+  getCalendarEventById(params: { tenantRef: string; eventId: string }): Promise<SlotlockCalendarEvent | null>;
   /** List active events with at least one materialized occurrence intersecting the window. */
   listCalendarEvents(params: {
     tenantRef: string;
@@ -2274,8 +2259,7 @@ async function tenantLimitCount(
       break;
   }
   const count = Number(rows[0]?.count ?? 0);
-  if (!Number.isSafeInteger(count) || count < 0)
-    throw new Error('slotlock: invalid tenant row count');
+  if (!Number.isSafeInteger(count) || count < 0) throw new Error('slotlock: invalid tenant row count');
   return count;
 }
 
@@ -2358,10 +2342,7 @@ function holdTenantRef(options: SlotlockHoldTenantOptions): string | null {
   return tenantRef;
 }
 
-export function createSlotlockStore(
-  sql: StoreSql,
-  options: SlotlockStoreOptions = {},
-): SlotlockStore {
+export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions = {}): SlotlockStore {
   return buildSlotlockStore(sql, options, null);
 }
 
@@ -2743,8 +2724,7 @@ function buildSlotlockStore(
     async createResource(params) {
       assertValidResourceInput(params);
       const requested = params.maxTenantResources;
-      const configured =
-        params.tenantRef === undefined ? undefined : configuredTenantLimits.resources;
+      const configured = params.tenantRef === undefined ? undefined : configuredTenantLimits.resources;
       if (requested === undefined && configured === undefined) return upsertResource(sql, params);
       if (
         requested !== undefined &&
@@ -3041,11 +3021,7 @@ function buildSlotlockStore(
               return { ok: true, reservation: toReservation(found), idempotent: true };
             }
             const bookingLimit = await tenantLimitReached(tx, params.tenantRef, 'reservations');
-            const resourceState = await tenantResourceState(
-              tx,
-              params.resourceId,
-              params.tenantRef,
-            );
+            const resourceState = await tenantResourceState(tx, params.resourceId, params.tenantRef);
             if (resourceState === 'missing') return { ok: false, code: 'resource_tenant_mismatch' };
             if (resourceState === 'archived') return { ok: false, code: 'resource_archived' };
             if (bookingLimit !== null) {
@@ -3136,11 +3112,7 @@ function buildSlotlockStore(
             if (params.revision !== currentRevision + 1) {
               return { ok: false, code: 'revision_conflict' };
             }
-            const resourceState = await tenantResourceState(
-              tx,
-              params.resourceId,
-              params.tenantRef,
-            );
+            const resourceState = await tenantResourceState(tx, params.resourceId, params.tenantRef);
             if (resourceState === 'missing') return { ok: false, code: 'resource_tenant_mismatch' };
             if (resourceState === 'archived') return { ok: false, code: 'resource_archived' };
             if (
@@ -3282,9 +3254,7 @@ function buildSlotlockStore(
       const keyed = idempotencyKey !== undefined || principalRef !== undefined;
       if (
         keyed &&
-        (tenantRef === undefined ||
-          !isValidIdentity(principalRef) ||
-          !isValidIdentity(idempotencyKey))
+        (tenantRef === undefined || !isValidIdentity(principalRef) || !isValidIdentity(idempotencyKey))
       ) {
         return { ok: false, code: 'invalid_identity' };
       }
@@ -3334,8 +3304,7 @@ function buildSlotlockStore(
                FOR SHARE`;
             if (!resource) return { ok: false, code: 'resource_not_found' };
             if (resource.archived) return { ok: false, code: 'resource_archived' };
-            if (holdLimit !== null)
-              return { ok: false, code: 'hold_limit_reached', limit: holdLimit };
+            if (holdLimit !== null) return { ok: false, code: 'hold_limit_reached', limit: holdLimit };
             if (
               resource.tenant_ref !== null &&
               !(await recurrenceCoversWrite(tx, {
@@ -3588,10 +3557,7 @@ function buildSlotlockStore(
 
     async putCalendarEvent(params) {
       const ownerRef = params.ownerRef ?? SLOTLOCK_INTERNAL_EVENT_OWNER_REF;
-      if (
-        params.expectedResourceId !== undefined &&
-        !isValidResourceId(params.expectedResourceId)
-      ) {
+      if (params.expectedResourceId !== undefined && !isValidResourceId(params.expectedResourceId)) {
         return { ok: false, code: 'invalid_identity' };
       }
       if (
@@ -3692,11 +3658,7 @@ function buildSlotlockStore(
                 currentRevision: Number(tombstones[0].revision),
               };
             }
-            const resourceState = await tenantResourceState(
-              tx,
-              params.resourceId,
-              params.tenantRef,
-            );
+            const resourceState = await tenantResourceState(tx, params.resourceId, params.tenantRef);
             if (resourceState === 'missing') return { ok: false, code: 'resource_tenant_mismatch' };
             if (resourceState === 'archived') return { ok: false, code: 'resource_archived' };
             const existing = await tx<CalendarEventRow[]>`
@@ -4077,18 +4039,13 @@ function buildSlotlockStore(
         refusedEventIds,
         hasMore,
         next:
-          hasMore && last
-            ? { materializedEndsAt: last.materialized_ends_at, eventId: last.id }
-            : null,
+          hasMore && last ? { materializedEndsAt: last.materialized_ends_at, eventId: last.id } : null,
       };
     },
 
     async cancelCalendarEvent(params) {
       const ownerRef = params.ownerRef ?? SLOTLOCK_INTERNAL_EVENT_OWNER_REF;
-      if (
-        params.expectedResourceId !== undefined &&
-        !isValidResourceId(params.expectedResourceId)
-      ) {
+      if (params.expectedResourceId !== undefined && !isValidResourceId(params.expectedResourceId)) {
         return { ok: false, code: 'invalid_identity' };
       }
       if (
@@ -4772,8 +4729,7 @@ function buildSlotlockStore(
         busy = await this.listBusy(params.resourceId, reach);
       } else {
         busy = [];
-        const parts =
-          bufferAfterMs > 0 ? [window, { start: window.end, end: reach.end }] : [window];
+        const parts = bufferAfterMs > 0 ? [window, { start: window.end, end: reach.end }] : [window];
         for (const part of parts) {
           const freeBusy = await this.getFreeBusy({
             tenantRef,
@@ -4818,9 +4774,7 @@ function buildSlotlockStore(
           }))
       ) {
         throw Object.assign(
-          new Error(
-            'Slotlock suspension reason must be 1-500 characters without control characters',
-          ),
+          new Error('Slotlock suspension reason must be 1-500 characters without control characters'),
           { code: 'invalid_suspension_reason' as const },
         );
       }

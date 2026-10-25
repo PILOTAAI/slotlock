@@ -170,14 +170,8 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
 
       // No new key; one it has still authenticates (reads go on).
       const keys = createSlotlockApiKeyStore(application);
-      await expect(keys.create({ tenantRef, name: 'New key', scopes: ['read'] })).rejects.toThrow(
-        /suspended/,
-      );
-      const kept = await keys.create({
-        tenantRef: other.tenantRef,
-        name: 'Kept key',
-        scopes: ['read'],
-      });
+      await expect(keys.create({ tenantRef, name: 'New key', scopes: ['read'] })).rejects.toThrow(/suspended/);
+      const kept = await keys.create({ tenantRef: other.tenantRef, name: 'Kept key', scopes: ['read'] });
       await asOwner((store) => store.suspendTenant({ tenantRef: other.tenantRef }));
       await expect(keys.authenticate(kept.key)).resolves.toMatchObject({
         tenantRef: other.tenantRef,

@@ -5,7 +5,11 @@
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { maintainSlotlockTenant } from '../maintenance.js';
-import { type SlotlockStore, calendarEventRollingHorizon, createSlotlockStore } from '../store.js';
+import {
+  type SlotlockStore,
+  calendarEventRollingHorizon,
+  createSlotlockStore,
+} from '../store.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
 const d = (iso: string) => new Date(iso);
@@ -128,11 +132,7 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
   });
 
   /** A daily 09:00-10:00 UTC series on the resource, stored for `window`. */
-  async function dailySeries(
-    tenantRef: string,
-    resourceId: string,
-    window: { start: Date; end: Date },
-  ) {
+  async function dailySeries(tenantRef: string, resourceId: string, window: { start: Date; end: Date }) {
     const start = new Date(window.start.getTime() + 9 * HOUR);
     const put = await store.putCalendarEvent({
       tenantRef,
@@ -176,10 +176,9 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
           revision: 1,
         }),
       ).resolves.toEqual({ ok: false, code: 'recurrence_not_materialized' });
-      await expect(store.acquireHold({ resourceId, ...window, ttlMs: 60_000 })).resolves.toEqual({
-        ok: false,
-        code: 'recurrence_not_materialized',
-      });
+      await expect(
+        store.acquireHold({ resourceId, ...window, ttlMs: 60_000 }),
+      ).resolves.toEqual({ ok: false, code: 'recurrence_not_materialized' });
       await expect(store.createReservation({ resourceId, ...window })).resolves.toEqual({
         ok: false,
         code: 'recurrence_not_materialized',
@@ -480,12 +479,7 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
         tenantRef,
         window: calendarEventRollingHorizon(),
       });
-      expect(roll).toMatchObject({
-        examined: 1,
-        extended: 0,
-        conflicts: 1,
-        conflictEventIds: [stuck],
-      });
+      expect(roll).toMatchObject({ examined: 1, extended: 0, conflicts: 1, conflictEventIds: [stuck] });
     });
 
     it('puts a series it cannot extend behind the others, so the next pass reaches a healthy one', async () => {

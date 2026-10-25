@@ -89,7 +89,9 @@ describe.skipIf(!url)('resource visibility, archive and delete (real Postgres)',
         resources: { external_ref: string }[];
       };
       expect(listed.resources.map((resource) => resource.external_ref)).toEqual(['vehicle-1']);
-      const describeResource = agent.describeResource as NonNullable<typeof agent.describeResource>;
+      const describeResource = agent.describeResource as NonNullable<
+        typeof agent.describeResource
+      >;
       await expect(describeResource(agentContext(tenantRef), hmrc.id)).resolves.toBeNull();
       const window = { start: '2027-03-01T00:00:00.000Z', end: '2027-03-08T00:00:00.000Z' };
       const notFound = { code: 'resource_not_found' };
@@ -400,7 +402,7 @@ describe.skipIf(!url)('resource visibility, archive and delete (real Postgres)',
       await new Promise((resolve) => setTimeout(resolve, 200));
       release();
       await archive;
-      // The verifier's repro: the confirm read the resource before the archive committed, and booked.
+      // Without the resource's share lock the confirm read it before the archive committed, and booked.
       await expect(confirm).resolves.toEqual({ ok: false, code: 'resource_archived' });
       const [row] = await sql<{ status: string }[]>`
         SELECT status FROM slotlock.reservations WHERE id = ${hold.hold.id}`;
