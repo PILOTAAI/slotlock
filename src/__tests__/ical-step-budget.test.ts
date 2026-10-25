@@ -11,6 +11,7 @@ import {
   expandCalendarEventOccurrences,
   expandStoredCalendarEventOccurrences,
   parseICalendarChanges,
+  parseICalendarFeed,
   parseTrustedICalendarEvents,
 } from '../sync.js';
 
@@ -651,6 +652,125 @@ describe('the step budget on recurrence expansion', () => {
       }
       expect(performance.now() - started).toBeLessThan(5_000);
     });
+  });
+
+  describe('a series in a named time zone (SEC-3)', () => {
+    // Every occurrence of a series in an IANA zone is read through the zone's offsets. Each read
+    // built an Intl formatter to check the zone's name and asked Intl for four to six offsets, and
+    // none of it was charged: forty daily London series from 2016 held a feed for 35 seconds and
+    // were read, and one written as a single event took half a second to be refused.
+    const daily = (zone: string, series: number) =>
+      [
+        'BEGIN:VCALENDAR',
+        'VERSION:2.0',
+        'PRODID:-//Slotlock tests//EN',
+        ...Array.from({ length: series }, (_, index) => {
+          const minute = String(index % 60).padStart(2, '0');
+          return [
+            'BEGIN:VEVENT',
+            `UID:daily-${index}`,
+            'DTSTAMP:20261010T000000Z',
+            `DTSTART;TZID=${zone}:20160105T09${minute}00`,
+            `DTEND;TZID=${zone}:20160105T10${minute}00`,
+            'RRULE:FREQ=DAILY;COUNT=3990',
+            'END:VEVENT',
+          ];
+        }).flat(),
+        'END:VCALENDAR',
+      ].join('\r\n');
+    // The verifier's window: 46 occurrences of each series fall in it, 1,840 in all, fewer than a
+    // feed may hold, so only the budget can refuse the feed.
+    const feedWindow = {
+      start: new Date('2026-10-23T00:00:00Z'),
+      end: new Date('2027-10-23T00:00:00Z'),
+    };
+    const since = (start: string, timezone: string, rrule = 'FREQ=DAILY') => ({
+      start: new Date(start),
+      end: new Date(new Date(start).getTime() + 30 * 60_000),
+      timezone,
+      summary: 'Busy',
+      recurrence: { rrule },
+    });
+
+    /** How many Intl formatters `work` builds, how many instants it asks them to read, how long. */
+    function intlWork(work: () => unknown) {
+      const Formatter = Intl.DateTimeFormat;
+      let built = 0;
+      const counting = new Proxy(Formatter, {
+        construct(target, args, newTarget) {
+          built += 1;
+          return Reflect.construct(target, args, newTarget);
+        },
+      });
+      const read = vi.spyOn(Formatter.prototype, 'formatToParts');
+      Object.defineProperty(Intl, 'DateTimeFormat', { value: counting, configurable: true });
+      try {
+        const { ms, error } = timed(work);
+        return { built, read: read.mock.calls.length, ms, error };
+      } finally {
+        Object.defineProperty(Intl, 'DateTimeFormat', { value: Formatter, configurable: true });
+        read.mockRestore();
+      }
+    }
+
+    it.each(['UTC', 'Europe/London'])(
+      'refuses forty daily series from 2016 in %s as a feed, promptly, reading Intl a bounded number of times',
+      (zone) => {
+        const work = intlWork(() => parseICalendarChanges(daily(zone, 40), undefined, feedWindow));
+        expect(work.error).toBeInstanceOf(CalendarExpansionLimitError);
+        // A month of a zone's offsets is read from Intl once: about 35 instants. From 2016 to 2026
+        // that is a few thousand, however many occurrences convert a time in it.
+        expect(work.built).toBeLessThan(10);
+        expect(work.read).toBeLessThan(20_000);
+        expect(work.ms).toBeLessThan(2_500);
+      },
+      120_000,
+    );
+
+    it('refuses a daily London series from 2016 as one write, reading Intl a bounded number of times', () => {
+      const work = intlWork(() =>
+        expandCalendarEventOccurrences(since('2016-02-01T09:00:00Z', 'Europe/London'), WINDOW),
+      );
+      expect(work.error).toEqual(refused);
+      expect(work.built).toBeLessThan(10);
+      expect(work.read).toBeLessThan(20_000);
+    }, 120_000);
+
+    it('refuses fifty writes of it within a few seconds in all', () => {
+      const started = performance.now();
+      for (let write = 0; write < 50; write++) {
+        const series = since('2016-02-01T09:00:00Z', 'Europe/London');
+        expect(timed(() => expandCalendarEventOccurrences(series, WINDOW)).error).toEqual(refused);
+      }
+      expect(performance.now() - started).toBeLessThan(5_000);
+    }, 120_000);
+
+    it('still writes a daily London series from 2020, and every weekday since 2016', () => {
+      expect(
+        expandCalendarEventOccurrences(since('2020-02-03T09:00:00Z', 'Europe/London'), WINDOW),
+      ).toHaveLength(365);
+      const weekdays = since(
+        '2016-02-01T09:00:00Z',
+        'Europe/London',
+        'FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR',
+      );
+      expect(expandCalendarEventOccurrences(weekdays, WINDOW)).toHaveLength(261);
+    });
+
+    it('reads or refuses a London feed the same way whether its offsets were read before or not', async () => {
+      // The months of offsets a parse reads are charged whether or not an earlier parse in the
+      // process has read them already, so what is refused never depends on what came before.
+      const text = daily('Europe/London', 40);
+      const refusedUids = (read: typeof parseICalendarFeed) =>
+        read(text, undefined, feedWindow).refused.map((refusal) => refusal.uid);
+      vi.resetModules();
+      const fresh = await import('../sync.js');
+      const cold = refusedUids(fresh.parseICalendarFeed);
+      expect(cold.length).toBeGreaterThan(0);
+      expect(cold.length).toBeLessThan(40);
+      expect(refusedUids(parseICalendarFeed)).toEqual(cold);
+      expect(refusedUids(fresh.parseICalendarFeed)).toEqual(cold);
+    }, 120_000);
   });
 
   it('still reads an ordinary feed in full', () => {

@@ -7,10 +7,13 @@ import {
   createTimeZoneConverter,
   utcFrame,
   wallFrameToInstant,
+  ZONE_OFFSET_REACH_MS,
   type ZoneTransition,
   zonedDateTimeFields,
   zonedDateTimeToUtc,
   zonedOffsetMinutes,
+  zoneOffsetChangeReads,
+  zoneOffsetDay,
   zoneTransitions,
 } from './timezone.js';
 import type {
@@ -173,6 +176,19 @@ const ICAL_STEP_CHARGES: Readonly<Record<string, StepCharge>> = {
   },
   expand_by_day: { before: () => 0, after: (_iterator, days) => listedDays(days) / 2 },
 };
+
+/**
+ * What Slotlock's own work on what ical.js finds costs, in the same steps: each occurrence an
+ * expansion passes (its instant, exceptions and change); each conversion of a time between a zone's
+ * wall clock and its instants, half a step in an IANA zone (a few lookups in the offsets timezone.ts
+ * keeps a day at a time) and one and a half in a zone only the feed defines (ical.js's list of its
+ * changes, searched at each lookup, as ical.js itself searches it at each step); and each instant
+ * Intl is asked for to read a day of an IANA zone's offsets (about two and a half microseconds),
+ * the first time a budget reads that day. Before these were charged, a series in a named zone ran
+ * twenty times as long as the same series in UTC within the same budget.
+ */
+const OCCURRENCE_STEPS = 1;
+const ZONE_READ_STEPS = { conversion: 0.5, ownZone: 1.5, intl: 2.5 } as const;
 
 /**
  * What one RecurIterator method costs: charged before it runs, from its arguments, and after, from
@@ -859,6 +875,8 @@ interface ZoneReader {
   toInstant(wallFrameMs: number, choice?: WallTimeChoice): number;
   /** The wall time an instant reads as. */
   toWall(instantMs: number): number;
+  /** The IANA zone whose offsets it reads from Intl (timezone.ts keeps them a month at a time). */
+  zone?: string;
 }
 
 const UTC_READER: ZoneReader = { toInstant: (wall) => wall, toWall: (instant) => instant };
@@ -869,6 +887,7 @@ function intlReader(timezone: string): ZoneReader {
   if (reader) return reader;
   const converter = createTimeZoneConverter(timezone);
   reader = {
+    zone: timezone,
     toInstant: (wall, choice) => converter.wallFrameToUtc(wall, choice).getTime(),
     toWall: (instant) => {
       const fields = zonedDateTimeFields(new Date(instant), timezone);
@@ -1048,18 +1067,19 @@ function veventRuleTexts(input: string): string[] {
 }
 
 /**
- * The instant a calendar time names (zoneReader), where the clocks change as `choice` says: by
- * default RFC 5545 §3.3.5's first instant of a repeated time and a skipped time moved forward.
- * ical.js frames a floating value as a local JS date, which a server process has no business with.
+ * The instant a calendar time names (zoneReader), RFC 5545 §3.3.5's first instant of a repeated
+ * time and a skipped time moved forward, charged to `budget` when one is given. ical.js frames a
+ * floating value as a local JS date, which a server process has no business with.
  */
 function calendarTimeValue(
   value: unknown,
   propertyTimezone: unknown,
   calendarTimezone: string | undefined,
-  choice?: WallTimeChoice,
+  budget?: RecurrenceBudget,
 ): Date {
-  const reader = zoneReader(value, propertyTimezone, calendarTimezone);
-  const instant = reader.toInstant(wallFrameOf(value), choice);
+  const shared = zoneReader(value, propertyTimezone, calendarTimezone);
+  const reader = budget ? budget.zoneReader(shared) : shared;
+  const instant = reader.toInstant(wallFrameOf(value));
   if (!Number.isFinite(instant)) throw new CalendarContractError('invalid_icalendar');
   return new Date(instant);
 }
@@ -1071,9 +1091,19 @@ function ownZone(value: unknown): string | undefined {
   return tzid && tzid !== 'floating' && tzid !== 'local' ? tzid : undefined;
 }
 
-/** What one parse may spend: steps searching for occurrences (ICAL_STEP_CHARGES). */
+/**
+ * What one parse may spend: steps searching for occurrences (ICAL_STEP_CHARGES), reading each one
+ * it finds, and reading times in their zones (ZONE_READ_STEPS).
+ */
 class RecurrenceBudget {
   private steps: number;
+  /** Each zone's readers as this budget charges them, so a parse's readers stay one per zone. */
+  private readonly readers = new Map<ZoneReader, ZoneReader>();
+  /**
+   * What of each IANA zone's offsets this budget has paid for: the midnight that starts UTC day `d`
+   * as `2d`, the changes within day `d` as `2d + 1` (zoneOffsetDay).
+   */
+  private readonly read = new Map<string, Set<number>>();
 
   constructor(limits: ExpansionLimits) {
     this.steps = limits.steps;
@@ -1083,6 +1113,62 @@ class RecurrenceBudget {
   charge(steps: number): void {
     this.steps -= steps;
     if (this.steps < 0) expansionLimit();
+  }
+
+  /** `reader`, with every conversion it makes charged here (chargeZoneRead). */
+  zoneReader(reader: ZoneReader): ZoneReader {
+    if (reader === UTC_READER) return reader;
+    const known = this.readers.get(reader);
+    if (known) return known;
+    const zone = reader.zone;
+    const charged: ZoneReader = {
+      toInstant: (wall, choice) => {
+        this.chargeZoneRead(zone, wall - ZONE_OFFSET_REACH_MS, wall + ZONE_OFFSET_REACH_MS);
+        return reader.toInstant(wall, choice);
+      },
+      toWall: (instant) => {
+        this.chargeZoneRead(zone, instant, instant);
+        return reader.toWall(instant);
+      },
+    };
+    if (zone !== undefined) charged.zone = zone;
+    this.readers.set(reader, charged);
+    return charged;
+  }
+
+  /**
+   * Charge one conversion of a time in `zone` that reads its offsets from `fromMs` to `toMs` (at
+   * most three UTC days), and what of those days this budget has not paid for: each midnight, and
+   * the search for each day's changes (zoneOffsetChangeReads), as Intl is asked for them with none
+   * kept. The process keeps them, but a parse is charged as if it read them now, so what it refuses
+   * never depends on what was read before it.
+   */
+  chargeZoneRead(zone: string | undefined, fromMs: number, toMs: number): void {
+    // Without an IANA zone, a reader reads one only the feed defines (UTC's is never charged).
+    if (zone === undefined) {
+      this.charge(ZONE_READ_STEPS.ownZone);
+      return;
+    }
+    this.charge(ZONE_READ_STEPS.conversion);
+    let paid = this.read.get(zone);
+    if (!paid) {
+      paid = new Set();
+      this.read.set(zone, paid);
+    }
+    const first = zoneOffsetDay(fromMs);
+    const last = zoneOffsetDay(toMs);
+    // Not a time: the conversion refuses it.
+    if (!Number.isFinite(first) || !Number.isFinite(last)) return;
+    const pay = (key: number, reads: () => number) => {
+      if (paid.has(key)) return;
+      paid.add(key);
+      this.charge(reads() * ZONE_READ_STEPS.intl);
+    };
+    for (let day = first; day <= last; day++) {
+      pay(2 * day, () => 1);
+      pay(2 * day + 2, () => 1);
+      pay(2 * day + 1, () => zoneOffsetChangeReads(zone, day));
+    }
   }
 }
 
@@ -1493,6 +1579,7 @@ interface TimezoneCoverage {
   changes: unknown[];
   expandedUntilYear: number;
   _ensureCoverage: (year: number) => void;
+  utcOffset: (time: unknown) => number;
 }
 
 /**
@@ -1502,19 +1589,28 @@ interface TimezoneCoverage {
  * six apart, sorted inside one call, expanded a zone of 3,000 changes 1,000 times into 3 million
  * (26 to 35 seconds, 650 MB). Each expansion starts again from DTSTART, so emptying the list first
  * leaves the same changes, once. If ical.js no longer expands zones this way, the feed is refused.
+ * And charge each offset ical.js looks up in such a zone to `budget`, as a conversion in it is: it
+ * compares a series' times at every step of its search.
  */
-function budgetTimezoneCoverage(root: ICAL.Component): void {
+function budgetTimezoneCoverage(root: ICAL.Component, budget: RecurrenceBudget): void {
   for (const component of root.getAllSubcomponents('vtimezone')) {
     const tzid = component.getFirstPropertyValue('tzid');
     if (typeof tzid !== 'string') continue;
     const zone = root.getTimeZoneByID(tzid) as unknown as TimezoneCoverage | null;
     if (!zone) continue;
     const ensure = zone._ensureCoverage;
-    if (typeof ensure !== 'function') throw new CalendarContractError('invalid_icalendar');
+    const offset = zone.utcOffset;
+    if (typeof ensure !== 'function' || typeof offset !== 'function') {
+      throw new CalendarContractError('invalid_icalendar');
+    }
     zone._ensureCoverage = function (this: TimezoneCoverage, year: number) {
       if (this.changes.length > 0 && this.expandedUntilYear >= year) return;
       this.changes = [];
       ensure.call(this, year);
+    };
+    zone.utcOffset = function (this: TimezoneCoverage, time: unknown) {
+      budget.charge(ZONE_READ_STEPS.ownZone);
+      return offset.call(this, time);
     };
   }
 }
@@ -1805,14 +1901,19 @@ function cursorFitsRule(
  * of Slotlock reads wall times with: a gap moves forward, a fold takes its first instant.
  */
 class IntlTimezone extends ICAL.Timezone {
+  private readonly zone: string;
   private readonly converter: ReturnType<typeof createTimeZoneConverter>;
+  /** The parse's budget, which each offset found is charged to as any conversion is. */
+  private readonly budget: RecurrenceBudget;
   /** Offsets already found, by wall time: ical.js asks again at every comparison. */
   private readonly offsets = new Map<number, number>();
 
-  constructor(tzid: string) {
+  constructor(tzid: string, budget: RecurrenceBudget) {
     super({ tzid });
     // A TZID is matched as written (" Europe/Berlin" is that TZID); Slotlock reads its zone trimmed.
-    this.converter = createTimeZoneConverter(tzid.trim());
+    this.zone = tzid.trim();
+    this.converter = createTimeZoneConverter(this.zone);
+    this.budget = budget;
   }
 
   override utcOffset(time: ICAL.Time): number {
@@ -1820,6 +1921,12 @@ class IntlTimezone extends ICAL.Timezone {
     const wallMs = wall.getTime();
     let offset = this.offsets.get(wallMs);
     if (offset === undefined) {
+      // ical.js compares a series' times at every step of its search, each in this zone.
+      this.budget.chargeZoneRead(
+        this.zone,
+        wallMs - ZONE_OFFSET_REACH_MS,
+        wallMs + ZONE_OFFSET_REACH_MS,
+      );
       offset = Math.round((wallMs - this.converter.wallFrameToUtc(wallMs).getTime()) / 1000);
       if (this.offsets.size >= 4_096) this.offsets.clear();
       this.offsets.set(wallMs, offset);
@@ -1838,16 +1945,29 @@ interface RecurrencePeriod {
   end: string;
 }
 
-/** Whether Intl reads `timezone` (trimmed) as a zone: how a feed's TZID is read, leniently. */
+const knownTimezones = new Map<string, boolean>();
+
+/**
+ * Whether Intl reads `timezone` (trimmed) as a zone: how a feed's TZID is read, leniently. Asking
+ * builds a formatter (about 30 microseconds), and every occurrence of a series asks again, so each
+ * name's answer is kept: Intl gives one name the same answer for the life of a process. The map is
+ * emptied when it fills, like the formatters (a feed names at most MAX_ICAL_TIMEZONES zones).
+ */
 function isKnownTimezone(timezone: string): boolean {
   const name = timezone.trim();
   if (!name || Buffer.byteLength(name, 'utf8') > 255) return false;
+  const known = knownTimezones.get(name);
+  if (known !== undefined) return known;
+  let answer: boolean;
   try {
     new Intl.DateTimeFormat('en-GB', { timeZone: name }).format(0);
-    return true;
+    answer = true;
   } catch {
-    return false;
+    answer = false;
   }
+  if (knownTimezones.size >= 256) knownTimezones.clear();
+  knownTimezones.set(name, answer);
+  return answer;
 }
 
 /** Wall-clock fields as a jCal DATE-TIME, `2027-01-04T09:00:00`, with a `Z` when they are UTC's. */
@@ -1907,6 +2027,7 @@ function frameEventTimes(
   root: ICAL.Component,
   components: ICAL.Component[],
   calendarTimezone: string | undefined,
+  budget: RecurrenceBudget,
 ): Map<ICAL.Component, RecurrencePeriod[]> {
   const timezone =
     calendarTimezone !== undefined && isKnownTimezone(calendarTimezone)
@@ -2001,7 +2122,7 @@ function frameEventTimes(
     if (ICAL.TimezoneService.has(tzid) || !isKnownTimezone(tzid)) continue;
     // ical.js keeps a calendar's zones here; without it, it could not use one of these.
     if (!(cache instanceof Map)) throw new CalendarContractError('invalid_icalendar');
-    cache.set(tzid, new IntlTimezone(tzid));
+    cache.set(tzid, new IntlTimezone(tzid, budget));
   }
   alignSeriesTimes(components);
   return periods;
@@ -2228,11 +2349,14 @@ function parseCalendarChanges(
     let Budgeted: typeof ICAL.RecurIterator | undefined;
     const budgeted = () => (Budgeted ??= budgetedRecurIterator(budget));
     budgetTimezoneRules(root, budgeted);
-    budgetTimezoneCoverage(root);
+    budgetTimezoneCoverage(root, budget);
     // A time read in a zone of its own (a VTIMEZONE's, or an IntlTimezone) is read in that zone: an
     // RDATE may name another zone than its series' DTSTART, and an occurrence keeps the RDATE's.
+    // Every time is read through the budget, which charges its conversions.
     const timeValue = (value: unknown, zone: unknown, fallback: string | undefined) =>
-      calendarTimeValue(value, ownZone(value) ?? zone, fallback);
+      calendarTimeValue(value, ownZone(value) ?? zone, fallback, budget);
+    const readerOf = (value: unknown, zone: unknown) =>
+      budget.zoneReader(zoneReader(value, ownZone(value) ?? zone, defaultTimezone));
     const embeddedTimezone = root.getFirstPropertyValue('x-wr-timezone');
     const defaultTimezone =
       calendarTimezone?.trim() ||
@@ -2243,7 +2367,7 @@ function parseCalendarChanges(
       throw new CalendarContractError('invalid_icalendar');
     }
     boundComponents(components);
-    const periods = frameEventTimes(root, components, defaultTimezone);
+    const periods = frameEventTimes(root, components, defaultTimezone, budget);
     const events = feedEvents(components);
     // A series is a master and the overrides (RECURRENCE-ID components) that share its UID. Each is
     // read on its own: with `refused`, a series Slotlock cannot read is named there and the rest of
@@ -2315,7 +2439,7 @@ function parseCalendarChanges(
       const startTime = event.startDate;
       if (!(startTime instanceof ICAL.Time)) throw new CalendarContractError('invalid_icalendar');
       const startZone = component.getFirstProperty('dtstart')?.getParameter('tzid');
-      const reader = zoneReader(startTime, ownZone(startTime) ?? startZone, defaultTimezone);
+      const reader = readerOf(startTime, startZone);
       const startWall = wallFrameOf(startTime);
       const start = anchor ? anchor.start.getTime() : reader.toInstant(startWall);
       const allDay = startTime.isDate;
@@ -2333,9 +2457,7 @@ function parseCalendarChanges(
         const endZone = endProperty.getParameter('tzid') ?? startZone;
         const end = anchor
           ? anchor.end.getTime()
-          : zoneReader(endTime, ownZone(endTime) ?? endZone, defaultTimezone).toInstant(
-              wallFrameOf(endTime),
-            );
+          : readerOf(endTime, endZone).toInstant(wallFrameOf(endTime));
         // An end the clocks moved onto its start (both in the hour they skip), or before it, is
         // refused: the event as written cannot be read. An end written as its start is no length.
         const writtenAsStart =
@@ -2448,7 +2570,7 @@ function parseCalendarChanges(
       for (const period of periods.get(event.component) ?? []) {
         const zone = period.property.getParameter('tzid');
         const start = ICAL.Time.fromDateTimeString(period.start, period.property);
-        const reader = zoneReader(start, ownZone(start) ?? zone, defaultTimezone);
+        const reader = readerOf(start, zone);
         const startWall = wallFrameOf(start);
         const startMs = reader.toInstant(startWall);
         let endMs: number;
@@ -2696,10 +2818,22 @@ function parseCalendarChanges(
             ? startTime
             : null;
         const firstAt = first ? timeValue(first, startZone, defaultTimezone).getTime() : 0;
+        // Each zone the series' times are in is read with one reader for the whole series: an
+        // RRULE's occurrences are in DTSTART's zone, an RDATE's in its own.
+        const readers = new Map<unknown, ZoneReader>();
+        const readerFor = (time: ICAL.Time) => {
+          let reader = readers.get(time.zone);
+          if (!reader) {
+            reader = readerOf(time, startZone);
+            readers.set(time.zone, reader);
+          }
+          return reader;
+        };
         let held: ICAL.Time | null | undefined;
         while (true) {
           remainingWork -= 1;
           if (remainingWork < 0) expansionLimit();
+          budget.charge(OCCURRENCE_STEPS);
           // Before the next step, everything the iterator has passed may end before the window:
           // then this is where the next expansion can start.
           if (leaving && key !== null && series && position !== undefined && held === undefined) {
@@ -2733,8 +2867,10 @@ function parseCalendarChanges(
             scannedTo = Number.POSITIVE_INFINITY;
             break;
           }
-          const occurrenceStart = timeValue(occurrence, startZone, defaultTimezone);
-          position = occurrenceStart.getTime();
+          const reader = readerFor(occurrence);
+          const wall = wallFrameOf(occurrence);
+          position = reader.toInstant(wall);
+          if (!Number.isFinite(position)) throw new CalendarContractError('invalid_icalendar');
           if (position >= scanEndMs) {
             scannedTo = position;
             break;
@@ -2765,9 +2901,6 @@ function parseCalendarChanges(
             }
             continue;
           }
-          const time = occurrence;
-          const reader = zoneReader(time, ownZone(time) ?? startZone, defaultTimezone);
-          const wall = wallFrameOf(time);
           // A PERIOD RDATE's occurrence ends where its period does.
           const periodEnd = (periodEnds ??= periodEndsOf(event)).get(position);
           const range = periodEnd === undefined ? rangeBefore(at) : undefined;
@@ -3464,7 +3597,7 @@ export function parseTrustedICalendarEvents(
     if (root.name !== 'vcalendar') throw new CalendarContractError('invalid_icalendar');
     let Budgeted: typeof ICAL.RecurIterator | undefined;
     budgetTimezoneRules(root, () => (Budgeted ??= budgetedRecurIterator(budget)));
-    budgetTimezoneCoverage(root);
+    budgetTimezoneCoverage(root, budget);
     const timeValue = (value: unknown, zone: unknown, fallback: string | undefined) =>
       calendarTimeValue(value, zone, fallback);
     const embeddedTimezone = root.getFirstPropertyValue('x-wr-timezone');
@@ -3479,7 +3612,7 @@ export function parseTrustedICalendarEvents(
     boundComponents(components);
     // Times are read as a feed's are, so a stored series occupies what the feed reports: zones it
     // names without defining them, floating times in the calendar's zone, all-day EXDATEs as days.
-    frameEventTimes(root, components, defaultTimezone);
+    frameEventTimes(root, components, defaultTimezone, budget);
     const masters = new Map<string, ICAL.Event>();
     const exceptionsByUid = new Map<string, ICAL.Event[]>();
     for (const event of feedEvents(components)) {
