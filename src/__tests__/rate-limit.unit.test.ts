@@ -452,7 +452,7 @@ describe('series writes', () => {
     limiter.close();
   });
 
-  it("hands a freed slot to the tenant that ran least recently, never to one tenant's queue first (P11)", async () => {
+  it("hands a freed slot to the tenant with the fewest writes in flight, never to one tenant's queue first (P11)", async () => {
     const limiter = createSlotlockRequestLimits({
       limits: limitsWith({ caps: { tenant_series_writes: 1, series_writes: 1 } }),
       basePath: '',
@@ -546,12 +546,12 @@ describe('series writes', () => {
     limiter.close();
   });
 
-  it("keeps another tenant's update and reads within a few expansions while six tenants burst (P11, SEC-3)", async () => {
-    // The verifier's cross-process probe: a request takes several turns of the event loop before it
-    // reaches a slot (its key lookup, then the query behind it), and with a freed slot handed over
-    // at once, one of the bursting tenants' expansions ran on every turn. With six tenants bursting,
-    // another tenant's update took 6.7 expansions and its reads up to 5.6.
-    const expansionMs = 100;
+  /**
+   * serve in miniature, without request budgets: a key lookup takes a few turns of the event loop
+   * (round trips to the database), and a PATCH waits for a series slot, then holds the loop for the
+   * milliseconds `costOf` gives its tenant, as an expansion does.
+   */
+  function expandingServer(costOf: (tenant: string) => number) {
     const lookupTurns = 5;
     const limiter = createSlotlockRequestLimits({
       limits: limitsWith({
@@ -567,7 +567,6 @@ describe('series writes', () => {
       }),
       basePath: '',
       authenticate: async (request) => {
-        // A key lookup: round trips to the database, each a turn of the event loop.
         for (let turn = 0; turn < lookupTurns; turn += 1) {
           await new Promise((resolve) => setTimeout(resolve, 1));
         }
@@ -584,7 +583,7 @@ describe('series writes', () => {
         } catch (error) {
           return new Response(null, { status: (error as SlotlockAgentOperationError).status });
         }
-        const until = performance.now() + expansionMs;
+        const until = performance.now() + costOf(principal.tenantRef);
         while (performance.now() < until) {
           // An expansion holds the event loop.
         }
@@ -599,6 +598,21 @@ describe('series writes', () => {
         }),
         { remoteAddress: '203.0.113.7' },
       );
+    const timed = async (tenant: string, method: string) => {
+      const started = performance.now();
+      const { status } = await send(tenant, method);
+      return { status, ms: performance.now() - started };
+    };
+    return { limiter, send, timed };
+  }
+
+  it("keeps another tenant's update and reads within a few expansions while six tenants burst (P11, SEC-3)", async () => {
+    // The verifier's cross-process probe: a request takes several turns of the event loop before it
+    // reaches a slot (its key lookup, then the query behind it), and with a freed slot handed over
+    // at once, one of the bursting tenants' expansions ran on every turn. With six tenants bursting,
+    // another tenant's update took 6.7 expansions and its reads up to 5.6.
+    const expansionMs = 100;
+    const { limiter, send, timed } = expandingServer(() => expansionMs);
     let bursting = true;
     const ran = new Set<string>();
     // Six tenants, each keeping five writes in flight: one running and four waiting.
@@ -608,25 +622,56 @@ describe('series writes', () => {
         if ((await send(tenant, 'PATCH')).status === 200) ran.add(tenant);
       }
     });
-    // Once each has had a slot, a tenant that has not had one lately goes ahead of all of them.
+    // Once each has had a slot, B, with one write in flight, goes ahead of all of them.
     await vi.waitFor(() => expect(ran.size).toBe(6), { timeout: 10_000, interval: 20 });
-    const timed = async (method: string) => {
-      const started = performance.now();
-      const { status } = await send('b', method);
-      return { status, ms: performance.now() - started };
-    };
     const reads: number[] = [];
-    for (let index = 0; index < 4; index += 1) reads.push((await timed('GET')).ms);
-    const update = await timed('PATCH');
+    for (let index = 0; index < 4; index += 1) reads.push((await timed('b', 'GET')).ms);
+    // Not only its first: once B has had a slot, it still goes ahead of the tenants with more in
+    // flight, rather than taking its turn behind each of them.
+    const updates: Array<{ status: number; ms: number }> = [];
+    for (let index = 0; index < 3; index += 1) updates.push(await timed('b', 'PATCH'));
     bursting = false;
     await Promise.all(burst);
     limiter.close();
-    const detail = `update ${update.ms.toFixed(0)} ms, reads ${reads.map((ms) => ms.toFixed(0)).join(', ')} ms, one expansion ${expansionMs} ms`;
-    expect(update.status, detail).toBe(200);
-    // The expansion running when the update arrives, the rest of its slot, and the update's own.
-    expect(update.ms, detail).toBeLessThan(4 * expansionMs);
+    const detail = `updates ${updates.map(({ status, ms }) => `${status} in ${ms.toFixed(0)}`).join(', ')} ms, reads ${reads.map((ms) => ms.toFixed(0)).join(', ')} ms, one expansion ${expansionMs} ms`;
+    for (const update of updates) {
+      expect(update.status, detail).toBe(200);
+      // The expansion running when the update arrives and its slot's rest, one more of each when
+      // the update's lookup spans a hand-over, and the update's own. Taking turns, it waited 14 or
+      // more.
+      expect(update.ms, detail).toBeLessThan(6 * expansionMs);
+    }
     // A read waits for at most the expansion running when it arrives.
     expect(Math.max(...reads), detail).toBeLessThan(2.5 * expansionMs);
+  }, 60_000);
+
+  it('serves a tenant whose writes are cheap ahead of tenants that each keep one costly write in flight (P11)', async () => {
+    // Six tenants with as many writes in flight as B (one each) cannot put six expansions ahead of
+    // B's every write: theirs kept the server busy, B's did not. Taking turns, first come among
+    // equals, B's second and third updates waited for each of the six.
+    const expansionMs = 100;
+    const { limiter, send, timed } = expandingServer((tenant) => (tenant === 'b' ? 0 : expansionMs));
+    let bursting = true;
+    const ran = new Set<string>();
+    const burst = Array.from({ length: 6 }, async (_, index) => {
+      const tenant = `costly-${index}`;
+      while (bursting) {
+        if ((await send(tenant, 'PATCH')).status === 200) ran.add(tenant);
+      }
+    });
+    await vi.waitFor(() => expect(ran.size).toBe(6), { timeout: 10_000, interval: 20 });
+    const updates: Array<{ status: number; ms: number }> = [];
+    for (let index = 0; index < 3; index += 1) updates.push(await timed('b', 'PATCH'));
+    bursting = false;
+    await Promise.all(burst);
+    limiter.close();
+    const detail = `updates ${updates.map(({ status, ms }) => `${status} in ${ms.toFixed(0)}`).join(', ')} ms, one expansion ${expansionMs} ms`;
+    for (const update of updates) {
+      expect(update.status, detail).toBe(200);
+      // The expansion running when the update arrives and its slot's rest, and one more of each
+      // when the update's lookup spans a hand-over. Taking turns, it waited 12 or more.
+      expect(update.ms, detail).toBeLessThan(5 * expansionMs);
+    }
   }, 60_000);
 
   it('charges an MCP or A2A write before it waits for a series slot, so one over budget is refused at once (P11)', async () => {

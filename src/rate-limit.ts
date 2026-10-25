@@ -34,8 +34,10 @@ const MAX_SERIES_WAITING = 64;
 const MAX_SERIES_WAIT_MS = 2_000;
 /** A tenant's series writes that may wait behind its running one. */
 const MAX_TENANT_SERIES_WAITING = 4;
-/** The longest a freed slot rests, however long its write kept the event loop busy. */
+/** The longest a freed slot rests, however long the event loop was busy while its write held it. */
 const MAX_SLOT_REST_MS = 1_000;
+/** A key's use of the slots counts half as much after this long. */
+const SLOT_USE_HALF_LIFE_MS = 10_000;
 /**
  * Fields a proxy puts the client's address in: CF-Connecting-IP, True-Client-IP and X-Forwarded-For
  * (developers.cloudflare.com/fundamentals/reference/http-headers, read 2026-10-24), X-Real-IP, and
@@ -318,13 +320,16 @@ function bucketsFor(rate: SlotlockRate, now: () => number) {
 }
 
 /**
- * Slots, at most `perKey` running for a key and `total` in all, shared fairly between keys: a freed
- * slot goes to the waiter whose key started one least recently (first come among equals), so one
- * key's queue never stands in front of another key's write. A freed slot first rests for as long as
- * its write kept the event loop busy (up to MAX_SLOT_REST_MS): a request that needs a few turns of
- * the loop before it is answered (another tenant's read, or its write on its way to a slot) has
- * them in the rest, so the writes that wait here hold at most about half the loop, however many
- * keys send them.
+ * Slots, at most `perKey` running for a key and `total` in all, shared between keys by how much
+ * each asks for. A key's use is how long the event loop was busy while its writes held a slot,
+ * halving every SLOT_USE_HALF_LIFE_MS. A freed slot goes to the waiter whose key has the fewest
+ * writes in flight (running and waiting), then to the one whose key has used the slots least, then
+ * to the first come. So a key sending one write at a time goes ahead of keys keeping several in
+ * flight, and of keys with one each whose writes kept the loop busier, however many keys send
+ * costly writes. A freed slot first rests for as long as the event loop was busy while its write
+ * held it (up to MAX_SLOT_REST_MS): a request that needs a few turns of the loop before it is
+ * answered (another tenant's read, or its write on its way to a slot) has them in the rest, so the
+ * writes that wait here hold at most about half the loop.
  */
 function seriesGate(perKey: number, total: number) {
   let running = 0;
@@ -336,12 +341,22 @@ function seriesGate(perKey: number, total: number) {
     else byKey.set(key, count);
   };
   const runningFor = new Map<string, number>();
-  /** When each key last started a slot, oldest first; a key not here has not started one lately. */
-  const started = new Map<string, number>();
-  let starts = 0;
+  /** Each key's use as of `at`, in milliseconds; least recently changed first. */
+  const used = new Map<string, { ms: number; at: number }>();
+  const useOf = (key: string, at: number) => {
+    const entry = used.get(key);
+    return entry ? entry.ms * 0.5 ** ((at - entry.at) / SLOT_USE_HALF_LIFE_MS) : 0;
+  };
   /** Whether a hand-over is due on a later turn: one at a time, so slots never go out in a run. */
   let handing = false;
   const release = (key: string, busyMs: number) => {
+    const at = performance.now();
+    const ms = useOf(key, at) + busyMs;
+    used.delete(key);
+    used.set(key, { ms, at });
+    // Forgetting the key whose use changed longest ago forgets the use that has had longest to
+    // fade.
+    if (used.size > MAX_BUCKET_KEYS) used.delete(used.keys().next().value as string);
     const count = (runningFor.get(key) ?? 1) - 1;
     if (count === 0) runningFor.delete(key);
     else runningFor.set(key, count);
@@ -366,15 +381,20 @@ function seriesGate(perKey: number, total: number) {
     });
   };
   const next = () => {
+    const at = performance.now();
     while (running < total) {
       let index = -1;
-      let oldest = Number.POSITIVE_INFINITY;
-      for (const [at, { key }] of waiting.entries()) {
+      let best: { inFlight: number; use: number } | undefined;
+      for (const [position, { key }] of waiting.entries()) {
         if ((runningFor.get(key) ?? 0) >= perKey) continue;
-        const last = started.get(key) ?? -1;
-        if (last < oldest) {
-          oldest = last;
-          index = at;
+        const rank = { inFlight: byKey.get(key) ?? 0, use: useOf(key, at) };
+        if (
+          !best ||
+          rank.inFlight < best.inFlight ||
+          (rank.inFlight === best.inFlight && rank.use < best.use)
+        ) {
+          best = rank;
+          index = position;
         }
       }
       if (index === -1) return;
@@ -394,12 +414,10 @@ function seriesGate(perKey: number, total: number) {
       const start = (): (() => void) => {
         running += 1;
         runningFor.set(key, (runningFor.get(key) ?? 0) + 1);
-        started.delete(key);
-        started.set(key, (starts += 1));
-        // Forgetting the key that started longest ago keeps the order: it would have gone first.
-        if (started.size > MAX_BUCKET_KEYS) started.delete(started.keys().next().value as string);
-        // Node's performance.eventLoopUtilization(earlier) is the time since `earlier` the loop
-        // spent outside waiting for I/O, a synchronous expansion still running included.
+        // Node's performance.eventLoopUtilization(earlier).active is the time since `earlier` the
+        // loop spent outside its event provider, where it waits for I/O (nodejs.org/api/
+        // perf_hooks.html, read 2026-10-25): a synchronous expansion counts in full, the wait for
+        // a query's answer only for the other work the loop runs meanwhile.
         const loop = performance.eventLoopUtilization();
         let released = false;
         return () => {

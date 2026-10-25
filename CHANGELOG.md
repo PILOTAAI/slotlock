@@ -17,8 +17,9 @@ versioning.
   not counted.
 - `slotlock serve` runs a recurring create and every event update one at a time per tenant and per
   server (`tenant_series_writes`, `series_writes`), taking the write's token before it waits. A
-  freed slot rests for as long as the write before kept the server busy, up to a second, then goes
-  to the waiting tenant that has had one least recently. Four more of a tenant's writes may wait
+  freed slot rests for as long as the server was busy while the write before held it, up to a
+  second, then goes to the waiting tenant with the fewest writes in flight and, among those, the
+  one whose writes have kept the server busy least lately. Four more of a tenant's writes may wait
   and the rest get 429; one that has waited two seconds gets 429 while its tenant's own write is
   still running, otherwise 503 `server_busy`. An application API maintenance run waits the same
   way for slots of its own: one per tenant, `maintenance_runs` (1) per server.

@@ -59,6 +59,20 @@ describe('hosted safety in the documentation', () => {
     expect(read('CHANGELOG.md')).not.toMatch(/one that waits two seconds gets 503/);
   });
 
+  it('says how a freed slot is shared and what another tenant may still wait for (P11, SEC-3)', () => {
+    const start = readme.indexOf('- The server limits requests per client address');
+    expect(start, 'canary: the limits bullet exists').toBeGreaterThanOrEqual(0);
+    const limits = flat(readme.slice(start, readme.indexOf('\n\n', start)));
+    const added = flat(section(read('CHANGELOG.md'), '### Added'));
+    // seriesGate ranks waiters by writes in flight, then by use; the order of starts is gone.
+    for (const text of [limits, added]) {
+      expect(text).toMatch(/fewest writes in flight[^.]*kept the server busy least lately/);
+      expect(text).not.toMatch(/has had one least recently/);
+    }
+    // Expansion still runs on the main thread, so the docs promise no bound on reads.
+    expect(limits).toMatch(/main thread[^.]*wait for the one running/);
+  });
+
   it('says a key unused for 15 minutes may be told busy during a flood of made-up keys (SEC-2)', () => {
     const model = flat(section(security, '## Security model'));
     expect(model).toMatch(/not authenticated in the last 15 minutes[^.]*503/);

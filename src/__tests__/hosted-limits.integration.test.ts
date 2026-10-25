@@ -699,24 +699,34 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
           if (answer.status === 200) ran.add(tenant);
         }
       });
-      // Once each bursting tenant has had a slot, B, which has not had one lately, goes first.
+      // Once each bursting tenant has had a slot, B, with one write in flight, goes first.
       await eventually(() => (ran.size === 6 ? true : undefined), 60_000);
       const reads: number[] = [];
       for (let index = 0; index < 8; index += 1) {
         reads.push((await call(server.origin, 'GET', '/v1/resources', { key: keys['b-second'] })).ms);
       }
-      const updated = await call(server.origin, 'PATCH', `/v1/events/${encodeURIComponent(event.id)}`, {
-        key: keys['b-second'],
-        body: {
-          expected_revision: event.revision,
-          title: 'Renamed while six tenants fire',
-          idempotency_key: `six-update-${randomUUID()}`,
-        },
-      });
-      const detail = `one costly write ${single.toFixed(0)} ms, update ${updated.ms.toFixed(0)} ms, reads ${reads.map((ms) => ms.toFixed(0)).join(', ')} ms, bursts ${JSON.stringify(tally(outcomes))}`;
-      expect(updated.status, detail).toBe(200);
-      // The expansion running when the update arrives, its slot's rest, and the update itself.
-      expect(updated.ms, detail).toBeLessThan(4 * single);
+      // Not only B's first update: each of them, although B has had a slot just before.
+      const updates: Array<{ status: number; ms: number }> = [];
+      let revision = event.revision;
+      for (let index = 0; index < 3; index += 1) {
+        const updated = await call(server.origin, 'PATCH', `/v1/events/${encodeURIComponent(event.id)}`, {
+          key: keys['b-second'],
+          body: {
+            expected_revision: revision,
+            title: `Renamed while six tenants fire (${index + 1})`,
+            idempotency_key: `six-update-${randomUUID()}`,
+          },
+        });
+        updates.push({ status: updated.status, ms: updated.ms });
+        if (updated.status !== 200) break;
+        revision = (updated.body as { event: { revision: number } }).event.revision;
+      }
+      const detail = `one costly write ${single.toFixed(0)} ms, updates ${updates.map(({ status, ms }) => `${status} in ${ms.toFixed(0)}`).join(', ')} ms, reads ${reads.map((ms) => ms.toFixed(0)).join(', ')} ms, bursts ${JSON.stringify(tally(outcomes))}`;
+      expect(updates.map(({ status }) => status), detail).toEqual([200, 200, 200]);
+      for (const updated of updates) {
+        // The expansion running when the update arrives, its slot's rest, and the update itself.
+        expect(updated.ms, detail).toBeLessThan(4 * single);
+      }
       // A read waits for at most the expansion running when it arrives.
       expect(Math.max(...reads), detail).toBeLessThan(Math.max(1_000, 2 * single));
     } finally {

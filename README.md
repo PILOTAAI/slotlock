@@ -53,17 +53,21 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
   budgets, apart from the agents'. A recurring create and every event update (a new title
   re-expands a recurring event's series too) takes its write token, then waits for a slot: one at
   a time per tenant (`tenant_series_writes`) and per server (`series_writes`). A freed slot rests
-  for as long as the write before kept the server busy (at most a second), so with one slot these
-  writes keep it busy at most about half the time; it then goes to the waiting tenant that has had
-  one least recently. Four more of a tenant's writes may wait and the rest get 429. A write that
-  has waited two seconds gets 429 while its tenant's own write is still running, otherwise 503
-  `server_busy`. An application API maintenance run waits the same way for slots of its own: one
-  per tenant, `maintenance_runs` per server. The health check is not counted. `SLOTLOCK_LIMITS`
-  changes the limits; behind a proxy, set `SLOTLOCK_TRUSTED_PROXY_HEADER` to the field it puts the
-  client's address in (`CF-Connecting-IP` behind Cloudflare), or every client shares the proxy's
-  budget: the server logs a `client_address_field_ignored` warning when such a field arrives
-  without the setting. A client can send that field itself, so let nothing reach the server except
-  through the proxy.
+  for as long as the server was busy while the write before held it (at most a second), so with
+  one slot these writes keep it busy at most about half the time. It then goes to the waiting
+  tenant with the fewest writes in flight and, among those, the one whose writes have kept the
+  server busy least lately (halving every ten seconds). So a tenant sending one write at a time
+  waits for the write running, its rest, and only those tenants with one write in flight whose
+  writes kept the server less busy, however many tenants keep more waiting. An expansion runs on
+  the server's main thread, so any request may also wait for the one running. Four more of a
+  tenant's writes may wait and the rest get 429. A write that has waited two seconds gets 429
+  while its tenant's own write is still running, otherwise 503 `server_busy`. An application API
+  maintenance run waits the same way for slots of its own: one per tenant, `maintenance_runs` per
+  server. The health check is not counted. `SLOTLOCK_LIMITS` changes the limits; behind a proxy,
+  set `SLOTLOCK_TRUSTED_PROXY_HEADER` to the field it puts the client's address in
+  (`CF-Connecting-IP` behind Cloudflare), or every client shares the proxy's budget: the server
+  logs a `client_address_field_ignored` warning when such a field arrives without the setting. A
+  client can send that field itself, so let nothing reach the server except through the proxy.
 
 ```sh
 slotlock hours set '[{"rrule":"FREQ=WEEKLY;BYDAY=SA","startMinutes":600,"durationMinutes":240}]' --resource vehicle-42
