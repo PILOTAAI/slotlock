@@ -575,6 +575,19 @@ async function slotlockSchemaUpToDate(tx: TransactionSql): Promise<boolean> {
   return recorded.catalog_sha256 === (await slotlockCatalogDigest(tx));
 }
 
+/** Whether a constraint in the `slotlock` schema is still NOT VALID (old rows broke it). */
+async function slotlockConstraintUnvalidated(tx: TransactionSql): Promise<boolean> {
+  const [row] = await tx<{ unvalidated: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1
+        FROM pg_catalog.pg_constraint con
+        JOIN pg_catalog.pg_class rel ON rel.oid = con.conrelid
+        JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+       WHERE ns.nspname = 'slotlock' AND NOT con.convalidated
+    ) AS unvalidated`;
+  return row?.unvalidated === true;
+}
+
 /**
  * Whether every tenant table has forced RLS and only its tenant policy, bound to `setting`, whose
  * live fingerprint (computed as the RLS DDL computes it) matches the contract the DDL recorded.
@@ -1726,7 +1739,8 @@ export interface SlotlockStore {
    * release migrated, changing nothing. Records SLOTLOCK_SCHEMA_VERSION. A schema this release
    * already migrated, unchanged since, is left as it is without a lock on any table. Constraints an
    * upgrade adds NOT VALID are validated in a second transaction, whose locks no serving read or
-   * write waits for (one inside a caller's transaction shares its locks until it ends). Each lock it
+   * write waits for (one inside a caller's transaction shares its locks until it ends); one that old
+   * rows still break stays NOT VALID, and each later migration validates it again. Each lock it
    * waits for is bounded by `lockTimeoutMs`, after which it tries again (`schema_lock_timeout` once
    * out of attempts).
    */
@@ -2586,18 +2600,19 @@ function buildSlotlockStore(
       // PostgreSQL's IF NOT EXISTS DDL is idempotent after commit but not race-free: two fresh
       // application instances can still collide on pg_namespace/pg_extension unique indexes.
       // inMigration serializes bootstrap per database and the transaction releases the lock on
-      // crashes. A schema this release already left as it is changes nothing and locks no table.
-      const changed = await inMigration(sql, migrationOptions, async (tx) => {
+      // crashes. A schema this release already left as it is changes nothing and locks no table,
+      // unless old rows kept one of its constraints NOT VALID: then only the validation runs again.
+      const validate = await inMigration(sql, migrationOptions, async (tx) => {
         await tx.unsafe(SLOTLOCK_DEPLOYMENT_CHECKS).catch((error: unknown) => {
           throw schemaControlRefusal(error);
         });
-        if (await slotlockSchemaUpToDate(tx)) return false;
+        if (await slotlockSchemaUpToDate(tx)) return slotlockConstraintUnvalidated(tx);
         await tx.unsafe(SLOTLOCK_STRUCTURE_DDL).catch((error: unknown) => {
           throw schemaControlRefusal(error);
         });
         return true;
       });
-      if (!changed) return;
+      if (!validate) return;
       // Once the DDL has committed, its ACCESS EXCLUSIVE locks are gone: validating holds none that
       // a serving query waits for (ddl.ts, DEPLOYMENT_VALIDATE_CONSTRAINTS). Inside a caller's
       // transaction both steps share it, and its locks, until it ends. The digests go last, so a

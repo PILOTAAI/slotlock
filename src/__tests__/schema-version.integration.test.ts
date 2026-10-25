@@ -204,11 +204,17 @@ describe.skipIf(!url)('schema version and migration locks (real Postgres)', () =
       VALUES ('${resource?.id}', '2027-01-01T09:00:00Z', '2027-01-01T10:00:00Z', 0);
     `);
     await store.applySchema();
-    const revision = (await constraints()).find(
-      ({ name }) => name === 'slotlock_reservations_revision_valid',
-    );
-    expect(revision?.validated).toBe(false);
+    const revision = async () =>
+      (await constraints()).find(({ name }) => name === 'slotlock_reservations_revision_valid');
+    expect((await revision())?.validated).toBe(false);
     await expect(readSlotlockSchemaVersion(sql)).resolves.toBe(SLOTLOCK_SCHEMA_VERSION);
+    // Once the row is fixed, the next migration validates it. Before, the schema counted as up to
+    // date and the constraint stayed NOT VALID for good.
+    await sql`UPDATE slotlock.reservations SET revision = 1 WHERE resource_id = ${resource?.id ?? null}`;
+    await store.applySchema();
+    expect((await revision())?.validated).toBe(true);
+    await store.applySchema();
+    expect((await revision())?.validated).toBe(true);
   });
 
   it('serve refuses a database migrated by an older or a newer release, naming which', async () => {

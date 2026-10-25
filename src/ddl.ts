@@ -910,7 +910,8 @@ REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[1]} FROM PUBLIC;
 // (PostgreSQL 17, ALTER TABLE and Explicit Locking). It sees every row whatever row-level security
 // the table forces: the check scans the table itself, and referential checks bypass row security.
 // One that old rows still break stays NOT VALID, with a notice, rather than stopping the migration:
-// it binds every new row either way. Once valid, a constraint is never checked again.
+// it binds every new row either way, and applySchema tries it again at each later migration. Once
+// valid, a constraint is never checked again.
 const DEPLOYMENT_VALIDATE_CONSTRAINTS = `DO $slotlock_validate_constraints$
 DECLARE
   unchecked record;
