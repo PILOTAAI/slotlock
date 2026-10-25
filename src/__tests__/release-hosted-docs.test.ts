@@ -193,8 +193,13 @@ describe('the hosted service page', () => {
   // the privacy notice says so; the code it describes is checked once that file is in this tree.
   const PSEUDONYM =
     "each named only by a pseudonym: a hash of its IP address, keyed by a secret held only in the running server's memory and replaced when it restarts";
+  // Every reason the server counts a refusal for, in the notice's words.
+  const REFUSALS =
+    'For each minute in which the server refused requests, they also record how many it refused (over a rate limit, while too busy, too large, or with a credential it did not accept)';
   it('tells the privacy notice how refused requests are logged', () => {
-    expect(flat(read('PRIVACY.md'))).toContain(PSEUDONYM);
+    const privacy = flat(read('PRIVACY.md'));
+    expect(privacy).toContain(PSEUDONYM);
+    expect(privacy).toContain(REFUSALS);
   });
   it.runIf(existsSync(path('src/rate-limit.ts')))(
     'logs refused requests as the privacy notice says',
@@ -204,6 +209,16 @@ describe('the hosted service page', () => {
       expect(limits).toContain("createHmac('sha256', pseudonymKey).update(address)");
       expect(limits).toMatch(/const MAX_LOGGED_CLIENTS = 10;/);
       expect(limits).toMatch(/const REFUSAL_LOG_INTERVAL_MS = 60_000;/);
+      // The reasons REFUSALS names: a rate limit, three caps on work at once, size and credentials.
+      const reasons = /export type SlotlockRefusalReason =([^;]*);/.exec(limits)?.[1] ?? '';
+      expect([...reasons.matchAll(/'(\w+)'/g)].map(([, reason]) => reason).sort()).toEqual([
+        'auth_refused',
+        'lookup_overflow',
+        'maintenance_busy',
+        'rate_limited',
+        'request_too_large',
+        'series_writes_busy',
+      ]);
     },
   );
 
