@@ -715,8 +715,8 @@ $slotlock_installed_schema_version$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_SCHEMA_FUNCTIONS[0]} FROM PUBLIC;
 `;
 
-// Tenant suspension and erasure. A suspended tenant's server transactions (withTenant) may read and
-// write nothing; its keys still authenticate, but it gets no new key or secret. The table names
+// Tenant suspension and erasure. A suspended tenant's server transactions (withTenant) may read,
+// and write nothing; its keys still authenticate, but it gets no new key or secret. The table names
 // tenants and why they were suspended, so RLS is enabled with no policy and no role is granted
 // anything: a server reads it only through tenant_suspended(), and only the deployment role, which
 // owns it, suspends or lifts a suspension. Erasure keeps the suspension, so an erased abuser stays

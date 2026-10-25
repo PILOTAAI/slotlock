@@ -4387,7 +4387,6 @@ function buildSlotlockStore(
              )
            ORDER BY booking.id
            LIMIT ${limit}`;
-        let adopted = 0;
         for (const { id } of legacy) {
           await lockExternalIdentity(tx, params.tenantRef, id);
           const [taken] = await tx<{ id: string }[]>`
@@ -4398,13 +4397,11 @@ function buildSlotlockStore(
           await tx`
             DELETE FROM slotlock.reservation_tombstones
              WHERE tenant_ref = ${params.tenantRef} AND external_ref = ${id}`;
-          const given = await tx<{ id: string }[]>`
+          await tx`
             UPDATE slotlock.reservations
                SET tenant_ref = ${params.tenantRef}, external_ref = id::text,
                    occupied_ends_at = ends_at + buffer_after_ms * interval '1 millisecond'
-             WHERE id = ${id} AND tenant_ref IS NULL AND status = 'confirmed'
-            RETURNING id`;
-          adopted += given.length;
+             WHERE id = ${id} AND tenant_ref IS NULL AND status = 'confirmed'`;
         }
         // A writer reaping or confirming a hold locks it: such a row is skipped, and the delete
         // repeats the predicate on the row as it now is.
