@@ -2062,12 +2062,20 @@ function promptSeries(
     const booked = expandCalendarEventOccurrences(content, horizon);
     beyond = promptSeriesEnd(series.rule, booked.length, horizon.end);
     const length = end.getTime() - start.getTime();
+    // Moved: by an exception, to another time or length. One the clocks change inside, or that
+    // the store ends where the next starts, is where its rule puts it.
+    const excepted = new Set(
+      exceptions.flatMap((exception) =>
+        exception.cancelled !== true && exception.start ? [exception.recurrenceId.getTime()] : [],
+      ),
+    );
     moved = promptMoved(
       booked.flatMap((occurrence) => {
         const from = new Date(occurrence.recurrenceId);
         const shifted =
-          occurrence.start.getTime() !== from.getTime() ||
-          occurrence.end.getTime() - occurrence.start.getTime() !== length;
+          excepted.has(from.getTime()) &&
+          (occurrence.start.getTime() !== from.getTime() ||
+            occurrence.end.getTime() - occurrence.start.getTime() !== length);
         return shifted && Number.isFinite(from.getTime())
           ? [{ from, start: occurrence.start, end: occurrence.end }]
           : [];

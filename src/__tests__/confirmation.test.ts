@@ -912,6 +912,21 @@ describe('a confirmation question a person can trust', () => {
       );
     });
 
+    it('calls an occurrence moved only when an exception moves it, not when the clocks change', async () => {
+      // London, daily 00:00-06:00 from 24 October 2026: the night the clocks go back, the store
+      // books the seven hours the wall clock reads, but nothing moved the occurrence.
+      expect(
+        await asked({
+          ...BOOKING,
+          starts_at: '2026-10-23T23:00:00Z',
+          ends_at: '2026-10-24T05:00:00Z',
+          recurrence_rule: 'FREQ=DAILY;COUNT=3',
+        }),
+      ).toBe(
+        'Book vehicle-42 3 times, from 2026-10-24 00:00–06:00 UTC+01:00 to 2026-10-26 00:00–06:00 UTC+00:00 (Europe/London), repeating FREQ=DAILY;COUNT=3: "Vehicle handover".',
+      );
+    });
+
     it('names an occurrence moved past the window the store keeps booked, which it books later', async () => {
       const moved = {
         recurrence_id: '2027-03-03T09:00:00Z',
@@ -1144,11 +1159,7 @@ describe('a confirmation question a person can trust', () => {
       },
       'slotlock_update_event',
     );
-    // DTSTART's own 49 hours reach past the rule's 09:00:59 local the same day, so the store ends
-    // them there: the first instance is named too.
-    expect(message).toContain(
-      '5 moved (2027-03-02 09:00:59 to 2027-03-02 09:00:59–12:00:59; 2027-03-09 12:00:59 to 2027-03-09 03:00–04:00; ',
-    );
+    expect(message).toContain('4 moved (2027-03-09 12:00:59 to 2027-03-09 03:00–04:00; ');
     expect(message).toContain('; also description, location, attendees, reminders; ');
     expect(message).toContain(`; title to "${'N'.repeat(119)}…"`);
     expect(message.endsWith(`. It is titled "${'T'.repeat(119)}…".`)).toBe(true);
