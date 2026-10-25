@@ -1569,6 +1569,30 @@ async function rollStoredSeries(
   return true;
 }
 
+/**
+ * Work out and store when a series stored before 0.3 ends (recurrence_ends_by), as its next roll
+ * would; its stored occurrences are left as they are.
+ */
+async function learnSeriesEnd(tx: TransactionSql, tenantRef: string, eventId: string): Promise<void> {
+  const [row] = await tx<CalendarEventRow[]>`
+    SELECT id, tenant_ref, owner_ref, external_ref, resource_id, starts_at, ends_at, timezone,
+           summary, description, location, status, transparency, organizer, attendees,
+           reminders, recurrence_rule, recurrence_exceptions, materialized_starts_at,
+           materialized_ends_at, recurrence_cursor, revision, source, created_at,
+           updated_at
+      FROM slotlock.calendar_events
+     WHERE id = ${eventId} AND tenant_ref = ${tenantRef}
+       AND recurrence_rule IS NOT NULL AND recurrence_ends_by IS NULL
+     FOR UPDATE`;
+  if (!row) return;
+  const childMap = await loadCalendarEventChildren(tx, [row.id]);
+  const event = toCalendarEvent(row, childMap.get(row.id));
+  await tx`
+    UPDATE slotlock.calendar_events
+       SET recurrence_ends_by = ${recurrenceEndsByColumn(event)}::text::timestamptz
+     WHERE id = ${row.id} AND tenant_ref = ${tenantRef} AND recurrence_ends_by IS NULL`;
+}
+
 /** Put a master the roll could not extend behind the others for an hour. */
 async function deferRoll(executor: StoreSql, tenantRef: string, eventId: string): Promise<void> {
   await executor`
@@ -1602,8 +1626,8 @@ async function recurrenceCoversWrite(
   const horizon = calendarEventRollingHorizon();
   if (params.end <= horizon.start) return true;
   const from = params.start > horizon.start ? params.start : horizon.start;
-  const behind = () => tx<{ id: string }[]>`
-    SELECT event.id
+  const behind = () => tx<{ id: string; ends_by_unknown: boolean }[]>`
+    SELECT event.id, event.recurrence_ends_by IS NULL AS ends_by_unknown
       FROM slotlock.calendar_events event
      WHERE event.tenant_ref = ${params.tenantRef}
        AND event.resource_id = ${params.resourceId}
@@ -1627,7 +1651,13 @@ async function recurrenceCoversWrite(
      ORDER BY event.id`;
   const due = await behind();
   if (due.length === 0) return true;
-  if (params.end > horizon.end) return false;
+  if (params.end > horizon.end) {
+    // No roll stores a series past the horizon. One stored before 0.3 has not worked out when it
+    // ends; it does so now, and is left out if it ends before the write.
+    if (due.some((row) => !row.ends_by_unknown)) return false;
+    for (const { id } of due) await learnSeriesEnd(tx, params.tenantRef, id);
+    return (await behind()).length === 0;
+  }
   for (const { id } of due) {
     try {
       await tx.savepoint((sp) => rollStoredSeries(sp, params.tenantRef, id, horizon));

@@ -258,8 +258,8 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
           recurrence: { rrule, ...(exceptions ? { exceptions } : {}) },
           materializationWindow: horizon,
         });
-      // The verifier's repro: one series that ended long ago refused every write ending past the
-      // horizon on its resource, a lease included.
+      // Before, one series that ended long ago refused every write ending past the horizon on its
+      // resource, a lease included.
       expect((await series('FREQ=DAILY;COUNT=3', earlier)).ok).toBe(true);
       expect(
         (
@@ -348,6 +348,53 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
           externalRef: `lease-${crypto.randomUUID()}`,
         }),
       ).resolves.toEqual({ ok: false, code: 'recurrence_not_materialized' });
+    });
+
+    it('works out when a series stored before 0.3 ends before a long write, and refuses one that goes on', async () => {
+      const horizon = calendarEventRollingHorizon();
+      const earlier = new Date(horizon.start.getTime() - 300 * DAY + 9 * HOUR);
+      const leaseStart = new Date(horizon.start.getTime() + 30 * DAY);
+      const stored = async (rrule: string) => {
+        const { tenantRef, resourceId } = await freshTenant();
+        const put = await store.putCalendarEvent({
+          tenantRef,
+          externalRef: `rota-${crypto.randomUUID()}`,
+          idempotencyKey: `create-${crypto.randomUUID()}`,
+          expectedRevision: 0,
+          resourceId,
+          start: earlier,
+          end: new Date(earlier.getTime() + HOUR),
+          timezone: 'UTC',
+          summary: 'Old rota',
+          recurrence: { rrule },
+          materializationWindow: horizon,
+        });
+        if (!put.ok) throw new Error(put.code);
+        // As 0.2 left it: stored to the horizon, with no end worked out.
+        await sql`
+          UPDATE slotlock.calendar_events SET recurrence_ends_by = NULL
+           WHERE id = ${put.eventId} AND tenant_ref = ${tenantRef}`;
+        const lease = await store.createExternalReservation({
+          tenantRef,
+          externalRef: `lease-${crypto.randomUUID()}`,
+          resourceId,
+          start: leaseStart,
+          end: new Date(leaseStart.getTime() + 730 * DAY),
+          bufferAfterMs: 0,
+          revision: 1,
+        });
+        const [row] = await sql<{ ends_by: string | null }[]>`
+          SELECT recurrence_ends_by::text AS ends_by FROM slotlock.calendar_events
+           WHERE id = ${put.eventId}`;
+        return { lease, endsBy: row?.ends_by ?? null };
+      };
+      // Before, it counted as going on until its next roll, and refused the lease.
+      const ended = await stored('FREQ=DAILY;COUNT=3');
+      expect(ended.lease).toMatchObject({ ok: true });
+      expect(ended.endsBy).not.toBeNull();
+      const goesOn = await stored('FREQ=WEEKLY');
+      expect(goesOn.lease).toEqual({ ok: false, code: 'recurrence_not_materialized' });
+      expect(goesOn.endsBy).toBe('infinity');
     });
 
     it('extends a series not yet rolled that far before it books, so the overlap is caught', async () => {
