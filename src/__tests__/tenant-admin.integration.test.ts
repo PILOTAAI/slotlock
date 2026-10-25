@@ -1,10 +1,10 @@
 // Suspending and erasing a tenant, deployed as README's deployment role (NOSUPERUSER NOBYPASSRLS,
 // reached through SET ROLE) under forced row-level security, and served by a LOGIN role that
-// grantApplicationRole granted. A suspended tenant may read, and write nothing, its writes in flight
-// are waited for, and only the deployment role suspends. Erasure deletes every row the tenant owns in
-// every table with a tenant column (the catalog is enumerated, so a table added later must be
-// covered), retires its keys, leaves another tenant as it was, and deletes nothing the second time.
-// A database and roles of their own; skipped without DATABASE_URL.
+// grantApplicationRole granted. A suspended tenant may read, and write nothing; its writes in
+// flight are waited for, and only the deployment role suspends. Erasure deletes every row the
+// tenant owns in every table with a tenant column (the catalog is enumerated, so a table added
+// later must be covered), retires its keys, leaves another tenant as it was, and deletes nothing
+// the second time. A database and roles of their own; skipped without DATABASE_URL.
 import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';

@@ -210,7 +210,8 @@ describe.skipIf(!url)('schema version and migration locks (real Postgres)', () =
     await expect(readSlotlockSchemaVersion(sql)).resolves.toBe(SLOTLOCK_SCHEMA_VERSION);
     // Once the row is fixed, the next migration validates it. Before, the schema counted as up to
     // date and the constraint stayed NOT VALID for good.
-    await sql`UPDATE slotlock.reservations SET revision = 1 WHERE resource_id = ${resource?.id ?? null}`;
+    await sql`
+      UPDATE slotlock.reservations SET revision = 1 WHERE resource_id = ${resource?.id ?? null}`;
     await store.applySchema();
     expect((await revision())?.validated).toBe(true);
     await store.applySchema();
@@ -236,7 +237,7 @@ describe.skipIf(!url)('schema version and migration locks (real Postgres)', () =
       externalRef: 'van-1',
       timezone: 'UTC',
     });
-    // Before, the three counted as made at the upgrade, and the tenant could book nothing for 30 days.
+    // Before, the three counted as made at the upgrade: the tenant could book nothing for 30 days.
     await expect(
       limited.createExternalReservation({
         tenantRef,
@@ -252,7 +253,11 @@ describe.skipIf(!url)('schema version and migration locks (real Postgres)', () =
     await expect(
       limited.cancelExternalReservation({ tenantRef, externalRef: 'old-booking-0', revision: 2 }),
     ).resolves.toEqual({ ok: true, cancelled: false, revision: 2 });
-    await limited.cancelExternalReservation({ tenantRef, externalRef: 'never-booked', revision: 1 });
+    await limited.cancelExternalReservation({
+      tenantRef,
+      externalRef: 'never-booked',
+      revision: 1,
+    });
     const [recent] = await sql<{ count: number }[]>`
       SELECT count(*)::int AS count FROM slotlock.reservation_tombstones
        WHERE tenant_ref = ${tenantRef} AND cancelled_at > now() - interval '1 minute'`;

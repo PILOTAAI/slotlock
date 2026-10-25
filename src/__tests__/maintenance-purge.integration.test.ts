@@ -1,8 +1,8 @@
 // Maintenance deletes what a tenant no longer needs: holds past their expiry (which nothing else
-// removes unless a rival writes over their time) and the answers kept for keyed ones, and references
-// retired by a cancel no booking held, older than the retention window. A cancelled booking's tombstone is
-// kept, so its reference is never booked again. It deletes only that tenant's, and nothing live.
-// Skipped without DATABASE_URL.
+// removes unless a rival writes over their time) and the answers kept for keyed ones, and
+// references retired by a cancel no booking held, older than the retention window. A cancelled
+// booking's tombstone is kept, so its reference is never booked again. It deletes only that
+// tenant's, and nothing live. Skipped without DATABASE_URL.
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { maintainSlotlockTenant } from '../maintenance.js';
@@ -146,7 +146,7 @@ describe.skipIf(!url)('maintenance purge and booking retention (real Postgres)',
       SELECT cancelled_at FROM slotlock.reservation_tombstones
        WHERE tenant_ref = ${tenantRef} AND external_ref = 'new-ref'`;
     expect(Date.now() - (tombstone?.cancelled_at.getTime() ?? 0)).toBeLessThan(60_000);
-    // The first hold expires a minute ago. Before, its answer was kept for 30 days after it was made.
+    // The first hold expired a minute ago. Before, its answer was kept 30 days after it was made.
     await sql`
       UPDATE slotlock.reservations SET expires_at = now() - interval '1 minute'
        WHERE id = ${expired.hold.id}`;

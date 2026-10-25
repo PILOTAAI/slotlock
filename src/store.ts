@@ -2061,12 +2061,13 @@ export interface SlotlockStore {
     retentionDays?: number;
   }): Promise<CalendarEventRetentionResult>;
   /**
-   * Delete one bounded batch of a tenant's dead booking rows: holds past their expiry and the answers
-   * kept for keyed ones (at once), and references retired by a cancel no booking held, older than
-   * the retention window. A cancelled booking's tombstone is never deleted here (only by erasing
-   * the tenant), so its reference is never booked again. Rows another transaction holds are
-   * skipped, not waited on. It also gives a confirmed booking a 0.2 server wrote without its tenant
-   * the tenant and its own id as reference, as the migration does. Call until `hasMore` is false.
+   * Delete one bounded batch of a tenant's dead booking rows: holds past their expiry and the
+   * answers kept for keyed ones (at once), and references retired by a cancel no booking held,
+   * older than the retention window. A cancelled booking's tombstone is never deleted here (only by
+   * erasing the tenant), so its reference is never booked again. Rows another transaction holds
+   * are skipped, not waited on. It also gives a confirmed booking a 0.2 server wrote without its
+   * tenant the tenant and its own id as reference, as the migration does. Call until `hasMore` is
+   * false.
    */
   pruneBookingRetention(params: {
     tenantRef: string;

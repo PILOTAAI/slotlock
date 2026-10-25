@@ -441,15 +441,14 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
       await expect(
         overlapping.lease(new Date(overlapping.lastEnd.getTime() - 30 * 60_000)),
       ).resolves.toMatchObject({ ok: false, code: 'overlap' });
-      // Stored for its first day only, as if maintenance had stopped: the series is caught up first.
+      // Stored for its first day only, as if maintenance had stopped: it is caught up first.
       const behind = await twoDays({
         start: horizon.start,
         end: new Date(horizon.start.getTime() + 3 * DAY),
       });
-      await expect(behind.lease(new Date(behind.lastEnd.getTime() - 30 * 60_000))).resolves.toMatchObject({
-        ok: false,
-        code: 'overlap',
-      });
+      await expect(
+        behind.lease(new Date(behind.lastEnd.getTime() - 30 * 60_000)),
+      ).resolves.toMatchObject({ ok: false, code: 'overlap' });
       await expect(behind.lease(new Date(behind.lastEnd.getTime() + HOUR))).resolves.toMatchObject({
         ok: true,
       });
