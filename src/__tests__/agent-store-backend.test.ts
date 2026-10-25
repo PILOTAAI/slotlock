@@ -3,7 +3,11 @@ import {
   type SlotlockAgentInvocationContext,
   invokeSlotlockAgentOperation,
 } from '../agent-server.js';
-import { createSlotlockStoreAgentBackend } from '../agent-store-backend.js';
+import type { SlotlockApplicationInvocationContext } from '../application-api.js';
+import {
+  createSlotlockStoreAgentBackend,
+  createSlotlockStoreApplicationBackend,
+} from '../agent-store-backend.js';
 import type { SlotlockStore, SlotlockTenantStore } from '../store.js';
 
 const tenantRef = 'tenant-a';
@@ -607,5 +611,25 @@ describe('Slotlock store-backed agent server adapter', () => {
       },
     });
     expect(outcome).toEqual({ ok: false, status: 403, code: 'tenant_suspended' });
+  });
+
+  it('answers a resource created again with another visibility with 409, not a server failure', async () => {
+    const createResource = vi.fn().mockRejectedValue(
+      Object.assign(new Error('Slotlock resource visibility cannot be changed by creating it'), {
+        code: 'resource_visibility_conflict',
+      }),
+    );
+    withTenant.mockImplementation(async (_tenant: string, callback: (s: unknown) => unknown) =>
+      callback({ createResource }),
+    );
+    const backend = createSlotlockStoreApplicationBackend(store);
+    const admin = {
+      principal: { subject: 'admin-a', tenantRef, scopes: ['admin'] },
+      operation: 'slotlock_create_resource',
+      signal: new AbortController().signal,
+    } as unknown as SlotlockApplicationInvocationContext;
+    await expect(
+      backend.createResource(admin, { external_ref: 'vehicle-1', timezone: 'UTC' }),
+    ).rejects.toMatchObject({ code: 'resource_visibility_conflict', status: 409 });
   });
 });

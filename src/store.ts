@@ -1491,9 +1491,10 @@ async function upsertResource(
 ): Promise<SlotlockResource> {
   type ResourceIdentityRow = ResourceRow;
   const visibility = params.visibility ?? 'shared';
+  const asked = params.visibility ?? null;
   let rows: ResourceIdentityRow[];
-  // An existing identity is updated only when the visibility asked for is the one it has: creation
-  // never reclassifies a resource, so a private one cannot be made shared by creating it again.
+  // An existing identity keeps the visibility it has: creating it again with none named returns it
+  // as it is, and with another one is refused, so a private one is never made shared that way.
   if (params.tenantRef !== undefined && params.externalRef !== undefined) {
     rows = await executor<ResourceIdentityRow[]>`
       INSERT INTO slotlock.resources (external_ref, tenant_ref, timezone, visibility)
@@ -1501,7 +1502,7 @@ async function upsertResource(
       ON CONFLICT (tenant_ref, external_ref)
         WHERE tenant_ref IS NOT NULL AND external_ref IS NOT NULL
       DO UPDATE SET timezone = EXCLUDED.timezone
-      WHERE slotlock.resources.visibility = EXCLUDED.visibility
+      WHERE ${asked}::text IS NULL OR slotlock.resources.visibility = ${asked}::text
       RETURNING id, external_ref, tenant_ref, timezone, availability_rules, visibility, archived_at`;
   } else if (params.externalRef !== undefined) {
     rows = await executor<ResourceIdentityRow[]>`
@@ -1510,7 +1511,7 @@ async function upsertResource(
       ON CONFLICT (external_ref)
         WHERE tenant_ref IS NULL AND external_ref IS NOT NULL
       DO UPDATE SET external_ref = EXCLUDED.external_ref
-      WHERE slotlock.resources.visibility = EXCLUDED.visibility
+      WHERE ${asked}::text IS NULL OR slotlock.resources.visibility = ${asked}::text
       RETURNING id, external_ref, tenant_ref, timezone, availability_rules, visibility, archived_at`;
   } else {
     rows = await executor<ResourceIdentityRow[]>`
@@ -1798,7 +1799,8 @@ export interface SlotlockStore {
     maxTenantResources?: number;
     /**
      * `shared` (the default) or `private`, which agents never see. Fixed at creation: creating an
-     * existing reference again with another visibility is refused (`resource_visibility_conflict`).
+     * existing reference again with none named returns it as it is, and with another visibility is
+     * refused (`resource_visibility_conflict`).
      */
     visibility?: SlotlockResource['visibility'];
   }): Promise<SlotlockResource>;

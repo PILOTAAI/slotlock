@@ -721,7 +721,9 @@ export interface SlotlockStoreApplicationBackendOptions {
 function storeRefusal(error: unknown): unknown {
   const code = (error as { code?: unknown } | null)?.code;
   if (typeof code !== 'string') return error;
-  if (code === 'resource_limit_reached') return new SlotlockAgentOperationError(code, 409);
+  if (code === 'resource_limit_reached' || code === 'resource_visibility_conflict') {
+    return new SlotlockAgentOperationError(code, 409);
+  }
   if (code.startsWith('invalid_') && code !== 'invalid_transaction_isolation') {
     return new SlotlockAgentOperationError(code, 400);
   }

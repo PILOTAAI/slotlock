@@ -143,15 +143,35 @@ describe.skipIf(!url)('resource visibility, archive and delete (real Postgres)',
 
     it('is not reclassified by creating it again, and a bad visibility is refused', async () => {
       const tenantRef = freshTenant();
-      await store.createResource({
+      const deadlines = await store.createResource({
         tenantRef,
         externalRef: 'finance:deadlines',
         timezone: 'UTC',
         visibility: 'private',
       });
+      // Created again with no visibility named, it is returned as it is. Before, that was refused,
+      // and the application API answered it 500.
       await expect(
         store.createResource({ tenantRef, externalRef: 'finance:deadlines', timezone: 'UTC' }),
+      ).resolves.toEqual(deadlines);
+      const admin = createSlotlockStoreApplicationBackend(store);
+      await expect(
+        admin.createResource(adminContext(tenantRef), {
+          external_ref: 'finance:deadlines',
+          timezone: 'UTC',
+        }),
+      ).resolves.toMatchObject({ resource: { id: deadlines.id } });
+      await expect(
+        store.createResource({
+          tenantRef,
+          externalRef: 'finance:deadlines',
+          timezone: 'UTC',
+          visibility: 'shared',
+        }),
       ).rejects.toMatchObject({ code: 'resource_visibility_conflict' });
+      await expect(store.getResource({ tenantRef, id: deadlines.id })).resolves.toMatchObject({
+        visibility: 'private',
+      });
       await expect(
         store.createResource({
           tenantRef,
