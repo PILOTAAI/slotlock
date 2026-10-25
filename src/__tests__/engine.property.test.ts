@@ -227,8 +227,10 @@ describe('weekly rule expansion', () => {
           const expanded = expandRules(rules, shifted, timezone);
           expectCanonical(expanded);
           const converter = createTimeZoneConverter(timezone);
+          // A window's edge the clocks skip stands where the skipped hour ends (SPEC.md, "Time
+          // and intervals"), so a window wholly inside one holds no time.
           const toUtc = (localDay: number, minutes: number) =>
-            converter.wallFrameToUtc(localDay + minutes * MINUTE).getTime();
+            converter.wallFrameToUtc(localDay + minutes * MINUTE, { gap: 'end' }).getTime();
           const oracle = (t: number) => {
             const { date } = zonedCalendarDate(new Date(t), timezone);
             const today = Date.parse(`${date}T00:00:00Z`);
