@@ -365,17 +365,26 @@ describe('token buckets', () => {
     expect((await target.fetch(get('/manifest.json'), first)).status).toBe(429);
     const address = (index: number) =>
       `10.${(index >> 16) & 255}.${(index >> 8) & 255}.${(index & 255) + 1}`;
-    const started = performance.now();
-    for (let index = 1; index <= 300_000; index += 1) {
-      await target.fetch(get('/manifest.json'), { remoteAddress: address(index) });
-    }
-    // Room is made a tenth at a time, so each new address costs a constant amount: 300,000 new
-    // addresses take far less than the quadratic sweep a scan per request would.
-    expect(performance.now() - started).toBeLessThan(30_000);
+    /** Milliseconds per request for new addresses `from` to `to`. */
+    const flood = async (from: number, to: number) => {
+      const started = performance.now();
+      for (let index = from; index <= to; index += 1) {
+        await target.fetch(get('/manifest.json'), { remoteAddress: address(index) });
+      }
+      return (performance.now() - started) / (to - from + 1);
+    };
+    // Up to 100,000 keys each new address adds a bucket. Past them, room is made a tenth at a time,
+    // so a new address costs about as much, not the sweep of every bucket a scan per request would.
+    // A ratio, so a loaded machine slows both floods alike.
+    const filling = await flood(1, 99_999);
+    const past = await flood(100_000, 120_000);
+    expect(past, `${past.toFixed(4)} ms a request past the cap, ${filling.toFixed(4)} before`).toBeLessThan(
+      5 * filling,
+    );
     // The least recently used buckets went: the first client starts afresh rather than the server
     // growing without bound, and a recent one is still counted.
     expect((await target.fetch(get('/manifest.json'), first)).status).toBe(401);
-    expect((await target.fetch(get('/manifest.json'), { remoteAddress: address(300_000) })).status).toBe(
+    expect((await target.fetch(get('/manifest.json'), { remoteAddress: address(120_000) })).status).toBe(
       429,
     );
   }, 60_000);
