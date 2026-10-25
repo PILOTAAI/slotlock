@@ -2185,8 +2185,9 @@ async function lockTenantLimit(
 
 /**
  * Rows a tenant added within this many days count against its limits whatever time they hold, so
- * bookings and events dated in the past, and cancellations, cannot grow its storage without bound.
- * The same window maintenance keeps idempotency records and stray retirements for.
+ * bookings and events dated in the past, and cancellations, add at most the limit in any such
+ * window. Ended history is not pruned: over a longer time it can still grow. The same window
+ * maintenance keeps idempotency records and stray retirements for.
  */
 const TENANT_LIMIT_RECENT_DAYS = SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS;
 

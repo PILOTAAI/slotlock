@@ -1,9 +1,9 @@
-// Per-tenant limits bound what one tenant can store on a shared database: live holds, bookings still
-// to come (with the cancellations that retire references no booking held), calendar events still to
-// come (with the agent cancellations that count against them), provider coverage and resources. What
-// has ended leaves the limit. A write that would pass a limit is refused with the limit, racing
-// writers included; what the tenant already has can still be revised, cancelled and released; and
-// other tenants are unaffected. Skipped without DATABASE_URL.
+// Per-tenant limits bound what one tenant can store on a shared database: live holds, bookings and
+// calendar events still to come or added in the last 30 days (cancellations included), references
+// a cancel retired with no booking and agent cancellations until maintenance prunes them, provider
+// coverage and resources. Older history leaves the limit. A write that would pass a limit is
+// refused with the limit, racing writers included; what the tenant already has can still be
+// revised, cancelled and released; and other tenants are unaffected. Skipped without DATABASE_URL.
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -218,7 +218,7 @@ describe.skipIf(!url)('per-tenant limits (real Postgres)', () => {
       code: 'reservation_limit_reached',
       limit: 2,
     });
-    // The verifier's repro: a tenant whose bookings have all ended could never book again.
+    // Before, a tenant whose bookings had all ended could never book again.
     await age(tenantRef);
     await expect(book(slot(0).start)).resolves.toMatchObject({ ok: true });
     const ending = await book(slot(1).start);
@@ -286,7 +286,7 @@ describe.skipIf(!url)('per-tenant limits (real Postgres)', () => {
     });
   });
 
-  it('caps events of every owner with agent cancellations; the tenant’s own cancellations free a place', async () => {
+  it('caps events of every owner with their cancellations; the tenant’s own leave the limit once no longer recent', async () => {
     const store = limited({ events: 2 });
     const { tenantRef, resourceId } = await freshTenant(store);
     const put = (n: number, ownerRef?: string, externalRef = `event-${crypto.randomUUID()}`) =>

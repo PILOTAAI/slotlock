@@ -202,7 +202,7 @@ describe.skipIf(!url)('maintenance purge and booking retention (real Postgres)',
     await expect(
       store.cancelExternalReservation({ tenantRef, externalRef, revision: 2 }),
     ).resolves.toEqual({ ok: true, cancelled: true, revision: 2 });
-    // The verifier's repro: aged past the window and pruned, the reference booked again.
+    // Before, aged past the window and pruned, the reference booked again.
     await sql`
       UPDATE slotlock.reservation_tombstones SET cancelled_at = now() - interval '400 days'
        WHERE tenant_ref = ${tenantRef}`;
