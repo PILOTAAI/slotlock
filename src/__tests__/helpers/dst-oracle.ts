@@ -107,15 +107,17 @@ export interface SimpleSeries {
 /**
  * Each occurrence of a DAILY or WEEKLY COUNT series under the rule, as [start, end) ms. A series'
  * occurrences never overlap: where one reaches past the next one's start, it ends there and the
- * next ends at the later of the two ends.
+ * next ends at the later of the two ends. A series as the store holds it (`stored`) has only its
+ * first occurrence's instants, so its wall-clock end is the wall time its end instant reads.
  */
-export function occupation(series: SimpleSeries): [number, number][] {
+export function occupation(series: SimpleSeries, stored = false): [number, number][] {
   const n0 = wallFrame(series.start);
   const s0 = resolve(n0, series.zone);
   const e0 = resolve(wallFrame(series.end), series.zone);
   const exact = e0 - s0;
-  // DTEND's wall time as its instant reads it (a time written in a gap reads moved forward).
-  const wallLength = wallOf(e0, series.zone) - n0;
+  // DTEND's wall time as written, carried to each occurrence's date (one in a gap is carried as
+  // written, though its own instant reads moved forward); stored, the wall time its instant reads.
+  const wallLength = (stored ? wallOf(e0, series.zone) : wallFrame(series.end)) - n0;
   const out: [number, number][] = [];
   for (let k = 0; k < series.count; k++) {
     const n = n0 + k * series.everyDays * DAY;

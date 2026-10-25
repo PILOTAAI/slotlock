@@ -157,7 +157,8 @@ function holdsTheRule(series: SimpleSeries): void {
   };
   const label = `${zone} ${start}-${end} ${rule}`;
   const s0 = first;
-  const e0 = resolve(wallFrame(end), zone);
+  const e0Wall = wallFrame(end);
+  const e0 = resolve(e0Wall, zone);
   // An end the clocks move onto or before its start cannot be read: both parsers refuse it.
   if (e0 <= s0) {
     expect(() => parseICalendarChanges(ics, undefined, window), label).toThrow(
@@ -176,9 +177,8 @@ function holdsTheRule(series: SimpleSeries): void {
     ),
   );
   expect(feed, `feed: ${label}`).toEqual(expected);
-  // A DTSTART the clocks skip has no instant that reads as it: the importer refuses it.
-  const startWall = wallFrame(start);
-  if (instantsOf(startWall, zone).length === 0) {
+  // A DTSTART or DTEND the clocks skip has no instant that reads as it: the importer refuses it.
+  if (instantsOf(wallFrame(start), zone).length === 0 || instantsOf(e0Wall, zone).length === 0) {
     expect(() => parseTrustedICalendarEvents(ics), label).toThrow(CalendarContractError);
     return;
   }
@@ -267,15 +267,12 @@ describe('every occurrence near a clock change, on every path', () => {
         const [event] = parseTrustedICalendarEvents(ics, zone);
         const stored = spans(expandCalendarEventOccurrences(event as CalendarEventContent, window));
         // A stored series is a timed one from local midnight to local midnight, held to the union
-        // rule: where the clocks go forward, its exact length may hold an hour the feed's day
-        // does not, but never less.
-        const timed = occupation({
-          zone,
-          start: `${start}T000000`,
-          end: `${end}T000000`,
-          everyDays,
-          count,
-        });
+        // rule: where the clocks go forward, its exact length (or its end, where that midnight is
+        // skipped) may hold an hour the feed's day does not, but never less.
+        const timed = occupation(
+          { zone, start: `${start}T000000`, end: `${end}T000000`, everyDays, count },
+          true,
+        );
         expect(stored, `store: ${label}`).toEqual(
           sorted(timed.map(([from, to]): Span => [minute(from), minute(to)])),
         );

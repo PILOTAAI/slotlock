@@ -2460,20 +2460,17 @@ function parseCalendarChanges(
           : readerOf(endTime, endZone).toInstant(wallFrameOf(endTime));
         // An end the clocks moved onto its start (both in the hour they skip), or before it, is
         // refused: the event as written cannot be read. An end written as its start is no length.
-        const writtenAsStart =
-          wallFrameOf(endTime) === startWall &&
-          (ownZone(endTime) ?? endZone) === (ownZone(startTime) ?? startZone);
+        const sameZone = (ownZone(endTime) ?? endZone) === (ownZone(startTime) ?? startZone);
+        const writtenAsStart = wallFrameOf(endTime) === startWall && sameZone;
         if (end < start || (end === start && !writtenAsStart)) {
           throw new CalendarContractError('invalid_icalendar');
         }
-        // DTEND's wall time in DTSTART's zone, as its instant reads (a time written in a gap reads
-        // moved forward, as RFC 5545 §3.3.5 reads it).
-        return {
-          ...base,
-          exact: end - start,
-          wall: reader.toWall(end) - startWall,
-          ends: end > start,
-        };
+        // DTEND's wall time as written, when it is written in DTSTART's zone: one in the hour the
+        // clocks skip is carried to later days as written, though its own instant reads an hour
+        // later (RFC 5545 §3.3.5). In another zone, or for a stored series (instants), it is the
+        // wall time its instant reads in DTSTART's zone.
+        const endWall = !anchor && sameZone ? wallFrameOf(endTime) : reader.toWall(end);
+        return { ...base, exact: end - start, wall: endWall - startWall, ends: end > start };
       }
       if (duration instanceof ICAL.Duration) {
         const days = duration.weeks * 7 + duration.days;
@@ -3742,6 +3739,31 @@ export function parseTrustedICalendarEvents(
         // refused.
         if (own.reader.toWall(own.start) !== own.startWall) {
           throw new CalendarContractError('invalid_icalendar');
+        }
+        // Its later occurrences end on the wall clock where its first one's end instant reads, and
+        // last at least as long. A DTEND the clocks skip reads an hour later than written, and a
+        // DURATION that counts days lasts a day on the calendar, 23 or 25 hours across a change,
+        // where the first one's instants say 24: either would hold an hour the feed does not. They
+        // are refused (days only outside UTC, where every day is 24 hours).
+        if (!allDay) {
+          const endProperty = component.getFirstProperty('dtend');
+          const endTime = endProperty?.getFirstValue();
+          const startTime = event.startDate;
+          const sameZone =
+            endTime instanceof ICAL.Time &&
+            (ownZone(endTime) ?? endProperty?.getParameter('tzid') ?? timezoneParameter) ===
+              (ownZone(startTime) ?? timezoneParameter);
+          if (sameZone && own.reader.toWall(own.end) !== wallFrameOf(endTime)) {
+            throw new CalendarContractError('invalid_icalendar');
+          }
+          const duration = component.getFirstPropertyValue('duration');
+          if (
+            duration instanceof ICAL.Duration &&
+            duration.weeks * 7 + duration.days > 0 &&
+            own.reader !== UTC_READER
+          ) {
+            throw new CalendarContractError('invalid_icalendar');
+          }
         }
         const lengthMs = own.end - own.start;
         const exceptions = new Map<number, CalendarRecurrenceException>();

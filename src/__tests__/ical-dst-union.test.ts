@@ -292,6 +292,87 @@ describe('hours are exact, days nominal (ENG-6)', () => {
   });
 });
 
+describe('a DTEND written in the hour the clocks skip (ENG-18)', () => {
+  // New York, daily 01:00-02:30 from 14 March 2027, the night 02:00 becomes 03:00: the first
+  // instance ends at 03:30 EDT (RFC 5545 §3.3.5 moves 02:30 forward by the gap), 1.5 exact hours.
+  // Later days end at the written 02:30 on the wall clock, also 1.5 hours: carrying the moved 03:30
+  // instead held an extra hour every day for the life of the series.
+  const text = series(
+    'America/New_York',
+    '20270314T010000',
+    '20270314T023000',
+    'FREQ=DAILY;COUNT=3',
+  );
+  const window = w('2027-03-13T00:00:00Z', '2027-03-20T00:00:00Z');
+
+  it('the feed carries the written end to later days', () => {
+    expect(feedSpans(text, window)).toEqual([
+      ['2027-03-14T06:00:00.000Z', '2027-03-14T07:30:00.000Z'],
+      ['2027-03-15T05:00:00.000Z', '2027-03-15T06:30:00.000Z'],
+      ['2027-03-16T05:00:00.000Z', '2027-03-16T06:30:00.000Z'],
+    ]);
+    expect(feedSpans(text, window)).toEqual(
+      oracle('America/New_York', '20270314T010000', '20270314T023000', 1, 3),
+    );
+  });
+
+  it('the trusted parser refuses it: a stored series reads its end from the instant', () => {
+    // Stored as 06:00Z-07:30Z, the series' end reads 03:30 on the wall clock, and every later day
+    // would hold an hour more than the feed reports.
+    expect(() => parseTrustedICalendarEvents(text)).toThrow(CalendarContractError);
+    // The same series written with an end the clocks do not skip is stored as the feed reads it.
+    const later = series(
+      'America/New_York',
+      '20270314T010000',
+      '20270314T033000',
+      'FREQ=DAILY;COUNT=3',
+    );
+    const [event] = parseTrustedICalendarEvents(later);
+    expect(storeSpans(event as CalendarEventContent, window)).toEqual(feedSpans(later, window));
+  });
+});
+
+describe('a series whose DURATION counts days (ENG-6)', () => {
+  // London, weekly from Saturday 20 March 2027 at 23:00, P1DT2H: a day on the calendar, then two
+  // exact hours. The occurrence of 27 March spans the spring change, so its day is 23 hours.
+  const weekly = (zone: string, duration: string) =>
+    cal(
+      ...ev(
+        'd',
+        `DTSTART;TZID=${zone}:20270320T230000`,
+        `DURATION:${duration}`,
+        'RRULE:FREQ=WEEKLY;COUNT=3',
+      ),
+    );
+  const window = w('2027-03-19T00:00:00Z', '2027-04-10T00:00:00Z');
+
+  it('the feed counts the day on the calendar and the hours exactly', () => {
+    expect(feedSpans(weekly('Europe/London', 'P1DT2H'), window)).toEqual([
+      ['2027-03-20T23:00:00.000Z', '2027-03-22T01:00:00.000Z'],
+      ['2027-03-27T23:00:00.000Z', '2027-03-29T00:00:00.000Z'],
+      ['2027-04-03T22:00:00.000Z', '2027-04-05T00:00:00.000Z'],
+    ]);
+  });
+
+  it.each(['P1DT2H', 'P1D', 'P1W'])(
+    'the trusted parser refuses %s in a zone with clock changes: the store has only instants',
+    (duration) => {
+      // Stored as the first instance's instants, every later one would last 26 exact hours: one
+      // hour more than the feed reports across the change.
+      expect(() => parseTrustedICalendarEvents(weekly('Europe/London', duration))).toThrow(
+        CalendarContractError,
+      );
+    },
+  );
+
+  it('the trusted parser stores days in UTC, and hours anywhere, as the feed reads them', () => {
+    for (const text of [weekly('UTC', 'P1DT2H'), weekly('Europe/London', 'PT26H')]) {
+      const [event] = parseTrustedICalendarEvents(text);
+      expect(storeSpans(event as CalendarEventContent, window)).toEqual(feedSpans(text, window));
+    }
+  });
+});
+
 describe('a DTSTART inside the gap or the fold (ENG-14)', () => {
   const night = w('2027-03-27T00:00:00Z', '2027-04-01T00:00:00Z');
 
