@@ -1,4 +1,4 @@
-// Per-tenant limits bound what one tenant can store on a shared database: live holds, bookings and
+// Per-tenant limits bound what one tenant can store on a shared database: holds, bookings and
 // calendar events still to come or added in the last 30 days (cancellations included), references
 // a cancel retired with no booking and agent cancellations until maintenance prunes them, provider
 // coverage and resources. Older history leaves the limit. A write that would pass a limit is
@@ -150,6 +150,64 @@ describe.skipIf(!url)('per-tenant limits (real Postgres)', () => {
     // Maintenance forgets the rest at once, since their holds have expired.
     await maintainSlotlockTenant(store, tenantRef);
     expect(await answers()).toBe(0);
+  });
+
+  it('keeps at most the limit of held rows, however short the holds and whether or not keyed', async () => {
+    const store = limited({ holds: 5 });
+    const { tenantRef, resourceId } = await freshTenant(store);
+    const heldRows = async () => {
+      const [row] = await sql<{ count: number }[]>`
+        SELECT count(*)::int AS count FROM slotlock.reservations
+         WHERE resource_id = ${resourceId} AND status = 'held'`;
+      return row?.count ?? 0;
+    };
+    // Before, an expired hold no rival wrote over stayed until maintenance, uncounted: 40 held
+    // rows under a limit of 5. Each hold here takes its own hour, so none reaps another.
+    for (let n = 0; n < 40; n++) {
+      const hold = await store.acquireHold({
+        tenantRef,
+        resourceId,
+        ...slot(n),
+        ttlMs: 1,
+        ...(n % 2 === 0 ? { idempotencyKey: `short-${n}`, principalRef: 'key-1' } : {}),
+      });
+      // A write at the limit deletes the holds that have expired, and takes a place.
+      expect(hold.ok).toBe(true);
+      expect(await heldRows()).toBeLessThanOrEqual(5);
+    }
+    // A live hold still counts until it expires: the limit is not freed by deleting live ones.
+    const live = await freshTenant(store);
+    for (let n = 0; n < 2; n++) {
+      const hold = await store.acquireHold({
+        tenantRef: live.tenantRef,
+        resourceId: live.resourceId,
+        ...slot(n),
+        ttlMs: 60_000,
+      });
+      expect(hold.ok).toBe(true);
+    }
+    await sql`
+      UPDATE slotlock.reservations SET expires_at = now() - interval '1 second'
+       WHERE resource_id = ${live.resourceId} AND starts_at = ${slot(0).start}`;
+    const twoLimited = limited({ holds: 2 });
+    expect(
+      (
+        await twoLimited.acquireHold({
+          tenantRef: live.tenantRef,
+          resourceId: live.resourceId,
+          ...slot(2),
+          ttlMs: 60_000,
+        })
+      ).ok,
+    ).toBe(true);
+    await expect(
+      twoLimited.acquireHold({
+        tenantRef: live.tenantRef,
+        resourceId: live.resourceId,
+        ...slot(3),
+        ttlMs: 60_000,
+      }),
+    ).resolves.toEqual({ ok: false, code: 'hold_limit_reached', limit: 2 });
   });
 
   it("keeps a keyed hold's place until it would have expired, released or confirmed, so a retry still answers", async () => {

@@ -2188,9 +2188,10 @@ export interface SlotlockTenantLimits {
   /** Resources, archived ones included; the lower of this and a call's `maxTenantResources`. */
   resources?: number;
   /**
-   * Live holds on the tenant's resources; expired ones (purged by maintenance) do not count. A keyed
-   * hold keeps its place until it would have expired, released or confirmed, while its answer is
-   * kept for retries; a hold at the limit first forgets the answers of holds that have expired.
+   * Holds on the tenant's resources, expired ones included until they are deleted. A keyed hold
+   * keeps its place until it would have expired, released or confirmed, while its answer is kept
+   * for retries. A hold at the limit first deletes the tenant's expired holds and forgets their
+   * answers, as maintenance does, so only live holds keep a new one out.
    */
   holds?: number;
   /**
@@ -2266,24 +2267,24 @@ async function tenantLimitCount(
   let rows: { count: number }[];
   switch (kind) {
     case 'holds':
-      // Live holds, and the answer kept for each keyed hold no longer live (released, confirmed or
-      // expired) until it is forgotten. An answer whose hold is live is left out: that hold counts.
+      // Every held row, expired or not, until it is deleted: an expired hold no rival writes over
+      // stays stored until maintenance or a hold at the limit deletes it. And the answer kept for
+      // each keyed hold no longer held (released or confirmed, or its expired row deleted) until it
+      // is forgotten. An answer whose hold is still a held row is left out: that row counts.
       rows = await tx<{ count: number }[]>`
         SELECT (
           (SELECT count(*) FROM (
             SELECT 1
               FROM slotlock.reservations hold
               JOIN slotlock.resources resource ON resource.id = hold.resource_id
-             WHERE resource.tenant_ref = ${tenantRef}
-               AND hold.status = 'held' AND hold.expires_at > now()
-             LIMIT ${limit}) live)
+             WHERE resource.tenant_ref = ${tenantRef} AND hold.status = 'held'
+             LIMIT ${limit}) held)
           + (SELECT count(*) FROM (
             SELECT 1 FROM slotlock.hold_commands answer
              WHERE answer.tenant_ref = ${tenantRef}
                AND NOT EXISTS (
                  SELECT 1 FROM slotlock.reservations hold
-                  WHERE hold.id = answer.hold_id
-                    AND hold.status = 'held' AND hold.expires_at > now()
+                  WHERE hold.id = answer.hold_id AND hold.status = 'held'
                )
              LIMIT ${limit}) kept)
         )::int AS count`;
@@ -2363,6 +2364,37 @@ async function tenantLimitCount(
   const count = Number(rows[0]?.count ?? 0);
   if (!Number.isSafeInteger(count) || count < 0) throw new Error('slotlock: invalid tenant row count');
   return count;
+}
+
+/**
+ * Delete up to `limit` of a tenant's holds that have expired, oldest first; the number deleted. A
+ * writer reaping or confirming a hold locks it: such a row is skipped, and the delete repeats the
+ * predicate on the row as it now is.
+ */
+async function deleteExpiredHolds(
+  tx: TransactionSql,
+  tenantRef: string,
+  limit: number,
+): Promise<number> {
+  const [row] = await tx<{ deleted: number }[]>`
+    WITH candidates AS MATERIALIZED (
+      SELECT hold.id
+        FROM slotlock.reservations hold
+        JOIN slotlock.resources resource ON resource.id = hold.resource_id
+       WHERE resource.tenant_ref = ${tenantRef}
+         AND hold.status = 'held' AND hold.expires_at <= now()
+       ORDER BY hold.expires_at, hold.id
+       LIMIT ${limit}
+       FOR UPDATE OF hold SKIP LOCKED
+    ), deleted AS (
+      DELETE FROM slotlock.reservations hold
+       USING candidates candidate
+       WHERE hold.id = candidate.id
+         AND hold.status = 'held' AND hold.expires_at <= now()
+      RETURNING 1
+    )
+    SELECT count(*)::int AS deleted FROM deleted`;
+  return Number(row?.deleted ?? 0);
 }
 
 /**
@@ -2606,9 +2638,16 @@ function buildSlotlockStore(
     await assertReadCommitted(tx);
     await lockTenantLimit(tx, tenantRef, kind);
     if ((await tenantLimitCount(tx, tenantRef, kind, limit)) < limit) return null;
-    // A keyed hold's answer keeps its place only until the hold would have expired; at the limit,
-    // the answers past that are forgotten, as maintenance would, and the count is read again.
-    if (kind !== 'holds' || (await forgetExpiredHoldAnswers(tx, tenantRef, limit)) === 0) {
+    // A hold, and a keyed hold's answer, keep their place only until the hold expires; at the
+    // limit, the expired holds and their answers are deleted, as maintenance would, and the count
+    // is read again. Counting expired rows until then keeps what a tenant stores within the limit
+    // between maintenance passes, however short its holds.
+    if (
+      kind !== 'holds' ||
+      (await deleteExpiredHolds(tx, tenantRef, limit)) +
+        (await forgetExpiredHoldAnswers(tx, tenantRef, limit)) ===
+        0
+    ) {
       return limit;
     }
     return (await tenantLimitCount(tx, tenantRef, kind, limit)) >= limit ? limit : null;
@@ -4431,26 +4470,7 @@ function buildSlotlockStore(
                    occupied_ends_at = ends_at + buffer_after_ms * interval '1 millisecond'
              WHERE id = ${id} AND tenant_ref IS NULL AND status = 'confirmed'`;
         }
-        // A writer reaping or confirming a hold locks it: such a row is skipped, and the delete
-        // repeats the predicate on the row as it now is.
-        const [holds] = await tx<{ deleted: number }[]>`
-          WITH candidates AS MATERIALIZED (
-            SELECT hold.id
-              FROM slotlock.reservations hold
-              JOIN slotlock.resources resource ON resource.id = hold.resource_id
-             WHERE resource.tenant_ref = ${params.tenantRef}
-               AND hold.status = 'held' AND hold.expires_at <= now()
-             ORDER BY hold.expires_at, hold.id
-             LIMIT ${limit}
-             FOR UPDATE OF hold SKIP LOCKED
-          ), deleted AS (
-            DELETE FROM slotlock.reservations hold
-             USING candidates candidate
-             WHERE hold.id = candidate.id
-               AND hold.status = 'held' AND hold.expires_at <= now()
-            RETURNING 1
-          )
-          SELECT count(*)::int AS deleted FROM deleted`;
+        const expiredHoldsDeleted = await deleteExpiredHolds(tx, params.tenantRef, limit);
         const holdCommandsDeleted = await forgetExpiredHoldAnswers(tx, params.tenantRef, limit);
         // Only references retired with no booking: a cancelled booking's tombstone is kept.
         const [tombstones] = await tx<{ deleted: number }[]>`
@@ -4473,7 +4493,6 @@ function buildSlotlockStore(
             RETURNING 1
           )
           SELECT count(*)::int AS deleted FROM deleted`;
-        const expiredHoldsDeleted = Number(holds?.deleted ?? 0);
         const tombstonesDeleted = Number(tombstones?.deleted ?? 0);
         return {
           expiredHoldsDeleted,

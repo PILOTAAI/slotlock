@@ -167,7 +167,7 @@ export type AcquireHoldResult =
    * extended that far (past the rolling horizon, or blocked): the time cannot be proven free.
    */
   | { ok: false; code: 'recurrence_not_materialized' }
-  /** The resource's tenant has as many live holds as its `holds` limit. */
+  /** The resource's tenant has as many holds as its `holds` limit, expired ones deleted. */
   | { ok: false; code: 'hold_limit_reached'; limit: number }
   | { ok: false; code: 'overlap'; conflictingReservationId: string | null };
 
