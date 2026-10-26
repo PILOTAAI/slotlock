@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { SLOTLOCK_MCP_LEGACY_PROTOCOL_VERSION } from '../agent-server.js';
 import { SLOTLOCK_DASHBOARD_FUNCTIONS } from '../ddl.js';
 import { type SlotlockEnv, runSlotlockCli } from '../self-host.js';
+import { createSlotlockStore } from '../store.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
 const packageVersion = (
@@ -188,6 +189,93 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         DELETE FROM slotlock.resources
          WHERE tenant_ref = ${tenantRef} AND external_ref IS DISTINCT FROM 'vehicle-42'`;
       await admin`UPDATE slotlock.resources SET availability_rules = NULL WHERE tenant_ref = ${tenantRef}`;
+    }
+  });
+
+  it('archives, restores and deletes resources, and suspends and erases a tenant, from the command line', async () => {
+    const lifecycle = `cli-lifecycle-${randomUUID()}`;
+    const runIn = async (argv: string[], overrides: SlotlockEnv = {}) => {
+      const stdout = output();
+      const stderr = output();
+      const code = await runSlotlockCli(argv, {
+        env: { ...env, SLOTLOCK_TENANT: lifecycle, ...overrides },
+        stdout,
+        stderr,
+        signal: new AbortController().signal,
+      });
+      return { code, stdout, stderr, line: () => JSON.parse(stdout.text()) as Record<string, unknown> };
+    };
+    try {
+      expect((await runIn(['resource', 'add', 'retired-van'])).code).toBe(0);
+      const archived = await runIn(['resource', 'archive', 'retired-van']);
+      expect(archived.code).toBe(0);
+      expect(archived.line()).toMatchObject({
+        external_ref: 'retired-van',
+        visibility: 'shared',
+        archived_at: expect.any(String),
+      });
+      expect((await runIn(['resource', 'list'])).stdout.text()).toBe('');
+      // By id as well as by reference, archived ones included.
+      const restored = await runIn(['resource', 'restore', archived.line().id as string]);
+      expect(restored.line()).toMatchObject({ external_ref: 'retired-van', archived_at: null });
+      expect((await runIn(['resource', 'list'])).stdout.text()).toContain('retired-van');
+
+      // A live hold keeps a resource from being deleted; released, it goes.
+      const id = restored.line().id as string;
+      const store = createSlotlockStore(admin);
+      const held = await store.withTenant(lifecycle, (tenant) =>
+        tenant.acquireHold({
+          tenantRef: lifecycle,
+          resourceId: id,
+          start: new Date(Date.now() + 86_400_000),
+          end: new Date(Date.now() + 90_000_000),
+          ttlMs: 600_000,
+        }),
+      );
+      expect(held.ok).toBe(true);
+      const inUse = await runIn(['resource', 'delete', 'retired-van']);
+      expect(inUse.code).toBe(1);
+      expect(inUse.stderr.text()).toMatch(/has not ended; cancel or move it first/);
+      if (held.ok) {
+        await store.withTenant(lifecycle, (tenant) => tenant.releaseHold(held.hold.id, { tenantRef: lifecycle }));
+      }
+      const deleted = await runIn(['resource', 'delete', 'retired-van']);
+      expect(deleted.line()).toEqual({ id, external_ref: 'retired-van', deleted: true });
+      const gone = await runIn(['resource', 'delete', 'retired-van']);
+      expect(gone.code).toBe(1);
+      expect(gone.stderr.text()).toMatch(/no resource with that reference or id/);
+
+      expect((await runIn(['tenant', 'status'])).line()).toEqual({ tenant: lifecycle, suspended: false });
+      // The serving role may not suspend: only the schema owner, SLOTLOCK_MIGRATE_DATABASE_URL's.
+      const notOwner = await runIn(['tenant', 'suspend'], { SLOTLOCK_MIGRATE_DATABASE_URL: '' });
+      expect(notOwner.code).toBe(1);
+      expect(notOwner.stderr.text()).toMatch(/only the schema owner suspends/);
+      const suspended = await runIn(['tenant', 'suspend', '--reason', 'chargeback review']);
+      expect(suspended.line()).toEqual({ tenant: lifecycle, suspended: true, changed: true });
+      expect((await runIn(['tenant', 'suspend'])).line()).toEqual({ tenant: lifecycle, suspended: true, changed: false });
+      expect((await runIn(['tenant', 'status'])).line()).toEqual({ tenant: lifecycle, suspended: true });
+      // Suspended, the tenant writes nothing, even from the command line.
+      expect((await runIn(['resource', 'add', 'suspended-van'])).code).toBe(1);
+      expect((await runIn(['tenant', 'unsuspend'])).line()).toEqual({
+        tenant: lifecycle,
+        suspended: false,
+        changed: true,
+      });
+
+      expect((await runIn(['resource', 'add', 'erased-van'])).code).toBe(0);
+      const unconfirmed = await runIn(['tenant', 'erase', '--confirm', tenantRef]);
+      expect(unconfirmed.code).toBe(2);
+      expect((await runIn(['resource', 'list'])).stdout.text()).toContain('erased-van');
+      const erased = await runIn(['tenant', 'erase', '--confirm', lifecycle]);
+      expect(erased.code).toBe(0);
+      expect(erased.line()).toMatchObject({ tenant: lifecycle, rows: expect.objectContaining({ resources: 1 }) });
+      expect((await runIn(['resource', 'list'])).stdout.text()).toBe('');
+      expect((await runIn(['tenant', 'erase', '--confirm', lifecycle])).line()).toMatchObject({ total: 0 });
+      // The command line's own tenant is as it was.
+      expect((await run(['resource', 'list'])).stdout.text()).toContain('vehicle-42');
+    } finally {
+      await admin`DELETE FROM slotlock.tenant_suspensions WHERE tenant_ref = ${lifecycle}`;
+      await admin`DELETE FROM slotlock.resources WHERE tenant_ref = ${lifecycle}`;
     }
   });
 

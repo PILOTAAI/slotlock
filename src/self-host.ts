@@ -822,10 +822,11 @@ function hoursLine(resource: SlotlockResource): string {
   })}\n`;
 }
 
-/** Every resource of the tenant, a page at a time. */
+/** Every resource of the tenant in use (with `includeArchived`, every one), a page at a time. */
 async function tenantResources(
   store: ReturnType<typeof createSlotlockStore>,
   tenantRef: string,
+  includeArchived = false,
 ): Promise<SlotlockResource[]> {
   const all: SlotlockResource[] = [];
   let after: string | undefined;
@@ -835,6 +836,7 @@ async function tenantResources(
         tenantRef,
         limit: RESOURCE_PAGE_SIZE,
         ...(after !== undefined ? { after } : {}),
+        ...(includeArchived ? { includeArchived } : {}),
       }),
     );
     all.push(...page);
@@ -884,6 +886,97 @@ async function runHours(
     if (!updated) return false;
     out.write(hoursLine(updated));
     return true;
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
+/** A resource as `resource archive` and `resource restore` print it. */
+function resourceStateLine(resource: SlotlockResource): string {
+  return `${JSON.stringify({
+    id: resource.id,
+    external_ref: resource.externalRef,
+    timezone: resource.timezone,
+    visibility: resource.visibility ?? 'shared',
+    archived_at: resource.archivedAt?.toISOString() ?? null,
+  })}\n`;
+}
+
+/**
+ * `resource archive|restore|delete`: the tenant's resource named by id, else by reference, archived
+ * ones included. Returns false when no resource has that name, and `in_use` when a delete is
+ * refused because something on the resource has not ended.
+ */
+async function changeResource(
+  config: SlotlockDatabaseConfig,
+  out: OutputStream,
+  name: string,
+  action: 'archive' | 'restore' | 'delete',
+): Promise<boolean | 'in_use'> {
+  const sql = connect(config.databaseUrl, 1);
+  try {
+    const store = createSlotlockStore(sql);
+    const tenantRef = config.tenantRef;
+    const resources = await tenantResources(store, tenantRef, true);
+    // An id first: another resource's reference may spell it.
+    const named =
+      resources.find((resource) => resource.id === name) ??
+      resources.find((resource) => resource.externalRef === name);
+    if (!named) return false;
+    const id = named.id;
+    if (action === 'delete') {
+      const result = await store.withTenant(tenantRef, (tenant) => tenant.deleteResource({ tenantRef, id }));
+      if (!result.ok) return 'in_use';
+      if (!result.deleted) return false;
+      out.write(`${JSON.stringify({ id, external_ref: named.externalRef, deleted: true })}\n`);
+      return true;
+    }
+    const changed = await store.withTenant(tenantRef, (tenant) =>
+      action === 'archive'
+        ? tenant.archiveResource({ tenantRef, id })
+        : tenant.restoreResource({ tenantRef, id }),
+    );
+    if (!changed) return false;
+    out.write(resourceStateLine(changed));
+    return true;
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
+/**
+ * `tenant status|suspend|unsuspend|erase` for SLOTLOCK_TENANT. Suspending and lifting a suspension
+ * are the deployment role's alone, so they connect as SLOTLOCK_MIGRATE_DATABASE_URL when it is set;
+ * the serving role reads a suspension and may erase.
+ */
+async function runTenantCommand(
+  config: SlotlockDatabaseConfig,
+  out: OutputStream,
+  action: 'status' | 'suspend' | 'unsuspend' | 'erase',
+  reason?: string,
+): Promise<void> {
+  const owner = action === 'suspend' || action === 'unsuspend';
+  const sql = connect(owner ? (config.migrateDatabaseUrl ?? config.databaseUrl) : config.databaseUrl, 1);
+  try {
+    const store = createSlotlockStore(sql);
+    const tenantRef = config.tenantRef;
+    let line: Record<string, unknown>;
+    if (action === 'status') {
+      line = { tenant: tenantRef, suspended: await store.isTenantSuspended({ tenantRef }) };
+    } else if (action === 'suspend') {
+      const { suspended } = await store.suspendTenant({
+        tenantRef,
+        ...(reason !== undefined ? { reason } : {}),
+      });
+      line = { tenant: tenantRef, suspended: true, changed: suspended };
+    } else if (action === 'unsuspend') {
+      const { unsuspended } = await store.unsuspendTenant({ tenantRef });
+      line = { tenant: tenantRef, suspended: false, changed: unsuspended };
+    } else {
+      const erased = await store.eraseTenant({ tenantRef });
+      line = { tenant: tenantRef, total: erased.total, rows: erased.rows };
+    }
+    out.write(`${JSON.stringify(line)}\n`);
   } finally {
     await sql.end({ timeout: 5 });
   }
@@ -1004,6 +1097,11 @@ Commands:
   resource add <ref> [--timezone <IANA zone>]
                            Create a calendar resource (a car, room, person or machine)
   resource list            Print the tenant's resources, one JSON object per line
+  resource archive <ref>   Take a resource out of use: no new bookings, holds or events, and
+                           no longer listed; what is on it stays
+  resource restore <ref>   Put an archived resource back in use
+  resource delete <ref>    Delete a resource and its history; refused while a booking, hold
+                           or event on it has not ended
   hours show [--resource <ref>]
                            Print each resource's bookable hours (null: the server's)
   hours set <json> (--resource <ref> | --all)
@@ -1018,6 +1116,15 @@ Commands:
   key rotate <id>          Give an active key a new secret and print it once; the old one stops
                            working at once, and the key keeps its id and what it booked
   key revoke <id>          Revoke one of the tenant's API keys at once
+  tenant status            Print whether the tenant is suspended
+  tenant suspend [--reason <text>]
+                           Suspend the tenant: it may read, and writes nothing; its keys get
+                           no new secret (as SLOTLOCK_MIGRATE_DATABASE_URL's role when set:
+                           only the schema owner suspends)
+  tenant unsuspend         Lift the tenant's suspension (as the schema owner, likewise)
+  tenant erase --confirm <tenant>
+                           Delete everything the tenant has, its API keys included, for good;
+                           --confirm repeats SLOTLOCK_TENANT
   healthcheck              Exit 0 when the local server reports ready
 
 Options:
@@ -1102,7 +1209,7 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     return 2;
   }
   const subcommand =
-    command === 'resource' || command === 'key' || command === 'hours'
+    command === 'resource' || command === 'key' || command === 'hours' || command === 'tenant'
       ? `${command} ${operands[0] ?? ''}`.trim()
       : command;
   const expectedOperands: Record<string, number> = {
@@ -1112,6 +1219,13 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     healthcheck: 0,
     'resource add': 2,
     'resource list': 1,
+    'resource archive': 2,
+    'resource restore': 2,
+    'resource delete': 2,
+    'tenant status': 1,
+    'tenant suspend': 1,
+    'tenant unsuspend': 1,
+    'tenant erase': 1,
     'key create': 2,
     'key list': 1,
     'key rotate': 2,
@@ -1131,6 +1245,15 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     if (values[option] !== undefined && subcommand !== 'key create') {
       return usage(`--${option} applies only to key create`);
     }
+  }
+  if (values.reason !== undefined && subcommand !== 'tenant suspend') {
+    return usage('--reason applies only to tenant suspend');
+  }
+  if (values.confirm !== undefined && subcommand !== 'tenant erase') {
+    return usage('--confirm applies only to tenant erase');
+  }
+  if (subcommand === 'tenant erase' && values.confirm === undefined) {
+    return usage('tenant erase needs --confirm <tenant>, the tenant it erases (SLOTLOCK_TENANT)');
   }
   if (values.all && subcommand !== 'hours set' && subcommand !== 'hours clear') {
     return usage('--all applies only to hours set and hours clear');
@@ -1206,6 +1329,58 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
       case 'resource list':
         await listResources(readSlotlockDatabaseConfig(io.env), io.stdout);
         return 0;
+      case 'resource archive':
+      case 'resource restore':
+      case 'resource delete': {
+        const changed = await changeResource(
+          readSlotlockDatabaseConfig(io.env),
+          io.stdout,
+          operands[1] as string,
+          subcommand.slice('resource '.length) as 'archive' | 'restore' | 'delete',
+        );
+        if (changed === 'in_use') {
+          io.stderr.write(
+            'slotlock: a booking, hold or calendar event on that resource has not ended; cancel or move it first, or archive the resource\n',
+          );
+          return 1;
+        }
+        if (!changed) {
+          io.stderr.write('slotlock: no resource with that reference or id in this tenant\n');
+          return 1;
+        }
+        return 0;
+      }
+      case 'tenant status':
+      case 'tenant suspend':
+      case 'tenant unsuspend':
+      case 'tenant erase': {
+        const config = readSlotlockDatabaseConfig(io.env);
+        // The tenant named twice, so erasing the one SLOTLOCK_TENANT happens to name is deliberate.
+        if (subcommand === 'tenant erase' && values.confirm !== config.tenantRef) {
+          return usage('--confirm must repeat SLOTLOCK_TENANT, the tenant tenant erase deletes');
+        }
+        try {
+          await runTenantCommand(
+            config,
+            io.stdout,
+            subcommand.slice('tenant '.length) as 'status' | 'suspend' | 'unsuspend' | 'erase',
+            values.reason,
+          );
+        } catch (error) {
+          const code = (error as { code?: unknown } | null)?.code;
+          if (code === 'tenant_suspension_not_permitted') {
+            io.stderr.write(
+              'slotlock: only the schema owner suspends a tenant or lifts a suspension; set SLOTLOCK_MIGRATE_DATABASE_URL to its URL\n',
+            );
+            return 1;
+          }
+          if (code === 'invalid_suspension_reason') {
+            return usage('--reason must be 1-500 characters without control characters');
+          }
+          throw error;
+        }
+        return 0;
+      }
       case 'hours show':
       case 'hours set':
       case 'hours clear': {
@@ -1306,6 +1481,8 @@ function parseCliArguments(argv: readonly string[]) {
       'expires-in-days': { type: 'string' },
       resource: { type: 'string' },
       all: { type: 'boolean' },
+      reason: { type: 'string' },
+      confirm: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
     },
