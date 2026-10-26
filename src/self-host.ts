@@ -46,6 +46,7 @@ import {
   readSecret,
   readServerUrl,
   readTrustedProxyHeader,
+  slotlockKeySubscriptions,
 } from './config.js';
 import { SLOTLOCK_APPLICATION_SCOPE } from './application-api.js';
 import { SLOTLOCK_DASHBOARD_FUNCTIONS, SLOTLOCK_TENANT_TABLES } from './ddl.js';
@@ -635,7 +636,10 @@ export async function startSlotlockServer(
         await limits.admit({ principal, operation, input });
         return true;
       },
-      subscriptions: { maxPerTenant: caps.tenant_subscriptions },
+      subscriptions: {
+        maxPerTenant: caps.tenant_subscriptions,
+        maxPerPrincipal: slotlockKeySubscriptions(caps),
+      },
       health: async () => {
         if (!health || performance.now() - health.at > HEALTH_RESULT_MS) {
           health = { at: performance.now(), ready: databaseReachable(sql) };
@@ -732,6 +736,8 @@ export async function startSlotlockServer(
           Object.entries(config.limits.rates).map(([name, rate]) => [name, formatSlotlockRate(rate)]),
         ),
         ...caps,
+        // What a key may hold, which is below key_subscriptions when the tenant's cap is lower.
+        key_subscriptions: slotlockKeySubscriptions(caps),
       },
       client_address: config.trustedProxyHeader ?? 'socket',
     });
@@ -1035,7 +1041,9 @@ Environment:
                                  tenant_series_writes and series_writes
                                  (1: writes that may expand a recurring series at once),
                                  maintenance_runs (1: application API maintenance runs at once),
-                                 tenant_subscriptions (16), key_lookups (2), key_lookup_queue (256)
+                                 tenant_subscriptions (16), key_subscriptions (4, and fewer
+                                 than tenant_subscriptions), key_lookups (2),
+                                 key_lookup_queue (256)
   SLOTLOCK_TRUSTED_PROXY_HEADER  The request field a proxy in front sets to the client address,
                                  such as CF-Connecting-IP (default: the connection's address);
                                  set it only when every request comes through that proxy

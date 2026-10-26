@@ -115,7 +115,10 @@ versioning.
   maintenance run waits the same way for slots of its own: one per tenant, `maintenance_runs` (1)
   per server.
 - `createSlotlockAgentServer` takes `subscriptions.maxPerTenant`; `slotlock serve` caps each tenant
-  at 16 live-update streams (`tenant_subscriptions`).
+  at 16 live-update streams (`tenant_subscriptions`), and each key at 4 of them
+  (`key_subscriptions`), always fewer than its tenant's unless the tenant may hold only one: with
+  `tenant_subscriptions` at 4 or fewer, one key could otherwise hold every stream of its tenant and
+  lock its other keys out.
 - `slotlock serve` logs a `refusals` line each minute there are any, and at shutdown: auth
   refusals, rate limits, lookup overflows, busy series writes, busy maintenance runs and bodies too
   large, with clients named only by per-process pseudonyms.

@@ -204,6 +204,7 @@ const CAP_RANGES = Object.freeze({
   series_writes: [1, 100],
   maintenance_runs: [1, 100],
   tenant_subscriptions: [1, 10_000],
+  key_subscriptions: [1, 64],
   key_lookups: [1, 8],
   key_lookup_queue: [0, 10_000],
 } as const);
@@ -238,6 +239,9 @@ export interface SlotlockLimits {
  *   at a time from waiting behind tenants with more, not behind many tenants with one each
  *   (rate-limit.ts).
  * - `tenant_subscriptions`: MCP live-update streams one tenant may hold open.
+ * - `key_subscriptions`: of those, how many one key (or the server token) may hold, and always
+ *   fewer than its tenant's, so one key cannot lock the tenant's other keys out
+ *   (slotlockKeySubscriptions).
  * - `key_lookups` and `key_lookup_queue`: API key lookups running at once and waiting.
  */
 export const SLOTLOCK_DEFAULT_LIMITS: SlotlockLimits = Object.freeze({
@@ -258,10 +262,20 @@ export const SLOTLOCK_DEFAULT_LIMITS: SlotlockLimits = Object.freeze({
     series_writes: 1,
     maintenance_runs: 1,
     tenant_subscriptions: 16,
+    key_subscriptions: 4,
     key_lookups: 2,
     key_lookup_queue: 256,
   }),
 });
+
+/**
+ * The live-update streams one key may hold open: `key_subscriptions`, but at least one fewer than
+ * its tenant may (unless the tenant may hold only one), so a key at its own limit leaves its
+ * tenant's other keys a stream however the two caps are set.
+ */
+export function slotlockKeySubscriptions(caps: Readonly<Record<SlotlockCapName, number>>): number {
+  return Math.max(1, Math.min(caps.key_subscriptions, caps.tenant_subscriptions - 1));
+}
 
 const RATE_PERIOD_SECONDS: Readonly<Record<string, number>> = { s: 1, m: 60, h: 3_600 };
 const MAX_RATE_COUNT = 1_000_000;

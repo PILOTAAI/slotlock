@@ -845,7 +845,9 @@ returns busy time and coverage for the next `resourceWindowDays` (30). `subscrip
 - A subscription ends after `maxDurationMs` (15 minutes), on `shutdown()`, or when access is lost.
 - At most 4 open per caller and 256 per server (`maxPerPrincipal`, `maxTotal`). `maxPerTenant`
   caps one tenant's across all its callers (default `maxTotal`; `slotlock serve` sets 16), so a
-  tenant with many keys cannot hold every slot. `subscriptions: false` turns them off.
+  tenant with many keys cannot hold every slot. `slotlock serve` lets one key hold
+  `key_subscriptions` (4), and always fewer than its tenant may unless that is one, so one key
+  cannot lock its tenant's other keys out. `subscriptions: false` turns them off.
 
 ### Caching and tracing
 

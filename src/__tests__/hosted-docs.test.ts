@@ -42,6 +42,8 @@ describe('hosted safety in the documentation', () => {
     expect(limits).toMatch(/health check[^.]*not counted/i);
     const live = flat(section(readme, '### Calendar resources and live updates'));
     expect(live).toContain('maxPerTenant');
+    expect(live).toMatch(/`key_subscriptions`[^.]*fewer than its tenant/);
+    expect(flat(section(read('CHANGELOG.md'), '## Unreleased'))).toContain('key_subscriptions');
   });
 
   it('says what a write that waits gets, how a freed slot is shared, and where maintenance waits (P11)', () => {
