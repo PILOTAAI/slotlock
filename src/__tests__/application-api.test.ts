@@ -26,11 +26,44 @@ import {
 const BASE = 'https://calendar.example.com/slotlock';
 const RESOURCE_ID = '0f8b6c1e-2d4a-4c7e-9b1a-3e5f7a9c2d4b';
 const HOLD_ID = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
+const EVENT_ID = '3d6f0a2b-8c4e-4f1a-9b7d-5e2c8a1f4b6d';
 const RESOURCE = {
   id: RESOURCE_ID,
   external_ref: 'vehicle-42',
   timezone: 'Europe/London',
   availability: null,
+  visibility: 'shared',
+  archived_at: null,
+};
+const HOLD = {
+  id: HOLD_ID,
+  resource_id: RESOURCE_ID,
+  start: '2027-03-29T09:00:00.000Z',
+  end: '2027-03-29T10:00:00.000Z',
+  expires_at: '2027-03-29T08:10:00.000Z',
+  source: 'checkout',
+};
+const TENANT_EVENT = {
+  id: EVENT_ID,
+  event_ref: 'agent:handover',
+  owner_ref: `agent:${'a'.repeat(64)}`,
+  resource_id: RESOURCE_ID,
+  starts_at: '2027-03-02T09:00:00.000Z',
+  ends_at: '2027-03-02T10:00:00.000Z',
+  timezone: 'Europe/London',
+  title: 'Handover',
+  description: null,
+  location: null,
+  organizer: null,
+  attendees: [],
+  reminders: [],
+  status: 'confirmed',
+  transparency: 'opaque',
+  sequence: 2,
+  revision: 2,
+  recurrence_rule: null,
+  recurrence_exceptions: [],
+  recurrence_id: null,
 };
 const RESERVATION = {
   id: HOLD_ID,
@@ -57,14 +90,27 @@ const agentBackend = {
 const backend = {
   createResource: vi.fn(),
   getResource: vi.fn(),
+  archiveResource: vi.fn(),
+  restoreResource: vi.fn(),
+  deleteResource: vi.fn(),
+  listBusy: vi.fn(),
   setResourceAvailability: vi.fn(),
   setTenantAvailability: vi.fn(),
   acquireHold: vi.fn(),
+  getHold: vi.fn(),
+  listHolds: vi.fn(),
   confirmHold: vi.fn(),
   releaseHold: vi.fn(),
+  getReservation: vi.fn(),
+  listReservations: vi.fn(),
   putReservation: vi.fn(),
   cancelReservation: vi.fn(),
   recordCoverage: vi.fn(),
+  listTenantEvents: vi.fn(),
+  getTenantEvent: vi.fn(),
+  cancelTenantEvent: vi.fn(),
+  getTenant: vi.fn(),
+  eraseTenant: vi.fn(),
   runMaintenance: vi.fn(),
 } satisfies Record<keyof SlotlockApplicationBackend, ReturnType<typeof vi.fn>>;
 const authorizeApplication = vi.fn();
@@ -154,23 +200,27 @@ function exampleRequest(name: string, token = 'admin'): Request {
 const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>> = {
   createResource: { resource: RESOURCE },
   getResource: { resource: RESOURCE },
+  archiveResource: { resource: { ...RESOURCE, archived_at: '2027-03-01T00:00:00.000Z' } },
+  restoreResource: { resource: RESOURCE },
+  deleteResource: { deleted: true },
+  listBusy: { busy: [{ start: '2027-03-29T09:00:00.000Z', end: '2027-03-29T10:00:00.000Z' }] },
   setResourceAvailability: { resource: RESOURCE },
   setTenantAvailability: { resources_updated: 3 },
-  acquireHold: {
-    hold: {
-      id: HOLD_ID,
-      resource_id: RESOURCE_ID,
-      start: '2027-03-29T09:00:00.000Z',
-      end: '2027-03-29T10:00:00.000Z',
-      expires_at: '2027-03-29T08:10:00.000Z',
-      source: 'checkout',
-    },
-  },
+  acquireHold: { hold: HOLD },
+  getHold: { hold: HOLD },
+  listHolds: { holds: [HOLD], next_cursor: null },
   confirmHold: { reservation: RESERVATION },
   releaseHold: { released: true },
+  getReservation: { reservation: RESERVATION },
+  listReservations: { reservations: [RESERVATION], next_cursor: 'eyJzdGFydCI6IjIwMjcifQ' },
   putReservation: { reservation: RESERVATION, replayed: false },
   cancelReservation: { cancelled: true, revision: 2 },
   recordCoverage: { revision: 7, replayed: false },
+  listTenantEvents: { events: [TENANT_EVENT], next_cursor: null },
+  getTenantEvent: { event: TENANT_EVENT },
+  cancelTenantEvent: { event_id: EVENT_ID, revision: 3, cancelled: true, replayed: false },
+  getTenant: { tenant: { ref: 'tenant-a', suspended: false } },
+  eraseTenant: { total: 12, rows: { resources: 2, reservations: 10 } },
   runMaintenance: { extended: 0, conflicts: 0, refused: 0, pruned: 0, capped: false },
 };
 
@@ -357,6 +407,104 @@ describe('the application API over REST', () => {
     );
     expect(wrongType.status).toBe(415);
     for (const method of Object.values(backend)) expect(method).not.toHaveBeenCalled();
+  });
+
+  it('takes a retry identity from the Idempotency-Key header where the operation keeps one', async () => {
+    const server = buildServer();
+    const hold = {
+      resource_id: RESOURCE_ID,
+      start: '2027-03-29T09:00:00Z',
+      end: '2027-03-29T10:00:00Z',
+      ttl_seconds: 600,
+    };
+    const keyed = await server.fetch(
+      call('POST', '/v1/holds', { body: hold, headers: { 'Idempotency-Key': 'checkout-1' } }),
+    );
+    expect(keyed.status).toBe(200);
+    expect(backend.acquireHold.mock.calls[0]?.[1]).toEqual({ ...hold, idempotency_key: 'checkout-1' });
+    // The same key in the header and the body is one key; two different ones are refused.
+    const both = await server.fetch(
+      call('POST', '/v1/holds', {
+        body: { ...hold, idempotency_key: 'checkout-1' },
+        headers: { 'Idempotency-Key': 'checkout-1' },
+      }),
+    );
+    expect(both.status).toBe(200);
+    const differing = await server.fetch(
+      call('POST', '/v1/holds', {
+        body: { ...hold, idempotency_key: 'checkout-1' },
+        headers: { 'Idempotency-Key': 'checkout-2' },
+      }),
+    );
+    expect(differing.status).toBe(400);
+    expect(await errorCode(differing)).toBe('invalid_arguments');
+    // A key the store could not keep (control characters, past 500 bytes) is refused like the field.
+    const tooLong = await server.fetch(
+      call('POST', '/v1/holds', { body: hold, headers: { 'Idempotency-Key': 'k'.repeat(501) } }),
+    );
+    expect(tooLong.status).toBe(400);
+    // An operation that keeps no key refuses one rather than dropping it.
+    const unkept = await server.fetch(
+      call('POST', `/v1/holds/${HOLD_ID}/confirm`, { body: {}, headers: { 'Idempotency-Key': 'c-1' } }),
+    );
+    expect(unkept.status).toBe(400);
+    expect(await errorCode(unkept)).toBe('idempotency_key_not_supported');
+    expect(backend.acquireHold).toHaveBeenCalledTimes(2);
+    expect(backend.confirmHold).not.toHaveBeenCalled();
+
+    // Cancelling any event of the tenant needs a key, from the query or the header.
+    const unkeyed = await server.fetch(call('DELETE', `/v1/tenant/events/${EVENT_ID}?expected_revision=2`));
+    expect(unkeyed.status).toBe(400);
+    expect(await errorCode(unkeyed)).toBe('invalid_arguments');
+    const headed = await server.fetch(
+      call('DELETE', `/v1/tenant/events/${EVENT_ID}?expected_revision=2`, {
+        headers: { 'Idempotency-Key': 'cancel-1' },
+      }),
+    );
+    expect(headed.status).toBe(200);
+    expect(backend.cancelTenantEvent.mock.calls[0]?.[1]).toEqual({
+      event_id: EVENT_ID,
+      expected_revision: 2,
+      idempotency_key: 'cancel-1',
+    });
+  });
+
+  it('documents the Idempotency-Key header on exactly the operations that keep a key', async () => {
+    const document = (await (await buildServer().fetch(call('GET', '/openapi.json', { token: null }))).json()) as {
+      paths: Record<string, Record<string, { operationId: string; parameters?: { name: string; in: string }[] }>>;
+    };
+    const headed = Object.values(document.paths)
+      .flatMap((methods) => Object.values(methods))
+      .filter((operation) => operation.parameters?.some((parameter) => parameter.in === 'header'))
+      .map((operation) => operation.operationId)
+      .sort();
+    expect(headed).toEqual(['slotlock_acquire_hold', 'slotlock_cancel_tenant_event']);
+  });
+
+  it('takes a visibility only at creation, and erases a tenant only with its reference', () => {
+    const create = slotlockApplicationOperation('slotlock_create_resource');
+    expect(create.input.parse({ external_ref: 'van-1', visibility: 'private' })).toEqual({
+      external_ref: 'van-1',
+      timezone: 'UTC',
+      visibility: 'private',
+    });
+    // Left out, it is not defaulted: an existing resource is then answered as it is.
+    expect(create.input.parse({ external_ref: 'van-1' })).not.toHaveProperty('visibility');
+    expect(create.input.safeParse({ external_ref: 'van-1', visibility: 'hidden' }).success).toBe(false);
+    const erase = slotlockApplicationOperation('slotlock_erase_tenant');
+    expect(erase.input.safeParse({}).success).toBe(false);
+    expect(erase.input.safeParse({ confirm_tenant_ref: '' }).success).toBe(false);
+    expect(erase.input.safeParse({ confirm_tenant_ref: 'tenant-a', yes: true }).success).toBe(false);
+    for (const name of ['slotlock_list_busy', 'slotlock_list_reservations', 'slotlock_list_tenant_events'] as const) {
+      const list = slotlockApplicationOperation(name);
+      const window = { start: '2027-01-01T00:00:00Z', end: '2028-01-03T00:00:00Z' };
+      expect(list.input.safeParse({ ...list.example, ...window }).success).toBe(true);
+      expect(list.input.safeParse({ ...list.example, ...window, end: '2028-01-03T00:00:00.001Z' }).success).toBe(false);
+      expect(list.input.safeParse({ ...list.example, end: list.example.start }).success).toBe(false);
+    }
+    const holds = slotlockApplicationOperation('slotlock_list_holds');
+    expect(holds.input.parse({ resource_id: RESOURCE_ID })).toEqual({ resource_id: RESOURCE_ID, limit: 50 });
+    expect(holds.input.safeParse({ resource_id: RESOURCE_ID, limit: 101 }).success).toBe(false);
   });
 
   it('reads path parameters percent-decoded, so a reference may hold a slash', async () => {

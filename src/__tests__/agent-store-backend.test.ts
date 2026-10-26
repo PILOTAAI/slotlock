@@ -718,4 +718,39 @@ describe('Slotlock store-backed agent server adapter', () => {
       backend.createResource(admin, { external_ref: 'vehicle-1', timezone: 'UTC' }),
     ).rejects.toMatchObject({ code: 'resource_visibility_conflict', status: 409 });
   });
+
+  it('erases a tenant only when allowed, with its own reference, and never a suspended one', async () => {
+    const isTenantSuspended = vi.fn().mockResolvedValue(false);
+    const eraseTenant = vi.fn().mockResolvedValue({ rows: { resources: 1 }, total: 1 });
+    withTenant.mockImplementation(async (_tenant: string, callback: (s: unknown) => unknown) =>
+      callback({ isTenantSuspended, eraseTenant }),
+    );
+    const admin = {
+      principal: { subject: 'admin-a', tenantRef, scopes: ['admin'] },
+      operation: 'slotlock_erase_tenant',
+      signal: new AbortController().signal,
+    } as unknown as SlotlockApplicationInvocationContext;
+    await expect(
+      createSlotlockStoreApplicationBackend(store).eraseTenant(admin, { confirm_tenant_ref: tenantRef }),
+    ).rejects.toMatchObject({ code: 'tenant_erasure_disabled', status: 403 });
+    const backend = createSlotlockStoreApplicationBackend(store, { tenantErasure: true });
+    await expect(
+      backend.eraseTenant(admin, { confirm_tenant_ref: 'tenant-b' }),
+    ).rejects.toMatchObject({ code: 'invalid_confirmation', status: 400 });
+    expect(withTenant).not.toHaveBeenCalled();
+    isTenantSuspended.mockResolvedValueOnce(true);
+    await expect(
+      backend.eraseTenant(admin, { confirm_tenant_ref: tenantRef }),
+    ).rejects.toMatchObject({ code: 'tenant_suspended', status: 403 });
+    expect(eraseTenant).not.toHaveBeenCalled();
+    expect(await backend.eraseTenant(admin, { confirm_tenant_ref: tenantRef })).toEqual({
+      total: 1,
+      rows: { resources: 1 },
+    });
+    expect(eraseTenant).toHaveBeenCalledWith({ tenantRef });
+    // In the tenant's READ COMMITTED transaction, as the other writes are.
+    expect(withTenant).toHaveBeenLastCalledWith(tenantRef, expect.any(Function), {
+      isolation: 'read committed',
+    });
+  });
 });

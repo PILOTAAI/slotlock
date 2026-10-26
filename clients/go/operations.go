@@ -20,14 +20,27 @@ var operations = func() map[string]operation {
 		{name: "slotlock_update_event", method: "PATCH", path: "/v1/events/{event_id}", pathParams: []string{"event_id"}, query: nil},
 		{name: "slotlock_delete_event", method: "DELETE", path: "/v1/events/{event_id}", pathParams: []string{"event_id"}, query: []string{"expected_revision", "idempotency_key"}},
 		{name: "slotlock_get_resource", method: "GET", path: "/v1/resources/{resource_id}", pathParams: []string{"resource_id"}, query: nil},
+		{name: "slotlock_delete_resource", method: "DELETE", path: "/v1/resources/{resource_id}", pathParams: []string{"resource_id"}, query: nil},
+		{name: "slotlock_archive_resource", method: "POST", path: "/v1/resources/{resource_id}/archive", pathParams: []string{"resource_id"}, query: nil},
+		{name: "slotlock_restore_resource", method: "POST", path: "/v1/resources/{resource_id}/restore", pathParams: []string{"resource_id"}, query: nil},
+		{name: "slotlock_list_busy", method: "GET", path: "/v1/resources/{resource_id}/busy", pathParams: []string{"resource_id"}, query: []string{"start", "end"}},
 		{name: "slotlock_set_resource_availability", method: "PUT", path: "/v1/resources/{resource_id}/availability", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_set_tenant_availability", method: "PUT", path: "/v1/availability", pathParams: nil, query: nil},
 		{name: "slotlock_acquire_hold", method: "POST", path: "/v1/holds", pathParams: nil, query: nil},
-		{name: "slotlock_confirm_hold", method: "POST", path: "/v1/holds/{hold_id}/confirm", pathParams: []string{"hold_id"}, query: nil},
+		{name: "slotlock_get_hold", method: "GET", path: "/v1/holds/{hold_id}", pathParams: []string{"hold_id"}, query: nil},
 		{name: "slotlock_release_hold", method: "DELETE", path: "/v1/holds/{hold_id}", pathParams: []string{"hold_id"}, query: nil},
+		{name: "slotlock_list_holds", method: "GET", path: "/v1/resources/{resource_id}/holds", pathParams: []string{"resource_id"}, query: []string{"limit", "cursor"}},
+		{name: "slotlock_confirm_hold", method: "POST", path: "/v1/holds/{hold_id}/confirm", pathParams: []string{"hold_id"}, query: nil},
+		{name: "slotlock_get_reservation", method: "GET", path: "/v1/reservations/{reservation_ref}", pathParams: []string{"reservation_ref"}, query: nil},
 		{name: "slotlock_put_reservation", method: "PUT", path: "/v1/reservations/{reservation_ref}", pathParams: []string{"reservation_ref"}, query: nil},
 		{name: "slotlock_cancel_reservation", method: "DELETE", path: "/v1/reservations/{reservation_ref}", pathParams: []string{"reservation_ref"}, query: []string{"revision"}},
+		{name: "slotlock_list_reservations", method: "GET", path: "/v1/resources/{resource_id}/reservations", pathParams: []string{"resource_id"}, query: []string{"start", "end", "limit", "cursor"}},
 		{name: "slotlock_record_coverage", method: "PUT", path: "/v1/resources/{resource_id}/coverage/{source}", pathParams: []string{"resource_id", "source"}, query: nil},
+		{name: "slotlock_list_tenant_events", method: "GET", path: "/v1/tenant/events", pathParams: nil, query: []string{"resource_id", "start", "end", "limit", "cursor"}},
+		{name: "slotlock_get_tenant_event", method: "GET", path: "/v1/tenant/events/{event_id}", pathParams: []string{"event_id"}, query: nil},
+		{name: "slotlock_cancel_tenant_event", method: "DELETE", path: "/v1/tenant/events/{event_id}", pathParams: []string{"event_id"}, query: []string{"expected_revision", "expected_resource_id", "idempotency_key"}},
+		{name: "slotlock_get_tenant", method: "GET", path: "/v1/tenant", pathParams: nil, query: nil},
+		{name: "slotlock_erase_tenant", method: "POST", path: "/v1/tenant/erase", pathParams: nil, query: nil},
 		{name: "slotlock_run_maintenance", method: "POST", path: "/v1/maintenance", pathParams: nil, query: nil},
 	}
 	byName := make(map[string]operation, len(list))
@@ -66,6 +79,8 @@ type CreateResourceInput struct {
 	ExternalRef string
 
 	Timezone *string
+
+	Visibility *string
 }
 
 func (in CreateResourceInput) values() map[string]any {
@@ -74,11 +89,17 @@ func (in CreateResourceInput) values() map[string]any {
 	if in.Timezone != nil {
 		values["timezone"] = *in.Timezone
 	}
+	if in.Visibility != nil {
+		values["visibility"] = *in.Visibility
+	}
 	return values
 }
 
 // CreateResource: Create or update a resource. Create the resource with this external reference,
 // or update its time zone if the tenant already has it. Repeating the call changes nothing more.
+// visibility is shared (the default: agents list and book it) or private (agents never see it),
+// fixed at creation: naming another for an existing resource answers 409
+// resource_visibility_conflict.
 func (c *Client) CreateResource(ctx context.Context, in CreateResourceInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_create_resource", in.values())
 }
@@ -268,6 +289,8 @@ type UpdateEventInput struct {
 
 	IdempotencyKey string
 
+	ExpectedResourceID *string
+
 	ResourceID *string
 
 	StartsAt *string
@@ -302,6 +325,9 @@ func (in UpdateEventInput) values() map[string]any {
 	values["event_id"] = in.EventID
 	values["expected_revision"] = in.ExpectedRevision
 	values["idempotency_key"] = in.IdempotencyKey
+	if in.ExpectedResourceID != nil {
+		values["expected_resource_id"] = *in.ExpectedResourceID
+	}
 	if in.ResourceID != nil {
 		values["resource_id"] = *in.ResourceID
 	}
@@ -348,7 +374,8 @@ func (in UpdateEventInput) values() map[string]any {
 }
 
 // UpdateEvent: Update resource event. Apply an expected-revision event patch and rematerialize
-// occupancy atomically.
+// occupancy atomically. With expected_resource_id, the resource you read the event on, an event
+// since moved elsewhere is not found.
 func (c *Client) UpdateEvent(ctx context.Context, in UpdateEventInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_update_event", in.values())
 }
@@ -387,9 +414,91 @@ func (in GetResourceInput) values() map[string]any {
 	return values
 }
 
-// GetResource: Get a resource. One resource of the tenant, with its own weekly bookable hours.
+// GetResource: Get a resource. One resource of the tenant, archived or not, with its own weekly
+// bookable hours and its visibility.
 func (c *Client) GetResource(ctx context.Context, in GetResourceInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_get_resource", in.values())
+}
+
+// DeleteResourceInput holds the arguments of [Client.DeleteResource].
+type DeleteResourceInput struct {
+	ResourceID string
+}
+
+func (in DeleteResourceInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_id"] = in.ResourceID
+	return values
+}
+
+// DeleteResource: Delete a resource. Delete a resource with its history (past bookings, coverage,
+// cancelled events), freeing its place under the tenant's resource limit. Refused with 409
+// resource_in_use while a booking on it has not ended, a hold on it is live, or a calendar event
+// is on it: cancel or move those first. deleted is false when the tenant has no such resource,
+// deleted already, say.
+func (c *Client) DeleteResource(ctx context.Context, in DeleteResourceInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_delete_resource", in.values())
+}
+
+// ArchiveResourceInput holds the arguments of [Client.ArchiveResource].
+type ArchiveResourceInput struct {
+	ResourceID string
+}
+
+func (in ArchiveResourceInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_id"] = in.ResourceID
+	return values
+}
+
+// ArchiveResource: Archive a resource. Take a resource out of use: no list shows it and it takes
+// no new booking, hold or event (409 resource_archived), while what is on it stays and can still
+// be cancelled or released. Archiving it again keeps the first time.
+func (c *Client) ArchiveResource(ctx context.Context, in ArchiveResourceInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_archive_resource", in.values())
+}
+
+// RestoreResourceInput holds the arguments of [Client.RestoreResource].
+type RestoreResourceInput struct {
+	ResourceID string
+}
+
+func (in RestoreResourceInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_id"] = in.ResourceID
+	return values
+}
+
+// RestoreResource: Restore a resource. Put an archived resource back in use. Restoring one in use
+// changes nothing.
+func (c *Client) RestoreResource(ctx context.Context, in RestoreResourceInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_restore_resource", in.values())
+}
+
+// ListBusyInput holds the arguments of [Client.ListBusy].
+type ListBusyInput struct {
+	ResourceID string
+
+	Start string
+
+	End string
+}
+
+func (in ListBusyInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_id"] = in.ResourceID
+	values["start"] = in.Start
+	values["end"] = in.End
+	return values
+}
+
+// ListBusy: List a resource's busy time. The time a resource of the tenant, private ones
+// included, is occupied in a window of at most 367 days, by start: bookings with their
+// turnaround, live holds, and calendar events. Adjacent intervals are not merged. More than
+// 10,000 answers 400 calendar_work_limit: narrow the window. Free/busy with coverage, for the
+// resources agents see, is slotlock_get_free_busy.
+func (c *Client) ListBusy(ctx context.Context, in ListBusyInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_list_busy", in.values())
 }
 
 // SetResourceAvailabilityInput holds the arguments of [Client.SetResourceAvailability].
@@ -447,6 +556,10 @@ type AcquireHoldInput struct {
 	TTLSeconds int64
 
 	Source *string
+
+	// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
+	// request answers what the first did; with another request, 409 idempotency_conflict.
+	IdempotencyKey *string
 }
 
 func (in AcquireHoldInput) values() map[string]any {
@@ -458,32 +571,38 @@ func (in AcquireHoldInput) values() map[string]any {
 	if in.Source != nil {
 		values["source"] = *in.Source
 	}
+	if in.IdempotencyKey != nil {
+		values["idempotency_key"] = *in.IdempotencyKey
+	}
 	return values
 }
 
 // AcquireHold: Hold time. Occupy a window without booking it, for example while a customer pays.
 // The hold blocks every other booking until it expires (the database clock, ttl_seconds from
-// now), is confirmed, or is released. A taken window answers 409 overlap.
+// now), is confirmed, or is released. A taken window answers 409 overlap. With an idempotency key
+// (the Idempotency-Key header or idempotency_key), a retry answers the hold the first request
+// made, until that hold would have expired, is released or is confirmed; the same key with
+// another request is 409 idempotency_conflict.
 func (c *Client) AcquireHold(ctx context.Context, in AcquireHoldInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_acquire_hold", in.values())
 }
 
-// ConfirmHoldInput holds the arguments of [Client.ConfirmHold].
-type ConfirmHoldInput struct {
+// GetHoldInput holds the arguments of [Client.GetHold].
+type GetHoldInput struct {
 	HoldID string
 }
 
-func (in ConfirmHoldInput) values() map[string]any {
+func (in GetHoldInput) values() map[string]any {
 	values := map[string]any{}
 	values["hold_id"] = in.HoldID
 	return values
 }
 
-// ConfirmHold: Confirm a hold. Turn an unexpired hold into a confirmed reservation. Confirming it
-// again answers the same reservation, so a retry is safe. An expired hold answers 409
-// hold_expired; a released or unknown one, 404 hold_not_found.
-func (c *Client) ConfirmHold(ctx context.Context, in ConfirmHoldInput) (map[string]any, error) {
-	return c.Call(ctx, "slotlock_confirm_hold", in.values())
+// GetHold: Get a hold. One of the tenant's live holds. An expired, confirmed, released or unknown
+// one answers 404 hold_not_found; a confirmed one is a reservation whose reference is the hold's
+// id.
+func (c *Client) GetHold(ctx context.Context, in GetHoldInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_get_hold", in.values())
 }
 
 // ReleaseHoldInput holds the arguments of [Client.ReleaseHold].
@@ -501,6 +620,71 @@ func (in ReleaseHoldInput) values() map[string]any {
 // gone: expired, confirmed or released.
 func (c *Client) ReleaseHold(ctx context.Context, in ReleaseHoldInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_release_hold", in.values())
+}
+
+// ListHoldsInput holds the arguments of [Client.ListHolds].
+type ListHoldsInput struct {
+	ResourceID string
+
+	Limit *int64
+
+	Cursor *string
+}
+
+func (in ListHoldsInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_id"] = in.ResourceID
+	if in.Limit != nil {
+		values["limit"] = *in.Limit
+	}
+	if in.Cursor != nil {
+		values["cursor"] = *in.Cursor
+	}
+	return values
+}
+
+// ListHolds: List a resource's holds. The live holds on one of the tenant's resources, by start
+// then id, a page at a time: pass next_cursor as cursor for the next page, until it is null.
+func (c *Client) ListHolds(ctx context.Context, in ListHoldsInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_list_holds", in.values())
+}
+
+// ConfirmHoldInput holds the arguments of [Client.ConfirmHold].
+type ConfirmHoldInput struct {
+	HoldID string
+}
+
+func (in ConfirmHoldInput) values() map[string]any {
+	values := map[string]any{}
+	values["hold_id"] = in.HoldID
+	return values
+}
+
+// ConfirmHold: Confirm a hold. Turn an unexpired hold into a confirmed reservation, whose
+// reference is the hold's id at revision 1: move or cancel it with the reservation routes by that
+// reference (DELETE /v1/reservations/{hold_id}?revision=2 cancels it). Confirming it again
+// answers the same reservation, so a retry is safe. An expired hold answers 409 hold_expired; a
+// released or unknown one, 404 hold_not_found.
+func (c *Client) ConfirmHold(ctx context.Context, in ConfirmHoldInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_confirm_hold", in.values())
+}
+
+// GetReservationInput holds the arguments of [Client.GetReservation].
+type GetReservationInput struct {
+	ReservationRef string
+}
+
+func (in GetReservationInput) values() map[string]any {
+	values := map[string]any{}
+	values["reservation_ref"] = in.ReservationRef
+	return values
+}
+
+// GetReservation: Get a reservation. The tenant's booking with this reference as it now is, at
+// its current revision: move it at that revision plus 1. A cancelled or unknown reference, or a
+// calendar event's time, answers 404 reservation_not_found.
+func (c *Client) GetReservation(ctx context.Context, in GetReservationInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_get_reservation", in.values())
 }
 
 // PutReservationInput holds the arguments of [Client.PutReservation].
@@ -567,6 +751,41 @@ func (c *Client) CancelReservation(ctx context.Context, in CancelReservationInpu
 	return c.Call(ctx, "slotlock_cancel_reservation", in.values())
 }
 
+// ListReservationsInput holds the arguments of [Client.ListReservations].
+type ListReservationsInput struct {
+	ResourceID string
+
+	Start string
+
+	End string
+
+	Limit *int64
+
+	Cursor *string
+}
+
+func (in ListReservationsInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_id"] = in.ResourceID
+	values["start"] = in.Start
+	values["end"] = in.End
+	if in.Limit != nil {
+		values["limit"] = *in.Limit
+	}
+	if in.Cursor != nil {
+		values["cursor"] = *in.Cursor
+	}
+	return values
+}
+
+// ListReservations: List a resource's reservations. The tenant's bookings on one resource whose
+// time, turnaround included, meets a window of at most 367 days, by start then id, a page at a
+// time: pass next_cursor as cursor for the next page, until it is null. Calendar events are not
+// bookings; slotlock_list_tenant_events lists them.
+func (c *Client) ListReservations(ctx context.Context, in ListReservationsInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_list_reservations", in.values())
+}
+
 // RecordCoverageInput holds the arguments of [Client.RecordCoverage].
 type RecordCoverageInput struct {
 	ResourceID string
@@ -596,6 +815,130 @@ func (in RecordCoverageInput) values() map[string]any {
 // forward; repeating one changes nothing.
 func (c *Client) RecordCoverage(ctx context.Context, in RecordCoverageInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_record_coverage", in.values())
+}
+
+// ListTenantEventsInput holds the arguments of [Client.ListTenantEvents].
+type ListTenantEventsInput struct {
+	ResourceID string
+
+	Start string
+
+	End string
+
+	Limit *int64
+
+	Cursor *string
+}
+
+func (in ListTenantEventsInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_id"] = in.ResourceID
+	values["start"] = in.Start
+	values["end"] = in.End
+	if in.Limit != nil {
+		values["limit"] = *in.Limit
+	}
+	if in.Cursor != nil {
+		values["cursor"] = *in.Cursor
+	}
+	return values
+}
+
+// ListTenantEvents: List a resource's events, every key's. The calendar events on one of the
+// tenant's resources with an occurrence in a window of at most 367 days, whichever key wrote them
+// (a revoked one's included), by start then id, a page at a time: pass next_cursor as cursor for
+// the next page, until it is null.
+func (c *Client) ListTenantEvents(ctx context.Context, in ListTenantEventsInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_list_tenant_events", in.values())
+}
+
+// GetTenantEventInput holds the arguments of [Client.GetTenantEvent].
+type GetTenantEventInput struct {
+	EventID string
+}
+
+func (in GetTenantEventInput) values() map[string]any {
+	values := map[string]any{}
+	values["event_id"] = in.EventID
+	return values
+}
+
+// GetTenantEvent: Get any event of the tenant. One of the tenant's events by its id (the id
+// slotlock_list_tenant_events gives), whichever key wrote it. A cancelled or unknown one answers
+// 404 event_not_found.
+func (c *Client) GetTenantEvent(ctx context.Context, in GetTenantEventInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_get_tenant_event", in.values())
+}
+
+// CancelTenantEventInput holds the arguments of [Client.CancelTenantEvent].
+type CancelTenantEventInput struct {
+	EventID string
+
+	ExpectedRevision int64
+
+	// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
+	// request answers what the first did; with another request, 409 idempotency_conflict.
+	IdempotencyKey string
+
+	ExpectedResourceID *string
+}
+
+func (in CancelTenantEventInput) values() map[string]any {
+	values := map[string]any{}
+	values["event_id"] = in.EventID
+	values["expected_revision"] = in.ExpectedRevision
+	values["idempotency_key"] = in.IdempotencyKey
+	if in.ExpectedResourceID != nil {
+		values["expected_resource_id"] = *in.ExpectedResourceID
+	}
+	return values
+}
+
+// CancelTenantEvent: Cancel any event of the tenant. Cancel one of the tenant's events by its id,
+// whichever key wrote it (a revoked key's included, without charging its quota), at the revision
+// you last read (expected_revision). Its owner cannot create it again. With expected_resource_id,
+// an event since moved to another resource answers 404 event_not_found. Needs an idempotency key
+// (the Idempotency-Key header or idempotency_key): a retry with it answers the first cancellation
+// (replayed: true).
+func (c *Client) CancelTenantEvent(ctx context.Context, in CancelTenantEventInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_cancel_tenant_event", in.values())
+}
+
+// GetTenantInput holds the arguments of [Client.GetTenant].
+type GetTenantInput struct {
+}
+
+func (in GetTenantInput) values() map[string]any {
+	values := map[string]any{}
+	return values
+}
+
+// GetTenant: Get the tenant. The key's tenant: its reference, and whether it is suspended. A
+// suspended tenant may read and writes nothing (403 tenant_suspended); only the server's operator
+// suspends a tenant or lifts a suspension (slotlock tenant suspend).
+func (c *Client) GetTenant(ctx context.Context, in GetTenantInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_get_tenant", in.values())
+}
+
+// EraseTenantInput holds the arguments of [Client.EraseTenant].
+type EraseTenantInput struct {
+	ConfirmTenantRef string
+}
+
+func (in EraseTenantInput) values() map[string]any {
+	values := map[string]any{}
+	values["confirm_tenant_ref"] = in.ConfirmTenantRef
+	return values
+}
+
+// EraseTenant: Erase the tenant. Delete everything the key's tenant has, at once and for good:
+// resources, holds, bookings, events, coverage and every API key, this one included.
+// confirm_tenant_ref must be the tenant's reference (slotlock_get_tenant), or it answers 400
+// invalid_confirmation. Off unless the server allows it (403 tenant_erasure_disabled; slotlock
+// serve does not: its operator runs slotlock tenant erase). A suspended tenant cannot erase
+// itself (403 tenant_suspended). Erasing again deletes nothing.
+func (c *Client) EraseTenant(ctx context.Context, in EraseTenantInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_erase_tenant", in.values())
 }
 
 // RunMaintenanceInput holds the arguments of [Client.RunMaintenance].

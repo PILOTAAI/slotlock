@@ -20,15 +20,18 @@ describe.skipIf(!url)('the application API on the real store', () => {
   const tenantA = `app-a-${randomUUID()}`;
   const tenantB = `app-b-${randomUUID()}`;
   const tenantCapped = `app-cap-${randomUUID()}`;
+  const tenantErased = `app-erase-${randomUUID()}`;
   const principals: Record<string, SlotlockAgentPrincipal> = {
     a: { subject: 'app-a', tenantRef: tenantA, scopes: ['read', 'write', 'admin'] },
     b: { subject: 'app-b', tenantRef: tenantB, scopes: ['admin'] },
     agent: { subject: 'agent-a', tenantRef: tenantA, scopes: ['read', 'write'] },
     capped: { subject: 'app-cap', tenantRef: tenantCapped, scopes: ['admin'] },
+    erased: { subject: 'app-erase', tenantRef: tenantErased, scopes: ['admin'] },
+    erasedAgent: { subject: 'agent-erase', tenantRef: tenantErased, scopes: ['read', 'write'] },
   };
 
   // The capped tenant's server lets a tenant have two resources; the others', a hundred.
-  const server = (maxTenantResources: number) =>
+  const server = (maxTenantResources: number, tenantErasure = false) =>
     createSlotlockAgentServer({
       publicBaseUrl: BASE,
       allowInsecureLocalhost: true,
@@ -41,18 +44,25 @@ describe.skipIf(!url)('the application API on the real store', () => {
       health: async () => ({ ready: true, checks: [] }),
       rest: true,
       application: {
-        backend: createSlotlockStoreApplicationBackend(store, { maxTenantResources }),
+        backend: createSlotlockStoreApplicationBackend(store, { maxTenantResources, tenantErasure }),
         authorize: async ({ principal }) => principal.scopes?.includes('admin') === true,
       },
     });
 
-  const call = async (who: string, method: string, path: string, body?: unknown) => {
-    const response = await server(who === 'capped' ? 2 : 100).fetch(
+  const call = async (
+    who: string,
+    method: string,
+    path: string,
+    body?: unknown,
+    options: { headers?: Record<string, string>; tenantErasure?: boolean } = {},
+  ) => {
+    const response = await server(who === 'capped' ? 2 : 100, options.tenantErasure).fetch(
       new Request(`${BASE}${path}`, {
         method,
         headers: {
           Authorization: `Bearer ${who}`,
           ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+          ...options.headers,
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       }),
@@ -72,7 +82,11 @@ describe.skipIf(!url)('the application API on the real store', () => {
   });
 
   afterAll(async () => {
-    for (const tenant of [tenantA, tenantB, tenantCapped]) {
+    for (const tenant of [tenantA, tenantB, tenantCapped, tenantErased]) {
+      await sql`DELETE FROM slotlock.tenant_suspensions WHERE tenant_ref = ${tenant}`;
+      await sql`DELETE FROM slotlock.calendar_event_commands WHERE tenant_ref = ${tenant}`;
+      await sql`DELETE FROM slotlock.calendar_event_tombstones WHERE tenant_ref = ${tenant}`;
+      await sql`DELETE FROM slotlock.calendar_events WHERE tenant_ref = ${tenant}`;
       await sql`DELETE FROM slotlock.calendar_coverage WHERE tenant_ref = ${tenant}`;
       await sql`DELETE FROM slotlock.reservation_tombstones WHERE tenant_ref = ${tenant}`;
       await sql`
@@ -93,6 +107,8 @@ describe.skipIf(!url)('the application API on the real store', () => {
           external_ref: 'van-1',
           timezone: 'Europe/London',
           availability: null,
+          visibility: 'shared',
+          archived_at: null,
         },
       },
     });
@@ -332,5 +348,258 @@ describe.skipIf(!url)('the application API on the real store', () => {
       body: { extended: 0, conflicts: 0, refused: 0, pruned: 0, capped: false },
     });
     expect(await call('agent', 'POST', '/v1/maintenance', {})).toEqual(refused(403, 'forbidden'));
+  });
+
+  it('creates a private resource agents never see, and archives, restores and deletes resources', async () => {
+    const privateVan = await call('a', 'POST', '/v1/resources', { external_ref: 'private-van', visibility: 'private' });
+    expect(privateVan.body.resource).toMatchObject({ visibility: 'private', archived_at: null });
+    const id = privateVan.body.resource.id as string;
+    // Created again without a visibility, it is answered as it is; with the other, refused.
+    expect((await call('a', 'POST', '/v1/resources', { external_ref: 'private-van' })).body.resource).toMatchObject({
+      id,
+      visibility: 'private',
+    });
+    expect(await call('a', 'POST', '/v1/resources', { external_ref: 'private-van', visibility: 'shared' })).toEqual(
+      refused(409, 'resource_visibility_conflict'),
+    );
+    const listedToAgent = await call('agent', 'GET', '/v1/resources?limit=100');
+    expect(listedToAgent.status).toBe(200);
+    expect(listedToAgent.body.resources.map((resource: { id: string }) => resource.id)).not.toContain(id);
+
+    const shared = (await call('a', 'POST', '/v1/resources', { external_ref: `retired-van-${randomUUID()}` })).body
+      .resource;
+    const window = { resource_id: shared.id, start: day(40, '09:00:00'), end: day(40, '10:00:00') };
+    const holdId = (await call('a', 'POST', '/v1/holds', { ...window, ttl_seconds: 600 })).body.hold.id as string;
+    const archived = await call('a', 'POST', `/v1/resources/${shared.id}/archive`, {});
+    expect(archived.status).toBe(200);
+    const archivedAt = archived.body.resource.archived_at as string;
+    expect(Date.parse(archivedAt)).toBeLessThanOrEqual(Date.now() + 1_000);
+    // Archiving again keeps the first time; reading it still works; booking on it does not.
+    expect((await call('a', 'POST', `/v1/resources/${shared.id}/archive`, {})).body.resource.archived_at).toBe(archivedAt);
+    expect((await call('a', 'GET', `/v1/resources/${shared.id}`)).body.resource.archived_at).toBe(archivedAt);
+    expect(
+      await call('a', 'POST', '/v1/holds', { ...window, start: day(41, '09:00:00'), end: day(41, '10:00:00'), ttl_seconds: 60 }),
+    ).toEqual(refused(409, 'resource_archived'));
+    expect(await call('b', 'POST', `/v1/resources/${shared.id}/archive`, {})).toEqual(refused(404, 'resource_not_found'));
+    expect(await call('b', 'POST', `/v1/resources/${shared.id}/restore`, {})).toEqual(refused(404, 'resource_not_found'));
+    expect(await call('b', 'DELETE', `/v1/resources/${shared.id}`)).toEqual({ status: 200, body: { deleted: false } });
+
+    const restored = await call('a', 'POST', `/v1/resources/${shared.id}/restore`, {});
+    expect(restored.body.resource.archived_at).toBeNull();
+    // The live hold keeps it in use until it is released.
+    expect(await call('a', 'DELETE', `/v1/resources/${shared.id}`)).toEqual(refused(409, 'resource_in_use'));
+    expect((await call('a', 'DELETE', `/v1/holds/${holdId}`)).body).toEqual({ released: true });
+    expect(await call('a', 'DELETE', `/v1/resources/${shared.id}`)).toEqual({ status: 200, body: { deleted: true } });
+    expect(await call('a', 'DELETE', `/v1/resources/${shared.id}`)).toEqual({ status: 200, body: { deleted: false } });
+    expect(await call('a', 'DELETE', '/v1/resources/not-a-uuid')).toEqual({ status: 200, body: { deleted: false } });
+    expect(await call('a', 'GET', `/v1/resources/${shared.id}`)).toEqual(refused(404, 'resource_not_found'));
+    expect(await call('a', 'POST', '/v1/resources/not-a-uuid/archive', {})).toEqual(refused(404, 'resource_not_found'));
+  });
+
+  it('keys a hold by the Idempotency-Key header, and reads holds, reservations and busy time', async () => {
+    const resource = (await call('a', 'POST', '/v1/resources', { external_ref: `read-van-${randomUUID()}` })).body.resource;
+    const first = { resource_id: resource.id, start: day(50, '09:00:00'), end: day(50, '10:00:00'), ttl_seconds: 600 };
+    const key = { headers: { 'Idempotency-Key': `checkout-${randomUUID()}` } };
+    const held = await call('a', 'POST', '/v1/holds', first, key);
+    expect(held.status).toBe(200);
+    // The retry answers the same hold rather than overlapping it; another body under the key is refused.
+    expect(await call('a', 'POST', '/v1/holds', first, key)).toEqual(held);
+    expect(await call('a', 'POST', '/v1/holds', { ...first, ttl_seconds: 900 }, key)).toEqual(
+      refused(409, 'idempotency_conflict'),
+    );
+    // Another key's same text is its own: here it overlaps the first hold.
+    expect(await call('a', 'POST', '/v1/holds', first, { headers: { 'Idempotency-Key': 'other-key' } })).toEqual(
+      refused(409, 'overlap'),
+    );
+    const holdId = held.body.hold.id as string;
+    expect(await call('a', 'GET', `/v1/holds/${holdId}`)).toEqual({ status: 200, body: held.body });
+    expect(await call('b', 'GET', `/v1/holds/${holdId}`)).toEqual(refused(404, 'hold_not_found'));
+    expect(await call('a', 'GET', '/v1/holds/not-a-hold')).toEqual(refused(404, 'hold_not_found'));
+
+    const second = (
+      await call('a', 'POST', '/v1/holds', { ...first, start: day(51, '09:00:00'), end: day(51, '10:00:00') })
+    ).body.hold;
+    const pageOne = await call('a', 'GET', `/v1/resources/${resource.id}/holds?limit=1`);
+    expect(pageOne.body.holds).toEqual([held.body.hold]);
+    expect(pageOne.body.next_cursor).toEqual(expect.any(String));
+    const pageTwo = await call(
+      'a',
+      'GET',
+      `/v1/resources/${resource.id}/holds?limit=1&cursor=${encodeURIComponent(pageOne.body.next_cursor)}`,
+    );
+    expect(pageTwo.body).toEqual({ holds: [second], next_cursor: null });
+    expect(await call('b', 'GET', `/v1/resources/${resource.id}/holds`)).toEqual(refused(404, 'resource_not_found'));
+    expect(await call('a', 'GET', `/v1/resources/${resource.id}/holds?cursor=nonsense`)).toEqual(
+      refused(400, 'invalid_cursor'),
+    );
+
+    // A confirmed hold is no longer a hold: it is the reservation with its id as reference.
+    const confirmed = (await call('a', 'POST', `/v1/holds/${holdId}/confirm`, {})).body.reservation;
+    expect(await call('a', 'GET', `/v1/holds/${holdId}`)).toEqual(refused(404, 'hold_not_found'));
+    expect(await call('a', 'GET', `/v1/reservations/${holdId}`)).toEqual({ status: 200, body: { reservation: confirmed } });
+
+    const ref = `BK-${randomUUID()}`;
+    const booked = (
+      await call('a', 'PUT', `/v1/reservations/${ref}`, {
+        resource_id: resource.id,
+        start: day(52, '09:00:00'),
+        end: day(52, '12:00:00'),
+        buffer_after_minutes: 30,
+        revision: 1,
+      })
+    ).body.reservation;
+    expect(await call('a', 'GET', `/v1/reservations/${ref}`)).toEqual({ status: 200, body: { reservation: booked } });
+    expect(await call('b', 'GET', `/v1/reservations/${ref}`)).toEqual(refused(404, 'reservation_not_found'));
+    const window = `start=${encodeURIComponent(day(45))}&end=${encodeURIComponent(day(60))}`;
+    const listed = await call('a', 'GET', `/v1/resources/${resource.id}/reservations?${window}&limit=1`);
+    expect(listed.body.reservations).toEqual([confirmed]);
+    const rest = await call(
+      'a',
+      'GET',
+      `/v1/resources/${resource.id}/reservations?${window}&limit=1&cursor=${encodeURIComponent(listed.body.next_cursor)}`,
+    );
+    expect(rest.body).toEqual({ reservations: [booked], next_cursor: null });
+    expect(await call('a', 'GET', `/v1/resources/${resource.id}/reservations?start=${encodeURIComponent(day(45))}&end=${encodeURIComponent(day(500))}`)).toEqual(
+      refused(400, 'invalid_arguments'),
+    );
+
+    // Busy time: the confirmed hold, the live second hold, and the booking with its turnaround.
+    const busy = await call('a', 'GET', `/v1/resources/${resource.id}/busy?${window}`);
+    expect(busy).toEqual({
+      status: 200,
+      body: {
+        busy: [
+          { start: first.start, end: first.end },
+          { start: second.start, end: second.end },
+          { start: day(52, '09:00:00'), end: day(52, '12:30:00') },
+        ],
+      },
+    });
+    expect(await call('b', 'GET', `/v1/resources/${resource.id}/busy?${window}`)).toEqual(
+      refused(404, 'resource_not_found'),
+    );
+
+    // Cancelled, a reservation is no longer read.
+    expect((await call('a', 'DELETE', `/v1/reservations/${holdId}?revision=2`)).body).toEqual({ cancelled: true, revision: 2 });
+    expect(await call('a', 'GET', `/v1/reservations/${holdId}`)).toEqual(refused(404, 'reservation_not_found'));
+  });
+
+  it("reads and cancels any key's event, fenced to the resource it is on", async () => {
+    const resource = (await call('a', 'POST', '/v1/resources', { external_ref: `event-van-${randomUUID()}` })).body.resource;
+    const other = (await call('a', 'POST', '/v1/resources', { external_ref: `event-van-${randomUUID()}` })).body.resource;
+    const created = await call('agent', 'POST', '/v1/events', {
+      resource_id: resource.id,
+      starts_at: day(60, '09:00:00'),
+      ends_at: day(60, '10:00:00'),
+      timezone: 'UTC',
+      title: 'Handover',
+      idempotency_key: `handover-${randomUUID()}`,
+    });
+    expect(created.status).toBe(200);
+    const eventRef = created.body.event.id as string;
+    // The agent's update is fenced to the resource it read the event on.
+    expect(
+      await call('agent', 'PATCH', `/v1/events/${encodeURIComponent(eventRef)}`, {
+        expected_revision: 1,
+        expected_resource_id: other.id,
+        title: 'Handover, moved?',
+        idempotency_key: `fence-${randomUUID()}`,
+      }),
+    ).toMatchObject({ status: 404 });
+    const updated = await call('agent', 'PATCH', `/v1/events/${encodeURIComponent(eventRef)}`, {
+      expected_revision: 1,
+      expected_resource_id: resource.id,
+      title: 'Handover at the depot',
+      idempotency_key: `fence-${randomUUID()}`,
+    });
+    expect(updated.body.event).toMatchObject({ title: 'Handover at the depot', revision: 2 });
+
+    const window = `start=${encodeURIComponent(day(59))}&end=${encodeURIComponent(day(61))}`;
+    const listed = await call('a', 'GET', `/v1/tenant/events?resource_id=${resource.id}&${window}`);
+    expect(listed.status).toBe(200);
+    expect(listed.body.next_cursor).toBeNull();
+    expect(listed.body.events).toEqual([
+      {
+        ...updated.body.event,
+        id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        event_ref: eventRef,
+        owner_ref: expect.stringMatching(/^agent:[0-9a-f]{64}$/),
+      },
+    ]);
+    const eventId = listed.body.events[0].id as string;
+    expect(await call('a', 'GET', `/v1/tenant/events/${eventId}`)).toEqual({
+      status: 200,
+      body: { event: listed.body.events[0] },
+    });
+    expect(await call('b', 'GET', `/v1/tenant/events/${eventId}`)).toEqual(refused(404, 'event_not_found'));
+    expect(await call('b', 'GET', `/v1/tenant/events?resource_id=${resource.id}&${window}`)).toEqual(
+      refused(404, 'resource_not_found'),
+    );
+    expect(await call('agent', 'GET', `/v1/tenant/events/${eventId}`)).toEqual(refused(403, 'forbidden'));
+
+    const key = { headers: { 'Idempotency-Key': `cancel-${randomUUID()}` } };
+    expect(
+      await call('a', 'DELETE', `/v1/tenant/events/${eventId}?expected_revision=2&expected_resource_id=${other.id}`, undefined, key),
+    ).toEqual(refused(404, 'event_not_found'));
+    expect(await call('a', 'DELETE', `/v1/tenant/events/${eventId}?expected_revision=1`, undefined, key)).toMatchObject({
+      status: 409,
+    });
+    const cancelled = await call(
+      'a',
+      'DELETE',
+      `/v1/tenant/events/${eventId}?expected_revision=2&expected_resource_id=${resource.id}`,
+      undefined,
+      key,
+    );
+    expect(cancelled).toEqual({ status: 200, body: { event_id: eventId, revision: 3, cancelled: true, replayed: false } });
+    expect(
+      await call('a', 'DELETE', `/v1/tenant/events/${eventId}?expected_revision=2&expected_resource_id=${resource.id}`, undefined, key),
+    ).toEqual({ status: 200, body: { ...cancelled.body, replayed: true } });
+    expect(await call('a', 'GET', `/v1/tenant/events/${eventId}`)).toEqual(refused(404, 'event_not_found'));
+    expect(await call('agent', 'GET', `/v1/events/${encodeURIComponent(eventRef)}`)).toMatchObject({ status: 404 });
+  });
+
+  it('reads its suspension, and erases itself only when allowed, confirmed and not suspended', async () => {
+    expect(await call('a', 'GET', '/v1/tenant')).toEqual({
+      status: 200,
+      body: { tenant: { ref: tenantA, suspended: false } },
+    });
+    expect(await call('agent', 'GET', '/v1/tenant')).toEqual(refused(403, 'forbidden'));
+    const resource = (await call('erased', 'POST', '/v1/resources', { external_ref: 'erase-van' })).body.resource;
+    await call('erased', 'PUT', `/v1/reservations/erase-${randomUUID()}`, {
+      resource_id: resource.id,
+      start: day(70, '09:00:00'),
+      end: day(70, '10:00:00'),
+      revision: 1,
+    });
+    const confirm = { confirm_tenant_ref: tenantErased };
+    expect(await call('erased', 'POST', '/v1/tenant/erase', confirm)).toEqual(refused(403, 'tenant_erasure_disabled'));
+    expect(await call('erased', 'POST', '/v1/tenant/erase', { confirm_tenant_ref: tenantA }, { tenantErasure: true })).toEqual(
+      refused(400, 'invalid_confirmation'),
+    );
+    expect(await call('erasedAgent', 'POST', '/v1/tenant/erase', confirm, { tenantErasure: true })).toEqual(
+      refused(403, 'forbidden'),
+    );
+
+    // Suspended, it reads and says so, and its data is kept for the operator.
+    expect(await store.suspendTenant({ tenantRef: tenantErased, reason: 'review' })).toEqual({ suspended: true });
+    expect((await call('erased', 'GET', '/v1/tenant')).body).toEqual({ tenant: { ref: tenantErased, suspended: true } });
+    expect(await call('erased', 'POST', '/v1/tenant/erase', confirm, { tenantErasure: true })).toEqual(
+      refused(403, 'tenant_suspended'),
+    );
+    expect((await call('erased', 'GET', `/v1/resources/${resource.id}`)).status).toBe(200);
+    await store.unsuspendTenant({ tenantRef: tenantErased });
+
+    const erased = await call('erased', 'POST', '/v1/tenant/erase', confirm, { tenantErasure: true });
+    expect(erased.status).toBe(200);
+    expect(erased.body.rows).toMatchObject({ resources: 1 });
+    expect(erased.body.total).toBeGreaterThanOrEqual(2);
+    expect(await call('erased', 'GET', `/v1/resources/${resource.id}`)).toEqual(refused(404, 'resource_not_found'));
+    expect((await call('erased', 'POST', '/v1/tenant/erase', confirm, { tenantErasure: true })).body.total).toBe(0);
+    // Another tenant's resources are as they were.
+    expect((await call('a', 'GET', '/v1/tenant')).status).toBe(200);
+    const [row] = await sql<{ count: string }[]>`
+      SELECT count(*)::text AS count FROM slotlock.resources WHERE tenant_ref = ${tenantA}`;
+    expect(Number(row?.count)).toBeGreaterThan(0);
   });
 });

@@ -3318,6 +3318,24 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     if (Object.keys(params).some((name) => Object.hasOwn(given, name))) {
       return refuseCall(400, 'invalid_arguments');
     }
+    // An application write's retry identity may come as the Idempotency-Key header, where HTTP
+    // clients put it, as well as its `idempotency_key` argument. On an operation that keeps none it
+    // is refused rather than ignored: a key that was dropped would promise a replay it never gives.
+    // The agent tools take theirs as an argument alone, as they always have.
+    const idempotencyHeader = request.headers.get('idempotency-key');
+    if (idempotencyHeader !== null && isSlotlockApplicationOperation(route.operation)) {
+      const fields = (restInputSchemas.get(route.operation)?.properties ?? {}) as Record<
+        string,
+        unknown
+      >;
+      if (!Object.hasOwn(fields, 'idempotency_key')) {
+        return refuseCall(400, 'idempotency_key_not_supported');
+      }
+      if (Object.hasOwn(given, 'idempotency_key') && given.idempotency_key !== idempotencyHeader) {
+        return refuseCall(400, 'invalid_arguments');
+      }
+      given = { ...given, idempotency_key: idempotencyHeader };
+    }
     const outcome = isSlotlockApplicationOperation(route.operation)
       ? await invokeApplicationOperation(
           slotlockApplicationOperation(route.operation),

@@ -78,6 +78,34 @@ OPERATIONS: dict[str, Operation] = {
         ("resource_id",),
         (),
     ),
+    "slotlock_delete_resource": Operation(
+        "slotlock_delete_resource",
+        "DELETE",
+        "/v1/resources/{resource_id}",
+        ("resource_id",),
+        (),
+    ),
+    "slotlock_archive_resource": Operation(
+        "slotlock_archive_resource",
+        "POST",
+        "/v1/resources/{resource_id}/archive",
+        ("resource_id",),
+        (),
+    ),
+    "slotlock_restore_resource": Operation(
+        "slotlock_restore_resource",
+        "POST",
+        "/v1/resources/{resource_id}/restore",
+        ("resource_id",),
+        (),
+    ),
+    "slotlock_list_busy": Operation(
+        "slotlock_list_busy",
+        "GET",
+        "/v1/resources/{resource_id}/busy",
+        ("resource_id",),
+        ("start", "end"),
+    ),
     "slotlock_set_resource_availability": Operation(
         "slotlock_set_resource_availability",
         "PUT",
@@ -99,10 +127,10 @@ OPERATIONS: dict[str, Operation] = {
         (),
         (),
     ),
-    "slotlock_confirm_hold": Operation(
-        "slotlock_confirm_hold",
-        "POST",
-        "/v1/holds/{hold_id}/confirm",
+    "slotlock_get_hold": Operation(
+        "slotlock_get_hold",
+        "GET",
+        "/v1/holds/{hold_id}",
         ("hold_id",),
         (),
     ),
@@ -111,6 +139,27 @@ OPERATIONS: dict[str, Operation] = {
         "DELETE",
         "/v1/holds/{hold_id}",
         ("hold_id",),
+        (),
+    ),
+    "slotlock_list_holds": Operation(
+        "slotlock_list_holds",
+        "GET",
+        "/v1/resources/{resource_id}/holds",
+        ("resource_id",),
+        ("limit", "cursor"),
+    ),
+    "slotlock_confirm_hold": Operation(
+        "slotlock_confirm_hold",
+        "POST",
+        "/v1/holds/{hold_id}/confirm",
+        ("hold_id",),
+        (),
+    ),
+    "slotlock_get_reservation": Operation(
+        "slotlock_get_reservation",
+        "GET",
+        "/v1/reservations/{reservation_ref}",
+        ("reservation_ref",),
         (),
     ),
     "slotlock_put_reservation": Operation(
@@ -127,11 +176,53 @@ OPERATIONS: dict[str, Operation] = {
         ("reservation_ref",),
         ("revision",),
     ),
+    "slotlock_list_reservations": Operation(
+        "slotlock_list_reservations",
+        "GET",
+        "/v1/resources/{resource_id}/reservations",
+        ("resource_id",),
+        ("start", "end", "limit", "cursor"),
+    ),
     "slotlock_record_coverage": Operation(
         "slotlock_record_coverage",
         "PUT",
         "/v1/resources/{resource_id}/coverage/{source}",
         ("resource_id", "source"),
+        (),
+    ),
+    "slotlock_list_tenant_events": Operation(
+        "slotlock_list_tenant_events",
+        "GET",
+        "/v1/tenant/events",
+        (),
+        ("resource_id", "start", "end", "limit", "cursor"),
+    ),
+    "slotlock_get_tenant_event": Operation(
+        "slotlock_get_tenant_event",
+        "GET",
+        "/v1/tenant/events/{event_id}",
+        ("event_id",),
+        (),
+    ),
+    "slotlock_cancel_tenant_event": Operation(
+        "slotlock_cancel_tenant_event",
+        "DELETE",
+        "/v1/tenant/events/{event_id}",
+        ("event_id",),
+        ("expected_revision", "expected_resource_id", "idempotency_key"),
+    ),
+    "slotlock_get_tenant": Operation(
+        "slotlock_get_tenant",
+        "GET",
+        "/v1/tenant",
+        (),
+        (),
+    ),
+    "slotlock_erase_tenant": Operation(
+        "slotlock_erase_tenant",
+        "POST",
+        "/v1/tenant/erase",
+        (),
         (),
     ),
     "slotlock_run_maintenance": Operation(
@@ -164,15 +255,25 @@ class Operations(Transport):
             values["limit"] = limit
         return self.call("slotlock_list_resources", values)
 
-    def create_resource(self, *, external_ref: str, timezone: str | None = None) -> dict[str, Any]:
+    def create_resource(
+        self,
+        *,
+        external_ref: str,
+        timezone: str | None = None,
+        visibility: str | None = None,
+    ) -> dict[str, Any]:
         """Create or update a resource.
 
         Create the resource with this external reference, or update its time zone if the tenant
-        already has it. Repeating the call changes nothing more.
+        already has it. Repeating the call changes nothing more. visibility is shared (the
+        default: agents list and book it) or private (agents never see it), fixed at creation:
+        naming another for an existing resource answers 409 resource_visibility_conflict.
         """
         values: dict[str, Any] = {"external_ref": external_ref}
         if timezone is not None:
             values["timezone"] = timezone
+        if visibility is not None:
+            values["visibility"] = visibility
         return self.call("slotlock_create_resource", values)
 
     def get_free_busy(self, *, resource_ids: list[str], start: str, end: str) -> dict[str, Any]:
@@ -291,6 +392,7 @@ class Operations(Transport):
         *,
         expected_revision: int,
         idempotency_key: str,
+        expected_resource_id: str | None = None,
         resource_id: str | None = None,
         starts_at: str | None = None,
         ends_at: str | None = None,
@@ -308,13 +410,17 @@ class Operations(Transport):
     ) -> dict[str, Any]:
         """Update resource event.
 
-        Apply an expected-revision event patch and rematerialize occupancy atomically.
+        Apply an expected-revision event patch and rematerialize occupancy atomically. With
+        expected_resource_id, the resource you read the event on, an event since moved elsewhere
+        is not found.
         """
         values: dict[str, Any] = {
             "event_id": event_id,
             "expected_revision": expected_revision,
             "idempotency_key": idempotency_key,
         }
+        if expected_resource_id is not None:
+            values["expected_resource_id"] = expected_resource_id
         if resource_id is not None:
             values["resource_id"] = resource_id
         if starts_at is not None:
@@ -366,10 +472,53 @@ class Operations(Transport):
     def get_resource(self, resource_id: str) -> dict[str, Any]:
         """Get a resource.
 
-        One resource of the tenant, with its own weekly bookable hours.
+        One resource of the tenant, archived or not, with its own weekly bookable hours and its
+        visibility.
         """
         values: dict[str, Any] = {"resource_id": resource_id}
         return self.call("slotlock_get_resource", values)
+
+    def delete_resource(self, resource_id: str) -> dict[str, Any]:
+        """Delete a resource.
+
+        Delete a resource with its history (past bookings, coverage, cancelled events), freeing
+        its place under the tenant's resource limit. Refused with 409 resource_in_use while a
+        booking on it has not ended, a hold on it is live, or a calendar event is on it: cancel or
+        move those first. deleted is false when the tenant has no such resource, deleted already,
+        say.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id}
+        return self.call("slotlock_delete_resource", values)
+
+    def archive_resource(self, resource_id: str) -> dict[str, Any]:
+        """Archive a resource.
+
+        Take a resource out of use: no list shows it and it takes no new booking, hold or event
+        (409 resource_archived), while what is on it stays and can still be cancelled or released.
+        Archiving it again keeps the first time.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id}
+        return self.call("slotlock_archive_resource", values)
+
+    def restore_resource(self, resource_id: str) -> dict[str, Any]:
+        """Restore a resource.
+
+        Put an archived resource back in use. Restoring one in use changes nothing.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id}
+        return self.call("slotlock_restore_resource", values)
+
+    def list_busy(self, resource_id: str, *, start: str, end: str) -> dict[str, Any]:
+        """List a resource's busy time.
+
+        The time a resource of the tenant, private ones included, is occupied in a window of at
+        most 367 days, by start: bookings with their turnaround, live holds, and calendar events.
+        Adjacent intervals are not merged. More than 10,000 answers 400 calendar_work_limit:
+        narrow the window. Free/busy with coverage, for the resources agents see, is
+        slotlock_get_free_busy.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id, "start": start, "end": end}
+        return self.call("slotlock_list_busy", values)
 
     def set_resource_availability(
         self,
@@ -404,12 +553,21 @@ class Operations(Transport):
         end: str,
         ttl_seconds: int,
         source: str | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Hold time.
 
         Occupy a window without booking it, for example while a customer pays. The hold blocks
         every other booking until it expires (the database clock, ttl_seconds from now), is
-        confirmed, or is released. A taken window answers 409 overlap.
+        confirmed, or is released. A taken window answers 409 overlap. With an idempotency key
+        (the Idempotency-Key header or idempotency_key), a retry answers the hold the first
+        request made, until that hold would have expired, is released or is confirmed; the same
+        key with another request is 409 idempotency_conflict.
+
+        Args:
+            idempotency_key: A retry identity, also accepted as the Idempotency-Key header: the
+            same key with the same request answers what the first did; with another request, 409
+            idempotency_conflict.
         """
         values: dict[str, Any] = {
             "resource_id": resource_id,
@@ -419,17 +577,18 @@ class Operations(Transport):
         }
         if source is not None:
             values["source"] = source
+        if idempotency_key is not None:
+            values["idempotency_key"] = idempotency_key
         return self.call("slotlock_acquire_hold", values)
 
-    def confirm_hold(self, hold_id: str) -> dict[str, Any]:
-        """Confirm a hold.
+    def get_hold(self, hold_id: str) -> dict[str, Any]:
+        """Get a hold.
 
-        Turn an unexpired hold into a confirmed reservation. Confirming it again answers the same
-        reservation, so a retry is safe. An expired hold answers 409 hold_expired; a released or
-        unknown one, 404 hold_not_found.
+        One of the tenant's live holds. An expired, confirmed, released or unknown one answers 404
+        hold_not_found; a confirmed one is a reservation whose reference is the hold's id.
         """
         values: dict[str, Any] = {"hold_id": hold_id}
-        return self.call("slotlock_confirm_hold", values)
+        return self.call("slotlock_get_hold", values)
 
     def release_hold(self, hold_id: str) -> dict[str, Any]:
         """Release a hold.
@@ -439,6 +598,47 @@ class Operations(Transport):
         """
         values: dict[str, Any] = {"hold_id": hold_id}
         return self.call("slotlock_release_hold", values)
+
+    def list_holds(
+        self,
+        resource_id: str,
+        *,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """List a resource's holds.
+
+        The live holds on one of the tenant's resources, by start then id, a page at a time: pass
+        next_cursor as cursor for the next page, until it is null.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id}
+        if limit is not None:
+            values["limit"] = limit
+        if cursor is not None:
+            values["cursor"] = cursor
+        return self.call("slotlock_list_holds", values)
+
+    def confirm_hold(self, hold_id: str) -> dict[str, Any]:
+        """Confirm a hold.
+
+        Turn an unexpired hold into a confirmed reservation, whose reference is the hold's id at
+        revision 1: move or cancel it with the reservation routes by that reference (DELETE
+        /v1/reservations/{hold_id}?revision=2 cancels it). Confirming it again answers the same
+        reservation, so a retry is safe. An expired hold answers 409 hold_expired; a released or
+        unknown one, 404 hold_not_found.
+        """
+        values: dict[str, Any] = {"hold_id": hold_id}
+        return self.call("slotlock_confirm_hold", values)
+
+    def get_reservation(self, reservation_ref: str) -> dict[str, Any]:
+        """Get a reservation.
+
+        The tenant's booking with this reference as it now is, at its current revision: move it at
+        that revision plus 1. A cancelled or unknown reference, or a calendar event's time,
+        answers 404 reservation_not_found.
+        """
+        values: dict[str, Any] = {"reservation_ref": reservation_ref}
+        return self.call("slotlock_get_reservation", values)
 
     def put_reservation(
         self,
@@ -481,6 +681,29 @@ class Operations(Transport):
         values: dict[str, Any] = {"reservation_ref": reservation_ref, "revision": revision}
         return self.call("slotlock_cancel_reservation", values)
 
+    def list_reservations(
+        self,
+        resource_id: str,
+        *,
+        start: str,
+        end: str,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """List a resource's reservations.
+
+        The tenant's bookings on one resource whose time, turnaround included, meets a window of
+        at most 367 days, by start then id, a page at a time: pass next_cursor as cursor for the
+        next page, until it is null. Calendar events are not bookings; slotlock_list_tenant_events
+        lists them.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id, "start": start, "end": end}
+        if limit is not None:
+            values["limit"] = limit
+        if cursor is not None:
+            values["cursor"] = cursor
+        return self.call("slotlock_list_reservations", values)
+
     def record_coverage(
         self,
         resource_id: str,
@@ -505,6 +728,91 @@ class Operations(Transport):
             "revision": revision,
         }
         return self.call("slotlock_record_coverage", values)
+
+    def list_tenant_events(
+        self,
+        *,
+        resource_id: str,
+        start: str,
+        end: str,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """List a resource's events, every key's.
+
+        The calendar events on one of the tenant's resources with an occurrence in a window of at
+        most 367 days, whichever key wrote them (a revoked one's included), by start then id, a
+        page at a time: pass next_cursor as cursor for the next page, until it is null.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id, "start": start, "end": end}
+        if limit is not None:
+            values["limit"] = limit
+        if cursor is not None:
+            values["cursor"] = cursor
+        return self.call("slotlock_list_tenant_events", values)
+
+    def get_tenant_event(self, event_id: str) -> dict[str, Any]:
+        """Get any event of the tenant.
+
+        One of the tenant's events by its id (the id slotlock_list_tenant_events gives), whichever
+        key wrote it. A cancelled or unknown one answers 404 event_not_found.
+        """
+        values: dict[str, Any] = {"event_id": event_id}
+        return self.call("slotlock_get_tenant_event", values)
+
+    def cancel_tenant_event(
+        self,
+        event_id: str,
+        *,
+        expected_revision: int,
+        idempotency_key: str,
+        expected_resource_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Cancel any event of the tenant.
+
+        Cancel one of the tenant's events by its id, whichever key wrote it (a revoked key's
+        included, without charging its quota), at the revision you last read (expected_revision).
+        Its owner cannot create it again. With expected_resource_id, an event since moved to
+        another resource answers 404 event_not_found. Needs an idempotency key (the
+        Idempotency-Key header or idempotency_key): a retry with it answers the first cancellation
+        (replayed: true).
+
+        Args:
+            idempotency_key: A retry identity, also accepted as the Idempotency-Key header: the
+            same key with the same request answers what the first did; with another request, 409
+            idempotency_conflict.
+        """
+        values: dict[str, Any] = {
+            "event_id": event_id,
+            "expected_revision": expected_revision,
+            "idempotency_key": idempotency_key,
+        }
+        if expected_resource_id is not None:
+            values["expected_resource_id"] = expected_resource_id
+        return self.call("slotlock_cancel_tenant_event", values)
+
+    def get_tenant(self) -> dict[str, Any]:
+        """Get the tenant.
+
+        The key's tenant: its reference, and whether it is suspended. A suspended tenant may read
+        and writes nothing (403 tenant_suspended); only the server's operator suspends a tenant or
+        lifts a suspension (slotlock tenant suspend).
+        """
+        values: dict[str, Any] = {}
+        return self.call("slotlock_get_tenant", values)
+
+    def erase_tenant(self, *, confirm_tenant_ref: str) -> dict[str, Any]:
+        """Erase the tenant.
+
+        Delete everything the key's tenant has, at once and for good: resources, holds, bookings,
+        events, coverage and every API key, this one included. confirm_tenant_ref must be the
+        tenant's reference (slotlock_get_tenant), or it answers 400 invalid_confirmation. Off
+        unless the server allows it (403 tenant_erasure_disabled; slotlock serve does not: its
+        operator runs slotlock tenant erase). A suspended tenant cannot erase itself (403
+        tenant_suspended). Erasing again deletes nothing.
+        """
+        values: dict[str, Any] = {"confirm_tenant_ref": confirm_tenant_ref}
+        return self.call("slotlock_erase_tenant", values)
 
     def run_maintenance(self) -> dict[str, Any]:
         """Run maintenance.
