@@ -66,6 +66,10 @@ versioning.
   9999, the years an RFC 3339 date-time can write; a write outside them is refused `invalid_event`.
 - `slotlock_list_events` reads a resource named more than once once. One id named 100 times read
   its events 100 times and returned the first event 100 times.
+- The application API's busy read (`GET /v1/resources/{id}/busy`) stops reading at the first
+  interval past the 10,000 it may return. It read every row of the window before refusing, so a
+  resource with many bookings cost a full read on every refused request. `store.listBusy` takes a
+  `limit`.
 
 ### Fixed
 

@@ -1988,12 +1988,13 @@ export interface SlotlockStore {
   /**
    * Reservations overlapping `window` for one resource, as merged-ready half-open intervals. With
    * `tenantRef`, only a resource of that tenant (`resource_not_found` otherwise, whatever the
-   * connection's row-level security). An id the store never issues is `invalid_identity`.
+   * connection's row-level security). An id the store never issues is `invalid_identity`. With
+   * `limit`, at most that many, the first by start.
    */
   listBusy(
     resourceId: string,
     window: Interval,
-    options?: { tenantRef?: string },
+    options?: { tenantRef?: string; limit?: number },
   ): Promise<Interval[]>;
   /** Create or revise one trusted event under expected-revision + tenant idempotency guards. */
   putCalendarEvent(params: PutCalendarEventCommand): Promise<PutCalendarEventResult>;
@@ -3708,6 +3709,11 @@ function buildSlotlockStore(
       if (!isValidResourceId(resourceId)) {
         throw invalidIdentityError('Slotlock resource id must be a UUID');
       }
+      if (options.limit !== undefined && !(Number.isSafeInteger(options.limit) && options.limit > 0)) {
+        throw Object.assign(new Error('Slotlock busy read limit must be a positive whole number'), {
+          code: 'invalid_limit' as const,
+        });
+      }
       if (options.tenantRef !== undefined) {
         if (!isValidIdentity(options.tenantRef)) {
           throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
@@ -3730,7 +3736,8 @@ function buildSlotlockStore(
            AND starts_at < ${window.end}
            AND COALESCE(occupied_ends_at, ends_at) > ${window.start}
            AND (status <> 'held' OR expires_at > now())
-         ORDER BY starts_at`;
+         ORDER BY starts_at
+         LIMIT ${options.limit ?? null}`;
       return rows.map((r) => ({ start: r.starts_at, end: r.occupied_ends_at }));
     },
 

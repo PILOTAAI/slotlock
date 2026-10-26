@@ -3,7 +3,7 @@
 // backend's own tenant checks, not from RLS; the self-host test serves it as a role RLS does filter.
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { type SlotlockAgentPrincipal, createSlotlockAgentServer } from '../agent-server.js';
 import {
   createSlotlockStoreAgentBackend,
@@ -511,6 +511,44 @@ describe.skipIf(!url)('the application API on the real store', () => {
     const read = await call('a', 'GET', `/v1/tenant/events/${listed.body.events[0].id}`);
     expect(read.status).toBe(200);
   });
+
+  it('stops reading busy time at the first interval past what one read may return', async () => {
+    // The audit's probe: 24,000 rows were all read into the process before the request was refused.
+    const resource = (await call('a', 'POST', '/v1/resources', { external_ref: `busy-van-${randomUUID()}` })).body.resource;
+    const from = new Date(day(30));
+    await sql`
+      INSERT INTO slotlock.reservations (resource_id, tenant_ref, external_ref, starts_at, ends_at)
+      SELECT ${resource.id}, ${tenantA}, 'busy-' || n,
+             ${from}::timestamptz + n * interval '1 minute',
+             ${from}::timestamptz + (n + 1) * interval '1 minute'
+        FROM generate_series(0, 10_049) AS n`;
+    const read: number[] = [];
+    const withTenant = store.withTenant.bind(store);
+    const spy = vi.spyOn(store, 'withTenant').mockImplementation(((tenantRef, callback, options) =>
+      withTenant(
+        tenantRef,
+        (tenant) =>
+          callback(
+            Object.assign(Object.create(tenant), {
+              listBusy: async (...args: Parameters<typeof tenant.listBusy>) => {
+                const busy = await tenant.listBusy(...args);
+                read.push(busy.length);
+                return busy;
+              },
+            }),
+          ),
+        options,
+      )) as typeof store.withTenant);
+    try {
+      const window = `start=${encodeURIComponent(day(29))}&end=${encodeURIComponent(day(40))}`;
+      expect(await call('a', 'GET', `/v1/resources/${resource.id}/busy?${window}`)).toEqual(
+        refused(400, 'calendar_work_limit'),
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    expect(read).toEqual([10_001]);
+  }, 60_000);
 
   it("reads and cancels any key's event, fenced to the resource it is on", async () => {
     const resource = (await call('a', 'POST', '/v1/resources', { external_ref: `event-van-${randomUUID()}` })).body.resource;

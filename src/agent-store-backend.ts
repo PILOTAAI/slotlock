@@ -996,8 +996,10 @@ export function createSlotlockStoreApplicationBackend(
     async listBusy(context, input) {
       return withTenant(store, context, async (tenant) => {
         const resource = await requireResource(tenant, tenantOf(context), input.resource_id as string);
+        // One row past the cap is enough to refuse: the rest is never read.
         const busy = await tenant.listBusy(resource.id, interval(input as { start: string; end: string }), {
           tenantRef: tenantOf(context),
+          limit: MAX_LISTED_BUSY + 1,
         });
         if (busy.length > MAX_LISTED_BUSY) {
           throw new SlotlockAgentOperationError('calendar_work_limit', 400);
