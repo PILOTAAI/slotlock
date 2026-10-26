@@ -567,7 +567,7 @@ const ordinary = [
   'END:VEVENT',
   'END:VCALENDAR',
 ].join('\\r\\n');
-// Refused by the parser's own one-second limit: a zone whose rule never occurs, read slowly.
+// Refused at the end of the parser's step budget: a zone whose rule never occurs, read slowly.
 const slow = [
   'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Slotlock verify//EN',
   'BEGIN:VTIMEZONE', 'TZID:Custom/Slow', 'BEGIN:STANDARD', 'DTSTART:19700101T000000',

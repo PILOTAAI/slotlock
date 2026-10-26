@@ -335,8 +335,8 @@ describe('expandRules', () => {
 
   it('timezone: a rule wholly inside a spring-forward gap yields NOTHING — negative-offset zones included', () => {
     // America/New_York springs forward 2027-03-14 02:00 EST → 03:00 EDT. A [02:00, 03:00)
-    // local rule names only skipped wall time: both endpoints shift forward to 07:00Z and the
-    // degenerate window is dropped. (The naive probe manufactured [06:00Z, 07:00Z) — wall
+    // local rule names only skipped wall time: both endpoints stand where the gap ends, 07:00Z,
+    // and the degenerate window is dropped. (The naive probe manufactured [06:00Z, 07:00Z) — wall
     // 01:00–02:00 EST, an hour the rule excludes.)
     const rule = { rrule: 'FREQ=WEEKLY;BYDAY=SU', startMinutes: 2 * 60, durationMinutes: 60 };
     const windows = expandRules(
@@ -346,6 +346,33 @@ describe('expandRules', () => {
     );
     expect(windows).toEqual([]);
   });
+
+  it.each([
+    // [local start, minutes, what the window names that exists]
+    ['02:30', 60, [['2027-03-14T07:00:00.000Z', '2027-03-14T07:30:00.000Z']]],
+    ['02:00', 30, []],
+    ['01:00', 90, [['2027-03-14T06:00:00.000Z', '2027-03-14T07:00:00.000Z']]],
+    ['02:30', 90, [['2027-03-14T07:00:00.000Z', '2027-03-14T08:00:00.000Z']]],
+  ] as const)(
+    'timezone: a window with an edge in a spring-forward gap is clipped to it: [%s +%i min) in New York',
+    (start, minutes, expected) => {
+      // America/New_York skips 02:00-03:00 on 2027-03-14 (07:00Z). A window holds only the wall
+      // times it names that exist: an edge in the gap stands where the gap ends, never moved an
+      // hour on into time the rule does not name (D15).
+      const [hours = 0, mins = 0] = start.split(':').map(Number);
+      const rule = {
+        rrule: 'FREQ=WEEKLY;BYDAY=SU',
+        startMinutes: hours * 60 + mins,
+        durationMinutes: minutes,
+      };
+      const windows = expandRules(
+        [rule],
+        { start: d('2027-03-14T00:00:00Z'), end: d('2027-03-15T00:00:00Z') },
+        'America/New_York',
+      );
+      expect(windows.map((w) => [w.start.toISOString(), w.end.toISOString()])).toEqual(expected);
+    },
+  );
 
   it('timezone: BYDAY-less FREQ=WEEKLY is refused in BOTH paths (anchor-nondeterministic)', () => {
     const rule = { rrule: 'FREQ=WEEKLY', startMinutes: 10 * 60, durationMinutes: 60 };

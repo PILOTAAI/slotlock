@@ -5,9 +5,10 @@
 // 09:00–18:00 local on DST days; the real UTC span shrinks/grows by the transition). rrule's
 // own `tzid` is deliberately NOT used (known-buggy): rrule does pure date arithmetic on UTC
 // stamps and each stamp's Y/M/D is re-interpreted as a LOCAL calendar date, converted to UTC
-// instants by Intl offset probing (dependency-free, deterministic, RFC 5545 policy: a wall
-// time inside a spring-forward gap shifts FORWARD by the gap; a fall-back-ambiguous wall time
-// is its FIRST occurrence — chosen explicitly, identical in every zone sign).
+// instants by Intl offset probing (dependency-free, deterministic: a window edge inside a
+// spring-forward gap stands where the gap ends, so a window holds only the wall times it names
+// that exist; a fall-back-ambiguous wall time is its FIRST occurrence — chosen explicitly,
+// identical in every zone sign).
 //
 // ESM interop (LOAD-BEARING — a plain named import took the whole API down in review):
 // rrule 2.8.1 ships no `exports` map; under bundlers/vitest the `module` ESM build resolves and
@@ -194,11 +195,15 @@ export function expandRules(
       let start: Date;
       let end: Date;
       if (converter) {
-        // The stamp's Y/M/D is the LOCAL calendar date; start and end are both wall-clock.
+        // The stamp's Y/M/D is the LOCAL calendar date; start and end are both wall-clock. An
+        // edge the clocks skip stands where the skipped hour ends: moved on by the gap, as RFC 5545
+        // reads a time, [02:30, 03:30) gave nothing although 03:00-03:30 exists, and [02:00,
+        // 02:30) gave 03:00-03:30, which it never names.
         const wallDay = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate());
-        start = converter.wallFrameToUtc(wallDay + rule.startMinutes * MINUTE_MS);
+        start = converter.wallFrameToUtc(wallDay + rule.startMinutes * MINUTE_MS, { gap: 'end' });
         end = converter.wallFrameToUtc(
           wallDay + (rule.startMinutes + rule.durationMinutes) * MINUTE_MS,
+          { gap: 'end' },
         );
         if (end.getTime() <= start.getTime()) continue;
       } else {

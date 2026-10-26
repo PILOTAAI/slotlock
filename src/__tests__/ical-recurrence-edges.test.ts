@@ -112,9 +112,10 @@ describe('recurrence edges', () => {
 
   it('an occurrence starting in a DST gap is reported, for its exact length', () => {
     // RFC 5545 3.3.5: 02:00 in the gap is read with the offset before it (01:00Z), and lasts the
-    // series' exact length (3.8.5.3), 1h: on the wall clock it would end as it starts. Any other
-    // occurrence ends on the wall clock, as calendars show it: 01:00-04:00 the night the clocks go
-    // forward is two hours.
+    // series' exact length (3.8.5.3), 1h: on the wall clock it would end as it starts. Every
+    // occurrence ends at the later of its exact end and its wall-clock end (SPEC.md, "Daylight-saving
+    // time"): 01:00-04:00 the night the clocks go forward is three hours, as on any other night,
+    // although the wall clock shows two.
     const W = w('2027-03-01T00:00:00Z', '2027-05-01T00:00:00Z');
     const gap = cal(
       ...ev(
@@ -143,7 +144,7 @@ describe('recurrence edges', () => {
       ],
       [
         ['2027-03-21T00:00:00.000Z', '2027-03-21T03:00:00.000Z'],
-        ['2027-03-28T00:00:00.000Z', '2027-03-28T02:00:00.000Z'],
+        ['2027-03-28T00:00:00.000Z', '2027-03-28T03:00:00.000Z'],
       ],
     ]);
   });
@@ -253,7 +254,11 @@ describe('recurrence edges', () => {
     const W = w('2027-01-01T00:00:00Z', '2027-01-20T00:00:00Z');
     const [series] = parseTrustedICalendarEvents(feed, 'Europe/Berlin');
     // 4, 6 and 7 January in Berlin: noon UTC on 5 January falls on the 5th there.
-    const days = ['2027-01-03T23:00:00.000Z', '2027-01-05T23:00:00.000Z', '2027-01-06T23:00:00.000Z'];
+    const days = [
+      '2027-01-03T23:00:00.000Z',
+      '2027-01-05T23:00:00.000Z',
+      '2027-01-06T23:00:00.000Z',
+    ];
     expect([
       starts(expandCalendarEventOccurrences(series as never, W)),
       starts(parseICalendarChanges(feed, 'Europe/Berlin', W)),
@@ -275,7 +280,11 @@ describe('recurrence edges', () => {
     );
     const W = w('2027-01-01T00:00:00Z', '2027-02-01T00:00:00Z');
     const [series] = parseTrustedICalendarEvents(feed, 'UTC');
-    const weeks = ['2027-01-04T09:00:00.000Z', '2027-01-11T09:00:00.000Z', '2027-01-25T09:00:00.000Z'];
+    const weeks = [
+      '2027-01-04T09:00:00.000Z',
+      '2027-01-11T09:00:00.000Z',
+      '2027-01-25T09:00:00.000Z',
+    ];
     expect([
       starts(parseICalendarChanges(feed, undefined, W)),
       starts(expandCalendarEventOccurrences(series as never, W)),
@@ -387,6 +396,32 @@ describe('recurrence edges', () => {
       ['2027-01-04T09:00:00.000Z', '2027-01-06T09:00:00.000Z'],
       3,
       ['2027-01-04T09:00:00.000Z', '2027-01-06T09:00:00.000Z'],
+    ]);
+  });
+
+  it('a CalDAV-expanded series keeps every instance, its first without a RECURRENCE-ID', () => {
+    // RFC 4791 §9.6.5: every instance but the first must carry a RECURRENCE-ID, and none carries
+    // RRULE. Each later instance was read as an exception of a one-off, and dropped.
+    const W = w('2027-01-01T00:00:00Z', '2027-02-01T00:00:00Z');
+    const expanded = cal(
+      ...ev('x', 'DTSTART:20270104T090000Z', 'DTEND:20270104T100000Z'),
+      ...ev(
+        'x',
+        'RECURRENCE-ID:20270105T090000Z',
+        'DTSTART:20270105T090000Z',
+        'DTEND:20270105T100000Z',
+      ),
+      ...ev(
+        'x',
+        'RECURRENCE-ID:20270106T090000Z',
+        'DTSTART:20270106T140000Z',
+        'DTEND:20270106T150000Z',
+      ),
+    );
+    expect(spans(parseICalendarChanges(expanded, undefined, W))).toEqual([
+      ['2027-01-04T09:00:00.000Z', '2027-01-04T10:00:00.000Z'],
+      ['2027-01-05T09:00:00.000Z', '2027-01-05T10:00:00.000Z'],
+      ['2027-01-06T14:00:00.000Z', '2027-01-06T15:00:00.000Z'],
     ]);
   });
 });

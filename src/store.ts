@@ -2451,9 +2451,10 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
             break;
           } catch (error) {
             if (error instanceof CalendarExpansionLimitError) {
-              // It takes more than Slotlock expands: a rule that never occurs again, or one with no
-              // cursor to resume from whose search from its start has outgrown the budget. Nothing
-              // was written; its old coverage stays, and the masters after it still roll.
+              // It takes more than Slotlock expands: a rule that never occurs again, one with no
+              // cursor to resume from whose search from its start has outgrown the budget, or one an
+              // earlier Slotlock stored that this one refuses. Nothing was written; its old coverage
+              // stays, and the masters after it still roll.
               refused += 1;
               refusedEventIds.push(candidate.id);
               break;
