@@ -104,6 +104,12 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
   (`CF-Connecting-IP` behind Cloudflare), or every client shares the proxy's budget: the server
   logs a `client_address_field_ignored` warning when such a field arrives without the setting. A
   client can send that field itself, so let nothing reach the server except through the proxy.
+- The server also bounds what one tenant may store, whichever key, agent or application writes
+  it: 10,000 holds, and 100,000 each of bookings, calendar events and coverage rows, counted as
+  the store's `tenantLimits` count them, besides 10,000 resources. A write past one answers 409
+  `hold_limit_reached`, `reservation_limit_reached`, `event_limit_reached` or
+  `coverage_limit_reached`; `SLOTLOCK_LIMITS` changes them (`tenant_holds`,
+  `tenant_reservations`, `tenant_events`, `tenant_coverage`).
 
 ```sh
 slotlock hours set '[{"rrule":"FREQ=WEEKLY;BYDAY=SA","startMinutes":600,"durationMinutes":240}]' --resource vehicle-42

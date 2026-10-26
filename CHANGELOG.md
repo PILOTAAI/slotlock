@@ -7,6 +7,12 @@ versioning.
 
 ### Security
 
+- `slotlock serve` bounds what one tenant may store. It gave its store no tenant limits, so an admin
+  key could add holds, bookings and coverage rows through the application API (and an agent
+  events) without end, growing the shared database. It now applies the store's tenant limits to
+  every surface: 10,000 holds and 100,000 each of bookings, events and coverage rows by default,
+  set with `SLOTLOCK_LIMITS` (`tenant_holds`, `tenant_reservations`, `tenant_events`,
+  `tenant_coverage`); a write past one answers 409 with its `*_limit_reached` code.
 - The example dashboard Worker configuration removes query strings, which hold OAuth codes, from
   the URLs Workers Logs keep.
 - SECURITY.md and the README say write confirmation is attested by the client: it keeps an agent

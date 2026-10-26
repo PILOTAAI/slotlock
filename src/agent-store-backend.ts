@@ -82,6 +82,13 @@ interface AgentEventInput {
   idempotency_key: string;
 }
 
+/**
+ * A write runs under READ COMMITTED whatever the role's default: a store given tenant limits (as
+ * `slotlock serve`'s is) counts it against them under the tenant's lock, which needs that level,
+ * and refuses it otherwise.
+ */
+const WRITE = { isolation: 'read committed' } as const;
+
 /** What tenant scoping needs of an agent or application call. */
 interface TenantCallContext {
   principal: { tenantRef: string };
@@ -535,7 +542,7 @@ export function createSlotlockStoreAgentBackend(
         });
         if (!created) throw new SlotlockAgentOperationError('store_inconsistent', 503);
         return { event: projectSlotlockCalendarEvent(created), replayed: result.idempotent };
-      });
+      }, WRITE);
     },
 
     async getEvent(context, input) {
@@ -675,7 +682,7 @@ export function createSlotlockStoreAgentBackend(
         });
         if (!updated) throw new SlotlockAgentOperationError('store_inconsistent', 503);
         return { event: projectSlotlockCalendarEvent(updated), replayed: result.idempotent };
-      });
+      }, WRITE);
     },
 
     async deleteEvent(context, input) {
@@ -702,7 +709,7 @@ export function createSlotlockStoreAgentBackend(
           deleted: true,
           replayed: result.idempotent,
         };
-      });
+      }, WRITE);
     },
   };
 }
@@ -914,7 +921,7 @@ export function createSlotlockStoreApplicationBackend(
         });
         if (!result.ok) throw applicationRefusal(result.code);
         return { hold: holdOutput(result.hold) };
-      });
+      }, WRITE);
     },
 
     async confirmHold(context, input) {
@@ -924,7 +931,7 @@ export function createSlotlockStoreApplicationBackend(
         const result = await tenant.confirmHold(id, { tenantRef: tenantOf(context) });
         if (!result.ok) throw applicationRefusal(result.code);
         return { reservation: reservationOutput(result.reservation) };
-      });
+      }, WRITE);
     },
 
     async releaseHold(context, input) {
@@ -955,7 +962,7 @@ export function createSlotlockStoreApplicationBackend(
             : await tenant.rescheduleExternalReservation(command);
         if (!result.ok) throw applicationRefusal(result.code);
         return { reservation: reservationOutput(result.reservation), replayed: result.idempotent };
-      });
+      }, WRITE);
     },
 
     async cancelReservation(context, input) {
@@ -967,7 +974,7 @@ export function createSlotlockStoreApplicationBackend(
         });
         if (!result.ok) throw applicationRefusal(result.code);
         return { cancelled: result.cancelled, revision: result.revision };
-      });
+      }, WRITE);
     },
 
     async recordCoverage(context, input) {
@@ -982,7 +989,7 @@ export function createSlotlockStoreApplicationBackend(
         });
         if (!result.ok) throw applicationRefusal(result.code);
         return { revision: result.revision, replayed: result.idempotent };
-      });
+      }, WRITE);
     },
 
     async runMaintenance(context) {

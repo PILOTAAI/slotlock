@@ -577,9 +577,18 @@ export async function startSlotlockServer(
         }
       }
     }
-    const store = createSlotlockStore(sql);
-    const publicUrl = new URL(config.publicUrl);
     const { caps } = config.limits;
+    // Every surface writes through this store, so its tenant limits bound what any key can add.
+    const store = createSlotlockStore(sql, {
+      tenantLimits: {
+        resources: SERVE_MAX_TENANT_RESOURCES,
+        holds: caps.tenant_holds,
+        reservations: caps.tenant_reservations,
+        events: caps.tenant_events,
+        coverage: caps.tenant_coverage,
+      },
+    });
+    const publicUrl = new URL(config.publicUrl);
     const authenticateKey = createSlotlockApiKeyAuthenticator(createSlotlockApiKeyStore(sql), {
       maxConcurrentLookups: caps.key_lookups,
       maxWaitingLookups: caps.key_lookup_queue,
@@ -1037,7 +1046,9 @@ Environment:
                                  tenant_series_writes and series_writes
                                  (1: writes that may expand a recurring series at once),
                                  maintenance_runs (1: application API maintenance runs at once),
-                                 tenant_subscriptions (16), key_lookups (2), key_lookup_queue (256)
+                                 tenant_subscriptions (16), key_lookups (2), key_lookup_queue (256);
+                                 what one tenant may store: tenant_holds (10000),
+                                 tenant_reservations, tenant_events and tenant_coverage (100000)
   SLOTLOCK_TRUSTED_PROXY_HEADER  The request field a proxy in front sets to the client address,
                                  such as CF-Connecting-IP (default: the connection's address);
                                  set it only when every request comes through that proxy

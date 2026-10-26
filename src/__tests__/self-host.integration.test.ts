@@ -641,6 +641,89 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     }
   });
 
+  it("bounds what one tenant's application API can store: holds, reservations and coverage", async () => {
+    const stdoutKey = output();
+    expect(
+      await runSlotlockCli(['key', 'create', 'Bulk site', '--scope', 'admin'], {
+        env: { ...env, SLOTLOCK_TENANT: otherTenantRef },
+        stdout: stdoutKey,
+        stderr: output(),
+        signal: new AbortController().signal,
+      }),
+    ).toBe(0);
+    const { key } = JSON.parse(stdoutKey.text()) as { key: string };
+    const shutdown = new AbortController();
+    const stdout = output();
+    const stderr = output();
+    // Before, the server gave its store no tenant limits: an admin key could add holds,
+    // reservations and coverage rows without end, and SLOTLOCK_LIMITS had no setting for them.
+    const serving = runSlotlockCli(['serve'], {
+      env: {
+        ...env,
+        SLOTLOCK_LIMITS: 'tenant_holds=2,tenant_reservations=1,tenant_coverage=1,tenant_events=5',
+      },
+      stdout,
+      stderr,
+      signal: shutdown.signal,
+    });
+    try {
+      const listening = await eventually(() =>
+        stdout.events().find(({ event }) => event === 'listening'),
+      );
+      expect(listening.limits).toMatchObject({
+        tenant_holds: 2,
+        tenant_reservations: 1,
+        tenant_coverage: 1,
+        tenant_events: 5,
+      });
+      const origin = listening.address as string;
+      const rest = async (method: string, path: string, body: unknown) => {
+        const response = await fetch(`${origin}${path}`, {
+          method,
+          headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        return { status: response.status, body: (await response.json()) as Record<string, any> };
+      };
+      const created = await rest('POST', '/v1/resources', { external_ref: 'vehicle-bulk' });
+      expect(created.status).toBe(200);
+      const resourceId = created.body.resource.id as string;
+      const hour = (n: number) => ({
+        start: new Date(Date.UTC(2027, 3, 5, n)).toISOString(),
+        end: new Date(Date.UTC(2027, 3, 5, n + 1)).toISOString(),
+      });
+
+      for (const n of [0, 1]) {
+        const held = await rest('POST', '/v1/holds', { resource_id: resourceId, ...hour(n), ttl_seconds: 600 });
+        expect(held.status).toBe(200);
+      }
+      expect(
+        await rest('POST', '/v1/holds', { resource_id: resourceId, ...hour(2), ttl_seconds: 600 }),
+      ).toEqual({ status: 409, body: { error: { code: 'hold_limit_reached' } } });
+
+      const booked = await rest('PUT', '/v1/reservations/booking-1', {
+        resource_id: resourceId,
+        ...hour(3),
+        revision: 1,
+      });
+      expect(booked.status).toBe(200);
+      expect(
+        await rest('PUT', '/v1/reservations/booking-2', { resource_id: resourceId, ...hour(4), revision: 1 }),
+      ).toEqual({ status: 409, body: { error: { code: 'reservation_limit_reached' } } });
+
+      const window = { start: '2027-04-01T00:00:00Z', end: '2027-05-01T00:00:00Z', revision: 1 };
+      expect((await rest('PUT', `/v1/resources/${resourceId}/coverage/google:a`, window)).status).toBe(200);
+      expect(await rest('PUT', `/v1/resources/${resourceId}/coverage/google:b`, window)).toEqual({
+        status: 409,
+        body: { error: { code: 'coverage_limit_reached' } },
+      });
+    } finally {
+      shutdown.abort();
+    }
+    expect(await serving).toBe(0);
+    expect(stderr.text()).toBe('');
+  });
+
   it('maintains the tenant from the command line, and leaves it to a server already doing so', async () => {
     const first = await run(['maintain']);
     expect(first.code).toBe(0);
