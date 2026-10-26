@@ -183,6 +183,8 @@ upgrade notes first.
   `Idempotency-Key` header as well as `idempotency_key`; a hold retried with it answers the first
   hold, and the key reused with another request is `409 idempotency_conflict`. Another application
   route refuses the header (`400 idempotency_key_not_supported`) rather than ignore it.
+- `POST /v1/holds` takes `buffer_after_minutes` (0 to 30 days), as a booking does: the time after
+  the hold stays busy, and the booking it is confirmed as keeps it.
 - In the store: private resources, which agents neither list, describe nor book; `archiveResource`,
   `restoreResource` and `deleteResource`; holds with a turnaround buffer the booking keeps and a
   retry identity; `getHold`, `listHolds`, `getReservation` and `listReservations`; and reading,

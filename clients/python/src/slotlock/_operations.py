@@ -554,12 +554,14 @@ class Operations(Transport):
         ttl_seconds: int,
         source: str | None = None,
         idempotency_key: str | None = None,
+        buffer_after_minutes: int | None = None,
     ) -> dict[str, Any]:
         """Hold time.
 
         Occupy a window without booking it, for example while a customer pays. The hold blocks
         every other booking until it expires (the database clock, ttl_seconds from now), is
-        confirmed, or is released. A taken window answers 409 overlap. With an idempotency key
+        confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and
+        a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key
         (the Idempotency-Key header or idempotency_key), a retry answers the hold the first
         request made, until that hold would have expired, is released or is confirmed; the same
         key with another request is 409 idempotency_conflict.
@@ -579,6 +581,8 @@ class Operations(Transport):
             values["source"] = source
         if idempotency_key is not None:
             values["idempotency_key"] = idempotency_key
+        if buffer_after_minutes is not None:
+            values["buffer_after_minutes"] = buffer_after_minutes
         return self.call("slotlock_acquire_hold", values)
 
     def get_hold(self, hold_id: str) -> dict[str, Any]:

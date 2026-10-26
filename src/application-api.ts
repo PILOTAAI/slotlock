@@ -160,6 +160,13 @@ const IDEMPOTENCY_KEY = IDENTITY.describe(
   'A retry identity, also accepted as the Idempotency-Key header: the same key with the same request answers what the first did; with another request, 409 idempotency_conflict.',
 );
 
+/** Minutes after the end kept busy as well, for turnaround: at most 30 days. */
+const BUFFER_AFTER_MINUTES = z
+  .number()
+  .int()
+  .min(0)
+  .max(30 * 24 * 60);
+
 const AVAILABILITY_RULE = z
   .object({
     rrule: z.string().min(1).max(500),
@@ -344,7 +351,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_acquire_hold',
       title: 'Hold time',
       description:
-        'Occupy a window without booking it, for example while a customer pays. The hold blocks every other booking until it expires (the database clock, ttl_seconds from now), is confirmed, or is released. A taken window answers 409 overlap. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the hold the first request made, until that hold would have expired, is released or is confirmed; the same key with another request is 409 idempotency_conflict.',
+        'Occupy a window without booking it, for example while a customer pays. The hold blocks every other booking until it expires (the database clock, ttl_seconds from now), is confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the hold the first request made, until that hold would have expired, is released or is confirmed; the same key with another request is 409 idempotency_conflict.',
       method: 'POST',
       path: '/v1/holds',
       input: z
@@ -359,6 +366,8 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
             .max(7 * 24 * 60 * 60),
           source: SOURCE.optional(),
           idempotency_key: IDEMPOTENCY_KEY.optional(),
+          // Last: a generated client's 0.2.0 positional arguments keep their places.
+          buffer_after_minutes: BUFFER_AFTER_MINUTES.optional(),
         })
         .strict()
         .refine(boundedSpan, SPAN_MESSAGE),
@@ -477,12 +486,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           resource_id: RESOURCE_ID,
           start: DATE_TIME,
           end: DATE_TIME,
-          buffer_after_minutes: z
-            .number()
-            .int()
-            .min(0)
-            .max(30 * 24 * 60)
-            .default(0),
+          buffer_after_minutes: BUFFER_AFTER_MINUTES.default(0),
           revision: REVISION,
           source: SOURCE.optional(),
         })

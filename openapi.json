@@ -3563,7 +3563,7 @@
       "post": {
         "operationId": "slotlock_acquire_hold",
         "summary": "Hold time",
-        "description": "Occupy a window without booking it, for example while a customer pays. The hold blocks every other booking until it expires (the database clock, ttl_seconds from now), is confirmed, or is released. A taken window answers 409 overlap. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the hold the first request made, until that hold would have expired, is released or is confirmed; the same key with another request is 409 idempotency_conflict.",
+        "description": "Occupy a window without booking it, for example while a customer pays. The hold blocks every other booking until it expires (the database clock, ttl_seconds from now), is confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the hold the first request made, until that hold would have expired, is released or is confirmed; the same key with another request is 409 idempotency_conflict.",
         "tags": [
           "Application"
         ],
@@ -3603,6 +3603,11 @@
                     "minLength": 1,
                     "maxLength": 500,
                     "description": "A retry identity, also accepted as the Idempotency-Key header: the same key with the same request answers what the first did; with another request, 409 idempotency_conflict."
+                  },
+                  "buffer_after_minutes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 43200
                   }
                 },
                 "required": [

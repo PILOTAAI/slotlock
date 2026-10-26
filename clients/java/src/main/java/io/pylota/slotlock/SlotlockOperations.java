@@ -429,7 +429,8 @@ public abstract class SlotlockOperations {
   /**
    * Hold time. Occupy a window without booking it, for example while a customer pays. The hold
    * blocks every other booking until it expires (the database clock, ttl_seconds from now), is
-   * confirmed, or is released. A taken window answers 409 overlap. With an idempotency key (the
+   * confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and a
+   * confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key (the
    * Idempotency-Key header or idempotency_key), a retry answers the hold the first request made,
    * until that hold would have expired, is released or is confirmed; the same key with another
    * request is 409 idempotency_conflict.
@@ -439,7 +440,7 @@ public abstract class SlotlockOperations {
    * @param end {@code end}, string
    * @param ttlSeconds {@code ttl_seconds}, integer
    * @param optional the optional arguments, or null: {@code source} (string), {@code
-   * idempotency_key} (string)
+   * idempotency_key} (string), {@code buffer_after_minutes} (integer)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -449,14 +450,15 @@ public abstract class SlotlockOperations {
     values.put("start", start);
     values.put("end", end);
     values.put("ttl_seconds", ttlSeconds);
-    putOptional(values, optional, Set.of("source", "idempotency_key"), "slotlock_acquire_hold");
+    putOptional(values, optional, Set.of("source", "idempotency_key", "buffer_after_minutes"), "slotlock_acquire_hold");
     return call("slotlock_acquire_hold", values);
   }
 
   /**
    * Hold time. Occupy a window without booking it, for example while a customer pays. The hold
    * blocks every other booking until it expires (the database clock, ttl_seconds from now), is
-   * confirmed, or is released. A taken window answers 409 overlap. With an idempotency key (the
+   * confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and a
+   * confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key (the
    * Idempotency-Key header or idempotency_key), a retry answers the hold the first request made,
    * until that hold would have expired, is released or is confirmed; the same key with another
    * request is 409 idempotency_conflict.

@@ -560,6 +560,8 @@ type AcquireHoldInput struct {
 	// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
 	// request answers what the first did; with another request, 409 idempotency_conflict.
 	IdempotencyKey *string
+
+	BufferAfterMinutes *int64
 }
 
 func (in AcquireHoldInput) values() map[string]any {
@@ -574,15 +576,19 @@ func (in AcquireHoldInput) values() map[string]any {
 	if in.IdempotencyKey != nil {
 		values["idempotency_key"] = *in.IdempotencyKey
 	}
+	if in.BufferAfterMinutes != nil {
+		values["buffer_after_minutes"] = *in.BufferAfterMinutes
+	}
 	return values
 }
 
 // AcquireHold: Hold time. Occupy a window without booking it, for example while a customer pays.
 // The hold blocks every other booking until it expires (the database clock, ttl_seconds from
-// now), is confirmed, or is released. A taken window answers 409 overlap. With an idempotency key
-// (the Idempotency-Key header or idempotency_key), a retry answers the hold the first request
-// made, until that hold would have expired, is released or is confirmed; the same key with
-// another request is 409 idempotency_conflict.
+// now), is confirmed, or is released. buffer_after_minutes keeps the time after it busy as well,
+// and a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key (the
+// Idempotency-Key header or idempotency_key), a retry answers the hold the first request made,
+// until that hold would have expired, is released or is confirmed; the same key with another
+// request is 409 idempotency_conflict.
 func (c *Client) AcquireHold(ctx context.Context, in AcquireHoldInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_acquire_hold", in.values())
 }

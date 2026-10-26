@@ -492,7 +492,8 @@ public sealed partial class SlotlockClient
     /// <remarks>
     /// Occupy a window without booking it, for example while a customer pays. The hold blocks
     /// every other booking until it expires (the database clock, ttl_seconds from now), is
-    /// confirmed, or is released. A taken window answers 409 overlap. With an idempotency key
+    /// confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and
+    /// a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key
     /// (the Idempotency-Key header or idempotency_key), a retry answers the hold the first
     /// request made, until that hold would have expired, is released or is confirmed; the same
     /// key with another request is 409 idempotency_conflict.
@@ -505,6 +506,7 @@ public sealed partial class SlotlockClient
     /// <param name="idempotencyKey">A retry identity, also accepted as the Idempotency-Key
     /// header: the same key with the same request answers what the first did; with another
     /// request, 409 idempotency_conflict.</param>
+    /// <param name="bufferAfterMinutes">buffer_after_minutes</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -515,6 +517,7 @@ public sealed partial class SlotlockClient
         long ttlSeconds,
         Optional<string> source = default,
         Optional<string> idempotencyKey = default,
+        Optional<long> bufferAfterMinutes = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -524,6 +527,7 @@ public sealed partial class SlotlockClient
         values["ttl_seconds"] = Json.ToNode(ttlSeconds);
         if (source.HasValue) values["source"] = Json.ToNode(source.Value);
         if (idempotencyKey.HasValue) values["idempotency_key"] = Json.ToNode(idempotencyKey.Value);
+        if (bufferAfterMinutes.HasValue) values["buffer_after_minutes"] = Json.ToNode(bufferAfterMinutes.Value);
         return CallAsync("slotlock_acquire_hold", values, cancellationToken);
     }
 

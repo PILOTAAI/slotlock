@@ -248,6 +248,38 @@ describe.skipIf(!url)('the application API on the real store', () => {
     expect((await call('a', 'POST', '/v1/holds', { ...third, ttl_seconds: 60 })).status).toBe(200);
   });
 
+  it('holds time with a buffer after it, which stays busy until the hold ends', async () => {
+    const resource = (await call('a', 'POST', '/v1/resources', { external_ref: 'buffered-hold-van' })).body.resource;
+    const window = { resource_id: resource.id, start: day(13, '09:00:00'), end: day(13, '10:00:00') };
+    const held = await call('a', 'POST', '/v1/holds', { ...window, ttl_seconds: 600, buffer_after_minutes: 30 });
+    expect(held).toMatchObject({ status: 200, body: { hold: { start: window.start, end: window.end } } });
+    // The half hour after it is taken; the time after that is not.
+    const inBuffer = { ...window, start: day(13, '10:15:00'), end: day(13, '11:00:00') };
+    expect(await call('a', 'POST', '/v1/holds', { ...inBuffer, ttl_seconds: 60 })).toEqual(refused(409, 'overlap'));
+    expect(await call('a', 'PUT', `/v1/reservations/in-buffer-${randomUUID()}`, { ...inBuffer, revision: 1 })).toEqual(
+      refused(409, 'overlap'),
+    );
+    const busy = await call(
+      'a',
+      'GET',
+      `/v1/resources/${resource.id}/busy?start=${encodeURIComponent(day(13))}&end=${encodeURIComponent(day(14))}`,
+    );
+    expect(busy.body).toEqual({ busy: [{ start: window.start, end: day(13, '10:30:00') }] });
+    expect(
+      (await call('a', 'POST', '/v1/holds', { ...window, start: day(13, '10:30:00'), end: day(13, '11:00:00'), ttl_seconds: 60 }))
+        .status,
+    ).toBe(200);
+    // Confirmed, the hold is a booking with the same buffer.
+    expect((await call('a', 'POST', `/v1/holds/${held.body.hold.id}/confirm`, {})).body.reservation).toMatchObject({
+      end: window.end,
+      buffer_after_minutes: 30,
+    });
+    // Bounded as a reservation's buffer is.
+    expect(
+      await call('a', 'POST', '/v1/holds', { ...window, start: day(14, '09:00:00'), end: day(14, '10:00:00'), ttl_seconds: 60, buffer_after_minutes: 30 * 24 * 60 + 1 }),
+    ).toEqual(refused(400, 'invalid_arguments'));
+  });
+
   it('books, replays, moves and cancels a reservation by its reference and revision', async () => {
     const resource = (await call('a', 'POST', '/v1/resources', { external_ref: 'booking-van' })).body.resource;
     const ref = `BK-${randomUUID()}`;

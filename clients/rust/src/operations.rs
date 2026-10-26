@@ -427,6 +427,8 @@ pub struct AcquireHoldInput {
     /// request answers what the first did; with another request, 409 idempotency_conflict.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub buffer_after_minutes: Option<i64>,
 }
 
 /// The arguments of [`Client::get_hold`].
@@ -691,7 +693,8 @@ impl Client {
     ///
     /// Occupy a window without booking it, for example while a customer pays. The hold blocks
     /// every other booking until it expires (the database clock, ttl_seconds from now), is
-    /// confirmed, or is released. A taken window answers 409 overlap. With an idempotency key
+    /// confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and
+    /// a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key
     /// (the Idempotency-Key header or idempotency_key), a retry answers the hold the first
     /// request made, until that hold would have expired, is released or is confirmed; the same
     /// key with another request is 409 idempotency_conflict.
