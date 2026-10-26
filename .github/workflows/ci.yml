@@ -215,7 +215,11 @@ jobs:
           push: false
           tags: slotlock:ci
       # The server the clients call: the image, as a role row-level security confines, confirming
-      # only deletes (so the suites write events and still meet a 428), with an admin key.
+      # only deletes (so the suites write events and still meet a 428), with an admin key. The smoke
+      # check and all five suites write as one key of one tenant, faster than its hosted budgets (20
+      # writes, then 5 a second, for the key, the tenant and the tenant's application API), so those
+      # buckets are off here; the clients' 429 handling is unit-tested and the limits themselves by
+      # hosted-limits.integration.test.ts.
       - name: Serves the image with an admin key
         run: |
           docker run --rm --network host --env PGPASSWORD=ci-only-password \
@@ -230,6 +234,7 @@ jobs:
             --env SLOTLOCK_CONFIRMATION_SECRET="$(openssl rand -hex 32)" \
             --env SLOTLOCK_CONFIRM_WRITES=slotlock_delete_event \
             --env SLOTLOCK_TENANT=clients \
+            --env SLOTLOCK_LIMITS=key_read=off,key_write=off,tenant_read=off,tenant_write=off,app_read=off,app_write=off \
             --env HOST=127.0.0.1 \
             slotlock:ci serve --migrate
           health=starting
