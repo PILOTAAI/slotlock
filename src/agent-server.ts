@@ -35,6 +35,7 @@ import {
   isSlotlockApplicationOperation,
   slotlockApplicationOperation,
 } from './application-api.js';
+import { SLOTLOCK_EVENT_OUTPUT as EVENT } from './event-schema.js';
 import { ignoreRejection } from './hooks.js';
 import { slotlockPackageVersion } from './package-version.js';
 import {
@@ -122,14 +123,6 @@ const RESOURCE_ID = z.string().trim().min(1).max(200);
 const EVENT_ID = z.string().trim().min(1).max(500);
 const IDEMPOTENCY_KEY = z.string().trim().min(1).max(200);
 const REVISION = z.number().int().positive();
-// Output bounds mirror the trusted store's byte ceilings. A value admitted by a UTF-8 byte
-// ceiling can never exceed that many UTF-16 code units, so every valid stored/provider event is
-// serializable without truncating recurrence semantics or calendar identities.
-const TRUSTED_SUMMARY_OUTPUT_MAX = 4_096;
-const TRUSTED_TEXT_OUTPUT_MAX = 16_384;
-const TRUSTED_PERSON_NAME_OUTPUT_MAX = 1_024;
-const TRUSTED_RECURRENCE_EXCEPTION_OUTPUT_MAX = 1_000;
-const TRUSTED_REMINDER_MINUTES_OUTPUT_MAX = 366 * 24 * 60;
 const MAX_AGENT_WINDOW_MS = SLOTLOCK_CALENDAR_HORIZON_DAYS * 24 * 60 * 60 * 1_000;
 /** The longest slot `slotlock_find_next_available` can look for: the whole search window. */
 const MAX_SLOT_MINUTES = SLOTLOCK_CALENDAR_HORIZON_DAYS * 24 * 60;
@@ -154,41 +147,6 @@ const COVERAGE = z
     end: DATE_TIME,
     certainty: z.enum(['certain', 'uncertain']),
     reason: z.string().max(100).nullable(),
-  })
-  .strict();
-const ORGANIZER = z
-  .object({
-    address: z.string().email().max(320),
-    name: z.string().trim().max(TRUSTED_PERSON_NAME_OUTPUT_MAX).nullable(),
-  })
-  .strict();
-const ATTENDEE = z
-  .object({
-    address: z.string().email().max(320),
-    name: z.string().trim().max(TRUSTED_PERSON_NAME_OUTPUT_MAX).nullable(),
-    role: z.enum(['chair', 'required', 'optional', 'non_participant']),
-    participation_status: z.enum([
-      'needs_action',
-      'accepted',
-      'declined',
-      'tentative',
-      'delegated',
-    ]),
-    rsvp: z.boolean(),
-  })
-  .strict();
-const REMINDER = z
-  .object({
-    minutes_before: z.number().int().min(0).max(TRUSTED_REMINDER_MINUTES_OUTPUT_MAX),
-    channel: z.enum(['display', 'email']),
-  })
-  .strict();
-const RECURRENCE_EXCEPTION = z
-  .object({
-    recurrence_id: DATE_TIME,
-    cancelled: z.boolean(),
-    starts_at: DATE_TIME.nullable(),
-    ends_at: DATE_TIME.nullable(),
   })
   .strict();
 const ORGANIZER_INPUT = z
@@ -252,31 +210,6 @@ const MCP_INITIALIZE_PARAMS = z
     _meta: z.record(z.string(), z.unknown()).optional(),
   })
   .passthrough();
-const EVENT = z
-  .object({
-    id: EVENT_ID,
-    resource_id: RESOURCE_ID,
-    starts_at: DATE_TIME,
-    ends_at: DATE_TIME,
-    timezone: z.string().min(1).max(100),
-    title: z.string().max(TRUSTED_SUMMARY_OUTPUT_MAX).nullable(),
-    description: z.string().max(TRUSTED_TEXT_OUTPUT_MAX).nullable(),
-    location: z.string().max(TRUSTED_TEXT_OUTPUT_MAX).nullable(),
-    organizer: ORGANIZER.nullable(),
-    attendees: z.array(ATTENDEE).max(100),
-    reminders: z.array(REMINDER).max(20),
-    status: z.enum(['tentative', 'confirmed', 'cancelled']),
-    transparency: z.enum(['opaque', 'transparent']),
-    sequence: z.number().int().nonnegative(),
-    revision: REVISION,
-    recurrence_rule: z.string().max(TRUSTED_SUMMARY_OUTPUT_MAX).nullable(),
-    recurrence_exceptions: z
-      .array(RECURRENCE_EXCEPTION)
-      .max(TRUSTED_RECURRENCE_EXCEPTION_OUTPUT_MAX),
-    recurrence_id: DATE_TIME.nullable(),
-  })
-  .strict();
-
 type JsonSchema = Readonly<Record<string, unknown>>;
 type ObjectSchema = z.ZodType<Record<string, unknown>>;
 
