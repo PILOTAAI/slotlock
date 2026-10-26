@@ -486,6 +486,7 @@ describe.skipIf(!url)('Slotlock README examples (real Postgres)', () => {
       refused: 0,
       pruned: 0,
       capped: false,
+      rollPending: false,
     });
   });
 
