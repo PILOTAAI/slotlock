@@ -7,6 +7,10 @@ versioning.
 
 ### Security
 
+- `slotlock_get_free_busy` and `slotlock_find_next_available` read a resource named more than once
+  once, and read 10,000 busy intervals in all across the resources a request names, answering
+  `400 calendar_work_limit` past that (as they now do when the store refuses one resource's). A
+  request naming 100 resources, or one resource 100 times, did 100 times the work of one.
 - The example dashboard Worker configuration removes query strings, which hold OAuth codes, from
   the URLs Workers Logs keep.
 - SECURITY.md and the README say write confirmation is attested by the client: it keeps an agent

@@ -543,6 +543,61 @@ describe('Slotlock store-backed agent server adapter', () => {
     expect(availabilityRules).toHaveBeenCalledOnce();
   });
 
+  it('reads a resource named more than once in one search once', async () => {
+    const backend = createSlotlockStoreAgentBackend(store, { availabilityRules });
+    const window = { start: '2027-01-10T00:00:00.000Z', end: '2027-01-11T00:00:00.000Z' };
+    const repeated = Array.from({ length: 100 }, () => resource.id);
+    await backend.findNextAvailable(
+      { ...context, operation: 'slotlock_find_next_available' },
+      { resource_ids: repeated, ...window, duration_minutes: 60 },
+    );
+    expect(getFreeBusy).toHaveBeenCalledOnce();
+    getFreeBusy.mockClear();
+    const freeBusy = await backend.getFreeBusy(
+      { ...context, operation: 'slotlock_get_free_busy' },
+      { resource_ids: repeated, ...window },
+    );
+    expect(getFreeBusy).toHaveBeenCalledOnce();
+    expect(freeBusy.resources).toHaveLength(1);
+  });
+
+  it('refuses a search whose resources hold more busy intervals in all than one request may read', async () => {
+    const ids = Array.from(
+      { length: 5 },
+      (_, index) => `${String(index + 4).repeat(8)}-4444-4444-8444-444444444444`,
+    );
+    getResource.mockImplementation(async ({ id }: { id: string }) => ({ ...resource, id }));
+    // Each under the store's 10,000 a resource, but 30,000 in all.
+    const busy = Array.from({ length: 6_000 }, (_, index) => ({
+      start: new Date(Date.UTC(2027, 0, 10) + index * 60_000),
+      end: new Date(Date.UTC(2027, 0, 10) + index * 60_000 + 30_000),
+    }));
+    getFreeBusy.mockResolvedValue({ busy, coverage: { state: 'complete', missingSources: [] } });
+    const backend = createSlotlockStoreAgentBackend(store, { availabilityRules });
+    const window = { start: '2027-01-10T00:00:00.000Z', end: '2027-01-20T00:00:00.000Z' };
+    await expect(
+      backend.findNextAvailable(
+        { ...context, operation: 'slotlock_find_next_available' },
+        { resource_ids: ids, ...window, duration_minutes: 60 },
+      ),
+    ).rejects.toMatchObject({ code: 'calendar_work_limit', status: 400 });
+    await expect(
+      backend.getFreeBusy({ ...context, operation: 'slotlock_get_free_busy' }, { resource_ids: ids, ...window }),
+    ).rejects.toMatchObject({ code: 'calendar_work_limit', status: 400 });
+    // The store's own refusal for one resource is the caller's to narrow too, not a server failure.
+    getFreeBusy.mockRejectedValueOnce(
+      Object.assign(new Error('Slotlock free/busy work limit exceeded'), {
+        code: 'calendar_work_limit',
+      }),
+    );
+    await expect(
+      backend.getFreeBusy(
+        { ...context, operation: 'slotlock_get_free_busy' },
+        { resource_ids: [ids[0]], ...window },
+      ),
+    ).rejects.toMatchObject({ code: 'calendar_work_limit', status: 400 });
+  });
+
   it('maps missing and conflicting store outcomes to bounded protocol-safe errors', async () => {
     const backend = createSlotlockStoreAgentBackend(store, { availabilityRules });
     getCalendarEvent.mockResolvedValueOnce(null);

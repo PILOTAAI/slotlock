@@ -889,6 +889,9 @@ curl "http://localhost:8080/v1/resources" -H "Authorization: Bearer $SLOTLOCK_AP
 - Keys, scopes, `authorize` and the rate limit apply as over MCP. The body is the tool's output, or
   `{"error":{"code":…}}` with the matching HTTP status.
 - REST cannot ask a person, so a write listed in `confirmation` answers `428 confirmation_required`.
+- Free/busy and the next-available search read each resource they name once, however often it is
+  named, and 10,000 busy intervals in all; past that they answer `400 calendar_work_limit`: ask for
+  fewer resources or a shorter window.
 - There are no CORS headers: call it from a server, not a browser.
 - From Python, Go, Rust, Java or .NET, use the [clients](clients/README.md): one method per
   operation, the application API included, each tested against the server in CI. For another

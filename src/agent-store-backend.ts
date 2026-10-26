@@ -116,6 +116,42 @@ async function withTenant<T>(
   return value;
 }
 
+/**
+ * Busy intervals one free/busy read or search may gather across all the resources it names: as many
+ * as the store reads for one resource. Without it, a request naming 100 resources at that limit, or
+ * one resource 100 times, did 100 times the work of one.
+ */
+const MAX_REQUEST_BUSY_INTERVALS = 10_000;
+
+/** The resources a request names, each once, in the order first named. */
+function distinctResourceIds(input: Record<string, unknown>): string[] {
+  return [...new Set(input.resource_ids as string[])];
+}
+
+/** Counts a request's busy intervals against MAX_REQUEST_BUSY_INTERVALS, refusing past it. */
+function busyBudget(): (intervals: number) => void {
+  let left = MAX_REQUEST_BUSY_INTERVALS;
+  return (intervals) => {
+    left -= intervals;
+    if (left < 0) throw new SlotlockAgentOperationError('calendar_work_limit', 400);
+  };
+}
+
+/** The store's free/busy read, its refusal to read past its limit answered as the caller's to narrow. */
+async function readFreeBusy(
+  tenantStore: SlotlockTenantStore,
+  params: Parameters<SlotlockTenantStore['getFreeBusy']>[0],
+): Promise<Awaited<ReturnType<SlotlockTenantStore['getFreeBusy']>>> {
+  try {
+    return await tenantStore.getFreeBusy(params);
+  } catch (error) {
+    if ((error as { code?: unknown } | null)?.code === 'calendar_work_limit') {
+      throw new SlotlockAgentOperationError('calendar_work_limit', 400);
+    }
+    throw error;
+  }
+}
+
 function interval(input: { start: string; end: string }): Interval {
   return { start: new Date(input.start), end: new Date(input.end) };
 }
@@ -401,7 +437,8 @@ export function createSlotlockStoreAgentBackend(
 
     async getFreeBusy(context, input) {
       const window = interval(input as { start: string; end: string });
-      const resourceIds = input.resource_ids as string[];
+      const resourceIds = distinctResourceIds(input);
+      const charge = busyBudget();
       return withTenant(store, context, async (tenantStore) => {
         const resources = [];
         for (const resourceId of resourceIds) {
@@ -411,7 +448,7 @@ export function createSlotlockStoreAgentBackend(
             resourceId,
           );
           const sources = await requiredSources(options, context, resource);
-          const result = await tenantStore.getFreeBusy({
+          const result = await readFreeBusy(tenantStore, {
             tenantRef: context.principal.tenantRef,
             resourceId,
             window,
@@ -420,6 +457,7 @@ export function createSlotlockStoreAgentBackend(
               ? { coverageMaxAgeMs: options.coverageMaxAgeMs }
               : {}),
           });
+          charge(result.busy.length);
           resources.push({
             resource_id: resourceId,
             busy: result.busy.map((busy) => ({
@@ -435,8 +473,9 @@ export function createSlotlockStoreAgentBackend(
 
     async findNextAvailable(context, input) {
       const window = interval(input as { start: string; end: string });
-      const resourceIds = input.resource_ids as string[];
+      const resourceIds = distinctResourceIds(input);
       const durationMs = (input.duration_minutes as number) * 60_000;
+      const charge = busyBudget();
       return withTenant(store, context, async (tenantStore) => {
         let best: { resourceId: string; interval: Interval } | null = null;
         let incomplete = false;
@@ -447,7 +486,7 @@ export function createSlotlockStoreAgentBackend(
             resourceId,
           );
           const sources = await requiredSources(options, context, resource);
-          const freeBusy = await tenantStore.getFreeBusy({
+          const freeBusy = await readFreeBusy(tenantStore, {
             tenantRef: context.principal.tenantRef,
             resourceId,
             window,
@@ -456,6 +495,7 @@ export function createSlotlockStoreAgentBackend(
               ? { coverageMaxAgeMs: options.coverageMaxAgeMs }
               : {}),
           });
+          charge(freeBusy.busy.length);
           if (freeBusy.coverage.state !== 'complete') {
             incomplete = true;
             continue;
