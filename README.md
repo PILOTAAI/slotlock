@@ -531,7 +531,8 @@ expansion reads that day of the zone, whatever the process has read before. A fe
 (VTIMEZONE) count against the same budget, each change listed when one is expanded costing four
 tenths: one written the way Outlook writes them, from 1601, costs about 6,000. A feed may carry 100
 time zones and name 100 it does not define, 1,000 observances and 2,000 RDATE values in the zones it
-carries, and 20,000 RDATE and EXDATE values in its events; a property's name and parameters may take
+carries, and 20,000 RDATE and EXDATE values in its events, and an event 8 RRULEs, each further one
+costing a step at every occurrence its expansion passes; a property's name and parameters may take
 8 KB and list 100. A MINUTELY to WEEKLY step, a `DURATION`, or an event's length may be a century at
 most. A calendar that needs more, such as a rule that never occurs
 (`FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30`), is refused: `invalid_event` on a write, `invalid_icalendar`

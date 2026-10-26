@@ -32,6 +32,10 @@ versioning.
   holds were never purged. An instant is now one occurrence wherever the rule names it again; a
   series whose roll fails for any other reason is refused by id and put back like one over the
   budget; and a pass still prunes when its roll fails, then reports the failure.
+- A feed event may list 8 RRULEs, and each one past the first costs a step of the expansion budget
+  at every occurrence it passes. Any number was accepted, and choosing among them was not charged:
+  one event with 110,000 RRULEs (2 MB) held `parseICalendarFeed` for about 9 seconds before it was
+  refused. It is now refused before it is expanded.
 
 ### Fixed
 

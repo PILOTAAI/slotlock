@@ -132,6 +132,8 @@ const EVENT_LIMITS: ExpansionLimits = { steps: 50_000 };
 
 /** RDATE and EXDATE values one event may list: ical.js sorts them in as it reads them. */
 const MAX_ICAL_DATES_PER_EVENT = MAX_ICAL_EXCEPTIONS_PER_SERIES;
+/** RRULEs one event may list: every step of its expansion compares each one's next time. */
+const MAX_ICAL_RULES_PER_EVENT = 8;
 /** And a whole feed: each value is a time ical.js resolves, its zone looked up among the feed's. */
 const MAX_ICAL_DATES_PER_FEED = 20 * MAX_ICAL_DATES_PER_EVENT;
 /**
@@ -192,6 +194,8 @@ const ICAL_STEP_CHARGES: Readonly<Record<string, StepCharge>> = {
  * twenty times as long as the same series in UTC within the same budget.
  */
 const OCCURRENCE_STEPS = 1;
+/** Each further RRULE whose next time an expansion step compares, choosing among them. */
+const RULE_SCAN_STEPS = 1;
 const ZONE_READ_STEPS = { conversion: 0.5, ownZone: 1.5, intl: 5 } as const;
 /**
  * Each change ical.js lists when it expands one of the feed's own zones (Timezone#_ensureCoverage):
@@ -1227,6 +1231,7 @@ function budgetRule(rule: unknown, Budgeted: typeof ICAL.RecurIterator): void {
 function budgetedExpansion(
   event: ICAL.Event,
   Budgeted: typeof ICAL.RecurIterator,
+  budget: RecurrenceBudget,
   start?: ICAL.Time,
 ): ICAL.RecurExpansion {
   for (const property of event.component.getAllProperties('rrule')) {
@@ -1237,7 +1242,7 @@ function budgetedExpansion(
   if (!Array.isArray(iterators) || !iterators.every((iterator) => iterator instanceof Budgeted)) {
     throw new CalendarContractError('invalid_icalendar');
   }
-  return withEveryRule(expansion);
+  return withEveryRule(expansion, budget);
 }
 
 /**
@@ -1246,13 +1251,17 @@ function budgetedExpansion(
  * skipped the iterator after an ended first one, and for any other removed the one before it,
  * which had not ended, so a series with two RRULEs lost occurrences once either rule ended.
  */
-function withEveryRule(expansion: ICAL.RecurExpansion): ICAL.RecurExpansion {
+function withEveryRule(
+  expansion: ICAL.RecurExpansion,
+  budget: RecurrenceBudget,
+): ICAL.RecurExpansion {
   const state = expansion as unknown as ExpansionState & { _nextRecurrenceIter?: unknown };
   if (typeof state._nextRecurrenceIter !== 'function') {
     throw new CalendarContractError('invalid_icalendar');
   }
   state._nextRecurrenceIter = () => {
     const iterators = state.ruleIterators as IteratorState[];
+    if (iterators.length > 1) budget.charge((iterators.length - 1) * RULE_SCAN_STEPS);
     let chosen: IteratorState | null = null;
     for (let index = 0; index < iterators.length; ) {
       const iterator = iterators[index] as IteratorState;
@@ -1312,7 +1321,8 @@ function writtenFieldsMs(property: ICAL.Property | null): number | undefined {
  * Refuse a VEVENT that ical.js would spend unbounded work reading, before anything reads its times:
  * a DURATION, or a DTEND after its DTSTART, longer than MAX_ICAL_STEP_DAYS (ical.js adds a span to
  * a time a month at a time, Time#adjust, and `DURATION:PT99999999999999999999S` held the process),
- * a negative DURATION, or more RDATE and EXDATE values than MAX_ICAL_DATES_PER_EVENT. Returns how
+ * a negative DURATION, more RDATE and EXDATE values than MAX_ICAL_DATES_PER_EVENT, or more RRULEs
+ * than MAX_ICAL_RULES_PER_EVENT. Returns how
  * many it lists, for the feed's own limit. It reads times only as written, so it runs before the
  * times are framed: framing reads every date value, and 115,000 EXDATE values took 11 seconds.
  */
@@ -1334,6 +1344,7 @@ function boundComponent(component: ICAL.Component): number {
     for (const property of component.getAllProperties(name)) dates += valueCount(property);
   }
   if (dates > MAX_ICAL_DATES_PER_EVENT) expansionLimit();
+  if (component.getAllProperties('rrule').length > MAX_ICAL_RULES_PER_EVENT) expansionLimit();
   return dates;
 }
 
@@ -1822,6 +1833,7 @@ function keptSeriesCursor(snapshot: CalendarSeriesCursor | null): CalendarSeries
 function resumedExpansion(
   event: ICAL.Event,
   Budgeted: typeof ICAL.RecurIterator,
+  budget: RecurrenceBudget,
   cursor: CalendarSeriesCursor,
 ): ICAL.RecurExpansion | null {
   const rule = event.component.getFirstPropertyValue('rrule') as ICAL.Recur;
@@ -1856,7 +1868,7 @@ function resumedExpansion(
   if (iterators.length !== 1 || !(iterators[0] instanceof Budgeted)) {
     throw new CalendarContractError('invalid_icalendar');
   }
-  return withEveryRule(expansion);
+  return withEveryRule(expansion, budget);
 }
 
 /**
@@ -2793,8 +2805,8 @@ function parseCalendarChanges(
       // when `resume` does not fit this series.
       const expand = (resume: CalendarSeriesCursor | null) => {
         const iterator = resume
-          ? resumedExpansion(event, budgeted(), resume)
-          : budgetedExpansion(event, budgeted(), from);
+          ? resumedExpansion(event, budgeted(), budget, resume)
+          : budgetedExpansion(event, budgeted(), budget, from);
         if (iterator === null) return null;
         // The cursor stands on the occurrence it last passed: the same time, read the same way.
         if (
