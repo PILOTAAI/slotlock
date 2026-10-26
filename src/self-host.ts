@@ -907,7 +907,7 @@ function parseKeyScopes(value: string | undefined): SlotlockApiKeyScope[] {
  */
 async function maintainTenant(
   config: SlotlockDatabaseConfig,
-): Promise<(SlotlockMaintenanceResult & { passes: number }) | null> {
+): Promise<(Omit<SlotlockMaintenanceResult, 'rollPending'> & { passes: number }) | null> {
   const sql = connect(config.databaseUrl, 2);
   try {
     const store = createSlotlockStore(sql);
@@ -920,9 +920,11 @@ async function maintainTenant(
         sum.conflicts += pass.conflicts;
         sum.refused += pass.refused;
         sum.pruned += pass.pruned;
-        // A capped pass that got nowhere met only series it cannot extend: another would too.
+        // A capped pass that got nowhere met only series it cannot extend. While its roll stopped
+        // before the series it had put back, the next pass meets new ones (and perhaps a healthy
+        // one); once it reached them, another pass would meet them again.
         sum.capped = pass.capped;
-        if (pass.capped && pass.extended + pass.pruned === 0) break;
+        if (pass.capped && pass.extended + pass.pruned === 0 && !pass.rollPending) break;
       }
       return sum;
     });

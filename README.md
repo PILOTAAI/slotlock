@@ -1134,10 +1134,13 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
   tenant list. `startSlotlockMaintenance({ store, sql, tenants, intervalMs })` is the scheduler
   `serve` uses, lock included; `withSlotlockMaintenanceLock` is the lock alone.
 - **Capped passes.** A capped pass that extended and pruned nothing met only series it cannot extend
-  (counted in `conflicts` and `refused`): another pass would too, so wait for the next interval.
+  (counted in `conflicts` and `refused`). The roll puts each behind every series it has not put
+  back, for an hour, so with `rollPending: true` (it stopped before those) run another pass at once:
+  it meets new ones, and a healthy series is reached however many are stuck. Otherwise another pass
+  would meet the same ones, so wait for the next interval.
 - **Paging the roll yourself.** `rollCalendarEventHorizon` returns `next`; pass it as `after` to the
-  next batch of the same pass. A series left in conflict or refused keeps its place at the front of
-  the order, so without `after` every later batch would examine it again.
+  next batch of the same pass, so later batches go on from the last series examined. Series the
+  roll has never put back come first, then those it has, longest waiting first.
 - **Quotas.** Each agent principal may retain 1,000 event identities (active plus cancelled) and
   10,000 idempotency commands, of which 9,000 can be creates or updates, so a cancel always has
   room. Adjust with `agentOwnerEventQuota` and `agentOwnerCommandQuota` on `createSlotlockStore`.

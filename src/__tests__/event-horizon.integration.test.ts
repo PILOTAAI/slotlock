@@ -10,6 +10,7 @@ import {
   calendarEventRollingHorizon,
   createSlotlockStore,
 } from '../store.js';
+import type { CalendarHorizonRollCursor } from '../types.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
 const d = (iso: string) => new Date(iso);
@@ -647,6 +648,40 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
       const second = await maintainSlotlockTenant(store, tenantRef, { batches: 1 });
       expect(second).toMatchObject({ extended: 1, conflicts: 1 });
       expect(await storedWindow(healthy)).toEqual(horizon);
+    }, 60_000);
+
+    it('reaches every series it has not put back before one it has, however many it has put back', async () => {
+      const { tenantRef, resourceId } = await freshTenant();
+      await stuckSeries(tenantRef, 3);
+      const horizon = calendarEventRollingHorizon();
+      const healthy = await dailySeries(tenantRef, resourceId, {
+        start: horizon.start,
+        end: new Date(horizon.start.getTime() + 31 * DAY),
+      });
+      const roll = (extra: { limit?: number; after?: CalendarHorizonRollCursor } = {}) =>
+        store.rollCalendarEventHorizon({ tenantRef, window: horizon, ...extra });
+      // Two passes of one series each put two of the three stuck ones back.
+      const first = await roll({ limit: 1 });
+      const second = await roll({ limit: 1 });
+      const putBack = [...first.conflictEventIds, ...second.conflictEventIds];
+      expect(putBack).toHaveLength(2);
+      // An hour on, both are due again, in the order they were put back.
+      await sql`
+        UPDATE slotlock.calendar_events
+           SET roll_retry_at = roll_retry_at - interval '1 hour 1 second'
+         WHERE tenant_ref = ${tenantRef} AND roll_retry_at IS NOT NULL`;
+      // Before, they were first in the roll's order again, and the next two passes met only them:
+      // with more stuck series than two passes cover, the healthy one never rolled.
+      const third = await roll({ limit: 2 });
+      expect(third).toMatchObject({ examined: 2, extended: 1, conflicts: 1 });
+      expect(putBack).not.toContain(third.conflictEventIds[0]);
+      expect(await storedWindow(healthy)).toEqual(horizon);
+      // Then the ones put back, longest waiting first, a page at a time.
+      const fourth = await roll({ limit: 1 });
+      expect(fourth).toMatchObject({ examined: 1, conflictEventIds: [putBack[0]], hasMore: true });
+      expect(fourth.next?.rollRetryAt).toBeInstanceOf(Date);
+      const fifth = await roll({ limit: 1, ...(fourth.next ? { after: fourth.next } : {}) });
+      expect(fifth).toMatchObject({ examined: 1, conflictEventIds: [putBack[1]], hasMore: false });
     }, 60_000);
   });
 });

@@ -278,7 +278,9 @@ function recurrenceEndsByColumn(event: CalendarEventContent): string | null {
 /** The roll's `after`, checked, or `undefined` for a pass's first batch. */
 function rollCursor(after: CalendarHorizonRollCursor | undefined): CalendarHorizonRollCursor | undefined {
   if (after === undefined) return undefined;
+  const retryAt = after.rollRetryAt ?? null;
   if (
+    (retryAt !== null && (!(retryAt instanceof Date) || !Number.isFinite(retryAt.getTime()))) ||
     !(after.materializedEndsAt instanceof Date) ||
     !Number.isFinite(after.materializedEndsAt.getTime()) ||
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(after.eventId)
@@ -4144,9 +4146,14 @@ function buildSlotlockStore(
       }
       const after = rollCursor(params.after);
       // Due: the masters rolledWindow rolls, which do not cover the window and end within the cap
-      // of its start.
-      const candidates = await sql<{ id: string; materialized_ends_at: Date }[]>`
-        SELECT id, materialized_ends_at
+      // of its start. Those it has never put back come first, then those it has, longest waiting
+      // first: however many it cannot extend, they never stand in front of one it has not tried,
+      // so every pass that is not capped by such new ones reaches the healthy series, and the ones
+      // put back take turns.
+      const candidates = await sql<
+        { id: string; materialized_ends_at: Date; roll_retry_at: Date | null }[]
+      >`
+        SELECT id, materialized_ends_at, roll_retry_at
           FROM slotlock.calendar_events
          WHERE tenant_ref = ${params.tenantRef}
            AND recurrence_rule IS NOT NULL
@@ -4159,10 +4166,11 @@ function buildSlotlockStore(
            AND (roll_retry_at IS NULL OR roll_retry_at <= now())
            AND (
              ${after?.materializedEndsAt ?? null}::timestamptz IS NULL
-             OR (materialized_ends_at, id) >
-                (${after?.materializedEndsAt ?? null}::timestamptz, ${after?.eventId ?? null}::uuid)
+             OR (COALESCE(roll_retry_at, '-infinity'), materialized_ends_at, id) >
+                (COALESCE(${after?.rollRetryAt ?? null}::timestamptz, '-infinity'),
+                 ${after?.materializedEndsAt ?? null}::timestamptz, ${after?.eventId ?? null}::uuid)
            )
-         ORDER BY materialized_ends_at, id
+         ORDER BY COALESCE(roll_retry_at, '-infinity'), materialized_ends_at, id
          LIMIT ${limit + 1}`;
       const due = candidates.slice(0, limit);
       let extended = 0;
@@ -4221,7 +4229,13 @@ function buildSlotlockStore(
         refusedEventIds,
         hasMore,
         next:
-          hasMore && last ? { materializedEndsAt: last.materialized_ends_at, eventId: last.id } : null,
+          hasMore && last
+            ? {
+                rollRetryAt: last.roll_retry_at,
+                materializedEndsAt: last.materialized_ends_at,
+                eventId: last.id,
+              }
+            : null,
       };
     },
 

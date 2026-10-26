@@ -988,12 +988,12 @@ export function createSlotlockStoreApplicationBackend(
     async runMaintenance(context) {
       assertActive(context);
       try {
-        return {
-          ...(await maintainSlotlockTenant(store, tenantOf(context), {
-            batches,
-            signal: context.signal,
-          })),
-        };
+        // A caller goes round again while `capped`; when to do so at once is the scheduler's.
+        const { rollPending: _, ...result } = await maintainSlotlockTenant(store, tenantOf(context), {
+          batches,
+          signal: context.signal,
+        });
+        return result;
       } catch (error) {
         if (context.signal.aborted) throw new SlotlockAgentOperationError('request_aborted', 503);
         throw error;

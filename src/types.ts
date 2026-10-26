@@ -342,8 +342,16 @@ export type CancelCalendarEventResult =
   | { ok: false; code: 'owner_command_quota_exceeded'; limit: number }
   | { ok: false; code: 'revision_conflict'; currentRevision: number };
 
-/** A place in the roll's order of due masters: the last one a batch examined. */
+/**
+ * A place in the roll's order of due masters: the last one a batch examined. The roll takes the
+ * masters it has never put back first, then those it has, longest waiting first.
+ */
 export interface CalendarHorizonRollCursor {
+  /**
+   * When the master was due to be examined again, if the roll had put it back; null (or, from a
+   * cursor of an earlier release, missing) when it had not.
+   */
+  rollRetryAt?: Date | null;
   materializedEndsAt: Date;
   eventId: string;
 }
@@ -359,7 +367,7 @@ export interface CalendarHorizonRollResult {
   extended: number;
   /**
    * Masters whose new occurrence collided; their previous coverage remains intact, and they wait an
-   * hour before a roll examines them again, behind the masters it can extend.
+   * hour before a roll examines them again, behind every master it has not put back.
    */
   conflicts: number;
   /** The ids of those masters: what blocks each is a booking or hold on its new occurrences. */
@@ -367,7 +375,7 @@ export interface CalendarHorizonRollResult {
   /**
    * Masters whose rule takes more than the expansion budget to reach the window (one that never
    * occurs again, or almost never); their previous coverage remains intact, and they wait an hour
-   * before a roll examines them again.
+   * before a roll examines them again, behind every master it has not put back.
    */
   refused: number;
   /** The ids of those masters, to find and fix them. */
@@ -375,9 +383,8 @@ export interface CalendarHorizonRollResult {
   /** True when more due masters remain beyond this bounded batch. */
   hasMore: boolean;
   /**
-   * Pass as `after` for the next batch of this pass, so the masters this batch left behind (in
-   * conflict or refused, which keep their place at the front of the order) are not examined again
-   * by every later batch. `null` when none remain.
+   * Pass as `after` for the next batch of this pass, so the masters this batch examined are not
+   * examined again by every later batch. `null` when none remain.
    */
   next: CalendarHorizonRollCursor | null;
 }

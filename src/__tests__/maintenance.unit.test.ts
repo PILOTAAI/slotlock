@@ -36,7 +36,13 @@ const DONE_PURGE: BookingRetentionResult = {
   tombstonesDeleted: 0,
   hasMore: false,
 };
-const cursor = (n: number) => ({ materializedEndsAt: new Date(Date.UTC(2027, 0, n)), eventId: `event-${n}` });
+const cursor = (n: number) => ({
+  rollRetryAt: null,
+  materializedEndsAt: new Date(Date.UTC(2027, 0, n)),
+  eventId: `event-${n}`,
+});
+/** A place among the series the roll has put back, which it reaches after every other. */
+const retryCursor = (n: number) => ({ ...cursor(n), rollRetryAt: new Date(Date.UTC(2026, 11, 31)) });
 
 /** A store whose tenants answer from queues of results, then with nothing left to do. */
 function fakeStore() {
@@ -132,6 +138,7 @@ const result = (overrides: Partial<SlotlockMaintenanceResult> = {}): SlotlockMai
   refused: 0,
   pruned: 0,
   capped: false,
+  rollPending: false,
   ...overrides,
 });
 
@@ -187,7 +194,13 @@ describe('maintainSlotlockTenant', () => {
     const fake = fakeStore();
     fake.roll('fleet', ...[1, 2, 3].map((n) => ({ ...DONE_ROLL, extended: 1, hasMore: true, next: cursor(n) })));
     expect(await maintainSlotlockTenant(fake.store, 'fleet', { batches: 2 })).toEqual(
-      result({ extended: 2, capped: true }),
+      result({ extended: 2, capped: true, rollPending: true }),
+    );
+    // A roll that stopped among the series it put back has nothing new left behind.
+    const retries = fakeStore();
+    retries.roll('fleet', ...[1, 2].map((n) => ({ ...DONE_ROLL, refused: 1, hasMore: true, next: retryCursor(n) })));
+    expect(await maintainSlotlockTenant(retries.store, 'fleet', { batches: 1 })).toEqual(
+      result({ refused: 1, capped: true }),
     );
     const prunes = fakeStore();
     prunes.prune('fleet', ...[1, 2].map(() => ({ commandsDeleted: 5, tombstonesDeleted: 0, hasMore: true })));
@@ -327,10 +340,10 @@ describe('startSlotlockMaintenance', () => {
     const fake = fakeStore();
     // Ten batches of one extended series, then the rest: two passes back to back.
     fake.roll('fleet', ...Array.from({ length: 12 }, (_, n) => ({ ...DONE_ROLL, extended: 1, hasMore: true, next: cursor(n + 1) })));
-    // Another tenant whose only due series are ones it cannot extend: capped, but no progress. The
-    // store puts those behind the rest, so it goes round once more to reach what lies behind them,
-    // and then waits: a store that kept answering the same ones never loops.
-    fake.roll('stuck', ...Array.from({ length: 30 }, (_, n) => ({ ...DONE_ROLL, refused: 1, hasMore: true, next: cursor(n + 1) })));
+    // Another tenant whose pass meets only series the roll has put back before, and cannot extend
+    // again: capped, but nothing behind them is new, since the roll reaches them after every other
+    // series. It waits for the next interval: a store that kept answering them never loops.
+    fake.roll('stuck', ...Array.from({ length: 30 }, (_, n) => ({ ...DONE_ROLL, refused: 1, hasMore: true, next: retryCursor(n + 1) })));
     const onPass = vi.fn();
     const scheduler = startSlotlockMaintenance({
       store: fake.store,
@@ -342,13 +355,41 @@ describe('startSlotlockMaintenance', () => {
     await settle();
     await settle();
     expect(onPass.mock.calls.map(([pass]) => pass)).toEqual([
-      result({ extended: 10, capped: true }),
+      result({ extended: 10, capped: true, rollPending: true }),
       result({ refused: 10, capped: true }),
       result({ extended: 2 }),
-      result({ refused: 10, capped: true }),
     ]);
     await settle();
-    expect(onPass).toHaveBeenCalledTimes(4);
+    expect(onPass).toHaveBeenCalledTimes(3);
+    await scheduler.close();
+  });
+
+  it('goes round again while a capped pass stops among series not yet put back, however many are stuck', async () => {
+    const fake = fakeStore();
+    // 30 batches of series the roll meets for the first time and cannot extend, then a healthy one:
+    // each pass puts its ten behind every other series, so the next one meets new ones.
+    fake.roll(
+      'stuck',
+      ...Array.from({ length: 30 }, (_, n) => ({ ...DONE_ROLL, conflicts: 1, hasMore: true, next: cursor(n + 1) })),
+      { ...DONE_ROLL, extended: 1 },
+    );
+    const onPass = vi.fn();
+    const scheduler = startSlotlockMaintenance({
+      store: fake.store,
+      sql: fakeSql().sql,
+      tenants: ['stuck'],
+      intervalMs: HOUR,
+      onPass,
+    });
+    for (let i = 0; i < 4; i++) await settle();
+    // Before, it went round once more after a blocked pass and then waited an interval, by which
+    // time the first ones were due again: more than two passes' worth starved the healthy one.
+    expect(onPass.mock.calls.map(([pass]) => pass)).toEqual([
+      result({ conflicts: 10, capped: true, rollPending: true }),
+      result({ conflicts: 10, capped: true, rollPending: true }),
+      result({ conflicts: 10, capped: true, rollPending: true }),
+      result({ extended: 1 }),
+    ]);
     await scheduler.close();
   });
 

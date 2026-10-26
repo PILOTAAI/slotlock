@@ -19,6 +19,13 @@ versioning.
 
 ### Fixed
 
+- Series the roll cannot extend (in conflict or over the budget) no longer keep a healthy series
+  from rolling, however many there are. The roll puts each behind every series it has not put back,
+  for an hour, and takes those it has put back in turn, longest waiting first; its cursor carries
+  where it is in that order (`rollRetryAt`). A maintenance pass says when its roll stopped before
+  them (`rollPending`), and `slotlock serve` and `slotlock maintain` then go round again at once, so
+  each stuck series is met once before a healthy one is reached. Before, every pass met the same
+  stuck series first, and with more of them than a pass examines a healthy one never rolled.
 - A runtime dependency bump no longer breaks the release checks. The packed NOTICE is written at
   build time from `package.json` and `package-lock.json` (`scripts/notice.mjs`), naming the exact
   version of each dependency and the packages each pulls in; the repository's NOTICE names each

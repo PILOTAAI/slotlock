@@ -229,6 +229,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         refused: 0,
         pruned: 0,
         capped: false,
+        rollPending: false,
       });
       expect(origin).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
 
