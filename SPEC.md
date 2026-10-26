@@ -323,8 +323,11 @@ when `allowInsecureLocalhost` is set. Publishing metadata grants nothing: the em
 
 Every authenticated principal carries a tenant and scopes from `read`, `write` and `admin`. A read
 operation needs `read`; an event write needs `write`. The application API (resources, weekly hours,
-holds, reservations, coverage and maintenance, as REST under `/v1` beside the tools) needs `admin`.
-It is never an MCP tool or an A2A skill and never waits for a confirmation.
+holds, reservations, coverage, every key's events, the tenant itself and maintenance, as REST under
+`/v1` beside the tools) needs `admin`. It is never an MCP tool or an A2A skill and never waits for a
+confirmation. Through it a tenant may cancel any of its events, whichever key wrote it, and, only
+where the server allows it and with its own reference as confirmation, erase itself; it never
+suspends itself or lifts a suspension, which only the deployment role does.
 
 An API key is a random secret, stored only as its SHA-256 digest and reached only through
 `SECURITY DEFINER` functions. It acts in the tenant it was created in, with the scopes it was given
