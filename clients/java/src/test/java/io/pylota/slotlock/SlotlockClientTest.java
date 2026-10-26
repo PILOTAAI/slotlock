@@ -214,6 +214,32 @@ class SlotlockClientTest {
   }
 
   @Test
+  void retriesAKeyedHoldAndRetiresAResource() {
+    assumeTrue(client != null, "set SLOTLOCK_URL and SLOTLOCK_ADMIN_KEY to run against a server");
+    Map<String, Object> resource = map(client.createResource("java-retire-" + suffix, Map.of("visibility", "private")).get("resource"));
+    assertEquals("private", resource.get("visibility"));
+    String id = (String) resource.get("id");
+    client.setResourceAvailability(id, ALL_WEEK);
+    // A keyed hold retried answers the hold the first request made.
+    Map<String, Object> keyed = Map.of("idempotency_key", "java-hold-" + suffix);
+    Map<String, Object> hold = map(client.acquireHold(id, at(9), at(10), 600, keyed).get("hold"));
+    assertEquals(hold, client.acquireHold(id, at(9), at(10), 600, keyed).get("hold"));
+    refused(409, "idempotency_conflict", () -> client.acquireHold(id, at(9), at(10), 60, keyed));
+    String holdId = (String) hold.get("id");
+    assertEquals(hold, client.getHold(holdId).get("hold"));
+    // Confirmed, it is the reservation its id names, cancelled by that reference.
+    Object confirmed = client.confirmHold(holdId).get("reservation");
+    assertEquals(confirmed, client.getReservation(holdId).get("reservation"));
+    client.cancelReservation(holdId, 2);
+    refused(404, "reservation_not_found", () -> client.getReservation(holdId));
+
+    assertTrue(map(client.archiveResource(id).get("resource")).get("archived_at") instanceof String);
+    assertNull(map(client.restoreResource(id).get("resource")).get("archived_at"));
+    assertEquals(Map.of("deleted", true), client.deleteResource(id));
+    refused(404, "resource_not_found", () -> client.getResource(id));
+  }
+
+  @Test
   void saysWhyACallWasRefused() {
     assumeTrue(client != null, "set SLOTLOCK_URL and SLOTLOCK_ADMIN_KEY to run against a server");
     refused(404, "resource_not_found", () -> client.getResource("00000000-0000-4000-8000-000000000000"));

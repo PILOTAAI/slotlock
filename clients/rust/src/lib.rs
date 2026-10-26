@@ -9,7 +9,7 @@
 //!     start: "2027-03-29T09:00:00Z".into(),
 //!     end: "2027-03-29T10:00:00Z".into(),
 //!     ttl_seconds: 600,
-//!     source: None,
+//!     ..Default::default()
 //! })?;
 //! # Ok::<(), slotlock::Error>(())
 //! ```

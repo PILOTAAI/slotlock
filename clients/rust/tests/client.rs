@@ -140,6 +140,7 @@ fn books_holds_and_reservations_without_double_booking() {
         .create_resource(&CreateResourceInput {
             external_ref: format!("rust-{}", s.suffix),
             timezone: Some("UTC".into()),
+            ..Default::default()
         })
         .unwrap()["resource"]
         .clone();
@@ -165,6 +166,7 @@ fn books_holds_and_reservations_without_double_booking() {
         end: s.at(10.0),
         ttl_seconds: 600,
         source: Some("checkout".into()),
+        ..Default::default()
     };
     let hold = c.acquire_hold(&window).unwrap()["hold"].clone();
     assert_eq!(hold["source"], "checkout");
@@ -217,7 +219,7 @@ fn books_holds_and_reservations_without_double_booking() {
             start: s.at(12.25),
             end: s.at(12.5),
             ttl_seconds: 60,
-            source: None,
+            ..Default::default()
         }),
         409,
         "overlap",
@@ -296,7 +298,7 @@ fn writes_events_and_clears_a_field_with_null() {
     let id = c
         .create_resource(&CreateResourceInput {
             external_ref: format!("rust-events-{}", s.suffix),
-            timezone: None,
+            ..Default::default()
         })
         .unwrap()["resource"]["id"]
         .as_str()
@@ -349,6 +351,107 @@ fn writes_events_and_clears_a_field_with_null() {
         }),
         428,
         "confirmation_required",
+    );
+}
+
+#[test]
+fn retries_a_keyed_hold_and_retires_a_resource() {
+    let Some(s) = server() else {
+        return eprintln!("set SLOTLOCK_URL and SLOTLOCK_ADMIN_KEY to run against a server");
+    };
+    let c = &s.client;
+    let resource = c
+        .create_resource(&CreateResourceInput {
+            external_ref: format!("rust-retire-{}", s.suffix),
+            visibility: Some("private".into()),
+            ..Default::default()
+        })
+        .unwrap()["resource"]
+        .clone();
+    assert_eq!(resource["visibility"], "private");
+    let id = resource["id"].as_str().unwrap().to_string();
+    c.set_resource_availability(&SetResourceAvailabilityInput {
+        resource_id: id.clone(),
+        rules: Some(all_week()),
+    })
+    .unwrap();
+    // A keyed hold retried answers the hold the first request made.
+    let window = AcquireHoldInput {
+        resource_id: id.clone(),
+        start: s.at(9.0),
+        end: s.at(10.0),
+        ttl_seconds: 600,
+        idempotency_key: Some(format!("rust-hold-{}", s.suffix)),
+        ..Default::default()
+    };
+    let hold = c.acquire_hold(&window).unwrap()["hold"].clone();
+    assert_eq!(c.acquire_hold(&window).unwrap()["hold"], hold);
+    refused(
+        c.acquire_hold(&AcquireHoldInput {
+            ttl_seconds: 60,
+            ..window.clone()
+        }),
+        409,
+        "idempotency_conflict",
+    );
+    let hold_id = hold["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        c.get_hold(&GetHoldInput {
+            hold_id: hold_id.clone()
+        })
+        .unwrap()["hold"],
+        hold
+    );
+    // Confirmed, it is the reservation its id names, cancelled by that reference.
+    let confirmed = c
+        .confirm_hold(&ConfirmHoldInput {
+            hold_id: hold_id.clone(),
+        })
+        .unwrap()["reservation"]
+        .clone();
+    assert_eq!(
+        c.get_reservation(&GetReservationInput {
+            reservation_ref: hold_id.clone()
+        })
+        .unwrap()["reservation"],
+        confirmed
+    );
+    c.cancel_reservation(&CancelReservationInput {
+        reservation_ref: hold_id.clone(),
+        revision: 2,
+    })
+    .unwrap();
+    refused(
+        c.get_reservation(&GetReservationInput {
+            reservation_ref: hold_id,
+        }),
+        404,
+        "reservation_not_found",
+    );
+
+    let archived = c
+        .archive_resource(&ArchiveResourceInput {
+            resource_id: id.clone(),
+        })
+        .unwrap();
+    assert!(archived["resource"]["archived_at"].is_string());
+    let restored = c
+        .restore_resource(&RestoreResourceInput {
+            resource_id: id.clone(),
+        })
+        .unwrap();
+    assert!(restored["resource"]["archived_at"].is_null());
+    assert_eq!(
+        c.delete_resource(&DeleteResourceInput {
+            resource_id: id.clone()
+        })
+        .unwrap(),
+        json!({ "deleted": true })
+    );
+    refused(
+        c.get_resource(&GetResourceInput { resource_id: id }),
+        404,
+        "resource_not_found",
     );
 }
 

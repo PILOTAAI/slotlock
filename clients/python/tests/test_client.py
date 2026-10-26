@@ -325,6 +325,63 @@ class AgainstAServer(unittest.TestCase):
             ),
         )
 
+    def test_reads_holds_and_retires_a_resource_and_any_keys_event(self) -> None:
+        client = self.client
+        resource = client.create_resource(external_ref=f"python-retire-{self.suffix}", visibility="private")
+        resource_id = resource["resource"]["id"]
+        self.assertEqual(resource["resource"]["visibility"], "private")
+        client.set_resource_availability(resource_id, rules=ALL_WEEK)
+        # A keyed hold retried answers the hold the first request made.
+        window = {"resource_id": resource_id, "start": self.at(9), "end": self.at(10), "ttl_seconds": 600}
+        key = str(uuid.uuid4())
+        hold = client.acquire_hold(**window, idempotency_key=key)["hold"]
+        self.assertEqual(client.acquire_hold(**window, idempotency_key=key)["hold"], hold)
+        self.refused(
+            409,
+            "idempotency_conflict",
+            lambda: client.acquire_hold(**{**window, "ttl_seconds": 60}, idempotency_key=key),
+        )
+        self.assertEqual(client.get_hold(hold["id"])["hold"], hold)
+        self.assertEqual(client.list_holds(resource_id), {"holds": [hold], "next_cursor": None})
+        # Confirmed, it is the reservation its id names, and is cancelled by that reference.
+        confirmed = client.confirm_hold(hold["id"])["reservation"]
+        self.assertEqual(client.get_reservation(hold["id"])["reservation"], confirmed)
+        listed = client.list_reservations(resource_id, start=self.at(0), end=self.at(24))
+        self.assertEqual(listed["reservations"], [confirmed])
+        self.assertEqual(client.cancel_reservation(hold["id"], revision=2), {"cancelled": True, "revision": 2})
+        self.refused(404, "reservation_not_found", lambda: client.get_reservation(hold["id"]))
+
+        shared_id = client.create_resource(external_ref=f"python-events-{self.suffix}-t")["resource"]["id"]
+        created = client.create_event(
+            resource_id=shared_id,
+            starts_at=self.at(14),
+            ends_at=self.at(15),
+            timezone="UTC",
+            idempotency_key=str(uuid.uuid4()),
+        )["event"]
+        events = client.list_tenant_events(resource_id=shared_id, start=self.at(0), end=self.at(24))["events"]
+        self.assertEqual([event["event_ref"] for event in events], [created["id"]])
+        busy = client.list_busy(shared_id, start=self.at(0), end=self.at(24))["busy"]
+        self.assertEqual(busy, [{"start": events[0]["starts_at"], "end": events[0]["ends_at"]}])
+        # The tenant cancels it without the confirmation its key's delete waits for.
+        cancelled = client.cancel_tenant_event(
+            events[0]["id"], expected_revision=created["revision"], idempotency_key=str(uuid.uuid4())
+        )
+        self.assertEqual((cancelled["cancelled"], cancelled["replayed"]), (True, False))
+        self.refused(404, "event_not_found", lambda: client.get_tenant_event(events[0]["id"]))
+
+        archived = client.archive_resource(resource_id)["resource"]
+        self.assertIsNotNone(archived["archived_at"])
+        self.assertIsNone(client.restore_resource(resource_id)["resource"]["archived_at"])
+        self.assertEqual(client.delete_resource(resource_id), {"deleted": True})
+        self.assertEqual(client.delete_resource(resource_id), {"deleted": False})
+        tenant = client.get_tenant()["tenant"]
+        self.assertFalse(tenant["suspended"])
+        # The server leaves erasing a tenant to its operator.
+        self.refused(
+            403, "tenant_erasure_disabled", lambda: client.erase_tenant(confirm_tenant_ref=tenant["ref"])
+        )
+
     def test_says_why_a_call_was_refused(self) -> None:
         self.refused(
             404,

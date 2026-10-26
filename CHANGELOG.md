@@ -118,7 +118,9 @@ versioning.
   367 days; `GET /v1/tenant/events` and `GET`/`DELETE /v1/tenant/events/{id}`, which reach and
   cancel any key's event, a revoked one's included; and `GET /v1/tenant`, the key's tenant and
   whether it is suspended. A confirmed hold is cancelled by its id as a reservation reference, as
-  it always was; `slotlock_confirm_hold` now says so.
+  it always was; `slotlock_confirm_hold` now says so. New optional arguments come after the old
+  ones in every client; a Rust input struct written out field by field needs `..Default::default()`
+  for the fields it gained (`CreateResourceInput`, `AcquireHoldInput`, `UpdateEventInput`).
 - `POST /v1/tenant/erase` erases the key's tenant, with its reference as `confirm_tenant_ref`. It is
   off unless the application backend is created with `tenantErasure: true` (`slotlock serve` leaves
   it off) and refused while the tenant is suspended. Suspension stays the operator's: the store
