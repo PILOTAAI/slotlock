@@ -188,6 +188,17 @@ export function slotlockClientKey(value: string): string | null {
   return null;
 }
 
+/**
+ * The network a client key (slotlockClientKey) signs in from: an IPv6 /64's /48, any other key
+ * itself. A site is generally given a /48 or a /56 (RFC 6177) and may use each /64 in it, so a
+ * budget per /64 would let one site sign in as thousands of clients and use up a ceiling every
+ * client shares; per /48, a site counts as one, as a site behind one IPv4 address does.
+ */
+export function slotlockClientNetwork(key: string): string {
+  const prefix = /^([0-9a-f]{1,4}:[0-9a-f]{1,4}:[0-9a-f]{1,4}):[0-9a-f]{1,4}::\/64$/.exec(key);
+  return prefix ? `${prefix[1]}::/48` : key;
+}
+
 /** The client a request is counted as: the trusted field's last address, else the connection's. */
 function clientOf(
   request: Request,
@@ -742,12 +753,15 @@ export function createSlotlockRequestLimits(
               }
             }
           }
-          // Before anything is looked up: every request from the address, and its sign-ins. Not
-          // the health check, which a proxy in front asks from the address its requests share, and
-          // which reuses one database check a second.
+          // Before anything is looked up: every request from the address, and its sign-ins from
+          // its network, as the dashboard Worker counts them. Not the health check, which a proxy
+          // in front asks from the address its requests share, and which reuses one database
+          // check a second.
           const before = charge([
             ...(route === 'health' ? [] : [{ name: 'address' as const, key: address }]),
-            ...(route === 'sign_in' ? [{ name: 'sign_in' as const, key: address }] : []),
+            ...(route === 'sign_in'
+              ? [{ name: 'sign_in' as const, key: slotlockClientNetwork(address) }]
+              : []),
           ]);
           if (!before.ok) {
             count('rate_limited', address);

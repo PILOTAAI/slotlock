@@ -183,7 +183,9 @@ versioning.
   together, `SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT`. Until it is bound, `SLOTLOCK_SIGN_IN_RATE_LIMIT`
   counts every client together, as before, and the Worker logs a warning: add the ceiling before
   lowering that binding's limit to one client's. The dashboard runs at most two sign-ins from one
-  client at once. The Worker counts a client as `slotlock serve` does: an IPv6 client is its /64.
+  client at once. The Worker counts a client as `slotlock serve` does: an IPv6 client is its /64,
+  and its sign-ins are counted by its /48, so a site rotating through its /64s cannot use up the
+  ceiling every other client shares.
 - `slotlock serve`'s `/healthz` reuses one database check a second.
 - `slotlock --help` describes the server token as read and write, never admin.
 

@@ -226,7 +226,9 @@ export interface SlotlockLimits {
  * - `app_*`: a request to the application API (application-api.ts) takes its read and write tokens
  *   from its tenant's application buckets instead of the key and tenant ones, so the application
  *   and the tenant's agents cannot use up each other's budget; `global_*` counts it as well.
- * - `sign_in`: dashboard sign-ins and their callbacks from one client address.
+ * - `sign_in`: dashboard sign-ins and their callbacks from one client network: an IPv4 address,
+ *   or an IPv6 client's /48 (slotlockClientNetwork in rate-limit.ts), as the dashboard Worker
+ *   counts them.
  * - `tenant_series_writes` and `series_writes`: writes that may expand a recurring series (a
  *   recurring create, any update) running at once in a tenant and in each server process.
  * - `maintenance_runs`: the application API's maintenance runs at once in each server process, one

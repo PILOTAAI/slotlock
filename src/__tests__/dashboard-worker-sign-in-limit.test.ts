@@ -1,5 +1,5 @@
 // The dashboard Worker's sign-in limits count every request the dashboard routes to a sign-in or its
-// callback: per client address (SLOTLOCK_SIGN_IN_RATE_LIMIT), and for every client together under a
+// callback: per client network (SLOTLOCK_SIGN_IN_RATE_LIMIT), and for every client together under a
 // higher ceiling (SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT). The dashboard routes a path with one
 // trailing slash as the path without it, so `/dashboard/sign-in/` and `/dashboard/callback/` are
 // sign-ins too. No database is needed: a refused request never opens a client.
@@ -120,13 +120,38 @@ describe('SEC-12: sign-ins are limited per client, under a higher ceiling for al
       statuses.push((await worker.fetch(from(`2001:db8:1:2::${index.toString(16)}`), env, ctx)).status);
     }
     // The /64 took two of the ceiling's five, so other clients still sign in.
-    for (const address of ['198.51.100.4', '2001:db8:1:3::1']) {
+    for (const address of ['198.51.100.4', '2001:db8:2:3::1']) {
       statuses.push((await worker.fetch(from(address), env, ctx)).status);
     }
     expect(statuses).toEqual([302, 302, 429, 429, 429, 429, 302, 302]);
-    const clients = ['2001:db8:1:2::/64', '198.51.100.4', '2001:db8:1:3::/64'];
-    expect(new Set(signIn.asked)).toEqual(new Set(clients.map((key) => `sign-in:${key}`)));
+    const clients = ['2001:db8:1:2::/64', '198.51.100.4', '2001:db8:2:3::/64'];
+    const networks = ['2001:db8:1::/48', '198.51.100.4', '2001:db8:2::/48'];
+    expect(new Set(signIn.asked)).toEqual(new Set(networks.map((key) => `sign-in:${key}`)));
     expect(new Set(client.asked)).toEqual(new Set(clients.map((key) => `client:${key}`)));
+  });
+
+  it("counts an IPv6 client's sign-ins by its /48, so rotating /64s cannot use up the ceiling (SEC-12)", async () => {
+    // The verifier's probe after the /64 fix: sign-ins from 2001:db8:1:0::1, 2001:db8:1:1::1 and
+    // on, each /64 within its own limit, used up the ceiling every client shares, and the next
+    // visitor was refused. A /48 is one site's allocation, as one IPv4 address is a site behind NAT.
+    const signIn = limiter(2);
+    const ceiling = limiter(5);
+    const client = limiter();
+    const env = { ...environment(signIn, ceiling), SLOTLOCK_CLIENT_RATE_LIMIT: client };
+    const worker = createSlotlockDashboardWorker();
+    const statuses: number[] = [];
+    for (let index = 0; index < 8; index += 1) {
+      statuses.push((await worker.fetch(from(`2001:db8:1:${index.toString(16)}::1`), env, ctx)).status);
+    }
+    for (const address of ['198.51.100.4', '2001:db8:2:0::1']) {
+      statuses.push((await worker.fetch(from(address), env, ctx)).status);
+    }
+    expect(statuses).toEqual([302, 302, 429, 429, 429, 429, 429, 429, 302, 302]);
+    expect(new Set(signIn.asked)).toEqual(
+      new Set(['sign-in:2001:db8:1::/48', 'sign-in:198.51.100.4', 'sign-in:2001:db8:2::/48']),
+    );
+    // Every other dashboard request is still counted per /64.
+    expect(client.asked[1]).toBe('client:2001:db8:1:1::/64');
   });
 
   it('still bounds every client together', async () => {

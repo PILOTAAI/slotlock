@@ -253,7 +253,9 @@ this one and read its session secret, which signs in as any tenant.
   isolates, so three rate limiting bindings bound them all:
   - `SLOTLOCK_CLIENT_RATE_LIMIT` counts every dashboard request per client address (an IPv6
     client's /64, as `slotlock serve` counts it);
-  - `SLOTLOCK_SIGN_IN_RATE_LIMIT` counts sign-ins and callbacks per client address;
+  - `SLOTLOCK_SIGN_IN_RATE_LIMIT` counts sign-ins and callbacks per client network (an IPv6
+    client's /48, a site's allocation, as `slotlock serve` counts its sign-ins), so a site rotating
+    through its /64s cannot use up the ceiling;
   - `SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT` counts them from every client together, set far above one
     client's limit so a few clients cannot use it up for everyone.
 
