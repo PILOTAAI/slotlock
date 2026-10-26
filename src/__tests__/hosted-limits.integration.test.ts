@@ -648,8 +648,10 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
       // Before slots were shared fairly, B queued behind every one of A's waiting writes and was
       // answered 503 server_busy once it had waited two seconds.
       expect([recurring.status, updated.status], detail).toEqual([200, 200]);
-      // A write of A's may be expanding when B's arrives, and B's own expansion follows it.
-      expect(Math.max(recurring.ms, updated.ms), detail).toBeLessThan(3 * single);
+      // A write of A's may be expanding when B's arrives, and B's own expansion follows it. Queued
+      // behind A's writes instead, B waited the two seconds and was refused; a floor of a second
+      // keeps a loaded runner's slower expansions (a 110 ms write took 416 ms) from failing it.
+      expect(Math.max(recurring.ms, updated.ms), detail).toBeLessThan(Math.max(1_000, 3 * single));
       expect(outcomes['429'] ?? 0, detail).toBeGreaterThan(40);
     } finally {
       await server.stop();
