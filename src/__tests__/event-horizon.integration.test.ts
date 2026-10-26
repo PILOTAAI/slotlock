@@ -235,6 +235,50 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
       ).resolves.toMatchObject({ ok: true });
     });
 
+    it('lets an event past the horizon be renamed, but not moved, once a series reaches past it', async () => {
+      const { tenantRef, resourceId } = await freshTenant();
+      const horizon = calendarEventRollingHorizon();
+      const past = new Date(horizon.end.getTime() + 3 * DAY + 12 * HOUR);
+      const handover = {
+        tenantRef,
+        externalRef: `handover-${crypto.randomUUID()}`,
+        resourceId,
+        timezone: 'UTC',
+      };
+      // Booked before the series existed, so nothing refused it.
+      const made = await store.putCalendarEvent({
+        ...handover,
+        idempotencyKey: `create-${crypto.randomUUID()}`,
+        expectedRevision: 0,
+        start: past,
+        end: new Date(past.getTime() + HOUR),
+        summary: 'Handover',
+      });
+      expect(made).toMatchObject({ ok: true, revision: 1 });
+      await dailySeries(tenantRef, resourceId, horizon);
+      // The rename occupies no time the event did not hold already.
+      await expect(
+        store.putCalendarEvent({
+          ...handover,
+          idempotencyKey: `rename-${crypto.randomUUID()}`,
+          expectedRevision: 1,
+          start: past,
+          end: new Date(past.getTime() + HOUR),
+          summary: 'Handover, keys at the desk',
+        }),
+      ).resolves.toMatchObject({ ok: true, revision: 2 });
+      await expect(
+        store.putCalendarEvent({
+          ...handover,
+          idempotencyKey: `move-${crypto.randomUUID()}`,
+          expectedRevision: 2,
+          start: new Date(past.getTime() - 3 * HOUR),
+          end: new Date(past.getTime() - 2 * HOUR),
+          summary: 'Handover, keys at the desk',
+        }),
+      ).resolves.toEqual({ ok: false, code: 'recurrence_not_materialized' });
+    });
+
     it('lets a long write past the horizon through when every series on the resource has ended before it', async () => {
       const { tenantRef, resourceId } = await freshTenant();
       const horizon = calendarEventRollingHorizon();

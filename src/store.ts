@@ -1696,6 +1696,28 @@ async function recurrenceCoversWrite(
   return (await behind()).length === 0;
 }
 
+/**
+ * Whether an event already occupies, on the resource, all the time `occurrences` would: such a
+ * write (a rename, a new description) takes no time a series could later need, so it is not held
+ * to where the series on the resource are stored.
+ */
+async function holdsEveryOccurrence(
+  tx: TransactionSql,
+  eventId: string,
+  resourceId: string,
+  occurrences: readonly CalendarEventOccurrence[],
+): Promise<boolean> {
+  const held = await tx<{ start: Date; end: Date }[]>`
+    SELECT reservation.starts_at AS start, reservation.ends_at AS end
+      FROM slotlock.calendar_event_occurrences occurrence
+      JOIN slotlock.reservations reservation ON reservation.id = occurrence.reservation_id
+     WHERE occurrence.event_id = ${eventId}
+       AND reservation.resource_id = ${resourceId}`;
+  return occurrences.every((occurrence) =>
+    held.some(({ start, end }) => start <= occurrence.start && occurrence.end <= end),
+  );
+}
+
 /** From the earliest start to the latest end of an event's occurrences, or null for none. */
 function occurrenceSpan(occurrences: readonly CalendarEventOccurrence[]): Interval | null {
   const [first] = occurrences;
@@ -3831,7 +3853,11 @@ function buildSlotlockStore(
             const eventId = found?.id ?? randomUUID();
             const revision = currentRevision + 1;
             const reach = occurrenceSpan(occurrences);
-            if ((event.transparency ?? 'opaque') === 'opaque' && reach) {
+            if (
+              (event.transparency ?? 'opaque') === 'opaque' &&
+              reach &&
+              !(found && (await holdsEveryOccurrence(tx, found.id, params.resourceId, occurrences)))
+            ) {
               if (
                 !(await recurrenceCoversWrite(tx, {
                   tenantRef: params.tenantRef,

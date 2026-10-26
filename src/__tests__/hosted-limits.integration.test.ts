@@ -20,6 +20,25 @@ const openApi = JSON.parse(readFileSync(new URL('../../openapi.json', import.met
 };
 /** The audit's crafted rule: never an occurrence, so expansion runs to its step and time budget. */
 const COSTLY_RULE = 'FREQ=DAILY;INTERVAL=9999;BYMONTH=2;BYMONTHDAY=29';
+const HOUR_MS = 3_600_000;
+
+/**
+ * Midnight UTC `days` after today, plus `hours`: inside the 367-day horizon, where a write on a
+ * resource with a series is not refused as recurrence_not_materialized. Each case keeps to days of
+ * its own, since cases share the tenants' resources.
+ */
+function soon(days: number, hours = 0): Date {
+  const today = new Date();
+  return new Date(
+    Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()) +
+      (days * 24 + hours) * HOUR_MS,
+  );
+}
+
+/** An RFC 3339 UTC timestamp to the second, as the API takes it. */
+function at(date: Date): string {
+  return date.toISOString().replace('.000', '');
+}
 
 function output() {
   const chunks: string[] = [];
@@ -286,8 +305,8 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
         key: keys['a-admin'],
         body: {
           resource_id: resources.a,
-          starts_at: '2032-05-03T09:00:00Z',
-          ends_at: '2032-05-03T10:00:00Z',
+          starts_at: at(soon(40, 9)),
+          ends_at: at(soon(40, 10)),
           timezone: 'UTC',
           idempotency_key: `after-flood-${randomUUID()}`,
         },
@@ -514,8 +533,8 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
         key: keys['a-second'],
         body: {
           resource_id: resources.a,
-          starts_at: '2029-06-01T09:00:00Z',
-          ends_at: '2029-06-01T09:10:00Z',
+          starts_at: at(soon(55, 9)),
+          ends_at: at(new Date(soon(55, 9).getTime() + 600_000)),
           timezone: 'UTC',
           idempotency_key: `costly-probe-${randomUUID()}`,
           recurrence_rule: COSTLY_RULE,
@@ -536,7 +555,7 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
       const seed = randomUUID();
       const writes = await Promise.all(
         Array.from({ length: 50 }, (_, index) => {
-          const start = new Date(Date.UTC(2029, 0, 1) + index * 3_600_000);
+          const start = new Date(soon(60).getTime() + index * HOUR_MS);
           return call(server.origin, 'POST', '/v1/events', {
             key: keys['a-admin'],
             body: {
@@ -574,7 +593,7 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
     const server = await serve({ SLOTLOCK_LIMITS: 'address=off' });
     try {
       const costly = (index: number, seed: string) => {
-        const start = new Date(Date.UTC(2031, 0, 1) + index * 3_600_000);
+        const start = new Date(soon(100).getTime() + index * HOUR_MS);
         return call(server.origin, 'POST', '/v1/events', {
           key: keys['a-admin'],
           body: {
@@ -593,8 +612,8 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
         key: keys['b-second'],
         body: {
           resource_id: resources.b,
-          starts_at: '2031-03-03T09:00:00Z',
-          ends_at: '2031-03-03T10:00:00Z',
+          starts_at: at(soon(150, 9)),
+          ends_at: at(soon(150, 10)),
           timezone: 'UTC',
           idempotency_key: `fair-made-${randomUUID()}`,
         },
@@ -609,8 +628,8 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
         key: keys['b-second'],
         body: {
           resource_id: resources.b,
-          starts_at: '2031-03-04T09:00:00Z',
-          ends_at: '2031-03-04T10:00:00Z',
+          starts_at: at(soon(151, 9)),
+          ends_at: at(soon(151, 10)),
           timezone: 'UTC',
           idempotency_key: `fair-recurring-${randomUUID()}`,
           recurrence_rule: 'FREQ=WEEKLY;COUNT=4',
@@ -660,7 +679,7 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
     let sent = 0;
     const costly = (tenant: { key: string; resource: string }) => {
       const index = (sent += 1);
-      const start = new Date(Date.UTC(2033, 0, 1) + index * 3_600_000);
+      const start = new Date(soon(200).getTime() + index * HOUR_MS);
       return call(server.origin, 'POST', '/v1/events', {
         key: tenant.key,
         body: {
@@ -682,8 +701,8 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
         key: keys['b-second'],
         body: {
           resource_id: resources.b,
-          starts_at: '2033-03-03T09:00:00Z',
-          ends_at: '2033-03-03T10:00:00Z',
+          starts_at: at(soon(260, 9)),
+          ends_at: at(soon(260, 10)),
           timezone: 'UTC',
           idempotency_key: `six-made-${randomUUID()}`,
         },
@@ -696,7 +715,9 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
         while (firing) {
           const answer = await costly(bursting[tenant] as { key: string; resource: string });
           outcomes.push(answer.status);
-          if (answer.status === 200) ran.add(tenant);
+          // The step budget refuses the crafted rule (400 invalid_event) once it has expanded it,
+          // so a 400 had a slot as much as a 200 did.
+          if (answer.status === 200 || answer.status === 400) ran.add(tenant);
         }
       });
       // Once each bursting tenant has had a slot, B, with one write in flight, goes first.
@@ -811,13 +832,13 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
         key: keys['b-second'],
         body: {
           resource_id: resources.b,
-          starts_at: '2030-02-04T09:00:00Z',
-          ends_at: '2030-02-04T10:00:00Z',
+          starts_at: at(soon(300, 9)),
+          ends_at: at(soon(300, 10)),
           timezone: 'UTC',
           idempotency_key: `hosted-default-${randomUUID()}`,
         },
       });
-      expect(created.status).toBe(200);
+      expect(created.status, JSON.stringify(created.body)).toBe(200);
       expect(created.body).toMatchObject({ event: { resource_id: resources.b } });
     } finally {
       await server.stop();
