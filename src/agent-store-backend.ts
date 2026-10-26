@@ -130,6 +130,13 @@ async function withTenant<T>(
  */
 const MAX_REQUEST_BUSY_INTERVALS = 10_000;
 
+/**
+ * Bookable windows one search may expand from its resources' availability rules in all: five
+ * resources of 50 daily rules over a year, or a hundred of two. Without it, a search of 100 such
+ * resources over a year expanded 1.8 million windows and held the process for seven seconds.
+ */
+const MAX_REQUEST_RULE_WINDOWS = 100_000;
+
 /** The resources a request names, each once, in the order first named. */
 function distinctResourceIds(input: Record<string, unknown>): string[] {
   return [...new Set(input.resource_ids as string[])];
@@ -491,6 +498,7 @@ export function createSlotlockStoreAgentBackend(
       const resourceIds = distinctResourceIds(input);
       const durationMs = (input.duration_minutes as number) * 60_000;
       const charge = busyBudget();
+      let windowsLeft = MAX_REQUEST_RULE_WINDOWS;
       return withTenant(store, context, async (tenantStore) => {
         let best: { resourceId: string; interval: Interval } | null = null;
         let incomplete = false;
@@ -517,11 +525,10 @@ export function createSlotlockStoreAgentBackend(
           }
           const rules =
             resource.availabilityRules ?? (await options.availabilityRules(context, resource));
-          const candidate = findNextAvailable({
-            busy: freeBusy.busy,
-            windows: expandRules(rules, window, resource.timezone),
-            durationMs,
-          });
+          const windows = expandRules(rules, window, resource.timezone);
+          windowsLeft -= windows.length;
+          if (windowsLeft < 0) throw new SlotlockAgentOperationError('calendar_work_limit', 400);
+          const candidate = findNextAvailable({ busy: freeBusy.busy, windows, durationMs });
           if (
             candidate &&
             (!best ||

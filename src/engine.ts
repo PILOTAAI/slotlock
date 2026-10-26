@@ -55,13 +55,23 @@ export function findNextAvailable(params: {
 }): Interval | null {
   const { busy, windows, durationMs } = params;
   if (!Number.isFinite(durationMs) || durationMs <= 0) return null;
-  const orderedWindows = mergeIntervals(windows);
-  for (const window of orderedWindows) {
-    for (const free of subtractBusy(window, busy)) {
-      if (free.end.getTime() - free.start.getTime() >= durationMs) {
-        return { start: free.start, end: new Date(free.start.getTime() + durationMs) };
-      }
+  const slotAt = (start: Date): Interval => ({ start, end: new Date(start.getTime() + durationMs) });
+  // One walk of the merged busy list alongside the merged windows, both by start: a busy interval
+  // ending by a window's start ends before every later one too.
+  const merged = mergeIntervals(busy);
+  let next = 0;
+  for (const window of mergeIntervals(windows)) {
+    while (next < merged.length && (merged[next] as Interval).end.getTime() <= window.start.getTime()) {
+      next += 1;
     }
+    let cursor = window.start;
+    for (let index = next; index < merged.length; index++) {
+      const taken = merged[index] as Interval;
+      if (taken.start.getTime() >= window.end.getTime()) break;
+      if (taken.start.getTime() - cursor.getTime() >= durationMs) return slotAt(cursor);
+      if (taken.end.getTime() > cursor.getTime()) cursor = taken.end;
+    }
+    if (window.end.getTime() - cursor.getTime() >= durationMs) return slotAt(cursor);
   }
   return null;
 }

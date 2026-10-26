@@ -608,6 +608,39 @@ describe('Slotlock store-backed agent server adapter', () => {
     expect(listed.events).toHaveLength(1);
   });
 
+  it('refuses a search whose resources expand to more bookable windows in all than one request may', async () => {
+    // The audit's probe: 100 resources of 50 one-minute daily rules each, searched over a year, held
+    // the process for 7 seconds with no busy interval charged.
+    const ids = Array.from(
+      { length: 100 },
+      (_, index) => `${String(index).padStart(8, '0')}-4444-4444-8444-444444444444`,
+    );
+    const dense = Array.from({ length: 50 }, (_, index) => ({
+      rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR,SA,SU',
+      startMinutes: index * 20,
+      durationMinutes: 1,
+    }));
+    getResource.mockImplementation(async ({ id }: { id: string }) => ({ ...resource, id }));
+    availabilityRules.mockResolvedValue(dense);
+    const backend = createSlotlockStoreAgentBackend(store, { availabilityRules });
+    const search = (resourceIds: string[], end: string) =>
+      backend.findNextAvailable(
+        { ...context, operation: 'slotlock_find_next_available' },
+        { resource_ids: resourceIds, start: '2027-01-01T00:00:00.000Z', end, duration_minutes: 60 },
+      );
+    const started = performance.now();
+    await expect(search(ids, '2027-12-31T00:00:00.000Z')).rejects.toMatchObject({
+      code: 'calendar_work_limit',
+      status: 400,
+    });
+    expect(performance.now() - started).toBeLessThan(2_000);
+    // A search of one such resource, or of all of them over a week, still answers.
+    await expect(search([ids[0] as string], '2027-12-31T00:00:00.000Z')).resolves.toMatchObject({
+      resource_id: null,
+    });
+    await expect(search(ids, '2027-01-08T00:00:00.000Z')).resolves.toMatchObject({ resource_id: null });
+  });
+
   it('refuses a search whose resources hold more busy intervals in all than one request may read', async () => {
     const ids = Array.from(
       { length: 5 },

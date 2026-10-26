@@ -70,6 +70,10 @@ versioning.
   interval past the 10,000 it may return. It read every row of the window before refusing, so a
   resource with many bookings cost a full read on every refused request. `store.listBusy` takes a
   `limit`.
+- `slotlock_find_next_available` expands 100,000 bookable windows from its resources' hours in all,
+  answering `400 calendar_work_limit` past that, and walks a resource's busy time once rather than
+  once per window. Only busy intervals were counted, so 100 resources with 50 one-minute daily
+  rules each, searched over a year, held the process for about seven seconds.
 
 ### Fixed
 
