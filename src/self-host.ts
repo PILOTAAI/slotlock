@@ -36,12 +36,16 @@ import {
   SECRET_HINT,
   SlotlockConfigError,
   type SlotlockEnv,
+  type SlotlockLimits,
   type SlotlockServeDashboardConfig,
+  formatSlotlockRate,
   optional,
   readAvailability,
   readDashboardConfig,
+  readLimits,
   readSecret,
   readServerUrl,
+  readTrustedProxyHeader,
 } from './config.js';
 import { SLOTLOCK_APPLICATION_SCOPE } from './application-api.js';
 import { SLOTLOCK_DASHBOARD_FUNCTIONS, SLOTLOCK_TENANT_TABLES } from './ddl.js';
@@ -58,6 +62,7 @@ import {
   createSlotlockNodeServer,
 } from './node-server.js';
 import { slotlockPackageVersion } from './package-version.js';
+import { createSlotlockRequestLimits } from './rate-limit.js';
 import { type SlotlockSql, assertSlotlockSchemaCurrent, createSlotlockStore } from './store.js';
 import type { SlotlockResource, WeeklyAvailabilityRule } from './types.js';
 import { parseAvailabilityRules } from './weekly-hours.js';
@@ -75,6 +80,8 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_TENANT',
   'SLOTLOCK_AVAILABILITY',
   'SLOTLOCK_REST_API',
+  'SLOTLOCK_LIMITS',
+  'SLOTLOCK_TRUSTED_PROXY_HEADER',
   'SLOTLOCK_GITHUB_CLIENT_ID',
   'SLOTLOCK_GITHUB_CLIENT_SECRET',
   'SLOTLOCK_SESSION_SECRET',
@@ -86,7 +93,7 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8080;
 const DEFAULT_TENANT = 'default';
-/** The principal the server token resolves to: it acts in SLOTLOCK_TENANT with every scope. */
+/** The principal the server token resolves to: it acts in SLOTLOCK_TENANT with read and write. */
 const SELF_HOST_SUBJECT = 'self-host';
 /** Who `key create` records as a key's creator. */
 const CLI_KEY_CREATOR = 'cli';
@@ -120,6 +127,8 @@ const SERVED_OPERATIONS: ReadonlySet<SlotlockAgentOperation> = new Set([
   'slotlock_delete_event',
 ]);
 const HEALTH_QUERY_TIMEOUT_MS = 2_000;
+/** How long one database check answers /healthz, so a flood of health checks is not one of queries. */
+const HEALTH_RESULT_MS = 1_000;
 const HEALTHCHECK_TIMEOUT_MS = 5_000;
 const POOL_SIZE = 10;
 const RESOURCE_PAGE_SIZE = 1_000;
@@ -141,11 +150,14 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
   /** Where clients reach the server; Slotlock publishes its endpoints under this URL. */
   publicUrl: string;
   /**
-   * A bearer token for SLOTLOCK_TENANT with every scope. Optional: API keys (`slotlock key create`)
-   * authenticate whether or not it is set, each as its own tenant and scopes.
+   * A bearer token for SLOTLOCK_TENANT with read and write, never admin. Optional: API keys
+   * (`slotlock key create`) authenticate whether or not it is set, each as its own tenant and scopes.
    */
   authToken?: string;
-  /** Writes that wait for a person's confirmation (MCP 2026-07-28) and are refused elsewhere. */
+  /**
+   * Writes that wait for a person's confirmation (MCP 2026-07-28) and are refused elsewhere. None
+   * unless SLOTLOCK_CONFIRM_WRITES opts in: every authenticated write takes effect at once.
+   */
   confirmWrites: readonly SlotlockAgentWriteOperation[];
   /** Set exactly when `confirmWrites` is not empty. */
   confirmationSecret?: string;
@@ -158,6 +170,10 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
    * (SLOTLOCK_REST_API: on unless off).
    */
   restApi: boolean;
+  /** Request limits (SLOTLOCK_LIMITS over SLOTLOCK_DEFAULT_LIMITS): the server's only rate limit. */
+  limits: SlotlockLimits;
+  /** The lower-case request field a trusted proxy sets to the client address; else the socket's. */
+  trustedProxyHeader?: string;
 }
 
 function readDatabaseUrl(env: SlotlockEnv, name: string): string | undefined {
@@ -207,7 +223,7 @@ function readTenant(env: SlotlockEnv): string {
 }
 
 function readConfirmWrites(env: SlotlockEnv): SlotlockAgentWriteOperation[] {
-  const value = optional(env, 'SLOTLOCK_CONFIRM_WRITES') ?? 'all';
+  const value = optional(env, 'SLOTLOCK_CONFIRM_WRITES') ?? 'none';
   if (value === 'all') return [...WRITE_OPERATIONS];
   if (value === 'none') return [];
   const operations: SlotlockAgentWriteOperation[] = [];
@@ -251,7 +267,7 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
   const confirmationSecret = readSecret(env, 'SLOTLOCK_CONFIRMATION_SECRET');
   if (confirmWrites.length > 0 && confirmationSecret === undefined) {
     throw new SlotlockConfigError(
-      `SLOTLOCK_CONFIRMATION_SECRET is required while SLOTLOCK_CONFIRM_WRITES guards writes (the default): it signs each pending confirmation; ${SECRET_HINT}, or set SLOTLOCK_CONFIRM_WRITES=none to let agents write without asking a person`,
+      `SLOTLOCK_CONFIRMATION_SECRET is required while SLOTLOCK_CONFIRM_WRITES guards writes: it signs each pending confirmation; ${SECRET_HINT}, or set SLOTLOCK_CONFIRM_WRITES=none (the default) to let agents write without asking a person`,
     );
   }
   if (
@@ -272,7 +288,10 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
     confirmWrites,
     availability: readAvailability(env),
     restApi: readRestApi(env),
+    limits: readLimits(env),
   };
+  const trustedProxyHeader = readTrustedProxyHeader(env);
+  if (trustedProxyHeader !== undefined) config.trustedProxyHeader = trustedProxyHeader;
   if (authToken !== undefined) config.authToken = authToken;
   const dashboard = readDashboardConfig(env);
   if (dashboard !== undefined) config.dashboard = dashboard;
@@ -318,8 +337,8 @@ export function createSlotlockTokenAuthenticator(
 
 /**
  * What `serve` lets a principal call: a served operation its scopes cover. The server token's
- * principal carries every scope; a principal without scopes is refused everything here, though the
- * agent server alone would leave it to this function.
+ * principal carries read and write, never admin; a principal without scopes is refused everything
+ * here, though the agent server alone would leave it to this function.
  */
 export function authorizeSlotlockServeOperation(args: {
   principal: SlotlockAgentPrincipal;
@@ -345,6 +364,7 @@ export interface SlotlockCliIo {
 
 export interface SlotlockLogger {
   info(event: string, fields?: Record<string, unknown>): void;
+  warn(event: string, fields?: Record<string, unknown>): void;
   error(event: string, fields?: Record<string, unknown>): void;
 }
 
@@ -375,7 +395,10 @@ function secretsIn(env: SlotlockEnv): string[] {
   return [...new Set(secrets)].sort((a, b) => b.length - a.length);
 }
 
-/** One JSON object per line: info on stdout, errors on stderr, secrets replaced by `[redacted]`. */
+/**
+ * One JSON object per line: info on stdout, warnings and errors on stderr, secrets replaced by
+ * `[redacted]`.
+ */
 function createLogger(io: SlotlockCliIo): SlotlockLogger {
   const secrets = secretsIn(io.env);
   const write = (stream: OutputStream, level: string, event: string, fields = {}) => {
@@ -385,6 +408,7 @@ function createLogger(io: SlotlockCliIo): SlotlockLogger {
   };
   return {
     info: (event, fields) => write(io.stdout, 'info', event, fields),
+    warn: (event, fields) => write(io.stderr, 'warn', event, fields),
     error: (event, fields) => write(io.stderr, 'error', event, fields),
   };
 }
@@ -555,7 +579,11 @@ export async function startSlotlockServer(
     }
     const store = createSlotlockStore(sql);
     const publicUrl = new URL(config.publicUrl);
-    const authenticateKey = createSlotlockApiKeyAuthenticator(createSlotlockApiKeyStore(sql));
+    const { caps } = config.limits;
+    const authenticateKey = createSlotlockApiKeyAuthenticator(createSlotlockApiKeyStore(sql), {
+      maxConcurrentLookups: caps.key_lookups,
+      maxWaitingLookups: caps.key_lookup_queue,
+    });
     const authenticateToken =
       config.authToken === undefined
         ? undefined
@@ -568,13 +596,14 @@ export async function startSlotlockServer(
           });
     // Set once the listener is up; the authenticator tells it which tenants this server serves.
     let maintenance: SlotlockMaintenanceScheduler | undefined;
-    const agentServer = createSlotlockAgentServer({
-      publicBaseUrl: config.publicUrl,
-      // readPublicUrl admits plain HTTP only on a loopback host, which is all this permits anyway.
-      allowInsecureLocalhost: publicUrl.protocol === 'http:',
-      backend: createSlotlockStoreAgentBackend(store, {
-        availabilityRules: async () => config.availability.map((rule) => ({ ...rule })),
-      }),
+    const basePath = publicUrl.pathname.replace(/\/$/, '');
+    const limits = createSlotlockRequestLimits({
+      limits: config.limits,
+      ...(config.trustedProxyHeader !== undefined
+        ? { trustedProxyHeader: config.trustedProxyHeader }
+        : {}),
+      basePath,
+      signInPaths: config.dashboard ? ['/dashboard/sign-in', '/dashboard/callback'] : [],
       // The token is compared in constant time first; only then is a key looked up. A person the
       // dashboard no longer allows loses their keys with their session.
       authenticate: async (request) => {
@@ -583,12 +612,38 @@ export async function startSlotlockServer(
         maintenance?.touch(principal.tenantRef);
         return principal;
       },
-      authorize: async ({ principal, operation }) =>
-        authorizeSlotlockServeOperation({ principal, operation }),
-      health: async () =>
-        (await databaseReachable(sql))
+      // Counts and pseudonyms only: never an address, a credential or a tenant.
+      onRefusals: (counts) => log.info('refusals', { ...counts }),
+      // Behind a proxy without the setting, every client shares the proxy's address budget.
+      onIgnoredClientField: (field) =>
+        log.warn('client_address_field_ignored', { field, setting: 'SLOTLOCK_TRUSTED_PROXY_HEADER' }),
+    });
+    let health: { at: number; ready: Promise<boolean> } | undefined;
+    const agentServer = createSlotlockAgentServer({
+      publicBaseUrl: config.publicUrl,
+      // readPublicUrl admits plain HTTP only on a loopback host, which is all this permits anyway.
+      allowInsecureLocalhost: publicUrl.protocol === 'http:',
+      backend: createSlotlockStoreAgentBackend(store, {
+        availabilityRules: async () => config.availability.map((rule) => ({ ...rule })),
+      }),
+      authenticate: limits.authenticate,
+      consumeRateLimit: limits.consumeRateLimit,
+      // A write that may expand a recurring series also waits for one of a few slots, so one
+      // tenant's expansions cannot hold the event loop from every other tenant's requests.
+      authorize: async ({ principal, operation, input }) => {
+        if (!authorizeSlotlockServeOperation({ principal, operation })) return false;
+        await limits.admit({ principal, operation, input });
+        return true;
+      },
+      subscriptions: { maxPerTenant: caps.tenant_subscriptions },
+      health: async () => {
+        if (!health || performance.now() - health.at > HEALTH_RESULT_MS) {
+          health = { at: performance.now(), ready: databaseReachable(sql) };
+        }
+        return (await health.ready)
           ? { ready: true, checks: ['database'] }
-          : { ready: false, checks: ['database_unreachable'] },
+          : { ready: false, checks: ['database_unreachable'] };
+      },
       // Outcomes and counts only: the server never reports arguments or identities.
       onEvent: ({ type, ...fields }) => log.info(type, snakeCaseKeys(fields)),
       // What an agent sees only as internal_error: the operation and the error's message and code,
@@ -603,8 +658,11 @@ export async function startSlotlockServer(
               backend: createSlotlockStoreApplicationBackend(store, {
                 maxTenantResources: SERVE_MAX_TENANT_RESOURCES,
               }),
-              authorize: async ({ principal }) =>
-                principal.scopes?.includes(SLOTLOCK_APPLICATION_SCOPE) === true,
+              authorize: async ({ principal, operation, input }) => {
+                if (principal.scopes?.includes(SLOTLOCK_APPLICATION_SCOPE) !== true) return false;
+                await limits.admit({ principal, operation, input });
+                return true;
+              },
             },
           }
         : {}),
@@ -632,15 +690,18 @@ export async function startSlotlockServer(
             resources: createSlotlockDashboardResources(store),
             state: createSlotlockDashboardState(sql),
             availability: config.availability,
+            clientAddress: (request) => limits.clientAddress(request),
             onError: (error) => log.error('dashboard_error', describeError(error)),
           });
-    const target = dashboard
-      ? {
-          fetch: (request: Request) =>
-            dashboard.handles(request) ? dashboard.fetch(request) : agentServer.fetch(request),
-          shutdown: () => agentServer.shutdown(),
-        }
-      : agentServer;
+    const target = limits.serve(
+      dashboard
+        ? {
+            fetch: (request: Request) =>
+              dashboard.handles(request) ? dashboard.fetch(request) : agentServer.fetch(request),
+            shutdown: () => agentServer.shutdown(),
+          }
+        : agentServer,
+    );
     const listener = createSlotlockNodeServer(target, {
       requestOrigin: publicUrl.origin,
       onError: (error, phase) => log.error('http_error', { phase, ...describeError(error) }),
@@ -666,11 +727,19 @@ export async function startSlotlockServer(
       availability_rules: config.availability.length,
       rest: config.restApi ? `${config.publicUrl}/openapi.json` : null,
       maintenance_interval_minutes: SERVE_MAINTENANCE_INTERVAL_MS / 60_000,
+      limits: {
+        ...Object.fromEntries(
+          Object.entries(config.limits.rates).map(([name, rate]) => [name, formatSlotlockRate(rate)]),
+        ),
+        ...caps,
+      },
+      client_address: config.trustedProxyHeader ?? 'socket',
     });
     return {
       address,
       async close() {
         const result = await listener.close();
+        limits.close();
         await maintenance?.close();
         await sql.end({ timeout: 5 });
         return result;
@@ -942,16 +1011,34 @@ Environment:
   DATABASE_URL                   postgres:// URL of the role Slotlock serves as (required); serve
                                  refuses a superuser or a role with BYPASSRLS
   SLOTLOCK_MIGRATE_DATABASE_URL  postgres:// URL of the schema owner, for migrate (optional)
-  SLOTLOCK_AUTH_TOKEN            Optional bearer token for SLOTLOCK_TENANT with every scope,
-                                 32+ random characters (serve); API keys work with or without it
-  SLOTLOCK_CONFIRMATION_SECRET   Signs pending write confirmations, 32+ random characters (serve)
-  SLOTLOCK_CONFIRM_WRITES        all (default), none, or a comma-separated list of write tools
+  SLOTLOCK_AUTH_TOKEN            Optional bearer token for SLOTLOCK_TENANT with read and write
+                                 access (never admin), 32+ random characters (serve); API keys
+                                 work with or without it
+  SLOTLOCK_CONFIRMATION_SECRET   Signs pending write confirmations, 32+ random characters (serve;
+                                 required when SLOTLOCK_CONFIRM_WRITES is not none)
+  SLOTLOCK_CONFIRM_WRITES        none (default), all, or a comma-separated list of write tools
+                                 that wait for a person (MCP 2026-07-28 form elicitation; refused
+                                 with confirmation_required on REST, A2A and older MCP)
   SLOTLOCK_PUBLIC_URL            URL clients use (default http://localhost:$PORT)
   SLOTLOCK_TENANT                Tenant of the token, resource and key commands (default "default")
   SLOTLOCK_AVAILABILITY          JSON array of weekly bookable-hours rules (default: none)
   SLOTLOCK_REST_API              on (default): also serve the tools as a REST API under /v1, and
                                  the application API for admin keys, described at /openapi.json;
                                  off: MCP and A2A only
+  SLOTLOCK_LIMITS                Request limits, comma-separated name=value over the defaults:
+                                 rates as <count>/<s|m|h>[:<burst>] or off for address (50/s:100,
+                                 every request per client, before any key lookup), key_read,
+                                 tenant_read (20/s:40), key_write, tenant_write (5/s:20),
+                                 global_read (500/s:1000), global_write (50/s:100), app_read
+                                 (20/s:40) and app_write (5/s:20) per tenant for the
+                                 application API, sign_in (20/m:20); counts for
+                                 tenant_series_writes and series_writes
+                                 (1: writes that may expand a recurring series at once),
+                                 maintenance_runs (1: application API maintenance runs at once),
+                                 tenant_subscriptions (16), key_lookups (2), key_lookup_queue (256)
+  SLOTLOCK_TRUSTED_PROXY_HEADER  The request field a proxy in front sets to the client address,
+                                 such as CF-Connecting-IP (default: the connection's address);
+                                 set it only when every request comes through that proxy
   SLOTLOCK_GITHUB_CLIENT_ID      Serve the dashboard at $SLOTLOCK_PUBLIC_URL/dashboard: the Client ID
                                  of a GitHub OAuth app with callback .../dashboard/callback
   SLOTLOCK_GITHUB_CLIENT_SECRET  That app's client secret (dashboard)

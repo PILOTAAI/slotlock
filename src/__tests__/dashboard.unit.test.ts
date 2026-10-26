@@ -1165,6 +1165,50 @@ describe('limits found in review', () => {
     expect(session).toMatch(/^__Host-slotlock-session=/);
   });
 
+  it('holds at most two sign-ins in flight per client, so one client cannot take every slot (SEC-12)', async () => {
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let reached = 0;
+    const slow = fakeGitHub();
+    const target = dashboard({
+      clientAddress: (request) => request.headers.get('x-test-client') ?? undefined,
+      fetch: async (input, init) => {
+        reached += 1;
+        await held;
+        return slow.fetch(input, init);
+      },
+    });
+    const callback = async (client: string) => {
+      const start = await get(target, '/base/dashboard/sign-in');
+      const state = new URL(start.headers.get('location') ?? '').searchParams.get('state');
+      const pending = cookie(start, '__Host-slotlock-oauth')?.pair as string;
+      return target.fetch(
+        new Request(`${ORIGIN}/base/dashboard/callback?code=c&state=${state}`, {
+          headers: { cookie: pending, 'x-test-client': client },
+        }),
+      );
+    };
+    const first = [callback('203.0.113.7'), callback('203.0.113.7')];
+    while (reached < 2) await new Promise((resolve) => setTimeout(resolve, 0));
+    // A third from the same client is answered at once rather than joining GitHub's queue; another
+    // client still gets a slot.
+    const thirdCall = callback('203.0.113.7');
+    const third = await Promise.race([
+      thirdCall.then((response) => response.status),
+      new Promise((resolve) => setTimeout(() => resolve('still waiting on GitHub'), 200)),
+    ]);
+    expect(third).toBe(503);
+    const other = callback('198.51.100.4');
+    while (reached < 3) await new Promise((resolve) => setTimeout(resolve, 0));
+    release();
+    expect((await Promise.all([...first, other])).map((response) => response.status)).toEqual([
+      303, 303, 303,
+    ]);
+    await thirdCall;
+    // Once its sign-ins finish, the client may sign in again.
+    expect((await callback('203.0.113.7')).status).toBe(303);
+  });
+
   it('finishes each sign-in once', async () => {
     const target = dashboard();
     const start = await get(target, '/base/dashboard/sign-in');

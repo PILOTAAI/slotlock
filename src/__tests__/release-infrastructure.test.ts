@@ -141,6 +141,8 @@ describe('MCP Registry entry', () => {
     expect(
       (variable('SLOTLOCK_TENANT') as { description?: string } | undefined)?.description,
     ).toContain('API keys act in their own tenant');
+    // Writes take effect at once unless SLOTLOCK_CONFIRM_WRITES opts in.
+    expect(variable('SLOTLOCK_CONFIRM_WRITES')).toMatchObject({ default: 'none' });
     // The URL's {PORT} is the PORT variable, which is also the published container port.
     expect(serverPackage?.transport.url).toBe('http://localhost:{PORT}/mcp');
     expect(declared.map(({ name }) => name)).toContain('PORT');

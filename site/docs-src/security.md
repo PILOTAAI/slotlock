@@ -1,6 +1,6 @@
 ---
 title: Security model
-description: How Slotlock keeps agent writes safe. A person can confirm each one, PostgreSQL decides every overlap, and forced row-level security keeps tenants apart.
+description: How Slotlock keeps agent writes safe. An MCP client can ask its person to confirm each one, PostgreSQL decides every overlap, and forced row-level security keeps tenants apart.
 ---
 
 Three rules hold everywhere: the database decides overlaps, the tenant comes from the authenticated

@@ -74,6 +74,8 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       DATABASE_URL: applicationUrl.href,
       SLOTLOCK_MIGRATE_DATABASE_URL: url,
       SLOTLOCK_AUTH_TOKEN: token,
+      // Opted into here (the default is none), so the confirmation round stays covered.
+      SLOTLOCK_CONFIRM_WRITES: 'all',
       SLOTLOCK_CONFIRMATION_SECRET: confirmationSecret,
       SLOTLOCK_TENANT: tenantRef,
       HOST: '127.0.0.1',
@@ -303,7 +305,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       ).structuredContent.resources;
       expect(listed.map(({ external_ref }) => external_ref)).toEqual(['vehicle-42']);
 
-      // Writes are guarded by default, and a 2025 client cannot show the confirmation.
+      // Writes are guarded here, and a 2025 client cannot show the confirmation.
       const write = await mcp(
         {
           jsonrpc: '2.0',
@@ -340,8 +342,14 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       'confirmation',
       'call',
       'stopping',
+      // The anonymous call's 401, counted.
+      'refusals',
       'stopped',
     ]);
+    expect(stdout.events().find(({ event }) => event === 'refusals')).toMatchObject({
+      auth_refused: 1,
+      rate_limited: 0,
+    });
     // Each tool call logs its operation, outcome and duration; never its arguments.
     expect(stdout.events().filter(({ event }) => event === 'call')).toEqual([
       {
@@ -844,6 +852,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         SLOTLOCK_GITHUB_CLIENT_SECRET: clientSecret,
         SLOTLOCK_SESSION_SECRET: sessionSecret,
         SLOTLOCK_DASHBOARD_USERS: '4242',
+        SLOTLOCK_LIMITS: 'sign_in=3/m:3',
       },
       stdout,
       stderr,
@@ -870,6 +879,17 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         'http://localhost:8080/dashboard/callback',
       );
       expect(signIn.headers.get('set-cookie')).toMatch(/^__Host-slotlock-oauth=/);
+
+      // Sign-ins, which write a record and ask GitHub, have a budget per client address of their
+      // own (SEC-12); the dashboard's other pages do not count against it.
+      const more = [];
+      for (const path of ['/dashboard/sign-in', '/dashboard/callback/', '/dashboard/sign-in']) {
+        more.push(await fetch(`${origin}${path}`, { redirect: 'manual' }));
+      }
+      expect(more.map(({ status }) => status)).toEqual([302, 400, 429]);
+      expect(more[2]?.headers.get('retry-after')).toMatch(/^[1-9]\d*$/);
+      expect(more[2]?.headers.get('ratelimit')).toMatch(/^"sign_in";r=0;t=\d+$/);
+      expect((await fetch(`${origin}/dashboard`)).status).toBe(200);
 
       // MCP still answers beside it, and a person removed from the allowlist lost their keys.
       const mcp = (bearer?: string) =>

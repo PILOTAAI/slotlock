@@ -676,6 +676,53 @@ describe('live calendar updates (MCP 2026-07-28 subscriptions/listen)', () => {
     await other.cancel();
   });
 
+  it('caps open subscriptions per tenant, so one tenant with many keys cannot take them all (SURF-3)', async () => {
+    // The audit's probe: one tenant minted 64 keys and opened all 256 slots, and another tenant's
+    // first subscriptions/listen then answered 429. Here the tenant has six keys and the server six
+    // slots; the tenant's share is two.
+    authenticate.mockImplementation(async (request) => {
+      const token = request.headers.get('authorization') ?? '';
+      const key = /^Bearer key-(\d)$/.exec(token)?.[1];
+      if (key !== undefined) return { subject: `api_key:${key}`, tenantRef: 'tenant-a' };
+      return PRINCIPALS[token] ?? null;
+    });
+    const server = buildServer({
+      subscriptions: { pollIntervalMs: 1_000, maxPerPrincipal: 4, maxPerTenant: 2, maxTotal: 6 },
+    });
+    const opened: SseReader[] = [];
+    const statuses: number[] = [];
+    for (const key of [1, 2, 3, 4, 5, 6]) {
+      const response = await server.fetch(
+        listen({ resourceSubscriptions: [URI_A] }, `Bearer key-${key}`),
+      );
+      statuses.push(response.status);
+      if (response.status === 200) {
+        const reader = new SseReader(response);
+        await reader.message();
+        opened.push(reader);
+      } else {
+        expect(await rpc(response)).toMatchObject({
+          error: { code: -31029, message: 'Too many subscriptions' },
+        });
+      }
+    }
+    expect(statuses).toEqual([200, 200, 429, 429, 429, 429]);
+    // Another tenant still gets a slot.
+    const other = await server.fetch(listen({ resourceSubscriptions: [URI_A] }, 'Bearer third'));
+    expect(other.status).toBe(200);
+    const otherReader = new SseReader(other);
+    expect(await otherReader.message()).toMatchObject({
+      method: 'notifications/subscriptions/acknowledged',
+    });
+    // A closed subscription gives the tenant its slot back.
+    await opened[0]?.cancel();
+    const again = await server.fetch(listen({ resourceSubscriptions: [URI_A] }, 'Bearer key-3'));
+    expect(again.status).toBe(200);
+    await again.body?.cancel();
+    await opened[1]?.cancel();
+    await otherReader.cancel();
+  });
+
   it('releases the slot when opening fails, answering a rate limit or a fault as such', async () => {
     let limited = true;
     const server = buildServer({
@@ -763,6 +810,8 @@ describe('live calendar updates (MCP 2026-07-28 subscriptions/listen)', () => {
       { maxDurationMs: 59_999 },
       { keepAliveMs: 60_001 },
       { maxPerPrincipal: 0 },
+      { maxPerTenant: 0 },
+      { maxPerTenant: 10_001 },
       { maxTotal: 10_001 },
     ]) {
       expect(() => buildServer({ subscriptions })).toThrow(/subscriptions\.\w+ is invalid/);

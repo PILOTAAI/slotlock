@@ -465,7 +465,10 @@ export type SlotlockAgentWriteOperation = Extract<
  * A listed write first answers `input_required` with a yes/no form describing the change; it runs
  * only when the client retries with the person's explicit acceptance and the sealed state it was
  * given. Where no confirmation is possible — the 2025 MCP revisions and A2A — a listed write fails
- * with `confirmation_required`, never silently runs.
+ * with `confirmation_required`, never silently runs. The acceptance comes from the client, which a
+ * key holder controls: confirmation keeps an agent from writing unasked, and is not an
+ * authorization boundary (scopes and `authorize` are). Off unless set; `slotlock serve` sets it only
+ * when SLOTLOCK_CONFIRM_WRITES opts in.
  */
 export interface SlotlockAgentConfirmationOptions {
   operations: readonly SlotlockAgentWriteOperation[];
@@ -495,6 +498,12 @@ export interface SlotlockAgentSubscriptionOptions {
   keepAliveMs?: number;
   /** Open subscriptions one principal may hold: 1-64, default 4. */
   maxPerPrincipal?: number;
+  /**
+   * Open subscriptions one tenant may hold across all its principals: 1-10,000, default `maxTotal`.
+   * Set it below `maxTotal` on a multi-tenant server, so a tenant with many keys cannot hold every
+   * slot.
+   */
+  maxPerTenant?: number;
   /** Open subscriptions across the server: 1-10,000, default 256. */
   maxTotal?: number;
 }
@@ -1694,6 +1703,7 @@ interface SubscriptionPolicy {
   maxDurationMs: number;
   keepAliveMs: number;
   maxPerPrincipal: number;
+  maxPerTenant: number;
   maxTotal: number;
 }
 
@@ -1713,12 +1723,14 @@ function validateSubscriptions(
     }
     return setting;
   };
+  const maxTotal = bounded('maxTotal', 1, 10_000, 256);
   return {
     pollIntervalMs: bounded('pollIntervalMs', 1_000, 300_000, 10_000),
     maxDurationMs: bounded('maxDurationMs', 60_000, 86_400_000, 900_000),
     keepAliveMs: bounded('keepAliveMs', 1_000, 60_000, 15_000),
     maxPerPrincipal: bounded('maxPerPrincipal', 1, 64, 4),
-    maxTotal: bounded('maxTotal', 1, 10_000, 256),
+    maxPerTenant: bounded('maxPerTenant', 1, 10_000, maxTotal),
+    maxTotal,
   };
 }
 
@@ -2464,6 +2476,24 @@ function a2aError(
   });
 }
 
+/**
+ * The request's principal, or the error when `authenticate` throws a 503
+ * `SlotlockAgentOperationError`, as createSlotlockApiKeyAuthenticator does when its lookup queue is
+ * full: no answer about the credential, so the client is told to retry rather than that it is
+ * anonymous.
+ */
+async function principalOrBusy(
+  authenticate: SlotlockAgentServerOptions['authenticate'],
+  request: Request,
+): Promise<SlotlockAgentPrincipal | null | SlotlockAgentOperationError> {
+  try {
+    return await authenticate(request);
+  } catch (error) {
+    if (error instanceof SlotlockAgentOperationError && error.status === 503) return error;
+    throw error;
+  }
+}
+
 /** Map a request path onto the server's base path; `null` when it lies outside it. */
 function routePath(pathname: string, basePath: string): string | null {
   if (basePath === '') return pathname;
@@ -2652,6 +2682,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
   /** Open subscriptions (and slots reserved by ones still opening), for the caps and shutdown. */
   const openSubscriptions = new Set<{
     principalKey: string;
+    tenantRef: string;
     end(reason: 'shutdown'): void;
   }>();
   let shuttingDown = false;
@@ -2974,15 +3005,20 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     if (shuttingDown) return modernError(503, id, -32603, 'Server is shutting down');
     const principalKey = `${principal.tenantRef}\0${principal.subject}`;
     let held = 0;
-    for (const open of openSubscriptions) if (open.principalKey === principalKey) held += 1;
+    let heldByTenant = 0;
+    for (const open of openSubscriptions) {
+      if (open.principalKey === principalKey) held += 1;
+      if (open.tenantRef === principal.tenantRef) heldByTenant += 1;
+    }
     if (
       openSubscriptions.size >= subscriptionPolicy.maxTotal ||
-      held >= subscriptionPolicy.maxPerPrincipal
+      held >= subscriptionPolicy.maxPerPrincipal ||
+      heldByTenant >= subscriptionPolicy.maxPerTenant
     ) {
       return modernError(429, id, SLOTLOCK_MCP_RATE_LIMITED_ERROR_CODE, 'Too many subscriptions');
     }
     // The slot is held while access is checked, so concurrent opens cannot overshoot the caps.
-    const slot = { principalKey, end: (_reason: 'shutdown') => {} };
+    const slot = { principalKey, tenantRef: principal.tenantRef, end: (_reason: 'shutdown') => {} };
     openSubscriptions.add(slot);
     let streaming = false;
     try {
@@ -3009,7 +3045,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
   function streamSubscription(
     call: ModernCall,
     policy: SubscriptionPolicy,
-    slot: { principalKey: string; end(reason: 'shutdown'): void },
+    slot: { principalKey: string; tenantRef: string; end(reason: 'shutdown'): void },
     window: { start: string; end: string },
     watched: { resourceIds: string[]; digests: Map<string, string> },
   ): Response {
@@ -3287,7 +3323,10 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
         return refuse(403, 'origin_not_allowed');
       }
     }
-    const principal = await options.authenticate(request);
+    const principal = await principalOrBusy(options.authenticate, request);
+    if (principal instanceof SlotlockAgentOperationError) {
+      return refuse(503, principal.code, { 'Retry-After': '1' });
+    }
     if (
       !principal ||
       !isCanonicalPrincipalIdentity(principal.subject) ||
@@ -3438,7 +3477,21 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
           return json(403, rpcError(null, -32600, 'Origin not allowed'));
         }
       }
-      const principal = await options.authenticate(request);
+      const principal = await principalOrBusy(options.authenticate, request);
+      if (principal instanceof SlotlockAgentOperationError) {
+        // As `slotlock serve` answers it: A2A names the reason in an ErrorInfo, as for a rate limit.
+        const error = { code: -32603, message: 'Server is busy' };
+        const info = {
+          '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+          reason: 'SERVER_BUSY',
+          domain: 'slotlock',
+        };
+        return json(
+          503,
+          { jsonrpc: '2.0', id: null, error: path === '/a2a' ? { ...error, data: [info] } : error },
+          { 'Retry-After': '1' },
+        );
+      }
       if (
         !principal ||
         !isCanonicalPrincipalIdentity(principal.subject) ||

@@ -80,8 +80,30 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
   `migrate` service applies the schema as the owner.
 - `SLOTLOCK_AVAILABILITY` sets the default bookable hours. A resource can have its own
   (`slotlock hours set`, or the dashboard); with neither, no slot is offered.
-  `SLOTLOCK_CONFIRM_WRITES=all` (the default) makes every write wait for a person.
+  `SLOTLOCK_CONFIRM_WRITES=all` (as `.env.example` sets it; the server's default is `none`) makes
+  every write wait for a person.
 - To serve beyond this machine, put a TLS proxy in front and set `SLOTLOCK_PUBLIC_URL`.
+- The server limits requests per client address (before any key is looked up), per key, per
+  tenant and for the whole server, and answers `429 rate_limited` with `Retry-After` and the
+  `RateLimit` fields. The application API counts in its tenant's own `app_read` and `app_write`
+  budgets, apart from the agents'. A recurring create and every event update (a new title
+  re-expands a recurring event's series too) takes its write token, then waits for a slot: one at
+  a time per tenant (`tenant_series_writes`) and per server (`series_writes`). A freed slot rests
+  for as long as the server was busy while the write before held it (at most a second), so with
+  one slot these writes keep it busy at most about half the time. It then goes to the waiting
+  tenant with the fewest writes in flight and, among those, the one whose writes have kept the
+  server busy least lately (halving every ten seconds). So a tenant sending one write at a time
+  waits for the write running, its rest, and only those tenants with one write in flight whose
+  writes kept the server less busy, however many tenants keep more waiting. An expansion runs on
+  the server's main thread, so any request may also wait for the one running. Four more of a
+  tenant's writes may wait and the rest get 429. A write that has waited two seconds gets 429
+  while its tenant's own write is still running, otherwise 503 `server_busy`. An application API
+  maintenance run waits the same way for slots of its own: one per tenant, `maintenance_runs` per
+  server. The health check is not counted. `SLOTLOCK_LIMITS` changes the limits; behind a proxy,
+  set `SLOTLOCK_TRUSTED_PROXY_HEADER` to the field it puts the client's address in
+  (`CF-Connecting-IP` behind Cloudflare), or every client shares the proxy's budget: the server
+  logs a `client_address_field_ignored` warning when such a field arrives without the setting. A
+  client can send that field itself, so let nothing reach the server except through the proxy.
 
 ```sh
 slotlock hours set '[{"rrule":"FREQ=WEEKLY;BYDAY=SA","startMinutes":600,"durationMinutes":240}]' --resource vehicle-42
@@ -211,7 +233,7 @@ this one and read its session secret, which signs in as any tenant.
    - the configuration's id;
    - your hostname (`routes`);
    - `SLOTLOCK_PUBLIC_URL`, `SLOTLOCK_SERVICE_URL` and `SLOTLOCK_DASHBOARD_USERS` (`vars`);
-   - the two rate limiting bindings, each with a `namespace_id` unique in your account.
+   - the three rate limiting bindings, each with a `namespace_id` unique in your account.
 3. Create the GitHub OAuth app as above, with the callback URL
    `<SLOTLOCK_PUBLIC_URL>/dashboard/callback` on the Worker's origin.
 4. Store the secrets on the Worker: `npx wrangler secret put` for `SLOTLOCK_GITHUB_CLIENT_ID`,
@@ -223,11 +245,18 @@ this one and read its session secret, which signs in as any tenant.
   response is sent; Hyperdrive keeps the pool.
 - Anyone may start a sign-in, and each callback costs a database write and a request to GitHub
   with the app's client secret. An isolate runs at most eight at once, but Workers run many
-  isolates, so two rate limiting bindings bound them all:
-  - `SLOTLOCK_CLIENT_RATE_LIMIT` counts every dashboard request per client address;
-  - `SLOTLOCK_SIGN_IN_RATE_LIMIT` counts sign-ins and callbacks from every client together.
+  isolates, so three rate limiting bindings bound them all:
+  - `SLOTLOCK_CLIENT_RATE_LIMIT` counts every dashboard request per client address (an IPv6
+    client's /64, as `slotlock serve` counts it);
+  - `SLOTLOCK_SIGN_IN_RATE_LIMIT` counts sign-ins and callbacks per client address;
+  - `SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT` counts them from every client together, set far above one
+    client's limit so a few clients cannot use it up for everyone.
 
-  Their counts are per Cloudflare location. Without either binding the Worker answers 503.
+  Their counts are per Cloudflare location. Without either of the first two the Worker answers 503.
+  Without the ceiling, as in a configuration from before it, `SLOTLOCK_SIGN_IN_RATE_LIMIT` counts
+  every client together, and the Worker logs a warning: add the ceiling before lowering that
+  binding's limit to one client's. The example configuration also removes query strings (a
+  callback's OAuth code) from the URLs Workers Logs keep.
 - The server checks a dashboard tenant against `SLOTLOCK_DASHBOARD_USERS` only when it serves the
   dashboard itself. With the dashboard on Workers, removing a person from the Worker's list signs
   them out of the dashboard; to stop their keys, revoke them or erase the tenant.
@@ -789,6 +818,9 @@ handover".` Only an explicit yes runs the write.
 - The pending question is sealed (HMAC-SHA256) to the caller, the tool and the exact arguments, and
   expires after `ttlSeconds` (600).
 - Clients that cannot ask (MCP 2025 revisions, A2A) get `confirmation_required`; nothing is written.
+- The yes comes from the client: Slotlock relies on the MCP client to ask its person, and a key
+  holder's own client can answer for itself. Confirmation keeps an agent from writing unasked; it is
+  not an authorization boundary. Scopes and `authorize` decide who may write.
 - `secrets` holds 1 to 8 keys of 32+ bytes: list the new one first to rotate. `onEvent` reports each
   outcome for audit.
 
@@ -801,8 +833,9 @@ returns busy time and coverage for the next `resourceWindowDays` (30). `subscrip
 - Changes are found by re-reading through your backend every `subscriptions.pollIntervalMs` (10 s),
   re-checking the caller each time.
 - A subscription ends after `maxDurationMs` (15 minutes), on `shutdown()`, or when access is lost.
-- At most 4 open per caller and 256 per server (`maxPerPrincipal`, `maxTotal`).
-  `subscriptions: false` turns them off.
+- At most 4 open per caller and 256 per server (`maxPerPrincipal`, `maxTotal`). `maxPerTenant`
+  caps one tenant's across all its callers (default `maxTotal`; `slotlock serve` sets 16), so a
+  tenant with many keys cannot hold every slot. `subscriptions: false` turns them off.
 
 ### Caching and tracing
 
@@ -1131,13 +1164,18 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
 5. Bound retries on serialization failures; never blindly retry an unknown write.
 6. Reconcile external calendars with durable cursors and coverage windows.
 7. Monitor conflicts, refused rules, sync lag, capped maintenance runs, quota errors and confirmation outcomes.
-8. Keep writes confirmation-gated wherever your policy needs a person.
+8. Keep writes confirmation-gated wherever your policy needs a person (`slotlock serve`:
+   `SLOTLOCK_CONFIRM_WRITES`, `none` by default).
 9. Size live updates: at most `maxTotal` backend reads per `pollIntervalMs`.
 10. Give each agent its own API key with the narrowest scope and an expiry.
 11. After each deployment, check it end to end with a short-lived admin key, then revoke the key:
     `SLOTLOCK_URL=https://… SLOTLOCK_ADMIN_KEY=… node scripts/smoke-deployment.mjs` checks health,
     discovery, MCP, A2A, holds and reservations (in a resource named `slotlock-smoke`, 400 days
     ahead, cancelled after) and the 401, 409, 413 and 415 refusals.
+12. Rate-limit every public server. `slotlock serve` does it per client address, key, tenant and
+    server (`SLOTLOCK_LIMITS`); behind a proxy, set `SLOTLOCK_TRUSTED_PROXY_HEADER` and firewall
+    the server so nothing reaches it except through that proxy. Embedding the
+    agent server, give it a `consumeRateLimit`. Watch serve's `refusals` log line for floods.
 
 ## Supported versions
 

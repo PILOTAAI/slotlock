@@ -7,6 +7,10 @@ versioning.
 
 ### Security
 
+- The example dashboard Worker configuration removes query strings, which hold OAuth codes, from
+  the URLs Workers Logs keep.
+- SECURITY.md and the README say write confirmation is attested by the client: it keeps an agent
+  from writing unasked and is not an authorization boundary.
 - zod moves from 4.6.5 to 4.6.7 (#59), past GHSA-mrhx-c7xc-m3w5 (high): when validating an
   oversized array, zod 4.6.5 collects an issue for every failing element with no cap, so one
   authenticated tool or REST call could hold far more memory than its body. 0.1.0, 0.1.1 and 0.2.0
@@ -88,6 +92,29 @@ versioning.
 
 ### Added
 
+- `slotlock serve` limits requests: per client address before any key is looked up, then per API
+  key, per tenant and for the whole server, with reads and writes counted apart. The application
+  API counts in its tenant's own budget (`app_read`, `app_write`). A refusal answers 429
+  `rate_limited` with `Retry-After` and the `RateLimit` and `RateLimit-Policy` fields.
+  `SLOTLOCK_LIMITS` changes the limits; behind a proxy, `SLOTLOCK_TRUSTED_PROXY_HEADER` names the
+  field holding the client's address (`CF-Connecting-IP` behind Cloudflare); without it, the first
+  request carrying such a field logs a `client_address_field_ignored` warning. The health check is
+  not counted.
+- `slotlock serve` runs a recurring create and every event update one at a time per tenant and per
+  server (`tenant_series_writes`, `series_writes`), taking the write's token before it waits. A
+  freed slot rests for as long as the server was busy while the write before held it, up to a
+  second, then goes to the waiting tenant with the fewest writes in flight and, among those, the
+  one whose writes have kept the server busy least lately. Four more of a tenant's writes may wait
+  and the rest get 429; one that has waited two seconds gets 429 while its tenant's own write is
+  still running, otherwise 503 `server_busy`. An application API maintenance run waits the same
+  way for slots of its own: one per tenant, `maintenance_runs` (1) per server.
+- `createSlotlockAgentServer` takes `subscriptions.maxPerTenant`; `slotlock serve` caps each tenant
+  at 16 live-update streams (`tenant_subscriptions`).
+- `slotlock serve` logs a `refusals` line each minute there are any, and at shutdown: auth
+  refusals, rate limits, lookup overflows, busy series writes, busy maintenance runs and bodies too
+  large, with clients named only by per-process pseudonyms.
+- `createSlotlockNodeServer` hands the fetch target the connection's remote address as a second
+  argument.
 - The npm package ships `openapi.json`, the REST API's OpenAPI 3.1 document, exported as
   `slotlock/openapi.json`.
 - The capability manifest names the 0.2 surfaces: `rest-api`, `application-api`, `api-keys`,
@@ -135,6 +162,24 @@ versioning.
 - SECURITY.md says how hosted Slotlock may be tested: only against your own account, never another
   account's data, no load or denial of service, and reports through private vulnerability reporting,
   as the Terms of Service and Acceptable Use Policy refer to.
+
+### Changed
+
+- Breaking: `slotlock serve` defaults `SLOTLOCK_CONFIRM_WRITES` to `none`, so an authenticated
+  write takes effect at once. Set `all`, or a list of write tools, to opt into confirmation;
+  `SLOTLOCK_CONFIRMATION_SECRET` is required only then.
+- Breaking for code that calls it directly: when its lookup queue is full,
+  `createSlotlockApiKeyAuthenticator` throws `SlotlockAgentOperationError` `server_busy` (503)
+  instead of answering anonymous, which told a client holding a valid key that its key was bad.
+  `createSlotlockAgentServer` answers it 503 with `Retry-After` on REST, MCP and A2A. Keys that
+  recently authenticated wait in a queue of their own, served first.
+- The dashboard Worker limits sign-ins per client address, under a new binding for every client
+  together, `SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT`. Until it is bound, `SLOTLOCK_SIGN_IN_RATE_LIMIT`
+  counts every client together, as before, and the Worker logs a warning: add the ceiling before
+  lowering that binding's limit to one client's. The dashboard runs at most two sign-ins from one
+  client at once. The Worker counts a client as `slotlock serve` does: an IPv6 client is its /64.
+- `slotlock serve`'s `/healthz` reuses one database check a second.
+- `slotlock --help` describes the server token as read and write, never admin.
 
 ## 0.2.0 - 2026-10-23
 

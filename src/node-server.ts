@@ -22,9 +22,18 @@ const HANDLER_TIMEOUT = Symbol('handler_timeout');
 
 export type SlotlockNodeServerErrorPhase = 'client' | 'listen' | 'request' | 'server' | 'shutdown';
 
+/** What the listener knows about a request's connection, beside the Request itself. */
+export interface SlotlockNodeServerConnection {
+  /**
+   * The peer's address as the socket reports it (an IPv4 client of a dual-stack listener reads
+   * `::ffff:a.b.c.d`). Behind a proxy it is the proxy's; never taken from a request field.
+   */
+  remoteAddress?: string;
+}
+
 /** The narrow Fetch-compatible boundary returned by `createSlotlockAgentServer`. */
 export interface SlotlockNodeServerFetchTarget {
-  fetch(request: Request): Promise<Response>;
+  fetch(request: Request, connection?: SlotlockNodeServerConnection): Promise<Response>;
   /**
    * Called once when `close()` begins, after the listener stops accepting connections, to end
    * long-lived responses (MCP subscription streams) so they drain within the grace period.
@@ -413,7 +422,11 @@ export function createSlotlockNodeServer(
         timeout.unref();
       });
       try {
-        const outcome = await Promise.race([target.fetch(webRequest), handlerTimeout]);
+        const connection: SlotlockNodeServerConnection = {};
+        if (request.socket.remoteAddress !== undefined) {
+          connection.remoteAddress = request.socket.remoteAddress;
+        }
+        const outcome = await Promise.race([target.fetch(webRequest, connection), handlerTimeout]);
         if (outcome === HANDLER_TIMEOUT) {
           controller.abort(abortReason('handler_timeout'));
           safeReport(config.onError, new Error('handler_timeout'), 'request');

@@ -122,6 +122,8 @@ const expectedFiles = new Set([
   'node-server.d.ts',
   'package-version.js',
   'package-version.d.ts',
+  'rate-limit.js',
+  'rate-limit.d.ts',
   'rest-api.js',
   'rest-api.d.ts',
   'rules.js',
@@ -689,6 +691,7 @@ if (databaseUrl) {
         DATABASE_URL: servingUrl.href,
         SLOTLOCK_MIGRATE_DATABASE_URL: databaseUrl,
         SLOTLOCK_AUTH_TOKEN: token,
+        SLOTLOCK_CONFIRM_WRITES: 'all',
         SLOTLOCK_CONFIRMATION_SECRET: randomBytes(32).toString('hex'),
         SLOTLOCK_TENANT: 'package-verification',
         SLOTLOCK_REST_API: 'on',
@@ -750,7 +753,7 @@ if (databaseUrl) {
       );
       assert.equal((await tools.json()).result.tools.length, 8);
       // The REST API: its document is public, its routes take the same token, and a write that
-      // waits for a person (SLOTLOCK_CONFIRM_WRITES defaults to all) answers 428.
+      // waits for a person (SLOTLOCK_CONFIRM_WRITES=all, set above; the default is none) answers 428.
       const openApi = await fetch(`${listening.address}/openapi.json`);
       assert.equal(openApi.status, 200);
       assert.equal((await openApi.json()).openapi, '3.1.0');
