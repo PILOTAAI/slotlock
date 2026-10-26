@@ -430,6 +430,37 @@ describe('Slotlock store-backed agent server adapter', () => {
     );
   });
 
+  it("fences an update to the caller's expected resource when it sends one", async () => {
+    const backend = createSlotlockStoreAgentBackend(store, { availabilityRules });
+    const update = { ...context, operation: 'slotlock_update_event' as const };
+    const elsewhere = '44444444-4444-4444-8444-444444444444';
+    putCalendarEvent.mockResolvedValueOnce({ ok: false, code: 'resource_tenant_mismatch' });
+    await expect(
+      backend.updateEvent(update, {
+        event_id: event().externalRef,
+        expected_revision: 1,
+        expected_resource_id: elsewhere,
+        title: 'Moved?',
+        idempotency_key: 'fenced',
+      }),
+    ).rejects.toMatchObject({ code: 'not_found', status: 404 });
+    expect(putCalendarEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ expectedResourceId: elsewhere, resourceId: resource.id }),
+    );
+    // An id the store never issues names no resource an event is on: not found, nothing written.
+    putCalendarEvent.mockClear();
+    await expect(
+      backend.updateEvent(update, {
+        event_id: event().externalRef,
+        expected_revision: 1,
+        expected_resource_id: 'vehicle-1',
+        title: 'Moved?',
+        idempotency_key: 'fenced-2',
+      }),
+    ).rejects.toMatchObject({ code: 'event_not_found', status: 404 });
+    expect(putCalendarEvent).not.toHaveBeenCalled();
+  });
+
   it("answers from a resource's own hours before the default, and its [] as closed", async () => {
     const backend = createSlotlockStoreAgentBackend(store, { availabilityRules });
     const find = () =>

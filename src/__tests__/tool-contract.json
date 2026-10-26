@@ -1583,7 +1583,7 @@
   {
     "name": "slotlock_update_event",
     "title": "Update resource event",
-    "description": "Apply an expected-revision event patch and rematerialize occupancy atomically.",
+    "description": "Apply an expected-revision event patch and rematerialize occupancy atomically. With expected_resource_id, the resource you read the event on, an event since moved elsewhere is not found.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1596,6 +1596,11 @@
           "type": "integer",
           "exclusiveMinimum": 0,
           "maximum": 9007199254740991
+        },
+        "expected_resource_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
         },
         "resource_id": {
           "type": "string",

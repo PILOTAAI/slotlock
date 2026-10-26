@@ -634,7 +634,15 @@ export function createSlotlockStoreAgentBackend(
       const input = rawInput as unknown as AgentEventInput & {
         event_id: string;
         expected_revision: number;
+        expected_resource_id?: string;
       };
+      // No event is on a resource the store never issued (an external reference, say).
+      if (
+        input.expected_resource_id !== undefined &&
+        !STORE_ID_PATTERN.test(input.expected_resource_id)
+      ) {
+        throw new SlotlockAgentOperationError('event_not_found', 404);
+      }
       return withTenant(store, context, async (tenantStore) => {
         const current = await tenantStore.getCalendarEvent({
           tenantRef: context.principal.tenantRef,
@@ -706,7 +714,9 @@ export function createSlotlockStoreAgentBackend(
           tenantRef: context.principal.tenantRef,
           ownerRef: agentOwnerRef(context),
           externalRef: current.externalRef,
-          expectedResourceId: current.resourceId,
+          // The caller's fence when it sent one, checked under the event's lock; otherwise the
+          // resource just read, so a move between that read and the write is not overwritten.
+          expectedResourceId: input.expected_resource_id ?? current.resourceId,
           resourceId,
           expectedRevision: input.expected_revision,
           idempotencyKey: agentCommandIdempotencyKey(context, input.idempotency_key),

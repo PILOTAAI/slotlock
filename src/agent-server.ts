@@ -779,11 +779,13 @@ const OPERATION_DEFINITIONS = [
   {
     name: 'slotlock_update_event',
     title: 'Update resource event',
-    description: 'Apply an expected-revision event patch and rematerialize occupancy atomically.',
+    description:
+      'Apply an expected-revision event patch and rematerialize occupancy atomically. With expected_resource_id, the resource you read the event on, an event since moved elsewhere is not found.',
     input: z
       .object({
         event_id: EVENT_ID,
         expected_revision: REVISION,
+        expected_resource_id: RESOURCE_ID.optional(),
         resource_id: RESOURCE_ID.optional(),
         starts_at: DATE_TIME.optional(),
         ends_at: DATE_TIME.optional(),
