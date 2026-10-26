@@ -109,6 +109,29 @@ versioning.
 
 ### Added
 
+- The application API serves the store calls it lacked, each in `openapi.json` and the five
+  clients: a resource's `visibility` (`private` ones are never shown to agents) and `archived_at`;
+  `POST /v1/resources/{id}/archive` and `…/restore`, and `DELETE /v1/resources/{id}` (`409
+  resource_in_use` while anything on it is live); `GET /v1/holds/{id}`,
+  `GET /v1/resources/{id}/holds`, `GET /v1/reservations/{ref}`,
+  `GET /v1/resources/{id}/reservations` and `GET /v1/resources/{id}/busy`, paged and bounded to
+  367 days; `GET /v1/tenant/events` and `GET`/`DELETE /v1/tenant/events/{id}`, which reach and
+  cancel any key's event, a revoked one's included; and `GET /v1/tenant`, the key's tenant and
+  whether it is suspended. A confirmed hold is cancelled by its id as a reservation reference, as
+  it always was; `slotlock_confirm_hold` now says so.
+- `POST /v1/tenant/erase` erases the key's tenant, with its reference as `confirm_tenant_ref`. It is
+  off unless the application backend is created with `tenantErasure: true` (`slotlock serve` leaves
+  it off) and refused while the tenant is suspended. Suspension stays the operator's: the store
+  allows it only to the schema owner, and a tenant that suspended itself could not lift it.
+- `POST /v1/holds` and `DELETE /v1/tenant/events/{id}` take a retry identity as the
+  `Idempotency-Key` header as well as `idempotency_key`; a hold retried with it answers the first
+  hold, and the key reused with another request is `409 idempotency_conflict`. Another application
+  route refuses the header (`400 idempotency_key_not_supported`) rather than ignore it.
+- `slotlock_update_event` takes `expected_resource_id`: an event since moved to another resource is
+  not found, checked under the event's lock.
+- `slotlock resource archive|restore|delete <ref>` and `slotlock tenant status|suspend|unsuspend|erase`.
+  `suspend` and `unsuspend` connect as `SLOTLOCK_MIGRATE_DATABASE_URL`'s role, the only one that
+  may; `erase` needs `--confirm` repeating `SLOTLOCK_TENANT`.
 - `slotlock serve` limits requests: per client address before any key is looked up, then per API
   key, per tenant and for the whole server, with reads and writes counted apart. The application
   API counts in its tenant's own budget (`app_read`, `app_write`). A refusal answers 429

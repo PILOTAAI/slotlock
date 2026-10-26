@@ -173,6 +173,25 @@ slotlock key revoke <id>
 - A tenant may hold 100 active keys. The last six characters are a checksum secret scanners can
   verify offline.
 
+### Retiring resources and tenants
+
+```sh
+slotlock resource archive vehicle-42   # no new bookings, holds or events; history kept
+slotlock resource restore vehicle-42
+slotlock resource delete vehicle-42    # with its history; refused while anything on it is live
+slotlock tenant status
+slotlock tenant suspend --reason "chargeback review"
+slotlock tenant unsuspend
+slotlock tenant erase --confirm "$SLOTLOCK_TENANT"
+```
+
+- The resource commands take a reference or an id, and act in `SLOTLOCK_TENANT`.
+- A suspended tenant may read and writes nothing; its keys still authenticate, but it gets no new
+  key or secret. Only the schema owner suspends or lifts a suspension, so `suspend` and `unsuspend`
+  connect as `SLOTLOCK_MIGRATE_DATABASE_URL`'s role when it is set.
+- `erase` deletes everything the tenant has, its API keys included, at once and for good;
+  `--confirm` must repeat the tenant. A suspension outlives it.
+
 ### Dashboard
 
 The server can also serve a dashboard where people sign in with GitHub and manage their own keys and
@@ -753,7 +772,7 @@ export async function startCalendarServer(config: CalendarServerConfig) {
 | `slotlock_list_events` | Events the caller created in a window | read-only |
 | `slotlock_get_event` | One event the caller created | read-only |
 | `slotlock_create_event` | Create an event of up to 3,660 days (idempotent) | write |
-| `slotlock_update_event` | Patch at an expected revision | write |
+| `slotlock_update_event` | Patch at an expected revision, optionally fenced to `expected_resource_id` | write |
 | `slotlock_delete_event` | Tombstone at an expected revision | write, destructive |
 
 A query window is at most 367 days. Each caller sees only the events it created, but everyone's
@@ -925,16 +944,27 @@ waits for a confirmation.
 
 | Request | Does |
 | --- | --- |
-| `POST /v1/resources` | Create the resource with this `external_ref`, or update its `timezone` |
-| `GET /v1/resources/{resource_id}` | One resource, with its own weekly hours |
+| `POST /v1/resources` | Create the resource with this `external_ref`, or update its `timezone`; `visibility: "private"` hides it from agents |
+| `GET /v1/resources/{resource_id}` | One resource, with its own weekly hours, visibility and `archived_at` |
+| `POST /v1/resources/{resource_id}/archive` | Take it out of use; `…/restore` puts it back |
+| `DELETE /v1/resources/{resource_id}` | Delete it with its history (`409 resource_in_use` while anything on it is live) |
+| `GET /v1/resources/{resource_id}/busy?start=…&end=…` | Its occupied time, private resources included |
 | `PUT /v1/resources/{resource_id}/availability` | Its own weekly hours; `[]` never bookable, `null` the server's |
 | `PUT /v1/availability` | Every resource's weekly hours at once |
 | `POST /v1/holds` | Hold a window for `ttl_seconds` (up to 7 days) |
+| `GET /v1/holds/{hold_id}` | One live hold; `GET /v1/resources/{resource_id}/holds` lists them |
 | `POST /v1/holds/{hold_id}/confirm` | Turn the hold into a reservation |
 | `DELETE /v1/holds/{hold_id}` | Release the hold |
+| `GET /v1/reservations/{reservation_ref}` | The booking at its current revision |
+| `GET /v1/resources/{resource_id}/reservations?start=…&end=…` | Its bookings in a window |
 | `PUT /v1/reservations/{reservation_ref}` | Book (`revision: 1`) or move (the current revision plus 1) |
 | `DELETE /v1/reservations/{reservation_ref}?revision=…` | Cancel, at the current revision plus 1 |
 | `PUT /v1/resources/{resource_id}/coverage/{source}` | Record that `source`'s events are complete for a window |
+| `GET /v1/tenant/events?resource_id=…&start=…&end=…` | Every key's events on a resource, with the `id` the next two take |
+| `GET /v1/tenant/events/{event_id}` | One of them |
+| `DELETE /v1/tenant/events/{event_id}?expected_revision=…` | Cancel it, whichever key wrote it |
+| `GET /v1/tenant` | The key's tenant, and whether it is suspended |
+| `POST /v1/tenant/erase` | Erase the tenant, when the server allows it |
 | `POST /v1/maintenance` | Run [maintenance](#operations) for the key's tenant |
 
 ```sh
@@ -950,8 +980,23 @@ curl -X PUT "http://localhost:8080/v1/reservations/BK-42" \
   `replayed: true`, a confirmed hold confirms again, and a cancelled reference stays cancelled (a
   late booking for it answers `409`). A late copy of a booking or a move that has since been
   superseded answers `409 stale_revision`.
+- A confirmed hold is the booking whose reference is the hold's id, at revision 1: cancel it with
+  `DELETE /v1/reservations/{hold_id}?revision=2`.
+- `POST /v1/holds` and `DELETE /v1/tenant/events/…` take a retry identity as the `Idempotency-Key`
+  header or as `idempotency_key`. A retried hold answers the hold the first request made; the same
+  key with another request is `409 idempotency_conflict`. Other routes are safe to retry as they
+  are, and refuse the header (`400 idempotency_key_not_supported`).
+- Lists page by `limit` (up to 100) and `cursor`, the `next_cursor` of the page before, and read a
+  window of at most 367 days.
 - The time a calendar event occupies is the event's: reservation calls never find, move or cancel
-  it, whatever reference they name. Change the event instead.
+  it, whatever reference they name. Change the event instead, or cancel it as the tenant with
+  `DELETE /v1/tenant/events/{event_id}`, which needs its revision and an idempotency key, and
+  takes `expected_resource_id` to fence it to the resource you read it on.
+- Erasing a tenant over the API is off unless the backend is created with `tenantErasure: true`
+  (`slotlock serve` leaves it off: its operator runs `slotlock tenant erase`). It needs
+  `confirm_tenant_ref` to be the tenant's reference (`GET /v1/tenant`), deletes every key the tenant
+  has, the caller's included, and is refused while the tenant is suspended. Suspending a tenant is
+  never an API call: only the schema owner may, and a tenant could not lift its own.
 - The tenant is the key's. Another tenant's resource or hold is `404`, whatever the database role.
 - With the library, pass `application` beside `rest: true`:
   `{ backend: createSlotlockStoreApplicationBackend(store, { maxTenantResources }), authorize }`.
