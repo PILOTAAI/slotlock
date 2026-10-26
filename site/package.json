@@ -29,9 +29,7 @@
     "wrangler": "4.151.1"
   },
   "overrides": {
-    "miniflare": {
-      "undici": "7.30.1"
-    },
+    "undici@7.29.1": "7.30.1",
     "postcss-nested": "7.0.2",
     "postcss-selector-parser": "7.1.6"
   }
