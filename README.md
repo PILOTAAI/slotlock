@@ -85,8 +85,8 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
 - To serve beyond this machine, put a TLS proxy in front and set `SLOTLOCK_PUBLIC_URL`.
 - The server limits requests per client address (before any key is looked up), per key, per
   tenant and for the whole server, and answers `429 rate_limited` with `Retry-After` and the
-  `RateLimit` fields. The application API counts in its tenant's own `app_read` and `app_write`
-  budgets, apart from the agents'. A recurring create and every event update (a new title
+  `RateLimit` fields. The application API counts an admin key's calls in its tenant's own
+  `app_read` and `app_write` budgets, apart from the agents'; another key's are its own. A recurring create and every event update (a new title
   re-expands a recurring event's series too) takes its write token, then waits for a slot: one at
   a time per tenant (`tenant_series_writes`) and per server (`series_writes`); each server process
   counts its own. A freed slot rests for as long as the server was busy while the write before

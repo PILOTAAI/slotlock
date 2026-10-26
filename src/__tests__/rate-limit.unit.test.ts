@@ -20,6 +20,12 @@ import {
 } from '../rate-limit.js';
 
 const PRINCIPAL: SlotlockAgentPrincipal = { subject: 'api_key:1', tenantRef: 'fleet-7' };
+/** Keys of the same tenant that carry scopes, as `slotlock serve`'s do. */
+const SCOPED: Record<string, SlotlockAgentPrincipal> = {
+  'Bearer reader': { subject: 'api_key:2', tenantRef: 'fleet-7', scopes: ['read'] },
+  'Bearer writer': { subject: 'api_key:3', tenantRef: 'fleet-7', scopes: ['read', 'write'] },
+  'Bearer admin': { subject: 'api_key:4', tenantRef: 'fleet-7', scopes: ['read', 'write', 'admin'] },
+};
 
 function limitsWith(overrides: {
   rates?: Partial<SlotlockLimits['rates']>;
@@ -49,7 +55,8 @@ function setup(
     ...options,
     authenticate: async (request) => {
       lookups.push(request.headers.get('authorization') ?? '');
-      return request.headers.get('authorization') === 'Bearer good' ? PRINCIPAL : null;
+      const authorization = request.headers.get('authorization') ?? '';
+      return authorization === 'Bearer good' ? PRINCIPAL : (SCOPED[authorization] ?? null);
     },
     onRefusals: (counts) => refusals.push(counts),
   });
@@ -382,6 +389,31 @@ describe('token buckets', () => {
       'GET /v1/resources 429 "key_read";r=0;t=1',
       'GET /v1/resources/r1 200 "app_read";r=0;t=3',
     ]);
+  });
+
+  it("charges a key that may not use the application API its own buckets, not the application's", async () => {
+    // The audit's probe: 20 refused POST /v1/holds from a read-only key emptied the tenant's
+    // app_write, and 40 refused GET /v1/tenant its app_read, so the admin's next call answered 429.
+    const { target } = setup(limitsWith({ rates: { address: null } }), { now: clock().now });
+    const ask = (method: string, path: string, key: string) =>
+      target.fetch(
+        new Request(`http://localhost${path}`, { method, headers: { authorization: `Bearer ${key}` } }),
+        { remoteAddress: '127.0.0.1' },
+      );
+    for (const key of ['reader', 'writer']) {
+      for (let index = 0; index < 20; index++) await ask('POST', '/v1/holds', key);
+      for (let index = 0; index < 40; index++) await ask('GET', '/v1/tenant', key);
+    }
+    const write = await ask('POST', '/v1/holds', 'admin');
+    expect(write.status).toBe(200);
+    expect(write.headers.get('ratelimit')).toBe('"app_write";r=19;t=1');
+    const read = await ask('GET', '/v1/tenant', 'admin');
+    expect(read.status).toBe(200);
+    expect(read.headers.get('ratelimit')).toBe('"app_read";r=38;t=1');
+    // The reader's refused application calls came out of its own key's budget.
+    const own = await ask('GET', '/v1/resources', 'reader');
+    expect(own.status).toBe(429);
+    expect(own.headers.get('ratelimit')).toMatch(/^"key_read";r=0;/);
   });
 
   it('keeps its memory bounded under a flood from ever new addresses', async () => {

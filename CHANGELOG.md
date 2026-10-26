@@ -42,6 +42,10 @@ versioning.
   the tenant holding most, less one, now ends that tenant's oldest stream gracefully (reported as
   `preempted`) instead of being refused. `SLOTLOCK_LIMITS` sets the server's cap (`subscriptions`,
   256).
+- A key without the admin scope no longer spends its tenant's application API budget. Its calls to
+  application routes, each refused 403, took tokens from the tenant's `app_read` and `app_write`, so
+  one read-only key could keep the tenant's admin application answered 429. They now come out of
+  the key's own `key_*` and `tenant_*` budgets.
 
 ### Fixed
 

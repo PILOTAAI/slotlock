@@ -22,7 +22,7 @@ import {
   slotlockAgentOperationScope,
 } from './agent-server.js';
 import { slotlockBearerCredential } from './api-keys.js';
-import type { SlotlockApplicationOperation } from './application-api.js';
+import { SLOTLOCK_APPLICATION_SCOPE, type SlotlockApplicationOperation } from './application-api.js';
 import type { SlotlockLimits, SlotlockRate, SlotlockRateName } from './config.js';
 import type { SlotlockNodeServerConnection, SlotlockNodeServerFetchTarget } from './node-server.js';
 import { SLOTLOCK_APPLICATION_REST_ROUTES, matchSlotlockRestRoute } from './rest-api.js';
@@ -630,8 +630,10 @@ export function createSlotlockRequestLimits(
 
   /**
    * Take the read or write tokens a request has not yet been charged: from its key and tenant, or
-   * its tenant's application buckets, and from the server's. False, with the refusal recorded, when
-   * one is short.
+   * its tenant's application buckets when it may use the application API (an embedder's principal
+   * with no scopes, or one with the admin scope), and from the server's. A key that may not is
+   * charged its own buckets, so its refused application calls cannot spend the application's.
+   * False, with the refusal recorded, when one is short.
    */
   function chargeRequest(
     state: RequestState,
@@ -641,8 +643,11 @@ export function createSlotlockRequestLimits(
     const due = classes.filter((kind) => !state.charged[kind]);
     if (due.length === 0) return true;
     const keyOf = `${principal.tenantRef}\0${principal.subject}`;
+    const application =
+      state.application &&
+      (principal.scopes === undefined || principal.scopes.includes(SLOTLOCK_APPLICATION_SCOPE));
     const checks = due.flatMap((kind) => [
-      ...(state.application
+      ...(application
         ? [{ name: `app_${kind}` as SlotlockRateName, key: principal.tenantRef }]
         : [
             { name: `key_${kind}` as SlotlockRateName, key: keyOf },

@@ -229,9 +229,10 @@ export interface SlotlockLimits {
  * - `key_*`, `tenant_*`, `global_*`: an authenticated request takes a read token from its key, its
  *   tenant and the server; a write (a REST method other than GET or HEAD, or a write tool) takes a
  *   write token from each as well.
- * - `app_*`: a request to the application API (application-api.ts) takes its read and write tokens
- *   from its tenant's application buckets instead of the key and tenant ones, so the application
- *   and the tenant's agents cannot use up each other's budget; `global_*` counts it as well.
+ * - `app_*`: a request to the application API (application-api.ts) from an admin key takes its
+ *   read and write tokens from its tenant's application buckets instead of the key and tenant ones,
+ *   so the application and the tenant's agents cannot use up each other's budget; one from any
+ *   other key takes them from that key's own. `global_*` counts it as well.
  * - `sign_in`: dashboard sign-ins and their callbacks from one client network: an IPv4 address,
  *   or an IPv6 client's /48 (slotlockClientNetwork in rate-limit.ts), as the dashboard Worker
  *   counts them.
