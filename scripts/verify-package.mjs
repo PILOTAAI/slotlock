@@ -104,6 +104,8 @@ const expectedFiles = new Set([
   'ddl.d.ts',
   'engine.js',
   'engine.d.ts',
+  'event-schema.js',
+  'event-schema.d.ts',
   'hooks.js',
   'hooks.d.ts',
   'ical-worker.js',
