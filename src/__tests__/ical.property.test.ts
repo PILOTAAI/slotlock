@@ -198,12 +198,14 @@ const text = fc
   .array(
     fc.oneof(
       { weight: 4, arbitrary: fc.string({ unit: 'grapheme', minLength: 1, maxLength: 4 }) },
-      fc.constantFrom(',', ';', ':', '\\', '\n', '\r\n', '\r', '\t', '"', ' ', 'é', '漢', '👩‍🔧', '\\n'),
+      fc.constantFrom(',', ';', ':', '\\', '\n', '\r\n', '\t', '"', ' ', 'é', '漢', '👩‍🔧', '\\n'),
     ),
     { minLength: 1, maxLength: 30 },
   )
   .map((parts) => parts.join(''))
-  .filter((value) => value.trim().length > 0);
+  .filter((value) => value.trim().length > 0 && !/[\u0000-\u0008\u000b-\u001f\u007f]/.test(value.replace(/\r\n/g, '')));
+/** Text as Slotlock keeps it: trimmed, its line breaks LF. */
+const kept = (value: string) => value.replace(/\r\n/g, '\n').trim();
 
 describe('iCalendar written by Slotlock', () => {
   it('reads back with the same text, times and identity', () => {
@@ -230,12 +232,36 @@ describe('iCalendar written by Slotlock', () => {
           };
           const [read, ...rest] = parseTrustedICalendarEvents(emitICalendar(event), 'UTC');
           expect(rest).toEqual([]);
-          expect(read).toMatchObject({ uid, start, end, sequence, summary: summary.trim() });
-          expect(read?.description).toBe(description?.trim() || undefined);
-          expect(read?.location).toBe(location?.trim() || undefined);
+          expect(read).toMatchObject({ uid, start, end, sequence, summary: kept(summary) });
+          expect(read?.description).toBe(description === undefined ? undefined : kept(description) || undefined);
+          expect(read?.location).toBe(location === undefined ? undefined : kept(location) || undefined);
         },
       ),
       { numRuns: 1_000 },
+    );
+  });
+
+  it('refuses text with a lone CR or another control character, wherever it is', () => {
+    fc.assert(
+      fc.property(
+        text,
+        fc.constantFrom('\r', '\u0000', '\u000b', '\u001b', '\u007f'),
+        fc.nat(),
+        fc.constantFrom('summary', 'description', 'location'),
+        (value, control, at, field) => {
+          const index = at % (value.length + 1);
+          const hostile = `x${value.slice(0, index)}${control}x${value.slice(index)}`;
+          const event = {
+            uid: 'control@example.com',
+            start: new Date('2027-01-01T09:00:00Z'),
+            end: new Date('2027-01-01T10:00:00Z'),
+            summary: 'Handover',
+            [field]: hostile,
+          };
+          expect(() => emitICalendar(event)).toThrowError(CalendarContractError);
+        },
+      ),
+      { numRuns: 300 },
     );
   });
 });

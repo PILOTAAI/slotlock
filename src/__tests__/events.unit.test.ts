@@ -195,6 +195,38 @@ END:VCALENDAR\r
     expect(events[1]?.getFirstProperty('recurrence-id')).toBeDefined();
   });
 
+  it('refuses control characters in event text, so no output line ends at a bare CR', () => {
+    const event = {
+      uid: 'handover-43@slotlock.example',
+      start: d('2027-06-12T09:15:00Z'),
+      end: d('2027-06-12T10:15:00Z'),
+      timezone: 'UTC',
+      summary: 'Vehicle handover',
+      organizer: { email: 'fleet@example.com', name: 'Fleet Desk' },
+      attendees: [{ email: 'agent@example.com', name: 'Booking Agent' }],
+    };
+    // The audit's probe: a reader that ends lines at CR saw METHOD:CANCEL and X-CN-INJ:1.
+    for (const hostile of [
+      { ...event, summary: 'Handover\rMETHOD:CANCEL' },
+      { ...event, description: 'Keys\rMETHOD:CANCEL' },
+      { ...event, location: 'Depot\u0000 7' },
+      { ...event, uid: 'handover\r@slotlock.example' },
+      { ...event, uid: 'handover\n@slotlock.example' },
+      { ...event, organizer: { email: 'fleet@example.com', name: 'Desk\rX-CN-INJ:1' } },
+      { ...event, attendees: [{ email: 'agent@example.com', name: 'Agent\u001b' }] },
+    ]) {
+      expect(() => emitITipCalendar(hostile, 'REQUEST')).toThrowError(CalendarContractError);
+    }
+    // A description may run over several lines, written with LF or CRLF.
+    const payload = emitITipCalendar(
+      { ...event, description: 'Keys at the desk.\r\nFuel full.\nTab\there.' },
+      'REQUEST',
+    );
+    expect(payload.replace(/\r\n/g, '')).not.toMatch(/\r/);
+    const master = new ICAL.Component(ICAL.parse(payload)).getFirstSubcomponent('vevent');
+    expect(master?.getFirstPropertyValue('description')).toBe('Keys at the desk.\nFuel full.\nTab\there.');
+  });
+
   it('fails closed before unbounded trusted-event work or cardinality can reach the store', () => {
     const event = {
       start: d('2027-01-01T09:00:00Z'),

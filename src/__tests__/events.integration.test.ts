@@ -516,6 +516,22 @@ describe.skipIf(!url)('Slotlock calendar events (real Postgres)', () => {
     ).resolves.toEqual({ ok: false, code: 'invalid_event' });
   });
 
+  it('refuses an event whose text holds a bare CR as invalid_event', async () => {
+    await expect(
+      store.putCalendarEvent({
+        tenantRef,
+        externalRef: `bare-cr-${crypto.randomUUID()}`,
+        idempotencyKey: `command-${crypto.randomUUID()}`,
+        expectedRevision: 0,
+        resourceId,
+        start: d('2027-03-20T09:00:00Z'),
+        end: d('2027-03-20T10:00:00Z'),
+        timezone: 'UTC',
+        summary: 'Handover\rMETHOD:CANCEL',
+      }),
+    ).resolves.toEqual({ ok: false, code: 'invalid_event' });
+  });
+
   it('stores a one-off event longer than the recurrence window, up to the 3,660-day ceiling', async () => {
     const DAY = 24 * 60 * 60 * 1000;
     const leaseResource = (

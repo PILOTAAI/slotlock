@@ -360,7 +360,11 @@ function expansionLimit(): never {
 
 function requiredIdentity(value: string): string {
   const normalized = value.trim();
-  if (!normalized || Buffer.byteLength(normalized, 'utf8') > 1024) {
+  if (
+    !normalized ||
+    Buffer.byteLength(normalized, 'utf8') > 1024 ||
+    /[\u0000-\u001f\u007f]/.test(normalized)
+  ) {
     throw new CalendarContractError('invalid_external_identity');
   }
   return normalized;
@@ -379,9 +383,18 @@ function instant(value: Date | string): Date {
   return parsed;
 }
 
+/**
+ * Text as an event keeps it: trimmed, its line breaks LF. A tab or LF is kept (ical.js escapes LF in
+ * a value and a parameter), and any other control character refused: ical.js leaves a bare CR as it
+ * is, and a reader that ends lines at one would read what follows it as a property of its own.
+ */
 function boundedText(value: string, maxBytes: number, required: boolean): string | undefined {
-  const normalized = value.trim();
-  if ((required && !normalized) || Buffer.byteLength(normalized, 'utf8') > maxBytes) {
+  const normalized = value.replace(/\r\n/g, '\n').trim();
+  if (
+    (required && !normalized) ||
+    Buffer.byteLength(normalized, 'utf8') > maxBytes ||
+    /[\u0000-\u0008\u000b-\u001f\u007f]/.test(normalized)
+  ) {
     throw new CalendarContractError('invalid_icalendar');
   }
   return normalized || undefined;

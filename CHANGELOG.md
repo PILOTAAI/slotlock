@@ -50,6 +50,11 @@ versioning.
   (`/v1/resources\..\availability`), as it refuses one between slashes. URL parsing reads a
   backslash as a slash, so such a target reached the server as `/v1/availability`. An encoded
   backslash (`%5C`) is still an ordinary character.
+- An event's title, description, location and participant names may hold a tab or a line break,
+  and no other control character; its UID none. A write with one is refused `invalid_event`, and
+  `emitICalendar`/`emitITipCalendar` refuse it. ical.js left a bare CR in what they wrote, so a
+  reader that ends lines at one read the rest as properties of its own (`METHOD:CANCEL`). A CRLF
+  line break is kept as LF.
 
 ### Fixed
 
