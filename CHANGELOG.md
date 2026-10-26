@@ -46,6 +46,10 @@ versioning.
   application routes, each refused 403, took tokens from the tenant's `app_read` and `app_write`, so
   one read-only key could keep the tenant's admin application answered 429. They now come out of
   the key's own `key_*` and `tenant_*` budgets.
+- The Node listener refuses a request target with a dot segment between backslashes
+  (`/v1/resources\..\availability`), as it refuses one between slashes. URL parsing reads a
+  backslash as a slash, so such a target reached the server as `/v1/availability`. An encoded
+  backslash (`%5C`) is still an ordinary character.
 
 ### Fixed
 

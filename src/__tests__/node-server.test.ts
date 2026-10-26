@@ -333,13 +333,24 @@ describe('Slotlock Node HTTP server adapter', () => {
       '/v1/./resources',
       '/v1/resources/%2e?limit=1',
       '/v1/resources/..#x',
+      // URL parsing takes a backslash for a slash in an http(s) path.
+      '/v1/resources\\..\\availability',
+      '/v1/resources/x\\..\\availability',
+      '/v1/resources/x\\%2e%2e\\availability',
+      '/v1/events/a\\.\\b',
     ]) {
       expect((await get(path)).status, path).toBe(400);
     }
     expect(fetchTarget.fetch).not.toHaveBeenCalled();
 
     // The canary: dots inside a segment are an ordinary path parameter.
-    for (const path of ['/v1/resources/..x', '/v1/events/a.b', '/v1/resources/%2E%2Ex']) {
+    for (const path of [
+      '/v1/resources/..x',
+      '/v1/events/a.b',
+      '/v1/resources/%2E%2Ex',
+      // An encoded backslash is not a separator: it reaches the target as written.
+      '/v1/resources/x%5C..%5Cavailability',
+    ]) {
       const forwarded = await get(path);
       expect(forwarded.status, path).toBe(200);
       expect(new URL(forwarded.body).pathname, path).toBe(path);

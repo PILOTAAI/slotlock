@@ -228,8 +228,9 @@ function toWebRequest(
   }
   // URL parsing resolves dot segments, `%2E` spellings included: `/v1/resources/%2E%2E/availability`
   // would reach the target as `/v1/availability`, a path parameter of `..` naming another route.
+  // It also takes a backslash for a slash, so a segment ends at either.
   const path = target.split(/[?#]/, 1)[0] ?? '';
-  if (path.split('/').some((segment) => /^(?:\.|%2e){1,2}$/i.test(segment))) {
+  if (path.split(/[\\/]/).some((segment) => /^(?:\.|%2e){1,2}$/i.test(segment))) {
     throw new Error('invalid_request_target');
   }
   const url = new URL(target, requestOrigin);
