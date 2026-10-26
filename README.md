@@ -103,8 +103,12 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
   server's main thread, so any request may also wait for the one running. A write that has waited
   two seconds gets 429 while its tenant's own write is still running, otherwise 503
   `server_busy`. An application API maintenance run waits the same way for slots of its own: one
-  per tenant, `maintenance_runs` per server. The health check is not counted. `SLOTLOCK_LIMITS`
-  changes the limits; behind a proxy, set `SLOTLOCK_TRUSTED_PROXY_HEADER` to the field it puts the
+  per tenant, `maintenance_runs` per server. The health check is not counted. One tenant's
+  requests hold at most `tenant_transactions` (2) of the server's 10 database connections at once
+  and the rest wait their turn, so a tenant's writes waiting on its own locks leave the others to
+  other tenants and key lookups; a server with one tenant can set `tenant_transactions=10`. A
+  request whose transaction waits more than 5 seconds for a lock gets 503 `server_busy`.
+  `SLOTLOCK_LIMITS` changes the limits; behind a proxy, set `SLOTLOCK_TRUSTED_PROXY_HEADER` to the field it puts the
   client's address in (`CF-Connecting-IP` behind Cloudflare) before the server takes traffic, or
   every client shares the proxy's budget: the server logs a `client_address_field_ignored` warning
   when such a field arrives without the setting. Behind two proxies, such as Cloudflare and then
@@ -460,7 +464,11 @@ callback call uses, supports nested savepoints, and restores the previous contex
 standalone `set_config(..., true)` through a pool: its transaction ends before the next call.
 `withTenant(tenantRef, callback, { isolation: 'read committed' })` runs the callback in a READ
 COMMITTED transaction whatever the role's default, and refuses inside a caller's transaction of
-another level.
+another level. A store sharing one pool among tenants can bound each tenant's share:
+`createSlotlockStore(sql, { maxTenantTransactions, tenantLockTimeoutMs })` runs at most that many
+of a tenant's `withTenant` transactions at once (the rest wait in the process, and leave the line
+when `withTenant`'s `signal` aborts), and refuses one that waits longer than that for a lock with
+`lock_timeout`, safe to retry. `slotlock serve` sets `tenant_transactions` (2) and 5,000.
 
 `createResource({ ..., maxTenantResources })` refuses a new resource (`resource_limit_reached`) once
 the tenant has that many (1-100,000); an existing `externalRef` is still updated. Capped creates for
@@ -801,7 +809,7 @@ A refusal is a result the model can act on:
 | `confirmation_required` | The write needs a person, and this client cannot ask one |
 | `confirmation_declined`, `confirmation_cancelled` | The person said no, or dismissed the question |
 | `invalid_cursor`, `invalid_event`, `invalid_window`, … | The store rejected a bounded input |
-| `request_aborted`, `store_inconsistent` | Transient; retry |
+| `request_aborted`, `server_busy`, `store_inconsistent` | Transient; retry |
 
 #### Errors from your own backend
 

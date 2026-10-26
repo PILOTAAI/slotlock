@@ -118,7 +118,9 @@ describe('Slotlock store-backed agent server adapter', () => {
     });
     // Only a shared resource: a private one is invisible to agents.
     expect(getResource).toHaveBeenCalledWith({ tenantRef, id: resource.id, visibility: 'shared' });
-    expect(withTenant).toHaveBeenCalledWith(tenantRef, expect.any(Function));
+    expect(withTenant).toHaveBeenCalledWith(tenantRef, expect.any(Function), {
+      signal: context.signal,
+    });
 
     getResource.mockResolvedValueOnce(null);
     expect(await backend.describeResource?.(context, resource.id)).toBeNull();
@@ -748,6 +750,33 @@ describe('Slotlock store-backed agent server adapter', () => {
     expect(outcome).toEqual({ ok: false, status: 403, code: 'tenant_suspended' });
   });
 
+  it('answers a write that waited past the lock timeout with 503 server_busy, to retry', async () => {
+    const backend = createSlotlockStoreAgentBackend(store, { availabilityRules });
+    putCalendarEvent.mockRejectedValueOnce(
+      Object.assign(new Error('Slotlock tenant transaction waited too long for a lock'), {
+        code: 'lock_timeout',
+      }),
+    );
+    const outcome = await invokeSlotlockAgentOperation({
+      operation: 'slotlock_create_event',
+      input: {
+        resource_id: resource.id,
+        starts_at: '2027-01-10T09:00:00.000Z',
+        ends_at: '2027-01-10T10:00:00.000Z',
+        timezone: 'Europe/London',
+        title: 'Collection',
+        idempotency_key: 'busy',
+      },
+      request: new Request('http://localhost/mcp'),
+      options: {
+        backend,
+        authenticate: async () => context.principal,
+        authorize: async () => true,
+      },
+    });
+    expect(outcome).toEqual({ ok: false, status: 503, code: 'server_busy' });
+  });
+
   it('answers a resource created again with another visibility with 409, not a server failure', async () => {
     const createResource = vi.fn().mockRejectedValue(
       Object.assign(new Error('Slotlock resource visibility cannot be changed by creating it'), {
@@ -800,6 +829,7 @@ describe('Slotlock store-backed agent server adapter', () => {
     // In the tenant's READ COMMITTED transaction, as the other writes are.
     expect(withTenant).toHaveBeenLastCalledWith(tenantRef, expect.any(Function), {
       isolation: 'read committed',
+      signal: admin.signal,
     });
   });
 });

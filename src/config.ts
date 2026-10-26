@@ -208,6 +208,8 @@ const CAP_RANGES = Object.freeze({
   key_subscriptions: [1, 64],
   key_lookups: [1, 8],
   key_lookup_queue: [0, 10_000],
+  // serve's pool has 10 connections: more than that bounds nothing.
+  tenant_transactions: [1, 10],
   tenant_holds: [1, 10_000_000],
   tenant_reservations: [1, 10_000_000],
   tenant_events: [1, 10_000_000],
@@ -251,6 +253,10 @@ export interface SlotlockLimits {
  *   fewer than its tenant's, so one key cannot lock the tenant's other keys out
  *   (slotlockKeySubscriptions).
  * - `key_lookups` and `key_lookup_queue`: API key lookups running at once and waiting.
+ * - `tenant_transactions`: store transactions one tenant runs at once on the server's pool of 10
+ *   connections; the rest wait their turn in the process, so a tenant's writes waiting on its own
+ *   locks leave the other connections to other tenants and key lookups. A server with one tenant
+ *   can set 10.
  * - `tenant_holds`, `tenant_reservations`, `tenant_events` and `tenant_coverage`: what one tenant
  *   may store, counted as the store's tenant limits count it (SlotlockTenantLimits), whichever key,
  *   agent or application writes it. Every write surface of the server shares them, so no admin
@@ -279,6 +285,7 @@ export const SLOTLOCK_DEFAULT_LIMITS: SlotlockLimits = Object.freeze({
     key_subscriptions: 4,
     key_lookups: 2,
     key_lookup_queue: 256,
+    tenant_transactions: 2,
     // Sized for the server's 10,000 resources a tenant: a live hold for every one, ten bookings and
     // ten events a resource, and coverage from ten calendars a resource.
     tenant_holds: 10_000,

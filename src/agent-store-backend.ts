@@ -108,15 +108,17 @@ async function withTenant<T>(
   assertActive(context);
   let value: T;
   try {
-    value =
-      options === undefined
-        ? await store.withTenant(context.principal.tenantRef, callback)
-        : await store.withTenant(context.principal.tenantRef, callback, options);
+    value = await store.withTenant(context.principal.tenantRef, callback, {
+      ...options,
+      signal: context.signal,
+    });
   } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
     // A suspended tenant may read; a write it asks for is forbidden, not a server failure.
-    if ((error as { code?: unknown } | null)?.code === 'tenant_suspended') {
-      throw new SlotlockAgentOperationError('tenant_suspended', 403);
-    }
+    if (code === 'tenant_suspended') throw new SlotlockAgentOperationError('tenant_suspended', 403);
+    // Waited past the store's lock timeout behind the tenant's own writes: retry later.
+    if (code === 'lock_timeout') throw new SlotlockAgentOperationError('server_busy', 503);
+    assertActive(context);
     throw error;
   }
   assertActive(context);

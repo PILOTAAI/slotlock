@@ -7,6 +7,14 @@ versioning.
 
 ### Security
 
+- One tenant can no longer hold every database connection of `slotlock serve`. Its pool of 10 was
+  shared with no bound per tenant, so 12 one-off creates waiting on their tenant's lock behind a
+  2,000-occurrence series held the whole pool, and another tenant's request waited about a second
+  for a connection. A tenant's store transactions now run at most 2 at once, the rest waiting their
+  turn in the process, and a request's transaction that waits more than 5 seconds for a lock
+  answers 503 `server_busy`. `SLOTLOCK_LIMITS` sets the share (`tenant_transactions`, 1-10); a
+  server with one tenant can set 10. `createSlotlockStore` takes `maxTenantTransactions` and
+  `tenantLockTimeoutMs` (`lock_timeout`) to do the same.
 - `slotlock_get_free_busy` and `slotlock_find_next_available` read a resource named more than once
   once, and read 10,000 busy intervals in all across the resources a request names, answering
   `400 calendar_work_limit` past that (as they now do when the store refuses one resource's). A

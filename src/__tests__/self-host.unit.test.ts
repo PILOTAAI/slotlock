@@ -105,6 +105,14 @@ describe('slotlock serve configuration', () => {
     for (const name of SLOTLOCK_CAP_NAMES) expect(SLOTLOCK_CLI_HELP).toContain(name);
   });
 
+  it("reads each tenant's share of the pool, 2 of 10 unless set, up to the whole pool", () => {
+    expect(SLOTLOCK_DEFAULT_LIMITS.caps.tenant_transactions).toBe(2);
+    for (const value of [1, 10]) {
+      const config = readSlotlockServeConfig(serveEnv({ SLOTLOCK_LIMITS: `tenant_transactions=${value}` }));
+      expect(config.limits.caps).toEqual({ ...SLOTLOCK_DEFAULT_LIMITS.caps, tenant_transactions: value });
+    }
+  });
+
   it('writes each rate back in the smallest whole unit, as the listening line shows it', () => {
     expect(
       Object.fromEntries(
@@ -144,6 +152,8 @@ describe('slotlock serve configuration', () => {
     ['a cap that is a rate', 'series_writes=1/s', /series_writes must be a whole number from 1 to 100/],
     ['a cap of zero', 'tenant_series_writes=0', /tenant_series_writes must be a whole number/],
     ['more key lookups than the pool can spare', 'key_lookups=9', /key_lookups must be a whole number from 1 to 8/],
+    ['more tenant transactions than the pool holds', 'tenant_transactions=11', /tenant_transactions must be a whole number from 1 to 10/],
+    ['no tenant transactions', 'tenant_transactions=0', /tenant_transactions must be a whole number from 1 to 10/],
     ['a limit set twice', 'address=off,address=1/s', /address is set twice/],
     ['an entry without a value', 'address', /is not name=value/],
   ])('refuses SLOTLOCK_LIMITS with %s', (_case, value, message) => {

@@ -64,7 +64,13 @@ import {
 } from './node-server.js';
 import { slotlockPackageVersion } from './package-version.js';
 import { createSlotlockRequestLimits } from './rate-limit.js';
-import { type SlotlockSql, assertSlotlockSchemaCurrent, createSlotlockStore } from './store.js';
+import {
+  type SlotlockSql,
+  type SlotlockStore,
+  type SlotlockTenantLimits,
+  assertSlotlockSchemaCurrent,
+  createSlotlockStore,
+} from './store.js';
 import type { SlotlockResource, WeeklyAvailabilityRule } from './types.js';
 import { parseAvailabilityRules } from './weekly-hours.js';
 
@@ -131,7 +137,10 @@ const HEALTH_QUERY_TIMEOUT_MS = 2_000;
 /** How long one database check answers /healthz, so a flood of health checks is not one of queries. */
 const HEALTH_RESULT_MS = 1_000;
 const HEALTHCHECK_TIMEOUT_MS = 5_000;
+/** One pool for every tenant; SLOTLOCK_LIMITS `tenant_transactions` (config.ts) goes up to it. */
 const POOL_SIZE = 10;
+/** How long a request's transaction waits for any one lock before it answers 503 `server_busy`. */
+const SERVE_LOCK_TIMEOUT_MS = 5_000;
 const RESOURCE_PAGE_SIZE = 1_000;
 
 export interface SlotlockDatabaseConfig {
@@ -510,6 +519,31 @@ function dashboardAllows(config: SlotlockServeConfig, tenantRef: string): boolea
   return githubId === undefined || users.includes(githubId);
 }
 
+function serveTenantLimits(caps: SlotlockLimits['caps']): SlotlockTenantLimits {
+  return {
+    resources: SERVE_MAX_TENANT_RESOURCES,
+    holds: caps.tenant_holds,
+    reservations: caps.tenant_reservations,
+    events: caps.tenant_events,
+    coverage: caps.tenant_coverage,
+  };
+}
+
+/**
+ * The store `serve` answers requests from. Every surface writes through it, so its tenant limits
+ * bound what any key can add, and its transaction limits what one tenant holds of the shared pool.
+ */
+export function createSlotlockServeStore(
+  sql: SlotlockSql,
+  caps: SlotlockLimits['caps'],
+): SlotlockStore {
+  return createSlotlockStore(sql, {
+    tenantLimits: serveTenantLimits(caps),
+    maxTenantTransactions: caps.tenant_transactions,
+    tenantLockTimeoutMs: SERVE_LOCK_TIMEOUT_MS,
+  });
+}
+
 /** Serve MCP and A2A over HTTP from the Postgres store, as one token-authenticated tenant. */
 export async function startSlotlockServer(
   config: SlotlockServeConfig,
@@ -579,16 +613,7 @@ export async function startSlotlockServer(
       }
     }
     const { caps } = config.limits;
-    // Every surface writes through this store, so its tenant limits bound what any key can add.
-    const store = createSlotlockStore(sql, {
-      tenantLimits: {
-        resources: SERVE_MAX_TENANT_RESOURCES,
-        holds: caps.tenant_holds,
-        reservations: caps.tenant_reservations,
-        events: caps.tenant_events,
-        coverage: caps.tenant_coverage,
-      },
-    });
+    const store = createSlotlockServeStore(sql, caps);
     const publicUrl = new URL(config.publicUrl);
     const authenticateKey = createSlotlockApiKeyAuthenticator(createSlotlockApiKeyStore(sql), {
       maxConcurrentLookups: caps.key_lookups,
@@ -722,7 +747,8 @@ export async function startSlotlockServer(
     });
     const address = await listener.listen({ host: config.host, port: config.port });
     maintenance = startSlotlockMaintenance({
-      store,
+      // One tenant at a time, and its long passes may wait on a request's locks for longer.
+      store: createSlotlockStore(sql, { tenantLimits: serveTenantLimits(caps) }),
       sql,
       tenants: [config.tenantRef],
       intervalMs: SERVE_MAINTENANCE_INTERVAL_MS,
@@ -1162,7 +1188,9 @@ Environment:
                                  maintenance_runs (1: application API maintenance runs at once),
                                  subscriptions (256), tenant_subscriptions (16),
                                  key_subscriptions (4, and fewer than tenant_subscriptions),
-                                 key_lookups (2), key_lookup_queue (256); what one tenant may store:
+                                 key_lookups (2), key_lookup_queue (256),
+                                 tenant_transactions (2: one tenant's database transactions at
+                                 once, of the pool's 10); what one tenant may store:
                                  tenant_holds (10000), tenant_reservations, tenant_events and
                                  tenant_coverage (100000)
   SLOTLOCK_TRUSTED_PROXY_HEADER  The request field a proxy in front sets to the client address,

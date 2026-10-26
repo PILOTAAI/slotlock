@@ -1807,12 +1807,14 @@ export interface SlotlockStore {
    * that snapshot can miss a suspension, and its reads go on; with `isolation: 'read committed'`
    * such a transaction is refused outright. The serving role needs EXECUTE on
    * slotlock.tenant_suspended(text): without it this refuses with `application_role_not_granted`
-   * (grantApplicationRole grants it), and on a schema without it with `schema_outdated`.
+   * (grantApplicationRole grants it), and on a schema without it with `schema_outdated`. With the
+   * store's `maxTenantTransactions`, an aborted `signal` takes a call still waiting for its turn out
+   * of the line, refused with the signal's reason.
    */
   withTenant<T>(
     tenantRef: string,
     callback: (store: SlotlockTenantStore) => Promise<T>,
-    options?: { isolation?: 'read committed' },
+    options?: { isolation?: 'read committed'; signal?: AbortSignal },
   ): Promise<T>;
   /**
    * INVARIANT (erasure completeness): a tenant integration must use a stable, erasable business
@@ -2184,6 +2186,19 @@ export interface SlotlockStoreOptions {
    * does not count, and a count stops reading at the limit.
    */
   tenantLimits?: SlotlockTenantLimits;
+  /**
+   * How many withTenant transactions of one tenant run at once on this store (1-1,000; no limit by
+   * default). The rest wait in this process, in order, so one tenant's transactions waiting on its
+   * own locks hold at most this many of a pool's connections. Not counted inside a caller's
+   * transaction, which holds its connection already.
+   */
+  maxTenantTransactions?: number;
+  /**
+   * The longest a withTenant transaction waits for any one lock, in milliseconds (1-600,000; none by
+   * default). Past it the transaction is rolled back and refused with `lock_timeout`, which is safe
+   * to retry. Not set inside a caller's transaction.
+   */
+  tenantLockTimeoutMs?: number;
 }
 
 /** Per-tenant row limits, each a whole number from 1 to 10,000,000 (resources: to 100,000). */
@@ -2508,6 +2523,61 @@ function holdTenantRef(options: SlotlockHoldTenantOptions): string | null {
   return tenantRef;
 }
 
+/**
+ * At most `max` holders per tenant at once; the rest wait in order. An aborted signal takes a
+ * waiter out of the line, rejecting with its reason. Each holder calls the release it gets once.
+ */
+export function createTenantSlots(
+  max: number,
+): (tenantRef: string, signal?: AbortSignal) => Promise<() => void> {
+  const tenants = new Map<string, { running: number; waiting: Array<() => void> }>();
+  return async (tenantRef, signal) => {
+    signal?.throwIfAborted();
+    let tenant = tenants.get(tenantRef);
+    if (!tenant) {
+      tenant = { running: 0, waiting: [] };
+      tenants.set(tenantRef, tenant);
+    }
+    const slots = tenant;
+    if (slots.running < max) {
+      slots.running += 1;
+    } else {
+      await new Promise<void>((resolve, reject) => {
+        const start = () => {
+          signal?.removeEventListener('abort', abort);
+          resolve();
+        };
+        const abort = () => {
+          slots.waiting.splice(slots.waiting.indexOf(start), 1);
+          reject(signal?.reason);
+        };
+        slots.waiting.push(start);
+        signal?.addEventListener('abort', abort, { once: true });
+      });
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      // Handed straight to the next in line, so the count stays as it is.
+      const next = slots.waiting.shift();
+      if (next) {
+        next();
+        return;
+      }
+      slots.running -= 1;
+      if (slots.running === 0) tenants.delete(tenantRef);
+    };
+  };
+}
+
+function lockTimeoutError(cause: unknown): Error & { code: 'lock_timeout' } {
+  return Object.assign(
+    new Error('Slotlock tenant transaction waited too long for a lock: retry later', { cause }),
+    { code: 'lock_timeout' as const },
+  );
+}
+
 export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions = {}): SlotlockStore {
   return buildSlotlockStore(sql, options, null);
 }
@@ -2618,6 +2688,25 @@ function buildSlotlockStore(
     );
   }
   const configuredTenantLimits = tenantLimitsOption(options.tenantLimits);
+  const { maxTenantTransactions, tenantLockTimeoutMs } = options;
+  const whole = (value: number | undefined, max: number) =>
+    value === undefined || (Number.isSafeInteger(value) && value >= 1 && value <= max);
+  if (!whole(maxTenantTransactions, 1_000) || !whole(tenantLockTimeoutMs, 600_000)) {
+    throw Object.assign(
+      new Error(
+        'Slotlock maxTenantTransactions must be 1-1000 and tenantLockTimeoutMs 1-600000, whole numbers',
+      ),
+      { code: 'invalid_tenant_transaction_options' as const },
+    );
+  }
+  // Only a client opens transactions of its own; inside a caller's, neither applies.
+  const ownTransactions = 'begin' in sql;
+  const tenantSlots =
+    ownTransactions && maxTenantTransactions !== undefined
+      ? createTenantSlots(maxTenantTransactions)
+      : undefined;
+  const lockTimeout =
+    ownTransactions && tenantLockTimeoutMs !== undefined ? `${tenantLockTimeoutMs}ms` : undefined;
   createSlotlockTenantRlsDdl(configuredTenantSetting); // Validate once before any scoped query.
   const storeOptions: SlotlockStoreOptions = {
     tenantContextSetting: configuredTenantSetting,
@@ -2862,9 +2951,16 @@ function buildSlotlockStore(
       }
       const isolation = options?.isolation;
       if (isolation !== undefined && isolation !== 'read committed') throw invalidIsolationError();
+      const release = await tenantSlots?.(tenantRef, options?.signal);
+      // A lock wait that timed out leaves the transaction unusable, so the reset below fails with
+      // another error in its place: noted here as it happens.
+      let timedOut = false;
       return inTransaction(
         sql,
         async (tx) => {
+          if (lockTimeout !== undefined) {
+            await tx`SELECT set_config('lock_timeout', ${lockTimeout}, true)`;
+          }
           if (isolation !== undefined) await assertReadCommitted(tx);
           // Held shared until the transaction ends: suspension and erasure, which take it
           // exclusively, wait for this transaction, and one that starts after them reads them below
@@ -2893,12 +2989,22 @@ function buildSlotlockStore(
             return await callback(
               buildSlotlockStore(tx, storeOptions, refusal) as SlotlockTenantStore,
             );
+          } catch (error) {
+            if (pgCode(error) === LOCK_NOT_AVAILABLE) timedOut = true;
+            throw error;
           } finally {
             await tx`SELECT set_config(${configuredTenantSetting}, ${previous[0]?.value ?? ''}, true)`;
           }
         },
         'read committed',
-      );
+      )
+        .catch((error: unknown) => {
+          if (lockTimeout !== undefined && (timedOut || pgCode(error) === LOCK_NOT_AVAILABLE)) {
+            throw lockTimeoutError(error);
+          }
+          throw error;
+        })
+        .finally(() => release?.());
     },
 
     async createResource(params) {
