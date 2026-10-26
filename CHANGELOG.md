@@ -101,13 +101,19 @@ versioning.
   request carrying such a field logs a `client_address_field_ignored` warning. The health check is
   not counted.
 - `slotlock serve` runs a recurring create and every event update one at a time per tenant and per
-  server (`tenant_series_writes`, `series_writes`), taking the write's token before it waits. A
-  freed slot rests for as long as the server was busy while the write before held it, up to a
-  second, then goes to the waiting tenant with the fewest writes in flight and, among those, the
-  one whose writes have kept the server busy least lately. Four more of a tenant's writes may wait
-  and the rest get 429; one that has waited two seconds gets 429 while its tenant's own write is
-  still running, otherwise 503 `server_busy`. An application API maintenance run waits the same
-  way for slots of its own: one per tenant, `maintenance_runs` (1) per server.
+  server (`tenant_series_writes`, `series_writes`), taking the write's token before it waits; each
+  server process counts its own slots. A freed slot rests for as long as the server was busy while
+  the write before held it, up to a second, so writes that each hold it under a second keep the
+  server busy at most about half the time. It then goes to the waiting tenant with the fewest
+  writes in flight and, among those, the one whose writes have kept the server busy least lately.
+  Tenants with more writes waiting never go ahead of one sending a write at a time, but many
+  tenants with one write each and less use, new ones included, can each go ahead of it once. Four
+  more of a tenant's writes may wait and the rest get 429. When the server's 64 places are taken,
+  a write from a tenant with fewer writes in flight than the one with the most takes the place of
+  that tenant's last write, which gets 503 `server_busy`. One that has waited two seconds gets 429
+  while its tenant's own write is still running, otherwise 503 `server_busy`. An application API
+  maintenance run waits the same way for slots of its own: one per tenant, `maintenance_runs` (1)
+  per server.
 - `createSlotlockAgentServer` takes `subscriptions.maxPerTenant`; `slotlock serve` caps each tenant
   at 16 live-update streams (`tenant_subscriptions`).
 - `slotlock serve` logs a `refusals` line each minute there are any, and at shutdown: auth

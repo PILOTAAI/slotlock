@@ -73,6 +73,27 @@ describe('hosted safety in the documentation', () => {
     expect(limits).toMatch(/main thread[^.]*wait for the one running/);
   });
 
+  it('promises no more fairness than the slots give (P11)', () => {
+    const start = readme.indexOf('- The server limits requests per client address');
+    expect(start, 'canary: the limits bullet exists').toBeGreaterThanOrEqual(0);
+    const limits = flat(readme.slice(start, readme.indexOf('\n\n', start)));
+    const added = flat(section(read('CHANGELOG.md'), '### Added'));
+    const config = flat(read('src/config.ts'));
+    for (const text of [limits, added]) {
+      // Each tenant with one write in flight and less use, a new one included, goes ahead once:
+      // the wait grows with the number of such tenants, not with one.
+      expect(text).not.toMatch(/however many tenants keep more waiting/);
+      expect(text).toMatch(/each go ahead of it once/);
+      // seriesGate's queue holds 64 and makes room for the key with fewer writes in flight.
+      expect(text).toMatch(/64 places[^.]*fewer writes in flight/);
+      // The rest is capped at a second, so the half holds only for writes shorter than that.
+      expect(text).toMatch(/under a second[^.]*about half/);
+      // Every process counts its own slots.
+      expect(text).toMatch(/each server process/i);
+    }
+    expect(config).toMatch(/each server process/i);
+  });
+
   it('says a key unused for 15 minutes may be told busy during a flood of made-up keys (SEC-2)', () => {
     const model = flat(section(security, '## Security model'));
     expect(model).toMatch(/not authenticated in the last 15 minutes[^.]*503/);

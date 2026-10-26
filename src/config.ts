@@ -228,11 +228,13 @@ export interface SlotlockLimits {
  *   and the tenant's agents cannot use up each other's budget; `global_*` counts it as well.
  * - `sign_in`: dashboard sign-ins and their callbacks from one client address.
  * - `tenant_series_writes` and `series_writes`: writes that may expand a recurring series (a
- *   recurring create, any update) running at once in a tenant and in the server.
- * - `maintenance_runs`: the application API's maintenance runs at once in the server, one a tenant,
- *   in slots of their own. A freed slot of either kind rests for as long as the event loop was
- *   busy while its write held it, up to a second, then goes to the tenant with the fewest writes
- *   in flight and, among those, the least use lately (rate-limit.ts).
+ *   recurring create, any update) running at once in a tenant and in each server process.
+ * - `maintenance_runs`: the application API's maintenance runs at once in each server process, one
+ *   a tenant, in slots of their own. A freed slot of either kind rests for as long as the event
+ *   loop was busy while its write held it, up to a second, then goes to the tenant with the fewest
+ *   writes in flight and, among those, the least use lately. That keeps a tenant sending one write
+ *   at a time from waiting behind tenants with more, not behind many tenants with one each
+ *   (rate-limit.ts).
  * - `tenant_subscriptions`: MCP live-update streams one tenant may hold open.
  * - `key_lookups` and `key_lookup_queue`: API key lookups running at once and waiting.
  */

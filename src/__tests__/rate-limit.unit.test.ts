@@ -492,6 +492,49 @@ describe('series writes', () => {
     limiter.close();
   });
 
+  it("makes room in a full queue for a tenant with fewer writes in flight, however many tenants fill it (P11)", async () => {
+    // The verifier's point that the fairness held against one tenant only: thirteen tenants with
+    // five writes each in flight filled the server's 64 places, and every other tenant's write was
+    // answered 503 at once, however few it had in flight.
+    const limiter = createSlotlockRequestLimits({
+      limits: limitsWith({ caps: { tenant_series_writes: 1, series_writes: 1 } }),
+      basePath: '',
+      authenticate: async () => null,
+    });
+    const order: string[] = [];
+    let finishHolder: () => void = () => {};
+    const write = (tenantRef: string, label: string, hold?: Promise<void>) =>
+      inRequest(limiter, async () => {
+        await limiter.admit({
+          principal: { subject: 's', tenantRef },
+          operation: 'slotlock_update_event',
+          input: {},
+        });
+        order.push(label);
+        await hold;
+      });
+    const tick = () => new Promise((resolve) => setImmediate(resolve));
+    const holder = write('holder', 'holder', new Promise((resolve) => (finishHolder = resolve)));
+    await tick();
+    const flood: ReturnType<typeof write>[] = [];
+    for (let tenant = 0; tenant < 13; tenant += 1) {
+      for (let index = 0; index < 5; index += 1) flood.push(write(`flood-${tenant}`, `f${tenant}`));
+    }
+    await tick();
+    const honest = write('honest', 'honest');
+    await tick();
+    finishHolder();
+    await holder;
+    const answer = await honest;
+    expect(answer.outcome).toBeUndefined();
+    expect(order.slice(0, 2)).toEqual(['holder', 'honest']);
+    // The flood's own writes are answered busy in its place, from the tenant with the most in flight.
+    const answers = await Promise.all(flood);
+    const busy = answers.filter(({ response }) => response.headers.get('ratelimit') === '"series_writes";r=0');
+    expect(busy.length).toBeGreaterThanOrEqual(2);
+    limiter.close();
+  }, 20_000);
+
   it("serves another tenant's write after the running expansion and its slot's rest while a tenant bursts (P11)", async () => {
     // serve's order for a REST write: the protocol charge, the series slot, then an expansion that
     // holds the event loop. The verifier's probe: with first-come slots, tenant B's one update
