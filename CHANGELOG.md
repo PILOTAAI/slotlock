@@ -55,6 +55,10 @@ versioning.
   `emitICalendar`/`emitITipCalendar` refuse it. ical.js left a bare CR in what they wrote, so a
   reader that ends lines at one read the rest as properties of its own (`METHOD:CANCEL`). A CRLF
   line break is kept as LF.
+- A write confirmation no longer states a series' dates in UTC when it could not read the event
+  (a write-only key, a refused or slow read) and the update names no time zone. The store books the
+  series in the event's own zone, so the dates approved could differ in time, weekday and count from
+  those booked. The question now shows the rule and says its dates follow the event's existing zone.
 
 ### Fixed
 

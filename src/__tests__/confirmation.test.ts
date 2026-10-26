@@ -700,6 +700,36 @@ describe('a confirmation question a person can trust', () => {
     expect(describeResource).not.toHaveBeenCalled();
   });
 
+  it('states no dates for a series it could not read when the update names no zone', async () => {
+    // The store expands the series in the event's own zone, which an unread event does not show:
+    // the question said "so it books 10 times ... (UTC)" where New York booked six an hour earlier.
+    const writeOnly = buildServer({
+      backend: { ...backend, describeResource } as SlotlockAgentCalendarBackend,
+      authenticate: async () => ({ subject, tenantRef: 'tenant-a', scopes: ['write'] }),
+    });
+    const update = {
+      event_id: EVENT.id,
+      expected_revision: 1,
+      idempotency_key: 'update-1',
+      starts_at: '2027-03-01T12:00:00Z',
+      ends_at: '2027-03-01T13:00:00Z',
+      recurrence_rule: 'FREQ=WEEKLY;BYDAY=MO,WE;UNTIL=20270405T000000Z',
+    };
+    const unzoned = await prompt(writeOnly, 'slotlock_update_event', update);
+    const message = unzoned.inputRequests.slotlock_confirm?.params.message ?? '';
+    expect(message).not.toMatch(/books \d+ time/);
+    expect(message).toContain(
+      "repeats FREQ=WEEKLY;BYDAY=MO,WE;UNTIL=20270405T000000Z, on dates that follow the event's existing time zone",
+    );
+    // A zone the update names is the one the store expands in.
+    const zoned = await prompt(writeOnly, 'slotlock_update_event', {
+      ...update,
+      timezone: 'America/New_York',
+    });
+    expect(zoned.inputRequests.slotlock_confirm?.params.message).toMatch(/so it books 10 times/);
+    expect(getEvent).not.toHaveBeenCalled();
+  });
+
   it('names by id when authorize refuses the read, though it allows the write', async () => {
     authorize.mockImplementation(
       async ({ operation }: { operation: string }) =>

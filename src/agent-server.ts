@@ -2301,10 +2301,19 @@ async function confirmationMessage(
   if (input.recurrence_rule === null) {
     changes.push('no longer repeats');
   } else if (typeof rule === 'string' && reshaped && seriesStart && seriesEnd) {
-    const seriesZone = input.timezone ?? event?.timezone ?? 'UTC';
-    changes.push(
-      `so it books ${promptSeries({ start: seriesStart, end: seriesEnd, timezone: seriesZone, rule, exceptions }, zone)}`,
-    );
+    const seriesZone = input.timezone ?? event?.timezone;
+    if (seriesZone === undefined) {
+      // An unread event and no new zone: the store expands in the event's own, which the question
+      // cannot know, so it states no dates.
+      changes.push(`repeats ${promptRule(rule)}, on dates that follow the event's existing time zone`);
+      if (input.recurrence_exceptions !== undefined) {
+        changes.push(`exceptions to ${promptRequestedExceptions(input.recurrence_exceptions, zone)}`);
+      }
+    } else {
+      changes.push(
+        `so it books ${promptSeries({ start: seriesStart, end: seriesEnd, timezone: seriesZone, rule, exceptions }, zone)}`,
+      );
+    }
   } else {
     if (typeof input.recurrence_rule === 'string') {
       changes.push(`repeats ${promptRule(input.recurrence_rule)}`);
