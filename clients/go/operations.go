@@ -289,8 +289,6 @@ type UpdateEventInput struct {
 
 	IdempotencyKey string
 
-	ExpectedResourceID *string
-
 	ResourceID *string
 
 	StartsAt *string
@@ -318,6 +316,8 @@ type UpdateEventInput struct {
 	RecurrenceRule Nullable[string]
 
 	RecurrenceExceptions []map[string]any
+
+	ExpectedResourceID *string
 }
 
 func (in UpdateEventInput) values() map[string]any {
@@ -325,9 +325,6 @@ func (in UpdateEventInput) values() map[string]any {
 	values["event_id"] = in.EventID
 	values["expected_revision"] = in.ExpectedRevision
 	values["idempotency_key"] = in.IdempotencyKey
-	if in.ExpectedResourceID != nil {
-		values["expected_resource_id"] = *in.ExpectedResourceID
-	}
 	if in.ResourceID != nil {
 		values["resource_id"] = *in.ResourceID
 	}
@@ -369,6 +366,9 @@ func (in UpdateEventInput) values() map[string]any {
 	}
 	if in.RecurrenceExceptions != nil {
 		values["recurrence_exceptions"] = in.RecurrenceExceptions
+	}
+	if in.ExpectedResourceID != nil {
+		values["expected_resource_id"] = *in.ExpectedResourceID
 	}
 	return values
 }

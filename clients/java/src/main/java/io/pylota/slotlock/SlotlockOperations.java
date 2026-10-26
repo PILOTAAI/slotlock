@@ -261,13 +261,13 @@ public abstract class SlotlockOperations {
    * @param eventId {@code event_id}, string
    * @param expectedRevision {@code expected_revision}, integer
    * @param idempotencyKey {@code idempotency_key}, string
-   * @param optional the optional arguments, or null: {@code expected_resource_id} (string),
-   * {@code resource_id} (string), {@code starts_at} (string), {@code ends_at} (string), {@code
-   * timezone} (string), {@code title} (string, null clears it), {@code description} (string, null
-   * clears it), {@code location} (string, null clears it), {@code organizer} (object, null clears
-   * it), {@code attendees} (list of object), {@code reminders} (list of object), {@code
-   * transparency} (string), {@code status} (string), {@code recurrence_rule} (string, null clears
-   * it), {@code recurrence_exceptions} (list of object)
+   * @param optional the optional arguments, or null: {@code resource_id} (string), {@code
+   * starts_at} (string), {@code ends_at} (string), {@code timezone} (string), {@code title}
+   * (string, null clears it), {@code description} (string, null clears it), {@code location}
+   * (string, null clears it), {@code organizer} (object, null clears it), {@code attendees} (list
+   * of object), {@code reminders} (list of object), {@code transparency} (string), {@code status}
+   * (string), {@code recurrence_rule} (string, null clears it), {@code recurrence_exceptions}
+   * (list of object), {@code expected_resource_id} (string)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -276,7 +276,7 @@ public abstract class SlotlockOperations {
     values.put("event_id", eventId);
     values.put("expected_revision", expectedRevision);
     values.put("idempotency_key", idempotencyKey);
-    putOptional(values, optional, Set.of("expected_resource_id", "resource_id", "starts_at", "ends_at", "timezone", "title", "description", "location", "organizer", "attendees", "reminders", "transparency", "status", "recurrence_rule", "recurrence_exceptions"), "slotlock_update_event");
+    putOptional(values, optional, Set.of("resource_id", "starts_at", "ends_at", "timezone", "title", "description", "location", "organizer", "attendees", "reminders", "transparency", "status", "recurrence_rule", "recurrence_exceptions", "expected_resource_id"), "slotlock_update_event");
     return call("slotlock_update_event", values);
   }
 

@@ -392,7 +392,6 @@ class Operations(Transport):
         *,
         expected_revision: int,
         idempotency_key: str,
-        expected_resource_id: str | None = None,
         resource_id: str | None = None,
         starts_at: str | None = None,
         ends_at: str | None = None,
@@ -407,6 +406,7 @@ class Operations(Transport):
         status: str | None = None,
         recurrence_rule: str | None | Unset = UNSET,
         recurrence_exceptions: list[dict[str, Any]] | None = None,
+        expected_resource_id: str | None = None,
     ) -> dict[str, Any]:
         """Update resource event.
 
@@ -419,8 +419,6 @@ class Operations(Transport):
             "expected_revision": expected_revision,
             "idempotency_key": idempotency_key,
         }
-        if expected_resource_id is not None:
-            values["expected_resource_id"] = expected_resource_id
         if resource_id is not None:
             values["resource_id"] = resource_id
         if starts_at is not None:
@@ -449,6 +447,8 @@ class Operations(Transport):
             values["recurrence_rule"] = recurrence_rule
         if recurrence_exceptions is not None:
             values["recurrence_exceptions"] = recurrence_exceptions
+        if expected_resource_id is not None:
+            values["expected_resource_id"] = expected_resource_id
         return self.call("slotlock_update_event", values)
 
     def delete_event(

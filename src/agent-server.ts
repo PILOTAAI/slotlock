@@ -785,7 +785,6 @@ const OPERATION_DEFINITIONS = [
       .object({
         event_id: EVENT_ID,
         expected_revision: REVISION,
-        expected_resource_id: RESOURCE_ID.optional(),
         resource_id: RESOURCE_ID.optional(),
         starts_at: DATE_TIME.optional(),
         ends_at: DATE_TIME.optional(),
@@ -801,6 +800,8 @@ const OPERATION_DEFINITIONS = [
         recurrence_rule: RECURRENCE_RULE.nullable().optional(),
         recurrence_exceptions: z.array(RECURRENCE_EXCEPTION_INPUT).max(500).optional(),
         idempotency_key: IDEMPOTENCY_KEY,
+        // Last, so the generated clients that take optional arguments by position keep their order.
+        expected_resource_id: RESOURCE_ID.optional(),
       })
       .strict()
       .refine(

@@ -325,8 +325,6 @@ pub struct UpdateEventInput {
     pub expected_revision: i64,
     pub idempotency_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub expected_resource_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub resource_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub starts_at: Option<String>,
@@ -359,6 +357,8 @@ pub struct UpdateEventInput {
     pub recurrence_rule: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recurrence_exceptions: Option<Vec<Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_resource_id: Option<String>,
 }
 
 /// The arguments of [`Client::delete_event`].

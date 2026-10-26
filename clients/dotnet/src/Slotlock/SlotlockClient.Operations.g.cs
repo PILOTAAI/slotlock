@@ -260,7 +260,6 @@ public sealed partial class SlotlockClient
     /// <param name="eventId">event_id</param>
     /// <param name="expectedRevision">expected_revision</param>
     /// <param name="idempotencyKey">idempotency_key</param>
-    /// <param name="expectedResourceId">expected_resource_id</param>
     /// <param name="resourceId">resource_id</param>
     /// <param name="startsAt">starts_at</param>
     /// <param name="endsAt">ends_at</param>
@@ -276,6 +275,7 @@ public sealed partial class SlotlockClient
     /// <param name="recurrenceRule">recurrence_rule Null clears it; leave it out to keep
     /// it.</param>
     /// <param name="recurrenceExceptions">recurrence_exceptions</param>
+    /// <param name="expectedResourceId">expected_resource_id</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -283,7 +283,6 @@ public sealed partial class SlotlockClient
         string eventId,
         long expectedRevision,
         string idempotencyKey,
-        Optional<string> expectedResourceId = default,
         Optional<string> resourceId = default,
         Optional<string> startsAt = default,
         Optional<string> endsAt = default,
@@ -298,13 +297,13 @@ public sealed partial class SlotlockClient
         Optional<string> status = default,
         Optional<string?> recurrenceRule = default,
         Optional<JsonArray> recurrenceExceptions = default,
+        Optional<string> expectedResourceId = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["event_id"] = Json.ToNode(eventId);
         values["expected_revision"] = Json.ToNode(expectedRevision);
         values["idempotency_key"] = Json.ToNode(idempotencyKey);
-        if (expectedResourceId.HasValue) values["expected_resource_id"] = Json.ToNode(expectedResourceId.Value);
         if (resourceId.HasValue) values["resource_id"] = Json.ToNode(resourceId.Value);
         if (startsAt.HasValue) values["starts_at"] = Json.ToNode(startsAt.Value);
         if (endsAt.HasValue) values["ends_at"] = Json.ToNode(endsAt.Value);
@@ -319,6 +318,7 @@ public sealed partial class SlotlockClient
         if (status.HasValue) values["status"] = Json.ToNode(status.Value);
         if (recurrenceRule.HasValue) values["recurrence_rule"] = Json.ToNode(recurrenceRule.Value);
         if (recurrenceExceptions.HasValue) values["recurrence_exceptions"] = Json.ToNode(recurrenceExceptions.Value);
+        if (expectedResourceId.HasValue) values["expected_resource_id"] = Json.ToNode(expectedResourceId.Value);
         return CallAsync("slotlock_update_event", values, cancellationToken);
     }
 
