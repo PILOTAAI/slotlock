@@ -99,6 +99,26 @@ END:VCALENDAR\r
     ]);
   });
 
+  it('expands an instant a spring-forward names twice once, however far apart the two are', () => {
+    // 02:00 and 02:30 do not exist on 2028-03-12 in New York: ical.js moves them to 03:00 and
+    // 03:30, which the rule names again two steps later.
+    const occurrences = expandCalendarEventOccurrences(
+      {
+        start: d('2028-03-10T07:00:00Z'),
+        end: d('2028-03-10T07:15:00Z'),
+        timezone: 'America/New_York',
+        summary: 'Night check',
+        transparency: 'transparent',
+        recurrence: { rrule: 'FREQ=DAILY;BYHOUR=2,3;BYMINUTE=0,30' },
+      },
+      { start: d('2028-03-12T00:00:00Z'), end: d('2028-03-13T00:00:00Z') },
+    );
+    expect(occurrences.map((occurrence) => occurrence.recurrenceId)).toEqual([
+      '2028-03-12T07:00:00.000Z',
+      '2028-03-12T07:30:00.000Z',
+    ]);
+  });
+
   it('maps EXDATE to a cancellation exception and rejects recurrence constructs it cannot preserve', () => {
     const payload = `BEGIN:VCALENDAR\r
 VERSION:2.0\r

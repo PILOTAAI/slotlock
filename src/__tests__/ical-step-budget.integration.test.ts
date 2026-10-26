@@ -178,8 +178,9 @@ describe.skipIf(!url)('the expansion budget in the store (real Postgres)', () =>
     expect(result.refusedEventIds).toEqual(expect.arrayContaining(ids));
   });
 
-  it('still fails a roll over a stored series that is wrong rather than too big', async () => {
-    // Only a rule's size is skipped: a series Slotlock cannot read at all surfaces, as before.
+  it('names and puts back a stored series that is wrong rather than too big', async () => {
+    // A series Slotlock cannot read at all is refused by id, so it can be found and fixed, and
+    // waits behind the others rather than stopping the tenant's roll.
     const otherTenant = `budget-tenant-${crypto.randomUUID()}`;
     const resource = await store.createResource({
       externalRef: `budget-resource-${crypto.randomUUID()}`,
@@ -202,7 +203,7 @@ describe.skipIf(!url)('the expansion budget in the store (real Postgres)', () =>
           tenantRef: otherTenant,
           window: { start: d('2027-01-05T00:00:00Z'), end: d('2027-01-12T00:00:00Z') },
         }),
-      ).rejects.toThrow();
+      ).resolves.toMatchObject({ extended: 0, refused: 1, refusedEventIds: [created.eventId] });
     } finally {
       await sql`DELETE FROM slotlock.calendar_event_commands WHERE tenant_ref = ${otherTenant}`;
       await sql`DELETE FROM slotlock.calendar_event_occurrences WHERE tenant_ref = ${otherTenant}`;

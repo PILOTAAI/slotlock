@@ -374,7 +374,8 @@ export interface CalendarHorizonRollResult {
   conflictEventIds: string[];
   /**
    * Masters whose rule takes more than the expansion budget to reach the window (one that never
-   * occurs again, or almost never); their previous coverage remains intact, and they wait an hour
+   * occurs again, or almost never), or whose roll failed for any other reason; their previous
+   * coverage remains intact, and they wait an hour
    * before a roll examines them again, behind every master it has not put back.
    */
   refused: number;

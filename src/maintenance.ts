@@ -14,7 +14,7 @@ export interface SlotlockMaintenanceResult {
   extended: number;
   /** Series that could not extend because an occurrence would overlap a booking. */
   conflicts: number;
-  /** Series over the expansion budget; they keep their old coverage. */
+  /** Series over the expansion budget, or whose roll failed otherwise; they keep their old coverage. */
   refused: number;
   /**
    * Expired holds and the answers kept for keyed ones, and past the retention window event
@@ -52,20 +52,28 @@ export async function maintainSlotlockTenant(
   let refused = 0;
   let rollCapped = true;
   let after: CalendarHorizonRollCursor | null = null;
-  for (let batch = 0; batch < batches; batch++) {
-    options.signal?.throwIfAborted();
-    const from: CalendarHorizonRollCursor | null = after;
-    const roll: CalendarHorizonRollResult = await store.withTenant(tenantRef, (tenant) =>
-      tenant.rollCalendarEventHorizon({ tenantRef, window, ...(from ? { after: from } : {}) }),
-    );
-    extended += roll.extended;
-    conflicts += roll.conflicts;
-    refused += roll.refused;
-    after = roll.next;
-    if (!after) {
-      rollCapped = false;
-      break;
+  // A roll that fails does not stop the pruning: expired holds are purged all the same, and the
+  // roll's error is thrown after.
+  let rollFailure: { error: unknown } | null = null;
+  try {
+    for (let batch = 0; batch < batches; batch++) {
+      options.signal?.throwIfAborted();
+      const from: CalendarHorizonRollCursor | null = after;
+      const roll: CalendarHorizonRollResult = await store.withTenant(tenantRef, (tenant) =>
+        tenant.rollCalendarEventHorizon({ tenantRef, window, ...(from ? { after: from } : {}) }),
+      );
+      extended += roll.extended;
+      conflicts += roll.conflicts;
+      refused += roll.refused;
+      after = roll.next;
+      if (!after) {
+        rollCapped = false;
+        break;
+      }
     }
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+    rollFailure = { error };
   }
   let pruned = 0;
   let eventsLeft = true;
@@ -87,6 +95,7 @@ export async function maintainSlotlockTenant(
       bookingsLeft = prune.hasMore;
     }
   }
+  if (rollFailure) throw rollFailure.error;
   return {
     extended,
     conflicts,

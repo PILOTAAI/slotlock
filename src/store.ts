@@ -4214,7 +4214,13 @@ function buildSlotlockStore(
               await deferRoll(sql, params.tenantRef, candidate.id);
               break;
             }
-            throw error;
+            // Anything else this one series meets (a row no Slotlock would write, a constraint it
+            // trips) was rolled back with its savepoint too: it is put back like one over the
+            // budget, so no single row stops the tenant's roll.
+            refused += 1;
+            refusedEventIds.push(candidate.id);
+            await deferRoll(sql, params.tenantRef, candidate.id);
+            break;
           }
         }
       }

@@ -548,9 +548,11 @@ is over the budget. A place serves only the rule, start and time zone it was kep
 same version of ical.js, and never lies past an occurrence that could still reach the window (one
 within the event's length and a day of it, or one an exception moves into it). Otherwise the series
 is searched from its start, within the same budget. During maintenance, a stored series that
-outgrows the budget, or that an earlier release stored and this one refuses, is counted as `refused`
-(its ids in `refusedEventIds`) and keeps its old coverage; a row no release could have written, such
-as a rule ical.js cannot read, fails the roll. `storedCalendarEventProblem(event)` says why this
+outgrows the budget, that an earlier release stored and this one refuses, or whose roll fails for
+any other reason (a row no release could have written, such as a rule ical.js cannot read), is
+counted as `refused` (its ids in `refusedEventIds`), keeps its old coverage and waits an hour behind
+the others. A pass whose roll fails still prunes, then reports the failure.
+`storedCalendarEventProblem(event)` says why this
 release would refuse a stored event (a rule shape it no longer expands, `COUNT` with a yearly day
 some years lack, or an exception that names no occurrence), or `null`; run it over your stored
 events before upgrading.

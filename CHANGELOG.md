@@ -26,6 +26,12 @@ versioning.
   authenticated tool or REST call could hold far more memory than its body. 0.1.0, 0.1.1 and 0.2.0
   pin zod 4.6.5 exactly; their users can add `"overrides": {"zod": "4.6.7"}` to their own
   `package.json` (README, Known issues in 0.2.0).
+- One recurring series can no longer stop its tenant's maintenance. A rule naming two wall times
+  in a spring-forward gap (`FREQ=DAILY;BYHOUR=2,3;BYMINUTE=0,30` in New York) gave one instant
+  twice, and its roll failed every pass, so no other series of the tenant extended and its expired
+  holds were never purged. An instant is now one occurrence wherever the rule names it again; a
+  series whose roll fails for any other reason is refused by id and put back like one over the
+  budget; and a pass still prunes when its roll fails, then reports the failure.
 
 ### Fixed
 

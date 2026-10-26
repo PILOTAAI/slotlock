@@ -622,6 +622,95 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
       return ids;
     }
 
+    it('rolls a series across a spring-forward that names one instant twice, and the rest with it', async () => {
+      const { tenantRef, resourceId } = await freshTenant();
+      const horizon = calendarEventRollingHorizon();
+      // The next spring-forward in New York the roll reaches: 02:00 and 02:30 become 03:00 and
+      // 03:30, which the rule names again.
+      const springForward = [d('2027-03-14T07:00:00Z'), d('2028-03-12T07:00:00Z'), d('2029-03-11T07:00:00Z')].find(
+        (at) => at.getTime() > horizon.start.getTime() + 2 * DAY,
+      ) as Date;
+      const night = await store.createResource({
+        tenantRef,
+        externalRef: `night-${crypto.randomUUID()}`,
+        timezone: 'America/New_York',
+      });
+      const start = new Date(horizon.start.getTime() + 7 * HOUR);
+      const put = await store.putCalendarEvent({
+        tenantRef,
+        externalRef: `night-check-${crypto.randomUUID()}`,
+        idempotencyKey: `create-${crypto.randomUUID()}`,
+        expectedRevision: 0,
+        resourceId: night.id,
+        start,
+        end: new Date(start.getTime() + 15 * 60_000),
+        timezone: 'America/New_York',
+        summary: 'Night check',
+        transparency: 'transparent',
+        recurrence: { rrule: 'FREQ=DAILY;BYHOUR=2,3;BYMINUTE=0,30' },
+        materializationWindow: { start: horizon.start, end: new Date(springForward.getTime() - DAY) },
+      });
+      if (!put.ok) throw new Error(`series fixture failed: ${put.code}`);
+      const healthy = await dailySeries(tenantRef, resourceId, {
+        start: horizon.start,
+        end: new Date(horizon.start.getTime() + 31 * DAY),
+      });
+      const parking = await store.createResource({
+        tenantRef,
+        externalRef: `parking-${crypto.randomUUID()}`,
+        timezone: 'UTC',
+      });
+      const hold = await store.acquireHold({
+        tenantRef,
+        resourceId: parking.id,
+        start: new Date(horizon.start.getTime() + 2 * DAY),
+        end: new Date(horizon.start.getTime() + 2 * DAY + HOUR),
+        ttlMs: 50,
+      });
+      expect(hold.ok).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      // Before, the second 07:00Z hit the occurrences' primary key and every pass threw.
+      const pass = await maintainSlotlockTenant(store, tenantRef);
+      expect(pass).toMatchObject({ extended: 2, conflicts: 0, refused: 0 });
+      expect(await storedWindow(put.eventId)).toEqual(horizon);
+      expect(await storedWindow(healthy)).toEqual(horizon);
+      const [ids] = await sql<{ instants: number; distinct: number }[]>`
+        SELECT count(*)::int AS instants, count(DISTINCT starts_at)::int AS "distinct"
+          FROM slotlock.calendar_event_occurrences WHERE event_id = ${put.eventId}`;
+      expect(ids?.instants).toBe(ids?.distinct);
+      const [held] = await sql<{ count: number }[]>`
+        SELECT count(*)::int AS count FROM slotlock.reservations
+         WHERE resource_id = ${parking.id} AND status = 'held'`;
+      expect(held?.count).toBe(0);
+    }, 60_000);
+
+    it('puts back a series that fails for any reason and rolls the rest', async () => {
+      const { tenantRef, resourceId } = await freshTenant();
+      const horizon = calendarEventRollingHorizon();
+      const window = { start: horizon.start, end: new Date(horizon.start.getTime() + 30 * DAY) };
+      const broken = await dailySeries(tenantRef, resourceId, window);
+      const other = await store.createResource({
+        tenantRef,
+        externalRef: `vehicle-${crypto.randomUUID()}`,
+        timezone: 'UTC',
+      });
+      const healthy = await dailySeries(tenantRef, other.id, {
+        start: horizon.start,
+        end: new Date(horizon.start.getTime() + 31 * DAY),
+      });
+      // A row no Slotlock would write, as a corrupted or hand-edited one would be.
+      await sql`UPDATE slotlock.calendar_events SET recurrence_rule = 'FREQ=FORTNIGHTLY' WHERE id = ${broken}`;
+      const roll = await store.withTenant(tenantRef, (tenant) =>
+        tenant.rollCalendarEventHorizon({ tenantRef, window: horizon }),
+      );
+      expect(roll).toMatchObject({ examined: 2, extended: 1, refused: 1, refusedEventIds: [broken] });
+      expect(await storedWindow(healthy)).toEqual(horizon);
+      expect(await storedWindow(broken)).toEqual(window);
+      const [row] = await sql<{ retry: Date | null }[]>`
+        SELECT roll_retry_at AS retry FROM slotlock.calendar_events WHERE id = ${broken}`;
+      expect(row?.retry).toBeInstanceOf(Date);
+    }, 60_000);
+
     it('names the series a booking blocks, so it can be found and fixed', async () => {
       const { tenantRef } = await freshTenant();
       const [stuck] = await stuckSeries(tenantRef, 1);

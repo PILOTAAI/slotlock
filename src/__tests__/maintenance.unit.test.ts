@@ -190,6 +190,15 @@ describe('maintainSlotlockTenant', () => {
     );
   });
 
+  it('still prunes when the roll fails, then throws the roll\'s error', async () => {
+    const fake = fakeStore();
+    const failure = new Error('connection reset');
+    fake.fail('fleet', failure);
+    fake.purge('fleet', { ...DONE_PURGE, expiredHoldsDeleted: 3 });
+    await expect(maintainSlotlockTenant(fake.store, 'fleet')).rejects.toBe(failure);
+    expect(fake.calls.map(({ task }) => task)).toEqual(['roll', 'prune', 'purge']);
+  });
+
   it('stops each task after `batches` and says there is more', async () => {
     const fake = fakeStore();
     fake.roll('fleet', ...[1, 2, 3].map((n) => ({ ...DONE_ROLL, extended: 1, hasMore: true, next: cursor(n) })));
@@ -412,7 +421,8 @@ describe('startSlotlockMaintenance', () => {
     await settle();
     expect(onError).toHaveBeenCalledWith(failure);
     expect(onPass).toHaveBeenCalledTimes(1);
-    expect(tenantsMaintained(fake)).toEqual(['fine']);
+    // The failed roll's tenant is still pruned before its pass is reported failed.
+    expect(tenantsMaintained(fake)).toEqual(['broken', 'fine']);
     // The failed tenant waits for the next interval rather than failing in a loop.
     await vi.advanceTimersByTimeAsync(30 * 60_000);
     expect(onError).toHaveBeenCalledTimes(1);
@@ -454,7 +464,7 @@ describe('startSlotlockMaintenance', () => {
         failures: onError.mock.calls.length,
         maintained: tenantsMaintained(fake),
         unhandled,
-      }).toEqual({ passes: 2, failures: 1, maintained: ['fine', 'also-fine'], unhandled: [] });
+      }).toEqual({ passes: 2, failures: 1, maintained: ['fine', 'broken', 'also-fine'], unhandled: [] });
       await scheduler.close();
     } finally {
       process.off('unhandledRejection', record);

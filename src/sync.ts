@@ -2816,7 +2816,7 @@ function parseCalendarChanges(
         const found: ExternalCalendarChange[] = [];
         const matched = new Set<ReadOverride>();
         let position = resume?.position;
-        let previous: number | undefined;
+        const seen = new Set<number>();
         let snapshot = resume;
         let leaving = key !== null;
         // Every occurrence starting before this instant has been seen (all of them once the series
@@ -2895,10 +2895,10 @@ function parseCalendarChanges(
           // The first instance is DTSTART's own instant: for a stored series, the instant stored.
           const at = isFirst ? lengths.start : position;
           // An instant is one occurrence however many RRULEs and RDATEs name it (RFC 5545
-          // §3.8.5.3; ical.js yields it again), and none where an EXDATE names it.
-          const repeated = at === previous;
-          previous = at;
-          if (repeated) continue;
+          // §3.8.5.3; ical.js yields it again, and a spring-forward can move a wall time onto one
+          // the rule names later), and none where an EXDATE names it.
+          if (seen.has(at)) continue;
+          seen.add(at);
           if (event.component.hasProperty('exdate')) {
             exclusions ??= exclusionsOf(event);
             if (exclusions.instants.has(at) || exclusions.days.has(dayOf(occurrence))) continue;
