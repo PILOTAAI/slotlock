@@ -11,6 +11,12 @@ versioning.
   once, and read 10,000 busy intervals in all across the resources a request names, answering
   `400 calendar_work_limit` past that (as they now do when the store refuses one resource's). A
   request naming 100 resources, or one resource 100 times, did 100 times the work of one.
+- `slotlock serve` bounds what one tenant may store. It gave its store no tenant limits, so an admin
+  key could add holds, bookings and coverage rows through the application API (and an agent
+  events) without end, growing the shared database. It now applies the store's tenant limits to
+  every surface: 10,000 holds and 100,000 each of bookings, events and coverage rows by default,
+  set with `SLOTLOCK_LIMITS` (`tenant_holds`, `tenant_reservations`, `tenant_events`,
+  `tenant_coverage`); a write past one answers 409 with its `*_limit_reached` code.
 - The example dashboard Worker configuration removes query strings, which hold OAuth codes, from
   the URLs Workers Logs keep.
 - SECURITY.md and the README say write confirmation is attested by the client: it keeps an agent
@@ -23,6 +29,13 @@ versioning.
 
 ### Fixed
 
+- Series the roll cannot extend (in conflict or over the budget) no longer keep a healthy series
+  from rolling, however many there are. The roll puts each behind every series it has not put back,
+  for an hour, and takes those it has put back in turn, longest waiting first; its cursor carries
+  where it is in that order (`rollRetryAt`). A maintenance pass says when its roll stopped before
+  them (`rollPending`), and `slotlock serve` and `slotlock maintain` then go round again at once, so
+  each stuck series is met once before a healthy one is reached. Before, every pass met the same
+  stuck series first, and with more of them than a pass examines a healthy one never rolled.
 - A runtime dependency bump no longer breaks the release checks. The packed NOTICE is written at
   build time from `package.json` and `package-lock.json` (`scripts/notice.mjs`), naming the exact
   version of each dependency and the packages each pulls in; the repository's NOTICE names each

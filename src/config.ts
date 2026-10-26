@@ -207,6 +207,10 @@ const CAP_RANGES = Object.freeze({
   key_subscriptions: [1, 64],
   key_lookups: [1, 8],
   key_lookup_queue: [0, 10_000],
+  tenant_holds: [1, 10_000_000],
+  tenant_reservations: [1, 10_000_000],
+  tenant_events: [1, 10_000_000],
+  tenant_coverage: [1, 10_000_000],
 } as const);
 export type SlotlockCapName = keyof typeof CAP_RANGES;
 export const SLOTLOCK_CAP_NAMES = Object.freeze(Object.keys(CAP_RANGES) as SlotlockCapName[]);
@@ -243,6 +247,11 @@ export interface SlotlockLimits {
  *   fewer than its tenant's, so one key cannot lock the tenant's other keys out
  *   (slotlockKeySubscriptions).
  * - `key_lookups` and `key_lookup_queue`: API key lookups running at once and waiting.
+ * - `tenant_holds`, `tenant_reservations`, `tenant_events` and `tenant_coverage`: what one tenant
+ *   may store, counted as the store's tenant limits count it (SlotlockTenantLimits), whichever key,
+ *   agent or application writes it. Every write surface of the server shares them, so no admin
+ *   key can grow the shared database without end; a write past one answers 409 with its
+ *   `*_limit_reached` code.
  */
 export const SLOTLOCK_DEFAULT_LIMITS: SlotlockLimits = Object.freeze({
   rates: Object.freeze({
@@ -265,6 +274,12 @@ export const SLOTLOCK_DEFAULT_LIMITS: SlotlockLimits = Object.freeze({
     key_subscriptions: 4,
     key_lookups: 2,
     key_lookup_queue: 256,
+    // Sized for the server's 10,000 resources a tenant: a live hold for every one, ten bookings and
+    // ten events a resource, and coverage from ten calendars a resource.
+    tenant_holds: 10_000,
+    tenant_reservations: 100_000,
+    tenant_events: 100_000,
+    tenant_coverage: 100_000,
   }),
 });
 
@@ -331,7 +346,7 @@ export function readLimits(env: SlotlockEnv): SlotlockLimits {
       };
     } else if (Object.hasOwn(CAP_RANGES, name)) {
       const [minimum, maximum] = CAP_RANGES[name as SlotlockCapName];
-      const cap = /^\d{1,6}$/.test(setting) ? Number(setting) : Number.NaN;
+      const cap = /^\d{1,8}$/.test(setting) ? Number(setting) : Number.NaN;
       if (!(cap >= minimum && cap <= maximum)) {
         throw invalid(`${name} must be a whole number from ${minimum} to ${maximum}`);
       }

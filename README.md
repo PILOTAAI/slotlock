@@ -111,6 +111,12 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
   kamal-proxy, name the first one's field: the server reads the last address of a list field such
   as `X-Forwarded-For`, which the second proxy writes as Cloudflare's. A client can send that field
   itself, so let nothing reach the server except through the proxy.
+- The server also bounds what one tenant may store, whichever key, agent or application writes
+  it: 10,000 holds, and 100,000 each of bookings, calendar events and coverage rows, counted as
+  the store's `tenantLimits` count them, besides 10,000 resources. A write past one answers 409
+  `hold_limit_reached`, `reservation_limit_reached`, `event_limit_reached` or
+  `coverage_limit_reached`; `SLOTLOCK_LIMITS` changes them (`tenant_holds`,
+  `tenant_reservations`, `tenant_events`, `tenant_coverage`).
 
 ```sh
 slotlock hours set '[{"rrule":"FREQ=WEEKLY;BYDAY=SA","startMinutes":600,"durationMinutes":240}]' --resource vehicle-42
@@ -1149,10 +1155,13 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
   tenant list. `startSlotlockMaintenance({ store, sql, tenants, intervalMs })` is the scheduler
   `serve` uses, lock included; `withSlotlockMaintenanceLock` is the lock alone.
 - **Capped passes.** A capped pass that extended and pruned nothing met only series it cannot extend
-  (counted in `conflicts` and `refused`): another pass would too, so wait for the next interval.
+  (counted in `conflicts` and `refused`). The roll puts each behind every series it has not put
+  back, for an hour, so with `rollPending: true` (it stopped before those) run another pass at once:
+  it meets new ones, and a healthy series is reached however many are stuck. Otherwise another pass
+  would meet the same ones, so wait for the next interval.
 - **Paging the roll yourself.** `rollCalendarEventHorizon` returns `next`; pass it as `after` to the
-  next batch of the same pass. A series left in conflict or refused keeps its place at the front of
-  the order, so without `after` every later batch would examine it again.
+  next batch of the same pass, so later batches go on from the last series examined. Series the
+  roll has never put back come first, then those it has, longest waiting first.
 - **Quotas.** Each agent principal may retain 1,000 event identities (active plus cancelled) and
   10,000 idempotency commands, of which 9,000 can be creates or updates, so a cancel always has
   room. Adjust with `agentOwnerEventQuota` and `agentOwnerCommandQuota` on `createSlotlockStore`.

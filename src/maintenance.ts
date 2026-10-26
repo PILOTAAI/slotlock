@@ -24,6 +24,11 @@ export interface SlotlockMaintenanceResult {
   pruned: number;
   /** More was left than one pass does: run another. */
   capped: boolean;
+  /**
+   * The roll stopped before the series it had put back: series it has not tried since may still
+   * extend, so another pass should follow at once.
+   */
+  rollPending: boolean;
 }
 
 /**
@@ -88,6 +93,7 @@ export async function maintainSlotlockTenant(
     refused,
     pruned,
     capped: rollCapped || eventsLeft || bookingsLeft,
+    rollPending: rollCapped && after !== null && (after.rollRetryAt ?? null) === null,
   };
 }
 
@@ -166,8 +172,6 @@ export function startSlotlockMaintenance(
   const queue: string[] = [];
   /** Tenants waiting or in a pass: a tenant served during its own pass is not queued again. */
   const queued = new Set<string>();
-  /** Tenants whose last pass only met series it could not extend, and went round once more. */
-  const blockedOnly = new Set<string>();
   const controller = new AbortController();
   let working: Promise<void> | null = null;
 
@@ -203,15 +207,14 @@ export function startSlotlockMaintenance(
             } catch {
               // Reporting must never stop maintenance, or make a pass that ran look failed.
             }
-            // A capped pass that got somewhere goes round again at once. One that only met series
-            // it cannot extend has put them behind the others for an hour (the store does), so it
-            // goes round once more to reach the series behind them; twice in a row, it waits for
-            // the next interval rather than examine the same ones again and again.
+            // A capped pass that got somewhere goes round again at once, as does one whose roll
+            // stopped before the series it had put back: each series it could not extend is now
+            // behind every one it has not tried (the store puts it there), so the next pass meets
+            // new ones, and however many are stuck, each is met once before a healthy one is
+            // reached. A pass that reached the series put back waits for the next interval: they
+            // take turns there, and the next pass reaches anything new before them.
             const progressed = result.extended + result.pruned > 0;
-            const blocked = !progressed && result.conflicts + result.refused > 0;
-            again = result.capped && (progressed || (blocked && !blockedOnly.has(tenantRef)));
-            if (result.capped && blocked) blockedOnly.add(tenantRef);
-            else blockedOnly.delete(tenantRef);
+            again = result.capped && (progressed || result.rollPending);
           }
         } catch (error) {
           if (controller.signal.aborted) return;
@@ -252,7 +255,6 @@ export function startSlotlockMaintenance(
       while (served.size > maxTenants) {
         const forgotten = served.keys().next().value as string;
         served.delete(forgotten);
-        blockedOnly.delete(forgotten);
       }
       if (due(tenantRef)) enqueue(tenantRef);
     },
