@@ -60,7 +60,7 @@ describe('hosted safety in the documentation', () => {
     // An operator behind Cloudflare and kamal-proxy must name Cloudflare's field, and before traffic.
     expect(limits).toMatch(/TRUSTED_PROXY_HEADER[^.]*before the server takes traffic/);
     expect(limits).toMatch(/two proxies[^.]*name the first one's field/);
-    expect(flat(section(read('CHANGELOG.md'), '### Changed'))).toMatch(
+    expect(flat(section(read('CHANGELOG.md'), '### Upgrade notes'))).toMatch(
       /TRUSTED_PROXY_HEADER[^.]*before upgrading/,
     );
     expect(limits).not.toMatch(/one that waits two seconds gets 503/);
