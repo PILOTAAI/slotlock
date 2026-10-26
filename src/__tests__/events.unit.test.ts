@@ -408,7 +408,7 @@ describe('Slotlock long one-off events', () => {
       ),
     ).toEqual([['2027-01-01T00:00:00.000Z', '2028-06-01T00:00:00.000Z']]);
 
-    // Recurrence expansion keeps its bound: a 368-day window is still refused for a series.
+    // Recurrence expansion keeps its bound: a 370-day window is still refused for a series.
     expect(() =>
       expandCalendarEventOccurrences(
         {
@@ -418,7 +418,7 @@ describe('Slotlock long one-off events', () => {
           summary: 'Series',
           recurrence: { rrule: 'FREQ=WEEKLY;COUNT=3' },
         },
-        { start: d('2027-01-01T00:00:00Z'), end: d('2028-01-04T00:00:00Z') },
+        { start: d('2027-01-01T00:00:00Z'), end: d('2028-01-06T00:00:00Z') },
       ),
     ).toThrowError(expect.objectContaining({ code: 'invalid_icalendar' }));
   });

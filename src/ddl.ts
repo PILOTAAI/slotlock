@@ -76,6 +76,43 @@ $slotlock_restore_forced_row_security$;
 /** The start of the message with which the deployment DDL refuses a `slotlock` schema. */
 export const SLOTLOCK_SCHEMA_CONTROL_REFUSAL = 'Slotlock will not deploy into schema slotlock';
 
+/**
+ * The version of the schema this release creates, recorded in `slotlock.schema_version` by every
+ * migration. Releases up to 0.2 recorded nothing; 0.1 was version 1 and 0.2 version 2.
+ */
+export const SLOTLOCK_SCHEMA_VERSION = 3;
+
+/** The start of the message with which the deployment DDL refuses a schema a newer release migrated. */
+export const SLOTLOCK_SCHEMA_NEWER_REFUSAL =
+  'Slotlock will not migrate a schema a newer release migrated';
+
+/** The oldest PostgreSQL the DDL runs on (`server_version_num`): it uses pg_input_is_valid. */
+const MIN_SERVER_VERSION_NUM = 160000;
+
+// Before anything changes: a server too old for the DDL fails here, with a message that names the
+// version, rather than part way through on a function it lacks; and a schema a newer release
+// migrated is refused, since this release's DDL would put back what that release replaced.
+const SLOTLOCK_SCHEMA_PRECONDITIONS = `DO $slotlock_schema_preconditions$
+DECLARE
+  installed integer;
+BEGIN
+  IF pg_catalog.current_setting('server_version_num')::integer < ${MIN_SERVER_VERSION_NUM} THEN
+    RAISE EXCEPTION 'Slotlock needs PostgreSQL 16 or later; this server is %',
+      pg_catalog.current_setting('server_version')
+      USING ERRCODE = 'feature_not_supported';
+  END IF;
+  IF pg_catalog.to_regclass('slotlock.schema_version') IS NOT NULL THEN
+    EXECUTE 'SELECT version FROM slotlock.schema_version WHERE singleton' INTO installed;
+    IF installed > ${SLOTLOCK_SCHEMA_VERSION} THEN
+      RAISE EXCEPTION '${SLOTLOCK_SCHEMA_NEWER_REFUSAL} (version %; this release is version ${SLOTLOCK_SCHEMA_VERSION})', installed
+        USING ERRCODE = 'object_not_in_prerequisite_state',
+              HINT = 'Migrate and serve it with the release that migrated it, or a later one.';
+    END IF;
+  END IF;
+END
+$slotlock_schema_preconditions$;
+`;
+
 // Every slotlock.<name> the deployment uses resolves in that schema, and the deployment writes rows
 // into its tables, firing their triggers, as the owner of every table. A role that owns the schema,
 // can create objects in it, owns an object in it, owns the function a trigger on its tables runs, or
@@ -159,6 +196,13 @@ END
 $slotlock_schema_control$;
 `;
 
+/**
+ * What every migration checks before it changes anything, applySchema and applyTenantRls included
+ * when they find nothing to change: that no other role controls the schema, then the server version
+ * and the schema version. Run with search_path pinned, as the DDL pins it.
+ */
+export const SLOTLOCK_DEPLOYMENT_CHECKS = `${SLOTLOCK_SCHEMA_CONTROL_CHECK}${SLOTLOCK_SCHEMA_PRECONDITIONS}`;
+
 /** Active (unrevoked, unexpired) API keys one tenant may hold. */
 export const SLOTLOCK_API_KEY_ACTIVE_LIMIT = 100;
 /** API keys one tenant may hold in all, revoked and expired ones included, so lists stay bounded. */
@@ -201,17 +245,58 @@ export const SLOTLOCK_DASHBOARD_FUNCTIONS = Object.freeze([
 /** Live form records one person may leave in the dashboard's records (12 hours of forms). */
 export const SLOTLOCK_DASHBOARD_FORM_LIMIT = 1_000;
 
+/** The table that records which release migrated the schema (SLOTLOCK_SCHEMA_VERSION). */
+export const SLOTLOCK_SCHEMA_TABLES = Object.freeze(['schema_version'] as const);
+
+/** The SECURITY DEFINER function through which a server reads the version it is serving. */
+export const SLOTLOCK_SCHEMA_FUNCTIONS = Object.freeze([
+  'slotlock.installed_schema_version()',
+] as const);
+
+/** The table of suspended tenants: they may read, and write nothing (store.ts withTenant). */
+export const SLOTLOCK_TENANT_ADMIN_TABLES = Object.freeze(['tenant_suspensions'] as const);
+
+/**
+ * The SECURITY DEFINER functions through which a server checks a tenant's suspension and erases a
+ * tenant, by signature.
+ */
+export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
+  'slotlock.tenant_suspended(text)',
+  'slotlock.erase_tenant(text)',
+] as const);
+
+/**
+ * Functions only the deployment role runs: suspending and lifting a suspension. No other role is
+ * granted them, so a serving role cannot lift a suspension.
+ */
+export const SLOTLOCK_OPERATOR_FUNCTIONS = Object.freeze([
+  'slotlock.suspend_tenant(text, text)',
+  'slotlock.unsuspend_tenant(text)',
+] as const);
+
 /** Every SECURITY DEFINER function the serving role may execute, by signature. */
 export const SLOTLOCK_DEFINER_FUNCTIONS = Object.freeze([
   ...SLOTLOCK_API_KEY_FUNCTIONS,
   ...SLOTLOCK_DASHBOARD_FUNCTIONS,
+  ...SLOTLOCK_SCHEMA_FUNCTIONS,
+  ...SLOTLOCK_TENANT_ADMIN_FUNCTIONS,
 ]);
 
 /** Tables no role but their owner reads or writes, reached only through SLOTLOCK_DEFINER_FUNCTIONS. */
 export const SLOTLOCK_DEFINER_TABLES = Object.freeze([
   ...SLOTLOCK_API_KEY_TABLES,
   ...SLOTLOCK_DASHBOARD_TABLES,
+  ...SLOTLOCK_SCHEMA_TABLES,
+  ...SLOTLOCK_TENANT_ADMIN_TABLES,
 ]);
+
+/**
+ * The advisory lock every server transaction for a tenant holds shared (store.ts withTenant), and
+ * suspension and erasure take exclusively, keyed by this text's hashtextextended(…, 0).
+ */
+export function slotlockTenantLockKey(tenantRef: string): string {
+  return `slotlock:tenant:${tenantRef}`;
+}
 
 const API_KEY_COLUMNS = `key_id uuid,
   key_tenant_ref text,
@@ -331,6 +416,11 @@ BEGIN
       USING ERRCODE = 'invalid_transaction_state';
   END IF;
   PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || requested_tenant_ref, 0));
+  IF EXISTS (SELECT 1 FROM slotlock.tenant_suspensions suspended
+              WHERE suspended.tenant_ref = requested_tenant_ref) THEN
+    RAISE EXCEPTION 'Slotlock tenant is suspended: it gets no new API key'
+      USING ERRCODE = 'insufficient_privilege', HINT = 'tenant_suspended';
+  END IF;
   IF EXISTS (SELECT 1 FROM slotlock.api_key_retired_digests retired
               WHERE retired.secret_hash = requested_secret_hash) THEN
     RAISE EXCEPTION 'Slotlock never uses a retired API key digest again'
@@ -385,6 +475,13 @@ AS $slotlock_rotate_api_key$
 DECLARE
   retiring bytea;
 BEGIN
+  -- Ordered with suspension, which takes this lock too.
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || requested_tenant_ref, 0));
+  IF EXISTS (SELECT 1 FROM slotlock.tenant_suspensions suspended
+              WHERE suspended.tenant_ref = requested_tenant_ref) THEN
+    RAISE EXCEPTION 'Slotlock tenant is suspended: it gets no new API key secret'
+      USING ERRCODE = 'insufficient_privilege', HINT = 'tenant_suspended';
+  END IF;
   IF EXISTS (SELECT 1 FROM slotlock.api_key_retired_digests retired
               WHERE retired.secret_hash = requested_secret_hash) THEN
     RAISE EXCEPTION 'Slotlock never uses a retired API key digest again'
@@ -587,11 +684,274 @@ $slotlock_dashboard_session_ended$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[1]} FROM PUBLIC;
 `;
 
+// The schema's version. One row, written by the DDL itself at its end, so a schema migrated by
+// running SLOTLOCK_CORE_DDL directly is versioned too. applySchema adds digests of the DDL and of the
+// catalog it left, so that a later migration with nothing to change can tell, and take no lock on
+// any table. Nothing here names a tenant; RLS is enabled with no policy and no role is granted
+// anything, so a server reads the version only through installed_schema_version().
+const SLOTLOCK_SCHEMA_VERSION_DDL = `
+CREATE TABLE IF NOT EXISTS slotlock.schema_version (
+  singleton boolean PRIMARY KEY DEFAULT true,
+  version integer NOT NULL,
+  ddl_sha256 text,
+  catalog_sha256 text,
+  applied_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT slotlock_schema_version_singleton CHECK (singleton),
+  CONSTRAINT slotlock_schema_version_valid CHECK (version > 0)
+);
+ALTER TABLE slotlock.schema_version ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.schema_version FROM PUBLIC;
+
+-- NULL when no migration has recorded a version (a schema from 0.2 or earlier).
+CREATE OR REPLACE FUNCTION slotlock.installed_schema_version()
+RETURNS integer
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_installed_schema_version$
+  SELECT version FROM slotlock.schema_version WHERE singleton;
+$slotlock_installed_schema_version$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_SCHEMA_FUNCTIONS[0]} FROM PUBLIC;
+`;
+
+// Tenant suspension and erasure. A suspended tenant's server transactions (withTenant) may read,
+// and write nothing; its keys still authenticate, but it gets no new key or secret. The table names
+// tenants and why they were suspended, so RLS is enabled with no policy and no role is granted
+// anything: a server reads it only through tenant_suspended(), and only the deployment role, which
+// owns it, suspends or lifts a suspension. Erasure keeps the suspension, so an erased abuser stays
+// suspended.
+//
+// Every server transaction for a tenant holds the tenant's lock shared, from before it reads the
+// suspension; suspension and erasure take it exclusively. So a suspension waits for the tenant's
+// transactions in flight, and every one that starts after it sees it.
+const SLOTLOCK_TENANT_ADMIN_DDL = `
+CREATE TABLE IF NOT EXISTS slotlock.tenant_suspensions (
+  tenant_ref text PRIMARY KEY,
+  reason text,
+  suspended_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT slotlock_tenant_suspensions_tenant_ref_valid
+    CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500),
+  CONSTRAINT slotlock_tenant_suspensions_reason_valid
+    CHECK (reason IS NULL OR (char_length(reason) BETWEEN 1 AND 500 AND reason !~ '[[:cntrl:]]'))
+);
+ALTER TABLE slotlock.tenant_suspensions ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.tenant_suspensions FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION slotlock.tenant_suspended(requested_tenant_ref text)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_tenant_suspended$
+  SELECT EXISTS (
+    SELECT 1 FROM slotlock.tenant_suspensions suspended
+     WHERE suspended.tenant_ref = requested_tenant_ref
+  );
+$slotlock_tenant_suspended$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[0]} FROM PUBLIC;
+
+-- True when the tenant was not suspended already; a second suspension keeps the first's reason.
+CREATE OR REPLACE FUNCTION slotlock.suspend_tenant(requested_tenant_ref text, requested_reason text)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_suspend_tenant$
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:tenant:' || requested_tenant_ref, 0));
+  -- The tenant's key lock too: a key or secret being issued commits first, and one issued after
+  -- this commits sees the suspension and is refused.
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || requested_tenant_ref, 0));
+  INSERT INTO slotlock.tenant_suspensions (tenant_ref, reason)
+  VALUES (requested_tenant_ref, requested_reason)
+  ON CONFLICT (tenant_ref) DO NOTHING;
+  RETURN FOUND;
+END
+$slotlock_suspend_tenant$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_OPERATOR_FUNCTIONS[0]} FROM PUBLIC;
+
+-- True when the tenant was suspended.
+CREATE OR REPLACE FUNCTION slotlock.unsuspend_tenant(requested_tenant_ref text)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_unsuspend_tenant$
+BEGIN
+  DELETE FROM slotlock.tenant_suspensions WHERE tenant_ref = requested_tenant_ref;
+  RETURN FOUND;
+END
+$slotlock_unsuspend_tenant$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_OPERATOR_FUNCTIONS[1]} FROM PUBLIC;
+
+-- Tenant erasure: every row the tenant owns, one row of the result per table with how many were
+-- deleted, in an order no foreign key refuses. Holds carry no tenant: those on the tenant's resources
+-- are its. API key digests are retired, as erase_api_keys retires them, so no erased key works again.
+-- A personal (github:<id>) tenant's dashboard form records carry a digest of the person, the
+-- dashboard's (dashboard.ts ownerDigest). Running it again deletes nothing. Forced row-level security
+-- binds the function's owner too, so it names the tenant in every setting a policy reads, and puts
+-- the caller's values back after.
+CREATE OR REPLACE FUNCTION slotlock.erase_tenant(requested_tenant_ref text)
+RETURNS TABLE (erased_table text, erased_rows bigint)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_erase_tenant$
+DECLARE
+  setting text;
+  previous jsonb := '{}'::jsonb;
+BEGIN
+  IF requested_tenant_ref IS NULL OR octet_length(requested_tenant_ref) NOT BETWEEN 1 AND 500 THEN
+    RAISE EXCEPTION 'Slotlock tenant reference must be 1-500 UTF-8 bytes'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:tenant:' || requested_tenant_ref, 0));
+  -- A key being issued commits first, so its row is deleted below with the rest.
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || requested_tenant_ref, 0));
+  FOR setting IN
+    SELECT DISTINCT contract.tenant_context_setting FROM slotlock.rls_policy_contracts contract
+  LOOP
+    previous := previous || jsonb_build_object(setting, current_setting(setting, true));
+    PERFORM set_config(setting, requested_tenant_ref, true);
+  END LOOP;
+
+  erased_table := 'calendar_event_attendees';
+  DELETE FROM slotlock.calendar_event_attendees WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'calendar_event_reminders';
+  DELETE FROM slotlock.calendar_event_reminders WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'calendar_event_exceptions';
+  DELETE FROM slotlock.calendar_event_exceptions WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'calendar_event_occurrences';
+  DELETE FROM slotlock.calendar_event_occurrences WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'reservations';
+  DELETE FROM slotlock.reservations
+   WHERE tenant_ref = requested_tenant_ref
+      OR resource_id IN (SELECT owned.id FROM slotlock.resources owned
+                          WHERE owned.tenant_ref = requested_tenant_ref);
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'calendar_events';
+  DELETE FROM slotlock.calendar_events WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'calendar_event_tombstones';
+  DELETE FROM slotlock.calendar_event_tombstones WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'calendar_event_commands';
+  DELETE FROM slotlock.calendar_event_commands WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'reservation_tombstones';
+  DELETE FROM slotlock.reservation_tombstones WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'reservation_conflict_archive';
+  DELETE FROM slotlock.reservation_conflict_archive WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'calendar_coverage';
+  DELETE FROM slotlock.calendar_coverage WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'hold_commands';
+  DELETE FROM slotlock.hold_commands WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'resources';
+  DELETE FROM slotlock.resources WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'api_keys';
+  WITH erased AS (
+    DELETE FROM slotlock.api_keys WHERE tenant_ref = requested_tenant_ref RETURNING secret_hash
+  ), retired AS (
+    INSERT INTO slotlock.api_key_retired_digests (secret_hash)
+    SELECT erased.secret_hash FROM erased
+    ON CONFLICT DO NOTHING
+  )
+  SELECT count(*) INTO erased_rows FROM erased;
+  RETURN NEXT;
+  erased_table := 'dashboard_tokens';
+  erased_rows := 0;
+  IF requested_tenant_ref LIKE 'github:%' THEN
+    DELETE FROM slotlock.dashboard_tokens
+     WHERE kind = 'form'
+       AND owner_hash = sha256(convert_to(
+             'slotlock-dashboard-owner.' || substr(requested_tenant_ref, 8), 'UTF8'));
+    GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  END IF;
+  RETURN NEXT;
+
+  FOR setting IN SELECT jsonb_object_keys(previous) LOOP
+    PERFORM set_config(setting, coalesce(previous ->> setting, ''), true);
+  END LOOP;
+END
+$slotlock_erase_tenant$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[1]} FROM PUBLIC;
+`;
+
+// A constraint an upgrade added NOT VALID (no table scan under its ACCESS EXCLUSIVE lock) is checked
+// here. applySchema runs this in a transaction of its own once the DDL has committed: inside the
+// DDL's transaction every table it altered stays under ACCESS EXCLUSIVE until commit, so the scan
+// would hold up every serving query. On its own, each VALIDATE takes SHARE UPDATE EXCLUSIVE (and
+// ROW SHARE on a foreign key's referenced table), which no read or row write conflicts with
+// (PostgreSQL 17, ALTER TABLE and Explicit Locking). It sees every row whatever row-level security
+// the table forces: the check scans the table itself, and referential checks bypass row security.
+// One that old rows still break stays NOT VALID, with a notice, rather than stopping the migration:
+// it binds every new row either way, and applySchema tries it again at each later migration. Once
+// valid, a constraint is never checked again.
+const DEPLOYMENT_VALIDATE_CONSTRAINTS = `DO $slotlock_validate_constraints$
+DECLARE
+  unchecked record;
+BEGIN
+  FOR unchecked IN
+    SELECT rel.relname::text AS table_name, con.conname::text AS constraint_name
+      FROM pg_catalog.pg_constraint con
+      JOIN pg_catalog.pg_class rel ON rel.oid = con.conrelid
+      JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+     WHERE ns.nspname = 'slotlock' AND NOT con.convalidated
+     ORDER BY rel.relname, con.conname
+  LOOP
+    BEGIN
+      EXECUTE pg_catalog.format('ALTER TABLE slotlock.%I VALIDATE CONSTRAINT %I',
+                                unchecked.table_name, unchecked.constraint_name);
+    EXCEPTION WHEN check_violation OR foreign_key_violation OR not_null_violation THEN
+      RAISE NOTICE 'Slotlock left %.% NOT VALID: existing rows break it',
+        unchecked.table_name, unchecked.constraint_name;
+    END;
+  END LOOP;
+END
+$slotlock_validate_constraints$;
+`;
+
+/** The constraint validation applySchema runs after the rest of SLOTLOCK_CORE_DDL has committed. */
+export const SLOTLOCK_VALIDATION_DDL: string = DEPLOYMENT_VALIDATE_CONSTRAINTS;
+
+// The digests that let the next migration skip are recorded by applySchema once it has validated.
+const DEPLOYMENT_RECORD_VERSION = `INSERT INTO slotlock.schema_version (singleton, version, applied_at)
+VALUES (true, ${SLOTLOCK_SCHEMA_VERSION}, now())
+ON CONFLICT (singleton) DO UPDATE
+SET version = EXCLUDED.version, ddl_sha256 = NULL, catalog_sha256 = NULL,
+    applied_at = EXCLUDED.applied_at;
+`;
+
 // btree_gist is created in slotlock when it is missing; one installed elsewhere stays where it is.
-export const SLOTLOCK_CORE_DDL: string = `
+const CORE_DDL_BODY = `
 ${DEPLOYMENT_SEARCH_PATH_PIN}CREATE SCHEMA IF NOT EXISTS slotlock;
-${SLOTLOCK_SCHEMA_CONTROL_CHECK}CREATE EXTENSION IF NOT EXISTS btree_gist SCHEMA slotlock;
-${DEPLOYMENT_LIFT_FORCED_ROW_SECURITY}
+${SLOTLOCK_DEPLOYMENT_CHECKS}CREATE EXTENSION IF NOT EXISTS btree_gist SCHEMA slotlock;
+${DEPLOYMENT_LIFT_FORCED_ROW_SECURITY}${SLOTLOCK_SCHEMA_VERSION_DDL}
 -- Records the exact catalog representation installed for each owned RLS policy. Health checks
 -- compare live policy fingerprints with this contract so ALTER POLICY drift cannot hide behind a
 -- retained name/comment. This table contains configuration only, never tenant or calendar data.
@@ -660,6 +1020,11 @@ ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS tenant_ref text;
 -- Its CHECK holds SLOTLOCK_MAX_AVAILABILITY_RULES as it was when first added: changing the cap
 -- needs a constraint under a new name.
 ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS availability_rules jsonb;
+-- Who sees a resource: 'shared' ones are listed to agents and booked through them, 'private' ones
+-- (a tax-deadline calendar, say) only by the tenant's own code. Fixed when the resource is created.
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS visibility text NOT NULL DEFAULT 'shared';
+-- When the tenant archived it: listed nowhere and booked no more, its history kept. NULL: in use.
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS archived_at timestamptz;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS tenant_ref text;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS external_ref text;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS buffer_after_ms bigint NOT NULL DEFAULT 0;
@@ -706,6 +1071,20 @@ CREATE TABLE IF NOT EXISTS slotlock.reservation_tombstones (
   ),
   CONSTRAINT slotlock_reservation_tombstones_revision_valid CHECK (revision > 0)
 );
+-- When the reference was retired, so maintenance can prune it past the retention window. Rows from
+-- before 0.3 read '-infinity', earlier than every time, so none counts as a recent cancellation
+-- against the tenant's limits; new rows take now(). An ADD COLUMN default is evaluated once and
+-- kept for the rows already there, with no table rewrite, and SET DEFAULT changes only later
+-- inserts (PostgreSQL 16, ALTER TABLE notes; Date/Time Types, special values).
+ALTER TABLE slotlock.reservation_tombstones
+  ADD COLUMN IF NOT EXISTS cancelled_at timestamptz NOT NULL DEFAULT '-infinity';
+ALTER TABLE slotlock.reservation_tombstones ALTER COLUMN cancelled_at SET DEFAULT now();
+-- True when the cancel retired a reference no booking held (its create may still be on the way).
+-- Only those are pruned past the retention window. A cancelled booking's tombstone is kept until
+-- the tenant is erased, so a delayed or replayed create never books it again; rows from before 0.3
+-- are kept too.
+ALTER TABLE slotlock.reservation_tombstones
+  ADD COLUMN IF NOT EXISTS stray boolean NOT NULL DEFAULT false;
 -- Resource identity: one resource per tenant/external_ref namespace (plus one isolated NULL-tenant
 -- legacy namespace). Dedupe first (repoint reservations to the keeper, drop the rest) so the
 -- unique indexes also bind on DBs poisoned by the pre-index
@@ -866,6 +1245,14 @@ BEGIN
                 THEN jsonb_array_length(availability_rules) <= ${SLOTLOCK_MAX_AVAILABILITY_RULES}
                 ELSE false END
       );
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'slotlock_resources_visibility_valid'
+       AND conrelid = 'slotlock.resources'::regclass
+  ) THEN
+    ALTER TABLE slotlock.resources
+      ADD CONSTRAINT slotlock_resources_visibility_valid CHECK (visibility IN ('shared', 'private'));
   END IF;
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
@@ -1045,12 +1432,13 @@ CREATE TABLE IF NOT EXISTS slotlock.calendar_events (
     AND octet_length(external_ref) BETWEEN 1 AND 500
   ),
   CONSTRAINT slotlock_calendar_events_window_valid CHECK (ends_at > starts_at),
-  -- A recurring series expands inside a window of at most 367 days. A one-off event is its own
-  -- window, so a lease or long rental may span up to 3,660 days (the store's hard ceiling).
-  CONSTRAINT slotlock_calendar_events_materialization_window_bounded CHECK (
+  -- A recurring series expands inside a window of at most 369 days (a 367-day search from any
+  -- moment of the day, plus the day before it). A one-off event is its own window, so a lease or
+  -- long rental may span up to 3,660 days (the store's hard ceiling).
+  CONSTRAINT slotlock_calendar_events_materialization_window_limit CHECK (
     materialized_ends_at > materialized_starts_at
     AND (
-      materialized_ends_at - materialized_starts_at <= interval '367 days'
+      materialized_ends_at - materialized_starts_at <= interval '369 days'
       OR (
         recurrence_rule IS NULL
         AND materialized_starts_at = starts_at
@@ -1129,7 +1517,8 @@ DO $slotlock_calendar_event_window_bounds$
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
-     WHERE conname = 'slotlock_calendar_events_materialization_window_bounded'
+     WHERE conname IN ('slotlock_calendar_events_materialization_window_bounded',
+                       'slotlock_calendar_events_materialization_window_limit')
        AND conrelid = 'slotlock.calendar_events'::regclass
   ) THEN
     ALTER TABLE slotlock.calendar_events
@@ -1151,6 +1540,34 @@ $slotlock_calendar_event_window_bounds$;
 ALTER TABLE slotlock.calendar_events
   DROP CONSTRAINT IF EXISTS slotlock_calendar_events_materialization_window_valid;
 
+-- Up to 0.2 a series' window was at most 367 days. The 369-day CHECK admits every row the 367-day
+-- one did: add it NOT VALID and drop the old one in the same transaction.
+DO $slotlock_calendar_event_window_limit$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'slotlock_calendar_events_materialization_window_limit'
+       AND conrelid = 'slotlock.calendar_events'::regclass
+  ) THEN
+    ALTER TABLE slotlock.calendar_events
+      ADD CONSTRAINT slotlock_calendar_events_materialization_window_limit CHECK (
+        materialized_ends_at > materialized_starts_at
+        AND (
+          materialized_ends_at - materialized_starts_at <= interval '369 days'
+          OR (
+            recurrence_rule IS NULL
+            AND materialized_starts_at = starts_at
+            AND materialized_ends_at = ends_at
+            AND ends_at - starts_at <= interval '3660 days'
+          )
+        )
+      ) NOT VALID;
+  END IF;
+END
+$slotlock_calendar_event_window_limit$;
+ALTER TABLE slotlock.calendar_events
+  DROP CONSTRAINT IF EXISTS slotlock_calendar_events_materialization_window_bounded;
+
 -- Where a recurring series' last expansion stopped (ical.js's iterator state as JSON), so the next
 -- one resumes there instead of searching again from the series' start. Only Slotlock writes it. A
 -- cursor that does not fit the row's rule and start is ignored, so NULL, or a cursor left by an
@@ -1159,6 +1576,14 @@ ALTER TABLE slotlock.calendar_events
 -- not tie the cursor to a rule: a release from before cursors may turn a series into a one-off and
 -- leave its cursor, which is then never read.
 ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS recurrence_cursor jsonb;
+-- When the horizon roll may next examine a series it could not extend (an occurrence collided, or
+-- the rule is over the expansion budget): until then it waits behind the series that can roll, so
+-- a pile of blocked series never starves a healthy one. NULL: due as usual.
+ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS roll_retry_at timestamptz;
+-- For a recurring series, a time by which every occurrence ends, moved ones included; 'infinity'
+-- when its rule has no end, or none Slotlock could follow it to. NULL: not worked out yet (a series
+-- from before 0.3, until its next roll), and so treated as going on. Unused for a one-off event.
+ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS recurrence_ends_by timestamptz;
 ALTER TABLE slotlock.calendar_events
   DROP CONSTRAINT IF EXISTS slotlock_calendar_events_recurrence_cursor_bounded;
 DO $slotlock_calendar_event_recurrence_cursor$
@@ -1423,6 +1848,38 @@ CREATE UNIQUE INDEX IF NOT EXISTS slotlock_reservations_booking_external_ref_key
   WHERE tenant_ref IS NOT NULL AND external_ref IS NOT NULL AND calendar_event_id IS NULL;
 DROP INDEX IF EXISTS slotlock.slotlock_reservations_tenant_external_ref_key;
 
+-- Up to 0.2 a confirmed hold, and a createReservation booking, on a tenant's resource kept no tenant
+-- or reference, so no cancel or move could ever reach it. Each takes its resource's tenant and its
+-- own id as reference, as both now do when written. A tombstone already holding that reference was
+-- written by cancelling it as a reference no booking held (the only way to try): it retired nothing
+-- and is dropped, so the booking can be cancelled. A booking another booking's reference already
+-- uses (never written by Slotlock) is left as it was.
+DELETE FROM slotlock.reservation_tombstones tombstone
+ USING slotlock.reservations booking
+  JOIN slotlock.resources resource ON resource.id = booking.resource_id
+ WHERE booking.tenant_ref IS NULL
+   AND booking.status = 'confirmed'
+   AND booking.calendar_event_id IS NULL
+   AND resource.tenant_ref IS NOT NULL
+   AND tombstone.tenant_ref = resource.tenant_ref
+   AND tombstone.external_ref = booking.id::text;
+UPDATE slotlock.reservations booking
+   SET tenant_ref = resource.tenant_ref,
+       external_ref = booking.id::text,
+       occupied_ends_at = booking.ends_at + booking.buffer_after_ms * interval '1 millisecond'
+  FROM slotlock.resources resource
+ WHERE resource.id = booking.resource_id
+   AND booking.tenant_ref IS NULL
+   AND booking.status = 'confirmed'
+   AND booking.calendar_event_id IS NULL
+   AND resource.tenant_ref IS NOT NULL
+   AND NOT EXISTS (
+     SELECT 1 FROM slotlock.reservations taken
+      WHERE taken.tenant_ref = resource.tenant_ref
+        AND taken.external_ref = booking.id::text
+        AND taken.calendar_event_id IS NULL
+   );
+
 -- Materialized occurrences point at reservations created under the SAME exclusion arbiter as
 -- bookings and holds. Transparent events retain occurrence visibility with a NULL reservation.
 CREATE TABLE IF NOT EXISTS slotlock.calendar_event_occurrences (
@@ -1583,6 +2040,68 @@ CREATE TABLE IF NOT EXISTS slotlock.calendar_coverage (
   CONSTRAINT slotlock_calendar_coverage_revision_valid CHECK (revision > 0)
 );
 
+-- A keyed hold's first answer, by the key its caller gave inside its tenant and principal, so a
+-- retried request answers the same hold instead of overlapping it. The answer stays as given until
+-- the hold would have expired, even once it is confirmed, released or reaped, and counts against
+-- the tenant's hold limit while its hold is not live; then maintenance, or a hold at that limit,
+-- deletes it (store.ts forgetExpiredHoldAnswers).
+CREATE TABLE IF NOT EXISTS slotlock.hold_commands (
+  tenant_ref text NOT NULL,
+  principal_ref text NOT NULL,
+  idempotency_key text NOT NULL,
+  payload_hash text NOT NULL,
+  hold_id uuid NOT NULL,
+  resource_id uuid NOT NULL,
+  starts_at timestamptz NOT NULL,
+  ends_at timestamptz NOT NULL,
+  buffer_after_ms bigint NOT NULL,
+  expires_at timestamptz NOT NULL,
+  source text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT slotlock_hold_commands_key PRIMARY KEY (tenant_ref, principal_ref, idempotency_key),
+  CONSTRAINT slotlock_hold_commands_resource_tenant_fkey
+    FOREIGN KEY (resource_id, tenant_ref)
+    REFERENCES slotlock.resources (id, tenant_ref) ON DELETE CASCADE,
+  CONSTRAINT slotlock_hold_commands_identity_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND octet_length(principal_ref) BETWEEN 1 AND 500
+    AND octet_length(idempotency_key) BETWEEN 1 AND 500
+    AND octet_length(payload_hash) = 64
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_hold_commands_expiry_idx
+  ON slotlock.hold_commands (tenant_ref, expires_at);
+-- References retired with no booking: a tenant's count of them, and maintenance's prune.
+CREATE INDEX IF NOT EXISTS slotlock_reservation_tombstones_stray_idx
+  ON slotlock.reservation_tombstones (tenant_ref, cancelled_at) WHERE stray;
+-- Holds by resource and expiry: a tenant's live-hold count, and maintenance's purge of expired ones.
+CREATE INDEX IF NOT EXISTS slotlock_reservations_held_expiry_idx
+  ON slotlock.reservations (resource_id, expires_at) WHERE status = 'held';
+-- Confirmed bookings with no tenant, by resource: maintenance finds those a 0.2 server wrote on a
+-- tenant's resource after the migration (store.ts pruneBookingRetention).
+CREATE INDEX IF NOT EXISTS slotlock_reservations_untenanted_booking_idx
+  ON slotlock.reservations (resource_id)
+  WHERE tenant_ref IS NULL AND status = 'confirmed' AND calendar_event_id IS NULL;
+-- What the tenant limits count (store.ts tenantLimitCount), each read as a range so a count stops
+-- at the limit: bookings and events by when they end (one-offs and series apart) and by when they
+-- were made, and cancellations by when they were made.
+CREATE INDEX IF NOT EXISTS slotlock_reservations_booking_end_idx
+  ON slotlock.reservations (tenant_ref, occupied_ends_at)
+  WHERE external_ref IS NOT NULL AND calendar_event_id IS NULL;
+CREATE INDEX IF NOT EXISTS slotlock_reservations_booking_created_idx
+  ON slotlock.reservations (tenant_ref, created_at)
+  WHERE external_ref IS NOT NULL AND calendar_event_id IS NULL;
+CREATE INDEX IF NOT EXISTS slotlock_reservation_tombstones_cancelled_idx
+  ON slotlock.reservation_tombstones (tenant_ref, cancelled_at);
+CREATE INDEX IF NOT EXISTS slotlock_calendar_events_one_off_end_idx
+  ON slotlock.calendar_events (tenant_ref, ends_at) WHERE recurrence_rule IS NULL;
+CREATE INDEX IF NOT EXISTS slotlock_calendar_events_series_end_idx
+  ON slotlock.calendar_events (tenant_ref, recurrence_ends_by) WHERE recurrence_rule IS NOT NULL;
+CREATE INDEX IF NOT EXISTS slotlock_calendar_events_created_idx
+  ON slotlock.calendar_events (tenant_ref, created_at);
+CREATE INDEX IF NOT EXISTS slotlock_calendar_event_tombstones_cancelled_idx
+  ON slotlock.calendar_event_tombstones (tenant_ref, cancelled_at);
+
 CREATE INDEX IF NOT EXISTS slotlock_calendar_events_resource_time_idx
   ON slotlock.calendar_events (tenant_ref, resource_id, starts_at, ends_at);
 CREATE INDEX IF NOT EXISTS slotlock_calendar_events_owner_resource_time_idx
@@ -1598,7 +2117,16 @@ CREATE INDEX IF NOT EXISTS slotlock_calendar_event_occurrences_resource_time_idx
   ON slotlock.calendar_event_occurrences (tenant_ref, starts_at, ends_at);
 CREATE INDEX IF NOT EXISTS slotlock_reservations_calendar_event_idx
   ON slotlock.reservations (calendar_event_id) WHERE calendar_event_id IS NOT NULL;
-${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_DASHBOARD_DDL}${DEPLOYMENT_RESTORE_FORCED_ROW_SECURITY}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
+${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_DASHBOARD_DDL}${SLOTLOCK_TENANT_ADMIN_DDL}${DEPLOYMENT_RECORD_VERSION}`;
+
+/** The whole deployment DDL, run in one transaction: the schema, then its constraints validated. */
+export const SLOTLOCK_CORE_DDL: string = `${CORE_DDL_BODY}${DEPLOYMENT_VALIDATE_CONSTRAINTS}${DEPLOYMENT_RESTORE_FORCED_ROW_SECURITY}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
+
+/**
+ * SLOTLOCK_CORE_DDL without the validation, which applySchema runs as a step of its own after this
+ * commits (SLOTLOCK_VALIDATION_DDL).
+ */
+export const SLOTLOCK_STRUCTURE_DDL: string = `${CORE_DDL_BODY}${DEPLOYMENT_RESTORE_FORCED_ROW_SECURITY}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
 
 export const SLOTLOCK_TENANT_CONTEXT_SETTING = 'slotlock.tenant_ref';
 
@@ -1620,6 +2148,7 @@ export const SLOTLOCK_TENANT_TABLES = Object.freeze([
   'calendar_event_tombstones',
   'calendar_event_commands',
   'calendar_coverage',
+  'hold_commands',
 ] as const);
 
 const POSTGRES_SETTING_NAME = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/;
@@ -1670,7 +2199,7 @@ export function createSlotlockTenantRlsDdl(
     );
   }
   return `
-${DEPLOYMENT_SEARCH_PATH_PIN}${SLOTLOCK_SCHEMA_CONTROL_CHECK}ALTER TABLE slotlock.resources ENABLE ROW LEVEL SECURITY;
+${DEPLOYMENT_SEARCH_PATH_PIN}${SLOTLOCK_DEPLOYMENT_CHECKS}ALTER TABLE slotlock.resources ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.resources FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.reservations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.reservations FORCE ROW LEVEL SECURITY;
@@ -1694,6 +2223,8 @@ ALTER TABLE slotlock.calendar_event_commands ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.calendar_event_commands FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.calendar_coverage ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.calendar_coverage FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.hold_commands ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.hold_commands FORCE ROW LEVEL SECURITY;
 
 -- One database must have one tenant-context contract. Re-applying with an adapter-specific
 -- setting deliberately rebinds the stable policies instead of silently keeping a prior setting.
@@ -1717,7 +2248,8 @@ BEGIN
          'calendar_event_occurrences',
          'calendar_event_tombstones',
          'calendar_event_commands',
-         'calendar_coverage'
+         'calendar_coverage',
+         'hold_commands'
        )
   LOOP
     EXECUTE format(
@@ -1878,6 +2410,16 @@ BEGIN
       USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
       WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
   END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'hold_commands'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.hold_commands
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
 END
 $slotlock_rls$;
 
@@ -1904,6 +2446,8 @@ COMMENT ON POLICY tenant_isolation_v1 ON slotlock.calendar_event_tombstones
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.calendar_event_commands
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.calendar_coverage
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.hold_commands
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 
 INSERT INTO slotlock.rls_policy_contracts (
@@ -1939,7 +2483,8 @@ WHERE schemaname = 'slotlock'
     'calendar_event_occurrences',
     'calendar_event_tombstones',
     'calendar_event_commands',
-    'calendar_coverage'
+    'calendar_coverage',
+    'hold_commands'
   )
   AND policyname = 'tenant_isolation_v1'
 ON CONFLICT (table_name) DO UPDATE

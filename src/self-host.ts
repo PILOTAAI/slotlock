@@ -58,7 +58,7 @@ import {
   createSlotlockNodeServer,
 } from './node-server.js';
 import { slotlockPackageVersion } from './package-version.js';
-import { type SlotlockSql, createSlotlockStore } from './store.js';
+import { type SlotlockSql, assertSlotlockSchemaCurrent, createSlotlockStore } from './store.js';
 import type { SlotlockResource, WeeklyAvailabilityRule } from './types.js';
 import { parseAvailabilityRules } from './weekly-hours.js';
 
@@ -516,6 +516,9 @@ export async function startSlotlockServer(
         { code: 'schema_missing' },
       );
     }
+    // Migrated by another release: an older schema needs this release's migrate first, and a newer
+    // one has tables and rules this release's code does not know.
+    await assertSlotlockSchemaCurrent(sql);
     // A deployment run statement by statement lifts forced row-level security for its data steps
     // and, stopped part way, leaves it lifted until the next one puts it back. The owning role then
     // reads every tenant's rows: refuse to serve until then.

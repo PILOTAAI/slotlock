@@ -191,7 +191,8 @@ describe.skipIf(!url)('the application API on the real store', () => {
         reservation: {
           id: holdId,
           resource_id: resource.id,
-          reservation_ref: null,
+          // A confirmed hold is a booking whose reference is its own id.
+          reservation_ref: holdId,
           start: window.start,
           end: window.end,
           buffer_after_minutes: 0,
@@ -204,6 +205,15 @@ describe.skipIf(!url)('the application API on the real store', () => {
     expect(await call('a', 'POST', `/v1/holds/${holdId}/confirm`, {})).toEqual(confirmed);
     expect(await call('b', 'POST', `/v1/holds/${holdId}/confirm`, {})).toEqual(refused(404, 'hold_not_found'));
     expect(await call('a', 'DELETE', `/v1/holds/${holdId}`)).toEqual({ status: 200, body: { released: false } });
+    // It is cancelled by that reference like any booking, after which its window books again.
+    expect(await call('a', 'DELETE', `/v1/reservations/${holdId}?revision=2`)).toEqual({
+      status: 200,
+      body: { cancelled: true, revision: 2 },
+    });
+    expect(
+      (await call('a', 'PUT', `/v1/reservations/after-hold-${randomUUID()}`, { ...window, revision: 1 }))
+        .status,
+    ).toBe(200);
 
     // Release frees the window at once; releasing again, or an id that is no hold, changes nothing.
     const later = { ...window, start: day(11, '09:00:00'), end: day(11, '10:00:00') };

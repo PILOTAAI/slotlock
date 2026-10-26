@@ -445,10 +445,19 @@ describe.skipIf(!url)('capped resource creation in the store (real Postgres)', (
     for (const outcome of racing.filter(({ status }) => status === 'rejected')) {
       expect((outcome as PromiseRejectedResult).reason).toMatchObject({ code: 'resource_limit_reached' });
     }
-    // A capped create inside a REPEATABLE READ transaction cannot count exactly, so it refuses.
+    // withTenant opens its own transaction READ COMMITTED whatever the role's default, so a capped
+    // create counts exactly there. Inside a caller's REPEATABLE READ transaction it cannot, and its
+    // writes are refused.
     await expect(
       store.withTenant(tenantRef, (tenant) =>
         tenant.createResource({ tenantRef, externalRef: 'x', timezone: 'UTC', maxTenantResources: 50 }),
+      ),
+    ).resolves.toMatchObject({ externalRef: 'x' });
+    await expect(
+      repeatable.begin((tx) =>
+        createSlotlockStore(tx).withTenant(tenantRef, (tenant) =>
+          tenant.createResource({ tenantRef, externalRef: 'z', timezone: 'UTC', maxTenantResources: 50 }),
+        ),
       ),
     ).rejects.toMatchObject({ code: 'invalid_transaction_isolation' });
   });

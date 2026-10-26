@@ -736,12 +736,20 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         id: 1,
         error: { code: -32603, message: 'Internal error' },
       });
+      // Serve's first maintenance pass, which starts with it, has finished one way or the other.
+      await eventually(
+        () =>
+          stdout.events().find(({ event }) => event === 'maintenance') ??
+          stderr.events().find(({ event }) => event === 'maintenance_failed'),
+      );
     } finally {
       shutdown.abort();
       expect(await serving).toBe(0);
       expect((await run(['migrate'])).code).toBe(0);
     }
-    expect(stderr.events()).toEqual([
+    // The maintenance pass reads resources too (its booking prune), and logs the same refusal.
+    const failures = stderr.events();
+    expect(failures.filter(({ event }) => event !== 'maintenance_failed')).toEqual([
       expect.objectContaining({
         level: 'error',
         event: 'agent_error',
@@ -750,6 +758,9 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         error: expect.stringContaining('permission denied'),
       }),
     ]);
+    for (const failure of failures.filter(({ event }) => event === 'maintenance_failed')) {
+      expect(failure).toMatchObject({ level: 'error', code: '42501' });
+    }
     for (const secret of [token, confirmationSecret, password]) {
       expect(stderr.text()).not.toContain(secret);
     }

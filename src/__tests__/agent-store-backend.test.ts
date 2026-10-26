@@ -3,7 +3,11 @@ import {
   type SlotlockAgentInvocationContext,
   invokeSlotlockAgentOperation,
 } from '../agent-server.js';
-import { createSlotlockStoreAgentBackend } from '../agent-store-backend.js';
+import type { SlotlockApplicationInvocationContext } from '../application-api.js';
+import {
+  createSlotlockStoreAgentBackend,
+  createSlotlockStoreApplicationBackend,
+} from '../agent-store-backend.js';
 import type { SlotlockStore, SlotlockTenantStore } from '../store.js';
 
 const tenantRef = 'tenant-a';
@@ -112,7 +116,8 @@ describe('Slotlock store-backed agent server adapter', () => {
       name: 'vehicle-1',
       timezone: 'Europe/London',
     });
-    expect(getResource).toHaveBeenCalledWith({ tenantRef, id: resource.id });
+    // Only a shared resource: a private one is invisible to agents.
+    expect(getResource).toHaveBeenCalledWith({ tenantRef, id: resource.id, visibility: 'shared' });
     expect(withTenant).toHaveBeenCalledWith(tenantRef, expect.any(Function));
 
     getResource.mockResolvedValueOnce(null);
@@ -358,7 +363,7 @@ describe('Slotlock store-backed agent server adapter', () => {
         summary: 'Busy',
         materializationWindow: {
           start: new Date('2027-01-09T00:00:00.000Z'),
-          end: new Date('2028-01-11T00:00:00.000Z'),
+          end: new Date('2028-01-13T00:00:00.000Z'),
         },
       }),
     );
@@ -382,7 +387,7 @@ describe('Slotlock store-backed agent server adapter', () => {
       expect.objectContaining({
         materializationWindow: {
           start: new Date('2027-01-09T00:00:00.000Z'),
-          end: new Date('2028-01-11T00:00:00.000Z'),
+          end: new Date('2028-01-13T00:00:00.000Z'),
         },
       }),
     );
@@ -409,10 +414,16 @@ describe('Slotlock store-backed agent server adapter', () => {
       },
     );
 
-    expect(getResource).toHaveBeenCalledWith({ tenantRef, id: replacement.id });
+    expect(getResource).toHaveBeenCalledWith({
+      tenantRef,
+      id: replacement.id,
+      visibility: 'shared',
+    });
     expect(putCalendarEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         externalRef: event().externalRef,
+        // Fenced to the resource the event was read on, in case it moved meanwhile.
+        expectedResourceId: resource.id,
         resourceId: replacement.id,
         expectedRevision: 1,
       }),
@@ -573,5 +584,52 @@ describe('Slotlock store-backed agent server adapter', () => {
         idempotency_key: 'quota-refusal',
       }),
     ).rejects.toMatchObject({ code: 'owner_command_quota_exceeded', status: 429 });
+  });
+
+  it("answers a suspended tenant's write with 403 tenant_suspended, not a server failure", async () => {
+    const backend = createSlotlockStoreAgentBackend(store, { availabilityRules });
+    putCalendarEvent.mockRejectedValueOnce(
+      Object.assign(new Error('Slotlock tenant is suspended: it may read, and write nothing'), {
+        code: 'tenant_suspended',
+      }),
+    );
+    const outcome = await invokeSlotlockAgentOperation({
+      operation: 'slotlock_create_event',
+      input: {
+        resource_id: resource.id,
+        starts_at: '2027-01-10T09:00:00.000Z',
+        ends_at: '2027-01-10T10:00:00.000Z',
+        timezone: 'Europe/London',
+        title: 'Collection',
+        idempotency_key: 'suspended',
+      },
+      request: new Request('http://localhost/mcp'),
+      options: {
+        backend,
+        authenticate: async () => context.principal,
+        authorize: async () => true,
+      },
+    });
+    expect(outcome).toEqual({ ok: false, status: 403, code: 'tenant_suspended' });
+  });
+
+  it('answers a resource created again with another visibility with 409, not a server failure', async () => {
+    const createResource = vi.fn().mockRejectedValue(
+      Object.assign(new Error('Slotlock resource visibility cannot be changed by creating it'), {
+        code: 'resource_visibility_conflict',
+      }),
+    );
+    withTenant.mockImplementation(async (_tenant: string, callback: (s: unknown) => unknown) =>
+      callback({ createResource }),
+    );
+    const backend = createSlotlockStoreApplicationBackend(store);
+    const admin = {
+      principal: { subject: 'admin-a', tenantRef, scopes: ['admin'] },
+      operation: 'slotlock_create_resource',
+      signal: new AbortController().signal,
+    } as unknown as SlotlockApplicationInvocationContext;
+    await expect(
+      backend.createResource(admin, { external_ref: 'vehicle-1', timezone: 'UTC' }),
+    ).rejects.toMatchObject({ code: 'resource_visibility_conflict', status: 409 });
   });
 });

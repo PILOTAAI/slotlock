@@ -658,7 +658,7 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
   });
 
   it('strict tenant RLS hides every foreign and unset-context core row from a non-owner role', async () => {
-    const role = 'slotlock_core_rls_probe';
+    const role = `slotlock_core_rls_probe_${crypto.randomUUID().replaceAll('-', '').slice(0, 16)}`;
     const tenantA = `operator-${crypto.randomUUID()}`;
     const tenantB = `operator-${crypto.randomUUID()}`;
     const resourceA = await store.createResource({
@@ -766,6 +766,16 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
            WHERE archive_id = ${archiveB}::uuid RETURNING archive_id`;
         expect(foreignArchiveDelete).toEqual([]);
       });
+
+      // withTenant reads the tenant's suspension through a function PUBLIC may not run: a role
+      // granted table rights alone is told which grant it lacks.
+      await expect(
+        sql.begin(async (tx) => {
+          await tx.unsafe(`SET LOCAL ROLE ${role}`);
+          return createSlotlockStore(tx).withTenant(tenantA, async () => 'ran');
+        }),
+      ).rejects.toMatchObject({ code: 'application_role_not_granted' });
+      await sql.unsafe(`GRANT EXECUTE ON FUNCTION slotlock.tenant_suspended(text) TO ${role}`);
 
       await sql.begin(async (tx) => {
         await tx.unsafe(`SET LOCAL ROLE ${role}`);
@@ -981,6 +991,7 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
     ).rejects.toMatchObject({ code: 'invalid_window' });
     await expect(
       store.findNextAvailableFor({
+        tenantRef: null,
         resourceId,
         rules: [],
         searchWindow: { start: d('2027-02-02T10:00:00Z'), end: invalid },
@@ -1055,6 +1066,7 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
 
     // The convenience wrapper agrees with the composed pure calls.
     const viaStore = await store.findNextAvailableFor({
+      tenantRef: null,
       resourceId: res.id,
       rules,
       searchWindow,
@@ -1068,6 +1080,7 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
 
   it('empty rules → findNextAvailableFor suggests nothing', async () => {
     const viaStore = await store.findNextAvailableFor({
+      tenantRef: null,
       resourceId,
       rules: [],
       searchWindow: { start: d('2027-01-04T00:00:00Z'), end: d('2027-01-11T00:00:00Z') },
@@ -1276,6 +1289,7 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
       if (!live.ok) throw new Error('hold failed');
 
       const withLive = await store.findNextAvailableFor({
+        tenantRef: null,
         resourceId: res.id,
         rules,
         searchWindow,
@@ -1297,6 +1311,7 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
       await sleep(200);
 
       const afterExpiry = await store.findNextAvailableFor({
+        tenantRef: null,
         resourceId: res.id,
         rules,
         searchWindow,
@@ -1335,6 +1350,7 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
     // finds the slot.
     const resource = await store.createResource({ timezone: 'Pacific/Auckland' });
     const slot = await store.findNextAvailableFor({
+      tenantRef: null,
       resourceId: resource.id,
       rules: [{ rrule: 'FREQ=WEEKLY;BYDAY=MO', startMinutes: 9 * 60, durationMinutes: 120 }],
       searchWindow: {
