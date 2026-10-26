@@ -150,11 +150,12 @@ Expansion is bounded by a count of work, never a clock, so an input is accepted 
 way however loaded the machine: each series may pass 4,000 occurrences from its start, and an
 expansion may take 50,000 steps for an event as it is written and 500,000 for a feed or a stored
 series as maintenance rolls it. A step of ical.js's search costs three, a weekday it compares one,
-a day it walks an eighth, a year it scans three and an eighth for each day that scan lists, and a
+a day it walks a fifth, a year it scans three and an eighth for each day that scan lists, and a
 weekday of a year it lists half. Each occurrence passed costs one, each conversion of a time in an
 IANA zone half (one and a half in a zone only a feed defines), and each instant Intl is asked for
 to read a zone's offsets two and a half, charged the first time the expansion reads that day of
-the zone whatever was read before it. A zone written the way Outlook writes them, from 1601, costs
+the zone whatever was read before it. Each change listed when a feed's own zone is expanded costs
+four tenths. A zone written the way Outlook writes them, from 1601, costs
 about 6,000.
 
 A stored rule is daily or less frequent, follows RFC 5545 §3.3.10's grammar (every part known and

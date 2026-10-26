@@ -138,7 +138,7 @@ const MAX_ICAL_DATES_PER_FEED = 20 * MAX_ICAL_DATES_PER_EVENT;
  * The furthest one step of a SECONDLY to WEEKLY rule may move, in days: about a century. ical.js
  * moves it a day at a time (RecurIterator#increment_monthday) inside one step:
  * `FREQ=DAILY;INTERVAL=1000000000` spent 97 seconds in its second step. The days are charged
- * (ICAL_STEP_CHARGES), and a century is 36,600 days, about 4 ms.
+ * (ICAL_STEP_CHARGES), and a century is 36,600 days, about 7 ms.
  */
 const MAX_ICAL_STEP_DAYS = 36_600;
 const MAX_ICAL_INTERVAL: Readonly<Record<string, number>> = {
@@ -156,7 +156,8 @@ const MAX_ICAL_INTERVAL: Readonly<Record<string, number>> = {
  * `next_minute`, which calls `next_second`), and is followed by a check of the rule's parts: about
  * three microseconds for a DAILY rule with BYMONTH and BYMONTHDAY. `ruleDayOfWeek` reads one BYDAY value, which the
  * searches of a month and a week and the checks of a day do for every day and every value they
- * compare. `increment_monthday` walks its days one at a time, about a tenth of a microsecond each.
+ * compare. `increment_monthday` walks its days one at a time, about a fifth of a microsecond each on a
+ * 4-vCPU Linux runner under Node 22 (a tenth on the machine the rest was measured on).
  * `expand_year_days` lists the days of one year a YEARLY rule names, which the constructor repeats
  * as far as the year 20000: about three microseconds, and an eighth of one for each day it lists
  * and sorts (`BYMONTH` with 28 `BYMONTHDAY` values, 336 days, about 42). The days of the week
@@ -170,7 +171,7 @@ const ICAL_STEP_CHARGES: Readonly<Record<string, StepCharge>> = {
   next_second: { before: () => 3 },
   ruleDayOfWeek: { before: () => 1 },
   increment_monthday: {
-    before: (days) => (typeof days === 'number' && days > 0 ? days / 8 : 1),
+    before: (days) => (typeof days === 'number' && days > 0 ? days / 5 : 1),
   },
   expand_year_days: {
     before: () => 3,
@@ -191,6 +192,13 @@ const ICAL_STEP_CHARGES: Readonly<Record<string, StepCharge>> = {
  */
 const OCCURRENCE_STEPS = 1;
 const ZONE_READ_STEPS = { conversion: 0.5, ownZone: 1.5, intl: 2.5 } as const;
+/**
+ * Each change ical.js lists when it expands one of the feed's own zones (Timezone#_ensureCoverage):
+ * it adjusts and sorts every one, about four tenths of a microsecond each, and the steps of the
+ * zone's rules are charged besides. Uncharged, a zone at every cap read again for 1,000 later years
+ * listed 3 million changes in one call, two seconds on a 4-vCPU Linux runner within the budget.
+ */
+const ZONE_CHANGE_STEPS = 0.4;
 
 /**
  * What one RecurIterator method costs: charged before it runs, from its arguments, and after, from
@@ -1590,7 +1598,8 @@ interface TimezoneCoverage {
  * again from its start and appends all of them to what it already had: 1,000 date values in years
  * six apart, sorted inside one call, expanded a zone of 3,000 changes 1,000 times into 3 million
  * (26 to 35 seconds, 650 MB). Each expansion starts again from DTSTART, so emptying the list first
- * leaves the same changes, once. If ical.js no longer expands zones this way, the feed is refused.
+ * leaves the same changes, once, and each expansion is charged for the changes it lists
+ * (ZONE_CHANGE_STEPS). If ical.js no longer expands zones this way, the feed is refused.
  * And charge each offset ical.js looks up in such a zone to `budget`, as a conversion in it is: it
  * compares a series' times at every step of its search.
  */
@@ -1609,6 +1618,7 @@ function budgetTimezoneCoverage(root: ICAL.Component, budget: RecurrenceBudget):
       if (this.changes.length > 0 && this.expandedUntilYear >= year) return;
       this.changes = [];
       ensure.call(this, year);
+      budget.charge(this.changes.length * ZONE_CHANGE_STEPS);
     };
     zone.utcOffset = function (this: TimezoneCoverage, time: unknown) {
       budget.charge(ZONE_READ_STEPS.ownZone);

@@ -625,7 +625,8 @@ describe('every accepted shape', () => {
       }),
       { seed: 20261024, numRuns: 1500 },
     );
-  });
+    // 1,500 rules, each expanded twice: about four seconds on a fast laptop, six on a CI runner.
+  }, 60_000);
 
   it('includes the shapes agents use', () => {
     for (const rule of [
