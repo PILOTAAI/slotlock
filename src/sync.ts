@@ -186,12 +186,13 @@ const ICAL_STEP_CHARGES: Readonly<Record<string, StepCharge>> = {
  * wall clock and its instants, half a step in an IANA zone (a few lookups in the offsets timezone.ts
  * keeps a day at a time) and one and a half in a zone only the feed defines (ical.js's list of its
  * changes, searched at each lookup, as ical.js itself searches it at each step); and each instant
- * Intl is asked for to read a day of an IANA zone's offsets (about two and a half microseconds),
- * the first time a budget reads that day. Before these were charged, a series in a named zone ran
+ * Intl is asked for to read a day of an IANA zone's offsets (two and a half microseconds on the
+ * machine the rest was measured on, and with reading its parts as long again on a 4-vCPU Linux
+ * runner, five steps), the first time a budget reads that day. Before these were charged, a series in a named zone ran
  * twenty times as long as the same series in UTC within the same budget.
  */
 const OCCURRENCE_STEPS = 1;
-const ZONE_READ_STEPS = { conversion: 0.5, ownZone: 1.5, intl: 2.5 } as const;
+const ZONE_READ_STEPS = { conversion: 0.5, ownZone: 1.5, intl: 5 } as const;
 /**
  * Each change ical.js lists when it expands one of the feed's own zones (Timezone#_ensureCoverage):
  * it adjusts and sorts every one, about four tenths of a microsecond each, and the steps of the

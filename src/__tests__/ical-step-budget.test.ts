@@ -745,6 +745,34 @@ describe('the step budget on recurrence expansion', () => {
       expect(performance.now() - started).toBeLessThan(5_000);
     }, 120_000);
 
+    it('refuses a feed of yearly series in 100 zones from 1700 having read Intl at most 80,000 times', () => {
+      // Each instant Intl reads takes about five microseconds and its parts as long again on a CI
+      // runner. Charged two and a half steps, a feed read 107,000 of them, 1.6 to 1.9 seconds there,
+      // before the budget refused it: twice what the same budget allows a feed in UTC.
+      const zones = Intl.supportedValuesOf('timeZone').filter((zone) => !zone.startsWith('Etc/'));
+      const text = [
+        'BEGIN:VCALENDAR',
+        'VERSION:2.0',
+        'PRODID:-//Slotlock tests//EN',
+        ...Array.from({ length: 100 }, (_, index) => {
+          const zone = zones[(index * 7) % zones.length] as string;
+          return [
+            'BEGIN:VEVENT',
+            `UID:yearly-${index}`,
+            'DTSTAMP:20261010T000000Z',
+            `DTSTART;TZID=${zone}:17000105T090000`,
+            `DTEND;TZID=${zone}:17000105T100000`,
+            'RRULE:FREQ=YEARLY',
+            'END:VEVENT',
+          ];
+        }).flat(),
+        'END:VCALENDAR',
+      ].join('\r\n');
+      const work = intlWork(() => parseICalendarChanges(text, undefined, feedWindow));
+      expect(work.error).toBeInstanceOf(CalendarExpansionLimitError);
+      expect(work.read).toBeLessThan(80_000);
+    }, 120_000);
+
     it('still writes a daily London series from 2020, and every weekday since 2016', () => {
       expect(
         expandCalendarEventOccurrences(since('2020-02-03T09:00:00Z', 'Europe/London'), WINDOW),

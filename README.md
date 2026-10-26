@@ -487,20 +487,21 @@ time as unproven.
 A rule is expanded within a budget of steps, a count of work that reads no clock, so the same input
 is accepted or refused however loaded the machine: 500,000 for a feed (the whole read, from its
 text) or for a stored series as maintenance rolls it, about half a second, and 50,000 for one event
-as it is written, refused within a tenth of a second whatever its rule or time zone. A step is about
-a microsecond: a step of ical.js's search costs three, a weekday compared one, five days walked
-one, a year scanned three (and one for each eight days it lists), and two weekdays of a year listed
-one. Each occurrence passed costs one more, each conversion of a time in an IANA zone half (one and
-a half in a zone only the feed defines), and each instant Intl is asked for to read a zone's offsets
-two and a half, the first time an expansion reads that day of the zone, whatever the process has
-read before. A feed's own time zones (VTIMEZONE) count against the same budget, each change listed
-when one is expanded costing four tenths: one written the way Outlook writes them, from 1601, costs
-about 6,000. A feed may carry 100 time zones and name 100 it
-does not define, 1,000 observances and 2,000 RDATE values in the zones it carries, and 20,000 RDATE
-and EXDATE values in its events; a property's name and parameters may take 8 KB and list 100. A
-MINUTELY to WEEKLY step, a `DURATION`, or an event's length may be a century at most. A calendar
-that needs more, such as a rule that never occurs (`FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30`), is
-refused: `invalid_event` on a write, `invalid_icalendar` from a feed.
+as it is written, refused within a tenth of a second whatever its rule or time zone (on a laptop; a
+4-vCPU Linux server takes up to twice as long). A step is about a microsecond: a step of ical.js's
+search costs three, a weekday compared one, five days walked one, a year scanned three (and one for
+each eight days it lists), and two weekdays of a year listed one. Each occurrence passed costs one
+more, each conversion of a time in an IANA zone half (one and a half in a zone only the feed
+defines), and each instant Intl is asked for to read a zone's offsets five, the first time an
+expansion reads that day of the zone, whatever the process has read before. A feed's own time zones
+(VTIMEZONE) count against the same budget, each change listed when one is expanded costing four
+tenths: one written the way Outlook writes them, from 1601, costs about 6,000. A feed may carry 100
+time zones and name 100 it does not define, 1,000 observances and 2,000 RDATE values in the zones it
+carries, and 20,000 RDATE and EXDATE values in its events; a property's name and parameters may take
+8 KB and list 100. A MINUTELY to WEEKLY step, a `DURATION`, or an event's length may be a century at
+most. A calendar that needs more, such as a rule that never occurs
+(`FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30`), is refused: `invalid_event` on a write, `invalid_icalendar`
+from a feed.
 
 A feed's rules are expanded from their start, and each series may pass 4,000 occurrences on the way
 (a daily one, about 11 years) whatever the feed's other series take. A feed series with one DAILY or
