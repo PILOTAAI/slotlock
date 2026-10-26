@@ -635,8 +635,8 @@
                   "properties": {
                     "address": {
                       "type": "string",
-                      "maxLength": 320,
-                      "format": "email"
+                      "minLength": 3,
+                      "maxLength": 320
                     },
                     "name": {
                       "anyOf": [
@@ -669,8 +669,8 @@
                 "properties": {
                   "address": {
                     "type": "string",
-                    "maxLength": 320,
-                    "format": "email"
+                    "minLength": 3,
+                    "maxLength": 320
                   },
                   "name": {
                     "anyOf": [
@@ -962,8 +962,8 @@
                   "properties": {
                     "address": {
                       "type": "string",
-                      "maxLength": 320,
-                      "format": "email"
+                      "minLength": 3,
+                      "maxLength": 320
                     },
                     "name": {
                       "anyOf": [
@@ -996,8 +996,8 @@
                 "properties": {
                   "address": {
                     "type": "string",
-                    "maxLength": 320,
-                    "format": "email"
+                    "minLength": 3,
+                    "maxLength": 320
                   },
                   "name": {
                     "anyOf": [
@@ -1322,8 +1322,8 @@
                     "properties": {
                       "address": {
                         "type": "string",
-                        "maxLength": 320,
-                        "format": "email"
+                        "minLength": 3,
+                        "maxLength": 320
                       },
                       "name": {
                         "anyOf": [
@@ -1356,8 +1356,8 @@
                   "properties": {
                     "address": {
                       "type": "string",
-                      "maxLength": 320,
-                      "format": "email"
+                      "minLength": 3,
+                      "maxLength": 320
                     },
                     "name": {
                       "anyOf": [
@@ -1889,8 +1889,8 @@
                   "properties": {
                     "address": {
                       "type": "string",
-                      "maxLength": 320,
-                      "format": "email"
+                      "minLength": 3,
+                      "maxLength": 320
                     },
                     "name": {
                       "anyOf": [
@@ -1923,8 +1923,8 @@
                 "properties": {
                   "address": {
                     "type": "string",
-                    "maxLength": 320,
-                    "format": "email"
+                    "minLength": 3,
+                    "maxLength": 320
                   },
                   "name": {
                     "anyOf": [

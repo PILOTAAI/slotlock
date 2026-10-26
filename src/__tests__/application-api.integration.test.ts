@@ -484,6 +484,34 @@ describe.skipIf(!url)('the application API on the real store', () => {
     expect(await call('a', 'GET', `/v1/reservations/${holdId}`)).toEqual(refused(404, 'reservation_not_found'));
   });
 
+  it('lists an event whose participants have addresses an imported feed may carry', async () => {
+    // The audit's probe: an invitation whose ORGANIZER was mailto:ops@localhost made every listing
+    // of its window answer 500, and the event itself unreadable.
+    const resource = (await call('a', 'POST', '/v1/resources', { external_ref: `feed-van-${randomUUID()}` })).body.resource;
+    const put = await store.putCalendarEvent({
+      tenantRef: tenantA,
+      externalRef: `feed-${randomUUID()}`,
+      idempotencyKey: `import-${randomUUID()}`,
+      expectedRevision: 0,
+      resourceId: resource.id,
+      start: new Date(day(62, '12:00:00')),
+      end: new Date(day(62, '13:00:00')),
+      timezone: 'UTC',
+      summary: 'Imported invitation',
+      organizer: { email: 'ops@localhost' },
+      attendees: [{ email: 'grüße@bücher.example' }],
+    });
+    expect(put.ok).toBe(true);
+    const window = `start=${encodeURIComponent(day(61))}&end=${encodeURIComponent(day(63))}`;
+    const listed = await call('a', 'GET', `/v1/tenant/events?resource_id=${resource.id}&${window}`);
+    expect(listed.status).toBe(200);
+    expect(listed.body.events).toMatchObject([
+      { organizer: { address: 'ops@localhost' }, attendees: [{ address: 'grüße@bücher.example' }] },
+    ]);
+    const read = await call('a', 'GET', `/v1/tenant/events/${listed.body.events[0].id}`);
+    expect(read.status).toBe(200);
+  });
+
   it("reads and cancels any key's event, fenced to the resource it is on", async () => {
     const resource = (await call('a', 'POST', '/v1/resources', { external_ref: `event-van-${randomUUID()}` })).body.resource;
     const other = (await call('a', 'POST', '/v1/resources', { external_ref: `event-van-${randomUUID()}` })).body.resource;

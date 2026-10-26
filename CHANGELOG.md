@@ -59,6 +59,11 @@ versioning.
   (a write-only key, a refused or slow read) and the update names no time zone. The store books the
   series in the event's own zone, so the dates approved could differ in time, weekday and count from
   those booked. The question now shows the rule and says its dates follow the event's existing zone.
+- An event whose organizer or attendee address the store keeps but `z.email()` refuses, such as
+  `ops@localhost` from an imported feed, no longer makes every listing of its window answer 500 and
+  stop paginating. Events return participant addresses in the store's own grammar (one `@`, no
+  spaces), so openapi.json no longer marks them `format: email`. Event times are kept in years 1 to
+  9999, the years an RFC 3339 date-time can write; a write outside them is refused `invalid_event`.
 
 ### Fixed
 

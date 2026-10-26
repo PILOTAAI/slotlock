@@ -1,9 +1,12 @@
+import fc from 'fast-check';
 import ICAL from 'ical.js';
 import { describe, expect, it } from 'vitest';
+import { SLOTLOCK_EVENT_OUTPUT } from '../event-schema.js';
 import {
   CalendarContractError,
   emitITipCalendar,
   expandCalendarEventOccurrences,
+  normalizeCalendarEventContent,
   parseICalendarChanges,
   parseTrustedICalendarEvents,
 } from '../sync.js';
@@ -225,6 +228,62 @@ END:VCALENDAR\r
     expect(payload.replace(/\r\n/g, '')).not.toMatch(/\r/);
     const master = new ICAL.Component(ICAL.parse(payload)).getFirstSubcomponent('vevent');
     expect(master?.getFirstPropertyValue('description')).toBe('Keys at the desk.\nFuel full.\nTab\there.');
+  });
+
+  it('returns every participant address the store keeps', () => {
+    // The store keeps any address with one @ and no space; the output once wanted a stricter one,
+    // so one imported event made every listing of its window answer 500.
+    const organizer = SLOTLOCK_EVENT_OUTPUT.shape.organizer.unwrap();
+    const attendee = SLOTLOCK_EVENT_OUTPUT.shape.attendees.element;
+    const kept = (email: string) =>
+      normalizeCalendarEventContent({
+        start: d('2027-01-01T09:00:00Z'),
+        end: d('2027-01-01T10:00:00Z'),
+        timezone: 'UTC',
+        summary: 'Imported',
+        organizer: { email },
+        attendees: [{ email }],
+      });
+    const part = fc.string({ unit: 'grapheme', minLength: 1, maxLength: 20 });
+    fc.assert(
+      fc.property(part, part, (local, domain) => {
+        let content: ReturnType<typeof kept>;
+        try {
+          content = kept(`${local}@${domain}`);
+        } catch {
+          return;
+        }
+        const address = content.organizer?.email as string;
+        expect(organizer.safeParse({ address, name: null }).success, address).toBe(true);
+        expect(
+          attendee.safeParse({
+            address,
+            name: null,
+            role: 'required',
+            participation_status: 'needs_action',
+            rsvp: false,
+          }).success,
+          address,
+        ).toBe(true);
+      }),
+      { numRuns: 500 },
+    );
+    for (const address of ['ops@localhost', 'grüße@bücher.example']) {
+      expect(organizer.safeParse({ address: kept(address).organizer?.email, name: null }).success).toBe(true);
+    }
+  });
+
+  it('keeps instants in years 1-9999, which the events are returned in', () => {
+    const at = (start: Date) => () =>
+      normalizeCalendarEventContent({
+        start,
+        end: new Date(start.getTime() + 3_600_000),
+        timezone: 'UTC',
+        summary: 'Far',
+      });
+    expect(at(new Date(Date.UTC(10_000, 0, 1)))).toThrowError(CalendarContractError);
+    expect(at(new Date('0000-06-01T00:00:00Z'))).toThrowError(CalendarContractError);
+    expect(at(new Date('9999-12-31T22:00:00Z'))).not.toThrow();
   });
 
   it('fails closed before unbounded trusted-event work or cardinality can reach the store', () => {

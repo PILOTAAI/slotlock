@@ -377,7 +377,9 @@ function optionalIdentity(value: string | null | undefined): string | undefined 
 
 function instant(value: Date | string): Date {
   const parsed = value instanceof Date ? new Date(value.getTime()) : new Date(value);
-  if (!Number.isFinite(parsed.getTime())) {
+  // Years 1-9999: what an RFC 3339 date-time, as the events are returned, can write.
+  const year = parsed.getUTCFullYear();
+  if (!Number.isFinite(parsed.getTime()) || year < 1 || year > 9999) {
     throw new CalendarContractError('invalid_external_interval');
   }
   return parsed;

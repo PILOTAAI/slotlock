@@ -17,15 +17,25 @@ const TRUSTED_PERSON_NAME_OUTPUT_MAX = 1_024;
 const TRUSTED_RECURRENCE_EXCEPTION_OUTPUT_MAX = 1_000;
 const TRUSTED_REMINDER_MINUTES_OUTPUT_MAX = 366 * 24 * 60;
 
+// The grammar the store keeps an address in (normalizeEmail in sync.ts), so every stored one can be
+// returned: an address from an imported feed need not be one z.email() takes (ops@localhost).
+const STORED_ADDRESS = z
+  .string()
+  .min(3)
+  .max(320)
+  .refine((value) => /^[^\s@]+@[^\s@]+$/.test(value), {
+    message: 'must be one @ between characters other than spaces',
+  });
+
 const ORGANIZER = z
   .object({
-    address: z.string().email().max(320),
+    address: STORED_ADDRESS,
     name: z.string().trim().max(TRUSTED_PERSON_NAME_OUTPUT_MAX).nullable(),
   })
   .strict();
 const ATTENDEE = z
   .object({
-    address: z.string().email().max(320),
+    address: STORED_ADDRESS,
     name: z.string().trim().max(TRUSTED_PERSON_NAME_OUTPUT_MAX).nullable(),
     role: z.enum(['chair', 'required', 'optional', 'non_participant']),
     participation_status: z.enum([
