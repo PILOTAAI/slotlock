@@ -18,6 +18,13 @@ function section(markdown: string, heading: string): string {
   return end === -1 ? rest : rest.slice(0, end);
 }
 
+/** 0.3.0's release notes: its dated section once released, `## Unreleased` until then. */
+function notes030(): string {
+  const changelog = read('CHANGELOG.md');
+  const released = /^## 0\.3\.0 - .*$/m.exec(changelog)?.[0];
+  return section(changelog, released ?? '## Unreleased');
+}
+
 describe('hosted safety in the documentation', () => {
   const readme = read('README.md');
   const security = read('SECURITY.md');
@@ -43,7 +50,7 @@ describe('hosted safety in the documentation', () => {
     const live = flat(section(readme, '### Calendar resources and live updates'));
     expect(live).toContain('maxPerTenant');
     expect(live).toMatch(/`key_subscriptions`[^.]*fewer than its tenant/);
-    expect(flat(section(read('CHANGELOG.md'), '## Unreleased'))).toContain('key_subscriptions');
+    expect(flat(notes030())).toContain('key_subscriptions');
   });
 
   it('says what a write that waits gets, how a freed slot is shared, and where maintenance waits (P11)', () => {
@@ -107,8 +114,8 @@ describe('hosted safety in the documentation', () => {
     expect(model).toMatch(/not authenticated in the last 15 minutes[^.]*503/);
   });
 
-  it('lists the changes that need an operator or embedder to act under Unreleased', () => {
-    const unreleased = flat(section(read('CHANGELOG.md'), '## Unreleased'));
+  it('lists the changes that need an operator or embedder to act in the 0.3.0 notes', () => {
+    const unreleased = flat(notes030());
     for (const name of [
       'SLOTLOCK_CONFIRM_WRITES',
       'server_busy',
