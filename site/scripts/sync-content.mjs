@@ -371,13 +371,22 @@ async function readFacts() {
  * instructions the server gives the model. The names must match what readTools found.
  */
 async function readToolsReference(facts) {
-  const [agentServer, store, backend, types, rules] = await Promise.all([
+  const [agentServerOwn, eventSchema, store, backend, types, rules] = await Promise.all([
     read('src/agent-server.ts'),
+    read('src/event-schema.ts'),
     read('src/store.ts'),
     read('src/agent-store-backend.ts'),
     read('src/types.ts'),
     read('src/rules.ts'),
   ]);
+  // The event output lives in src/event-schema.ts, which the agent server imports as EVENT. Its
+  // declarations come after the agent server's own, so a name both declare reads the agent server's.
+  const eventOutput = eventSchema.replace(
+    /^export const SLOTLOCK_EVENT_OUTPUT\b/m,
+    'const EVENT',
+  );
+  if (eventOutput === eventSchema) fail('no SLOTLOCK_EVENT_OUTPUT in src/event-schema.ts');
+  const agentServer = `${agentServerOwn}\n${eventOutput}\n`;
   let parsed;
   try {
     parsed = readOperations(agentServer, {
