@@ -203,6 +203,7 @@ const CAP_RANGES = Object.freeze({
   tenant_series_writes: [1, 100],
   series_writes: [1, 100],
   maintenance_runs: [1, 100],
+  subscriptions: [1, 10_000],
   tenant_subscriptions: [1, 10_000],
   key_subscriptions: [1, 64],
   key_lookups: [1, 8],
@@ -242,7 +243,9 @@ export interface SlotlockLimits {
  *   writes in flight and, among those, the least use lately. That keeps a tenant sending one write
  *   at a time from waiting behind tenants with more, not behind many tenants with one each
  *   (rate-limit.ts).
- * - `tenant_subscriptions`: MCP live-update streams one tenant may hold open.
+ * - `subscriptions`: MCP live-update streams the server holds open. When it is full, a tenant
+ *   holding fewer than the tenant holding most, less one, ends that tenant's oldest stream.
+ * - `tenant_subscriptions`: of those, how many one tenant may hold.
  * - `key_subscriptions`: of those, how many one key (or the server token) may hold, and always
  *   fewer than its tenant's, so one key cannot lock the tenant's other keys out
  *   (slotlockKeySubscriptions).
@@ -270,6 +273,7 @@ export const SLOTLOCK_DEFAULT_LIMITS: SlotlockLimits = Object.freeze({
     tenant_series_writes: 1,
     series_writes: 1,
     maintenance_runs: 1,
+    subscriptions: 256,
     tenant_subscriptions: 16,
     key_subscriptions: 4,
     key_lookups: 2,

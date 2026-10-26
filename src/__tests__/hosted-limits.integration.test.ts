@@ -826,6 +826,35 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
     }
   });
 
+  it('caps the live-update streams the whole server holds with SLOTLOCK_LIMITS subscriptions', async () => {
+    const server = await serve({ SLOTLOCK_LIMITS: 'subscriptions=1' });
+    const listen = async (key: string | undefined, resource: string | undefined) => {
+      const request = modernRequest(
+        'subscriptions/listen',
+        { notifications: { resourceSubscriptions: [slotlockCalendarResourceUri(resource as string)] } },
+        { headers: { Authorization: `Bearer ${key}` } },
+      );
+      return fetch(`${server.origin}/mcp`, {
+        method: 'POST',
+        headers: request.headers,
+        body: await request.text(),
+      });
+    };
+    const open: SseReader[] = [];
+    try {
+      const first = await listen(keys['a-admin'], resources.a);
+      expect(first.status).toBe(200);
+      open.push(new SseReader(first));
+      await open[0]?.message();
+      // Each tenant would hold one: the other tenant takes nothing from it.
+      const other = await listen(keys['b-second'], resources.b);
+      expect(other.status).toBe(429);
+    } finally {
+      for (const reader of open) await reader.cancel();
+      await server.stop();
+    }
+  });
+
   it("keeps one key below its tenant's live-update streams, so it cannot lock the tenant's other keys out", async () => {
     // The audit's confirmed medium: each key could hold four streams whatever the tenant's cap, so
     // with tenant_subscriptions at four or fewer one key (or one agent) took every one of them.

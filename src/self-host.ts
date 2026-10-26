@@ -646,6 +646,7 @@ export async function startSlotlockServer(
         return true;
       },
       subscriptions: {
+        maxTotal: caps.subscriptions,
         maxPerTenant: caps.tenant_subscriptions,
         maxPerPrincipal: slotlockKeySubscriptions(caps),
       },
@@ -1159,9 +1160,9 @@ Environment:
                                  tenant_series_writes and series_writes
                                  (1: writes that may expand a recurring series at once),
                                  maintenance_runs (1: application API maintenance runs at once),
-                                 tenant_subscriptions (16), key_subscriptions (4, and fewer
-                                 than tenant_subscriptions), key_lookups (2),
-                                 key_lookup_queue (256); what one tenant may store:
+                                 subscriptions (256), tenant_subscriptions (16),
+                                 key_subscriptions (4, and fewer than tenant_subscriptions),
+                                 key_lookups (2), key_lookup_queue (256); what one tenant may store:
                                  tenant_holds (10000), tenant_reservations, tenant_events and
                                  tenant_coverage (100000)
   SLOTLOCK_TRUSTED_PROXY_HEADER  The request field a proxy in front sets to the client address,

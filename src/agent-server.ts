@@ -487,7 +487,7 @@ export type SlotlockAgentServerEvent =
       type: 'subscription';
       outcome: 'opened' | 'closed';
       /** Why a subscription closed. */
-      reason?: 'client' | 'duration' | 'shutdown' | 'revoked' | 'failed' | 'empty';
+      reason?: 'client' | 'duration' | 'shutdown' | 'revoked' | 'failed' | 'empty' | 'preempted';
       /** How many calendar resources it watched. */
       resources: number;
     };
@@ -1634,6 +1634,14 @@ const MAX_RESOURCE_SUBSCRIPTIONS = 20;
 /** Consecutive failed re-reads after which a subscription is abandoned. */
 const MAX_POLL_FAILURES = 3;
 
+/** An open subscription, or a slot reserved by one still opening (not yet `streaming`). */
+interface SubscriptionSlot {
+  principalKey: string;
+  tenantRef: string;
+  streaming: boolean;
+  end(reason: 'shutdown' | 'preempted'): void;
+}
+
 interface SubscriptionPolicy {
   pollIntervalMs: number;
   maxDurationMs: number;
@@ -2616,11 +2624,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     );
   }
   /** Open subscriptions (and slots reserved by ones still opening), for the caps and shutdown. */
-  const openSubscriptions = new Set<{
-    principalKey: string;
-    tenantRef: string;
-    end(reason: 'shutdown'): void;
-  }>();
+  const openSubscriptions = new Set<SubscriptionSlot>();
   let shuttingDown = false;
 
   const discoverResult = Object.freeze({
@@ -2947,6 +2951,25 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       if (open.tenantRef === principal.tenantRef) heldByTenant += 1;
     }
     if (
+      openSubscriptions.size >= subscriptionPolicy.maxTotal &&
+      held < subscriptionPolicy.maxPerPrincipal &&
+      heldByTenant < subscriptionPolicy.maxPerTenant
+    ) {
+      // A full server is shared out: a tenant holding fewer than the one holding most, less one,
+      // ends that tenant's oldest stream, so many tenants within their share cannot keep another
+      // from holding any. A slot still opening has nothing to end yet.
+      const streamsOf = new Map<string, SubscriptionSlot[]>();
+      for (const open of openSubscriptions) {
+        if (!open.streaming) continue;
+        const streams = streamsOf.get(open.tenantRef);
+        if (streams) streams.push(open);
+        else streamsOf.set(open.tenantRef, [open]);
+      }
+      let most: SubscriptionSlot[] = [];
+      for (const streams of streamsOf.values()) if (streams.length > most.length) most = streams;
+      if (most.length > heldByTenant + 1) most[0]?.end('preempted');
+    }
+    if (
       openSubscriptions.size >= subscriptionPolicy.maxTotal ||
       held >= subscriptionPolicy.maxPerPrincipal ||
       heldByTenant >= subscriptionPolicy.maxPerTenant
@@ -2954,7 +2977,12 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       return modernError(429, id, SLOTLOCK_MCP_RATE_LIMITED_ERROR_CODE, 'Too many subscriptions');
     }
     // The slot is held while access is checked, so concurrent opens cannot overshoot the caps.
-    const slot = { principalKey, tenantRef: principal.tenantRef, end: (_reason: 'shutdown') => {} };
+    const slot: SubscriptionSlot = {
+      principalKey,
+      tenantRef: principal.tenantRef,
+      streaming: false,
+      end: () => {},
+    };
     openSubscriptions.add(slot);
     let streaming = false;
     try {
@@ -2981,7 +3009,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
   function streamSubscription(
     call: ModernCall,
     policy: SubscriptionPolicy,
-    slot: { principalKey: string; tenantRef: string; end(reason: 'shutdown'): void },
+    slot: SubscriptionSlot,
     window: { start: string; end: string },
     watched: { resourceIds: string[]; digests: Map<string, string> },
   ): Response {
@@ -2998,7 +3026,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     const onAbort = () => end('client');
 
     function end(
-      reason: 'client' | 'duration' | 'shutdown' | 'revoked' | 'failed' | 'empty',
+      reason: 'client' | 'duration' | 'shutdown' | 'revoked' | 'failed' | 'empty' | 'preempted',
     ): void {
       if (ended) return;
       ended = true;
@@ -3029,6 +3057,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       });
     }
     slot.end = end;
+    slot.streaming = true;
 
     stream.send({
       jsonrpc: '2.0',

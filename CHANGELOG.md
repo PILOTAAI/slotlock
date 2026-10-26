@@ -36,6 +36,12 @@ versioning.
   at every occurrence it passes. Any number was accepted, and choosing among them was not charged:
   one event with 110,000 RRULEs (2 MB) held `parseICalendarFeed` for about 9 seconds before it was
   refused. It is now refused before it is expanded.
+- Many tenants can no longer hold every live-update stream between them. Each stayed within its
+  share, so 16 sign-up tenants could take all 256 of `slotlock serve`'s streams and every other
+  tenant's `subscriptions/listen` answered 429. When the server is full, a tenant holding fewer than
+  the tenant holding most, less one, now ends that tenant's oldest stream gracefully (reported as
+  `preempted`) instead of being refused. `SLOTLOCK_LIMITS` sets the server's cap (`subscriptions`,
+  256).
 
 ### Fixed
 

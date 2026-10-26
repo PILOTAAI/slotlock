@@ -304,8 +304,10 @@ that span changed, so the passage of time alone announces nothing. It ends a
 subscription gracefully, with the listen request's result, at its maximum duration, on shutdown, or
 when a re-read is refused as unauthenticated, unauthorized or not found; it closes the stream without
 a result after three consecutive failed re-reads or when the reader leaves more than 256 events
-unread. Open subscriptions, counted from the moment they start opening, are capped per principal and
-per server. A subscription that honors nothing ends right after its acknowledgment.
+unread. Open subscriptions, counted from the moment they start opening, are capped per principal,
+per tenant and per server. When the server is full, a listen from a tenant holding fewer than the
+tenant holding most, less one, ends that tenant's oldest open stream gracefully, as at shutdown,
+rather than being refused. A subscription that honors nothing ends right after its acknowledgment.
 
 ### Discovery and authorization
 

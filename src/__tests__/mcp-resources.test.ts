@@ -655,10 +655,11 @@ describe('live calendar updates (MCP 2026-07-28 subscriptions/listen)', () => {
       error: { code: -31029, message: 'Too many subscriptions' },
     });
     const other = new SseReader(
-      await server.fetch(listen({ resourceSubscriptions: [URI_A] }, 'Bearer other')),
+      await server.fetch(listen({ resourceSubscriptions: [URI_A] }, 'Bearer third')),
     );
     await other.message();
-    const full = await server.fetch(listen({ resourceSubscriptions: [URI_A] }, 'Bearer third'));
+    // Each tenant holds one: the server is full for either of them.
+    const full = await server.fetch(listen({ resourceSubscriptions: [URI_A] }, 'Bearer other'));
     expect(full.status).toBe(429);
 
     await first.cancel();
@@ -721,6 +722,39 @@ describe('live calendar updates (MCP 2026-07-28 subscriptions/listen)', () => {
     await again.body?.cancel();
     await opened[1]?.cancel();
     await otherReader.cancel();
+  });
+
+  it('ends the oldest subscription of the tenant holding most for a tenant holding fewer when the server is full', async () => {
+    // The audit's probe: 16 sign-up tenants held all 256 slots, each within its share, and every
+    // other tenant's first subscriptions/listen answered 429 for as long as they held them.
+    authenticate.mockImplementation(async (request) => {
+      const token = request.headers.get('authorization') ?? '';
+      const match = /^Bearer t(\d)-k(\d)$/.exec(token);
+      return match ? { subject: `api_key:${match[1]}-${match[2]}`, tenantRef: `tenant-${match[1]}` } : null;
+    });
+    const server = buildServer({
+      subscriptions: { pollIntervalMs: 1_000, maxPerPrincipal: 4, maxPerTenant: 2, maxTotal: 4 },
+    });
+    const open = async (token: string) => {
+      const response = await server.fetch(listen({ resourceSubscriptions: [URI_A] }, `Bearer ${token}`));
+      expect(response.status).toBe(200);
+      const reader = new SseReader(response);
+      await reader.message();
+      return reader;
+    };
+    const oldest = await open('t1-k1');
+    const held = [await open('t1-k2'), await open('t2-k1'), await open('t2-k2')];
+    // Before, the third tenant's first listen answered 429.
+    const third = await open('t3-k1');
+    // The first tenant's oldest is ended gracefully, with the listen request's result.
+    expect(await oldest.message()).toMatchObject({ result: { resultType: 'complete' } });
+    expect(closedEvents()).toEqual([
+      { type: 'subscription', outcome: 'closed', reason: 'preempted', resources: 1 },
+    ]);
+    // A tenant holding as many as the largest, less one, takes nothing back.
+    const refused = await server.fetch(listen({ resourceSubscriptions: [URI_A] }, 'Bearer t1-k1'));
+    expect(refused.status).toBe(429);
+    for (const reader of [...held, third]) await reader.cancel();
   });
 
   it('releases the slot when opening fails, answering a rate limit or a fault as such', async () => {
