@@ -171,6 +171,10 @@ versioning.
 
 ### Changed
 
+- Breaking behind a proxy: `slotlock serve` now limits requests per client address, so set
+  `SLOTLOCK_TRUSTED_PROXY_HEADER` (`CF-Connecting-IP` behind Cloudflare, also when kamal-proxy or
+  another proxy sits between) before upgrading a server behind one. Without it every client counts
+  as the proxy's one address and shares one `address` budget, 50 requests a second by default.
 - Breaking: `slotlock serve` defaults `SLOTLOCK_CONFIRM_WRITES` to `none`, so an authenticated
   write takes effect at once. Set `all`, or a list of write tools, to opt into confirmation;
   `SLOTLOCK_CONFIRMATION_SECRET` is required only then.

@@ -105,10 +105,12 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
   `server_busy`. An application API maintenance run waits the same way for slots of its own: one
   per tenant, `maintenance_runs` per server. The health check is not counted. `SLOTLOCK_LIMITS`
   changes the limits; behind a proxy, set `SLOTLOCK_TRUSTED_PROXY_HEADER` to the field it puts the
-  client's address in (`CF-Connecting-IP` behind Cloudflare), or every client shares the proxy's
-  budget: the server logs a `client_address_field_ignored` warning when such a field arrives
-  without the setting. A client can send that field itself, so let nothing reach the server except
-  through the proxy.
+  client's address in (`CF-Connecting-IP` behind Cloudflare) before the server takes traffic, or
+  every client shares the proxy's budget: the server logs a `client_address_field_ignored` warning
+  when such a field arrives without the setting. Behind two proxies, such as Cloudflare and then
+  kamal-proxy, name the first one's field: the server reads the last address of a list field such
+  as `X-Forwarded-For`, which the second proxy writes as Cloudflare's. A client can send that field
+  itself, so let nothing reach the server except through the proxy.
 
 ```sh
 slotlock hours set '[{"rrule":"FREQ=WEEKLY;BYDAY=SA","startMinutes":600,"durationMinutes":240}]' --resource vehicle-42

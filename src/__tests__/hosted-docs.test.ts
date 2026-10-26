@@ -55,6 +55,12 @@ describe('hosted safety in the documentation', () => {
     expect(limits).toMatch(/rests for as long as[^.]*busy/);
     expect(limits).toMatch(/maintenance run[^.]*`maintenance_runs`/);
     expect(limits).toContain('client_address_field_ignored');
+    // An operator behind Cloudflare and kamal-proxy must name Cloudflare's field, and before traffic.
+    expect(limits).toMatch(/TRUSTED_PROXY_HEADER[^.]*before the server takes traffic/);
+    expect(limits).toMatch(/two proxies[^.]*name the first one's field/);
+    expect(flat(section(read('CHANGELOG.md'), '### Changed'))).toMatch(
+      /TRUSTED_PROXY_HEADER[^.]*before upgrading/,
+    );
     expect(limits).not.toMatch(/one that waits two seconds gets 503/);
     expect(read('CHANGELOG.md')).not.toMatch(/one that waits two seconds gets 503/);
   });
