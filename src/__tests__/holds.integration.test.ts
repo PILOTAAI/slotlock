@@ -309,6 +309,54 @@ describe.skipIf(!url)('holds and the bookings they become (real Postgres)', () =
       }
     });
 
+    it('once expired, no longer blocks a booking or a hold in its buffer', async () => {
+      const { tenantRef, resourceId } = await freshTenant();
+      // An expired 09:00-10:00 hold with a half-hour buffer, before each write in its buffer.
+      const expiredHold = async (day: string) => {
+        const hold = await store.acquireHold({
+          resourceId,
+          start: d(`${day}T09:00:00Z`),
+          end: d(`${day}T10:00:00Z`),
+          ttlMs: 60_000,
+          bufferAfterMs: HOUR / 2,
+          tenantRef,
+        });
+        if (!hold.ok) throw new Error(`hold fixture failed: ${hold.code}`);
+        await sql`UPDATE slotlock.reservations SET expires_at = now() - interval '1 second' WHERE id = ${hold.hold.id}`;
+      };
+      await expiredHold('2027-08-05');
+      await expect(
+        store.createExternalReservation({
+          tenantRef,
+          externalRef: `booking-${crypto.randomUUID()}`,
+          resourceId,
+          start: d('2027-08-05T10:15:00Z'),
+          end: d('2027-08-05T11:00:00Z'),
+          bufferAfterMs: 0,
+          revision: 1,
+        }),
+      ).resolves.toMatchObject({ ok: true });
+      await expiredHold('2027-08-06');
+      await expect(
+        store.createReservation({
+          tenantRef,
+          resourceId,
+          start: d('2027-08-06T10:15:00Z'),
+          end: d('2027-08-06T11:00:00Z'),
+        }),
+      ).resolves.toMatchObject({ ok: true });
+      await expiredHold('2027-08-07');
+      await expect(
+        store.acquireHold({
+          tenantRef,
+          resourceId,
+          start: d('2027-08-07T10:15:00Z'),
+          end: d('2027-08-07T11:00:00Z'),
+          ttlMs: 60_000,
+        }),
+      ).resolves.toMatchObject({ ok: true });
+    });
+
     it('a retry with the same idempotency key answers the same hold; another body under it is refused', async () => {
       const { tenantRef, resourceId } = await freshTenant();
       const request = {

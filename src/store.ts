@@ -2445,10 +2445,11 @@ async function forgetExpiredHoldAnswers(
 }
 
 /**
- * Delete expired held rows overlapping the requested window, in deterministic id order under
- * FOR UPDATE — two concurrent reapers lock the same rows in the same order (no deadlock), the
- * loser simply finds them gone. Runs inside the caller's transaction, immediately before its
- * INSERT, so the EXCLUDE arbiter only ever sees LIVE occupation.
+ * Delete expired held rows whose occupied time (buffer included, as the EXCLUDE constraint reads
+ * it) overlaps the requested window, whose `end` is its own occupied end, in deterministic id
+ * order under FOR UPDATE — two concurrent reapers lock the same rows in the same order (no
+ * deadlock), the loser simply finds them gone. Runs inside the caller's transaction, immediately
+ * before its INSERT, so the EXCLUDE arbiter only ever sees LIVE occupation.
  */
 async function reapExpiredHolds(
   tx: TransactionSql,
@@ -2464,7 +2465,7 @@ async function reapExpiredHolds(
           AND status = 'held'
           AND expires_at <= now()
           AND starts_at < ${end}
-          AND ends_at > ${start}
+          AND COALESCE(occupied_ends_at, ends_at) > ${start}
         ORDER BY id
         FOR UPDATE
      )`;
