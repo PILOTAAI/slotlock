@@ -46,7 +46,8 @@
       "simple": { "limit": 60, "period": 60 }
     },
     {
-      // GitHub sign-ins and their callbacks, per client address: five sign-ins a minute.
+      // GitHub sign-ins and their callbacks, per client network (an IPv6 client's /48): five
+      // sign-ins a minute.
       "name": "SLOTLOCK_SIGN_IN_RATE_LIMIT",
       "namespace_id": "41002",
       "simple": { "limit": 10, "period": 60 }

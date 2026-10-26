@@ -42,6 +42,8 @@ describe('hosted safety in the documentation', () => {
     expect(limits).toMatch(/health check[^.]*not counted/i);
     const live = flat(section(readme, '### Calendar resources and live updates'));
     expect(live).toContain('maxPerTenant');
+    expect(live).toMatch(/`key_subscriptions`[^.]*fewer than its tenant/);
+    expect(flat(section(read('CHANGELOG.md'), '## Unreleased'))).toContain('key_subscriptions');
   });
 
   it('says what a write that waits gets, how a freed slot is shared, and where maintenance waits (P11)', () => {
@@ -55,6 +57,12 @@ describe('hosted safety in the documentation', () => {
     expect(limits).toMatch(/rests for as long as[^.]*busy/);
     expect(limits).toMatch(/maintenance run[^.]*`maintenance_runs`/);
     expect(limits).toContain('client_address_field_ignored');
+    // An operator behind Cloudflare and kamal-proxy must name Cloudflare's field, and before traffic.
+    expect(limits).toMatch(/TRUSTED_PROXY_HEADER[^.]*before the server takes traffic/);
+    expect(limits).toMatch(/two proxies[^.]*name the first one's field/);
+    expect(flat(section(read('CHANGELOG.md'), '### Changed'))).toMatch(
+      /TRUSTED_PROXY_HEADER[^.]*before upgrading/,
+    );
     expect(limits).not.toMatch(/one that waits two seconds gets 503/);
     expect(read('CHANGELOG.md')).not.toMatch(/one that waits two seconds gets 503/);
   });
@@ -71,6 +79,27 @@ describe('hosted safety in the documentation', () => {
     }
     // Expansion still runs on the main thread, so the docs promise no bound on reads.
     expect(limits).toMatch(/main thread[^.]*wait for the one running/);
+  });
+
+  it('promises no more fairness than the slots give (P11)', () => {
+    const start = readme.indexOf('- The server limits requests per client address');
+    expect(start, 'canary: the limits bullet exists').toBeGreaterThanOrEqual(0);
+    const limits = flat(readme.slice(start, readme.indexOf('\n\n', start)));
+    const added = flat(section(read('CHANGELOG.md'), '### Added'));
+    const config = flat(read('src/config.ts'));
+    for (const text of [limits, added]) {
+      // Each tenant with one write in flight and less use, a new one included, goes ahead once:
+      // the wait grows with the number of such tenants, not with one.
+      expect(text).not.toMatch(/however many tenants keep more waiting/);
+      expect(text).toMatch(/each go ahead of it once/);
+      // seriesGate's queue holds 64 and makes room for the key with fewer writes in flight.
+      expect(text).toMatch(/64 places[^.]*fewer writes in flight/);
+      // The rest is capped at a second, so the half holds only for writes shorter than that.
+      expect(text).toMatch(/under a second[^.]*about half/);
+      // Every process counts its own slots.
+      expect(text).toMatch(/each server process/i);
+    }
+    expect(config).toMatch(/each server process/i);
   });
 
   it('says a key unused for 15 minutes may be told busy during a flood of made-up keys (SEC-2)', () => {

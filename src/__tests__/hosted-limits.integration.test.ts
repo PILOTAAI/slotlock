@@ -824,6 +824,45 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
     }
   });
 
+  it("keeps one key below its tenant's live-update streams, so it cannot lock the tenant's other keys out", async () => {
+    // The audit's confirmed medium: each key could hold four streams whatever the tenant's cap, so
+    // with tenant_subscriptions at four or fewer one key (or one agent) took every one of them.
+    const server = await serve({ SLOTLOCK_LIMITS: 'tenant_subscriptions=3' });
+    const listen = async (key: string | undefined) => {
+      const request = modernRequest(
+        'subscriptions/listen',
+        { notifications: { resourceSubscriptions: [slotlockCalendarResourceUri(resources.a as string)] } },
+        { headers: { Authorization: `Bearer ${key}` } },
+      );
+      return fetch(`${server.origin}/mcp`, {
+        method: 'POST',
+        headers: request.headers,
+        body: await request.text(),
+      });
+    };
+    const open: SseReader[] = [];
+    try {
+      const statuses: number[] = [];
+      for (const key of [keys['a-admin'], keys['a-admin'], keys['a-admin'], keys['a-second']]) {
+        const response = await listen(key);
+        statuses.push(response.status);
+        if (response.status === 200) {
+          const reader = new SseReader(response);
+          open.push(reader);
+          expect(await reader.message()).toMatchObject({
+            method: 'notifications/subscriptions/acknowledged',
+          });
+        }
+      }
+      // The first key holds two of the tenant's three; the other key still gets the third.
+      expect(statuses).toEqual([200, 200, 429, 200]);
+      expect(server.listening).toMatchObject({ limits: { key_subscriptions: 2 } });
+    } finally {
+      for (const reader of open) await reader.cancel();
+      await server.stop();
+    }
+  });
+
   it('lets an authenticated write take effect at once by default, as the hosted service runs (SURF-4)', async () => {
     const server = await serve();
     try {

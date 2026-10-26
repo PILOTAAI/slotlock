@@ -26,7 +26,7 @@ import {
   createSlotlockDashboardResources,
   createSlotlockDashboardState,
 } from '../../src/dashboard.js';
-import { slotlockClientKey } from '../../src/rate-limit.js';
+import { slotlockClientKey, slotlockClientNetwork } from '../../src/rate-limit.js';
 import { createSlotlockStore } from '../../src/store.js';
 
 /**
@@ -43,7 +43,7 @@ export interface SlotlockDashboardWorkerEnv {
   HYPERDRIVE: { connectionString: string };
   /** Every dashboard request, counted per client (see clientOf). */
   SLOTLOCK_CLIENT_RATE_LIMIT?: SlotlockRateLimit;
-  /** GitHub sign-ins and their callbacks, counted per client. */
+  /** GitHub sign-ins and their callbacks, counted per client network (slotlockClientNetwork). */
   SLOTLOCK_SIGN_IN_RATE_LIMIT?: SlotlockRateLimit;
   /**
    * GitHub sign-ins and their callbacks, counted for every client together: a ceiling well above one
@@ -233,8 +233,11 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       // recognised as it recognises one: `/dashboard/sign-in/` is a sign-in too.
       const route = path.replace(/\/$/, '');
       if (signInPaths.has(route)) {
+        // Per network, not per /64: a site rotating through the /64s of its /48 is one client
+        // here, so it cannot use up the ceiling every other client shares.
+        const network = slotlockClientNetwork(address);
         const allowed = limits.signInCeiling
-          ? (await limits.signIn.limit({ key: `sign-in:${address}` })).success &&
+          ? (await limits.signIn.limit({ key: `sign-in:${network}` })).success &&
             (await limits.signInCeiling.limit({ key: 'sign-in' })).success
           : (await limits.signIn.limit({ key: 'sign-in' })).success;
         if (!allowed) return tooManyRequests();

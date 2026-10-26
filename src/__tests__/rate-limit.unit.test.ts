@@ -16,6 +16,7 @@ import {
   type SlotlockRefusalCounts,
   createSlotlockRequestLimits,
   slotlockClientKey,
+  slotlockClientNetwork,
 } from '../rate-limit.js';
 
 const PRINCIPAL: SlotlockAgentPrincipal = { subject: 'api_key:1', tenantRef: 'fleet-7' };
@@ -152,6 +153,33 @@ describe('client addresses', () => {
       .fetch(get('/v1/resources', { 'x-forwarded-for': '203.0.113.9' }), { remoteAddress: '10.0.0.1' });
     expect(ignored).toEqual(['cf-connecting-ip']);
     trusted.close();
+  });
+});
+
+describe('sign-ins', () => {
+  it("counts an IPv6 client's sign-ins by its /48, so rotating /64s inside one site buys none (SEC-12)", async () => {
+    // The verifier's probe against the dashboard Worker, here against serve: each /64 of a /48 had
+    // a sign-in budget of its own, so one site could keep every sign-in in flight with /64s to spare.
+    const limiter = createSlotlockRequestLimits({
+      limits: limitsWith({ rates: { address: null, sign_in: { perSecond: 1 / 60, burst: 2 } } }),
+      basePath: '',
+      signInPaths: ['/dashboard/sign-in'],
+      authenticate: async () => null,
+      now: clock().now,
+    });
+    const target = limiter.serve({ fetch: async () => new Response(null, { status: 302 }) });
+    const from = async (remoteAddress: string) =>
+      (await target.fetch(get('/dashboard/sign-in'), { remoteAddress })).status;
+    const statuses: number[] = [];
+    for (let index = 0; index < 4; index += 1) statuses.push(await from(`2001:db8:1:${index}::1`));
+    // Another site, and an IPv4 client, keep their own budgets.
+    statuses.push(await from('2001:db8:2:0::1'), await from('203.0.113.7'));
+    expect(statuses).toEqual([302, 302, 429, 429, 302, 302]);
+    // Every other request is still counted per /64.
+    expect(slotlockClientNetwork('2001:db8:1:2::/64')).toBe('2001:db8:1::/48');
+    expect(slotlockClientNetwork('203.0.113.7')).toBe('203.0.113.7');
+    expect(slotlockClientNetwork('unknown')).toBe('unknown');
+    limiter.close();
   });
 });
 
@@ -491,6 +519,49 @@ describe('series writes', () => {
     expect(order).toEqual(['a1', 'b1', 'c1', 'a2', 'a3', 'a4', 'a5']);
     limiter.close();
   });
+
+  it("makes room in a full queue for a tenant with fewer writes in flight, however many tenants fill it (P11)", async () => {
+    // The verifier's point that the fairness held against one tenant only: thirteen tenants with
+    // five writes each in flight filled the server's 64 places, and every other tenant's write was
+    // answered 503 at once, however few it had in flight.
+    const limiter = createSlotlockRequestLimits({
+      limits: limitsWith({ caps: { tenant_series_writes: 1, series_writes: 1 } }),
+      basePath: '',
+      authenticate: async () => null,
+    });
+    const order: string[] = [];
+    let finishHolder: () => void = () => {};
+    const write = (tenantRef: string, label: string, hold?: Promise<void>) =>
+      inRequest(limiter, async () => {
+        await limiter.admit({
+          principal: { subject: 's', tenantRef },
+          operation: 'slotlock_update_event',
+          input: {},
+        });
+        order.push(label);
+        await hold;
+      });
+    const tick = () => new Promise((resolve) => setImmediate(resolve));
+    const holder = write('holder', 'holder', new Promise((resolve) => (finishHolder = resolve)));
+    await tick();
+    const flood: ReturnType<typeof write>[] = [];
+    for (let tenant = 0; tenant < 13; tenant += 1) {
+      for (let index = 0; index < 5; index += 1) flood.push(write(`flood-${tenant}`, `f${tenant}`));
+    }
+    await tick();
+    const honest = write('honest', 'honest');
+    await tick();
+    finishHolder();
+    await holder;
+    const answer = await honest;
+    expect(answer.outcome).toBeUndefined();
+    expect(order.slice(0, 2)).toEqual(['holder', 'honest']);
+    // The flood's own writes are answered busy in its place, from the tenant with the most in flight.
+    const answers = await Promise.all(flood);
+    const busy = answers.filter(({ response }) => response.headers.get('ratelimit') === '"series_writes";r=0');
+    expect(busy.length).toBeGreaterThanOrEqual(2);
+    limiter.close();
+  }, 20_000);
 
   it("serves another tenant's write after the running expansion and its slot's rest while a tenant bursts (P11)", async () => {
     // serve's order for a REST write: the protocol charge, the series slot, then an expansion that

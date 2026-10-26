@@ -188,6 +188,17 @@ export function slotlockClientKey(value: string): string | null {
   return null;
 }
 
+/**
+ * The network a client key (slotlockClientKey) signs in from: an IPv6 /64's /48, any other key
+ * itself. A site is generally given a /48 or a /56 (RFC 6177) and may use each /64 in it, so a
+ * budget per /64 would let one site sign in as thousands of clients and use up a ceiling every
+ * client shares; per /48, a site counts as one, as a site behind one IPv4 address does.
+ */
+export function slotlockClientNetwork(key: string): string {
+  const prefix = /^([0-9a-f]{1,4}:[0-9a-f]{1,4}:[0-9a-f]{1,4}):[0-9a-f]{1,4}::\/64$/.exec(key);
+  return prefix ? `${prefix[1]}::/48` : key;
+}
+
 /** The client a request is counted as: the trusted field's last address, else the connection's. */
 function clientOf(
   request: Request,
@@ -325,16 +336,20 @@ function bucketsFor(rate: SlotlockRate, now: () => number) {
  * halving every SLOT_USE_HALF_LIFE_MS. A freed slot goes to the waiter whose key has the fewest
  * writes in flight (running and waiting), then to the one whose key has used the slots least, then
  * to the first come. So a key sending one write at a time goes ahead of keys keeping several in
- * flight, and of keys with one each whose writes kept the loop busier, however many keys send
- * costly writes. A freed slot first rests for as long as the event loop was busy while its write
- * held it (up to MAX_SLOT_REST_MS): a request that needs a few turns of the loop before it is
- * answered (another tenant's read, or its write on its way to a slot) has them in the rest, so the
- * writes that wait here hold at most about half the loop.
+ * flight, and of keys with one each whose writes kept the loop busier; keys with one each and less
+ * use, a new key included, each go ahead of it once, so its wait grows with how many there are.
+ * When the queue is full, a key with fewer writes in flight than the key with the most takes the
+ * place of that key's last waiter, so keys that each stay within their own cap cannot together
+ * turn every other key away. A freed slot first rests for as long as the event loop was busy
+ * while its write held it (up to MAX_SLOT_REST_MS): a request that needs a few turns of the loop
+ * before it is answered (another tenant's read, or its write on its way to a slot) has them in
+ * the rest, so writes that each hold the loop for under MAX_SLOT_REST_MS hold at most about half
+ * of it.
  */
 function seriesGate(perKey: number, total: number) {
   let running = 0;
   const byKey = new Map<string, number>();
-  const waiting: Array<{ key: string; start(): void }> = [];
+  const waiting: Array<{ key: string; start(): void; give(): void }> = [];
   const add = (key: string, delta: number) => {
     const count = (byKey.get(key) ?? 0) + delta;
     if (count === 0) byKey.delete(key);
@@ -432,11 +447,30 @@ function seriesGate(perKey: number, total: number) {
         add(key, 1);
         return Promise.resolve(start());
       }
-      if (waiting.length >= MAX_SERIES_WAITING || signal.aborted) return Promise.resolve('server');
+      if (signal.aborted) return Promise.resolve('server');
+      if (waiting.length >= MAX_SERIES_WAITING) {
+        // A full queue makes room for a key with fewer writes in flight than another waiter's: the
+        // last to come of the key with the most gives up its place. Otherwise many keys, each
+        // within its own cap, could fill the queue and turn every other key away.
+        const mine = (byKey.get(key) ?? 0) + 1;
+        let most = mine;
+        let displaced: (typeof waiting)[number] | undefined;
+        for (let index = waiting.length - 1; index >= 0; index -= 1) {
+          const entry = waiting[index] as (typeof waiting)[number];
+          const theirs = byKey.get(entry.key) ?? 0;
+          if (theirs > most) {
+            most = theirs;
+            displaced = entry;
+          }
+        }
+        if (!displaced) return Promise.resolve('server');
+        displaced.give();
+      }
       add(key, 1);
       return new Promise((resolve) => {
         const entry = {
           key,
+          give: () => give(),
           start: () => {
             clearTimeout(timer);
             signal.removeEventListener('abort', give);
@@ -719,12 +753,15 @@ export function createSlotlockRequestLimits(
               }
             }
           }
-          // Before anything is looked up: every request from the address, and its sign-ins. Not
-          // the health check, which a proxy in front asks from the address its requests share, and
-          // which reuses one database check a second.
+          // Before anything is looked up: every request from the address, and its sign-ins from
+          // its network, as the dashboard Worker counts them. Not the health check, which a proxy
+          // in front asks from the address its requests share, and which reuses one database
+          // check a second.
           const before = charge([
             ...(route === 'health' ? [] : [{ name: 'address' as const, key: address }]),
-            ...(route === 'sign_in' ? [{ name: 'sign_in' as const, key: address }] : []),
+            ...(route === 'sign_in'
+              ? [{ name: 'sign_in' as const, key: slotlockClientNetwork(address) }]
+              : []),
           ]);
           if (!before.ok) {
             count('rate_limited', address);

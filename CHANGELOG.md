@@ -105,15 +105,24 @@ versioning.
   request carrying such a field logs a `client_address_field_ignored` warning. The health check is
   not counted.
 - `slotlock serve` runs a recurring create and every event update one at a time per tenant and per
-  server (`tenant_series_writes`, `series_writes`), taking the write's token before it waits. A
-  freed slot rests for as long as the server was busy while the write before held it, up to a
-  second, then goes to the waiting tenant with the fewest writes in flight and, among those, the
-  one whose writes have kept the server busy least lately. Four more of a tenant's writes may wait
-  and the rest get 429; one that has waited two seconds gets 429 while its tenant's own write is
-  still running, otherwise 503 `server_busy`. An application API maintenance run waits the same
-  way for slots of its own: one per tenant, `maintenance_runs` (1) per server.
+  server (`tenant_series_writes`, `series_writes`), taking the write's token before it waits; each
+  server process counts its own slots. A freed slot rests for as long as the server was busy while
+  the write before held it, up to a second, so writes that each hold it under a second keep the
+  server busy at most about half the time. It then goes to the waiting tenant with the fewest
+  writes in flight and, among those, the one whose writes have kept the server busy least lately.
+  Tenants with more writes waiting never go ahead of one sending a write at a time, but many
+  tenants with one write each and less use, new ones included, can each go ahead of it once. Four
+  more of a tenant's writes may wait and the rest get 429. When the server's 64 places are taken,
+  a write from a tenant with fewer writes in flight than the one with the most takes the place of
+  that tenant's last write, which gets 503 `server_busy`. One that has waited two seconds gets 429
+  while its tenant's own write is still running, otherwise 503 `server_busy`. An application API
+  maintenance run waits the same way for slots of its own: one per tenant, `maintenance_runs` (1)
+  per server.
 - `createSlotlockAgentServer` takes `subscriptions.maxPerTenant`; `slotlock serve` caps each tenant
-  at 16 live-update streams (`tenant_subscriptions`).
+  at 16 live-update streams (`tenant_subscriptions`), and each key at 4 of them
+  (`key_subscriptions`), always fewer than its tenant's unless the tenant may hold only one: with
+  `tenant_subscriptions` at 4 or fewer, one key could otherwise hold every stream of its tenant and
+  lock its other keys out.
 - `slotlock serve` logs a `refusals` line each minute there are any, and at shutdown: auth
   refusals, rate limits, lookup overflows, busy series writes, busy maintenance runs and bodies too
   large, with clients named only by per-process pseudonyms.
@@ -169,6 +178,10 @@ versioning.
 
 ### Changed
 
+- Breaking behind a proxy: `slotlock serve` now limits requests per client address, so set
+  `SLOTLOCK_TRUSTED_PROXY_HEADER` (`CF-Connecting-IP` behind Cloudflare, also when kamal-proxy or
+  another proxy sits between) before upgrading a server behind one. Without it every client counts
+  as the proxy's one address and shares one `address` budget, 50 requests a second by default.
 - Breaking: `slotlock serve` defaults `SLOTLOCK_CONFIRM_WRITES` to `none`, so an authenticated
   write takes effect at once. Set `all`, or a list of write tools, to opt into confirmation;
   `SLOTLOCK_CONFIRMATION_SECRET` is required only then.
@@ -181,7 +194,9 @@ versioning.
   together, `SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT`. Until it is bound, `SLOTLOCK_SIGN_IN_RATE_LIMIT`
   counts every client together, as before, and the Worker logs a warning: add the ceiling before
   lowering that binding's limit to one client's. The dashboard runs at most two sign-ins from one
-  client at once. The Worker counts a client as `slotlock serve` does: an IPv6 client is its /64.
+  client at once. The Worker counts a client as `slotlock serve` does: an IPv6 client is its /64,
+  and its sign-ins are counted by its /48, so a site rotating through its /64s cannot use up the
+  ceiling every other client shares.
 - `slotlock serve`'s `/healthz` reuses one database check a second.
 - `slotlock --help` describes the server token as read and write, never admin.
 
