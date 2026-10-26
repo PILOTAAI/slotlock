@@ -64,6 +64,8 @@ versioning.
   stop paginating. Events return participant addresses in the store's own grammar (one `@`, no
   spaces), so openapi.json no longer marks them `format: email`. Event times are kept in years 1 to
   9999, the years an RFC 3339 date-time can write; a write outside them is refused `invalid_event`.
+- `slotlock_list_events` reads a resource named more than once once. One id named 100 times read
+  its events 100 times and returned the first event 100 times.
 
 ### Fixed
 

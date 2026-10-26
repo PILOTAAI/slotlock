@@ -592,6 +592,22 @@ describe('Slotlock store-backed agent server adapter', () => {
     expect(freeBusy.resources).toHaveLength(1);
   });
 
+  it('lists the events of a resource named more than once once', async () => {
+    // The audit's probe: one id 100 times read its events 100 times, and the page held 100 copies.
+    const backend = createSlotlockStoreAgentBackend(store, { availabilityRules });
+    const listed = await backend.listEvents(
+      { ...context, operation: 'slotlock_list_events' },
+      {
+        resource_ids: Array.from({ length: 100 }, () => resource.id),
+        start: '2027-01-10T00:00:00.000Z',
+        end: '2027-01-11T00:00:00.000Z',
+        limit: 50,
+      },
+    );
+    expect(listCalendarEvents).toHaveBeenCalledOnce();
+    expect(listed.events).toHaveLength(1);
+  });
+
   it('refuses a search whose resources hold more busy intervals in all than one request may read', async () => {
     const ids = Array.from(
       { length: 5 },

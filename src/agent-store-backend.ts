@@ -607,7 +607,7 @@ export function createSlotlockStoreAgentBackend(
 
     async listEvents(context, input) {
       const window = interval(input as { start: string; end: string });
-      const resourceIds = input.resource_ids as string[];
+      const resourceIds = distinctResourceIds(input);
       const limit = input.limit as number;
       const after = parseEventCursor(input.cursor);
       return withTenant(store, context, async (tenantStore) => {
