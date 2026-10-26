@@ -20,13 +20,13 @@
         "headers": [
           {
             "name": "Authorization",
-            "description": "The bearer token the server was started with (SLOTLOCK_AUTH_TOKEN).",
-            "value": "Bearer {SLOTLOCK_AUTH_TOKEN}",
+            "description": "A bearer the server accepts: SLOTLOCK_AUTH_TOKEN, or an API key from `slotlock key create` (slk_...).",
+            "value": "Bearer {token}",
             "isRequired": true,
             "isSecret": true,
             "variables": {
-              "SLOTLOCK_AUTH_TOKEN": {
-                "description": "The same value as the SLOTLOCK_AUTH_TOKEN environment variable.",
+              "token": {
+                "description": "SLOTLOCK_AUTH_TOKEN, or an API key (slk_...), which acts in the tenant it was created in.",
                 "isRequired": true,
                 "isSecret": true
               }
@@ -65,20 +65,18 @@
       "environmentVariables": [
         {
           "name": "DATABASE_URL",
-          "description": "postgres:// URL of a PostgreSQL 16 database the container can reach, as a role that is not a superuser and has no BYPASSRLS: serve refuses one, since row-level security would not confine it. Without SLOTLOCK_MIGRATE_DATABASE_URL this role also applies the schema, so it must be able to create it.",
+          "description": "postgres:// URL of a PostgreSQL 16 or newer database the container can reach, as a role that is not a superuser and has no BYPASSRLS: serve refuses one, since row-level security would not confine it. Without SLOTLOCK_MIGRATE_DATABASE_URL this role also applies the schema, so it must be able to create it.",
           "isRequired": true,
           "isSecret": true
         },
         {
           "name": "SLOTLOCK_AUTH_TOKEN",
-          "description": "Bearer token MCP and A2A clients must send: at least 32 random characters (openssl rand -hex 32).",
-          "isRequired": true,
+          "description": "Optional bearer token for SLOTLOCK_TENANT, with read and write (never admin): at least 32 random characters (openssl rand -hex 32). Leave it unset to accept only API keys (slotlock key create).",
           "isSecret": true
         },
         {
           "name": "SLOTLOCK_CONFIRMATION_SECRET",
-          "description": "Signs pending write confirmations: at least 32 random characters, different from the token. Not needed when SLOTLOCK_CONFIRM_WRITES is none.",
-          "isRequired": true,
+          "description": "Signs pending write confirmations: at least 32 random characters, different from the token. Required unless SLOTLOCK_CONFIRM_WRITES is none.",
           "isSecret": true
         },
         {
@@ -108,7 +106,7 @@
         },
         {
           "name": "SLOTLOCK_TENANT",
-          "description": "The tenant every request acts in.",
+          "description": "The tenant SLOTLOCK_AUTH_TOKEN acts in; API keys act in their own tenant.",
           "default": "default"
         }
       ]

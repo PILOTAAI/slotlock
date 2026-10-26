@@ -10,16 +10,18 @@
     <IsAotCompatible>true</IsAotCompatible>
     <RootNamespace>Slotlock</RootNamespace>
     <PackageId>Slotlock.Client</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <Description>A client for Slotlock's REST API: calendars AI agents cannot double-book.</Description>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageProjectUrl>https://slotlock.pylota.io</PackageProjectUrl>
     <RepositoryUrl>https://github.com/PILOTAAI/slotlock</RepositoryUrl>
     <PackageTags>calendar;booking;agents;mcp;scheduling</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="Slotlock.Tests" />
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 
 </Project>

@@ -28,7 +28,7 @@ namespace Slotlock;
 public sealed partial class SlotlockClient : IDisposable
 {
     /// <summary>This client's version, sent in its User-Agent.</summary>
-    public const string Version = "0.1.0";
+    public const string Version = "0.2.0";
 
     private static readonly HashSet<string> Loopback = new(StringComparer.OrdinalIgnoreCase) { "localhost", "127.0.0.1", "[::1]", "::1" };
 

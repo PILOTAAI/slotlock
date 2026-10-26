@@ -1,0 +1,12 @@
+# The new-issue page: issues are public, so it offers the private routes first (.github/SUPPORT.md).
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/PILOTAAI/slotlock/security/advisories/new
+    about: Privately, through GitHub's vulnerability reporting (SECURITY.md). Never in a public issue.
+  - name: Hosted Slotlock account, abuse or privacy
+    url: https://slotlock.pylota.io/docs/hosted/#help
+    about: support@pylota.io, abuse@pylota.io and privacy@pylota.io, for the hosted service.
+  - name: Is hosted Slotlock down?
+    url: https://github.com/PILOTAAI/slotlock/issues?q=is%3Aissue%20label%3Astatus%20is%3Aopen
+    about: Open status issues are the current incidents, raised by a probe outside the server.

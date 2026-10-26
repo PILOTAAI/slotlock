@@ -5,6 +5,42 @@ reservable, answers "when is this free?" from weekly availability rules, and let
 double bookings, however many writers race. Agents call it over MCP or A2A; your code calls it as a
 TypeScript library.
 
+## Known issues in 0.2.0
+
+Slotlock 0.2.0 can occupy less time than an event was written with, so another booking can take the
+rest: around daylight-saving changes, in any time zone that has them, and at the end of some series.
+The library and `slotlock serve` are both affected (the last case below is in the library's
+iCalendar readers only); the 0.1 releases are older still and unsupported. 0.3.0 fixes all six
+cases; while you run 0.2.0, do not rely on it alone to refuse bookings in them.
+
+- A recurring event whose first occurrence spans a daylight-saving change gets that occurrence an
+  hour short: in spring, an hour of the written time is free to book.
+- Recurring events written through the store (the agent tools and the application API) lose the
+  repeated hour of an autumn change: times in it move an hour early, and a series whose first
+  occurrence spans it can store no occurrences, so all of its time is free.
+- A stored recurring series cannot cancel or move an occurrence that falls in the skipped hour of a
+  spring change; the time it was moved to stays free.
+- An occurrence that starts in the skipped hour and lasts longer than the skipped hour is cut short:
+  a 75-minute occurrence occupies 15 minutes.
+- A timed recurring series with a date-only `UNTIL` ends at midnight UTC, so it can lose its last
+  day.
+- An event read from iCalendar (`parseICalendarChanges`, `parseTrustedICalendarEvents` or the
+  worker pool) whose `DURATION` counts hours loses an hour across a spring change, whether it is a
+  single event, a series, an `RDATE` period or a moved occurrence: `DURATION:PT48H` occupies 47
+  hours.
+
+0.1.0, 0.1.1 and 0.2.0 also pin zod 4.6.5 exactly, which has a high advisory
+([GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5): validating an oversized
+array can exhaust memory), which `npm audit` reports. While you run one of them, add this to your
+application's `package.json` and run `npm install`:
+
+```json
+"overrides": {"zod": "4.6.7"}
+```
+
+The full notice, with the versions affected, is in
+[docs/release/0.2.0-known-issues.md](https://github.com/PILOTAAI/slotlock/blob/main/docs/release/0.2.0-known-issues.md).
+
 ## Why it is built for agents
 
 - Resources own calendars, not users, and the tenant comes only from the authenticated caller.
@@ -20,15 +56,15 @@ TypeScript library.
 npm install slotlock postgres
 ```
 
-Node.js 22.12+, PostgreSQL 16 with `btree_gist` (created for you if missing), and `postgres` ^3.4.5
-as a peer dependency. TypeScript declarations are included.
+Node.js 22.12+, PostgreSQL 16 or newer with `btree_gist` (created for you if missing; CI runs 16,
+17 and 18), and `postgres` ^3.4.5 as a peer dependency. TypeScript declarations are included.
 
 ## Self-host with Docker
 
 From a clone of this repository:
 
 ```sh
-cp .env.example .env    # set the four empty secrets: openssl rand -hex 32
+scripts/quickstart-env.sh > .env    # .env.example, its four secrets set to openssl rand -hex 32
 docker compose up --build --detach
 docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/London
 ```
@@ -52,11 +88,13 @@ slotlock hours set '[{"rrule":"FREQ=WEEKLY;BYDAY=SA","startMinutes":600,"duratio
 slotlock hours clear --all    # back to SLOTLOCK_AVAILABILITY
 ```
 
-`slotlock --help` lists every setting.
+A rule is `rrule`, `startMinutes` and `durationMinutes` here and in `SLOTLOCK_AVAILABILITY`. The
+REST application API spells every field in snake_case, so there it is `rrule`, `start_minutes` and
+`duration_minutes`. `slotlock --help` lists every setting.
 
 ### Without Docker
 
-With Node.js 22.12+ and PostgreSQL 16, run each command as `npx slotlock` after
+With Node.js 22.12+ and PostgreSQL 16 or newer, run each command as `npx slotlock` after
 `npm install slotlock postgres`, or from a clone, built once, as `node dist/cli.js` (a clone does not
 put `slotlock` on your `PATH`). Use two roles, as Compose does:
 the server connects as a role that owns nothing and cannot bypass row-level security, and `migrate`
@@ -759,8 +797,8 @@ curl "http://localhost:8080/v1/resources" -H "Authorization: Bearer $SLOTLOCK_AP
 - There are no CORS headers: call it from a server, not a browser.
 - From Python, Go, Rust, Java or .NET, use the [clients](clients/README.md): one method per
   operation, the application API included, each tested against the server in CI. For another
-  language, generate one from [`openapi.json`](openapi.json) (or a server's `/openapi.json`) with any
-  OpenAPI 3.1 generator.
+  language, generate one from [`openapi.json`](openapi.json) (or a server's `/openapi.json`, or
+  `slotlock/openapi.json` in the npm package) with any OpenAPI 3.1 generator.
 
 ### Application API
 
@@ -1048,16 +1086,19 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
 | MCP | 2026-07-28 (stateless), 2025-11-25, 2025-06-18 |
 | A2A | 1.0, JSON-RPC binding |
 | MCP Apps | `io.modelcontextprotocol/ui` 2026-01-26 |
-| Node.js | ≥ 22.12 (CI: 22 and 24) |
-| PostgreSQL | 16 |
+| Node.js | ≥ 22.12 (CI: 22 and 24; the image runs 24) |
+| PostgreSQL | 16, 17 and 18 (CI runs the database suites on each; Compose ships 18) |
 | postgres (peer) | ^3.4.5 |
 
 ## Project status and boundaries
 
-0.1 is the core: availability maths, holds and reservations, events with recurrence, coverage-aware
+Slotlock is availability maths, holds and reservations, events with recurrence, coverage-aware
 free/busy, tenant isolation, iCalendar interchange, MCP and A2A with human confirmation and live
-updates, and an MCP Apps view. Provider sync (Google, Microsoft, CalDAV), notifications to people,
-and a human calendar app are yours to build around it.
+updates, an MCP Apps view, REST with the application API, scoped API keys, a GitHub sign-in
+dashboard, maintenance, and clients for five languages. [Hosted Slotlock](docs/hosted/README.md)
+runs it for you. Provider sync (Google, Microsoft, CalDAV), notifications to people, and a human
+calendar app are yours to build around it. What each version promises is in
+[VERSIONING.md](VERSIONING.md).
 
 Events need a finite duration (all-day events are whole local days; one event may last 3,660 days).
 Open-ended entries are refused rather than guessed.

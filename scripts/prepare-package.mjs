@@ -1,6 +1,7 @@
 import { cpSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { renderNotice } from './notice.mjs';
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const artifactRoot = join(packageRoot, 'dist');
@@ -29,6 +30,8 @@ const artifactManifest = {
     },
     './manifest': './slotlock.manifest.json',
     './manifest.schema': './slotlock-manifest.schema.json',
+    // The REST API's OpenAPI 3.1 document, the one /openapi.json serves and the clients come from.
+    './openapi.json': './openapi.json',
     './package.json': './package.json',
   },
   // The root manifest names the built executable (`./dist/cli.js`); in the artifact it sits at the
@@ -49,11 +52,13 @@ const artifactManifest = {
 };
 
 writeFileSync(join(artifactRoot, 'package.json'), `${JSON.stringify(artifactManifest, null, 2)}\n`);
+// Written, not copied: it names the exact version of each runtime dependency this build installs,
+// so a dependency bump needs no edit to NOTICE.
+writeFileSync(join(artifactRoot, 'NOTICE'), renderNotice(packageRoot, { versions: true }));
 
 for (const file of [
   'README.md',
   'LICENSE',
-  'NOTICE',
   'SECURITY.md',
   'SPEC.md',
   'CHANGELOG.md',
@@ -63,6 +68,7 @@ for (const file of [
   'MAINTAINERS.md',
   'slotlock.manifest.json',
   'slotlock-manifest.schema.json',
+  'openapi.json',
 ]) {
   cpSync(join(packageRoot, file), join(artifactRoot, file));
 }

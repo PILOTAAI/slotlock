@@ -7,4 +7,8 @@ interface Props {
 const { text } = Astro.props;
 ---
 
-{segments(text).map((part) => (part.code ? <code>{part.text}</code> : part.text))}
+{
+  segments(text).map((part) =>
+    part.code ? <code>{part.text}</code> : part.href ? <a href={part.href}>{part.text}</a> : part.text,
+  )
+}

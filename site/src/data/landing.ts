@@ -10,6 +10,9 @@ export const DDL_URL = `${REPO_URL}/blob/main/src/ddl.ts`;
 
 export { facts };
 
+/** 0.2 can accept double bookings around daylight-saving changes (/docs/known-issues/). */
+const knownIssues = facts.version.startsWith('0.2.');
+
 export const toolNames: string[] = facts.tools.map((tool) => tool.name);
 
 export interface Heading {
@@ -27,7 +30,7 @@ export const hero = {
   // The site deploys when a release merges, but npm serves that version only once a maintainer
   // approves it, so the pill names the version and claims nothing about where it is published.
   pill: { label: `Version ${facts.version}`, link: 'Release notes', href: '/docs/changelog/' },
-  eyebrow: `Open source · ${facts.license} · PostgreSQL 16`,
+  eyebrow: `Open source · ${facts.license} · PostgreSQL 16 to 18`,
   heading: {
     soft: 'Slotlock is a calendar for AI agents.',
     strong: 'Two agents, one slot, one booking.',
@@ -46,16 +49,10 @@ export const hero = {
         ]
       : []),
     {
-      id: 'source',
-      label: 'From source',
-      command: 'npm install slotlock postgres',
-      note: `Then \`npx slotlock migrate\` and \`npx slotlock serve\`, with two database roles as the README shows.`,
-    },
-    {
       id: 'npm',
       label: 'npm',
-      command: 'npm install slotlock postgres',
-      note: 'Works once the first release is published.',
+      command: `npm install slotlock@${facts.version} postgres`,
+      note: `Then \`npx slotlock migrate\` and \`npx slotlock serve\`, with two database roles as the README shows.${knownIssues ? ' Read the [known issues](/docs/known-issues/) first.' : ''}`,
     },
   ],
 };
@@ -302,9 +299,9 @@ export const steps = {
   diagram: {
     inputs: ['Your provider adapters', 'iCalendar feeds'],
     core: 'Slotlock engine',
-    store: 'PostgreSQL 16 · schema slotlock',
+    store: 'PostgreSQL · schema slotlock',
     outputs: ['MCP', 'A2A', 'TypeScript'],
-    aria: 'Diagram: your provider adapters and iCalendar feeds send busy time into the Slotlock engine, which stores everything in the slotlock schema of PostgreSQL 16 and serves agents over MCP, A2A and TypeScript.',
+    aria: 'Diagram: your provider adapters and iCalendar feeds send busy time into the Slotlock engine, which stores everything in the slotlock schema of PostgreSQL and serves agents over MCP, A2A and TypeScript.',
   },
 };
 
@@ -507,9 +504,9 @@ export const openSource = {
     'GOVERNANCE.md commits the engine, the spec and the server to Apache-2.0 or another OSI-approved licence.',
     'Contributions are signed off under the Developer Certificate of Origin. There is no CLA.',
     facts.composeUp
-      ? 'Docker Compose runs PostgreSQL 16 and the server on 127.0.0.1; writes wait for a person by default.'
-      : 'Needs Node.js 22.12 or newer and PostgreSQL 16 with btree_gist.',
-    'There is no hosted service. You run it, next to your own data.',
+      ? 'Docker Compose runs PostgreSQL 18 and the server on 127.0.0.1; writes wait for a person by default.'
+      : 'Needs Node.js 22.12 or newer and PostgreSQL 16 or newer with btree_gist.',
+    'Run it next to your own data, or use [hosted Slotlock](/docs/hosted/) once it opens.',
     'Report vulnerabilities privately through the repository’s Security tab.',
   ],
 };
@@ -528,7 +525,9 @@ export const faq = {
     },
     {
       q: 'Is it ready for production?',
-      a: `Not yet. ${facts.version} is an early 0.x release; the README keeps the production checklist.`,
+      a: knownIssues
+        ? `Not ${facts.version}: it can accept a double booking around a daylight-saving change. Read the [known issues](/docs/known-issues/), and use 0.3.0 once it is published; the README keeps the production checklist.`
+        : `${facts.version} is a 0.x release, so a minor release may change the API, as [versioning](/docs/versioning/) explains; the README keeps the production checklist.`,
     },
     {
       q: 'Does a model decide anything?',
@@ -571,6 +570,16 @@ export const footer = {
         { label: 'MCP and A2A server', href: '/docs/reference/' },
         { label: 'Specification', href: '/docs/specification/' },
         { label: 'Manifest schema', href: '/schema/manifest.schema.json' },
+      ],
+    },
+    {
+      title: 'Hosted',
+      links: [
+        { label: 'Hosted Slotlock', href: '/docs/hosted/' },
+        { label: 'Status', href: '/docs/status/' },
+        { label: 'Privacy notice', href: '/docs/privacy/' },
+        { label: 'Terms of Service', href: '/docs/terms/' },
+        { label: 'Acceptable use', href: '/docs/acceptable-use/' },
       ],
     },
     {

@@ -1,5 +1,7 @@
 # CI: the full suite (vitest, build, packed-artifact verification) against PostgreSQL 16 on the
-# Node.js versions the README supports, and a smoke test of the server image.
+# Node.js versions the README supports; the database suites again on PostgreSQL 17 (the major the
+# hosted service runs) and on the PostgreSQL 18 image docker-compose.yml pulls; a smoke test of the
+# server image; the language clients against it; and the Docker Compose quickstart, end to end.
 name: CI
 
 on:
@@ -54,6 +56,47 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+
+  postgres:
+    name: Database suites (PostgreSQL ${{ matrix.postgres }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - postgres: '17'
+            postgres-image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+          # The image docker-compose.yml pulls, digest and all.
+          - postgres: '18'
+            postgres-image: postgres:18.4@sha256:a02db8cac496f15b094798a38254f14d6e00741f709360e5e00bb6668ea31636
+    services:
+      postgres:
+        image: ${{ matrix.postgres-image }}
+        env:
+          POSTGRES_USER: slotlock_ci
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: slotlock
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username=slotlock_ci --dbname=slotlock"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgresql://slotlock_ci:ci-only-password@localhost:5432/slotlock
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      # Every *.integration.test.ts file; vitest runs them one file at a time (vitest.config.ts).
+      - run: npx vitest run .integration.test.ts
 
   image:
     name: Docker image
@@ -276,3 +319,41 @@ jobs:
       - name: Server log
         if: failure()
         run: docker logs slotlock
+
+  compose:
+    name: Compose quickstart
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      # The README's quickstart: .env from .env.example with its secrets filled in, then
+      # docker compose up --build, the deployment smoke check, and a restart on the same volume.
+      - name: Write .env from .env.example
+        run: scripts/quickstart-env.sh > .env
+      - name: Run the quickstart and check it
+        run: scripts/compose-smoke.sh
+
+  # The one check the "Protect main" ruleset requires from this workflow (scripts/configure-github.sh,
+  # with DCO's Signed-off-by): it passes only when every job above passed, so the client suites, the
+  # database suites on each PostgreSQL and the quickstart gate merges, and a job added here is
+  # required without touching the ruleset. Its needs list every other job (release-infrastructure
+  # test).
+  passed:
+    name: CI passed
+    # A required check that is skipped counts as passing, so this runs whatever the jobs did.
+    if: always()
+    needs: [test, postgres, image, clients, compose]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every job passed
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          echo "$RESULTS"
+          jq -e 'all(. == "success")' <<<"$RESULTS" >/dev/null

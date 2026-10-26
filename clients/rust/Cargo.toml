@@ -1,6 +1,6 @@
 [package]
 name = "slotlock"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
 description = "A client for Slotlock's REST API: calendars AI agents cannot double-book."

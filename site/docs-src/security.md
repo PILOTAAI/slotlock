@@ -35,7 +35,7 @@ Each re-read checks the caller's credentials again, so a revoked token ends its 
 
 Each agent may keep 1,000 events and 10,000 idempotency records, so one agent cannot fill the
 database. Pruning frees quota; it is not erasure. See
-[Operations](https://github.com/PILOTAAI/slotlock#operations).
+[Operations](/docs/operations/).
 
 ## Report a vulnerability
 

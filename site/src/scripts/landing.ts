@@ -58,7 +58,7 @@ if (navigator.clipboard) {
     install.hidden = false;
     install.addEventListener('click', () => {
       const target = document.querySelector<HTMLInputElement>('input[name="install"]:checked');
-      const id = target?.id.replace('install-', '') ?? 'source';
+      const id = target?.id.replace('install-', '') ?? 'npm';
       const command = document.getElementById(`cmd-${id}`)?.textContent?.trim() ?? '';
       void copy(install, command);
     });

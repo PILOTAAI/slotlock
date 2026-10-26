@@ -36,7 +36,12 @@
     "mcp-human-confirmation",
     "mcp-calendar-resources",
     "mcp-live-updates",
-    "trace-context-propagation"
+    "trace-context-propagation",
+    "rest-api",
+    "application-api",
+    "api-keys",
+    "dashboard",
+    "maintenance"
   ],
   "transportPolicy": "adapter-defined",
   "externalCalendarsAreAuthority": false

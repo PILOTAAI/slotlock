@@ -12,8 +12,9 @@
 //   public/openapi.json               the REST API, which client generators read
 //
 // Any fact it cannot find fails the build: a renamed constant must be looked at, not guessed.
+import { statSync } from 'node:fs';
 import { copyFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readOperations } from './tool-schemas.mjs';
 import { renderToolsPage } from './tools-page.mjs';
@@ -120,13 +121,24 @@ const SITE_LINKS = {
   'CHANGELOG.md': '/docs/changelog/',
   'slotlock-manifest.schema.json': '/schema/manifest.schema.json',
   'openapi.json': '/openapi.json',
+  'PRIVACY.md': '/docs/privacy/',
+  'TERMS.md': '/docs/terms/',
+  'ACCEPTABLE-USE.md': '/docs/acceptable-use/',
+  'VERSIONING.md': '/docs/versioning/',
+  'docs/hosted/README.md': '/docs/hosted/',
+  'docs/hosted/status.md': '/docs/status/',
+};
+
+/** Repository sections that are docs pages of their own, included without their heading. */
+const SECTION_LINKS = {
+  'README.md#known-issues-in-020': '/docs/known-issues/',
 };
 
 /** README in-page anchors whose section lives on another docs page (postbuild checks every link). */
 const ANCHORS = {
   '#application-api': '/docs/reference/#application-api',
   '#confirm-before-writing': '/docs/security/#confirmation-before-writes',
-  '#operations': '/docs/security/#quotas-and-retention',
+  '#operations': '/docs/operations/',
   '#rest-and-openapi': '/docs/reference/#rest-and-openapi',
 };
 
@@ -136,7 +148,15 @@ function rewriteLinks(markdown) {
     ANCHORS[anchor] ? `](${ANCHORS[anchor]})` : match,
   );
   return anchored.replace(/\]\((?:\.\/)?([A-Za-z0-9_./-]+?)(#[^)]*)?\)/g, (match, target, hash) => {
-    if (/^(https?:|mailto:|\/|#)/.test(target)) return match;
+    if (/^(https?:|mailto:|#)/.test(target)) return match;
+    // A file path from the repository root (GitHub reads /PRIVACY.md so); any other /path, such as
+    // /docs/hosted/, is the site's.
+    if (target.startsWith('/')) {
+      if (!statSync(join(ROOT, target), { throwIfNoEntry: false })?.isFile()) return match;
+      target = target.slice(1);
+    }
+    const section = SECTION_LINKS[`${target}${hash ?? ''}`];
+    if (section) return `](${section})`;
     const site = SITE_LINKS[target];
     if (site) return `](${site}${hash ?? ''})`;
     const kind = target.endsWith('/') ? 'tree' : 'blob';
@@ -146,6 +166,22 @@ function rewriteLinks(markdown) {
 
 function clean(markdown) {
   return rewriteLinks(markdown.replace(/^<!-- example: [^>]+ -->\n/gm, ''));
+}
+
+/**
+ * A file's relative links as paths from the repository root, so an included clients/README.md's
+ * `[python](python)` still names clients/python/ once rewriteLinks reads it. Directories end in `/`.
+ */
+function rebase(markdown, file) {
+  const dir = posix.dirname(file);
+  if (dir === '.') return markdown;
+  return markdown.replace(/\]\((?:\.\/)?([A-Za-z0-9_./-]+?)(#[^)]*)?\)/g, (match, target, hash) => {
+    if (/^(https?:|mailto:|\/|#)/.test(target)) return match;
+    const path = posix.normalize(posix.join(dir, target));
+    if (path.startsWith('..')) return match;
+    const directory = statSync(join(ROOT, path), { throwIfNoEntry: false })?.isDirectory();
+    return `](${path}${directory && !path.endsWith('/') ? '/' : ''}${hash ?? ''})`;
+  });
 }
 
 const sourceCache = new Map();
@@ -183,11 +219,11 @@ async function expand(template, facts, page, toolsPage) {
     const source = await sourceSections(file);
     if (!anchor) {
       // Whole file without its title.
-      parts.push(source.text.replace(/^# .*\n+/, '').trim());
+      parts.push(rebase(source.text.replace(/^# .*\n+/, '').trim(), file));
     } else {
       const section = source.sections.get(anchor);
       if (!section) fail(`${page}: ${file} has no heading #${anchor}`);
-      parts.push(renderSection(section, modifiers));
+      parts.push(rebase(renderSection(section, modifiers), file));
     }
     last = match.index + match[0].length;
   }

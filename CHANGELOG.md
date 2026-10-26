@@ -3,6 +3,139 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Security
+
+- zod moves from 4.6.5 to 4.6.7 (#59), past GHSA-mrhx-c7xc-m3w5 (high): when validating an
+  oversized array, zod 4.6.5 collects an issue for every failing element with no cap, so one
+  authenticated tool or REST call could hold far more memory than its body. 0.1.0, 0.1.1 and 0.2.0
+  pin zod 4.6.5 exactly; their users can add `"overrides": {"zod": "4.6.7"}` to their own
+  `package.json` (README, Known issues in 0.2.0).
+
+### Fixed
+
+- A runtime dependency bump no longer breaks the release checks. The packed NOTICE is written at
+  build time from `package.json` and `package-lock.json` (`scripts/notice.mjs`), naming the exact
+  version of each dependency and the packages each pulls in; the repository's NOTICE names each
+  direct dependency and its licence, so only a licence change asks for an edit, and a dependency
+  under a licence the project has not reviewed stops the build.
+- A release never moves npm's `latest` dist-tag, or the image's `latest` tag, backwards. Every stable
+  release used to be staged as `latest`, so approving a patch to an older line (0.2.1 after 0.3.0)
+  would have made it what npm installs by default. `scripts/dist-tag.sh` now chooses the tag from
+  the registry's current `latest`: a later release takes `latest`, a release on an older line takes
+  `latest-<major>.<minor>`, and a prerelease takes `next`. When the registry cannot say which version
+  is `latest`, the release stops instead of taking the error for "nothing published yet".
+- The server image and the MCP Registry entry are published only after the release's own suite has
+  passed. `image.yml` used to start on the tag beside `release.yml`, so a tag whose tests failed
+  still pushed an image and a registry entry. `release.yml` now calls it once its build job passes,
+  and the image push and the registry entry each wait in an environment (`ghcr`, `mcp-registry`)
+  that `scripts/configure-github.sh` sets up. The image's attestation is still signed by
+  `image.yml`, so `gh attestation verify --signer-workflow .../image.yml` keeps working.
+- The server image runs Node.js 24 LTS (24.22.1), the version the release suite runs on and a major
+  CI tests. It shipped Node.js 26.11.1, which CI never ran and which is not yet an LTS release,
+  while its header said 22.
+- CI runs the database suites on PostgreSQL 17 and on the PostgreSQL 18 image the Compose
+  quickstart pulls, as well as 16, and runs the quickstart itself end to end: `.env` from
+  `.env.example` (`scripts/quickstart-env.sh`), `docker compose up --build`, the deployment smoke
+  check, and a restart on the same volume (`scripts/compose-smoke.sh`). The docs now say PostgreSQL
+  16 or newer, and that Compose ships 18; they said 16 while Compose ran 18.
+- `.env.example` turns the REST API on, as `slotlock serve` and Compose already do by default.
+- The site's install row names the version (`npm install slotlock@<version> postgres`); it offered
+  `npm install slotlock postgres` twice, once as "From source" and once "once the first release is
+  published". The quickstart no longer says a clone runs exactly the released version, and the
+  concepts page says holds are also in the REST application API, as they are since 0.2.0.
+- SPEC.md describes 0.2 and later, not 0.1: it now covers scopes, API keys, the application API,
+  the dashboard and maintenance, and the 7-day hold and 30-day buffer caps. The README's project
+  status names the 0.2 surfaces and the hosted service instead of "0.1 is the core". The site has
+  pages for the language clients and for operations, and an included file's relative links now
+  resolve from its own directory.
+- The README says which spelling of an availability rule each surface takes: `startMinutes` and
+  `durationMinutes` for `slotlock hours set` and `SLOTLOCK_AVAILABILITY`, `start_minutes` and
+  `duration_minutes` over REST. A REST body pasted into `hours set` used to fail with no hint why.
+- **Release a version** takes `dry_run`: it mints the release app's token and prepares the release,
+  checks the token can read the repository and push the release branch
+  (`scripts/release-dry-run.sh`), and stops before pushing, opening, merging or tagging anything, so
+  the app's path can be proven before the first release that depends on it.
+- One aggregate check, "CI passed", gathers every CI job: the suites on each Node.js and
+  PostgreSQL, the image, the five language clients and the Compose quickstart.
+  `scripts/configure-github.sh` requires it and DCO's "Signed-off-by" on `main`; the client suites
+  and the deployment smoke check did not gate merges before.
+- `scripts/configure-github.sh` (the owner runs it) no longer lets the admin role bypass `main`'s
+  pull request rule and required checks, makes the person who runs it the required reviewer of the
+  npm, `ghcr` and `mcp-registry` environments, keeps GITHUB_TOKEN from opening or approving pull
+  requests unless `--allow-actions-pull-requests` is given (the release app opens them), and splits
+  the release-tag ruleset so the deploy-key bypass covers creating a `v*` tag only; only the admin
+  role may move or delete one. It applies the no-bypass rule only once "CI passed" has succeeded on
+  `main`, so CI jobs that have never passed cannot lock every pull request out.
+- Dependabot watches the dashboard Worker's lockfile and the five language clients (Cargo, Go
+  modules, Gradle, NuGet, pip) as well, and a test fails when a manifest is added without an entry.
+  The site's and the dashboard Worker's Wrangler pinned undici 7.29.1 (GHSA-xjj6-f33q-929c, high,
+  development tooling only) through miniflare, which Dependabot could not move; both lockfiles now
+  override it to 7.30.1. The development lockfile moves body-parser (through the A2A SDK's express)
+  from 2.3.0 to 2.4.0, past GHSA-27r3-jxmh-p828; a test keeps every lockfile out of the advisories
+  Scorecard reported.
+- `server.json` (the MCP Registry entry) no longer marks `SLOTLOCK_AUTH_TOKEN` and
+  `SLOTLOCK_CONFIRMATION_SECRET` as required: `slotlock serve` runs with API keys alone, and without
+  the secret when `SLOTLOCK_CONFIRM_WRITES` is `none`. Its Authorization header takes the token or an
+  API key, `SLOTLOCK_TENANT` says API keys act in their own tenant, and the database is PostgreSQL 16
+  or newer. `mcp-publisher validate` (v1.8.1) accepts it.
+- CodeQL runs from `.github/workflows/codeql.yml` with the extended security suite, as GitHub's
+  default setup did, and a configuration that drops `js/insufficient-password-hash` with its reason
+  written beside it: API keys are 238 random bits, so their SHA-256 is the design (SECURITY.md),
+  not a weak password hash. `scripts/configure-github.sh` turns default setup off, since GitHub runs
+  one or the other.
+
+### Added
+
+- The npm package ships `openapi.json`, the REST API's OpenAPI 3.1 document, exported as
+  `slotlock/openapi.json`.
+- The capability manifest names the 0.2 surfaces: `rest-api`, `application-api`, `api-keys`,
+  `dashboard` and `maintenance` (and its schema accepts them), and the package check asserts them.
+- Release jobs for the five language clients: `slotlock` on PyPI and crates.io, `Slotlock.Client` on
+  NuGet, `io.pylota:slotlock` on Maven Central and the Go module's `clients/go/v<version>` tag. Each
+  runs only after the release suite has passed, in its own environment a maintainer approves; PyPI,
+  crates.io and NuGet use trusted publishing, so no token is stored for them, and Maven Central gets
+  a deployment a maintainer publishes in the Central Portal. The clients now carry the package's
+  version (they said 0.1.0 beside a 0.2.0 server): `scripts/prepare-release.sh` moves them with each
+  release and `scripts/check-release-tag.sh` refuses a release where one disagrees.
+  `docs/release/clients.md` has each registry's one-time setup.
+- `scripts/check-stage.sh <stage-id>`, which a maintainer runs before `npm stage approve`. Approving
+  publishes the tarball the tag's run built, however old: 0.2.0 went public with zod 4.6.5
+  (GHSA-mrhx-c7xc-m3w5) after `main` had moved past it. The check refuses a stage whose tarball is
+  not the one the release tested, whose dist-tag would move `latest` backwards, or whose runtime
+  dependencies, installed as a consumer would that day, have a high or critical advisory, unless a
+  maintainer names it with `--allow`. The Release run's summary and CONTRIBUTING.md ask for it.
+- A public status for hosted Slotlock: `.github/workflows/status.yml` checks the API's `/healthz`
+  and the dashboard every ten minutes from GitHub's runners (`scripts/status-probe.sh`) and keeps an
+  issue labelled `status` open while either is down, closing it when it recovers
+  (`docs/hosted/status.md`). It stays off until the owner sets `SLOTLOCK_STATUS_PROBE` to `on`. A
+  test also keeps every workflow's default token read-only, as OpenSSF Scorecard checks.
+- A known-issues notice for 0.2.0, in the README ahead of the install instructions, on the site
+  (`/docs/known-issues/`, linked from the landing page and llms.txt) and as ready-to-publish text for
+  the v0.2.0 release notes, a pinned issue and two security advisories
+  (`docs/release/0.2.0-known-issues.md`): the six ways 0.2.0 can accept a double booking around
+  daylight-saving changes and series ends, one of them for single events read from iCalendar with
+  an hour `DURATION`, the exact zod 4.6.5 pin (GHSA-mrhx-c7xc-m3w5) with the
+  `"overrides": {"zod": "4.6.7"}` workaround, and upgrade to 0.3.0. `docs/release/deprecations.md`
+  gives the maintainer the `npm deprecate` and `mcp-publisher status` commands for 0.0.0-stage,
+  0.1.0, 0.1.1 and 0.2.0.
+- Drafts of the hosted service's privacy notice (`PRIVACY.md`, with what UK GDPR Article 13 asks
+  for), Terms of Service (`TERMS.md`, with the Article 28(3) data processing terms for the people in
+  tenants' calendars) and Acceptable Use Policy (`ACCEPTABLE-USE.md`), each marked for owner and
+  legal review before the hosted service opens; a hosted service page (`docs/hosted/README.md`) with
+  the addresses, price, limits read from the code, that writes take effect at once, and the support,
+  abuse, privacy and security contacts; and `VERSIONING.md`, what `/v1`, the tools and the version
+  numbers promise and the 90 days' notice before hosted Slotlock changes anything under `/v1`. The
+  site has a page for each and a Hosted section, and no longer says there is no hosted service.
+- `.github/SUPPORT.md` and the new-issue page give each kind of request its route: issues for
+  questions and bugs, `support@pylota.io`, `abuse@pylota.io` and `privacy@pylota.io` for the hosted
+  service, private vulnerability reporting for security, and the `status` issues. MAINTAINERS.md no
+  longer sends questions to Discussions, which are off.
+- SECURITY.md says how hosted Slotlock may be tested: only against your own account, never another
+  account's data, no load or denial of service, and reports through private vulnerability reporting,
+  as the Terms of Service and Acceptable Use Policy refer to.
+
 ## 0.2.0 - 2026-10-23
 
 ### Added

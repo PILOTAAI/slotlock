@@ -22,6 +22,20 @@ Do not include real customer, credential, calendar, or booking data. We will ack
 within three business days and coordinate disclosure after a fix is available. Fixed vulnerabilities
 are published as advisories at <https://github.com/PILOTAAI/slotlock/security/advisories>.
 
+## Testing hosted Slotlock
+
+Hosted Slotlock (`slotlock-api.pylota.io` and `app.slotlock.pylota.io`, run by TREFT LTD) is in scope,
+under these rules, which its [Terms of Service](TERMS.md) and
+[Acceptable Use Policy](ACCEPTABLE-USE.md) refer to:
+
+- Test only against an account of your own, signed in with your own GitHub account.
+- Never read, change or keep another account's data. If a test reaches any, stop and report it at
+  once, and delete what you saw.
+- Run no denial of service, load test or automated scanning that sends more than the published
+  limits ([hosted service page](docs/hosted/README.md#limits)); run Slotlock yourself for that.
+- Report through private vulnerability reporting as above, and give us the time to fix it before
+  you disclose anything.
+
 ## Security model
 
 Slotlock treats all external calendar content as untrusted. The parser has explicit size, component,
@@ -118,7 +132,9 @@ bits) and a 6-character checksum, and the database keeps only its SHA-256. A slo
 238 random bits, so a fast hash
 loses nothing and lets every request look a key up by its digest in one indexed read. Code scanners
 that treat every secret as a password report this as weak hashing (CodeQL
-`js/insufficient-password-hash`); it is the design, as for GitHub's and Stripe's tokens.
+`js/insufficient-password-hash`); it is the design, as for GitHub's and Stripe's tokens. The
+repository's CodeQL configuration (`.github/codeql/codeql-config.yml`) drops that one query with
+this reason beside it, rather than dismissing its alerts one by one.
 
 A key acts only in the tenant it was created for. `read` and `write` cover the agent tools; `admin`
 covers the application API (resources, hours, holds, reservations, coverage, maintenance), which is

@@ -13,7 +13,11 @@ each runs the same scenario against a real server in CI.
 | Java | [`java`](java) | Java 17+, no dependencies | `gradle jar` in `clients/java` |
 | .NET | [`dotnet`](dotnet) | .NET 8 or 10, no dependencies | `dotnet pack clients/dotnet/src/Slotlock` |
 
-None is on PyPI, the Go module proxy's tagged versions, crates.io, Maven Central or NuGet yet.
+Each release publishes them at the package's version, once its tests have passed and a maintainer
+has approved each registry: `slotlock` on PyPI and crates.io, `Slotlock.Client` on NuGet,
+`io.pylota:slotlock` on Maven Central, and the Go module's `clients/go/v<version>` tags
+([docs/release/clients.md](../docs/release/clients.md)). None is on a registry yet, so until a
+release says otherwise, install from the repository as above.
 
 ## What they share
 

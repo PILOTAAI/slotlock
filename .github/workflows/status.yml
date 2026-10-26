@@ -1,0 +1,36 @@
+# Hosted Slotlock's public status: every ten minutes, from GitHub's runners rather than the server
+# itself, scripts/status-probe.sh checks https://slotlock-api.pylota.io/healthz and the dashboard and
+# keeps an issue labelled `status` open for each part that is down (docs/hosted/status.md). It runs
+# only once the owner sets the repository variable SLOTLOCK_STATUS_PROBE to `on`, when the service
+# opens. GitHub runs a schedule at most every five minutes, may delay it at the start of an hour (so
+# it runs at :07, :17, ...), and turns it off in a public repository after 60 days without activity.
+name: Hosted status
+
+on:
+  schedule:
+    - cron: '7-59/10 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: hosted-status
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: Probe hosted Slotlock
+    if: vars.SLOTLOCK_STATUS_PROBE == 'on'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the API and the dashboard
+        run: scripts/status-probe.sh
+        env:
+          GH_TOKEN: ${{ github.token }}

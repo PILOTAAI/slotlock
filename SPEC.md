@@ -1,7 +1,8 @@
 # Slotlock agent-calendar specification 1.0
 
-This document defines the interoperable scheduling semantics of Slotlock 0.1. Implementations may use
-different transports or persistence layers, but must preserve these rules when claiming compatibility.
+This document defines the interoperable scheduling semantics of Slotlock 0.2 and later.
+Implementations may use different transports or persistence layers, but must preserve these rules
+when claiming compatibility. Which of them may change between releases is in VERSIONING.md.
 
 ## Resource model
 
@@ -24,7 +25,7 @@ Availability is the intersection of explicit bookable windows and the complement
 No rule means no availability. Unsupported or invalid rules contribute no availability. A next-slot
 answer must fit wholly inside the resulting free set for the requested positive duration.
 
-Slotlock 0.1 supports weekly RRULE cadence with explicit `BYDAY`, interval 1, optional absolute
+Weekly availability supports RRULE cadence with explicit `BYDAY`, interval 1, optional absolute
 `UNTIL`, a local start minute, and a positive duration. Rules requiring an authored recurrence anchor
 such as `COUNT` or interval greater than 1 fail closed.
 
@@ -33,7 +34,9 @@ such as `COUNT` or interval greater than 1 fail closed.
 - The persistence layer is the final conflict arbiter; an application pre-check is not authority.
 - A live hold occupies the same range as a confirmed reservation until its database-clock expiry.
 - Confirm and release operations are atomic and idempotent for their expected retry cases.
-- A trailing buffer extends occupied time without changing the customer-visible end instant.
+- A hold lasts at most 7 days from its creation.
+- A trailing buffer extends occupied time without changing the customer-visible end instant. It is
+  at most 30 days, and holds and reservations alike respect it.
 - External commands use `(tenantRef, externalRef)` as stable identity and a strictly increasing
   positive revision. A replay with the same revision and payload is idempotent; drift is rejected.
 - Cancellation leaves a revisioned tombstone so delayed delivery cannot resurrect the identity.
@@ -219,6 +222,29 @@ identifiers are published exactly as configured, since clients compare them as s
 so each must be a canonical URL without credentials, query or fragment: `https`, or loopback `http`
 when `allowInsecureLocalhost` is set. Publishing metadata grants nothing: the embedder's
 `authenticate` verifies every token, including its audience.
+
+### Scopes, API keys and the application API
+
+Every authenticated principal carries a tenant and scopes from `read`, `write` and `admin`. A read
+operation needs `read`; an event write needs `write`. The application API (resources, weekly hours,
+holds, reservations, coverage and maintenance, as REST under `/v1` beside the tools) needs `admin`.
+It is never an MCP tool or an A2A skill and never waits for a confirmation.
+
+An API key is a random secret, stored only as its SHA-256 digest and reached only through
+`SECURITY DEFINER` functions. It acts in the tenant it was created in, with the scopes it was given
+(`read` and `write` by default), until it expires (at most 3,650 days) or is revoked. A tenant holds
+at most 100 active keys and 1,000 in all. The digest of a rotated or erased key is kept, so that key
+is never valid again. A server's own bearer token is never `admin`.
+
+A dashboard signs a person in with GitHub, asking for no scope, to the tenant `github:<user id>`,
+and manages that tenant's keys, resources (at most 100) and weekly hours.
+
+### Maintenance
+
+Recurring events are materialized up to the rolling horizon. Maintenance extends each series to it
+and deletes commands and tombstones past the retention window, in bounded batches; a run that
+reaches its batch limit says so, and the next run continues. `slotlock serve` maintains each tenant
+it serves every hour; `slotlock maintain` and the application API run it on demand.
 
 ### Principal-scoped events, quotas and retention
 
