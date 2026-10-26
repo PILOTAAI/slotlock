@@ -95,6 +95,19 @@ public sealed partial class SlotlockClient
         return CallAsync("slotlock_create_resource", values, cancellationToken);
     }
 
+    /// <summary>Slotlock.Client 0.2.0's parameters for <c>CreateResourceAsync</c>, kept so code
+    /// written against them compiles.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public Task<JsonObject> CreateResourceAsync(
+        string externalRef,
+        Optional<string> timezone,
+        CancellationToken cancellationToken) =>
+        CreateResourceAsync(
+            externalRef: externalRef,
+            timezone: timezone,
+            cancellationToken: cancellationToken,
+            visibility: default);
+
     /// <summary>Get free-busy.</summary>
     /// <remarks>
     /// Return privacy-minimized busy intervals and explicit coverage certainty.
@@ -322,6 +335,49 @@ public sealed partial class SlotlockClient
         return CallAsync("slotlock_update_event", values, cancellationToken);
     }
 
+    /// <summary>Slotlock.Client 0.2.0's parameters for <c>UpdateEventAsync</c>, kept so code
+    /// written against them compiles.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public Task<JsonObject> UpdateEventAsync(
+        string eventId,
+        long expectedRevision,
+        string idempotencyKey,
+        Optional<string> resourceId,
+        Optional<string> startsAt,
+        Optional<string> endsAt,
+        Optional<string> timezone,
+        Optional<string?> title,
+        Optional<string?> description,
+        Optional<string?> location,
+        Optional<JsonObject?> organizer,
+        Optional<JsonArray> attendees,
+        Optional<JsonArray> reminders,
+        Optional<string> transparency,
+        Optional<string> status,
+        Optional<string?> recurrenceRule,
+        Optional<JsonArray> recurrenceExceptions,
+        CancellationToken cancellationToken) =>
+        UpdateEventAsync(
+            eventId: eventId,
+            expectedRevision: expectedRevision,
+            idempotencyKey: idempotencyKey,
+            resourceId: resourceId,
+            startsAt: startsAt,
+            endsAt: endsAt,
+            timezone: timezone,
+            title: title,
+            description: description,
+            location: location,
+            organizer: organizer,
+            attendees: attendees,
+            reminders: reminders,
+            transparency: transparency,
+            status: status,
+            recurrenceRule: recurrenceRule,
+            recurrenceExceptions: recurrenceExceptions,
+            cancellationToken: cancellationToken,
+            expectedResourceId: default);
+
     /// <summary>Delete resource event.</summary>
     /// <remarks>
     /// Tombstone an event at an expected revision so stale sync cannot resurrect it.
@@ -530,6 +586,26 @@ public sealed partial class SlotlockClient
         if (bufferAfterMinutes.HasValue) values["buffer_after_minutes"] = Json.ToNode(bufferAfterMinutes.Value);
         return CallAsync("slotlock_acquire_hold", values, cancellationToken);
     }
+
+    /// <summary>Slotlock.Client 0.2.0's parameters for <c>AcquireHoldAsync</c>, kept so code
+    /// written against them compiles.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public Task<JsonObject> AcquireHoldAsync(
+        string resourceId,
+        string start,
+        string end,
+        long ttlSeconds,
+        Optional<string> source,
+        CancellationToken cancellationToken) =>
+        AcquireHoldAsync(
+            resourceId: resourceId,
+            start: start,
+            end: end,
+            ttlSeconds: ttlSeconds,
+            source: source,
+            cancellationToken: cancellationToken,
+            idempotencyKey: default,
+            bufferAfterMinutes: default);
 
     /// <summary>Get a hold.</summary>
     /// <remarks>

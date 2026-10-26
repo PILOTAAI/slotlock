@@ -63,11 +63,13 @@ upgrade notes first.
   its lookup queue is full, instead of answering anonymous; `createSlotlockAgentServer` answers it
   503 with `Retry-After` on REST, MCP and A2A. During maintenance a series whose roll fails is
   reported in `refusedEventIds` and put back for an hour instead of failing the pass.
-- Clients and OpenAPI: new optional arguments come after the old ones in every client, but a Rust
-  input struct written out field by field needs `..Default::default()` for the fields it gained
-  (`CreateResourceInput`, `AcquireHoldInput`, `UpdateEventInput`). Event participant addresses in
-  responses are no longer `format: email` in openapi.json; they follow the store's own grammar (one
-  `@`, no spaces), so a client that checked them as email addresses should stop.
+- Clients and OpenAPI: new optional arguments come after the old ones in every client, and the
+  .NET client keeps 0.2.0's parameter lists as overloads, so a call passing the cancellation token
+  by position still compiles. A Rust input struct written out field by field needs
+  `..Default::default()` for the fields it gained (`CreateResourceInput`, `AcquireHoldInput`,
+  `UpdateEventInput`), and a Go one written without field names needs them. Event participant
+  addresses in responses are no longer `format: email` in openapi.json; they follow the store's
+  own grammar (one `@`, no spaces), so a client that checked them as email addresses should stop.
 - The dashboard Worker takes a new binding, `SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT`, for every
   client together. Until it is bound, `SLOTLOCK_SIGN_IN_RATE_LIMIT` counts every client together,
   as before, and the Worker logs a warning: add the ceiling before lowering that binding's limit
