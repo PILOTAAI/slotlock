@@ -7,6 +7,13 @@ versioning.
 
 ### Added
 
+- Calendar interchange: `GET`/`PUT /v1/resources/{resource_id}/availability/ical`
+  (`slotlock_export_resource_availability`, `slotlock_import_resource_availability`) write and read
+  a resource's weekly bookable hours as an iCalendar VAVAILABILITY (RFC 7953); an import must be in
+  the resource's zone or floating, and anything weekly hours cannot say answers 400
+  `invalid_availability`. `GET /v1/tenant/events/{event_id}/jscalendar`
+  (`slotlock_export_tenant_event`) answers an event as a JSCalendar Event (RFC 8984). The library
+  exports `emitVAvailability`, `parseVAvailability` and `toJSCalendarEvent`.
 - `npm run bench` (`scripts/bench.mjs`, `bench/*.sql`): RFC 0002's pgbench workloads, Slotlock's
   range constraint against one row per 15-minute slot, reproducible on any scratch database. A new
   Scaling page covers partitioning by resource (PostgreSQL 16, 17+), Citus, a home region per tenant,

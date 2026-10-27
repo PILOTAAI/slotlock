@@ -30,6 +30,8 @@ var operations = func() map[string]operation {
 		{name: "slotlock_restore_resource", method: "POST", path: "/v1/resources/{resource_id}/restore", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_list_busy", method: "GET", path: "/v1/resources/{resource_id}/busy", pathParams: []string{"resource_id"}, query: []string{"start", "end"}},
 		{name: "slotlock_set_resource_availability", method: "PUT", path: "/v1/resources/{resource_id}/availability", pathParams: []string{"resource_id"}, query: nil},
+		{name: "slotlock_export_resource_availability", method: "GET", path: "/v1/resources/{resource_id}/availability/ical", pathParams: []string{"resource_id"}, query: nil},
+		{name: "slotlock_import_resource_availability", method: "PUT", path: "/v1/resources/{resource_id}/availability/ical", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_set_resource_booking_rules", method: "PUT", path: "/v1/resources/{resource_id}/booking-rules", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_set_resource_pool", method: "PUT", path: "/v1/resources/{resource_id}/pool", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_list_pools", method: "GET", path: "/v1/pools", pathParams: nil, query: nil},
@@ -52,6 +54,7 @@ var operations = func() map[string]operation {
 		{name: "slotlock_list_tenant_events", method: "GET", path: "/v1/tenant/events", pathParams: nil, query: []string{"resource_id", "start", "end", "limit", "cursor"}},
 		{name: "slotlock_get_tenant_event", method: "GET", path: "/v1/tenant/events/{event_id}", pathParams: []string{"event_id"}, query: nil},
 		{name: "slotlock_cancel_tenant_event", method: "DELETE", path: "/v1/tenant/events/{event_id}", pathParams: []string{"event_id"}, query: []string{"expected_revision", "expected_resource_id", "idempotency_key"}},
+		{name: "slotlock_export_tenant_event", method: "GET", path: "/v1/tenant/events/{event_id}/jscalendar", pathParams: []string{"event_id"}, query: nil},
 		{name: "slotlock_get_tenant", method: "GET", path: "/v1/tenant", pathParams: nil, query: nil},
 		{name: "slotlock_erase_tenant", method: "POST", path: "/v1/tenant/erase", pathParams: nil, query: nil},
 		{name: "slotlock_run_maintenance", method: "POST", path: "/v1/maintenance", pathParams: nil, query: nil},
@@ -713,6 +716,49 @@ func (c *Client) SetResourceAvailability(ctx context.Context, in SetResourceAvai
 	return c.Call(ctx, "slotlock_set_resource_availability", in.values())
 }
 
+// ExportResourceAvailabilityInput holds the arguments of [Client.ExportResourceAvailability].
+type ExportResourceAvailabilityInput struct {
+	ResourceID string
+}
+
+func (in ExportResourceAvailabilityInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_id"] = in.ResourceID
+	return values
+}
+
+// ExportResourceAvailability: Export a resource's bookable hours as iCalendar. One resource's own
+// weekly bookable hours as an iCalendar VAVAILABILITY (RFC 7953) for a calendar or scheduling
+// tool: an AVAILABLE per rule, its DTSTART's TZID the resource's IANA time zone. `null` when the
+// resource uses the server's default.
+func (c *Client) ExportResourceAvailability(ctx context.Context, in ExportResourceAvailabilityInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_export_resource_availability", in.values())
+}
+
+// ImportResourceAvailabilityInput holds the arguments of [Client.ImportResourceAvailability].
+type ImportResourceAvailabilityInput struct {
+	ResourceID string
+
+	Icalendar string
+}
+
+func (in ImportResourceAvailabilityInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_id"] = in.ResourceID
+	values["icalendar"] = in.Icalendar
+	return values
+}
+
+// ImportResourceAvailability: Import a resource's bookable hours from iCalendar. Set one
+// resource's own weekly bookable hours from an iCalendar VAVAILABILITY (RFC 7953), as
+// slotlock_set_resource_availability does from rules: each AVAILABLE a weekly RRULE with a start
+// time and DTEND or DURATION. Times must be in the resource's time zone (its TZID) or floating.
+// 400 invalid_availability names what weekly hours cannot say: a bounded VAVAILABILITY, RDATE,
+// EXDATE, a single window, another zone.
+func (c *Client) ImportResourceAvailability(ctx context.Context, in ImportResourceAvailabilityInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_import_resource_availability", in.values())
+}
+
 // SetResourceBookingRulesInput holds the arguments of [Client.SetResourceBookingRules].
 type SetResourceBookingRulesInput struct {
 	ResourceID string
@@ -1289,6 +1335,26 @@ func (in CancelTenantEventInput) values() map[string]any {
 // (replayed: true).
 func (c *Client) CancelTenantEvent(ctx context.Context, in CancelTenantEventInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_cancel_tenant_event", in.values())
+}
+
+// ExportTenantEventInput holds the arguments of [Client.ExportTenantEvent].
+type ExportTenantEventInput struct {
+	EventID string
+}
+
+func (in ExportTenantEventInput) values() map[string]any {
+	values := map[string]any{}
+	values["event_id"] = in.EventID
+	return values
+}
+
+// ExportTenantEvent: Export an event as JSCalendar. One of the tenant's events as a JSCalendar
+// Event (RFC 8984), the JSON form of a calendar event: uid is its id, sequence its revision,
+// start a local time in timeZone with an exact duration, its people participants, its reminders
+// alerts, its recurrence recurrenceRules and recurrenceOverrides (and the RRULE verbatim as
+// slotlock.pylota.io:rrule). A cancelled or unknown one answers 404 event_not_found.
+func (c *Client) ExportTenantEvent(ctx context.Context, in ExportTenantEventInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_export_tenant_event", in.values())
 }
 
 // GetTenantInput holds the arguments of [Client.GetTenant].

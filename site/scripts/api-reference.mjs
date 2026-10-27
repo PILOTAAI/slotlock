@@ -32,6 +32,8 @@ export const GROUPS = [
       'slotlock_list_busy',
       'slotlock_set_resource_availability',
       'slotlock_set_tenant_availability',
+      'slotlock_export_resource_availability',
+      'slotlock_import_resource_availability',
       'slotlock_record_coverage',
       'slotlock_get_coverage',
       'slotlock_record_coverage_failure',
@@ -51,6 +53,7 @@ export const GROUPS = [
       'slotlock_delete_event',
       'slotlock_list_tenant_events',
       'slotlock_get_tenant_event',
+      'slotlock_export_tenant_event',
       'slotlock_cancel_tenant_event',
       'slotlock_get_tenant_event_history',
     ],
@@ -289,7 +292,11 @@ const RUN_VARIABLES = {
   tenant_event_revision: { from: 'slotlock_get_tenant_event', path: ['event', 'revision'] },
 };
 
-const TENANT_EVENT_ROUTES = new Set(['slotlock_get_tenant_event', 'slotlock_cancel_tenant_event']);
+const TENANT_EVENT_ROUTES = new Set([
+  'slotlock_get_tenant_event',
+  'slotlock_export_tenant_event',
+  'slotlock_cancel_tenant_event',
+]);
 
 /** An argument's run variable on this operation, if it has one. */
 function runVariable(operationId, name) {

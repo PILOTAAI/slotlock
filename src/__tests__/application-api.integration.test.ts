@@ -552,6 +552,78 @@ describe.skipIf(!url)('the application API on the real store', () => {
     expect(read.status).toBe(200);
   });
 
+  it('exports hours as a VAVAILABILITY, imports one back, and exports an event as JSCalendar', async () => {
+    const resource = (
+      await call('a', 'POST', '/v1/resources', { external_ref: `ical-van-${randomUUID()}`, timezone: 'Europe/London' })
+    ).body.resource;
+    const path = `/v1/resources/${resource.id}/availability/ical`;
+    // On the default there is nothing of its own to export.
+    expect(await call('a', 'GET', path)).toEqual({ status: 200, body: { icalendar: null } });
+    const rules = [
+      { rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR', start_minutes: 540, duration_minutes: 480 },
+      { rrule: 'FREQ=WEEKLY;BYDAY=SA', start_minutes: 600, duration_minutes: 120 },
+    ];
+    await call('a', 'PUT', `/v1/resources/${resource.id}/availability`, { rules });
+    const exported = await call('a', 'GET', path);
+    expect(exported.status).toBe(200);
+    expect(exported.body.icalendar).toContain('DTSTART;TZID=Europe/London:20240108T090000');
+
+    // Cleared, then imported from the export: the same rules.
+    await call('a', 'PUT', `/v1/resources/${resource.id}/availability`, { rules: [] });
+    const imported = await call('a', 'PUT', path, { icalendar: exported.body.icalendar });
+    expect(imported.status).toBe(200);
+    expect(imported.body.resource.availability).toEqual(rules);
+
+    // Another zone's times would land elsewhere; another tenant has no such resource.
+    const paris = (exported.body.icalendar as string).replaceAll('Europe/London', 'Europe/Paris');
+    expect(await call('a', 'PUT', path, { icalendar: paris })).toEqual(refused(400, 'invalid_availability'));
+    expect(await call('a', 'PUT', path, { icalendar: 'BEGIN:VCALENDAR' })).toEqual(refused(400, 'invalid_availability'));
+    expect(await call('b', 'GET', path)).toEqual(refused(404, 'resource_not_found'));
+    expect(await call('b', 'PUT', path, { icalendar: exported.body.icalendar })).toEqual(
+      refused(404, 'resource_not_found'),
+    );
+    expect((await call('a', 'GET', `/v1/resources/${resource.id}`)).body.resource.availability).toEqual(rules);
+
+    const put = await store.putCalendarEvent({
+      tenantRef: tenantA,
+      externalRef: `jscal-${randomUUID()}`,
+      idempotencyKey: `jscal-${randomUUID()}`,
+      expectedRevision: 0,
+      resourceId: resource.id,
+      start: new Date(day(40, '12:00:00')),
+      end: new Date(day(40, '13:30:00')),
+      timezone: 'UTC',
+      summary: 'Handover',
+      reminders: [{ action: 'display', minutesBeforeStart: 10 }],
+    });
+    expect(put.ok).toBe(true);
+    const eventId = (put as { eventId: string }).eventId;
+    const event = await call('a', 'GET', `/v1/tenant/events/${eventId}/jscalendar`);
+    expect(event).toEqual({
+      status: 200,
+      body: {
+        event: expect.objectContaining({
+          '@type': 'Event',
+          uid: eventId,
+          sequence: 1,
+          title: 'Handover',
+          start: day(40, '12:00:00').slice(0, 19),
+          timeZone: 'UTC',
+          duration: 'PT1H30M',
+          freeBusyStatus: 'busy',
+          alerts: {
+            a1: {
+              '@type': 'Alert',
+              trigger: { '@type': 'OffsetTrigger', offset: '-PT10M', relativeTo: 'start' },
+              action: 'display',
+            },
+          },
+        }),
+      },
+    });
+    expect(await call('b', 'GET', `/v1/tenant/events/${eventId}/jscalendar`)).toEqual(refused(404, 'event_not_found'));
+  });
+
   it('stops reading busy time at the first interval past what one read may return', async () => {
     // The audit's probe: 24,000 rows were all read into the process before the request was refused.
     const resource = (await call('a', 'POST', '/v1/resources', { external_ref: `busy-van-${randomUUID()}` })).body.resource;

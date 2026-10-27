@@ -146,6 +146,8 @@ const expectedFiles = new Set([
   'types.d.ts',
   'webhooks.js',
   'webhooks.d.ts',
+  'interop.js',
+  'interop.d.ts',
   'weekly-hours.js',
   'weekly-hours.d.ts',
 ]);

@@ -127,6 +127,9 @@ const backend = {
   listWebhooks: vi.fn(),
   deleteWebhook: vi.fn(),
   enableWebhook: vi.fn(),
+  exportResourceAvailability: vi.fn(),
+  importResourceAvailability: vi.fn(),
+  exportTenantEvent: vi.fn(),
 } satisfies Record<keyof SlotlockApplicationBackend, ReturnType<typeof vi.fn>>;
 const authorizeApplication = vi.fn();
 const consumeRateLimit = vi.fn();
@@ -247,6 +250,22 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   listBusy: { busy: [{ start: '2027-03-29T09:00:00.000Z', end: '2027-03-29T10:00:00.000Z' }] },
   setResourceAvailability: { resource: RESOURCE },
   setTenantAvailability: { resources_updated: 3 },
+  exportResourceAvailability: { icalendar: 'BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n' },
+  importResourceAvailability: { resource: RESOURCE },
+  exportTenantEvent: {
+    event: {
+      '@type': 'Event',
+      uid: EVENT_ID,
+      updated: '2027-03-01T09:00:00.000Z',
+      sequence: 2,
+      title: 'Van handover',
+      start: '2027-03-29T10:00:00',
+      timeZone: 'Europe/London',
+      duration: 'PT1H',
+      status: 'confirmed',
+      freeBusyStatus: 'busy',
+    },
+  },
   setResourceBookingRules: { resource: { ...RESOURCE, booking_rules: { min_notice_minutes: 120 } } },
   acquireHold: { hold: HOLD },
   getHold: { hold: HOLD },

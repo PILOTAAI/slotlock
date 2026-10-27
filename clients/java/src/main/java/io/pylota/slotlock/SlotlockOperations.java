@@ -32,6 +32,8 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_restore_resource", new Operation("POST", "/v1/resources/{resource_id}/restore", List.of("resource_id"), List.of())),
           Map.entry("slotlock_list_busy", new Operation("GET", "/v1/resources/{resource_id}/busy", List.of("resource_id"), List.of("start", "end"))),
           Map.entry("slotlock_set_resource_availability", new Operation("PUT", "/v1/resources/{resource_id}/availability", List.of("resource_id"), List.of())),
+          Map.entry("slotlock_export_resource_availability", new Operation("GET", "/v1/resources/{resource_id}/availability/ical", List.of("resource_id"), List.of())),
+          Map.entry("slotlock_import_resource_availability", new Operation("PUT", "/v1/resources/{resource_id}/availability/ical", List.of("resource_id"), List.of())),
           Map.entry("slotlock_set_resource_booking_rules", new Operation("PUT", "/v1/resources/{resource_id}/booking-rules", List.of("resource_id"), List.of())),
           Map.entry("slotlock_set_resource_pool", new Operation("PUT", "/v1/resources/{resource_id}/pool", List.of("resource_id"), List.of())),
           Map.entry("slotlock_list_pools", new Operation("GET", "/v1/pools", List.of(), List.of())),
@@ -54,6 +56,7 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_list_tenant_events", new Operation("GET", "/v1/tenant/events", List.of(), List.of("resource_id", "start", "end", "limit", "cursor"))),
           Map.entry("slotlock_get_tenant_event", new Operation("GET", "/v1/tenant/events/{event_id}", List.of("event_id"), List.of())),
           Map.entry("slotlock_cancel_tenant_event", new Operation("DELETE", "/v1/tenant/events/{event_id}", List.of("event_id"), List.of("expected_revision", "expected_resource_id", "idempotency_key"))),
+          Map.entry("slotlock_export_tenant_event", new Operation("GET", "/v1/tenant/events/{event_id}/jscalendar", List.of("event_id"), List.of())),
           Map.entry("slotlock_get_tenant", new Operation("GET", "/v1/tenant", List.of(), List.of())),
           Map.entry("slotlock_erase_tenant", new Operation("POST", "/v1/tenant/erase", List.of(), List.of())),
           Map.entry("slotlock_run_maintenance", new Operation("POST", "/v1/maintenance", List.of(), List.of())),
@@ -621,6 +624,42 @@ public abstract class SlotlockOperations {
   }
 
   /**
+   * Export a resource's bookable hours as iCalendar. One resource's own weekly bookable hours as
+   * an iCalendar VAVAILABILITY (RFC 7953) for a calendar or scheduling tool: an AVAILABLE per
+   * rule, its DTSTART's TZID the resource's IANA time zone. `null` when the resource uses the
+   * server's default.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> exportResourceAvailability(String resourceId) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("resource_id", resourceId);
+    return call("slotlock_export_resource_availability", values);
+  }
+
+  /**
+   * Import a resource's bookable hours from iCalendar. Set one resource's own weekly bookable
+   * hours from an iCalendar VAVAILABILITY (RFC 7953), as slotlock_set_resource_availability does
+   * from rules: each AVAILABLE a weekly RRULE with a start time and DTEND or DURATION. Times must
+   * be in the resource's time zone (its TZID) or floating. 400 invalid_availability names what
+   * weekly hours cannot say: a bounded VAVAILABILITY, RDATE, EXDATE, a single window, another
+   * zone.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param icalendar {@code icalendar}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> importResourceAvailability(String resourceId, String icalendar) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("resource_id", resourceId);
+    values.put("icalendar", icalendar);
+    return call("slotlock_import_resource_availability", values);
+  }
+
+  /**
    * Set a resource's booking rules. Set what a booking on one resource must satisfy from now on:
    * minimum notice, how far ahead, the step starts fall on (from local midnight in the resource's
    * time zone), the turnaround kept free after each booking, and whether bookings must lie inside
@@ -1175,6 +1214,23 @@ public abstract class SlotlockOperations {
    */
   public Map<String, Object> cancelTenantEvent(String eventId, long expectedRevision, String idempotencyKey) {
     return cancelTenantEvent(eventId, expectedRevision, idempotencyKey, null);
+  }
+
+  /**
+   * Export an event as JSCalendar. One of the tenant's events as a JSCalendar Event (RFC 8984),
+   * the JSON form of a calendar event: uid is its id, sequence its revision, start a local time
+   * in timeZone with an exact duration, its people participants, its reminders alerts, its
+   * recurrence recurrenceRules and recurrenceOverrides (and the RRULE verbatim as
+   * slotlock.pylota.io:rrule). A cancelled or unknown one answers 404 event_not_found.
+   *
+   * @param eventId {@code event_id}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> exportTenantEvent(String eventId) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("event_id", eventId);
+    return call("slotlock_export_tenant_event", values);
   }
 
   /**

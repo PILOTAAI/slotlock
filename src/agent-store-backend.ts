@@ -13,6 +13,7 @@ import type {
 import { type SlotlockBookingRule, type SlotlockBookingRules, bookingSearch } from './booking-rules.js';
 import { findNextAvailable } from './engine.js';
 import { expandRules } from './rules.js';
+import { emitVAvailability, parseVAvailability, toJSCalendarEvent } from './interop.js';
 import { type SlotlockStore, type SlotlockTenantStore, calendarEventRollingHorizon } from './store.js';
 import type {
   CalendarAttendee,
@@ -1386,6 +1387,53 @@ export function createSlotlockStoreApplicationBackend(
       });
     },
 
+    async exportResourceAvailability(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const resource = await requireResource(tenant, tenantOf(context), input.resource_id as string);
+        if (resource.availabilityRules === undefined) return { icalendar: null };
+        return {
+          icalendar: emitVAvailability({
+            rules: resource.availabilityRules,
+            timezone: resource.timezone,
+            uid: `${resource.id}-hours`,
+          }),
+        };
+      });
+    },
+
+    async importResourceAvailability(context, input) {
+      let parsed: ReturnType<typeof parseVAvailability>;
+      try {
+        parsed = parseVAvailability(input.icalendar as string);
+      } catch (error) {
+        throw storeRefusal(error);
+      }
+      const id = input.resource_id as string;
+      if (!STORE_ID_PATTERN.test(id)) throw new SlotlockAgentOperationError('resource_not_found', 404);
+      return withTenant(store, context, async (tenant) => {
+        const current = await requireResource(tenant, tenantOf(context), id);
+        // Rules are read in the resource's zone: times written in another would land elsewhere.
+        if (parsed.timezone !== null && parsed.timezone !== current.timezone) {
+          throw new SlotlockAgentOperationError('invalid_availability', 400, {
+            timezone: parsed.timezone,
+            resource_timezone: current.timezone,
+          });
+        }
+        let resource: SlotlockResource | null;
+        try {
+          resource = await tenant.setResourceAvailability({
+            tenantRef: tenantOf(context),
+            id,
+            rules: parsed.rules,
+          });
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+        if (!resource) throw new SlotlockAgentOperationError('resource_not_found', 404);
+        return { resource: resourceOutput(resource) };
+      });
+    },
+
     async setResourceBookingRules(context, input) {
       const rules = bookingRulesInput(input.rules);
       const id = input.resource_id as string;
@@ -1663,6 +1711,16 @@ export function createSlotlockStoreApplicationBackend(
         const event = await tenant.getCalendarEventById({ tenantRef: tenantOf(context), eventId: id });
         if (!event) throw new SlotlockAgentOperationError('event_not_found', 404);
         return { event: tenantEventOutput(event) };
+      });
+    },
+
+    async exportTenantEvent(context, input) {
+      const id = input.event_id as string;
+      if (!STORE_ID_PATTERN.test(id)) throw new SlotlockAgentOperationError('event_not_found', 404);
+      return withTenant(store, context, async (tenant) => {
+        const event = await tenant.getCalendarEventById({ tenantRef: tenantOf(context), eventId: id });
+        if (!event) throw new SlotlockAgentOperationError('event_not_found', 404);
+        return { event: toJSCalendarEvent(event) };
       });
     },
 
