@@ -698,7 +698,7 @@ public sealed partial class SlotlockClient
     /// a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key
     /// (the Idempotency-Key header or idempotency_key), a retry answers the hold the first
     /// request made, until that hold would have expired, is released or is confirmed; the same
-    /// key with another request is 409 idempotency_conflict.
+    /// key with another request is 422 idempotency_conflict.
     /// </remarks>
     /// <param name="resourceId">resource_id</param>
     /// <param name="start">start</param>
@@ -707,7 +707,7 @@ public sealed partial class SlotlockClient
     /// <param name="source">source</param>
     /// <param name="idempotencyKey">A retry identity, also accepted as the Idempotency-Key
     /// header: the same key with the same request answers what the first did; with another
-    /// request, 409 idempotency_conflict.</param>
+    /// request, 422 idempotency_conflict.</param>
     /// <param name="bufferAfterMinutes">buffer_after_minutes</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
@@ -1039,7 +1039,7 @@ public sealed partial class SlotlockClient
     /// <param name="expectedRevision">expected_revision</param>
     /// <param name="idempotencyKey">A retry identity, also accepted as the Idempotency-Key
     /// header: the same key with the same request answers what the first did; with another
-    /// request, 409 idempotency_conflict.</param>
+    /// request, 422 idempotency_conflict.</param>
     /// <param name="expectedResourceId">expected_resource_id</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>

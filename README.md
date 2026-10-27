@@ -962,6 +962,9 @@ never cached. W3C `traceparent`, `tracestate` and `baggage` reach your backend a
 | `GET /v1/resources` | `slotlock_list_resources` |
 | `GET /v1/free-busy` | `slotlock_get_free_busy` |
 | `GET /v1/next-available` | `slotlock_find_next_available` |
+| `GET /v1/available-slots` | `slotlock_find_available_slots` |
+| `POST /v1/slot-holds` | `slotlock_hold_slots` |
+| `DELETE /v1/slot-holds/{hold_id}` | `slotlock_release_slots` |
 | `GET /v1/events` | `slotlock_list_events` |
 | `POST /v1/events` | `slotlock_create_event` |
 | `GET /v1/events/{event_id}` | `slotlock_get_event` |
@@ -976,7 +979,17 @@ curl "http://localhost:8080/v1/resources" -H "Authorization: Bearer $SLOTLOCK_AP
   `resource_ids=a&resource_ids=b`); `POST`, `PUT` and `PATCH` take a JSON body. Ids are in the path;
   percent-encode one that holds `/`.
 - Keys, scopes, `authorize` and the rate limit apply as over MCP. The body is the tool's output, or
-  `{"error":{"code":…}}` with the matching HTTP status.
+  an [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem (`application/problem+json`) with
+  the matching HTTP status: `type` (a tag URI, one per code), `title`, `status`, `code`, and
+  `error.code` as well, the body earlier clients read. An `overlap` names the `resource_id`, `start`
+  and `end` it refused. A `Link: <…>; rel="describedby"` header points at these docs.
+- A write's `idempotency_key` may come as the `Idempotency-Key` header instead
+  ([draft 08](https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/)): a
+  quoted Structured Field String (`Idempotency-Key: "booking-BK-42"`) or the bare key, equal to the
+  argument when both are sent. A write that needs one and gets neither answers
+  `400 idempotency_key_required`; the same key with another request, `422 idempotency_conflict`.
+  An event write's key is kept 30 days, then removed by maintenance, after which the key is new; a
+  hold's until the hold would have expired, is released or is confirmed.
 - REST cannot ask a person, so a write listed in `confirmation` answers `428 confirmation_required`.
 - Free/busy and the next-available search read each resource they name once, however often it is
   named, and 10,000 busy intervals in all; the next-available search also expands 100,000 bookable
@@ -1038,7 +1051,7 @@ curl -X PUT "http://localhost:8080/v1/reservations/BK-42" \
   `DELETE /v1/reservations/{hold_id}?revision=2`.
 - `POST /v1/holds` and `DELETE /v1/tenant/events/…` take a retry identity as the `Idempotency-Key`
   header or as `idempotency_key`. A retried hold answers the hold the first request made; the same
-  key with another request is `409 idempotency_conflict`. Other routes are safe to retry as they
+  key with another request is `422 idempotency_conflict`. Other routes are safe to retry as they
   are, and refuse the header (`400 idempotency_key_not_supported`).
 - Lists page by `limit` (up to 100) and `cursor`, the `next_cursor` of the page before, and read a
   window of at most 367 days.

@@ -699,17 +699,17 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       const resourceId = created.body.resource.id as string;
       expect(await rest(agent.key, 'POST', '/v1/resources', { external_ref: 'vehicle-agent' })).toEqual({
         status: 403,
-        body: { error: { code: 'forbidden' } },
+        body: expect.objectContaining({ status: 403, code: 'forbidden', error: { code: 'forbidden' } }),
       });
       // The server token is what the docs give agents, so it reads and writes but is never admin:
       // the application API asks no person before it writes.
       expect(await rest(token, 'GET', `/v1/resources/${resourceId}`)).toEqual({
         status: 403,
-        body: { error: { code: 'forbidden' } },
+        body: expect.objectContaining({ status: 403, code: 'forbidden', error: { code: 'forbidden' } }),
       });
       expect(await rest(token, 'PUT', '/v1/availability', { rules: [] })).toEqual({
         status: 403,
-        body: { error: { code: 'forbidden' } },
+        body: expect.objectContaining({ status: 403, code: 'forbidden', error: { code: 'forbidden' } }),
       });
 
       const held = await rest(application.key, 'POST', '/v1/holds', {
@@ -723,11 +723,11 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       // Another tenant's admin key, read through the serving role's row-level security as well.
       expect(await rest(elsewhere.key, 'GET', `/v1/resources/${resourceId}`)).toEqual({
         status: 404,
-        body: { error: { code: 'resource_not_found' } },
+        body: expect.objectContaining({ status: 404, code: 'resource_not_found', error: { code: 'resource_not_found' } }),
       });
       expect(await rest(elsewhere.key, 'POST', `/v1/holds/${holdId}/confirm`, {})).toEqual({
         status: 404,
-        body: { error: { code: 'hold_not_found' } },
+        body: expect.objectContaining({ status: 404, code: 'hold_not_found', error: { code: 'hold_not_found' } }),
       });
       expect(await rest(elsewhere.key, 'DELETE', `/v1/holds/${holdId}`)).toEqual({
         status: 200,
@@ -814,7 +814,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       }
       expect(
         await rest('POST', '/v1/holds', { resource_id: resourceId, ...hour(2), ttl_seconds: 600 }),
-      ).toEqual({ status: 409, body: { error: { code: 'hold_limit_reached' } } });
+      ).toEqual({ status: 409, body: expect.objectContaining({ status: 409, code: 'hold_limit_reached', error: { code: 'hold_limit_reached' } }) });
 
       const booked = await rest('PUT', '/v1/reservations/booking-1', {
         resource_id: resourceId,
@@ -824,13 +824,13 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       expect(booked.status).toBe(200);
       expect(
         await rest('PUT', '/v1/reservations/booking-2', { resource_id: resourceId, ...hour(4), revision: 1 }),
-      ).toEqual({ status: 409, body: { error: { code: 'reservation_limit_reached' } } });
+      ).toEqual({ status: 409, body: expect.objectContaining({ status: 409, code: 'reservation_limit_reached', error: { code: 'reservation_limit_reached' } }) });
 
       const window = { start: '2027-04-01T00:00:00Z', end: '2027-05-01T00:00:00Z', revision: 1 };
       expect((await rest('PUT', `/v1/resources/${resourceId}/coverage/google:a`, window)).status).toBe(200);
       expect(await rest('PUT', `/v1/resources/${resourceId}/coverage/google:b`, window)).toEqual({
         status: 409,
-        body: { error: { code: 'coverage_limit_reached' } },
+        body: expect.objectContaining({ status: 409, code: 'coverage_limit_reached', error: { code: 'coverage_limit_reached' } }),
       });
     } finally {
       shutdown.abort();

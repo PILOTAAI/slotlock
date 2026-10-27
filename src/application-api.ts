@@ -156,10 +156,10 @@ const VISIBILITY = z.enum(['shared', 'private']);
 /**
  * A retry identity, as the `Idempotency-Key` request header or this field (the same value, if both
  * are sent): the same key with the same request answers what the first did, and with another
- * request is 409 idempotency_conflict.
+ * request is 422 idempotency_conflict.
  */
 const IDEMPOTENCY_KEY = IDENTITY.describe(
-  'A retry identity, also accepted as the Idempotency-Key header: the same key with the same request answers what the first did; with another request, 409 idempotency_conflict.',
+  'A retry identity, also accepted as the Idempotency-Key header: the same key with the same request answers what the first did; with another request, 422 idempotency_conflict.',
 );
 
 /** Minutes after the end kept busy as well, for turnaround: at most 30 days. */
@@ -382,7 +382,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_acquire_hold',
       title: 'Hold time',
       description:
-        'Occupy a window without booking it, for example while a customer pays. The hold blocks every other booking until it expires (the database clock, ttl_seconds from now), is confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the hold the first request made, until that hold would have expired, is released or is confirmed; the same key with another request is 409 idempotency_conflict.',
+        'Occupy a window without booking it, for example while a customer pays. The hold blocks every other booking until it expires (the database clock, ttl_seconds from now), is confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the hold the first request made, until that hold would have expired, is released or is confirmed; the same key with another request is 422 idempotency_conflict.',
       method: 'POST',
       path: '/v1/holds',
       input: z

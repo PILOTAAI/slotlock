@@ -487,7 +487,7 @@ pub struct AcquireHoldInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     /// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
-    /// request answers what the first did; with another request, 409 idempotency_conflict.
+    /// request answers what the first did; with another request, 422 idempotency_conflict.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -595,7 +595,7 @@ pub struct CancelTenantEventInput {
     pub event_id: String,
     pub expected_revision: i64,
     /// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
-    /// request answers what the first did; with another request, 409 idempotency_conflict.
+    /// request answers what the first did; with another request, 422 idempotency_conflict.
     pub idempotency_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_resource_id: Option<String>,
@@ -799,7 +799,7 @@ impl Client {
     /// a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key
     /// (the Idempotency-Key header or idempotency_key), a retry answers the hold the first
     /// request made, until that hold would have expired, is released or is confirmed; the same
-    /// key with another request is 409 idempotency_conflict.
+    /// key with another request is 422 idempotency_conflict.
     pub fn acquire_hold(&self, input: &AcquireHoldInput) -> Result<Value, Error> {
         self.call("slotlock_acquire_hold", serde_json::to_value(input)?)
     }

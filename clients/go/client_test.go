@@ -268,7 +268,7 @@ func TestRetriesAKeyedHoldAndRetiresAResource(t *testing.T) {
 	}
 	window.TTLSeconds = 60
 	_, err := c.AcquireHold(s.ctx, window)
-	s.refused(409, "idempotency_conflict", err)
+	s.refused(422, "idempotency_conflict", err)
 	holdID := hold["id"].(string)
 	if got := s.must(c.GetHold(s.ctx, GetHoldInput{HoldID: holdID}))["hold"]; !reflect.DeepEqual(got, hold) {
 		t.Fatalf("get_hold: %v", got)

@@ -1312,7 +1312,7 @@ describe('consumer-neutral Slotlock agent server', () => {
         }),
       );
       expect(rest.status).toBe(500);
-      expect(await rest.json()).toEqual({ error: { code: 'internal_error' } });
+      expect(await rest.json()).toEqual(expect.objectContaining({ status: 500, code: 'internal_error', error: { code: 'internal_error' } }));
       expect(onError.mock.calls).toEqual([
         [crash, { operation: 'slotlock_list_resources' }],
         [crash, { operation: 'slotlock_list_resources' }],

@@ -781,7 +781,10 @@ if (databaseUrl) {
         idempotency_key: 'package-verification',
       });
       assert.equal(guarded.status, 428);
-      assert.deepEqual(await guarded.json(), { error: { code: 'confirmation_required' } });
+      assert.equal(guarded.headers.get('content-type'), 'application/problem+json');
+      const problem = await guarded.json();
+      assert.equal(problem.code, 'confirmation_required');
+      assert.deepEqual(problem.error, { code: 'confirmation_required' });
     } finally {
       child.kill('SIGTERM');
     }

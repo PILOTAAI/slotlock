@@ -458,7 +458,7 @@ describe('the application API over REST', () => {
     // Cancelling any event of the tenant needs a key, from the query or the header.
     const unkeyed = await server.fetch(call('DELETE', `/v1/tenant/events/${EVENT_ID}?expected_revision=2`));
     expect(unkeyed.status).toBe(400);
-    expect(await errorCode(unkeyed)).toBe('invalid_arguments');
+    expect(await errorCode(unkeyed)).toBe('idempotency_key_required');
     const headed = await server.fetch(
       call('DELETE', `/v1/tenant/events/${EVENT_ID}?expected_revision=2`, {
         headers: { 'Idempotency-Key': 'cancel-1' },
@@ -481,7 +481,14 @@ describe('the application API over REST', () => {
       .filter((operation) => operation.parameters?.some((parameter) => parameter.in === 'header'))
       .map((operation) => operation.operationId)
       .sort();
-    expect(headed).toEqual(['slotlock_acquire_hold', 'slotlock_cancel_tenant_event']);
+    expect(headed).toEqual([
+      'slotlock_acquire_hold',
+      'slotlock_cancel_tenant_event',
+      'slotlock_create_event',
+      'slotlock_delete_event',
+      'slotlock_hold_slots',
+      'slotlock_update_event',
+    ]);
   });
 
   it('takes a visibility only at creation, and erases a tenant only with its reference', () => {
@@ -540,7 +547,7 @@ describe('the application API over REST', () => {
     backend.confirmHold.mockRejectedValueOnce(failure);
     const broken = await server.fetch(exampleRequest('slotlock_confirm_hold'));
     expect(broken.status).toBe(500);
-    expect(await broken.json()).toEqual({ error: { code: 'internal_error' } });
+    expect(await broken.json()).toEqual(expect.objectContaining({ status: 500, code: 'internal_error', error: { code: 'internal_error' } }));
     expect(onError).toHaveBeenCalledWith(failure, expect.objectContaining({ operation: 'slotlock_confirm_hold' }));
   });
 
@@ -550,7 +557,7 @@ describe('the application API over REST', () => {
     expect(response.status).toBe(500);
     const body = await response.text();
     expect(body).not.toContain('tenant-b');
-    expect(JSON.parse(body)).toEqual({ error: { code: 'internal_error' } });
+    expect(JSON.parse(body)).toEqual(expect.objectContaining({ status: 500, code: 'internal_error', error: { code: 'internal_error' } }));
     expect(onError).toHaveBeenCalledWith(
       expect.objectContaining({ code: 'invalid_backend_result' }),
       expect.objectContaining({ operation: 'slotlock_get_resource' }),

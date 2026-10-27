@@ -546,7 +546,7 @@ public abstract class SlotlockOperations {
    * confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key (the
    * Idempotency-Key header or idempotency_key), a retry answers the hold the first request made,
    * until that hold would have expired, is released or is confirmed; the same key with another
-   * request is 409 idempotency_conflict.
+   * request is 422 idempotency_conflict.
    *
    * @param resourceId {@code resource_id}, string
    * @param start {@code start}, string
@@ -574,7 +574,7 @@ public abstract class SlotlockOperations {
    * confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key (the
    * Idempotency-Key header or idempotency_key), a retry answers the hold the first request made,
    * until that hold would have expired, is released or is confirmed; the same key with another
-   * request is 409 idempotency_conflict.
+   * request is 422 idempotency_conflict.
    *
    * @param resourceId {@code resource_id}, string
    * @param start {@code start}, string
@@ -870,7 +870,7 @@ public abstract class SlotlockOperations {
    * @param eventId {@code event_id}, string
    * @param expectedRevision {@code expected_revision}, integer
    * @param idempotencyKey A retry identity, also accepted as the Idempotency-Key header: the same
-   * key with the same request answers what the first did; with another request, 409
+   * key with the same request answers what the first did; with another request, 422
    * idempotency_conflict.
    * @param optional the optional arguments, or null: {@code expected_resource_id} (string)
    * @return the response body
@@ -896,7 +896,7 @@ public abstract class SlotlockOperations {
    * @param eventId {@code event_id}, string
    * @param expectedRevision {@code expected_revision}, integer
    * @param idempotencyKey A retry identity, also accepted as the Idempotency-Key header: the same
-   * key with the same request answers what the first did; with another request, 409
+   * key with the same request answers what the first did; with another request, 422
    * idempotency_conflict.
    * @return the response body
    * @throws SlotlockException when the server refuses the call
