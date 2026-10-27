@@ -10,8 +10,10 @@ TypeScript library.
 Slotlock 0.2.0 can occupy less time than an event was written with, so another booking can take the
 rest: around daylight-saving changes, in any time zone that has them, and at the end of some series.
 The library and `slotlock serve` are both affected (the last case below is in the library's
-iCalendar readers only); the 0.1 releases are older still and unsupported. 0.3.0 fixes all six
-cases; while you run 0.2.0, do not rely on it alone to refuse bookings in them.
+iCalendar readers only); the 0.1 releases are older still and unsupported. 0.3.0, released on
+2026-10-27, fixes all six cases: upgrade (`npm install slotlock@0.3.0` or
+`ghcr.io/pilotaai/slotlock:0.3.0`, then `slotlock migrate`, as the [changelog](CHANGELOG.md) says).
+While you run 0.2.0, do not rely on it alone to refuse bookings in them.
 
 - A recurring event whose first occurrence spans a daylight-saving change gets that occurrence an
   hour short: in spring, an hour of the written time is free to book.
@@ -1125,7 +1127,7 @@ export async function openLiveCalendar(options: LiveCalendarOptions) {
 
 ```sh
 claude mcp add --transport http slotlock https://calendar.example.com/slotlock/mcp \
-  --header "Authorization: Bearer $SLOTLOCK_TOKEN"
+  --header "Authorization: Bearer $SLOTLOCK_API_KEY"
 ```
 
 **Claude API** (MCP connector, `anthropic-beta: mcp-client-2025-11-20`; the server must be public
@@ -1254,7 +1256,8 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
 9. Size live updates: at most `maxTotal` backend reads per `pollIntervalMs`.
 10. Give each agent its own API key with the narrowest scope and an expiry.
 11. After each deployment, check it end to end with a short-lived admin key, then revoke the key:
-    `SLOTLOCK_URL=https://… SLOTLOCK_ADMIN_KEY=… node scripts/smoke-deployment.mjs` checks health,
+    `SLOTLOCK_URL=https://… SLOTLOCK_ADMIN_KEY=… node scripts/smoke-deployment.mjs`, from a clone
+    of the repository, checks health,
     discovery, MCP, A2A, holds and reservations (in a resource named `slotlock-smoke`, 400 days
     ahead, cancelled after) and the 401, 409, 413 and 415 refusals.
 12. Rate-limit every public server. `slotlock serve` does it per client address, key, tenant and
@@ -1278,8 +1281,8 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
 Slotlock is availability maths, holds and reservations, events with recurrence, coverage-aware
 free/busy, tenant isolation, iCalendar interchange, MCP and A2A with human confirmation and live
 updates, an MCP Apps view, REST with the application API, scoped API keys, a GitHub sign-in
-dashboard, maintenance, and clients for five languages. [Hosted Slotlock](docs/hosted/README.md)
-runs it for you. Provider sync (Google, Microsoft, CalDAV), notifications to people, and a human
+dashboard, maintenance, and clients for five languages. [Hosted Slotlock](docs/hosted/README.md),
+not open yet, will run it for you. Provider sync (Google, Microsoft, CalDAV), notifications to people, and a human
 calendar app are yours to build around it. What each version promises is in
 [VERSIONING.md](VERSIONING.md).
 

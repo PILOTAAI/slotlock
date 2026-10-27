@@ -2,7 +2,13 @@
 
 A client for [Slotlock](https://slotlock.pylota.io)'s REST API: the agent tools and the application
 API, one method per operation. Java 17+, no dependencies (`java.net.http` and a strict JSON codec of
-its own). Build it with Gradle 9: `gradle jar`.
+its own). It is `io.pylota:slotlock` on
+[Maven Central](https://central.sonatype.com/artifact/io.pylota/slotlock), at the same version as the
+server:
+
+```kotlin
+implementation("io.pylota:slotlock:<version>")
+```
 
 ```java
 SlotlockClient slotlock = SlotlockClient.builder("https://calendar.example.com", apiKey).build();

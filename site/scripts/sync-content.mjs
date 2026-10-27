@@ -16,6 +16,7 @@ import { statSync } from 'node:fs';
 import { copyFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { renderApiReference } from './api-reference.mjs';
 import { readOperations } from './tool-schemas.mjs';
 import { renderToolsPage } from './tools-page.mjs';
 
@@ -121,6 +122,7 @@ const SITE_LINKS = {
   'CHANGELOG.md': '/docs/changelog/',
   'slotlock-manifest.schema.json': '/schema/manifest.schema.json',
   'openapi.json': '/openapi.json',
+  'clients/README.md': '/docs/clients/',
   'PRIVACY.md': '/docs/privacy/',
   'TERMS.md': '/docs/terms/',
   'ACCEPTABLE-USE.md': '/docs/acceptable-use/',
@@ -210,7 +212,8 @@ async function expand(template, facts, page, toolsPage) {
   }
   out += template.slice(last);
 
-  const required = /<!-- include ([^#\s>]+)(?:#([a-z0-9_-]+))?((?: (?:body|lead|promote))*) -->/g;
+  const required =
+    /<!-- include ([^#\s>]+)(?:#([a-z0-9_-]+))?((?: (?:body|lead|promote|snippet))*) -->/g;
   const parts = [];
   last = 0;
   for (const match of out.matchAll(required)) {
@@ -218,8 +221,17 @@ async function expand(template, facts, page, toolsPage) {
     const [, file, anchor, modifiers] = match;
     const source = await sourceSections(file);
     if (!anchor) {
-      // Whole file without its title.
-      parts.push(rebase(source.text.replace(/^# .*\n+/, '').trim(), file));
+      // Whole file without its title. `snippet` also drops its opening paragraph and a closing
+      // pointer back to the overview, for a page that already says both once (a client's README).
+      let whole = source.text.replace(/^# .*\n+/, '').trim();
+      if (/\bsnippet\b/.test(modifiers)) {
+        whole = whole
+          .replace(/^(?!```)[^\n]+(?:\n(?!\n)[^\n]+)*\n+/, '')
+          .replace(/\n+The \[clients overview\]\([^)]*\)[^\n]*$/, '')
+          // A coordinate written for every release reads at this one's version on the site.
+          .replace(/:<version>"/g, `:${facts.version}"`);
+      }
+      parts.push(rebase(whole, file));
     } else {
       const section = source.sections.get(anchor);
       if (!section) fail(`${page}: ${file} has no heading #${anchor}`);
@@ -228,9 +240,27 @@ async function expand(template, facts, page, toolsPage) {
     last = match.index + match[0].length;
   }
   parts.push(out.slice(last));
+  // `<!-- code examples/store.ts#book -->`: a region of an example file, which the repository's
+  // tests type-check and run, as a TypeScript block.
+  const joined = parts.join('');
+  const codeParts = [];
+  last = 0;
+  for (const match of joined.matchAll(/<!-- code ([^#\s]+)#([a-z0-9-]+) -->/g)) {
+    codeParts.push(joined.slice(last, match.index));
+    const [, file, region] = match;
+    const text = await read(file);
+    const found = new RegExp(
+      `// #region ${region}\\n([\\s\\S]*?)// #endregion ${region}`,
+    ).exec(text);
+    if (!found) fail(`${page}: ${file} has no region ${region}`);
+    codeParts.push(`\`\`\`ts\n${found[1].trimEnd()}\n\`\`\``);
+    last = match.index + match[0].length;
+  }
+  codeParts.push(joined.slice(last));
   // Facts first: the generated tools reference is already final text.
-  return clean(parts.join(''))
+  return clean(codeParts.join(''))
     .replace(/\{\{(\w+)\}\}/g, (_, key) => String(must(facts[key], `fact ${key}`)))
+    .replace(/<!-- agent-setup-prompt -->/g, () => `\`\`\`markdown wrap\n${facts.agentSetupPrompt}\`\`\``)
     .replace(/<!-- tools-overview -->/g, () => toolsPage.overview)
     .replace(/<!-- tools-details -->/g, () => toolsPage.details)
     .replace(/<!-- tools-objects -->/g, () => toolsPage.objects);
@@ -407,12 +437,16 @@ async function readToolsReference(facts) {
   );
   const page = renderToolsPage({ operations, facts, sources: [agentServer, backend, types], fail });
   facts.commonErrors = page.commonErrors;
-  return page;
+  return { page, toolExamples: Object.fromEntries(operations.map((op) => [op.name, op.example])) };
 }
 
 async function main() {
   const facts = await readFacts();
-  const toolsPage = await readToolsReference(facts);
+  const { page: toolsPage, toolExamples } = await readToolsReference(facts);
+  // The prompt for a coding agent: a docs page shows it and /slotlock-setup-prompt.md serves it.
+  facts.agentSetupPrompt = (
+    await readFile(join(SITE, 'src/data/agent-setup-prompt.md'), 'utf8')
+  ).replace(/\{\{(\w+)\}\}/g, (_, key) => String(must(facts[key], `fact ${key}`)));
   await rm(join(SITE, 'src/content/docs'), { recursive: true, force: true });
   await mkdir(DOCS_OUT, { recursive: true });
   await mkdir(GENERATED, { recursive: true });
@@ -441,6 +475,19 @@ async function main() {
   }
   await copyFile(join(ROOT, 'openapi.json'), join(SITE, 'public/openapi.json'));
 
+  // The REST reference and the Postman collection, both from openapi.json.
+  const api = renderApiReference({ openApi, version: facts.version, toolExamples, fail });
+  await mkdir(join(DOCS_OUT, 'api'), { recursive: true });
+  await writeFile(join(DOCS_OUT, 'api', 'index.md'), api.overview);
+  for (const apiPage of api.pages) {
+    await writeFile(join(DOCS_OUT, 'api', `${apiPage.slug}.md`), apiPage.markdown);
+  }
+  await writeFile(join(SITE, 'public/slotlock-setup-prompt.md'), facts.agentSetupPrompt);
+  await writeFile(
+    join(SITE, 'public/slotlock.postman_collection.json'),
+    `${JSON.stringify(api.postman, null, 2)}\n`,
+  );
+
   await writeFile(join(GENERATED, 'facts.json'), `${JSON.stringify(facts, null, 2)}\n`);
   const { tokensCss } = await import('../src/styles/tokens.mjs');
   await writeFile(join(GENERATED, 'tokens.css'), tokensCss());
@@ -448,7 +495,7 @@ async function main() {
     .filter(([, found]) => !found)
     .map(([key]) => key);
   console.log(
-    `sync-content: ${pages.length} docs pages, ${facts.toolCount} tools, version ${facts.version}` +
+    `sync-content: ${pages.length} docs pages, ${api.operationCount} REST pages, ${facts.toolCount} tools, version ${facts.version}` +
       (missing.length
         ? ` (README sections not there yet, fallback used: ${missing.join(', ')})`
         : ''),

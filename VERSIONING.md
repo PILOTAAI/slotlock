@@ -18,7 +18,7 @@ From 1.0, breaking changes need a new major version.
 
 The npm package, the server image, the MCP Registry entry and the five language clients carry the
 same version. npm's `latest` tag is always the highest release; a fix to an older line is published
-under `latest-<major>.<minor>` (for example `slotlock@latest-0.2`), and a prerelease under `next`.
+under `latest-<major>.<minor>` (for example `slotlock@latest-0.2`, if a 0.2 fix is ever published), and a prerelease under `next`.
 Security fixes go to the latest minor release, as SECURITY.md says, and each security release names
 the lowest safe version.
 

@@ -3,6 +3,15 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Fixed
+
+- The OpenAPI document declares the `404` and `409` the agent-tool routes answer: `404` on
+  free/busy, next available and reading or listing events, and `404` and `409` (`overlap`, a stale
+  revision) on creating, changing and cancelling one. Clients generated from it now type an overlap
+  instead of falling to `default`.
+
 ## 0.3.0 - 2026-10-27
 
 0.3.0 fixes the double bookings 0.2.0 could accept around daylight-saving changes and makes
