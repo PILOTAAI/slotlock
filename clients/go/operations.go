@@ -670,7 +670,7 @@ type AcquireHoldInput struct {
 	Source *string
 
 	// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
-	// request answers what the first did; with another request, 409 idempotency_conflict.
+	// request answers what the first did; with another request, 422 idempotency_conflict.
 	IdempotencyKey *string
 
 	BufferAfterMinutes *int64
@@ -700,7 +700,7 @@ func (in AcquireHoldInput) values() map[string]any {
 // and a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key (the
 // Idempotency-Key header or idempotency_key), a retry answers the hold the first request made,
 // until that hold would have expired, is released or is confirmed; the same key with another
-// request is 409 idempotency_conflict.
+// request is 422 idempotency_conflict.
 func (c *Client) AcquireHold(ctx context.Context, in AcquireHoldInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_acquire_hold", in.values())
 }
@@ -995,7 +995,7 @@ type CancelTenantEventInput struct {
 	ExpectedRevision int64
 
 	// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
-	// request answers what the first did; with another request, 409 idempotency_conflict.
+	// request answers what the first did; with another request, 422 idempotency_conflict.
 	IdempotencyKey string
 
 	ExpectedResourceID *string

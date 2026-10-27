@@ -235,7 +235,12 @@ describe.skipIf(!url)('a resource id that names no resource, on the real store',
 
         const rest = await server().fetch(restRequest(operation, input));
         const restBody = await rest.json();
-        if (rest.status !== 404 || !isEqual(restBody, { error: { code: 'resource_not_found' } })) {
+        const restProblem = restBody as { code?: unknown; error?: unknown };
+        if (
+          rest.status !== 404 ||
+          restProblem.code !== 'resource_not_found' ||
+          !isEqual(restProblem.error, { code: 'resource_not_found' })
+        ) {
           failures.push(`${where} over REST: ${rest.status} ${JSON.stringify(restBody)}`);
         }
 

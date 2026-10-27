@@ -43,6 +43,17 @@ versioning.
 
 ### Changed
 
+- REST refusals are RFC 9457 problem details (`application/problem+json`): `type` (a tag URI, one per
+  code), `title`, `status` and `code`, with `error.code` kept so existing clients read them as
+  before, and a `Link: rel="describedby"` header to the error docs. An `overlap` names the
+  `resource_id`, `start` and `end` it refused.
+- The same idempotency key with another request answers REST `422 idempotency_conflict` (was 409),
+  as draft-ietf-httpapi-idempotency-key-header-08 says. MCP and A2A answer the same code.
+- Every REST write that keeps an `idempotency_key` (the agent tools' as well as the application's)
+  takes it as the `Idempotency-Key` header, as a Structured Field String (`"…"`) or bare; a write
+  that requires one and gets neither answers `400 idempotency_key_required`. Keys are kept 30 days
+  for event writes and while the hold could be live for holds; the docs publish the policy.
+
 - The application API's resource has `booking_rules` (`null` when it has none), and
   `SlotlockApplicationBackend` has `setResourceBookingRules`: a backend of your own implements it.
 - The three write tools carry `_meta.ui.visibility: ["model"]`: MCP Apps hosts no longer let a view

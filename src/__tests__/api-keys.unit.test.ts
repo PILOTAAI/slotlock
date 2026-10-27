@@ -251,7 +251,7 @@ describe('API key authentication', () => {
     expect([rest.status, rest.headers.get('retry-after'), await rest.json()]).toEqual([
       503,
       '1',
-      { error: { code: 'server_busy' } },
+      expect.objectContaining({ status: 503, code: 'server_busy', error: { code: 'server_busy' } }),
     ]);
     const mcp = await call('/mcp');
     expect([mcp.status, mcp.headers.get('retry-after'), await mcp.json()]).toEqual([

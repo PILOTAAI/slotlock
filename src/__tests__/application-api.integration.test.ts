@@ -69,7 +69,11 @@ describe.skipIf(!url)('the application API on the real store', () => {
     );
     return { status: response.status, body: (await response.json()) as Record<string, any> };
   };
-  const refused = (status: number, code: string) => ({ status, body: { error: { code } } });
+  // RFC 9457 problem details, which still carry `error.code`.
+  const refused = (status: number, code: string) => ({
+    status,
+    body: expect.objectContaining({ status, code, error: { code } }),
+  });
 
   const day = (offset: number, time = '00:00:00') =>
     `${new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10)}T${time}.000Z`;
@@ -326,14 +330,16 @@ describe.skipIf(!url)('the application API on the real store', () => {
     ).toEqual(refused(409, 'overlap'));
     // Another reference over it overlaps; the same reference at a different revision-1 payload conflicts.
     expect(await call('a', 'PUT', `/v1/reservations/other-${randomUUID()}`, booking)).toEqual(refused(409, 'overlap'));
-    expect((await call('a', 'PUT', path, { ...booking, end: day(23, '09:00:00') })).status).toBe(409);
+    expect(await call('a', 'PUT', path, { ...booking, end: day(23, '09:00:00') })).toEqual(
+      refused(422, 'idempotency_conflict'),
+    );
 
     // Tenant B cannot book on A's resource, and its own reference with the same text is its own.
     expect(await call('b', 'PUT', path, booking)).toEqual(refused(404, 'resource_not_found'));
 
     const moved = await call('a', 'PUT', path, { ...booking, start: day(24, '09:00:00'), end: day(25, '09:00:00'), revision: 2 });
     expect(moved.body).toMatchObject({ reservation: { start: day(24, '09:00:00'), revision: 2 }, replayed: false });
-    expect(await call('a', 'PUT', path, { ...booking, revision: 2 })).toMatchObject({ status: 409 });
+    expect(await call('a', 'PUT', path, { ...booking, revision: 2 })).toEqual(refused(422, 'idempotency_conflict'));
     expect(await call('a', 'PUT', path, { ...booking, revision: 9 })).toMatchObject({ status: 409 });
     // The old window is free again.
     expect(
@@ -438,7 +444,7 @@ describe.skipIf(!url)('the application API on the real store', () => {
     // The retry answers the same hold rather than overlapping it; another body under the key is refused.
     expect(await call('a', 'POST', '/v1/holds', first, key)).toEqual(held);
     expect(await call('a', 'POST', '/v1/holds', { ...first, ttl_seconds: 900 }, key)).toEqual(
-      refused(409, 'idempotency_conflict'),
+      refused(422, 'idempotency_conflict'),
     );
     // Another key's same text is its own: here it overlaps the first hold.
     expect(await call('a', 'POST', '/v1/holds', first, { headers: { 'Idempotency-Key': 'other-key' } })).toEqual(

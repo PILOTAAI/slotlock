@@ -666,11 +666,11 @@ class Operations(Transport):
         a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key
         (the Idempotency-Key header or idempotency_key), a retry answers the hold the first
         request made, until that hold would have expired, is released or is confirmed; the same
-        key with another request is 409 idempotency_conflict.
+        key with another request is 422 idempotency_conflict.
 
         Args:
             idempotency_key: A retry identity, also accepted as the Idempotency-Key header: the
-            same key with the same request answers what the first did; with another request, 409
+            same key with the same request answers what the first did; with another request, 422
             idempotency_conflict.
         """
         values: dict[str, Any] = {
@@ -885,7 +885,7 @@ class Operations(Transport):
 
         Args:
             idempotency_key: A retry identity, also accepted as the Idempotency-Key header: the
-            same key with the same request answers what the first did; with another request, 409
+            same key with the same request answers what the first did; with another request, 422
             idempotency_conflict.
         """
         values: dict[str, Any] = {

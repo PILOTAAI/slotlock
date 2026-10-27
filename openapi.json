@@ -3,7 +3,7 @@
   "info": {
     "title": "Slotlock",
     "version": "v1",
-    "description": "Calendars agents cannot double-book. The \"Agent tools\" operations are the Slotlock MCP tools; the \"Application\" operations (resources, bookable hours, holds, reservations, coverage and maintenance) need an API key with the admin scope. An error is `{\"error\":{\"code\":…}}`, and a write that waits for a person answers 428 `confirmation_required`."
+    "description": "Calendars agents cannot double-book. The \"Agent tools\" operations are the Slotlock MCP tools; the \"Application\" operations (resources, bookable hours, holds, reservations, coverage and maintenance) need an API key with the admin scope. An error is RFC 9457 problem details (`application/problem+json`) whose `code` names it, also as `{\"error\":{\"code\":…}}`; an overlap names the `resource_id`, `start` and `end` it refused. A write that waits for a person answers 428 `confirmation_required`."
   },
   "servers": [
     {
@@ -920,6 +920,19 @@
             }
           }
         },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Stands in for idempotency_key: a Structured Field String (`\"8e03978e-40d5-43e8-bc93-6894a57f9324\"`, draft-ietf-httpapi-idempotency-key-header-08) or the bare key; when both are sent they must be equal. A retry with the same key and request answers what the first did; the same key with another request is 422 idempotency_conflict. An event write keeps its key for 30 days (maintenance removes it after that), a hold until the hold would have expired, is released or is confirmed. Where the key is required and neither is sent: 400 idempotency_key_required.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 502
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "The operation ran.",
@@ -1014,6 +1027,9 @@
             "$ref": "#/components/responses/Error"
           },
           "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
             "$ref": "#/components/responses/Error"
           },
           "428": {
@@ -1706,6 +1722,19 @@
             }
           }
         },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Stands in for idempotency_key: a Structured Field String (`\"8e03978e-40d5-43e8-bc93-6894a57f9324\"`, draft-ietf-httpapi-idempotency-key-header-08) or the bare key; when both are sent they must be equal. A retry with the same key and request answers what the first did; the same key with another request is 422 idempotency_conflict. An event write keeps its key for 30 days (maintenance removes it after that), a hold until the hold would have expired, is released or is confirmed. Where the key is required and neither is sent: 400 idempotency_key_required.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 502
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "The operation ran.",
@@ -2028,6 +2057,9 @@
             "$ref": "#/components/responses/Error"
           },
           "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
             "$ref": "#/components/responses/Error"
           },
           "428": {
@@ -2643,6 +2675,17 @@
               "minLength": 1,
               "maxLength": 500
             }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Stands in for idempotency_key: a Structured Field String (`\"8e03978e-40d5-43e8-bc93-6894a57f9324\"`, draft-ietf-httpapi-idempotency-key-header-08) or the bare key; when both are sent they must be equal. A retry with the same key and request answers what the first did; the same key with another request is 422 idempotency_conflict. An event write keeps its key for 30 days (maintenance removes it after that), a hold until the hold would have expired, is released or is confirmed. Where the key is required and neither is sent: 400 idempotency_key_required.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 502
+            }
           }
         ],
         "responses": {
@@ -2969,6 +3012,9 @@
           "409": {
             "$ref": "#/components/responses/Error"
           },
+          "422": {
+            "$ref": "#/components/responses/Error"
+          },
           "428": {
             "$ref": "#/components/responses/Error"
           },
@@ -3017,6 +3063,17 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 200
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Stands in for idempotency_key: a Structured Field String (`\"8e03978e-40d5-43e8-bc93-6894a57f9324\"`, draft-ietf-httpapi-idempotency-key-header-08) or the bare key; when both are sent they must be equal. A retry with the same key and request answers what the first did; the same key with another request is 422 idempotency_conflict. An event write keeps its key for 30 days (maintenance removes it after that), a hold until the hold would have expired, is released or is confirmed. Where the key is required and neither is sent: 400 idempotency_key_required.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 502
             }
           }
         ],
@@ -3070,6 +3127,9 @@
             "$ref": "#/components/responses/Error"
           },
           "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
             "$ref": "#/components/responses/Error"
           },
           "428": {
@@ -4431,7 +4491,7 @@
       "post": {
         "operationId": "slotlock_acquire_hold",
         "summary": "Hold time",
-        "description": "Occupy a window without booking it, for example while a customer pays. The hold blocks every other booking until it expires (the database clock, ttl_seconds from now), is confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the hold the first request made, until that hold would have expired, is released or is confirmed; the same key with another request is 409 idempotency_conflict.",
+        "description": "Occupy a window without booking it, for example while a customer pays. The hold blocks every other booking until it expires (the database clock, ttl_seconds from now), is confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the hold the first request made, until that hold would have expired, is released or is confirmed; the same key with another request is 422 idempotency_conflict.",
         "tags": [
           "Application"
         ],
@@ -4470,7 +4530,7 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 500,
-                    "description": "A retry identity, also accepted as the Idempotency-Key header: the same key with the same request answers what the first did; with another request, 409 idempotency_conflict."
+                    "description": "A retry identity, also accepted as the Idempotency-Key header: the same key with the same request answers what the first did; with another request, 422 idempotency_conflict."
                   },
                   "buffer_after_minutes": {
                     "type": "integer",
@@ -4494,11 +4554,11 @@
             "name": "Idempotency-Key",
             "in": "header",
             "required": false,
-            "description": "Stands in for idempotency_key, where HTTP clients put a retry identity; when both are sent they must be equal.",
+            "description": "Stands in for idempotency_key: a Structured Field String (`\"8e03978e-40d5-43e8-bc93-6894a57f9324\"`, draft-ietf-httpapi-idempotency-key-header-08) or the bare key; when both are sent they must be equal. A retry with the same key and request answers what the first did; the same key with another request is 422 idempotency_conflict. An event write keeps its key for 30 days (maintenance removes it after that), a hold until the hold would have expired, is released or is confirmed. Where the key is required and neither is sent: 400 idempotency_key_required.",
             "schema": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 500
+              "maxLength": 502
             }
           }
         ],
@@ -4579,6 +4639,9 @@
             "$ref": "#/components/responses/Error"
           },
           "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
             "$ref": "#/components/responses/Error"
           },
           "429": {
@@ -6528,18 +6591,18 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 500,
-              "description": "A retry identity, also accepted as the Idempotency-Key header: the same key with the same request answers what the first did; with another request, 409 idempotency_conflict."
+              "description": "A retry identity, also accepted as the Idempotency-Key header: the same key with the same request answers what the first did; with another request, 422 idempotency_conflict."
             }
           },
           {
             "name": "Idempotency-Key",
             "in": "header",
             "required": false,
-            "description": "Stands in for idempotency_key, where HTTP clients put a retry identity; when both are sent they must be equal.",
+            "description": "Stands in for idempotency_key: a Structured Field String (`\"8e03978e-40d5-43e8-bc93-6894a57f9324\"`, draft-ietf-httpapi-idempotency-key-header-08) or the bare key; when both are sent they must be equal. A retry with the same key and request answers what the first did; the same key with another request is 422 idempotency_conflict. An event write keeps its key for 30 days (maintenance removes it after that), a hold until the hold would have expired, is released or is confirmed. Where the key is required and neither is sent: 400 idempotency_key_required.",
             "schema": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 500
+              "maxLength": 502
             }
           }
         ],
@@ -6593,6 +6656,9 @@
             "$ref": "#/components/responses/Error"
           },
           "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
             "$ref": "#/components/responses/Error"
           },
           "429": {
@@ -6858,10 +6924,41 @@
     "schemas": {
       "Error": {
         "type": "object",
+        "description": "RFC 9457 problem details.",
         "required": [
+          "type",
+          "title",
+          "status",
+          "code",
           "error"
         ],
         "properties": {
+          "type": {
+            "type": "string",
+            "description": "The problem type: a tag URI, one per code."
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "code": {
+            "type": "string",
+            "description": "Why the operation did not run."
+          },
+          "resource_id": {
+            "type": "string",
+            "description": "An overlap: the resource it refused."
+          },
+          "start": {
+            "type": "string",
+            "description": "An overlap: the start it refused."
+          },
+          "end": {
+            "type": "string",
+            "description": "An overlap: the end it refused."
+          },
           "error": {
             "type": "object",
             "required": [
@@ -6879,8 +6976,16 @@
     "responses": {
       "Error": {
         "description": "The operation did not run; `code` says why.",
+        "headers": {
+          "Link": {
+            "description": "Where the error codes are documented (`rel=\"describedby\"`).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
         "content": {
-          "application/json": {
+          "application/problem+json": {
             "schema": {
               "$ref": "#/components/schemas/Error"
             }

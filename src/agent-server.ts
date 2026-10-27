@@ -43,6 +43,9 @@ import {
   SLOTLOCK_REST_ROUTES,
   type SlotlockRestRoute,
   matchSlotlockRestRoute,
+  parseIdempotencyKeyHeader,
+  SLOTLOCK_PROBLEM_DOCS,
+  slotlockProblem,
   restInputFromBody,
   restQueryInput,
   slotlockOpenApiDocument,
@@ -1205,6 +1208,18 @@ export function slotlockAgentTools() {
           : { visibility: ['model'] as const },
     },
   }));
+}
+
+/** The resource and interval a refused write asked for, as an overlap's problem details name them. */
+function refusedInterval(input: Record<string, unknown>): Record<string, string> {
+  const named: Record<string, string> = {};
+  const fields: [string, unknown][] = [
+    ['resource_id', input.resource_id],
+    ['start', input.starts_at ?? input.start],
+    ['end', input.ends_at ?? input.end],
+  ];
+  for (const [name, value] of fields) if (typeof value === 'string') named[name] = value;
+  return named;
 }
 
 function json(status: number, body: unknown, extraHeaders: Record<string, string> = {}): Response {
@@ -3486,8 +3501,18 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
    * for, so a guarded write answers 428 `confirmation_required`.
    */
   async function restCall(request: Request, path: string, url: URL): Promise<Response> {
-    const refuse = (status: number, code: string, headers: Record<string, string> = {}) =>
-      json(status, { error: { code } }, headers);
+    // Every refusal is RFC 9457 problem details, still carrying `error.code`.
+    const refuse = (
+      status: number,
+      code: string,
+      headers: Record<string, string> = {},
+      extensions: Record<string, unknown> = {},
+    ) =>
+      json(status, slotlockProblem(status, code, extensions), {
+        'Content-Type': 'application/problem+json',
+        Link: `<${SLOTLOCK_PROBLEM_DOCS}>; rel="describedby"; type="text/html"`,
+        ...headers,
+      });
     if (path === '/openapi.json') {
       return request.method === 'GET'
         ? json(200, openApi)
@@ -3565,23 +3590,29 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     if (Object.keys(params).some((name) => Object.hasOwn(given, name))) {
       return refuseCall(400, 'invalid_arguments');
     }
-    // An application write's retry identity may come as the Idempotency-Key header, where HTTP
-    // clients put it, as well as its `idempotency_key` argument. On an operation that keeps none it
-    // is refused rather than ignored: a key that was dropped would promise a replay it never gives.
-    // The agent tools take theirs as an argument alone, as they always have.
+    // A write's retry identity may come as the Idempotency-Key header (a Structured Field String,
+    // draft-ietf-httpapi-idempotency-key-header-08), where HTTP clients put it, as well as its
+    // `idempotency_key` argument. On an operation that keeps none it is refused rather than
+    // ignored: a key that was dropped would promise a replay it never gives.
+    const inputSchema = restInputSchemas.get(route.operation) as
+      | { properties?: Record<string, unknown>; required?: readonly string[] }
+      | undefined;
     const idempotencyHeader = request.headers.get('idempotency-key');
-    if (idempotencyHeader !== null && isSlotlockApplicationOperation(route.operation)) {
-      const fields = (restInputSchemas.get(route.operation)?.properties ?? {}) as Record<
-        string,
-        unknown
-      >;
-      if (!Object.hasOwn(fields, 'idempotency_key')) {
+    if (idempotencyHeader !== null) {
+      if (!Object.hasOwn(inputSchema?.properties ?? {}, 'idempotency_key')) {
         return refuseCall(400, 'idempotency_key_not_supported');
       }
-      if (Object.hasOwn(given, 'idempotency_key') && given.idempotency_key !== idempotencyHeader) {
+      const key = parseIdempotencyKeyHeader(idempotencyHeader);
+      if (key === null) return refuseCall(400, 'invalid_idempotency_key');
+      if (Object.hasOwn(given, 'idempotency_key') && given.idempotency_key !== key) {
         return refuseCall(400, 'invalid_arguments');
       }
-      given = { ...given, idempotency_key: idempotencyHeader };
+      given = { ...given, idempotency_key: key };
+    } else if (
+      inputSchema?.required?.includes('idempotency_key') &&
+      !Object.hasOwn(given, 'idempotency_key')
+    ) {
+      return refuseCall(400, 'idempotency_key_required');
     }
     const outcome = isSlotlockApplicationOperation(route.operation)
       ? await invokeApplicationOperation(
@@ -3602,7 +3633,11 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     const status = outcome.ok ? 200 : internal ? 500 : outcome.status;
     report(status);
     if (outcome.ok) return json(200, outcome.data);
-    return refuse(status, internal ? 'internal_error' : outcome.code);
+    if (internal) return refuse(status, 'internal_error');
+    // The same key with another request is 422 (the Idempotency-Key draft); on MCP and A2A, where
+    // no status is seen, it is the same code.
+    if (outcome.code === 'idempotency_conflict') return refuse(422, outcome.code);
+    return refuse(status, outcome.code, {}, outcome.code === 'overlap' ? refusedInterval(given) : {});
   }
 
   return {

@@ -79,6 +79,7 @@ const STATUS = {
   403: 'The key lacks the scope this route needs',
   404: "Not this tenant's, or gone",
   409: 'A conflict with what is stored: an overlap, a stale revision, a resource in use',
+  422: 'The idempotency key was used with another request (`idempotency_conflict`)',
   428: 'The server asks a person to confirm this write first (`confirmation_required`)',
   429: 'Rate limited: retry after `Retry-After` seconds',
 };
@@ -392,7 +393,7 @@ function renderPage(operation, { order, group, toolNames }) {
     '',
     '## Errors',
     '',
-    'An error answers `{"error":{"code":"…"}}` with one of these statuses. The [overview](/docs/api/#errors) lists what each means.',
+    'An error answers an RFC 9457 problem with one of these statuses; its `code` says why. The [overview](/docs/api/#errors) lists what each means.',
     '',
     '| Status | When |',
     '| --- | --- |',
@@ -462,22 +463,43 @@ curl "$SLOTLOCK_URL/v1/resources" -H "Authorization: Bearer $SLOTLOCK_API_KEY"
 - An event's own times are \`starts_at\` and \`ends_at\`; a window to search or list is \`start\` and
   \`end\`. A wrong field name answers \`400 invalid_arguments\`, so check each route's page.
 - Lists page with \`limit\` (up to 100) and \`cursor\`, the \`next_cursor\` of the page before.
-- Application writes are safe to retry: a repeated reservation answers \`replayed: true\` and a
-  confirmed hold confirms again. Holds and tenant-event cancellations take an \`Idempotency-Key\`
-  header; other routes refuse it.
+- Writes are safe to retry: a repeated reservation answers \`replayed: true\` and a confirmed hold
+  confirms again. A write with an \`idempotency_key\` also takes it as the \`Idempotency-Key\`
+  header, quoted (\`"booking-BK-42"\`) or bare; other routes refuse it. A write that needs a key
+  and gets none answers \`400 idempotency_key_required\`, and the same key with another request
+  \`422 idempotency_conflict\`. An event write's key is kept 30 days, a hold's while the hold could
+  be live.
 - There are no CORS headers: call the API from a server, not a browser.
 
 ## Errors
 
-An error is \`{"error":{"code":"…"}}\` with an HTTP status. Act on the \`code\`:
+An error is an [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem
+(\`application/problem+json\`) with an HTTP status:
+
+\`\`\`json
+{
+  "type": "tag:slotlock.pylota.io,2026:problem:overlap",
+  "title": "The time is taken",
+  "status": 409,
+  "code": "overlap",
+  "resource_id": "0f8b6c1e-2d4a-4c7e-9b1a-3e5f7a9c2d4b",
+  "start": "2027-03-02T09:00:00Z",
+  "end": "2027-03-02T10:00:00Z",
+  "error": { "code": "overlap" }
+}
+\`\`\`
+
+\`type\` names the problem, one per \`code\`; \`error.code\` repeats the code for clients written
+before. Act on the \`code\`:
 
 | Status | Means | Common codes |
 | --- | --- | --- |
-| \`400\` | The request is malformed or out of bounds | \`invalid_arguments\`, \`calendar_work_limit\` |
+| \`400\` | The request is malformed or out of bounds | \`invalid_arguments\`, \`calendar_work_limit\`, \`idempotency_key_required\` |
 | \`401\` | No key, or a revoked or expired one | \`authentication_required\` |
 | \`403\` | The key lacks the route's scope | \`forbidden\` |
 | \`404\` | Not this tenant's, or gone | \`resource_not_found\`, \`event_not_found\`, \`hold_not_found\`, \`reservation_not_found\`, or \`not_found\`: act on the status |
-| \`409\` | It conflicts with what is stored | \`overlap\`, \`stale_revision\`, \`resource_in_use\`, \`idempotency_conflict\` |
+| \`409\` | It conflicts with what is stored | \`overlap\`, \`stale_revision\`, \`resource_in_use\` |
+| \`422\` | An idempotency key reused with another request | \`idempotency_conflict\` |
 | \`428\` | A person must confirm this write first | \`confirmation_required\` |
 | \`429\` | Rate limited, or an agent's own quota is full | \`rate_limited\` (retry after the \`Retry-After\` header's seconds), \`owner_event_quota_exceeded\`, \`owner_command_quota_exceeded\` |
 
