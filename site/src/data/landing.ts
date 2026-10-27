@@ -26,6 +26,15 @@ export const meta = {
     'Slotlock is an open-source calendar for AI agents. Each resource is its own calendar, holds expire on their own, and PostgreSQL refuses any overlapping write and returns the conflict as data.',
 };
 
+export interface InstallTarget {
+  id: string;
+  label: string;
+  command: string;
+  /** False for a line that goes in a build file, not a terminal. */
+  shell?: false;
+  note: string;
+}
+
 export const hero = {
   // The site deploys when a release merges, but npm serves that version only once a maintainer
   // approves it, so the pill names the version and claims nothing about where it is published.
@@ -54,7 +63,39 @@ export const hero = {
       command: `npm install slotlock@${facts.version} postgres`,
       note: `Then \`npx slotlock migrate\` and \`npx slotlock serve\`, with two database roles as the README shows.${knownIssues ? ' Read the [known issues](/docs/known-issues/) first.' : ''}`,
     },
-  ],
+    // Clients for a running server; versions match the release (clients/README.md).
+    {
+      id: 'python',
+      label: 'Python',
+      command: `pip install slotlock==${facts.version}`,
+      note: 'Python 3.10+, against a running server. [Client guide](/docs/clients/#python)',
+    },
+    {
+      id: 'go',
+      label: 'Go',
+      command: `go get github.com/PILOTAAI/slotlock/clients/go@v${facts.version}`,
+      note: 'Go 1.22+, against a running server. [Client guide](/docs/clients/#go)',
+    },
+    {
+      id: 'rust',
+      label: 'Rust',
+      command: `cargo add slotlock@${facts.version}`,
+      note: 'Rust 1.85+, against a running server. [Client guide](/docs/clients/#rust)',
+    },
+    {
+      id: 'java',
+      label: 'Java',
+      command: `implementation("io.pylota:slotlock:${facts.version}")`,
+      shell: false,
+      note: 'Gradle; Maven takes the same coordinates. Java 17+. [Client guide](/docs/clients/#java)',
+    },
+    {
+      id: 'dotnet',
+      label: '.NET',
+      command: `dotnet add package Slotlock.Client -v ${facts.version}`,
+      note: '.NET 8 or 10, against a running server. [Client guide](/docs/clients/#net)',
+    },
+  ] satisfies InstallTarget[],
 };
 
 /** Hours on the hero axis are local wall time of each resource, 08:00 to 18:00. */
