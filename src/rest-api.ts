@@ -15,17 +15,38 @@ export interface SlotlockRestRoute<Operation extends string = SlotlockAgentOpera
   /** Relative to the server's base URL; `{name}` is one path segment. */
   path: string;
   operation: Operation;
+  /**
+   * The store refusals the route can answer besides the ones every route can: 404 for a record
+   * that is missing or another tenant's, 409 for a conflict with what is stored (an overlap, a
+   * stale revision). The OpenAPI document declares them, so a generated client types them.
+   */
+  refusals?: readonly (404 | 409)[];
 }
 
 export const SLOTLOCK_REST_ROUTES: readonly SlotlockRestRoute[] = Object.freeze([
   { method: 'GET', path: '/v1/resources', operation: 'slotlock_list_resources' },
-  { method: 'GET', path: '/v1/free-busy', operation: 'slotlock_get_free_busy' },
-  { method: 'GET', path: '/v1/next-available', operation: 'slotlock_find_next_available' },
-  { method: 'GET', path: '/v1/events', operation: 'slotlock_list_events' },
-  { method: 'POST', path: '/v1/events', operation: 'slotlock_create_event' },
-  { method: 'GET', path: '/v1/events/{event_id}', operation: 'slotlock_get_event' },
-  { method: 'PATCH', path: '/v1/events/{event_id}', operation: 'slotlock_update_event' },
-  { method: 'DELETE', path: '/v1/events/{event_id}', operation: 'slotlock_delete_event' },
+  { method: 'GET', path: '/v1/free-busy', operation: 'slotlock_get_free_busy', refusals: [404] },
+  {
+    method: 'GET',
+    path: '/v1/next-available',
+    operation: 'slotlock_find_next_available',
+    refusals: [404],
+  },
+  { method: 'GET', path: '/v1/events', operation: 'slotlock_list_events', refusals: [404] },
+  { method: 'POST', path: '/v1/events', operation: 'slotlock_create_event', refusals: [404, 409] },
+  { method: 'GET', path: '/v1/events/{event_id}', operation: 'slotlock_get_event', refusals: [404] },
+  {
+    method: 'PATCH',
+    path: '/v1/events/{event_id}',
+    operation: 'slotlock_update_event',
+    refusals: [404, 409],
+  },
+  {
+    method: 'DELETE',
+    path: '/v1/events/{event_id}',
+    operation: 'slotlock_delete_event',
+    refusals: [404, 409],
+  },
 ]);
 
 /** The application operations' routes, served when the server has an application backend. */
@@ -250,6 +271,7 @@ export function slotlockOpenApiDocument(args: {
           '400': ERROR_RESPONSE,
           '401': ERROR_RESPONSE,
           '403': ERROR_RESPONSE,
+          ...Object.fromEntries((route.refusals ?? []).map((status) => [status, ERROR_RESPONSE])),
           ...(route.method === 'GET' ? {} : { '428': ERROR_RESPONSE }),
           '429': ERROR_RESPONSE,
           default: ERROR_RESPONSE,

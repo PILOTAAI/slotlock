@@ -133,5 +133,17 @@ describe.skipIf(!url)('the REST API on the real store', () => {
     );
     expect(deleted.status).toBe(200);
     expect((await call('a', 'GET', path)).status).toBe(404);
+
+    // Every status seen above is one the server's own OpenAPI document declares for that route, so
+    // a generated client gets a typed error for it rather than falling to `default`.
+    const document = (await (await call('a', 'GET', '/openapi.json')).json()) as {
+      paths: Record<string, Record<string, { responses: Record<string, unknown> }>>;
+    };
+    const declared = (method: string, route: string) =>
+      Object.keys(document.paths[route]?.[method]?.responses ?? {});
+    expect(declared('post', '/v1/events')).toContain('409');
+    for (const method of ['get', 'patch', 'delete']) {
+      expect(declared(method, '/v1/events/{event_id}'), method).toContain('404');
+    }
   });
 });
