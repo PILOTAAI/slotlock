@@ -1206,6 +1206,56 @@ BEGIN
 END
 $slotlock_outbox_calendar_event$;
 
+-- Time zone rules change (tzdata): an event is kept as the wall-clock time it was booked for in its
+-- zone as well as the instant, so maintenance can find a future one-off event whose wall time now
+-- falls at another instant. PostgreSQL's own tzdata resolves both. A zone it does not know gives
+-- NULL rather than an error, and such an event is left alone.
+CREATE OR REPLACE FUNCTION slotlock.zoned_wall(instant timestamptz, zone text)
+RETURNS timestamp LANGUAGE plpgsql STABLE SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_zoned_wall$
+BEGIN
+  RETURN instant AT TIME ZONE zone;
+EXCEPTION WHEN OTHERS THEN
+  RETURN NULL;
+END
+$slotlock_zoned_wall$;
+CREATE OR REPLACE FUNCTION slotlock.zoned_instant(wall timestamp, zone text)
+RETURNS timestamptz LANGUAGE plpgsql STABLE SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_zoned_instant$
+BEGIN
+  RETURN wall AT TIME ZONE zone;
+EXCEPTION WHEN OTHERS THEN
+  RETURN NULL;
+END
+$slotlock_zoned_instant$;
+ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS wall_starts_at timestamp;
+ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS wall_ends_at timestamp;
+-- Set when a shift was reported, so it is reported once; any change of the event's time clears it.
+ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS zone_shift_reported_at timestamptz;
+CREATE OR REPLACE FUNCTION slotlock.calendar_event_wall_time()
+RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_calendar_event_wall_time$
+BEGIN
+  IF TG_OP = 'INSERT'
+     OR NEW.starts_at IS DISTINCT FROM OLD.starts_at OR NEW.ends_at IS DISTINCT FROM OLD.ends_at
+     OR NEW.timezone IS DISTINCT FROM OLD.timezone THEN
+    NEW.wall_starts_at := slotlock.zoned_wall(NEW.starts_at, NEW.timezone);
+    NEW.wall_ends_at := slotlock.zoned_wall(NEW.ends_at, NEW.timezone);
+    NEW.zone_shift_reported_at := NULL;
+  END IF;
+  RETURN NEW;
+END
+$slotlock_calendar_event_wall_time$;
+DROP TRIGGER IF EXISTS slotlock_calendar_event_wall_time ON slotlock.calendar_events;
+CREATE TRIGGER slotlock_calendar_event_wall_time
+  BEFORE INSERT OR UPDATE ON slotlock.calendar_events
+  FOR EACH ROW EXECUTE FUNCTION slotlock.calendar_event_wall_time();
+-- Events written before this release: their wall time as the rules read now.
+UPDATE slotlock.calendar_events
+   SET wall_starts_at = slotlock.zoned_wall(starts_at, timezone),
+       wall_ends_at = slotlock.zoned_wall(ends_at, timezone)
+ WHERE wall_starts_at IS NULL AND ends_at > now();
+
 DROP TRIGGER IF EXISTS slotlock_outbox_reservation_change ON slotlock.reservations;
 CREATE TRIGGER slotlock_outbox_reservation_change
   AFTER INSERT OR UPDATE OR DELETE ON slotlock.reservations

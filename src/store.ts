@@ -2278,6 +2278,19 @@ export interface SlotlockStore extends SlotlockEventFeed {
    * tenant the tenant and its own id as reference, as the migration does. Call until `hasMore` is
    * false.
    */
+  /**
+   * Time zone rules that changed since an event was booked (a new tzdata): a future one-off event
+   * whose wall-clock time in its zone now falls at another instant. Each is reported once on the
+   * feed (`event.timezone_shifted`, with the instant it has and the one its wall time now means).
+   * With `move`, it is moved there instead (a new revision, `event.updated` naming `slotlock:tzdata`),
+   * unless that overlaps another booking: then it stays and `event.timezone_conflict` reports it,
+   * for a person or an agent to decide. Up to `limit` (1-1,000, default 100) events a call.
+   */
+  followZoneRules(params: {
+    tenantRef: string;
+    move?: boolean;
+    limit?: number;
+  }): Promise<{ shifted: number; moved: number; conflicts: number }>;
   pruneBookingRetention(params: {
     tenantRef: string;
     /** Rows per class per call, 1-1000. Defaults to 100. */
@@ -4940,6 +4953,96 @@ function buildSlotlockStore(
           payloadHash,
         });
       });
+    },
+
+    async followZoneRules(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const limit = params.limit ?? 100;
+      if (!(Number.isSafeInteger(limit) && limit >= 1 && limit <= 1_000)) {
+        throw new RangeError('Slotlock zone-rule batch must be 1-1,000 events');
+      }
+      const shifted = await sql<{
+        id: string;
+        resource_id: string;
+        transparency: CalendarEventContent['transparency'];
+        revision: string | number;
+        buffer: string | number;
+        starts_at: Date;
+        ends_at: Date;
+        moved_start: Date;
+        moved_end: Date;
+      }[]>`
+        SELECT event.id, event.resource_id, event.transparency, event.revision, event.starts_at, event.ends_at,
+               slotlock.zoned_instant(event.wall_starts_at, event.timezone) AS moved_start,
+               slotlock.zoned_instant(event.wall_ends_at, event.timezone) AS moved_end,
+               COALESCE((SELECT max(booking.buffer_after_ms) FROM slotlock.reservations booking
+                          WHERE booking.calendar_event_id = event.id), 0) AS buffer
+          FROM slotlock.calendar_events event
+         WHERE event.tenant_ref = ${params.tenantRef}
+           AND event.recurrence_rule IS NULL
+           AND event.starts_at > now()
+           AND event.zone_shift_reported_at IS NULL
+           AND slotlock.zoned_instant(event.wall_starts_at, event.timezone) IS NOT NULL
+           AND slotlock.zoned_instant(event.wall_ends_at, event.timezone) IS NOT NULL
+           AND (slotlock.zoned_instant(event.wall_starts_at, event.timezone) <> event.starts_at
+                OR slotlock.zoned_instant(event.wall_ends_at, event.timezone) <> event.ends_at)
+         ORDER BY event.starts_at, event.id
+         LIMIT ${limit}
+         FOR UPDATE OF event SKIP LOCKED`;
+      let moved = 0;
+      let conflicts = 0;
+      const report = async (event: (typeof shifted)[number], type: 'event.timezone_shifted' | 'event.timezone_conflict') => {
+        await sql`UPDATE slotlock.calendar_events SET zone_shift_reported_at = now() WHERE id = ${event.id}`;
+        await sql`
+          INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+          VALUES (${params.tenantRef}, ${event.resource_id}, ${type}, ${event.id},
+                  ${sql.json({
+                    id: event.id,
+                    resource_id: event.resource_id,
+                    start: event.starts_at.toISOString(),
+                    end: event.ends_at.toISOString(),
+                    zone_start: event.moved_start.toISOString(),
+                    zone_end: event.moved_end.toISOString(),
+                  })}, 'slotlock:tzdata')`;
+      };
+      for (const event of shifted) {
+        if (!params.move) {
+          await report(event, 'event.timezone_shifted');
+          continue;
+        }
+        try {
+          await inTransaction(sql, async (tx) => {
+            const revision = Number(event.revision) + 1;
+            await tx`SELECT set_config('slotlock.actor', 'slotlock:tzdata', true)`;
+            await tx`
+              UPDATE slotlock.calendar_events
+                 SET starts_at = ${event.moved_start}, ends_at = ${event.moved_end},
+                     materialized_starts_at = ${event.moved_start}, materialized_ends_at = ${event.moved_end},
+                     revision = ${revision}, updated_at = now()
+               WHERE id = ${event.id}`;
+            await replaceCalendarEventOccurrences(tx, {
+              tenantRef: params.tenantRef,
+              eventId: event.id,
+              resourceId: event.resource_id,
+              event: { transparency: event.transparency } as CalendarEventContent,
+              occurrences: [
+                { recurrenceId: event.moved_start.toISOString(), start: event.moved_start, end: event.moved_end },
+              ],
+              revision,
+              bufferAfterMs: Number(event.buffer),
+            });
+          });
+          moved++;
+        } catch (error) {
+          if (pgCode(error) !== EXCLUSION_VIOLATION) throw error;
+          // It stays where it was; whoever owns it decides.
+          await report(event, 'event.timezone_conflict');
+          conflicts++;
+        }
+      }
+      return { shifted: shifted.length, moved, conflicts };
     },
 
     async pruneBookingRetention(params) {

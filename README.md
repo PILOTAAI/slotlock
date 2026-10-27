@@ -1118,6 +1118,13 @@ not commit. A change carries ids, times and states, never titles, descriptions o
   `GET /v1/tenant/events/{id}/history`, newest first, paged by `before`. In the library, pass
   `actor` to `withTenant` and read `listHistory`. It is kept as long as the feed and erased with
   the tenant.
+- When time zone rules change (a new tzdata), a booking's instant and the wall time it was made for
+  part: Winnipeg's 09:00 is no longer the instant stored. Slotlock keeps both, and maintenance finds
+  future one-off events whose wall time moved: it reports each once (`event.timezone_shifted`, with
+  the instant it has and the one its wall time now means). The library's `followZoneRules` option
+  to `maintainSlotlockTenant` moves them instead, as a new revision, unless that overlaps another
+  booking (`event.timezone_conflict`; it stays, for a person or an agent to decide). `/healthz`
+  reports the `tzdata` the server runs.
 - `slotlock serve` delivers (`SLOTLOCK_WEBHOOKS`): never to an address on a private network, which
   it checks when it connects, and following no redirect. `private` allows those, for testing.
 - In the library: `listChanges`, `createWebhookEndpoint` and the rest are store methods, and

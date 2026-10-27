@@ -481,6 +481,7 @@ describe.skipIf(!url)('Slotlock README examples (real Postgres)', () => {
       occurrenceCount: 8,
     });
     expect(await maintainTenant(app.store, tenantRef)).toEqual({
+      zoneShifts: 0,
       extended: 1,
       conflicts: 0,
       refused: 0,
