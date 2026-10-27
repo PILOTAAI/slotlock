@@ -297,11 +297,12 @@ await check4(scope);
 
 // The raw answers go to stdout, for the run's record (SPIKE_RAW=1 node run.mjs > raw.json); the driver
 // writes no file of what the Worker sent.
+// exitCode, never exit(): a pipe may still hold output, and exit() would cut the JSON off.
 if (process.env.SPIKE_RAW === '1') {
   console.log(JSON.stringify({ run, workerUrl, rows, observations, raw }, null, 2));
-  process.exit(rows.every((row) => row.pass) ? 0 : 1);
+} else {
+  console.log('\n| Check | Result | Evidence |\n| --- | --- | --- |');
+  for (const row of rows) console.log(`| ${row.check} | ${row.pass ? 'pass' : '**fail**'} | ${row.evidence} |`);
+  for (const line of observations) console.log(`\n${line}`);
 }
-console.log('\n| Check | Result | Evidence |\n| --- | --- | --- |');
-for (const row of rows) console.log(`| ${row.check} | ${row.pass ? 'pass' : '**fail**'} | ${row.evidence} |`);
-for (const line of observations) console.log(`\n${line}`);
 process.exitCode = rows.every((row) => row.pass) ? 0 : 1;
