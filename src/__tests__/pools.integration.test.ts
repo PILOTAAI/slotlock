@@ -69,7 +69,9 @@ describe.skipIf(!url)('pools (real Postgres)', () => {
     const refused = outcomes.find((outcome) => outcome.status === 'rejected') as PromiseRejectedResult;
     expect(refused.reason).toMatchObject({ code: 'pool_full', status: 409 });
     expect((await store.listPools({ tenantRef })).find(({ pool }) => pool === 'van')).toEqual({ pool: 'van', capacity: 5 });
-  });
+    // The racers queue on each other by design (each waits for the one ahead to commit); on a
+    // shared CI runner, under the other suites' load, that takes longer than vitest's 5 s.
+  }, 30_000);
 
   it('takes the first member free and allowed, and replays to the same one', async () => {
     const rooms = await members('room', 3);
