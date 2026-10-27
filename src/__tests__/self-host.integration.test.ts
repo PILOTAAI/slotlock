@@ -395,11 +395,14 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       expect(toolNames.sort()).toEqual([
         'slotlock_create_event',
         'slotlock_delete_event',
+        'slotlock_find_available_slots',
         'slotlock_find_next_available',
         'slotlock_get_event',
         'slotlock_get_free_busy',
+        'slotlock_hold_slots',
         'slotlock_list_events',
         'slotlock_list_resources',
+        'slotlock_release_slots',
         'slotlock_update_event',
       ]);
 

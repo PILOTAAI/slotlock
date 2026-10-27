@@ -16,6 +16,9 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_create_resource", new Operation("POST", "/v1/resources", List.of(), List.of())),
           Map.entry("slotlock_get_free_busy", new Operation("GET", "/v1/free-busy", List.of(), List.of("resource_ids", "start", "end"))),
           Map.entry("slotlock_find_next_available", new Operation("GET", "/v1/next-available", List.of(), List.of("resource_ids", "start", "end", "duration_minutes"))),
+          Map.entry("slotlock_find_available_slots", new Operation("GET", "/v1/available-slots", List.of(), List.of("resource_ids", "start", "end", "duration_minutes", "limit"))),
+          Map.entry("slotlock_hold_slots", new Operation("POST", "/v1/slot-holds", List.of(), List.of())),
+          Map.entry("slotlock_release_slots", new Operation("DELETE", "/v1/slot-holds/{hold_id}", List.of("hold_id"), List.of())),
           Map.entry("slotlock_list_events", new Operation("GET", "/v1/events", List.of(), List.of("resource_ids", "start", "end", "cursor", "limit"))),
           Map.entry("slotlock_create_event", new Operation("POST", "/v1/events", List.of(), List.of())),
           Map.entry("slotlock_get_event", new Operation("GET", "/v1/events/{event_id}", List.of("event_id"), List.of())),
@@ -165,6 +168,96 @@ public abstract class SlotlockOperations {
   }
 
   /**
+   * Find available slots. List up to `limit` certain slots of the requested duration, earliest
+   * first across the resources, each one free of busy time and inside the resource's hours, to
+   * offer a person a choice. No slot is listed unless every resource's coverage is certain.
+   *
+   * @param resourceIds {@code resource_ids}, list of string
+   * @param start {@code start}, string
+   * @param end {@code end}, string
+   * @param durationMinutes {@code duration_minutes}, integer
+   * @param optional the optional arguments, or null: {@code limit} (integer)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> findAvailableSlots(List<?> resourceIds, String start, String end, long durationMinutes, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("resource_ids", resourceIds);
+    values.put("start", start);
+    values.put("end", end);
+    values.put("duration_minutes", durationMinutes);
+    putOptional(values, optional, Set.of("limit"), "slotlock_find_available_slots");
+    return call("slotlock_find_available_slots", values);
+  }
+
+  /**
+   * Find available slots. List up to `limit` certain slots of the requested duration, earliest
+   * first across the resources, each one free of busy time and inside the resource's hours, to
+   * offer a person a choice. No slot is listed unless every resource's coverage is certain.
+   *
+   * @param resourceIds {@code resource_ids}, list of string
+   * @param start {@code start}, string
+   * @param end {@code end}, string
+   * @param durationMinutes {@code duration_minutes}, integer
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> findAvailableSlots(List<?> resourceIds, String start, String end, long durationMinutes) {
+    return findAvailableSlots(resourceIds, start, end, durationMinutes, null);
+  }
+
+  /**
+   * Hold candidate slots. Hold up to five candidate slots for a short time (30-900 seconds) while
+   * a person chooses, as alternatives in one group: each free one is held, the others are listed
+   * with why not. Book one by passing its hold_id to slotlock_create_event, which releases the
+   * rest; unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at
+   * once.
+   *
+   * @param slots {@code slots}, list of object
+   * @param idempotencyKey {@code idempotency_key}, string
+   * @param optional the optional arguments, or null: {@code ttl_seconds} (integer)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> holdSlots(List<?> slots, String idempotencyKey, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("slots", slots);
+    values.put("idempotency_key", idempotencyKey);
+    putOptional(values, optional, Set.of("ttl_seconds"), "slotlock_hold_slots");
+    return call("slotlock_hold_slots", values);
+  }
+
+  /**
+   * Hold candidate slots. Hold up to five candidate slots for a short time (30-900 seconds) while
+   * a person chooses, as alternatives in one group: each free one is held, the others are listed
+   * with why not. Book one by passing its hold_id to slotlock_create_event, which releases the
+   * rest; unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at
+   * once.
+   *
+   * @param slots {@code slots}, list of object
+   * @param idempotencyKey {@code idempotency_key}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> holdSlots(List<?> slots, String idempotencyKey) {
+    return holdSlots(slots, idempotencyKey, null);
+  }
+
+  /**
+   * Release held slots. Release one of your holds, and the rest of its group, at once instead of
+   * letting them expire. `released` is false when it was already gone.
+   *
+   * @param holdId {@code hold_id}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> releaseSlots(String holdId) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("hold_id", holdId);
+    return call("slotlock_release_slots", values);
+  }
+
+  /**
    * List resource events. List bounded events intersecting a time window.
    *
    * @param resourceIds {@code resource_ids}, list of string
@@ -210,7 +303,7 @@ public abstract class SlotlockOperations {
    * (string), {@code location} (string), {@code organizer} (object), {@code transparency}
    * (string), {@code status} (string), {@code recurrence_rule} (string), {@code attendees} (list
    * of object), {@code reminders} (list of object), {@code recurrence_exceptions} (list of
-   * object)
+   * object), {@code hold_id} (string)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -221,7 +314,7 @@ public abstract class SlotlockOperations {
     values.put("ends_at", endsAt);
     values.put("timezone", timezone);
     values.put("idempotency_key", idempotencyKey);
-    putOptional(values, optional, Set.of("title", "description", "location", "organizer", "transparency", "status", "recurrence_rule", "attendees", "reminders", "recurrence_exceptions"), "slotlock_create_event");
+    putOptional(values, optional, Set.of("title", "description", "location", "organizer", "transparency", "status", "recurrence_rule", "attendees", "reminders", "recurrence_exceptions", "hold_id"), "slotlock_create_event");
     return call("slotlock_create_event", values);
   }
 

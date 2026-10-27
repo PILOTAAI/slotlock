@@ -121,9 +121,92 @@ export const SLOTLOCK_A2A_TASK_STATES = Object.freeze([
 const DATE_TIME = z.string().datetime({ offset: true });
 const RESOURCE_ID = z.string().trim().min(1).max(200);
 const EVENT_ID = z.string().trim().min(1).max(500);
+const HOLD_ID = z.string().uuid();
 const IDEMPOTENCY_KEY = z.string().trim().min(1).max(200);
 const REVISION = z.number().int().positive();
 const MAX_AGENT_WINDOW_MS = SLOTLOCK_CALENDAR_HORIZON_DAYS * 24 * 60 * 60 * 1_000;
+/** How many slots `slotlock_find_available_slots` lists at most, and over how many resources. */
+const MAX_LISTED_SLOTS = 50;
+const MAX_SLOT_RESOURCES = 20;
+
+/** `slotlock_hold_slots`, from a backend that holds; one without it answers `holds_unavailable`. */
+function holdSlots(
+  backend: SlotlockAgentCalendarBackend,
+  context: SlotlockAgentInvocationContext,
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  if (!backend.holdSlots) throw new SlotlockAgentOperationError('holds_unavailable', 409);
+  return backend.holdSlots(context, input);
+}
+
+/** `slotlock_release_slots`, as `holdSlots`. */
+function releaseSlots(
+  backend: SlotlockAgentCalendarBackend,
+  context: SlotlockAgentInvocationContext,
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  if (!backend.releaseSlots) throw new SlotlockAgentOperationError('holds_unavailable', 409);
+  return backend.releaseSlots(context, input);
+}
+
+/**
+ * Slots for `slotlock_find_available_slots`, from the backend's own next-available search, so each
+ * one is checked against busy time, the resource's hours and coverage exactly as a single answer
+ * is. Each resource's earliest slot first, then the next one after whichever slot was listed: at
+ * most one search per resource plus one per listed slot. Like a single answer, the list is certain
+ * only when every resource's coverage is, and empty otherwise.
+ */
+async function findAvailableSlots(
+  backend: SlotlockAgentCalendarBackend,
+  context: SlotlockAgentInvocationContext,
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const end = input.end as string;
+  const durationMs = (input.duration_minutes as number) * 60_000;
+  const limit = input.limit as number;
+  const window = { start: new Date(input.start as string), end: new Date(end) };
+  const coverage = (certain: boolean) => ({
+    start: window.start.toISOString(),
+    end: window.end.toISOString(),
+    certainty: certain ? ('certain' as const) : ('uncertain' as const),
+    reason: certain ? null : 'coverage_incomplete',
+  });
+  type Slot = { resource_id: string; start: string; end: string };
+  const next = async (resourceId: string, from: string): Promise<Slot | null | 'uncertain'> => {
+    const found = await backend.findNextAvailable(context, {
+      resource_ids: [resourceId],
+      start: from,
+      end,
+      duration_minutes: input.duration_minutes,
+    });
+    if ((found.coverage as { certainty?: unknown } | undefined)?.certainty !== 'certain') {
+      return 'uncertain';
+    }
+    return typeof found.start === 'string' && typeof found.end === 'string'
+      ? { resource_id: resourceId, start: found.start, end: found.end }
+      : null;
+  };
+  const earliest = (a: Slot, b: Slot) =>
+    Date.parse(a.start) - Date.parse(b.start) || a.resource_id.localeCompare(b.resource_id);
+  const heads: Slot[] = [];
+  for (const resourceId of new Set(input.resource_ids as string[])) {
+    const head = await next(resourceId, window.start.toISOString());
+    if (head === 'uncertain') return { slots: [], coverage: coverage(false) };
+    if (head) heads.push(head);
+  }
+  const slots: Slot[] = [];
+  while (slots.length < limit && heads.length > 0) {
+    heads.sort(earliest);
+    const listed = heads.shift() as Slot;
+    slots.push(listed);
+    if (slots.length === limit || window.end.getTime() - Date.parse(listed.end) < durationMs) continue;
+    const after = await next(listed.resource_id, listed.end);
+    if (after === 'uncertain') return { slots: [], coverage: coverage(false) };
+    if (after) heads.push(after);
+  }
+  return { slots, coverage: coverage(true) };
+}
+
 /** The longest slot `slotlock_find_next_available` can look for: the whole search window. */
 const MAX_SLOT_MINUTES = SLOTLOCK_CALENDAR_HORIZON_DAYS * 24 * 60;
 const MAX_EVENT_DURATION_MS = SLOTLOCK_MAX_EVENT_DURATION_DAYS * 24 * 60 * 60 * 1_000;
@@ -221,6 +304,9 @@ export type SlotlockAgentOperation =
   | 'slotlock_list_resources'
   | 'slotlock_get_free_busy'
   | 'slotlock_find_next_available'
+  | 'slotlock_find_available_slots'
+  | 'slotlock_hold_slots'
+  | 'slotlock_release_slots'
   | 'slotlock_create_event'
   | 'slotlock_get_event'
   | 'slotlock_list_events'
@@ -264,6 +350,9 @@ const OPERATION_SCOPES: Readonly<Record<SlotlockAgentOperation, SlotlockAgentSco
   slotlock_list_resources: 'read',
   slotlock_get_free_busy: 'read',
   slotlock_find_next_available: 'read',
+  slotlock_find_available_slots: 'read',
+  slotlock_hold_slots: 'write',
+  slotlock_release_slots: 'write',
   slotlock_create_event: 'write',
   slotlock_get_event: 'read',
   slotlock_list_events: 'read',
@@ -367,6 +456,19 @@ export interface SlotlockAgentCalendarBackend {
     context: SlotlockAgentInvocationContext,
     resourceId: string,
   ): Promise<{ name: string | null; timezone: string | null } | null>;
+  /**
+   * Optional. Hold up to five candidate slots for this principal, as alternatives in one group
+   * (`slotlock_hold_slots`); a tool without it answers `holds_unavailable`.
+   */
+  holdSlots?(
+    context: SlotlockAgentInvocationContext,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+  /** Optional. Release one of this principal's holds with its group (`slotlock_release_slots`). */
+  releaseSlots?(
+    context: SlotlockAgentInvocationContext,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
 }
 
 /**
@@ -609,7 +711,14 @@ interface OperationDefinition {
     destructive: boolean;
     idempotent: boolean;
   };
-  invoke: keyof SlotlockAgentCalendarBackend;
+  /** The backend method that answers it, or how it answers from the backend's own methods. */
+  invoke:
+    | keyof SlotlockAgentCalendarBackend
+    | ((
+        backend: SlotlockAgentCalendarBackend,
+        context: SlotlockAgentInvocationContext,
+        input: Record<string, unknown>,
+      ) => Promise<Record<string, unknown>>);
   /** Valid arguments, published as the A2A skill's invocation example (a test parses each one). */
   example: Record<string, unknown>;
 }
@@ -635,6 +744,8 @@ const EVENT_CREATE_INPUT = z
     reminders: z.array(REMINDER_INPUT).max(20).optional(),
     idempotency_key: IDEMPOTENCY_KEY,
     recurrence_exceptions: z.array(RECURRENCE_EXCEPTION_INPUT).max(500).optional(),
+    /** Book the time one of your holds keeps (slotlock_hold_slots); its alternatives are released. */
+    hold_id: HOLD_ID.optional(),
   })
   .strict()
   .refine((value) => boundedEventSpan(value.starts_at, value.ends_at));
@@ -726,6 +837,33 @@ const OPERATION_DEFINITIONS = [
     risk: { readOnly: true, destructive: false, idempotent: true },
     invoke: 'findNextAvailable',
     example: { resource_ids: [EXAMPLE_RESOURCE_ID], ...EXAMPLE_WINDOW, duration_minutes: 120 },
+  },
+  {
+    name: 'slotlock_find_available_slots',
+    title: 'Find available slots',
+    description:
+      'List up to `limit` certain slots of the requested duration, earliest first across the resources, each one free of busy time and inside the resource\'s hours, to offer a person a choice. No slot is listed unless every resource\'s coverage is certain.',
+    input: z
+      .object({
+        resource_ids: z.array(RESOURCE_ID).min(1).max(MAX_SLOT_RESOURCES),
+        start: DATE_TIME,
+        end: DATE_TIME,
+        duration_minutes: z.number().int().min(1).max(MAX_SLOT_MINUTES),
+        limit: z.number().int().min(1).max(MAX_LISTED_SLOTS).default(10),
+      })
+      .strict()
+      .refine(boundedAgentWindow),
+    output: z
+      .object({
+        slots: z
+          .array(z.object({ resource_id: RESOURCE_ID, start: DATE_TIME, end: DATE_TIME }).strict())
+          .max(MAX_LISTED_SLOTS),
+        coverage: COVERAGE,
+      })
+      .strict(),
+    risk: { readOnly: true, destructive: false, idempotent: true },
+    invoke: findAvailableSlots,
+    example: { resource_ids: [EXAMPLE_RESOURCE_ID], ...EXAMPLE_WINDOW, duration_minutes: 60, limit: 10 },
   },
   {
     name: 'slotlock_create_event',
@@ -865,9 +1003,72 @@ const OPERATION_DEFINITIONS = [
       idempotency_key: 'cancel-handover-2027-03-02',
     },
   },
+  {
+    name: 'slotlock_hold_slots',
+    title: 'Hold candidate slots',
+    description:
+      'Hold up to five candidate slots for a short time (30-900 seconds) while a person chooses, as alternatives in one group: each free one is held, the others are listed with why not. Book one by passing its hold_id to slotlock_create_event, which releases the rest; unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at once.',
+    input: z
+      .object({
+        slots: z
+          .array(
+            z
+              .object({ resource_id: RESOURCE_ID, start: DATE_TIME, end: DATE_TIME })
+              .strict()
+              .refine((value) => boundedEventSpan(value.start, value.end)),
+          )
+          .min(1)
+          .max(5),
+        ttl_seconds: z.number().int().min(30).max(900).default(300),
+        idempotency_key: IDEMPOTENCY_KEY,
+      })
+      .strict(),
+    output: z
+      .object({
+        group_id: HOLD_ID,
+        holds: z
+          .array(
+            z
+              .object({
+                hold_id: HOLD_ID,
+                resource_id: RESOURCE_ID,
+                start: DATE_TIME,
+                end: DATE_TIME,
+                expires_at: DATE_TIME,
+              })
+              .strict(),
+          )
+          .max(5),
+        refused: z
+          .array(z.object({ index: z.number().int().min(0).max(4), code: z.string().max(64) }).strict())
+          .max(5),
+      })
+      .strict(),
+    risk: { readOnly: false, destructive: false, idempotent: true },
+    invoke: holdSlots,
+    example: {
+      slots: [
+        { resource_id: EXAMPLE_RESOURCE_ID, start: '2027-03-02T09:00:00Z', end: '2027-03-02T10:00:00Z' },
+        { resource_id: EXAMPLE_RESOURCE_ID, start: '2027-03-02T14:00:00Z', end: '2027-03-02T15:00:00Z' },
+      ],
+      ttl_seconds: 300,
+      idempotency_key: 'hold-handover-2027-03-02',
+    },
+  },
+  {
+    name: 'slotlock_release_slots',
+    title: 'Release held slots',
+    description:
+      'Release one of your holds, and the rest of its group, at once instead of letting them expire. `released` is false when it was already gone.',
+    input: z.object({ hold_id: HOLD_ID }).strict(),
+    output: z.object({ released: z.boolean() }).strict(),
+    risk: { readOnly: false, destructive: false, idempotent: true },
+    invoke: releaseSlots,
+    example: { hold_id: '7d3f8c2a-4b1e-4f6a-9c2d-1e5b7a9f3c4d' },
+  },
 ] as const satisfies readonly OperationDefinition[];
 
-const FORMATS_WITHOUT_PATTERN = new Set(['date-time', 'email']);
+const FORMATS_WITHOUT_PATTERN = new Set(['date-time', 'email', 'uuid']);
 
 function toJsonSchema(schema: ObjectSchema, io: 'input' | 'output'): JsonSchema {
   // Zod's own converter: zod-to-json-schema reads only Zod 3 schemas (for a Zod 4 one it returns {})
@@ -877,7 +1078,7 @@ function toJsonSchema(schema: ObjectSchema, io: 'input' | 'output'): JsonSchema 
     io,
     unrepresentable: 'throw',
     override: ({ jsonSchema }) => {
-      // Zod 4.6 writes its validation regex beside `format` for dates and emails (288 and 102
+      // Zod 4.6 writes its validation regex beside `format` for dates, emails and UUIDs (288 and 102
       // characters, on 60 fields): the format already says it, and every agent reads the list.
       if (FORMATS_WITHOUT_PATTERN.has(String(jsonSchema.format))) delete jsonSchema.pattern;
     },
@@ -992,16 +1193,17 @@ export function slotlockAgentTools() {
       idempotentHint: operation.risk.idempotent,
       openWorldHint: false,
     },
-    ...(operation.risk.readOnly
-      ? {
-          _meta: {
-            ui: {
-              resourceUri: SLOTLOCK_MCP_APP_RESOURCE_URI,
-              visibility: ['model', 'app'] as const,
-            },
-          },
-        }
-      : {}),
+    // Reads render in the calendar view, which may call them again. A write is the model's to make
+    // through the normal path, where a person can be asked to confirm it: never a view's, which
+    // MCP Apps would otherwise allow (visibility defaults to model and app).
+    // Held slots render there too, to pick from, but only the model holds.
+    _meta: {
+      ui: operation.risk.readOnly
+        ? { resourceUri: SLOTLOCK_MCP_APP_RESOURCE_URI, visibility: ['model', 'app'] as const }
+        : operation.name === 'slotlock_hold_slots'
+          ? { resourceUri: SLOTLOCK_MCP_APP_RESOURCE_URI, visibility: ['model'] as const }
+          : { visibility: ['model'] as const },
+    },
   }));
 }
 
@@ -1316,17 +1518,23 @@ export async function invokeSlotlockAgentOperation(args: {
       });
       if (halt) return { ok: false, status: halt.status, code: halt.code };
     }
-    const method = args.options.backend[operation.invoke] as (
-      context: SlotlockAgentInvocationContext,
-      input: Record<string, unknown>,
-    ) => Promise<Record<string, unknown>>;
+    const invoke = operation.invoke;
+    const backend = args.options.backend;
+    const method =
+      typeof invoke === 'function'
+        ? (context: SlotlockAgentInvocationContext, input: Record<string, unknown>) =>
+            invoke(backend, context, input)
+        : (backend[invoke] as (
+            context: SlotlockAgentInvocationContext,
+            input: Record<string, unknown>,
+          ) => Promise<Record<string, unknown>>);
     const context: SlotlockAgentInvocationContext = {
       principal,
       operation: operation.name,
       signal: args.request.signal,
     };
     if (args.trace) context.trace = args.trace;
-    const data = await method.call(args.options.backend, context, parsed.data);
+    const data = await method.call(backend, context, parsed.data);
     if (!operation.output.safeParse(data).success) {
       // Neither the result nor the schema's complaint about it: either may hold tenant data.
       reportUnexpected(
@@ -1724,7 +1932,7 @@ function unref<T>(timer: T): T {
 /** Natural-language guidance `server/discover` gives the model on how to use these tools well. */
 const SLOTLOCK_MCP_INSTRUCTIONS = [
   'Slotlock is a tenant-isolated resource calendar (vehicles, rooms, equipment).',
-  'Check availability before booking: slotlock_get_free_busy returns busy intervals and slotlock_find_next_available the earliest free slot of a given length; an answer is certain only when coverage.certainty is "certain".',
+  'Check availability before booking: slotlock_get_free_busy returns busy intervals and slotlock_find_next_available the earliest free slot of a given length, and slotlock_find_available_slots up to 50 of them to offer a person a choice; an answer is certain only when coverage.certainty is "certain".',
   'slotlock_create_event needs an idempotency_key: retry with the same key and arguments, never a new key for the same booking. slotlock_update_event and slotlock_delete_event need the event revision you last read as expected_revision.',
   'Times are RFC 3339 with an offset; intervals are half-open [start, end).',
   'A failed call returns {"error":{"code":"…"}}; read the code before retrying (overlap means the slot is taken).',

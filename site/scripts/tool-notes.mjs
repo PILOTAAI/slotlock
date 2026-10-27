@@ -14,6 +14,11 @@ export const SUMMARIES = {
     'Busy intervals for up to 100 resources in a window, and whether each answer is certain.',
   slotlock_find_next_available:
     'The earliest slot of a given length across resources, offered only when the answer is certain.',
+  slotlock_find_available_slots:
+    'Up to 50 slots of a given length, earliest first, to offer a person a choice.',
+  slotlock_hold_slots:
+    'Hold up to five candidate slots for a few minutes while a person chooses, as one group.',
+  slotlock_release_slots: 'Release one of your holds and the rest of its group at once.',
   slotlock_create_event:
     'Book time on a resource. If the time is taken, the database refuses it with `overlap`.',
   slotlock_get_event: 'Read one event this caller created.',
@@ -28,6 +33,12 @@ export const DETAILS = {
     'Busy time includes every booking on the resource, whoever made it. Intervals carry times only, never titles or attendees.',
   slotlock_find_next_available:
     'A slot is offered only inside the resource’s bookable hours, and only when the coverage of every resource asked about is `certain`. Otherwise `resource_id`, `start` and `end` are `null`: treat that as unknown, not as free.',
+  slotlock_find_available_slots:
+    'Each slot is free of busy time and inside the resource’s bookable hours, found the way `slotlock_find_next_available` finds one, and they never overlap on one resource. The list is empty unless the coverage of every resource asked about is `certain`. In an MCP Apps host the calendar view lets the person pick one, and sends the agent a message naming it.',
+  slotlock_hold_slots:
+    'Each free candidate is held for `ttl_seconds`, busy for everyone else; a taken one is listed in `refused` with its code. Book one with `slotlock_create_event`’s `hold_id`: the others are released in the same transaction. A hold is yours alone, and one agent may have 20 live at once.',
+  slotlock_release_slots:
+    'Holds expire on their own; release them when the person walks away, so the time is free sooner.',
   slotlock_create_event:
     'An opaque event goes through the database’s overlap check; a transparent one stays visible and blocks nothing. A retry with the same `idempotency_key` and arguments returns the first result with `replayed: true`.',
   slotlock_get_event:
@@ -63,6 +74,11 @@ export const INPUT_NOTES = {
     'Your key for this write. Retry with the same key and arguments; the same key with other arguments returns `idempotency_conflict`.',
   event_id: 'The `id` of an event this caller created.',
   expected_revision: 'The `revision` you last read; any other returns `revision_conflict`.',
+  'slotlock_create_event.hold_id':
+    'One of your live holds from `slotlock_hold_slots` covering this time: the event takes its place and its group is released, without judging notice again.',
+  'slotlock_hold_slots.slots': 'The candidates, for example the times you offered.',
+  'slotlock_hold_slots.ttl_seconds': 'How long each hold lasts, by the database clock.',
+  'slotlock_release_slots.hold_id': 'Any `hold_id` of the group.',
   'slotlock_update_event.resource_id': 'Moves the event to this resource.',
   'slotlock_update_event.title': '`null` resets it to Busy.',
   'slotlock_update_event.description': '`null` clears it.',
@@ -95,6 +111,11 @@ export const OUTPUT_NOTES = {
     'The resource with the earliest slot; `null` when there is none or coverage is uncertain.',
   'slotlock_find_next_available.start': 'Start of the slot, or `null`.',
   'slotlock_find_next_available.end': 'End of the slot, or `null`.',
+  'slotlock_find_available_slots.slots': 'Earliest first; on one resource, back to back at most.',
+  'slotlock_hold_slots.group_id': 'Shared by the holds this call made.',
+  'slotlock_hold_slots.holds': 'The candidates held, in the order sent.',
+  'slotlock_hold_slots.refused': 'The candidates not held, by `index` in `slots`, with why.',
+  'slotlock_release_slots.released': '`false` when the hold was already gone or is not yours.',
   'slotlock_list_events.events': 'Ordered by start.',
   'slotlock_delete_event.revision': 'The event’s revision after the delete.',
   'slotlock_delete_event.deleted': 'Always `true`.',
@@ -134,10 +155,15 @@ export const TOOL_ERRORS = {
   slotlock_list_resources: [],
   slotlock_get_free_busy: ['resource_not_found'],
   slotlock_find_next_available: ['resource_not_found'],
+  slotlock_find_available_slots: ['resource_not_found'],
+  slotlock_hold_slots: ['holds_unavailable', 'idempotency_conflict'],
+  slotlock_release_slots: ['holds_unavailable'],
   slotlock_create_event: [
     'overlap',
     'idempotency_conflict',
     'resource_not_found',
+    'hold_not_found',
+    'hold_mismatch',
     'invalid_event',
     'owner_event_quota_exceeded',
     'owner_command_quota_exceeded',
@@ -191,6 +217,10 @@ export const REFINEMENTS = [
   {
     matches: (text) => text === 'boundedAgentWindow',
     note: (facts) => `\`end\` must be after \`start\`, at most ${facts.horizonDays} days later.`,
+  },
+  {
+    matches: (text) => text.includes('boundedEventSpan(value.start, value.end)'),
+    note: (facts) => `\`end\` must be after \`start\`, at most ${facts.maxEventDaysText} days later.`,
   },
   {
     matches: (text) => text.includes('boundedEventSpan') && text.includes('=== undefined ||'),

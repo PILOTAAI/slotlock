@@ -18,11 +18,35 @@ versioning.
   them with `enforceBookingRules`; an imported event is not checked. `createSlotlockStore` takes
   `defaultAvailabilityRules` for resources without hours of their own (`slotlock serve` passes
   `SLOTLOCK_AVAILABILITY`). Run `slotlock migrate`.
+- Agent holds: `slotlock_hold_slots` (REST `POST /v1/slot-holds`) holds up to five candidate slots
+  for 30-900 seconds as one group while a person chooses, listing the taken ones by index;
+  `slotlock_create_event`'s `hold_id` books one, releasing the others in the same transaction; and
+  `slotlock_release_slots` (`DELETE /v1/slot-holds/{hold_id}`) releases a group at once. A hold is
+  its agent's alone, and one agent may have 20 live (`SLOTLOCK_MAX_HOLDS_PER_HOLDER`). In the
+  library, `acquireHold` takes `holderRef` and `groupId`, `releaseHold` a `holderRef`, and
+  `putCalendarEvent` `fromHold` (refused with `hold_not_found` or `hold_mismatch`). A backend of
+  your own implements the optional `holdSlots` and `releaseSlots`; without them the tools answer
+  `holds_unavailable`. Run `slotlock migrate`. In an MCP Apps host the calendar view renders the
+  held slots, with when they expire, and its message names the hold, so the person picks from time
+  nobody can take while they decide.
+- `slotlock_find_available_slots` (REST `GET /v1/available-slots`) lists up to 50 certain slots of
+  a duration, earliest first across up to 20 resources, each found the way
+  `slotlock_find_next_available` finds one: free of busy time, inside the resource's hours, and
+  only when every resource's coverage is certain.
+- The MCP Apps calendar view lets a person pick one of those slots: a strip of days, each day's times
+  by part of the day, and *Book this time*. It sends the agent a chat message naming the slot
+  (`ui/message`), so the agent books it through the normal, confirmable path, and shows the text to
+  send when the host refuses.
+- The view follows the host: its theme and its standard style variables, which it now applies (it
+  only read them before, so it looked the same, and light, in every host). It shows times in the
+  person's locale, clock and time zone, and reports its size to the host.
 
 ### Changed
 
 - The application API's resource has `booking_rules` (`null` when it has none), and
   `SlotlockApplicationBackend` has `setResourceBookingRules`: a backend of your own implements it.
+- The three write tools carry `_meta.ui.visibility: ["model"]`: MCP Apps hosts no longer let a view
+  call them (the default is model and app).
 
 ### Fixed
 

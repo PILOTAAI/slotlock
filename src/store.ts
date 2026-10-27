@@ -116,6 +116,9 @@ const MAX_COVERAGE_SOURCES = 64;
 const MAX_COVERAGE_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 /** Trusted provider/maintenance namespace used by backwards-compatible store callers. */
 export const SLOTLOCK_INTERNAL_EVENT_OWNER_REF = 'internal';
+
+/** How many live holds one holder (a keyed hold's principal) may have in a tenant at once. */
+export const SLOTLOCK_MAX_HOLDS_PER_HOLDER = 20;
 /** Default hard ceiling for retained active + tombstoned identities per agent principal. */
 export const SLOTLOCK_AGENT_OWNER_EVENT_QUOTA = 1_000;
 /** Hard retained command ceiling; includes reserved cancellation capacity for every identity. */
@@ -864,6 +867,7 @@ interface HoldRow {
   buffer_after_ms: string | number;
   expires_at: Date;
   source: string | null;
+  hold_group_id?: string | null;
 }
 
 function toHold(row: HoldRow): SlotlockHold {
@@ -875,6 +879,7 @@ function toHold(row: HoldRow): SlotlockHold {
     bufferAfterMs: Number(row.buffer_after_ms),
     expiresAt: row.expires_at,
     source: row.source,
+    ...(row.hold_group_id ? { groupId: row.hold_group_id } : {}),
   };
 }
 
@@ -1227,6 +1232,8 @@ function putCommandHash(params: {
     expectedRevision: params.command.expectedRevision,
     resourceId: params.command.resourceId,
     source: params.command.source ?? null,
+    // Only when present, so a create without a hold keeps the hash it always had.
+    ...(params.command.fromHold ? { fromHold: params.command.fromHold.holdId } : {}),
     event: {
       ...params.event,
       start: params.event.start.toISOString(),
@@ -2054,6 +2061,18 @@ export interface SlotlockStore {
     idempotencyKey?: string;
     /** Whose keys `idempotencyKey` is among, 1-500 UTF-8 bytes (an API key's subject, say). */
     principalRef?: string;
+    /**
+     * Who the hold belongs to, 1-500 UTF-8 bytes, inside `tenantRef` (required with it): an agent
+     * acting for one person, say. `releaseHold` and `putCalendarEvent`'s `fromHold` with a
+     * `holderRef` take only their own, and a holder may have `SLOTLOCK_MAX_HOLDS_PER_HOLDER` live at
+     * once. Without it the hold has no holder and no cap: an application holding for its customers.
+     */
+    holderRef?: string;
+    /**
+     * Holds taken as alternatives for one booking share a group (a UUID): booking one with
+     * `fromHold` releases the rest, and releasing one with a holder releases them all.
+     */
+    groupId?: string;
   }): Promise<AcquireHoldResult>;
   /** One of the tenant's live holds, or null (none, expired, confirmed, or another tenant's). */
   getHold(params: { tenantRef: string; holdId: string }): Promise<SlotlockHold | null>;
@@ -2093,7 +2112,16 @@ export interface SlotlockStore {
    * Delete a live hold; released=false when it was already gone (expired-reaped or confirmed). With
    * `tenantRef`, only a hold on one of that tenant's resources, as for confirmHold.
    */
-  releaseHold(holdId: string, options?: SlotlockHoldTenantOptions): Promise<ReleaseHoldResult>;
+  releaseHold(
+    holdId: string,
+    options?: SlotlockHoldTenantOptions & {
+      /**
+       * Only a hold this holder took (`acquireHold`'s `holderRef`), with the rest of its group:
+       * released=false for another holder's.
+       */
+      holderRef?: string;
+    },
+  ): Promise<ReleaseHoldResult>;
   /**
    * Reservations overlapping `window` for one resource, as merged-ready half-open intervals. With
    * `tenantRef`, only a resource of that tenant (`resource_not_found` otherwise, whatever the
@@ -3704,6 +3732,13 @@ function buildSlotlockStore(
         return { ok: false, code: 'invalid_identity' };
       }
       if (!isValidResourceId(params.resourceId)) return { ok: false, code: 'resource_not_found' };
+      if (params.groupId !== undefined && !isValidResourceId(params.groupId)) {
+        return { ok: false, code: 'invalid_identity' };
+      }
+      const { holderRef } = params;
+      if (holderRef !== undefined && (tenantRef === undefined || !isValidIdentity(holderRef))) {
+        return { ok: false, code: 'invalid_identity' };
+      }
       const payloadHash = calendarCommandHash({
         operation: 'hold',
         resourceId: params.resourceId,
@@ -3712,6 +3747,8 @@ function buildSlotlockStore(
         ttlMs: params.ttlMs,
         bufferAfterMs,
         source: params.source ?? null,
+        ...(params.groupId !== undefined ? { groupId: params.groupId } : {}),
+        ...(holderRef !== undefined ? { holderRef } : {}),
       });
       const ttlSeconds = params.ttlMs / 1000;
       // The buffer written: the one asked for, raised to the resource's turnaround.
@@ -3728,7 +3765,8 @@ function buildSlotlockStore(
               ])}, 0))`;
               const [prior] = await tx<(HoldRow & { payload_hash: string })[]>`
                 SELECT hold_id AS id, resource_id, starts_at, ends_at, buffer_after_ms, expires_at,
-                       source, payload_hash
+                       source, payload_hash,
+                       (SELECT hold_group_id FROM slotlock.reservations WHERE id = hold_id) AS hold_group_id
                   FROM slotlock.hold_commands
                  WHERE tenant_ref = ${tenantRef ?? null} AND principal_ref = ${principalRef ?? null}
                    AND idempotency_key = ${idempotencyKey ?? null}`;
@@ -3751,6 +3789,23 @@ function buildSlotlockStore(
             if (!resource) return { ok: false, code: 'resource_not_found' };
             if (resource.archived) return { ok: false, code: 'resource_archived' };
             if (holdLimit !== null) return { ok: false, code: 'hold_limit_reached', limit: holdLimit };
+            if (holderRef !== undefined) {
+              // One holder's live holds, counted under a lock on the holder so racing holds stop
+              // at the cap: an agent cannot hold a resource's whole week.
+              await tx`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify([
+                'slotlock-holder',
+                tenantRef,
+                holderRef,
+              ])}, 0))`;
+              const [held] = await tx<{ count: number }[]>`
+                SELECT count(*)::int AS count FROM slotlock.reservations
+                 WHERE holder_ref = ${holderRef} AND tenant_ref IS NULL AND status = 'held'
+                   AND expires_at > statement_timestamp()
+                   AND resource_id IN (SELECT id FROM slotlock.resources WHERE tenant_ref = ${tenantRef ?? null})`;
+              if ((held?.count ?? 0) >= SLOTLOCK_MAX_HOLDS_PER_HOLDER) {
+                return { ok: false, code: 'hold_limit_reached', limit: SLOTLOCK_MAX_HOLDS_PER_HOLDER };
+              }
+            }
             const ruling = await bookingRuling(tx, params.resourceId, params, defaultHours);
             if (ruling.rule) return { ok: false, code: 'booking_rule_violated', rule: ruling.rule };
             written = Math.max(bufferAfterMs, ruling.turnaroundMs);
@@ -3769,12 +3824,15 @@ function buildSlotlockStore(
             await reapExpiredHolds(tx, params.resourceId, params.start, reach);
             const [row] = await tx<HoldRow[]>`
               INSERT INTO slotlock.reservations (
-                resource_id, starts_at, ends_at, buffer_after_ms, status, expires_at, source
+                resource_id, starts_at, ends_at, buffer_after_ms, status, expires_at, source,
+                holder_ref, hold_group_id
               ) VALUES (
                 ${params.resourceId}, ${params.start}, ${params.end}, ${written}, 'held',
-                now() + make_interval(secs => ${ttlSeconds}), ${params.source ?? null}
+                now() + make_interval(secs => ${ttlSeconds}), ${params.source ?? null},
+                ${holderRef ?? null}, ${params.groupId ?? null}
               )
-              RETURNING id, resource_id, starts_at, ends_at, buffer_after_ms, expires_at, source`;
+              RETURNING id, resource_id, starts_at, ends_at, buffer_after_ms, expires_at, source,
+                        hold_group_id`;
             if (!row) throw new Error('slotlock: hold insert returned no row');
             if (keyed) {
               await tx`
@@ -3970,6 +4028,25 @@ function buildSlotlockStore(
     async releaseHold(holdId, options = {}) {
       const tenantRef = holdTenantRef(options);
       if (!isValidResourceId(holdId)) return { ok: true, released: false };
+      if (options.holderRef !== undefined) {
+        if (!isValidIdentity(options.holderRef)) return { ok: true, released: false };
+        const released = await sql<{ id: string }[]>`
+          WITH taken AS (
+            SELECT id, hold_group_id FROM slotlock.reservations
+             WHERE id = ${holdId} AND status = 'held' AND holder_ref = ${options.holderRef}
+               AND (${tenantRef}::text IS NULL
+                    OR resource_id IN (SELECT id FROM slotlock.resources WHERE tenant_ref = ${tenantRef}))
+          )
+          DELETE FROM slotlock.reservations hold
+           USING taken
+           WHERE hold.status = 'held' AND hold.holder_ref = ${options.holderRef}
+             AND (${tenantRef}::text IS NULL
+                  OR hold.resource_id IN (SELECT id FROM slotlock.resources WHERE tenant_ref = ${tenantRef}))
+             AND (hold.id = taken.id
+                  OR (taken.hold_group_id IS NOT NULL AND hold.hold_group_id = taken.hold_group_id))
+          RETURNING hold.id`;
+        return { ok: true, released: released.some(({ id }) => id === holdId) };
+      }
       const rows = await sql<{ id: string }[]>`
         DELETE FROM slotlock.reservations
          WHERE id = ${holdId} AND status = 'held'
@@ -4175,11 +4252,43 @@ function buildSlotlockStore(
             }
             const eventId = found?.id ?? randomUUID();
             const revision = currentRevision + 1;
+            if (params.fromHold) {
+              const { holdId, holderRef } = params.fromHold;
+              if (!isValidResourceId(holdId) || !isValidIdentity(holderRef)) {
+                return { ok: false, code: 'hold_not_found' };
+              }
+              const [hold] = await tx<
+                { resource_id: string; starts_at: Date; ends_at: Date; hold_group_id: string | null }[]
+              >`
+                SELECT resource_id, starts_at, ends_at, hold_group_id FROM slotlock.reservations
+                 WHERE id = ${holdId} AND status = 'held' AND holder_ref = ${holderRef}
+                   AND expires_at > statement_timestamp()
+                 FOR UPDATE`;
+              if (!hold) return { ok: false, code: 'hold_not_found' };
+              const [only] = occurrences;
+              if (
+                hold.resource_id !== params.resourceId ||
+                occurrences.length !== 1 ||
+                !only ||
+                only.start < hold.starts_at ||
+                only.end > hold.ends_at
+              ) {
+                return { ok: false, code: 'hold_mismatch' };
+              }
+              // The hold and its alternatives give way to the event in this transaction.
+              await tx`
+                DELETE FROM slotlock.reservations
+                 WHERE status = 'held' AND holder_ref = ${holderRef}
+                   AND (id = ${holdId}
+                        OR (${hold.hold_group_id}::uuid IS NOT NULL
+                            AND hold_group_id = ${hold.hold_group_id}::uuid))`;
+            }
             let turnaroundMs = 0;
             if (params.enforceBookingRules === true && (event.transparency ?? 'opaque') === 'opaque') {
               const judge = await bookingJudge(tx, params.resourceId, defaultHours);
               for (const [index, occurrence] of occurrences.entries()) {
-                const rule = judge.broken(occurrence, { first: index === 0 });
+                // A held time's notice and advance were judged when it was held.
+                const rule = judge.broken(occurrence, { first: index === 0 && !params.fromHold });
                 if (rule) return { ok: false, code: 'booking_rule_violated', rule };
               }
               turnaroundMs = judge.turnaroundMs;

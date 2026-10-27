@@ -809,6 +809,9 @@ export async function startCalendarServer(config: CalendarServerConfig) {
 | `slotlock_list_resources` | Resources visible to the tenant | read-only |
 | `slotlock_get_free_busy` | Busy intervals plus coverage certainty | read-only |
 | `slotlock_find_next_available` | Earliest *certain* slot across resources | read-only |
+| `slotlock_find_available_slots` | Up to 50 *certain* slots, earliest first, to offer a choice | read-only |
+| `slotlock_hold_slots` | Hold up to 5 candidates for 30-900 seconds while a person chooses | write |
+| `slotlock_release_slots` | Release a hold and the rest of its group | write |
 | `slotlock_list_events` | Events the caller created in a window | read-only |
 | `slotlock_get_event` | One event the caller created | read-only |
 | `slotlock_create_event` | Create an event of up to 3,660 days (idempotent) | write |
@@ -816,7 +819,14 @@ export async function startCalendarServer(config: CalendarServerConfig) {
 | `slotlock_delete_event` | Tombstone at an expected revision | write, destructive |
 
 A query window is at most 367 days. Each caller sees only the events it created, but everyone's
-events count as busy time. The older names `calendar.<verb>` and `calendar_<verb>` still work and
+events count as busy time.
+
+An agent offering a person several times holds them first, so none is taken while the person
+decides: `slotlock_hold_slots` holds each free candidate in one group (and lists the taken ones in
+`refused`), and `slotlock_create_event` with one `hold_id` books that time and releases the rest in
+the same transaction. A hold belongs to the agent that took it: another agent can neither book nor
+release it. One agent may have 20 live holds at once; unbooked ones expire by the database clock.
+Notice was judged when the time was held, so booking the hold does not judge it again. The older names `calendar.<verb>` and `calendar_<verb>` still work and
 are no longer advertised.
 
 ### Errors
@@ -1214,6 +1224,18 @@ Send one `application/json` data part, `{"skill": "<id>", "arguments": {…}}`, 
 Read-only tools link to `ui://slotlock/calendar`, a self-contained calendar view that hosts
 supporting MCP Apps (`io.modelcontextprotocol/ui`) render in a sandbox. It makes no network requests
 and never writes.
+
+A person can pick a slot in it. After `slotlock_find_available_slots` or a certain
+`slotlock_find_next_available`, the view shows a strip of days and each day's times by morning,
+afternoon and evening, or the one next available time. Picking a time and pressing *Book this time*
+sends one chat message naming the resource id and the slot's start and end. The agent books it with
+`slotlock_create_event`, through confirmation if `SLOTLOCK_CONFIRM_WRITES` asks for it. The message
+carries nothing else from the result. If the host refuses the message, the view shows the text to
+send instead. Write tools are marked `visibility: ["model"]`, so a host never lets a view call them.
+
+The view takes its look from the host: its light or dark theme and its standard MCP Apps style
+variables (colours, fonts, sizes). It shows times in the person's locale, clock and time zone, with
+a 12h/24h switch.
 
 ## Operations
 

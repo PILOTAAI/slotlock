@@ -14,6 +14,9 @@ var operations = func() map[string]operation {
 		{name: "slotlock_create_resource", method: "POST", path: "/v1/resources", pathParams: nil, query: nil},
 		{name: "slotlock_get_free_busy", method: "GET", path: "/v1/free-busy", pathParams: nil, query: []string{"resource_ids", "start", "end"}},
 		{name: "slotlock_find_next_available", method: "GET", path: "/v1/next-available", pathParams: nil, query: []string{"resource_ids", "start", "end", "duration_minutes"}},
+		{name: "slotlock_find_available_slots", method: "GET", path: "/v1/available-slots", pathParams: nil, query: []string{"resource_ids", "start", "end", "duration_minutes", "limit"}},
+		{name: "slotlock_hold_slots", method: "POST", path: "/v1/slot-holds", pathParams: nil, query: nil},
+		{name: "slotlock_release_slots", method: "DELETE", path: "/v1/slot-holds/{hold_id}", pathParams: []string{"hold_id"}, query: nil},
 		{name: "slotlock_list_events", method: "GET", path: "/v1/events", pathParams: nil, query: []string{"resource_ids", "start", "end", "cursor", "limit"}},
 		{name: "slotlock_create_event", method: "POST", path: "/v1/events", pathParams: nil, query: nil},
 		{name: "slotlock_get_event", method: "GET", path: "/v1/events/{event_id}", pathParams: []string{"event_id"}, query: nil},
@@ -155,6 +158,84 @@ func (c *Client) FindNextAvailable(ctx context.Context, in FindNextAvailableInpu
 	return c.Call(ctx, "slotlock_find_next_available", in.values())
 }
 
+// FindAvailableSlotsInput holds the arguments of [Client.FindAvailableSlots].
+type FindAvailableSlotsInput struct {
+	ResourceIDs []string
+
+	Start string
+
+	End string
+
+	DurationMinutes int64
+
+	Limit *int64
+}
+
+func (in FindAvailableSlotsInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_ids"] = in.ResourceIDs
+	values["start"] = in.Start
+	values["end"] = in.End
+	values["duration_minutes"] = in.DurationMinutes
+	if in.Limit != nil {
+		values["limit"] = *in.Limit
+	}
+	return values
+}
+
+// FindAvailableSlots: Find available slots. List up to `limit` certain slots of the requested
+// duration, earliest first across the resources, each one free of busy time and inside the
+// resource's hours, to offer a person a choice. No slot is listed unless every resource's
+// coverage is certain.
+func (c *Client) FindAvailableSlots(ctx context.Context, in FindAvailableSlotsInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_find_available_slots", in.values())
+}
+
+// HoldSlotsInput holds the arguments of [Client.HoldSlots].
+type HoldSlotsInput struct {
+	Slots []map[string]any
+
+	IdempotencyKey string
+
+	TTLSeconds *int64
+}
+
+func (in HoldSlotsInput) values() map[string]any {
+	values := map[string]any{}
+	values["slots"] = in.Slots
+	values["idempotency_key"] = in.IdempotencyKey
+	if in.TTLSeconds != nil {
+		values["ttl_seconds"] = *in.TTLSeconds
+	}
+	return values
+}
+
+// HoldSlots: Hold candidate slots. Hold up to five candidate slots for a short time (30-900
+// seconds) while a person chooses, as alternatives in one group: each free one is held, the
+// others are listed with why not. Book one by passing its hold_id to slotlock_create_event, which
+// releases the rest; unbooked holds expire on their own. A hold is yours alone, and you may have
+// 20 live at once.
+func (c *Client) HoldSlots(ctx context.Context, in HoldSlotsInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_hold_slots", in.values())
+}
+
+// ReleaseSlotsInput holds the arguments of [Client.ReleaseSlots].
+type ReleaseSlotsInput struct {
+	HoldID string
+}
+
+func (in ReleaseSlotsInput) values() map[string]any {
+	values := map[string]any{}
+	values["hold_id"] = in.HoldID
+	return values
+}
+
+// ReleaseSlots: Release held slots. Release one of your holds, and the rest of its group, at once
+// instead of letting them expire. `released` is false when it was already gone.
+func (c *Client) ReleaseSlots(ctx context.Context, in ReleaseSlotsInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_release_slots", in.values())
+}
+
 // ListEventsInput holds the arguments of [Client.ListEvents].
 type ListEventsInput struct {
 	ResourceIDs []string
@@ -218,6 +299,8 @@ type CreateEventInput struct {
 	Reminders []map[string]any
 
 	RecurrenceExceptions []map[string]any
+
+	HoldID *string
 }
 
 func (in CreateEventInput) values() map[string]any {
@@ -256,6 +339,9 @@ func (in CreateEventInput) values() map[string]any {
 	}
 	if in.RecurrenceExceptions != nil {
 		values["recurrence_exceptions"] = in.RecurrenceExceptions
+	}
+	if in.HoldID != nil {
+		values["hold_id"] = *in.HoldID
 	}
 	return values
 }

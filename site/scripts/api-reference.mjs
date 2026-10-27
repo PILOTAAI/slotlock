@@ -25,6 +25,7 @@ export const GROUPS = [
     operations: [
       'slotlock_get_free_busy',
       'slotlock_find_next_available',
+      'slotlock_find_available_slots',
       'slotlock_list_busy',
       'slotlock_set_resource_availability',
       'slotlock_set_tenant_availability',
@@ -34,6 +35,8 @@ export const GROUPS = [
   {
     name: 'Events',
     operations: [
+      'slotlock_hold_slots',
+      'slotlock_release_slots',
       'slotlock_create_event',
       'slotlock_list_events',
       'slotlock_get_event',
