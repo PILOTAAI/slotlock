@@ -292,7 +292,11 @@ const RUN_VARIABLES = {
   tenant_event_revision: { from: 'slotlock_get_tenant_event', path: ['event', 'revision'] },
 };
 
-const TENANT_EVENT_ROUTES = new Set(['slotlock_get_tenant_event', 'slotlock_cancel_tenant_event']);
+const TENANT_EVENT_ROUTES = new Set([
+  'slotlock_get_tenant_event',
+  'slotlock_export_tenant_event',
+  'slotlock_cancel_tenant_event',
+]);
 
 /** An argument's run variable on this operation, if it has one. */
 function runVariable(operationId, name) {
