@@ -1202,13 +1202,38 @@ function calendarCommandHash(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 
+/**
+ * What makes a put the same request: its identity and the event it asks for. Not the window its
+ * occurrences are stored over, which for a series is the rolling horizon from the current UTC
+ * midnight: with it in the hash, a retry after midnight was refused as a different request.
+ */
 function putCommandHash(params: {
   command: PutCalendarEventCommand;
   ownerRef: string;
   event: CalendarEventContent;
-  window: Interval;
 }): string {
+  return calendarCommandHash(putCommandValue(params));
+}
+
+/**
+ * The hash 0.3.0 and earlier stored, with the window in it, so a command stored before the upgrade
+ * still replays: always for a one-off event, whose window is its own span, and on the same UTC day
+ * for a series. Remove once no stored command can be that old (commands are pruned after 30 days).
+ */
+export function legacyPutCommandHash(
+  params: Parameters<typeof putCommandHash>[0] & { window: Interval },
+): string {
   return calendarCommandHash({
+    ...putCommandValue(params),
+    materializationWindow: {
+      start: params.window.start.toISOString(),
+      end: params.window.end.toISOString(),
+    },
+  });
+}
+
+function putCommandValue(params: Parameters<typeof putCommandHash>[0]) {
+  return {
     operation: 'put',
     ownerRef: params.ownerRef,
     externalRef: params.command.externalRef,
@@ -1227,11 +1252,7 @@ function putCommandHash(params: {
           }
         : null,
     },
-    materializationWindow: {
-      start: params.window.start.toISOString(),
-      end: params.window.end.toISOString(),
-    },
-  });
+  };
 }
 
 function cancelCommandHash(params: {
@@ -3891,7 +3912,8 @@ function buildSlotlockStore(
         if (error instanceof CalendarContractError) return { ok: false, code: 'invalid_event' };
         throw error;
       }
-      const payloadHash = putCommandHash({
+      const payloadHash = putCommandHash({ command: params, ownerRef, event });
+      const legacyPayloadHash = legacyPutCommandHash({
         command: params,
         ownerRef,
         event,
@@ -3916,7 +3938,11 @@ function buildSlotlockStore(
                FOR UPDATE`;
             const priorCommand = commands[0];
             if (priorCommand) {
-              if (priorCommand.operation !== 'put' || priorCommand.payload_hash !== payloadHash) {
+              if (
+                priorCommand.operation !== 'put' ||
+                (priorCommand.payload_hash !== payloadHash &&
+                  priorCommand.payload_hash !== legacyPayloadHash)
+              ) {
                 return { ok: false, code: 'idempotency_conflict' };
               }
               return commandResult(priorCommand, true);

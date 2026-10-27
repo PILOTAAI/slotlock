@@ -6,10 +6,13 @@ import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { maintainSlotlockTenant } from '../maintenance.js';
 import {
+  SLOTLOCK_INTERNAL_EVENT_OWNER_REF,
   type SlotlockStore,
   calendarEventRollingHorizon,
   createSlotlockStore,
+  legacyPutCommandHash,
 } from '../store.js';
+import { normalizeCalendarEventContent } from '../sync.js';
 import type { CalendarHorizonRollCursor } from '../types.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
@@ -91,6 +94,72 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
       ok: false,
       code: 'overlap',
       conflictingReservationId: booking.reservation.id,
+    });
+  });
+
+  it('replays a recurring create retried after UTC midnight, when the horizon has moved a day', async () => {
+    // The agent backend writes a series over calendarEventRollingHorizon(), which starts at the
+    // current UTC midnight. The window was in the command's hash, so a retry with the same key and
+    // arguments the next day was refused as idempotency_conflict instead of replayed.
+    const { tenantRef, resourceId } = await freshTenant();
+    const today = calendarEventRollingHorizon(new Date('2027-05-03T23:59:00Z'));
+    const tomorrow = calendarEventRollingHorizon(new Date('2027-05-04T00:01:00Z'));
+    expect(tomorrow.start.getTime() - today.start.getTime()).toBe(DAY);
+    const command = {
+      tenantRef,
+      externalRef: `weekly-${crypto.randomUUID()}`,
+      idempotencyKey: `create-${crypto.randomUUID()}`,
+      expectedRevision: 0,
+      resourceId,
+      start: d('2027-05-05T09:00:00Z'),
+      end: d('2027-05-05T10:00:00Z'),
+      timezone: 'UTC',
+      summary: 'Weekly service',
+      recurrence: { rrule: 'FREQ=WEEKLY;COUNT=10' },
+    };
+    const first = await store.putCalendarEvent({ ...command, materializationWindow: today });
+    if (!first.ok) throw new Error(first.code);
+    const retried = await store.putCalendarEvent({ ...command, materializationWindow: tomorrow });
+    expect(retried).toMatchObject({ ok: true, idempotent: true, revision: first.revision });
+    if (!retried.ok) throw new Error(retried.code);
+    expect(retried.eventId).toBe(first.eventId);
+    // A different request under the same key is still refused.
+    const changed = await store.putCalendarEvent({
+      ...command,
+      summary: 'Another service',
+      materializationWindow: tomorrow,
+    });
+    expect(changed).toEqual({ ok: false, code: 'idempotency_conflict' });
+  });
+
+  it('still replays a one-off event stored by 0.3.0, with the window in its hash', async () => {
+    const { tenantRef, resourceId } = await freshTenant();
+    const command = {
+      tenantRef,
+      externalRef: `booking-${crypto.randomUUID()}`,
+      idempotencyKey: `create-${crypto.randomUUID()}`,
+      expectedRevision: 0,
+      resourceId,
+      start: d('2027-05-06T09:00:00Z'),
+      end: d('2027-05-06T10:00:00Z'),
+      timezone: 'UTC',
+      summary: 'Pickup',
+    };
+    const first = await store.putCalendarEvent(command);
+    if (!first.ok) throw new Error(first.code);
+    // As 0.3.0 stored it: the one-off's window is its own span.
+    const legacy = legacyPutCommandHash({
+      command,
+      ownerRef: SLOTLOCK_INTERNAL_EVENT_OWNER_REF,
+      event: normalizeCalendarEventContent(command),
+      window: { start: command.start, end: command.end },
+    });
+    await sql`UPDATE slotlock.calendar_event_commands SET payload_hash = ${legacy}
+              WHERE tenant_ref = ${tenantRef} AND idempotency_key = ${command.idempotencyKey}`;
+    await expect(store.putCalendarEvent(command)).resolves.toMatchObject({
+      ok: true,
+      idempotent: true,
+      eventId: first.eventId,
     });
   });
 
