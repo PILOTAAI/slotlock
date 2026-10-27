@@ -274,6 +274,7 @@ fn books_holds_and_reservations_without_double_booking() {
             .list_resources(&ListResourcesInput {
                 cursor: cursor.clone(),
                 limit: Some(100),
+                pool: None,
             })
             .unwrap();
         found |= page["resources"]
