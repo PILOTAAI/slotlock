@@ -88,8 +88,11 @@ async function check1() {
   const [first, second] = [...exclusive].sort((a, b) => Date.parse(a.acquiredAt) - Date.parse(b.acquiredAt));
   record(
     '1a exclusive locks wait for each other',
-    exclusive.every((r) => r.ok) && ms(first.releasedAt, second.acquiredAt) >= 0,
-    `second acquired ${ms(first.releasedAt, second.acquiredAt)} ms after the first released; backends ${first.backend}, ${second.backend}`,
+    // The second must ask while the first holds the lock, or the pair never overlapped and proves nothing.
+    exclusive.every((r) => r.ok) &&
+      ms(second.askedAt, first.releasedAt) > 0 &&
+      ms(first.releasedAt, second.acquiredAt) >= 0,
+    `second asked ${ms(first.acquiredAt, second.askedAt)} ms into the hold, acquired ${ms(first.releasedAt, second.acquiredAt)} ms after its release; backends ${first.backend}, ${second.backend}`,
   );
 
   const shared = await Promise.all([
