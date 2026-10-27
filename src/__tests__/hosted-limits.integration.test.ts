@@ -128,6 +128,14 @@ function rawGet(
   });
 }
 
+/** The middle value: one stall of a loaded runner moves the largest sample, not this. */
+function median(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  const upper = sorted[middle] as number;
+  return sorted.length % 2 === 1 ? upper : ((sorted[middle - 1] as number) + upper) / 2;
+}
+
 function tally(statuses: number[]): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const status of statuses) counts[status] = (counts[status] ?? 0) + 1;
@@ -711,6 +719,19 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
       });
       expect(made.status).toBe(200);
       const event = (made.body as { event: { id: string; revision: number } }).event;
+      // The server is a process of its own: B's first update and read there run code not yet
+      // compiled, which a loaded runner turned into an 842 ms update (then 40 and 24 ms). Warm them
+      // up untimed, before the burst.
+      const warm = await call(server.origin, 'PATCH', `/v1/events/${encodeURIComponent(event.id)}`, {
+        key: keys['b-second'],
+        body: {
+          expected_revision: event.revision,
+          title: 'Warm before six tenants fire',
+          idempotency_key: `six-warm-${randomUUID()}`,
+        },
+      });
+      expect(warm.status).toBe(200);
+      expect((await call(server.origin, 'GET', '/v1/resources', { key: keys['b-second'] })).status).toBe(200);
       // Each tenant keeps five costly writes in flight: one running and four waiting.
       burst = Array.from({ length: 6 * 5 }, async (_, index) => {
         const tenant = index % 6;
@@ -730,7 +751,7 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
       }
       // Not only B's first update: each of them, although B has had a slot just before.
       const updates: Array<{ status: number; ms: number }> = [];
-      let revision = event.revision;
+      let revision = (warm.body as { event: { revision: number } }).event.revision;
       for (let index = 0; index < 3; index += 1) {
         const updated = await call(server.origin, 'PATCH', `/v1/events/${encodeURIComponent(event.id)}`, {
           key: keys['b-second'],
@@ -748,10 +769,17 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
       expect(updates.map(({ status }) => status), detail).toEqual([200, 200, 200]);
       for (const updated of updates) {
         // The expansion running when the update arrives, its slot's rest, and the update itself.
-        expect(updated.ms, detail).toBeLessThan(4 * single);
+        // The floor of a second, as above, is for one stall of a loaded runner; starved, the
+        // update waited 3.3 s.
+        expect(updated.ms, detail).toBeLessThan(Math.max(1_000, 4 * single));
       }
       // A read waits for at most the expansion running when it arrives.
       expect(Math.max(...reads), detail).toBeLessThan(Math.max(1_000, 2 * single));
+      // And most reads wait for none: a freed slot rests before the next expansion starts. Handed
+      // straight to the next waiter instead, every read waited for one (medians of 100 to 150 ms
+      // with 150 to 240 ms writes, against 8 to 9 ms resting), where the bounds above, measured
+      // against a whole expansion, still passed.
+      expect(median(reads), detail).toBeLessThan(Math.max(25, single / 4));
     } finally {
       firing = false;
       await Promise.all(burst);
