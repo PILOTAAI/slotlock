@@ -51,6 +51,11 @@ public sealed partial class SlotlockClient
         ["slotlock_get_tenant"] = new("GET", "/v1/tenant", [], []),
         ["slotlock_erase_tenant"] = new("POST", "/v1/tenant/erase", [], []),
         ["slotlock_run_maintenance"] = new("POST", "/v1/maintenance", [], []),
+        ["slotlock_list_changes"] = new("GET", "/v1/changes", [], ["cursor", "limit"]),
+        ["slotlock_list_webhooks"] = new("GET", "/v1/webhooks", [], []),
+        ["slotlock_create_webhook"] = new("POST", "/v1/webhooks", [], []),
+        ["slotlock_delete_webhook"] = new("DELETE", "/v1/webhooks/{webhook_id}", ["webhook_id"], []),
+        ["slotlock_enable_webhook"] = new("POST", "/v1/webhooks/{webhook_id}/enable", ["webhook_id"], []),
     };
 
     /// <summary>List calendar resources.</summary>
@@ -1111,6 +1116,105 @@ public sealed partial class SlotlockClient
     {
         var values = new JsonObject();
         return CallAsync("slotlock_run_maintenance", values, cancellationToken);
+    }
+
+    /// <summary>List changes.</summary>
+    /// <remarks>
+    /// What changed in the tenant, oldest first, as CloudEvents: holds made, confirmed, released
+    /// or expired; bookings made, moved or cancelled; calendar events created, changed or
+    /// cancelled (ids, times and states, never titles or attendees). Pass next_cursor as cursor
+    /// to read on; it is returned even when nothing is new, so poll with it. Only changes of
+    /// transactions that have ended are listed, so following the cursor never skips one. Changes
+    /// are kept 7 days: an older cursor answers 410 cursor_expired, so start again without one.
+    /// </remarks>
+    /// <param name="cursor">cursor</param>
+    /// <param name="limit">limit</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ListChangesAsync(
+        Optional<string> cursor = default,
+        Optional<long> limit = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        if (cursor.HasValue) values["cursor"] = Json.ToNode(cursor.Value);
+        if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
+        return CallAsync("slotlock_list_changes", values, cancellationToken);
+    }
+
+    /// <summary>List webhooks.</summary>
+    /// <remarks>
+    /// The tenant's webhooks with how delivery is going: failed attempts, the last status, and
+    /// whether and why one is disabled.
+    /// </remarks>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ListWebhooksAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        return CallAsync("slotlock_list_webhooks", values, cancellationToken);
+    }
+
+    /// <summary>Add a webhook.</summary>
+    /// <remarks>
+    /// Send the changes slotlock_list_changes lists from now on to an https URL, each as a
+    /// CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature),
+    /// in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a
+    /// 410, the webhook is disabled and the feed records webhook.disabled. The secret is returned
+    /// here only. At most 10 per tenant.
+    /// </remarks>
+    /// <param name="url">url</param>
+    /// <param name="eventTypes">event_types</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> CreateWebhookAsync(
+        string url,
+        Optional<IEnumerable<string>> eventTypes = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["url"] = Json.ToNode(url);
+        if (eventTypes.HasValue) values["event_types"] = Json.ToNode(eventTypes.Value);
+        return CallAsync("slotlock_create_webhook", values, cancellationToken);
+    }
+
+    /// <summary>Delete a webhook.</summary>
+    /// <remarks>
+    /// Stop sending to a webhook. deleted is false when the tenant has no such webhook.
+    /// </remarks>
+    /// <param name="webhookId">webhook_id</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> DeleteWebhookAsync(
+        string webhookId,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["webhook_id"] = Json.ToNode(webhookId);
+        return CallAsync("slotlock_delete_webhook", values, cancellationToken);
+    }
+
+    /// <summary>Enable a webhook.</summary>
+    /// <remarks>
+    /// Send to a disabled webhook again, from the first change it did not accept. 404
+    /// webhook_not_found when the tenant has no such webhook.
+    /// </remarks>
+    /// <param name="webhookId">webhook_id</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> EnableWebhookAsync(
+        string webhookId,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["webhook_id"] = Json.ToNode(webhookId);
+        return CallAsync("slotlock_enable_webhook", values, cancellationToken);
     }
 
 }

@@ -436,6 +436,8 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
             })
           ).ok,
         ).toBe(true);
+        const hook = await tenant.createWebhookEndpoint({ tenantRef, url: 'https://example.com/hook' });
+        if (!hook.ok) throw new Error(hook.code);
         expect(
           (
             await tenant.recordCalendarCoverage({

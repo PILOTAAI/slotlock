@@ -1,3 +1,5 @@
+import type { SlotlockWebhookEndpoint } from './event-feed.js';
+import { slotlockCloudEvent } from './webhooks.js';
 import { createHash } from 'node:crypto';
 import {
   type SlotlockAgentCalendarBackend,
@@ -942,6 +944,21 @@ function applicationRefusal(code: string): SlotlockAgentOperationError {
   return new SlotlockAgentOperationError(code, 409);
 }
 
+function webhookOutput(endpoint: SlotlockWebhookEndpoint) {
+  return {
+    id: endpoint.id,
+    url: endpoint.url,
+    event_types: endpoint.eventTypes,
+    created_at: endpoint.createdAt.toISOString(),
+    attempts: endpoint.attempts,
+    failing_since: endpoint.failingSince?.toISOString() ?? null,
+    last_status: endpoint.lastStatus,
+    last_error: endpoint.lastError,
+    disabled_at: endpoint.disabledAt?.toISOString() ?? null,
+    disabled_reason: endpoint.disabledReason as 'gone' | 'failing' | null,
+  };
+}
+
 function rulesOutput(rules: readonly WeeklyAvailabilityRule[] | undefined | null) {
   if (!rules) return null;
   return rules.map((rule) => ({
@@ -1450,6 +1467,60 @@ export function createSlotlockStoreApplicationBackend(
         }
         const erased = await tenant.eraseTenant({ tenantRef: tenantOf(context) });
         return { total: erased.total, rows: erased.rows };
+      }, WRITE);
+    },
+
+    async listChanges(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const page = await tenant.listChanges({
+          tenantRef: tenantOf(context),
+          limit: input.limit as number,
+          ...(input.cursor !== undefined ? { after: input.cursor as string } : {}),
+        });
+        if (!page.ok) {
+          throw new SlotlockAgentOperationError(page.code, page.code === 'cursor_expired' ? 410 : 400);
+        }
+        return { changes: page.changes.map(slotlockCloudEvent), next_cursor: page.next };
+      });
+    },
+
+    async createWebhook(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const created = await tenant.createWebhookEndpoint({
+          tenantRef: tenantOf(context),
+          url: input.url as string,
+          ...(input.event_types !== undefined ? { eventTypes: input.event_types as string[] } : {}),
+        });
+        if (!created.ok) {
+          throw new SlotlockAgentOperationError(
+            created.code,
+            created.code === 'webhook_limit_reached' ? 409 : 400,
+          );
+        }
+        return { webhook: webhookOutput(created.endpoint), secret: created.secret };
+      }, WRITE);
+    },
+
+    async listWebhooks(context) {
+      return withTenant(store, context, async (tenant) => ({
+        webhooks: (await tenant.listWebhookEndpoints({ tenantRef: tenantOf(context) })).map(webhookOutput),
+      }));
+    },
+
+    async deleteWebhook(context, input) {
+      return withTenant(store, context, async (tenant) =>
+        tenant.deleteWebhookEndpoint({ tenantRef: tenantOf(context), id: input.webhook_id as string }),
+      WRITE);
+    },
+
+    async enableWebhook(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const enabled = await tenant.enableWebhookEndpoint({
+          tenantRef: tenantOf(context),
+          id: input.webhook_id as string,
+        });
+        if (!enabled) throw new SlotlockAgentOperationError('webhook_not_found', 404);
+        return { webhook: webhookOutput(enabled) };
       }, WRITE);
     },
 

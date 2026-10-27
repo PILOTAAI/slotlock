@@ -6911,6 +6911,787 @@
           }
         }
       }
+    },
+    "/v1/changes": {
+      "get": {
+        "operationId": "slotlock_list_changes",
+        "summary": "List changes",
+        "description": "What changed in the tenant, oldest first, as CloudEvents: holds made, confirmed, released or expired; bookings made, moved or cancelled; calendar events created, changed or cancelled (ids, times and states, never titles or attendees). Pass next_cursor as cursor to read on; it is returned even when nothing is new, so poll with it. Only changes of transactions that have ended are listed, so following the cursor never skips one. Changes are kept 7 days: an older cursor answers 410 cursor_expired, so start again without one.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "changes": {
+                      "maxItems": 500,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "specversion": {
+                            "type": "string",
+                            "const": "1.0"
+                          },
+                          "id": {
+                            "type": "string",
+                            "maxLength": 40
+                          },
+                          "source": {
+                            "type": "string",
+                            "maxLength": 300
+                          },
+                          "type": {
+                            "type": "string",
+                            "maxLength": 100
+                          },
+                          "subject": {
+                            "type": "string",
+                            "maxLength": 500
+                          },
+                          "time": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "datacontenttype": {
+                            "type": "string",
+                            "const": "application/json"
+                          },
+                          "data": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string"
+                            },
+                            "additionalProperties": {}
+                          }
+                        },
+                        "required": [
+                          "specversion",
+                          "id",
+                          "source",
+                          "type",
+                          "subject",
+                          "time",
+                          "datacontenttype",
+                          "data"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "next_cursor": {
+                      "type": "string",
+                      "maxLength": 500
+                    }
+                  },
+                  "required": [
+                    "changes",
+                    "next_cursor"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "410": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/webhooks": {
+      "post": {
+        "operationId": "slotlock_create_webhook",
+        "summary": "Add a webhook",
+        "description": "Send the changes slotlock_list_changes lists from now on to an https URL, each as a CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature), in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a 410, the webhook is disabled and the feed records webhook.disabled. The secret is returned here only. At most 10 per tenant.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "maxLength": 2048,
+                    "format": "uri"
+                  },
+                  "event_types": {
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "hold.created",
+                        "hold.updated",
+                        "hold.confirmed",
+                        "hold.released",
+                        "hold.expired",
+                        "reservation.created",
+                        "reservation.updated",
+                        "reservation.cancelled",
+                        "event.created",
+                        "event.updated",
+                        "event.cancelled",
+                        "webhook.disabled"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "url"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "webhook": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "url": {
+                          "type": "string",
+                          "maxLength": 2048
+                        },
+                        "event_types": {
+                          "anyOf": [
+                            {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "hold.created",
+                                  "hold.updated",
+                                  "hold.confirmed",
+                                  "hold.released",
+                                  "hold.expired",
+                                  "reservation.created",
+                                  "reservation.updated",
+                                  "reservation.cancelled",
+                                  "event.created",
+                                  "event.updated",
+                                  "event.cancelled",
+                                  "webhook.disabled"
+                                ]
+                              }
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "created_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "attempts": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "failing_since": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "last_status": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "last_error": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 500
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "disabled_at": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "disabled_reason": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "gone",
+                                "failing"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "url",
+                        "event_types",
+                        "created_at",
+                        "attempts",
+                        "failing_since",
+                        "last_status",
+                        "last_error",
+                        "disabled_at",
+                        "disabled_reason"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "secret": {
+                      "type": "string",
+                      "pattern": "^whsec_"
+                    }
+                  },
+                  "required": [
+                    "webhook",
+                    "secret"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "get": {
+        "operationId": "slotlock_list_webhooks",
+        "summary": "List webhooks",
+        "description": "The tenant's webhooks with how delivery is going: failed attempts, the last status, and whether and why one is disabled.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "webhooks": {
+                      "maxItems": 10,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "url": {
+                            "type": "string",
+                            "maxLength": 2048
+                          },
+                          "event_types": {
+                            "anyOf": [
+                              {
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "enum": [
+                                    "hold.created",
+                                    "hold.updated",
+                                    "hold.confirmed",
+                                    "hold.released",
+                                    "hold.expired",
+                                    "reservation.created",
+                                    "reservation.updated",
+                                    "reservation.cancelled",
+                                    "event.created",
+                                    "event.updated",
+                                    "event.cancelled",
+                                    "webhook.disabled"
+                                  ]
+                                }
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "created_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "attempts": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "failing_since": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "last_status": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": -9007199254740991,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "last_error": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 500
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "disabled_at": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "disabled_reason": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "gone",
+                                  "failing"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "url",
+                          "event_types",
+                          "created_at",
+                          "attempts",
+                          "failing_since",
+                          "last_status",
+                          "last_error",
+                          "disabled_at",
+                          "disabled_reason"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "webhooks"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/webhooks/{webhook_id}": {
+      "delete": {
+        "operationId": "slotlock_delete_webhook",
+        "summary": "Delete a webhook",
+        "description": "Stop sending to a webhook. deleted is false when the tenant has no such webhook.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "parameters": [
+          {
+            "name": "webhook_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "deleted": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "deleted"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/webhooks/{webhook_id}/enable": {
+      "post": {
+        "operationId": "slotlock_enable_webhook",
+        "summary": "Enable a webhook",
+        "description": "Send to a disabled webhook again, from the first change it did not accept. 404 webhook_not_found when the tenant has no such webhook.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "webhook_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "webhook": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "url": {
+                          "type": "string",
+                          "maxLength": 2048
+                        },
+                        "event_types": {
+                          "anyOf": [
+                            {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "hold.created",
+                                  "hold.updated",
+                                  "hold.confirmed",
+                                  "hold.released",
+                                  "hold.expired",
+                                  "reservation.created",
+                                  "reservation.updated",
+                                  "reservation.cancelled",
+                                  "event.created",
+                                  "event.updated",
+                                  "event.cancelled",
+                                  "webhook.disabled"
+                                ]
+                              }
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "created_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "attempts": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "failing_since": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "last_status": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "last_error": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 500
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "disabled_at": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "disabled_reason": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "gone",
+                                "failing"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "url",
+                        "event_types",
+                        "created_at",
+                        "attempts",
+                        "failing_since",
+                        "last_status",
+                        "last_error",
+                        "disabled_at",
+                        "disabled_reason"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "webhook"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
     }
   },
   "components": {

@@ -260,6 +260,41 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         path_params: &[],
         query: &[],
     },
+    Operation {
+        name: "slotlock_list_changes",
+        method: "GET",
+        path: "/v1/changes",
+        path_params: &[],
+        query: &["cursor", "limit"],
+    },
+    Operation {
+        name: "slotlock_list_webhooks",
+        method: "GET",
+        path: "/v1/webhooks",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_create_webhook",
+        method: "POST",
+        path: "/v1/webhooks",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_delete_webhook",
+        method: "DELETE",
+        path: "/v1/webhooks/{webhook_id}",
+        path_params: &["webhook_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_enable_webhook",
+        method: "POST",
+        path: "/v1/webhooks/{webhook_id}/enable",
+        path_params: &["webhook_id"],
+        query: &[],
+    },
 ];
 
 /// The arguments of [`Client::list_resources`].
@@ -617,6 +652,40 @@ pub struct EraseTenantInput {
 pub struct RunMaintenanceInput {
 }
 
+/// The arguments of [`Client::list_changes`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ListChangesInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+}
+
+/// The arguments of [`Client::list_webhooks`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ListWebhooksInput {
+}
+
+/// The arguments of [`Client::create_webhook`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CreateWebhookInput {
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_types: Option<Vec<String>>,
+}
+
+/// The arguments of [`Client::delete_webhook`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DeleteWebhookInput {
+    pub webhook_id: String,
+}
+
+/// The arguments of [`Client::enable_webhook`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct EnableWebhookInput {
+    pub webhook_id: String,
+}
+
 impl Client {
     /// List calendar resources.
     ///
@@ -944,6 +1013,52 @@ impl Client {
     /// is true when there was more than one call does: call again.
     pub fn run_maintenance(&self, input: &RunMaintenanceInput) -> Result<Value, Error> {
         self.call("slotlock_run_maintenance", serde_json::to_value(input)?)
+    }
+
+    /// List changes.
+    ///
+    /// What changed in the tenant, oldest first, as CloudEvents: holds made, confirmed, released
+    /// or expired; bookings made, moved or cancelled; calendar events created, changed or
+    /// cancelled (ids, times and states, never titles or attendees). Pass next_cursor as cursor
+    /// to read on; it is returned even when nothing is new, so poll with it. Only changes of
+    /// transactions that have ended are listed, so following the cursor never skips one. Changes
+    /// are kept 7 days: an older cursor answers 410 cursor_expired, so start again without one.
+    pub fn list_changes(&self, input: &ListChangesInput) -> Result<Value, Error> {
+        self.call("slotlock_list_changes", serde_json::to_value(input)?)
+    }
+
+    /// List webhooks.
+    ///
+    /// The tenant's webhooks with how delivery is going: failed attempts, the last status, and
+    /// whether and why one is disabled.
+    pub fn list_webhooks(&self, input: &ListWebhooksInput) -> Result<Value, Error> {
+        self.call("slotlock_list_webhooks", serde_json::to_value(input)?)
+    }
+
+    /// Add a webhook.
+    ///
+    /// Send the changes slotlock_list_changes lists from now on to an https URL, each as a
+    /// CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature),
+    /// in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a
+    /// 410, the webhook is disabled and the feed records webhook.disabled. The secret is returned
+    /// here only. At most 10 per tenant.
+    pub fn create_webhook(&self, input: &CreateWebhookInput) -> Result<Value, Error> {
+        self.call("slotlock_create_webhook", serde_json::to_value(input)?)
+    }
+
+    /// Delete a webhook.
+    ///
+    /// Stop sending to a webhook. deleted is false when the tenant has no such webhook.
+    pub fn delete_webhook(&self, input: &DeleteWebhookInput) -> Result<Value, Error> {
+        self.call("slotlock_delete_webhook", serde_json::to_value(input)?)
+    }
+
+    /// Enable a webhook.
+    ///
+    /// Send to a disabled webhook again, from the first change it did not accept. 404
+    /// webhook_not_found when the tenant has no such webhook.
+    pub fn enable_webhook(&self, input: &EnableWebhookInput) -> Result<Value, Error> {
+        self.call("slotlock_enable_webhook", serde_json::to_value(input)?)
     }
 
 }

@@ -18,8 +18,8 @@ export interface SlotlockMaintenanceResult {
   refused: number;
   /**
    * Expired holds and the answers kept for keyed ones, and past the retention window event
-   * idempotency answers, agents' event cancellations and booking references retired with no
-   * booking, deleted. A cancelled booking's tombstone stays.
+   * idempotency answers, agents' event cancellations, booking references retired with no
+   * booking and feed changes, deleted. A cancelled booking's tombstone stays.
    */
   pruned: number;
   /** More was left than one pass does: run another. */
@@ -78,7 +78,8 @@ export async function maintainSlotlockTenant(
   let pruned = 0;
   let eventsLeft = true;
   let bookingsLeft = true;
-  for (let batch = 0; batch < batches && (eventsLeft || bookingsLeft); batch++) {
+  let changesLeft = true;
+  for (let batch = 0; batch < batches && (eventsLeft || bookingsLeft || changesLeft); batch++) {
     options.signal?.throwIfAborted();
     if (eventsLeft) {
       const prune = await store.withTenant(tenantRef, (tenant) =>
@@ -94,6 +95,13 @@ export async function maintainSlotlockTenant(
       pruned += prune.expiredHoldsDeleted + prune.holdCommandsDeleted + prune.tombstonesDeleted;
       bookingsLeft = prune.hasMore;
     }
+    if (changesLeft) {
+      const deleted = await store.withTenant(tenantRef, (tenant) =>
+        tenant.pruneChanges({ tenantRef, limit: CHANGE_PRUNE_BATCH }),
+      );
+      pruned += deleted;
+      changesLeft = deleted === CHANGE_PRUNE_BATCH;
+    }
   }
   if (rollFailure) throw rollFailure.error;
   return {
@@ -101,10 +109,13 @@ export async function maintainSlotlockTenant(
     conflicts,
     refused,
     pruned,
-    capped: rollCapped || eventsLeft || bookingsLeft,
+    capped: rollCapped || eventsLeft || bookingsLeft || changesLeft,
     rollPending: rollCapped && after !== null && (after.rollRetryAt ?? null) === null,
   };
 }
+
+/** Feed changes past the retention deleted per batch. */
+const CHANGE_PRUNE_BATCH = 1_000;
 
 /** The advisory lock key for one tenant's maintenance (64-bit, from the tenant reference). */
 const LOCK_NAMESPACE = 'slotlock.maintenance:';

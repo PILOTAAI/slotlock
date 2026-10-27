@@ -260,6 +260,41 @@ OPERATIONS: dict[str, Operation] = {
         (),
         (),
     ),
+    "slotlock_list_changes": Operation(
+        "slotlock_list_changes",
+        "GET",
+        "/v1/changes",
+        (),
+        ("cursor", "limit"),
+    ),
+    "slotlock_list_webhooks": Operation(
+        "slotlock_list_webhooks",
+        "GET",
+        "/v1/webhooks",
+        (),
+        (),
+    ),
+    "slotlock_create_webhook": Operation(
+        "slotlock_create_webhook",
+        "POST",
+        "/v1/webhooks",
+        (),
+        (),
+    ),
+    "slotlock_delete_webhook": Operation(
+        "slotlock_delete_webhook",
+        "DELETE",
+        "/v1/webhooks/{webhook_id}",
+        ("webhook_id",),
+        (),
+    ),
+    "slotlock_enable_webhook": Operation(
+        "slotlock_enable_webhook",
+        "POST",
+        "/v1/webhooks/{webhook_id}/enable",
+        ("webhook_id",),
+        (),
+    ),
 }
 
 
@@ -929,3 +964,65 @@ class Operations(Transport):
         """
         values: dict[str, Any] = {}
         return self.call("slotlock_run_maintenance", values)
+
+    def list_changes(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """List changes.
+
+        What changed in the tenant, oldest first, as CloudEvents: holds made, confirmed, released
+        or expired; bookings made, moved or cancelled; calendar events created, changed or
+        cancelled (ids, times and states, never titles or attendees). Pass next_cursor as cursor
+        to read on; it is returned even when nothing is new, so poll with it. Only changes of
+        transactions that have ended are listed, so following the cursor never skips one. Changes
+        are kept 7 days: an older cursor answers 410 cursor_expired, so start again without one.
+        """
+        values: dict[str, Any] = {}
+        if cursor is not None:
+            values["cursor"] = cursor
+        if limit is not None:
+            values["limit"] = limit
+        return self.call("slotlock_list_changes", values)
+
+    def list_webhooks(self) -> dict[str, Any]:
+        """List webhooks.
+
+        The tenant's webhooks with how delivery is going: failed attempts, the last status, and
+        whether and why one is disabled.
+        """
+        values: dict[str, Any] = {}
+        return self.call("slotlock_list_webhooks", values)
+
+    def create_webhook(self, *, url: str, event_types: list[str] | None = None) -> dict[str, Any]:
+        """Add a webhook.
+
+        Send the changes slotlock_list_changes lists from now on to an https URL, each as a
+        CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature),
+        in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a
+        410, the webhook is disabled and the feed records webhook.disabled. The secret is returned
+        here only. At most 10 per tenant.
+        """
+        values: dict[str, Any] = {"url": url}
+        if event_types is not None:
+            values["event_types"] = event_types
+        return self.call("slotlock_create_webhook", values)
+
+    def delete_webhook(self, webhook_id: str) -> dict[str, Any]:
+        """Delete a webhook.
+
+        Stop sending to a webhook. deleted is false when the tenant has no such webhook.
+        """
+        values: dict[str, Any] = {"webhook_id": webhook_id}
+        return self.call("slotlock_delete_webhook", values)
+
+    def enable_webhook(self, webhook_id: str) -> dict[str, Any]:
+        """Enable a webhook.
+
+        Send to a disabled webhook again, from the first change it did not accept. 404
+        webhook_not_found when the tenant has no such webhook.
+        """
+        values: dict[str, Any] = {"webhook_id": webhook_id}
+        return self.call("slotlock_enable_webhook", values)

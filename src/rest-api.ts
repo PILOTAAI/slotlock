@@ -100,6 +100,7 @@ const STATUS_TITLES: Readonly<Record<number, string>> = Object.freeze({
   404: 'Not Found',
   405: 'Method Not Allowed',
   409: 'Conflict',
+  410: 'Gone',
   413: 'Content Too Large',
   415: 'Unsupported Media Type',
   422: 'Unprocessable Content',
@@ -399,6 +400,8 @@ export function slotlockOpenApiDocument(args: {
           '403': ERROR_RESPONSE,
           '404': ERROR_RESPONSE,
           ...(route.method === 'GET' ? {} : { '409': ERROR_RESPONSE }),
+          // A change cursor past the feed's retention.
+          ...(route.operation === 'slotlock_list_changes' ? { '410': ERROR_RESPONSE } : {}),
           '429': ERROR_RESPONSE,
           default: ERROR_RESPONSE,
         },

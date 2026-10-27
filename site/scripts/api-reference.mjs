@@ -67,6 +67,16 @@ export const GROUPS = [
     ],
   },
   {
+    name: 'Changes and webhooks',
+    operations: [
+      'slotlock_list_changes',
+      'slotlock_create_webhook',
+      'slotlock_list_webhooks',
+      'slotlock_delete_webhook',
+      'slotlock_enable_webhook',
+    ],
+  },
+  {
     name: 'Tenant',
     operations: ['slotlock_get_tenant', 'slotlock_run_maintenance', 'slotlock_erase_tenant'],
   },
@@ -79,6 +89,7 @@ const STATUS = {
   403: 'The key lacks the scope this route needs',
   404: "Not this tenant's, or gone",
   409: 'A conflict with what is stored: an overlap, a stale revision, a resource in use',
+  410: 'The change cursor is older than the 7 days the feed keeps (`cursor_expired`): read from the start',
   422: 'The idempotency key was used with another request (`idempotency_conflict`)',
   428: 'The server asks a person to confirm this write first (`confirmation_required`)',
   429: 'Rate limited: retry after `Retry-After` seconds',
