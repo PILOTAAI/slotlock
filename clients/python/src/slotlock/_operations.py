@@ -267,6 +267,20 @@ OPERATIONS: dict[str, Operation] = {
         ("resource_id", "source"),
         (),
     ),
+    "slotlock_get_coverage": Operation(
+        "slotlock_get_coverage",
+        "GET",
+        "/v1/resources/{resource_id}/coverage",
+        ("resource_id",),
+        (),
+    ),
+    "slotlock_record_coverage_failure": Operation(
+        "slotlock_record_coverage_failure",
+        "POST",
+        "/v1/resources/{resource_id}/coverage/{source}/failure",
+        ("resource_id", "source"),
+        (),
+    ),
     "slotlock_list_tenant_events": Operation(
         "slotlock_list_tenant_events",
         "GET",
@@ -1066,6 +1080,33 @@ class Operations(Transport):
             "revision": revision,
         }
         return self.call("slotlock_record_coverage", values)
+
+    def get_coverage(self, resource_id: str) -> dict[str, Any]:
+        """A resource's coverage and its health.
+
+        Each external calendar (source) that records coverage of a resource: the window it covers,
+        when it was last read, its last error, and whether it is stale (not read for a day, so the
+        time it covers is unproven, not free). A source that goes stale is also put on the change
+        feed once, as coverage.stale, until it is read again.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id}
+        return self.call("slotlock_get_coverage", values)
+
+    def record_coverage_failure(
+        self,
+        resource_id: str,
+        source: str,
+        *,
+        error: str,
+    ) -> dict[str, Any]:
+        """Record a failed read of a source.
+
+        Record that reading an external calendar failed (it answered 500, a token expired): kept
+        as the source's last error, shown by slotlock_get_coverage, while its coverage stays as it
+        was. 404 coverage_not_found for a source that has never recorded coverage of the resource.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id, "source": source, "error": error}
+        return self.call("slotlock_record_coverage_failure", values)
 
     def list_tenant_events(
         self,

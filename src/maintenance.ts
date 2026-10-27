@@ -27,6 +27,8 @@ export interface SlotlockMaintenanceResult {
    * reported on the feed, or moved with `followZoneRules` (store.followZoneRules).
    */
   zoneShifts: number;
+  /** Coverage sources gone stale since the last pass, now reported on the feed (`coverage.stale`). */
+  staleSources: number;
   /** More was left than one pass does: run another. */
   capped: boolean;
   /**
@@ -112,6 +114,7 @@ export async function maintainSlotlockTenant(
   const zones = await store.withTenant(tenantRef, (tenant) =>
     tenant.followZoneRules({ tenantRef, move: options.followZoneRules === true }),
   );
+  const staleSources = await store.withTenant(tenantRef, (tenant) => tenant.reportStaleCoverage({ tenantRef }));
   if (rollFailure) throw rollFailure.error;
   return {
     extended,
@@ -119,6 +122,7 @@ export async function maintainSlotlockTenant(
     refused,
     pruned,
     zoneShifts: zones.shifted,
+    staleSources,
     capped: rollCapped || eventsLeft || bookingsLeft || changesLeft,
     rollPending: rollCapped && after !== null && (after.rollRetryAt ?? null) === null,
   };

@@ -119,6 +119,8 @@ const backend = {
   setResourcePool: vi.fn(),
   listPools: vi.fn(),
   getResourceHistory: vi.fn(),
+  getCoverage: vi.fn(),
+  recordCoverageFailure: vi.fn(),
   getReservationHistory: vi.fn(),
   getTenantEventHistory: vi.fn(),
   createWebhook: vi.fn(),
@@ -261,7 +263,7 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   cancelTenantEvent: { event_id: EVENT_ID, revision: 3, cancelled: true, replayed: false },
   getTenant: { tenant: { ref: 'tenant-a', suspended: false } },
   eraseTenant: { total: 12, rows: { resources: 2, reservations: 10 } },
-  runMaintenance: { extended: 0, conflicts: 0, refused: 0, pruned: 0, zone_shifts: 0, capped: false },
+  runMaintenance: { extended: 0, conflicts: 0, refused: 0, pruned: 0, zone_shifts: 0, stale_sources: 0, capped: false },
   listChanges: {
     changes: [
       {
@@ -282,6 +284,21 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   setResourcePool: { resource: { ...RESOURCE, pool: 'van' } },
   listPools: { pools: [{ pool: 'van', capacity: 5 }] },
   getResourceHistory: HISTORY,
+  getCoverage: {
+    sources: [
+      {
+        source: 'google:fleet@example.com',
+        start: '2027-03-01T00:00:00.000Z',
+        end: '2027-06-01T00:00:00.000Z',
+        revision: 7,
+        observed_at: '2027-02-28T09:00:00.000Z',
+        last_error: null,
+        last_error_at: null,
+        stale: false,
+      },
+    ],
+  },
+  recordCoverageFailure: { recorded: true },
   getReservationHistory: HISTORY,
   getTenantEventHistory: HISTORY,
   deleteWebhook: { deleted: true },

@@ -1588,6 +1588,39 @@ export function createSlotlockStoreApplicationBackend(
       }, WRITE);
     },
 
+    async getCoverage(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const resource = await requireResource(tenant, tenantOf(context), input.resource_id as string);
+        const sources = await tenant.listCoverage({ tenantRef: tenantOf(context), resourceId: resource.id });
+        return {
+          sources: sources.map((source) => ({
+            source: source.source,
+            start: source.start.toISOString(),
+            end: source.end.toISOString(),
+            revision: source.revision,
+            observed_at: source.observedAt.toISOString(),
+            last_error: source.lastError,
+            last_error_at: source.lastErrorAt?.toISOString() ?? null,
+            stale: source.stale,
+          })),
+        };
+      });
+    },
+
+    async recordCoverageFailure(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const resource = await requireResource(tenant, tenantOf(context), input.resource_id as string);
+        const result = await tenant.recordCoverageFailure({
+          tenantRef: tenantOf(context),
+          resourceId: resource.id,
+          source: input.source as string,
+          error: input.error as string,
+        });
+        if (!result.ok) throw applicationRefusal(result.code);
+        return { recorded: true };
+      }, WRITE);
+    },
+
     async recordCoverage(context, input) {
       return withTenant(store, context, async (tenant) => {
         const resource = await requireResource(tenant, tenantOf(context), input.resource_id as string);
@@ -1746,11 +1779,11 @@ export function createSlotlockStoreApplicationBackend(
       assertActive(context);
       try {
         // A caller goes round again while `capped`; when to do so at once is the scheduler's.
-        const { rollPending: _, zoneShifts, ...result } = await maintainSlotlockTenant(store, tenantOf(context), {
+        const { rollPending: _, zoneShifts, staleSources, ...result } = await maintainSlotlockTenant(store, tenantOf(context), {
           batches,
           signal: context.signal,
         });
-        return { ...result, zone_shifts: zoneShifts };
+        return { ...result, zone_shifts: zoneShifts, stale_sources: staleSources };
       } catch (error) {
         if (context.signal.aborted) throw new SlotlockAgentOperationError('request_aborted', 503);
         throw error;

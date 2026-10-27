@@ -271,6 +271,7 @@ fn books_holds_and_reservations_without_double_booking() {
             "extended",
             "pruned",
             "refused",
+            "stale_sources",
             "zone_shifts"
         ]
     );

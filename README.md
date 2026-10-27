@@ -1125,6 +1125,10 @@ not commit. A change carries ids, times and states, never titles, descriptions o
   to `maintainSlotlockTenant` moves them instead, as a new revision, unless that overlaps another
   booking (`event.timezone_conflict`; it stays, for a person or an agent to decide). `/healthz`
   reports the `tzdata` the server runs.
+- Feed health: `GET /v1/resources/{id}/coverage` shows each source's window, when it was last read,
+  its last error (`POST /v1/resources/{id}/coverage/{source}/failure` records one) and whether it is
+  stale (not read for a day, so the time it covers is unproven, never free). A source that goes stale
+  is put on the feed once, as `coverage.stale`, until it is read again.
 - `slotlock serve` delivers (`SLOTLOCK_WEBHOOKS`): never to an address on a private network, which
   it checks when it connects, and following no redirect. `private` allows those, for testing.
 - In the library: `listChanges`, `createWebhookEndpoint` and the rest are store methods, and

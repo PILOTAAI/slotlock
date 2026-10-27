@@ -7,6 +7,12 @@ versioning.
 
 ### Added
 
+- Feed health: `GET /v1/resources/{resource_id}/coverage` (`slotlock_get_coverage`, `listCoverage`)
+  shows each source's window, last read, last error and whether it is stale;
+  `POST /v1/resources/{resource_id}/coverage/{source}/failure` (`slotlock_record_coverage_failure`,
+  `recordCoverageFailure`) records a failed read. Maintenance puts a source that has gone stale on the
+  feed once (`coverage.stale`, `reportStaleCoverage`) and counts `staleSources` (`stale_sources`).
+  Unread time stays unproven, never free. Run `slotlock migrate`.
 - Time zone rule changes: each calendar event keeps the wall time it was booked for in its zone,
   and maintenance reports a future one-off event whose wall time now falls at another instant
   (`event.timezone_shifted` on the feed, once), or with `followZoneRules` moves it there as a new

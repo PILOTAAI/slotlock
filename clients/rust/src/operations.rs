@@ -268,6 +268,20 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
+        name: "slotlock_get_coverage",
+        method: "GET",
+        path: "/v1/resources/{resource_id}/coverage",
+        path_params: &["resource_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_record_coverage_failure",
+        method: "POST",
+        path: "/v1/resources/{resource_id}/coverage/{source}/failure",
+        path_params: &["resource_id", "source"],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_list_tenant_events",
         method: "GET",
         path: "/v1/tenant/events",
@@ -725,6 +739,20 @@ pub struct RecordCoverageInput {
     pub revision: i64,
 }
 
+/// The arguments of [`Client::get_coverage`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GetCoverageInput {
+    pub resource_id: String,
+}
+
+/// The arguments of [`Client::record_coverage_failure`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RecordCoverageFailureInput {
+    pub resource_id: String,
+    pub source: String,
+    pub error: String,
+}
+
 /// The arguments of [`Client::list_tenant_events`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ListTenantEventsInput {
@@ -1144,6 +1172,25 @@ impl Client {
     /// nothing.
     pub fn record_coverage(&self, input: &RecordCoverageInput) -> Result<Value, Error> {
         self.call("slotlock_record_coverage", serde_json::to_value(input)?)
+    }
+
+    /// A resource's coverage and its health.
+    ///
+    /// Each external calendar (source) that records coverage of a resource: the window it covers,
+    /// when it was last read, its last error, and whether it is stale (not read for a day, so the
+    /// time it covers is unproven, not free). A source that goes stale is also put on the change
+    /// feed once, as coverage.stale, until it is read again.
+    pub fn get_coverage(&self, input: &GetCoverageInput) -> Result<Value, Error> {
+        self.call("slotlock_get_coverage", serde_json::to_value(input)?)
+    }
+
+    /// Record a failed read of a source.
+    ///
+    /// Record that reading an external calendar failed (it answered 500, a token expired): kept
+    /// as the source's last error, shown by slotlock_get_coverage, while its coverage stays as it
+    /// was. 404 coverage_not_found for a source that has never recorded coverage of the resource.
+    pub fn record_coverage_failure(&self, input: &RecordCoverageFailureInput) -> Result<Value, Error> {
+        self.call("slotlock_record_coverage_failure", serde_json::to_value(input)?)
     }
 
     /// List a resource's events, every key's.
