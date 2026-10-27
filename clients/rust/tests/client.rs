@@ -391,7 +391,7 @@ fn retries_a_keyed_hold_and_retires_a_resource() {
             ttl_seconds: 60,
             ..window.clone()
         }),
-        409,
+        422,
         "idempotency_conflict",
     );
     let hold_id = hold["id"].as_str().unwrap().to_string();
