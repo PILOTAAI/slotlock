@@ -3,7 +3,10 @@
 // serves MCP on a real socket until its signal aborts. Skipped without DATABASE_URL.
 import { randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import postgres from 'postgres';
+import { Webhook } from 'standardwebhooks';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { SLOTLOCK_MCP_LEGACY_PROTOCOL_VERSION } from '../agent-server.js';
 import { SLOTLOCK_DASHBOARD_FUNCTIONS } from '../ddl.js';
@@ -192,6 +195,30 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     }
   });
 
+  it("sets and clears a resource's booking rules from the command line", async () => {
+    const added = await run(['resource', 'add', 'rules-van']);
+    expect(added.code).toBe(0);
+    try {
+      const rules = { minNoticeMinutes: 120, slotStepMinutes: 30, turnaroundMinutes: 15, enforceHours: true };
+      const set = await run(['rules', 'set', JSON.stringify(rules), '--resource', 'rules-van']);
+      expect(set.code).toBe(0);
+      expect(JSON.parse(set.stdout.text())).toMatchObject({ external_ref: 'rules-van', booking_rules: rules });
+      const cleared = await run(['rules', 'clear', '--resource', 'rules-van']);
+      expect(JSON.parse(cleared.stdout.text())).toMatchObject({ booking_rules: null });
+      // Outside their bounds, unknown, or without a resource: refused before anything is written.
+      for (const args of [
+        ['rules', 'set', '{"slotStepMinutes":0}', '--resource', 'rules-van'],
+        ['rules', 'set', '{"bufferBeforeMinutes":5}', '--resource', 'rules-van'],
+        ['rules', 'set', '{}'],
+      ]) {
+        expect((await run(args)).code, args.join(' ')).toBe(2);
+      }
+      expect((await run(['rules', 'clear', '--resource', 'no-such-van'])).code).toBe(1);
+    } finally {
+      expect((await run(['resource', 'delete', 'rules-van'])).code).toBe(0);
+    }
+  });
+
   it('archives, restores and deletes resources, and suspends and erases a tenant, from the command line', async () => {
     const lifecycle = `cli-lifecycle-${randomUUID()}`;
     const runIn = async (argv: string[], overrides: SlotlockEnv = {}) => {
@@ -297,7 +324,13 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         mcp: 'http://localhost:8080/mcp',
         a2a: 'http://localhost:8080/a2a',
         tenant: tenantRef,
-        confirm_writes: ['slotlock_create_event', 'slotlock_update_event', 'slotlock_delete_event'],
+        confirm_writes: [
+          'slotlock_create_event',
+          'slotlock_book_together',
+          'slotlock_book_pool',
+          'slotlock_update_event',
+          'slotlock_delete_event',
+        ],
         availability_rules: 1,
         rest: 'http://localhost:8080/openapi.json',
         maintenance_interval_minutes: 60,
@@ -312,6 +345,10 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         level: expect.any(String),
         time: expect.any(String),
         event: 'maintenance',
+        zoneShifts: 0,
+        staleSources: 0,
+        noShows: 0,
+        waitlistOffers: 0,
         extended: 0,
         conflicts: 0,
         refused: 0,
@@ -326,6 +363,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       expect(await health.json()).toEqual({
         status: 'ready',
         version: packageVersion,
+        tzdata: process.versions.tz,
         checks: ['database'],
       });
 
@@ -369,13 +407,18 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         ({ name }) => name,
       );
       expect(toolNames.sort()).toEqual([
+        'slotlock_book_pool',
+        'slotlock_book_together',
         'slotlock_create_event',
         'slotlock_delete_event',
+        'slotlock_find_available_slots',
         'slotlock_find_next_available',
         'slotlock_get_event',
         'slotlock_get_free_busy',
+        'slotlock_hold_slots',
         'slotlock_list_events',
         'slotlock_list_resources',
+        'slotlock_release_slots',
         'slotlock_update_event',
       ]);
 
@@ -672,17 +715,17 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       const resourceId = created.body.resource.id as string;
       expect(await rest(agent.key, 'POST', '/v1/resources', { external_ref: 'vehicle-agent' })).toEqual({
         status: 403,
-        body: { error: { code: 'forbidden' } },
+        body: expect.objectContaining({ status: 403, code: 'forbidden', error: { code: 'forbidden' } }),
       });
       // The server token is what the docs give agents, so it reads and writes but is never admin:
       // the application API asks no person before it writes.
       expect(await rest(token, 'GET', `/v1/resources/${resourceId}`)).toEqual({
         status: 403,
-        body: { error: { code: 'forbidden' } },
+        body: expect.objectContaining({ status: 403, code: 'forbidden', error: { code: 'forbidden' } }),
       });
       expect(await rest(token, 'PUT', '/v1/availability', { rules: [] })).toEqual({
         status: 403,
-        body: { error: { code: 'forbidden' } },
+        body: expect.objectContaining({ status: 403, code: 'forbidden', error: { code: 'forbidden' } }),
       });
 
       const held = await rest(application.key, 'POST', '/v1/holds', {
@@ -696,11 +739,11 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       // Another tenant's admin key, read through the serving role's row-level security as well.
       expect(await rest(elsewhere.key, 'GET', `/v1/resources/${resourceId}`)).toEqual({
         status: 404,
-        body: { error: { code: 'resource_not_found' } },
+        body: expect.objectContaining({ status: 404, code: 'resource_not_found', error: { code: 'resource_not_found' } }),
       });
       expect(await rest(elsewhere.key, 'POST', `/v1/holds/${holdId}/confirm`, {})).toEqual({
         status: 404,
-        body: { error: { code: 'hold_not_found' } },
+        body: expect.objectContaining({ status: 404, code: 'hold_not_found', error: { code: 'hold_not_found' } }),
       });
       expect(await rest(elsewhere.key, 'DELETE', `/v1/holds/${holdId}`)).toEqual({
         status: 200,
@@ -711,7 +754,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       });
       expect(await rest(application.key, 'POST', '/v1/maintenance', {})).toEqual({
         status: 200,
-        body: { extended: 0, conflicts: 0, refused: 0, pruned: 0, capped: false },
+        body: { extended: 0, conflicts: 0, refused: 0, pruned: 0, zone_shifts: 0, stale_sources: 0, no_shows: 0, waitlist_offers: 0, capped: false },
       });
 
       expect((await run(['key', 'revoke', application.id])).code).toBe(0);
@@ -727,6 +770,86 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     for (const key of [application.key, agent.key, elsewhere.key]) {
       expect(stdout.text()).not.toContain(key);
     }
+  });
+
+  it("delivers a tenant's changes to its webhook as the granted role, signed, and lists them", async () => {
+    const made = await run(['key', 'create', 'Webhook site', '--scope', 'admin']);
+    expect(made.code, made.stderr.text()).toBe(0);
+    const { key } = JSON.parse(made.stdout.text()) as { key: string };
+    const deliveries: { id: string; type: string }[] = [];
+    let secret = '';
+    const receiver = createServer((request, response) => {
+      let body = '';
+      request.on('data', (chunk) => {
+        body += chunk;
+      });
+      request.on('end', () => {
+        const event = new Webhook(secret).verify(body, request.headers as Record<string, string>) as { type: string };
+        deliveries.push({ id: request.headers['webhook-id'] as string, type: event.type });
+        response.writeHead(204).end();
+      });
+    });
+    await new Promise<void>((resolve) => receiver.listen(0, '127.0.0.1', resolve));
+    const hookUrl = `http://localhost:${(receiver.address() as AddressInfo).port}/hook`;
+    const shutdown = new AbortController();
+    const stdout = output();
+    const stderr = output();
+    const serving = runSlotlockCli(['serve'], {
+      env: { ...env, SLOTLOCK_WEBHOOKS: 'private' },
+      stdout,
+      stderr,
+      signal: shutdown.signal,
+    });
+    try {
+      const listening = await eventually(() => stdout.events().find(({ event }) => event === 'listening'));
+      expect(listening.webhooks).toBe('private');
+      const origin = listening.address as string;
+      const rest = async (method: string, path: string, body?: unknown) => {
+        const response = await fetch(`${origin}${path}`, {
+          method,
+          headers: { Authorization: `Bearer ${key}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        });
+        return { status: response.status, body: (await response.json()) as Record<string, any> };
+      };
+      const start = (await rest('GET', '/v1/changes')).body.next_cursor as string;
+      const hook = await rest('POST', '/v1/webhooks', { url: hookUrl, event_types: ['hold.created'] });
+      expect(hook.status).toBe(200);
+      secret = hook.body.secret as string;
+      const created = await rest('POST', '/v1/resources', { external_ref: 'webhook-van', timezone: 'UTC' });
+      const resourceId = created.body.resource.id as string;
+      const held = await rest('POST', '/v1/holds', {
+        resource_id: resourceId,
+        start: '2027-06-01T09:00:00Z',
+        end: '2027-06-01T10:00:00Z',
+        ttl_seconds: 600,
+      });
+      expect(held.status).toBe(200);
+      const delivered = await eventually(() => deliveries[0], 15_000);
+      expect(delivered.type).toBe('io.pylota.slotlock.hold.created');
+      const listed = await rest('GET', `/v1/changes?cursor=${encodeURIComponent(start)}`);
+      expect(listed.body.changes).toContainEqual(
+        expect.objectContaining({ id: delivered.id, type: 'io.pylota.slotlock.hold.created', subject: held.body.hold.id }),
+      );
+      expect(await rest('GET', '/v1/changes?cursor=nope')).toMatchObject({ status: 400, body: { code: 'invalid_cursor' } });
+      // A cursor past the 7 days the feed keeps is gone, not a server fault.
+      const old = Buffer.from(`1:1:1:${Date.now() - 31 * 86_400_000}`).toString('base64url');
+      expect(await rest('GET', `/v1/changes?cursor=${old}`)).toMatchObject({
+        status: 410,
+        body: { code: 'cursor_expired', title: 'Gone' },
+      });
+      expect((await rest('GET', '/v1/webhooks')).body.webhooks).toEqual([
+        expect.objectContaining({ url: hookUrl, attempts: 0, disabled_at: null }),
+      ]);
+      expect(await rest('DELETE', `/v1/webhooks/${hook.body.webhook.id}`)).toEqual({ status: 200, body: { deleted: true } });
+      expect(stdout.events().some(({ event, delivered: count }) => event === 'webhooks' && count === 1)).toBe(true);
+      expect(stdout.text()).not.toContain(secret);
+    } finally {
+      shutdown.abort();
+      await new Promise((resolve) => receiver.close(resolve));
+      await admin`DELETE FROM slotlock.resources WHERE tenant_ref = ${tenantRef} AND external_ref = 'webhook-van'`;
+    }
+    expect(await serving, stderr.text()).toBe(0);
   });
 
   it("bounds what one tenant's application API can store: holds, reservations and coverage", async () => {
@@ -787,7 +910,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       }
       expect(
         await rest('POST', '/v1/holds', { resource_id: resourceId, ...hour(2), ttl_seconds: 600 }),
-      ).toEqual({ status: 409, body: { error: { code: 'hold_limit_reached' } } });
+      ).toEqual({ status: 409, body: expect.objectContaining({ status: 409, code: 'hold_limit_reached', error: { code: 'hold_limit_reached' } }) });
 
       const booked = await rest('PUT', '/v1/reservations/booking-1', {
         resource_id: resourceId,
@@ -797,13 +920,13 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       expect(booked.status).toBe(200);
       expect(
         await rest('PUT', '/v1/reservations/booking-2', { resource_id: resourceId, ...hour(4), revision: 1 }),
-      ).toEqual({ status: 409, body: { error: { code: 'reservation_limit_reached' } } });
+      ).toEqual({ status: 409, body: expect.objectContaining({ status: 409, code: 'reservation_limit_reached', error: { code: 'reservation_limit_reached' } }) });
 
       const window = { start: '2027-04-01T00:00:00Z', end: '2027-05-01T00:00:00Z', revision: 1 };
       expect((await rest('PUT', `/v1/resources/${resourceId}/coverage/google:a`, window)).status).toBe(200);
       expect(await rest('PUT', `/v1/resources/${resourceId}/coverage/google:b`, window)).toEqual({
         status: 409,
-        body: { error: { code: 'coverage_limit_reached' } },
+        body: expect.objectContaining({ status: 409, code: 'coverage_limit_reached', error: { code: 'coverage_limit_reached' } }),
       });
     } finally {
       shutdown.abort();
@@ -817,6 +940,10 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     expect(first.code).toBe(0);
     expect(first.stderr.text()).toBe('');
     expect(JSON.parse(first.stdout.text())).toEqual({
+      zoneShifts: 0,
+      staleSources: 0,
+      noShows: 0,
+      waitlistOffers: 0,
       extended: 0,
       conflicts: 0,
       refused: 0,

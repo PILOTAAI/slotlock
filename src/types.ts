@@ -1,3 +1,4 @@
+import type { SlotlockBookingRule, SlotlockBookingRules } from './booking-rules.js';
 // Slotlock core types. Every interval is half-open `[start, end)`: back-to-back reservations do not
 // conflict, matching RFC 5545 interval semantics and PostgreSQL range boundaries.
 
@@ -33,6 +34,13 @@ export interface SlotlockResource {
   visibility?: 'shared' | 'private';
   /** When the tenant archived it: no longer listed or booked, its history kept. Absent in use. */
   archivedAt?: Date;
+  /** What a booking on it must satisfy (`SlotlockBookingRules`). Absent when it has none. */
+  bookingRules?: SlotlockBookingRules;
+  /**
+   * The pool it belongs to: interchangeable resources sharing a name, such as a vehicle class or a
+   * room type, booked by the class (`slotlock_book_pool`). Absent when it is in none.
+   */
+  pool?: string;
 }
 
 /** A confirmed occupation of a resource. The DB EXCLUDE constraint is the overlap arbiter. */
@@ -90,6 +98,8 @@ export type ExternalReservationResult =
   | { ok: false; code: 'recurrence_not_materialized' }
   /** The tenant's bookings and retired references are at its `reservations` limit. */
   | { ok: false; code: 'reservation_limit_reached'; limit: number }
+  /** The booking breaks one of the resource's booking rules (`SlotlockResource.bookingRules`). */
+  | { ok: false; code: 'booking_rule_violated'; rule: SlotlockBookingRule }
   | { ok: false; code: 'overlap'; conflictingReservationId: string | null };
 
 export type CancelExternalReservationResult =
@@ -134,6 +144,8 @@ export type CreateReservationResult =
   | { ok: false; code: 'recurrence_not_materialized' }
   /** The booking's tenant is at its `reservations` limit. */
   | { ok: false; code: 'reservation_limit_reached'; limit: number }
+  /** The booking breaks one of the resource's booking rules (`SlotlockResource.bookingRules`). */
+  | { ok: false; code: 'booking_rule_violated'; rule: SlotlockBookingRule }
   | { ok: false; code: 'overlap'; conflictingReservationId: string | null };
 
 /** A hold: occupies exactly like a reservation until its DB-clock expiry, then lazily reaped. */
@@ -146,6 +158,8 @@ export interface SlotlockHold {
   bufferAfterMs: number;
   expiresAt: Date;
   source: string | null;
+  /** The alternatives it was held with (`groupId` when acquired); absent when held alone. */
+  groupId?: string;
 }
 
 export type AcquireHoldResult =
@@ -169,6 +183,8 @@ export type AcquireHoldResult =
   | { ok: false; code: 'recurrence_not_materialized' }
   /** The resource's tenant has as many holds as its `holds` limit, expired ones deleted. */
   | { ok: false; code: 'hold_limit_reached'; limit: number }
+  /** The booking breaks one of the resource's booking rules (`SlotlockResource.bookingRules`). */
+  | { ok: false; code: 'booking_rule_violated'; rule: SlotlockBookingRule }
   | { ok: false; code: 'overlap'; conflictingReservationId: string | null };
 
 export type ConfirmHoldResult =
@@ -290,6 +306,21 @@ export interface PutCalendarEventCommand extends CalendarEventContent {
   /** Mandatory for recurrence; bounded to 367 days. Defaults to the event interval otherwise. */
   materializationWindow?: Interval;
   source?: string;
+  /**
+   * Judge the event as a booking made now against the resource's booking rules (its first
+   * occurrence for notice and advance, every occurrence for step and hours), and keep the
+   * resource's turnaround after each occurrence. Off by default: an imported event is what happened
+   * elsewhere. The agent tools set it.
+   */
+  enforceBookingRules?: boolean;
+  /**
+   * Book the time a live hold keeps: the hold must be `holderRef`'s (`acquireHold`'s
+   * `principalRef`), on this resource, and cover the event, a single occurrence. In one transaction
+   * the hold and the rest of its group are released and the event takes the time, so no rival can
+   * come between. Its notice and advance were judged when it was held; step and hours are judged
+   * again.
+   */
+  fromHold?: { holdId: string; holderRef: string };
 }
 
 export type PutCalendarEventResult =
@@ -314,11 +345,17 @@ export type PutCalendarEventResult =
   | { ok: false; code: 'resource_archived' }
   | { ok: false; code: 'event_cancelled'; currentRevision: number }
   | { ok: false; code: 'revision_conflict'; currentRevision: number }
+  /** `fromHold` names no live hold of that holder's: released, booked, expired, or another's. */
+  | { ok: false; code: 'hold_not_found' }
+  /** `fromHold`'s hold is on another resource, or does not cover the event. */
+  | { ok: false; code: 'hold_mismatch' }
   /**
    * A recurring event on the resource is not stored as far as this write reaches, and cannot be
    * extended that far (past the rolling horizon, or blocked): the time cannot be proven free.
    */
   | { ok: false; code: 'recurrence_not_materialized' }
+  /** The booking breaks one of the resource's booking rules (`SlotlockResource.bookingRules`). */
+  | { ok: false; code: 'booking_rule_violated'; rule: SlotlockBookingRule }
   | { ok: false; code: 'overlap'; conflictingReservationId: string | null };
 
 export type DeleteResourceResult =

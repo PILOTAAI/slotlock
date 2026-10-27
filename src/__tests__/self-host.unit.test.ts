@@ -3,9 +3,11 @@
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { slotlockAgentOperationScope, slotlockAgentTools } from '../agent-server.js';
 import { SLOTLOCK_CAP_NAMES, SLOTLOCK_DEFAULT_LIMITS, formatSlotlockRate } from '../config.js';
 import {
   SLOTLOCK_CLI_HELP,
+  authorizeSlotlockServeOperation,
   SLOTLOCK_ENVIRONMENT_VARIABLES,
   SlotlockConfigError,
   type SlotlockEnv,
@@ -52,6 +54,29 @@ async function run(argv: string[], env: SlotlockEnv = {}) {
   return { code, stdout: stdout.join(''), stderr: stderr.join('') };
 }
 
+describe('what slotlock serve lets a key call', () => {
+  it('is every tool it lists, to a key with the scope the tool needs', () => {
+    // A tool listed but refused is one an agent sees and cannot use.
+    for (const { name } of slotlockAgentTools()) {
+      const scope = slotlockAgentOperationScope(name);
+      expect(
+        authorizeSlotlockServeOperation({
+          principal: { subject: 'key', tenantRef: 'tenant-a', scopes: [scope] },
+          operation: name,
+        }),
+        name,
+      ).toBe(true);
+      expect(
+        authorizeSlotlockServeOperation({
+          principal: { subject: 'key', tenantRef: 'tenant-a', scopes: scope === 'read' ? [] : ['read'] },
+          operation: name,
+        }),
+        name,
+      ).toBe(false);
+    }
+  });
+});
+
 describe('slotlock serve configuration', () => {
   it('defaults to loopback, port 8080, one tenant, no confirmation round and REST on', () => {
     const env = serveEnv();
@@ -66,8 +91,25 @@ describe('slotlock serve configuration', () => {
       confirmWrites: [],
       availability: [],
       restApi: true,
+      webhooks: 'on',
+      sharedLimits: false,
       limits: SLOTLOCK_DEFAULT_LIMITS,
     });
+  });
+
+  it('shares tenant budgets through the database only when asked', () => {
+    expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_SHARED_LIMITS: 'on' })).sharedLimits).toBe(true);
+    expect(() => readSlotlockServeConfig(serveEnv({ SLOTLOCK_SHARED_LIMITS: 'yes' }))).toThrow(
+      'SLOTLOCK_SHARED_LIMITS must be on or off',
+    );
+  });
+
+  it('delivers webhooks unless off, and to private networks only when asked', () => {
+    expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_WEBHOOKS: 'off' })).webhooks).toBe('off');
+    expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_WEBHOOKS: 'private' })).webhooks).toBe('private');
+    expect(() => readSlotlockServeConfig(serveEnv({ SLOTLOCK_WEBHOOKS: 'yes' }))).toThrow(
+      'SLOTLOCK_WEBHOOKS must be on, off or private',
+    );
   });
 
   it('reads request limits over the defaults, and the trusted client-address field', () => {
@@ -178,6 +220,8 @@ describe('slotlock serve configuration', () => {
     const optedIn = readSlotlockServeConfig(serveEnv({ SLOTLOCK_CONFIRM_WRITES: 'all' }));
     expect(optedIn.confirmWrites).toEqual([
       'slotlock_create_event',
+      'slotlock_book_together',
+      'slotlock_book_pool',
       'slotlock_update_event',
       'slotlock_delete_event',
     ]);
@@ -563,7 +607,7 @@ describe('slotlock command line', () => {
     [['hours', 'set', '[]'], /hours set needs --resource <ref> or --all/],
     [['hours', 'clear', '--resource', 'van', '--all'], /hours clear needs --resource <ref> or --all/],
     [['hours', 'show', '--all'], /--all applies only to hours set and hours clear/],
-    [['resource', 'list', '--resource', 'van'], /--resource applies only to hours commands/],
+    [['resource', 'list', '--resource', 'van'], /--resource applies only to hours and rules commands/],
     [['hours', 'set', 'Mon 9-5', '--all'], /hours must be a JSON array of weekly rules/],
     [
       ['hours', 'set', '[{"rrule":"FREQ=DAILY","startMinutes":540,"durationMinutes":60}]', '--all'],

@@ -384,6 +384,7 @@ describe('consumer-neutral Slotlock agent server', () => {
     expect(await health.json()).toEqual({
       status: 'ready',
       version: SLOTLOCK_AGENT_SERVER_VERSION,
+      tzdata: process.versions.tz,
       checks: ['database', 'worker'],
     });
     const card = await server.fetch(
@@ -555,9 +556,14 @@ describe('consumer-neutral Slotlock agent server', () => {
         },
       },
     );
-    expect(
-      tools.result.tools.find((tool) => tool.name === 'slotlock_create_event'),
-    ).not.toHaveProperty('_meta');
+    // A write is the model's alone: no view renders it, and none may call it.
+    expect(tools.result.tools.find((tool) => tool.name === 'slotlock_create_event')?._meta).toEqual({
+      ui: { visibility: ['model'] },
+    });
+    // Held slots render in the view to pick from; still only the model holds.
+    expect(tools.result.tools.find((tool) => tool.name === 'slotlock_hold_slots')?._meta).toEqual({
+      ui: { resourceUri: SLOTLOCK_MCP_APP_RESOURCE_URI, visibility: ['model'] },
+    });
   });
 
   it('serves one self-contained, network-dark calendar UI through MCP resources', async () => {
@@ -1081,13 +1087,16 @@ describe('consumer-neutral Slotlock agent server', () => {
   describe('portable operation names', () => {
     it('advertises only names every tool-calling API accepts', () => {
       const names = slotlockAgentTools().map((tool) => tool.name);
-      expect(names).toHaveLength(8);
+      expect(names).toHaveLength(13);
       for (const name of names) {
         // Claude: ^[a-zA-Z0-9_-]{1,128}$. OpenAI function names: the same characters, at most 64.
         expect(name).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
         expect(isSlotlockAgentOperation(name)).toBe(true);
       }
-      expect(new Set(Object.values(SLOTLOCK_AGENT_OPERATION_LEGACY_NAMES))).toEqual(new Set(names));
+      // Every name an earlier build published still reaches an operation; a newer one has none.
+      for (const operation of Object.values(SLOTLOCK_AGENT_OPERATION_LEGACY_NAMES)) {
+        expect(names).toContain(operation);
+      }
     });
 
     it('resolves each legacy name to its current operation and nothing else', () => {
@@ -1304,7 +1313,7 @@ describe('consumer-neutral Slotlock agent server', () => {
         }),
       );
       expect(rest.status).toBe(500);
-      expect(await rest.json()).toEqual({ error: { code: 'internal_error' } });
+      expect(await rest.json()).toEqual(expect.objectContaining({ status: 500, code: 'internal_error', error: { code: 'internal_error' } }));
       expect(onError.mock.calls).toEqual([
         [crash, { operation: 'slotlock_list_resources' }],
         [crash, { operation: 'slotlock_list_resources' }],
@@ -2112,6 +2121,11 @@ describe('principal scopes', () => {
       slotlock_list_resources: 'read',
       slotlock_get_free_busy: 'read',
       slotlock_find_next_available: 'read',
+      slotlock_find_available_slots: 'read',
+      slotlock_hold_slots: 'write',
+      slotlock_release_slots: 'write',
+      slotlock_book_together: 'write',
+      slotlock_book_pool: 'write',
       slotlock_create_event: 'write',
       slotlock_get_event: 'read',
       slotlock_list_events: 'read',
@@ -2144,6 +2158,69 @@ describe('principal scopes', () => {
     const read = await (await server.fetch(call('slotlock_list_resources', { limit: 5 }))).json();
     expect(read).toMatchObject({ result: { structuredContent: { next_cursor: null } } });
     expect(authorize).toHaveBeenCalledTimes(1);
+  });
+
+  it('names the resource a bundle was refused on, over MCP, A2A and REST', async () => {
+    const bookTogether = vi.fn(async () => {
+      throw new SlotlockAgentOperationError('overlap', 409, { resource_id: 'driver-1', 'Bad Name': 'x' });
+    });
+    const server = buildServer({ ...asPrincipal(['read', 'write']), backend: { ...backend, bookTogether }, rest: true });
+    const args = {
+      resource_ids: ['van-1', 'driver-1'],
+      starts_at: '2027-03-02T09:00:00Z',
+      ends_at: '2027-03-02T10:00:00Z',
+      timezone: 'UTC',
+      idempotency_key: 'bundle-1',
+    };
+    const mcp = (await (await server.fetch(call('slotlock_book_together', args))).json()) as {
+      result: { content: { text: string }[] };
+    };
+    // Only well-formed detail names travel; `code` stays the code.
+    expect(JSON.parse(mcp.result.content[0]?.text ?? '')).toEqual({ error: { code: 'overlap', resource_id: 'driver-1' } });
+    expect(
+      await a2aReplyData(await server.fetch(a2aSendMessage({ skill: 'slotlock_book_together', arguments: args }))),
+    ).toEqual({ error: { code: 'overlap', resource_id: 'driver-1' } });
+    const rest = await server.fetch(
+      new Request('http://localhost/slotlock/v1/bundles', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer valid', 'Content-Type': 'application/json' },
+        body: JSON.stringify(args),
+      }),
+    );
+    expect(rest.status).toBe(409);
+    expect(await rest.json()).toMatchObject({ code: 'overlap', resource_id: 'driver-1', start: args.starts_at });
+
+    const without = buildServer(asPrincipal(['read', 'write']));
+    expectToolError(await (await without.fetch(call('slotlock_book_together', args))).json(), 'bundles_unavailable');
+  });
+
+  it('holds through a backend that holds, and answers holds_unavailable from one that does not', async () => {
+    const holdArgs = {
+      slots: [{ resource_id: 'van-1', start: '2027-03-02T09:00:00Z', end: '2027-03-02T10:00:00Z' }],
+      idempotency_key: 'hold-1',
+    };
+    const releaseArgs = { hold_id: '7d3f8c2a-4b1e-4f6a-9c2d-1e5b7a9f3c4d' };
+    const without = buildServer();
+    expectToolError(await (await without.fetch(call('slotlock_hold_slots', holdArgs))).json(), 'holds_unavailable');
+    expectToolError(
+      await (await without.fetch(call('slotlock_release_slots', releaseArgs))).json(),
+      'holds_unavailable',
+    );
+
+    const holdSlots = vi.fn(async () => ({ group_id: releaseArgs.hold_id, holds: [], refused: [] }));
+    const releaseSlots = vi.fn(async () => ({ released: true }));
+    const holding = buildServer({ backend: { ...backend, holdSlots, releaseSlots } });
+    const held = await (await holding.fetch(call('slotlock_hold_slots', holdArgs))).json();
+    expect(held).toMatchObject({ result: { structuredContent: { refused: [] } } });
+    // The default ttl reaches the backend.
+    expect(holdSlots).toHaveBeenCalledWith(expect.anything(), { ...holdArgs, ttl_seconds: 300 });
+    const released = await (await holding.fetch(call('slotlock_release_slots', releaseArgs))).json();
+    expect(released).toMatchObject({ result: { structuredContent: { released: true } } });
+
+    // Both are writes: a read principal gets neither.
+    const reader = buildServer({ ...asPrincipal(['read']), backend: { ...backend, holdSlots, releaseSlots } });
+    expectToolError(await (await reader.fetch(call('slotlock_hold_slots', holdArgs))).json(), 'forbidden');
+    expect(holdSlots).toHaveBeenCalledTimes(1);
   });
 
   it.each([

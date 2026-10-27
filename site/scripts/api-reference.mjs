@@ -17,6 +17,10 @@ export const GROUPS = [
       'slotlock_archive_resource',
       'slotlock_restore_resource',
       'slotlock_delete_resource',
+      'slotlock_set_resource_booking_rules',
+      'slotlock_set_resource_pool',
+      'slotlock_list_pools',
+      'slotlock_get_resource_history',
     ],
   },
   {
@@ -24,15 +28,24 @@ export const GROUPS = [
     operations: [
       'slotlock_get_free_busy',
       'slotlock_find_next_available',
+      'slotlock_find_available_slots',
       'slotlock_list_busy',
       'slotlock_set_resource_availability',
       'slotlock_set_tenant_availability',
+      'slotlock_export_resource_availability',
+      'slotlock_import_resource_availability',
       'slotlock_record_coverage',
+      'slotlock_get_coverage',
+      'slotlock_record_coverage_failure',
     ],
   },
   {
     name: 'Events',
     operations: [
+      'slotlock_hold_slots',
+      'slotlock_release_slots',
+      'slotlock_book_together',
+      'slotlock_book_pool',
       'slotlock_create_event',
       'slotlock_list_events',
       'slotlock_get_event',
@@ -40,7 +53,9 @@ export const GROUPS = [
       'slotlock_delete_event',
       'slotlock_list_tenant_events',
       'slotlock_get_tenant_event',
+      'slotlock_export_tenant_event',
       'slotlock_cancel_tenant_event',
+      'slotlock_get_tenant_event_history',
     ],
   },
   {
@@ -60,6 +75,22 @@ export const GROUPS = [
       'slotlock_get_reservation',
       'slotlock_list_reservations',
       'slotlock_cancel_reservation',
+      'slotlock_check_in_reservation',
+      'slotlock_get_reservation_history',
+    ],
+  },
+  {
+    name: 'Waitlist',
+    operations: ['slotlock_join_waitlist', 'slotlock_list_waitlist', 'slotlock_leave_waitlist'],
+  },
+  {
+    name: 'Changes and webhooks',
+    operations: [
+      'slotlock_list_changes',
+      'slotlock_create_webhook',
+      'slotlock_list_webhooks',
+      'slotlock_delete_webhook',
+      'slotlock_enable_webhook',
     ],
   },
   {
@@ -75,6 +106,8 @@ const STATUS = {
   403: 'The key lacks the scope this route needs',
   404: "Not this tenant's, or gone",
   409: 'A conflict with what is stored: an overlap, a stale revision, a resource in use',
+  410: 'The change cursor is older than the 30 days the feed keeps (`cursor_expired`): read from the start',
+  422: 'The idempotency key was used with another request (`idempotency_conflict`)',
   428: 'The server asks a person to confirm this write first (`confirmation_required`)',
   429: 'Rate limited: retry after `Retry-After` seconds',
 };
@@ -259,12 +292,17 @@ const RUN_VARIABLES = {
   resource_id: { from: 'slotlock_create_resource', path: ['resource', 'id'] },
   event_id: { from: 'slotlock_create_event', path: ['event', 'id'] },
   hold_id: { from: 'slotlock_acquire_hold', path: ['hold', 'id'] },
+  entry_id: { from: 'slotlock_join_waitlist', path: ['entry', 'id'] },
   // The tenant routes name an event by the id their own list gives, at its current revision.
   tenant_event_id: { from: 'slotlock_list_tenant_events', path: ['events', '0', 'id'] },
   tenant_event_revision: { from: 'slotlock_get_tenant_event', path: ['event', 'revision'] },
 };
 
-const TENANT_EVENT_ROUTES = new Set(['slotlock_get_tenant_event', 'slotlock_cancel_tenant_event']);
+const TENANT_EVENT_ROUTES = new Set([
+  'slotlock_get_tenant_event',
+  'slotlock_export_tenant_event',
+  'slotlock_cancel_tenant_event',
+]);
 
 /** An argument's run variable on this operation, if it has one. */
 function runVariable(operationId, name) {
@@ -388,7 +426,7 @@ function renderPage(operation, { order, group, toolNames }) {
     '',
     '## Errors',
     '',
-    'An error answers `{"error":{"code":"…"}}` with one of these statuses. The [overview](/docs/api/#errors) lists what each means.',
+    'An error answers an RFC 9457 problem with one of these statuses; its `code` says why. The [overview](/docs/api/#errors) lists what each means.',
     '',
     '| Status | When |',
     '| --- | --- |',
@@ -458,22 +496,43 @@ curl "$SLOTLOCK_URL/v1/resources" -H "Authorization: Bearer $SLOTLOCK_API_KEY"
 - An event's own times are \`starts_at\` and \`ends_at\`; a window to search or list is \`start\` and
   \`end\`. A wrong field name answers \`400 invalid_arguments\`, so check each route's page.
 - Lists page with \`limit\` (up to 100) and \`cursor\`, the \`next_cursor\` of the page before.
-- Application writes are safe to retry: a repeated reservation answers \`replayed: true\` and a
-  confirmed hold confirms again. Holds and tenant-event cancellations take an \`Idempotency-Key\`
-  header; other routes refuse it.
+- Writes are safe to retry: a repeated reservation answers \`replayed: true\` and a confirmed hold
+  confirms again. A write with an \`idempotency_key\` also takes it as the \`Idempotency-Key\`
+  header, quoted (\`"booking-BK-42"\`) or bare; other routes refuse it. A write that needs a key
+  and gets none answers \`400 idempotency_key_required\`, and the same key with another request
+  \`422 idempotency_conflict\`. An event write's key is kept 30 days, a hold's while the hold could
+  be live.
 - There are no CORS headers: call the API from a server, not a browser.
 
 ## Errors
 
-An error is \`{"error":{"code":"…"}}\` with an HTTP status. Act on the \`code\`:
+An error is an [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem
+(\`application/problem+json\`) with an HTTP status:
+
+\`\`\`json
+{
+  "type": "tag:slotlock.pylota.io,2026:problem:overlap",
+  "title": "The time is taken",
+  "status": 409,
+  "code": "overlap",
+  "resource_id": "0f8b6c1e-2d4a-4c7e-9b1a-3e5f7a9c2d4b",
+  "start": "2027-03-02T09:00:00Z",
+  "end": "2027-03-02T10:00:00Z",
+  "error": { "code": "overlap" }
+}
+\`\`\`
+
+\`type\` names the problem, one per \`code\`; \`error.code\` repeats the code for clients written
+before. Act on the \`code\`:
 
 | Status | Means | Common codes |
 | --- | --- | --- |
-| \`400\` | The request is malformed or out of bounds | \`invalid_arguments\`, \`calendar_work_limit\` |
+| \`400\` | The request is malformed or out of bounds | \`invalid_arguments\`, \`calendar_work_limit\`, \`idempotency_key_required\` |
 | \`401\` | No key, or a revoked or expired one | \`authentication_required\` |
 | \`403\` | The key lacks the route's scope | \`forbidden\` |
 | \`404\` | Not this tenant's, or gone | \`resource_not_found\`, \`event_not_found\`, \`hold_not_found\`, \`reservation_not_found\`, or \`not_found\`: act on the status |
-| \`409\` | It conflicts with what is stored | \`overlap\`, \`stale_revision\`, \`resource_in_use\`, \`idempotency_conflict\` |
+| \`409\` | It conflicts with what is stored | \`overlap\`, \`stale_revision\`, \`resource_in_use\` |
+| \`422\` | An idempotency key reused with another request | \`idempotency_conflict\` |
 | \`428\` | A person must confirm this write first | \`confirmation_required\` |
 | \`429\` | Rate limited, or an agent's own quota is full | \`rate_limited\` (retry after the \`Retry-After\` header's seconds), \`owner_event_quota_exceeded\`, \`owner_command_quota_exceeded\` |
 

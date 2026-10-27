@@ -15,10 +15,15 @@ public sealed partial class SlotlockClient
     /// <summary>Every operation, by name: its method, path, path parameters and query parameters.</summary>
     internal static readonly IReadOnlyDictionary<string, Operation> Operations = new Dictionary<string, Operation>
     {
-        ["slotlock_list_resources"] = new("GET", "/v1/resources", [], ["cursor", "limit"]),
+        ["slotlock_list_resources"] = new("GET", "/v1/resources", [], ["cursor", "limit", "pool"]),
         ["slotlock_create_resource"] = new("POST", "/v1/resources", [], []),
         ["slotlock_get_free_busy"] = new("GET", "/v1/free-busy", [], ["resource_ids", "start", "end"]),
         ["slotlock_find_next_available"] = new("GET", "/v1/next-available", [], ["resource_ids", "start", "end", "duration_minutes"]),
+        ["slotlock_find_available_slots"] = new("GET", "/v1/available-slots", [], ["resource_ids", "start", "end", "duration_minutes", "limit", "require_free"]),
+        ["slotlock_hold_slots"] = new("POST", "/v1/slot-holds", [], []),
+        ["slotlock_book_together"] = new("POST", "/v1/bundles", [], []),
+        ["slotlock_book_pool"] = new("POST", "/v1/pool-bookings", [], []),
+        ["slotlock_release_slots"] = new("DELETE", "/v1/slot-holds/{hold_id}", ["hold_id"], []),
         ["slotlock_list_events"] = new("GET", "/v1/events", [], ["resource_ids", "start", "end", "cursor", "limit"]),
         ["slotlock_create_event"] = new("POST", "/v1/events", [], []),
         ["slotlock_get_event"] = new("GET", "/v1/events/{event_id}", ["event_id"], []),
@@ -30,6 +35,14 @@ public sealed partial class SlotlockClient
         ["slotlock_restore_resource"] = new("POST", "/v1/resources/{resource_id}/restore", ["resource_id"], []),
         ["slotlock_list_busy"] = new("GET", "/v1/resources/{resource_id}/busy", ["resource_id"], ["start", "end"]),
         ["slotlock_set_resource_availability"] = new("PUT", "/v1/resources/{resource_id}/availability", ["resource_id"], []),
+        ["slotlock_export_resource_availability"] = new("GET", "/v1/resources/{resource_id}/availability/ical", ["resource_id"], []),
+        ["slotlock_import_resource_availability"] = new("PUT", "/v1/resources/{resource_id}/availability/ical", ["resource_id"], []),
+        ["slotlock_set_resource_booking_rules"] = new("PUT", "/v1/resources/{resource_id}/booking-rules", ["resource_id"], []),
+        ["slotlock_set_resource_pool"] = new("PUT", "/v1/resources/{resource_id}/pool", ["resource_id"], []),
+        ["slotlock_list_pools"] = new("GET", "/v1/pools", [], []),
+        ["slotlock_get_resource_history"] = new("GET", "/v1/resources/{resource_id}/history", ["resource_id"], ["limit", "before"]),
+        ["slotlock_get_reservation_history"] = new("GET", "/v1/reservations/{reservation_ref}/history", ["reservation_ref"], ["limit", "before"]),
+        ["slotlock_get_tenant_event_history"] = new("GET", "/v1/tenant/events/{event_id}/history", ["event_id"], ["limit", "before"]),
         ["slotlock_set_tenant_availability"] = new("PUT", "/v1/availability", [], []),
         ["slotlock_acquire_hold"] = new("POST", "/v1/holds", [], []),
         ["slotlock_get_hold"] = new("GET", "/v1/holds/{hold_id}", ["hold_id"], []),
@@ -40,34 +53,64 @@ public sealed partial class SlotlockClient
         ["slotlock_put_reservation"] = new("PUT", "/v1/reservations/{reservation_ref}", ["reservation_ref"], []),
         ["slotlock_cancel_reservation"] = new("DELETE", "/v1/reservations/{reservation_ref}", ["reservation_ref"], ["revision"]),
         ["slotlock_list_reservations"] = new("GET", "/v1/resources/{resource_id}/reservations", ["resource_id"], ["start", "end", "limit", "cursor"]),
+        ["slotlock_check_in_reservation"] = new("POST", "/v1/reservations/{reservation_ref}/check-in", ["reservation_ref"], []),
+        ["slotlock_list_waitlist"] = new("GET", "/v1/waitlist", [], ["resource_id", "pool", "holder_ref", "limit"]),
+        ["slotlock_join_waitlist"] = new("POST", "/v1/waitlist", [], []),
+        ["slotlock_leave_waitlist"] = new("DELETE", "/v1/waitlist/{entry_id}", ["entry_id"], []),
         ["slotlock_record_coverage"] = new("PUT", "/v1/resources/{resource_id}/coverage/{source}", ["resource_id", "source"], []),
+        ["slotlock_get_coverage"] = new("GET", "/v1/resources/{resource_id}/coverage", ["resource_id"], []),
+        ["slotlock_record_coverage_failure"] = new("POST", "/v1/resources/{resource_id}/coverage/{source}/failure", ["resource_id", "source"], []),
         ["slotlock_list_tenant_events"] = new("GET", "/v1/tenant/events", [], ["resource_id", "start", "end", "limit", "cursor"]),
         ["slotlock_get_tenant_event"] = new("GET", "/v1/tenant/events/{event_id}", ["event_id"], []),
         ["slotlock_cancel_tenant_event"] = new("DELETE", "/v1/tenant/events/{event_id}", ["event_id"], ["expected_revision", "expected_resource_id", "idempotency_key"]),
+        ["slotlock_export_tenant_event"] = new("GET", "/v1/tenant/events/{event_id}/jscalendar", ["event_id"], []),
         ["slotlock_get_tenant"] = new("GET", "/v1/tenant", [], []),
         ["slotlock_erase_tenant"] = new("POST", "/v1/tenant/erase", [], []),
         ["slotlock_run_maintenance"] = new("POST", "/v1/maintenance", [], []),
+        ["slotlock_list_changes"] = new("GET", "/v1/changes", [], ["cursor", "limit"]),
+        ["slotlock_list_webhooks"] = new("GET", "/v1/webhooks", [], []),
+        ["slotlock_create_webhook"] = new("POST", "/v1/webhooks", [], []),
+        ["slotlock_delete_webhook"] = new("DELETE", "/v1/webhooks/{webhook_id}", ["webhook_id"], []),
+        ["slotlock_enable_webhook"] = new("POST", "/v1/webhooks/{webhook_id}/enable", ["webhook_id"], []),
     };
 
     /// <summary>List calendar resources.</summary>
     /// <remarks>
-    /// List resources visible to the authenticated tenant principal.
+    /// List resources visible to the authenticated tenant principal, with the pool each belongs
+    /// to (a vehicle class, a room type). With pool, only that pool's members, in the order
+    /// slotlock_book_pool tries them.
     /// </remarks>
     /// <param name="cursor">cursor</param>
     /// <param name="limit">limit</param>
+    /// <param name="pool">pool</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> ListResourcesAsync(
         Optional<string> cursor = default,
         Optional<long> limit = default,
+        Optional<string> pool = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         if (cursor.HasValue) values["cursor"] = Json.ToNode(cursor.Value);
         if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
+        if (pool.HasValue) values["pool"] = Json.ToNode(pool.Value);
         return CallAsync("slotlock_list_resources", values, cancellationToken);
     }
+
+    /// <summary>Slotlock.Client 0.2.0's parameters for <c>ListResourcesAsync</c>, kept so code
+    /// written against them compiles.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public Task<JsonObject> ListResourcesAsync(
+        Optional<string> cursor,
+        Optional<long> limit,
+        CancellationToken cancellationToken) =>
+        ListResourcesAsync(
+            cursor: cursor,
+            limit: limit,
+            cancellationToken: cancellationToken,
+            pool: default);
 
     /// <summary>Create or update a resource.</summary>
     /// <remarks>
@@ -158,6 +201,159 @@ public sealed partial class SlotlockClient
         return CallAsync("slotlock_find_next_available", values, cancellationToken);
     }
 
+    /// <summary>Find available slots.</summary>
+    /// <remarks>
+    /// List up to `limit` certain slots of the requested duration, earliest first across the
+    /// resources, each one free of busy time and inside the resource's hours, to offer a person a
+    /// choice. With require_free, only times when at least that many of the resources are free
+    /// together, each slot naming them in resource_ids: every resource for a booking that needs
+    /// them all (book it with slotlock_book_together), or any n of them. No slot is listed unless
+    /// every resource's coverage is certain.
+    /// </remarks>
+    /// <param name="resourceIds">resource_ids</param>
+    /// <param name="start">start</param>
+    /// <param name="end">end</param>
+    /// <param name="durationMinutes">duration_minutes</param>
+    /// <param name="limit">limit</param>
+    /// <param name="requireFree">require_free</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> FindAvailableSlotsAsync(
+        IEnumerable<string> resourceIds,
+        string start,
+        string end,
+        long durationMinutes,
+        Optional<long> limit = default,
+        Optional<long> requireFree = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_ids"] = Json.ToNode(resourceIds);
+        values["start"] = Json.ToNode(start);
+        values["end"] = Json.ToNode(end);
+        values["duration_minutes"] = Json.ToNode(durationMinutes);
+        if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
+        if (requireFree.HasValue) values["require_free"] = Json.ToNode(requireFree.Value);
+        return CallAsync("slotlock_find_available_slots", values, cancellationToken);
+    }
+
+    /// <summary>Hold candidate slots.</summary>
+    /// <remarks>
+    /// Hold up to five candidate slots for a short time (30-900 seconds) while a person chooses,
+    /// as alternatives in one group: each free one is held, the others are listed with why not.
+    /// Book one by passing its hold_id to slotlock_create_event, which releases the rest;
+    /// unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at
+    /// once.
+    /// </remarks>
+    /// <param name="slots">slots</param>
+    /// <param name="idempotencyKey">idempotency_key</param>
+    /// <param name="ttlSeconds">ttl_seconds</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> HoldSlotsAsync(
+        JsonArray slots,
+        string idempotencyKey,
+        Optional<long> ttlSeconds = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["slots"] = Json.ToNode(slots);
+        values["idempotency_key"] = Json.ToNode(idempotencyKey);
+        if (ttlSeconds.HasValue) values["ttl_seconds"] = Json.ToNode(ttlSeconds.Value);
+        return CallAsync("slotlock_hold_slots", values, cancellationToken);
+    }
+
+    /// <summary>Book resources together.</summary>
+    /// <remarks>
+    /// Book the same time on 2-20 resources at once, all or none: a van with its driver, a room
+    /// with its projector. If any of them is taken, nothing is booked, and the refusal names that
+    /// resource_id. Find such a time with slotlock_find_available_slots and require_free. A retry
+    /// with the same idempotency_key answers the same events.
+    /// </remarks>
+    /// <param name="resourceIds">resource_ids</param>
+    /// <param name="startsAt">starts_at</param>
+    /// <param name="endsAt">ends_at</param>
+    /// <param name="timezone">timezone</param>
+    /// <param name="idempotencyKey">idempotency_key</param>
+    /// <param name="title">title</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> BookTogetherAsync(
+        IEnumerable<string> resourceIds,
+        string startsAt,
+        string endsAt,
+        string timezone,
+        string idempotencyKey,
+        Optional<string> title = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_ids"] = Json.ToNode(resourceIds);
+        values["starts_at"] = Json.ToNode(startsAt);
+        values["ends_at"] = Json.ToNode(endsAt);
+        values["timezone"] = Json.ToNode(timezone);
+        values["idempotency_key"] = Json.ToNode(idempotencyKey);
+        if (title.HasValue) values["title"] = Json.ToNode(title.Value);
+        return CallAsync("slotlock_book_together", values, cancellationToken);
+    }
+
+    /// <summary>Book from a pool.</summary>
+    /// <remarks>
+    /// Book any one member of a pool (a vehicle class, a room type) for a time: members are tried
+    /// in a fixed order and the first that is free and allows the booking is booked, in one
+    /// transaction, so a class sells out exactly at its number of members. The event names the
+    /// member booked. 409 pool_full when none is free; 404 pool_not_found when the pool has no
+    /// member you may book. A retry with the same idempotency_key answers the same event.
+    /// </remarks>
+    /// <param name="pool">pool</param>
+    /// <param name="startsAt">starts_at</param>
+    /// <param name="endsAt">ends_at</param>
+    /// <param name="timezone">timezone</param>
+    /// <param name="idempotencyKey">idempotency_key</param>
+    /// <param name="title">title</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> BookPoolAsync(
+        string pool,
+        string startsAt,
+        string endsAt,
+        string timezone,
+        string idempotencyKey,
+        Optional<string> title = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["pool"] = Json.ToNode(pool);
+        values["starts_at"] = Json.ToNode(startsAt);
+        values["ends_at"] = Json.ToNode(endsAt);
+        values["timezone"] = Json.ToNode(timezone);
+        values["idempotency_key"] = Json.ToNode(idempotencyKey);
+        if (title.HasValue) values["title"] = Json.ToNode(title.Value);
+        return CallAsync("slotlock_book_pool", values, cancellationToken);
+    }
+
+    /// <summary>Release held slots.</summary>
+    /// <remarks>
+    /// Release one of your holds, and the rest of its group, at once instead of letting them
+    /// expire. `released` is false when it was already gone.
+    /// </remarks>
+    /// <param name="holdId">hold_id</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ReleaseSlotsAsync(
+        string holdId,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["hold_id"] = Json.ToNode(holdId);
+        return CallAsync("slotlock_release_slots", values, cancellationToken);
+    }
+
     /// <summary>List resource events.</summary>
     /// <remarks>
     /// List bounded events intersecting a time window.
@@ -207,6 +403,7 @@ public sealed partial class SlotlockClient
     /// <param name="attendees">attendees</param>
     /// <param name="reminders">reminders</param>
     /// <param name="recurrenceExceptions">recurrence_exceptions</param>
+    /// <param name="holdId">hold_id</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -226,6 +423,7 @@ public sealed partial class SlotlockClient
         Optional<JsonArray> attendees = default,
         Optional<JsonArray> reminders = default,
         Optional<JsonArray> recurrenceExceptions = default,
+        Optional<string> holdId = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -244,8 +442,48 @@ public sealed partial class SlotlockClient
         if (attendees.HasValue) values["attendees"] = Json.ToNode(attendees.Value);
         if (reminders.HasValue) values["reminders"] = Json.ToNode(reminders.Value);
         if (recurrenceExceptions.HasValue) values["recurrence_exceptions"] = Json.ToNode(recurrenceExceptions.Value);
+        if (holdId.HasValue) values["hold_id"] = Json.ToNode(holdId.Value);
         return CallAsync("slotlock_create_event", values, cancellationToken);
     }
+
+    /// <summary>Slotlock.Client 0.2.0's parameters for <c>CreateEventAsync</c>, kept so code
+    /// written against them compiles.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public Task<JsonObject> CreateEventAsync(
+        string resourceId,
+        string startsAt,
+        string endsAt,
+        string timezone,
+        string idempotencyKey,
+        Optional<string> title,
+        Optional<string> description,
+        Optional<string> location,
+        Optional<JsonObject> organizer,
+        Optional<string> transparency,
+        Optional<string> status,
+        Optional<string> recurrenceRule,
+        Optional<JsonArray> attendees,
+        Optional<JsonArray> reminders,
+        Optional<JsonArray> recurrenceExceptions,
+        CancellationToken cancellationToken) =>
+        CreateEventAsync(
+            resourceId: resourceId,
+            startsAt: startsAt,
+            endsAt: endsAt,
+            timezone: timezone,
+            idempotencyKey: idempotencyKey,
+            title: title,
+            description: description,
+            location: location,
+            organizer: organizer,
+            transparency: transparency,
+            status: status,
+            recurrenceRule: recurrenceRule,
+            attendees: attendees,
+            reminders: reminders,
+            recurrenceExceptions: recurrenceExceptions,
+            cancellationToken: cancellationToken,
+            holdId: default);
 
     /// <summary>Get resource event.</summary>
     /// <remarks>
@@ -525,6 +763,186 @@ public sealed partial class SlotlockClient
         return CallAsync("slotlock_set_resource_availability", values, cancellationToken);
     }
 
+    /// <summary>Export a resource's bookable hours as iCalendar.</summary>
+    /// <remarks>
+    /// One resource's own weekly bookable hours as an iCalendar VAVAILABILITY (RFC 7953) for a
+    /// calendar or scheduling tool: an AVAILABLE per rule, its DTSTART's TZID the resource's IANA
+    /// time zone. `null` when the resource uses the server's default.
+    /// </remarks>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ExportResourceAvailabilityAsync(
+        string resourceId,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_id"] = Json.ToNode(resourceId);
+        return CallAsync("slotlock_export_resource_availability", values, cancellationToken);
+    }
+
+    /// <summary>Import a resource's bookable hours from iCalendar.</summary>
+    /// <remarks>
+    /// Set one resource's own weekly bookable hours from an iCalendar VAVAILABILITY (RFC 7953),
+    /// as slotlock_set_resource_availability does from rules: each AVAILABLE a weekly RRULE with
+    /// a start time and DTEND or DURATION. Times must be in the resource's time zone (its TZID)
+    /// or floating. 400 invalid_availability names what weekly hours cannot say: a bounded
+    /// VAVAILABILITY, RDATE, EXDATE, a single window, another zone.
+    /// </remarks>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="icalendar">icalendar</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ImportResourceAvailabilityAsync(
+        string resourceId,
+        string icalendar,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_id"] = Json.ToNode(resourceId);
+        values["icalendar"] = Json.ToNode(icalendar);
+        return CallAsync("slotlock_import_resource_availability", values, cancellationToken);
+    }
+
+    /// <summary>Set a resource's booking rules.</summary>
+    /// <remarks>
+    /// Set what a booking on one resource must satisfy from now on: minimum notice, how far
+    /// ahead, the step starts fall on (from local midnight in the resource's time zone), the
+    /// turnaround kept free after each booking, and whether bookings must lie inside its hours.
+    /// `null` clears them. Holds, reservations, moves and agents' events are refused with the
+    /// rule they break; searches offer only what they allow.
+    /// </remarks>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="rules">rules</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> SetResourceBookingRulesAsync(
+        string resourceId,
+        JsonObject? rules,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_id"] = Json.ToNode(resourceId);
+        values["rules"] = Json.ToNode(rules);
+        return CallAsync("slotlock_set_resource_booking_rules", values, cancellationToken);
+    }
+
+    /// <summary>Set a resource's pool.</summary>
+    /// <remarks>
+    /// Make a resource a member of a pool, a class of interchangeable resources such as a vehicle
+    /// class or a room type, or take it out (`null`). Agents book the class with
+    /// slotlock_book_pool, which takes the first member free; the class's capacity is its number
+    /// of members. A resource is in one pool at most; pool names are 1-100 of a-z, 0-9, '.', '_'
+    /// and '-'.
+    /// </remarks>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="pool">pool</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> SetResourcePoolAsync(
+        string resourceId,
+        string? pool,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_id"] = Json.ToNode(resourceId);
+        values["pool"] = Json.ToNode(pool);
+        return CallAsync("slotlock_set_resource_pool", values, cancellationToken);
+    }
+
+    /// <summary>List pools.</summary>
+    /// <remarks>
+    /// The tenant's pools by name, each with its capacity: how many members it has that are not
+    /// archived.
+    /// </remarks>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ListPoolsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        return CallAsync("slotlock_list_pools", values, cancellationToken);
+    }
+
+    /// <summary>A resource's history.</summary>
+    /// <remarks>
+    /// What happened on one of the tenant's resources, newest first: each hold, booking and event
+    /// made, moved, confirmed, released or cancelled, when, by whom (the API key or agent), and
+    /// for a change what it was before. Kept 30 days. Pass next_before as before for older
+    /// entries.
+    /// </remarks>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="limit">limit</param>
+    /// <param name="before">before</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> GetResourceHistoryAsync(
+        string resourceId,
+        Optional<long> limit = default,
+        Optional<string> before = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_id"] = Json.ToNode(resourceId);
+        if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
+        if (before.HasValue) values["before"] = Json.ToNode(before.Value);
+        return CallAsync("slotlock_get_resource_history", values, cancellationToken);
+    }
+
+    /// <summary>A booking's history.</summary>
+    /// <remarks>
+    /// What happened to one booking, by its reference, newest first: made, moved, cancelled, when
+    /// and by whom, as slotlock_get_resource_history.
+    /// </remarks>
+    /// <param name="reservationRef">reservation_ref</param>
+    /// <param name="limit">limit</param>
+    /// <param name="before">before</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> GetReservationHistoryAsync(
+        string reservationRef,
+        Optional<long> limit = default,
+        Optional<string> before = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["reservation_ref"] = Json.ToNode(reservationRef);
+        if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
+        if (before.HasValue) values["before"] = Json.ToNode(before.Value);
+        return CallAsync("slotlock_get_reservation_history", values, cancellationToken);
+    }
+
+    /// <summary>An event's history.</summary>
+    /// <remarks>
+    /// What happened to one calendar event of the tenant, by its id, newest first: created,
+    /// changed, cancelled, when and by whom, as slotlock_get_resource_history.
+    /// </remarks>
+    /// <param name="eventId">event_id</param>
+    /// <param name="limit">limit</param>
+    /// <param name="before">before</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> GetTenantEventHistoryAsync(
+        string eventId,
+        Optional<long> limit = default,
+        Optional<string> before = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["event_id"] = Json.ToNode(eventId);
+        if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
+        if (before.HasValue) values["before"] = Json.ToNode(before.Value);
+        return CallAsync("slotlock_get_tenant_event_history", values, cancellationToken);
+    }
+
     /// <summary>Set every resource's bookable hours.</summary>
     /// <remarks>
     /// Set the weekly bookable hours of every resource the tenant has, as
@@ -552,7 +970,7 @@ public sealed partial class SlotlockClient
     /// a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key
     /// (the Idempotency-Key header or idempotency_key), a retry answers the hold the first
     /// request made, until that hold would have expired, is released or is confirmed; the same
-    /// key with another request is 409 idempotency_conflict.
+    /// key with another request is 422 idempotency_conflict.
     /// </remarks>
     /// <param name="resourceId">resource_id</param>
     /// <param name="start">start</param>
@@ -561,7 +979,7 @@ public sealed partial class SlotlockClient
     /// <param name="source">source</param>
     /// <param name="idempotencyKey">A retry identity, also accepted as the Idempotency-Key
     /// header: the same key with the same request answers what the first did; with another
-    /// request, 409 idempotency_conflict.</param>
+    /// request, 422 idempotency_conflict.</param>
     /// <param name="bufferAfterMinutes">buffer_after_minutes</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
@@ -799,6 +1217,112 @@ public sealed partial class SlotlockClient
         return CallAsync("slotlock_list_reservations", values, cancellationToken);
     }
 
+    /// <summary>Check in a booking.</summary>
+    /// <remarks>
+    /// Claim a booking by its reference: the customer has arrived or picked up. On a resource
+    /// whose booking rules set check_in_minutes, a booking not checked in that long after its
+    /// start is released by maintenance (reservation.no_show on the feed) and offered to the
+    /// waitlist. Check-in opens an hour before the start (409 check_in_not_open before then) and
+    /// moving the booking to another start clears it. Checking in again keeps the first time; a
+    /// booking that has ended answers 409 reservation_ended.
+    /// </remarks>
+    /// <param name="reservationRef">reservation_ref</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> CheckInReservationAsync(
+        string reservationRef,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["reservation_ref"] = Json.ToNode(reservationRef);
+        return CallAsync("slotlock_check_in_reservation", values, cancellationToken);
+    }
+
+    /// <summary>List the waitlist.</summary>
+    /// <remarks>
+    /// The tenant's waitlist entries in the order they are offered (oldest first), with what each
+    /// was offered: optionally only those of one resource, pool or holder.
+    /// </remarks>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="pool">pool</param>
+    /// <param name="holderRef">holder_ref</param>
+    /// <param name="limit">limit</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ListWaitlistAsync(
+        Optional<string> resourceId = default,
+        Optional<string> pool = default,
+        Optional<string> holderRef = default,
+        Optional<long> limit = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        if (resourceId.HasValue) values["resource_id"] = Json.ToNode(resourceId.Value);
+        if (pool.HasValue) values["pool"] = Json.ToNode(pool.Value);
+        if (holderRef.HasValue) values["holder_ref"] = Json.ToNode(holderRef.Value);
+        if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
+        return CallAsync("slotlock_list_waitlist", values, cancellationToken);
+    }
+
+    /// <summary>Join the waitlist.</summary>
+    /// <remarks>
+    /// Wait for a window on one resource (resource_id) or on any member of a pool (pool) that is
+    /// taken now. When it comes free (a booking cancelled, a hold released or expired, a
+    /// no-show), the entries waiting for it are offered in the order they joined: the first gets
+    /// a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so
+    /// (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window
+    /// starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409
+    /// waitlist_limit_reached); a window is at most 31 days.
+    /// </remarks>
+    /// <param name="start">start</param>
+    /// <param name="end">end</param>
+    /// <param name="holderRef">holder_ref</param>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="pool">pool</param>
+    /// <param name="offerTtlSeconds">offer_ttl_seconds</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> JoinWaitlistAsync(
+        string start,
+        string end,
+        string holderRef,
+        Optional<string> resourceId = default,
+        Optional<string> pool = default,
+        Optional<long> offerTtlSeconds = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["start"] = Json.ToNode(start);
+        values["end"] = Json.ToNode(end);
+        values["holder_ref"] = Json.ToNode(holderRef);
+        if (resourceId.HasValue) values["resource_id"] = Json.ToNode(resourceId.Value);
+        if (pool.HasValue) values["pool"] = Json.ToNode(pool.Value);
+        if (offerTtlSeconds.HasValue) values["offer_ttl_seconds"] = Json.ToNode(offerTtlSeconds.Value);
+        return CallAsync("slotlock_join_waitlist", values, cancellationToken);
+    }
+
+    /// <summary>Leave the waitlist.</summary>
+    /// <remarks>
+    /// Stop waiting. A hold offered and not yet confirmed is released with the entry, and the
+    /// time offered to the next who waits; one confirmed is a booking and stays. left is false
+    /// when there was no such entry.
+    /// </remarks>
+    /// <param name="entryId">entry_id</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> LeaveWaitlistAsync(
+        string entryId,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["entry_id"] = Json.ToNode(entryId);
+        return CallAsync("slotlock_leave_waitlist", values, cancellationToken);
+    }
+
     /// <summary>Record calendar coverage.</summary>
     /// <remarks>
     /// Record that the events of an external calendar (source) are complete for a window of a
@@ -829,6 +1353,51 @@ public sealed partial class SlotlockClient
         values["end"] = Json.ToNode(end);
         values["revision"] = Json.ToNode(revision);
         return CallAsync("slotlock_record_coverage", values, cancellationToken);
+    }
+
+    /// <summary>A resource's coverage and its health.</summary>
+    /// <remarks>
+    /// Each external calendar (source) that records coverage of a resource: the window it covers,
+    /// when it was last read, its last error, and whether it is stale (not read for a day, so the
+    /// time it covers is unproven, not free). A source that goes stale is also put on the change
+    /// feed once, as coverage.stale, until it is read again.
+    /// </remarks>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> GetCoverageAsync(
+        string resourceId,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_id"] = Json.ToNode(resourceId);
+        return CallAsync("slotlock_get_coverage", values, cancellationToken);
+    }
+
+    /// <summary>Record a failed read of a source.</summary>
+    /// <remarks>
+    /// Record that reading an external calendar failed (it answered 500, a token expired): kept
+    /// as the source's last error, shown by slotlock_get_coverage, while its coverage stays as it
+    /// was. 404 coverage_not_found for a source that has never recorded coverage of the resource.
+    /// </remarks>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="source">source</param>
+    /// <param name="error">error</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> RecordCoverageFailureAsync(
+        string resourceId,
+        string source,
+        string error,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_id"] = Json.ToNode(resourceId);
+        values["source"] = Json.ToNode(source);
+        values["error"] = Json.ToNode(error);
+        return CallAsync("slotlock_record_coverage_failure", values, cancellationToken);
     }
 
     /// <summary>List a resource's events, every key's.</summary>
@@ -893,7 +1462,7 @@ public sealed partial class SlotlockClient
     /// <param name="expectedRevision">expected_revision</param>
     /// <param name="idempotencyKey">A retry identity, also accepted as the Idempotency-Key
     /// header: the same key with the same request answers what the first did; with another
-    /// request, 409 idempotency_conflict.</param>
+    /// request, 422 idempotency_conflict.</param>
     /// <param name="expectedResourceId">expected_resource_id</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
@@ -911,6 +1480,27 @@ public sealed partial class SlotlockClient
         values["idempotency_key"] = Json.ToNode(idempotencyKey);
         if (expectedResourceId.HasValue) values["expected_resource_id"] = Json.ToNode(expectedResourceId.Value);
         return CallAsync("slotlock_cancel_tenant_event", values, cancellationToken);
+    }
+
+    /// <summary>Export an event as JSCalendar.</summary>
+    /// <remarks>
+    /// One of the tenant's events as a JSCalendar Event (RFC 8984), the JSON form of a calendar
+    /// event: uid is its id, sequence its revision, start a local time in timeZone with an exact
+    /// duration, its people participants, its reminders alerts, its recurrence recurrenceRules
+    /// and recurrenceOverrides (and the RRULE verbatim as slotlock.pylota.io:rrule). A cancelled
+    /// or unknown one answers 404 event_not_found.
+    /// </remarks>
+    /// <param name="eventId">event_id</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ExportTenantEventAsync(
+        string eventId,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["event_id"] = Json.ToNode(eventId);
+        return CallAsync("slotlock_export_tenant_event", values, cancellationToken);
     }
 
     /// <summary>Get the tenant.</summary>
@@ -965,6 +1555,107 @@ public sealed partial class SlotlockClient
     {
         var values = new JsonObject();
         return CallAsync("slotlock_run_maintenance", values, cancellationToken);
+    }
+
+    /// <summary>List changes.</summary>
+    /// <remarks>
+    /// What changed in the tenant, oldest first, as CloudEvents: holds made, confirmed, released
+    /// or expired; bookings made, moved or cancelled; calendar events created, changed or
+    /// cancelled (ids, times and states, never titles or attendees). Pass next_cursor as cursor
+    /// to read on; it is returned even when nothing is new, so poll with it. Only changes of
+    /// transactions that have ended are listed, so following the cursor never skips one. Changes
+    /// are kept 30 days: an older cursor answers 410 cursor_expired, so start again without one.
+    /// </remarks>
+    /// <param name="cursor">cursor</param>
+    /// <param name="limit">limit</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ListChangesAsync(
+        Optional<string> cursor = default,
+        Optional<long> limit = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        if (cursor.HasValue) values["cursor"] = Json.ToNode(cursor.Value);
+        if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
+        return CallAsync("slotlock_list_changes", values, cancellationToken);
+    }
+
+    /// <summary>List webhooks.</summary>
+    /// <remarks>
+    /// The tenant's webhooks with how delivery is going: failed attempts, the last status, and
+    /// whether and why one is disabled.
+    /// </remarks>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ListWebhooksAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        return CallAsync("slotlock_list_webhooks", values, cancellationToken);
+    }
+
+    /// <summary>Add a webhook.</summary>
+    /// <remarks>
+    /// Send the changes slotlock_list_changes lists from now on to an https URL, each as a
+    /// CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature),
+    /// in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a
+    /// 410, the webhook is disabled and the feed records webhook.disabled. The secret is returned
+    /// here only. At most 10 per tenant.
+    /// </remarks>
+    /// <param name="url">url</param>
+    /// <param name="eventTypes">event_types</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> CreateWebhookAsync(
+        string url,
+        Optional<IEnumerable<string>> eventTypes = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["url"] = Json.ToNode(url);
+        if (eventTypes.HasValue) values["event_types"] = Json.ToNode(eventTypes.Value);
+        return CallAsync("slotlock_create_webhook", values, cancellationToken);
+    }
+
+    /// <summary>Delete a webhook.</summary>
+    /// <remarks>
+    /// Stop sending to a webhook. deleted is false when the tenant has no such webhook.
+    /// </remarks>
+    /// <param name="webhookId">webhook_id</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> DeleteWebhookAsync(
+        string webhookId,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["webhook_id"] = Json.ToNode(webhookId);
+        return CallAsync("slotlock_delete_webhook", values, cancellationToken);
+    }
+
+    /// <summary>Enable a webhook.</summary>
+    /// <remarks>
+    /// Send to a disabled webhook again, from the first change it did not accept. 404
+    /// webhook_not_found when the tenant has no such webhook; 409 changes_pruned when what it
+    /// missed is older than the 30 days the feed keeps, since it would skip those unseen: delete
+    /// it, add it again, and read what it missed from slotlock_list_changes.
+    /// </remarks>
+    /// <param name="webhookId">webhook_id</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> EnableWebhookAsync(
+        string webhookId,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["webhook_id"] = Json.ToNode(webhookId);
+        return CallAsync("slotlock_enable_webhook", values, cancellationToken);
     }
 
 }

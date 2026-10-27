@@ -78,7 +78,9 @@ describe('hosted safety in the documentation', () => {
     const start = readme.indexOf('- The server limits requests per client address');
     expect(start, 'canary: the limits bullet exists').toBeGreaterThanOrEqual(0);
     const limits = flat(readme.slice(start, readme.indexOf('\n\n', start)));
-    const added = flat(section(read('CHANGELOG.md'), '### Added'));
+    // The release that brought the fair slots, not whatever is unreleased above it.
+    const changelog = read('CHANGELOG.md');
+    const added = flat(section(changelog.slice(changelog.indexOf('\n## 0.3.0')), '### Added'));
     // seriesGate ranks waiters by writes in flight, then by use; the order of starts is gone.
     for (const text of [limits, added]) {
       expect(text).toMatch(/fewest writes in flight[^.]*kept the server busy least lately/);
@@ -92,7 +94,9 @@ describe('hosted safety in the documentation', () => {
     const start = readme.indexOf('- The server limits requests per client address');
     expect(start, 'canary: the limits bullet exists').toBeGreaterThanOrEqual(0);
     const limits = flat(readme.slice(start, readme.indexOf('\n\n', start)));
-    const added = flat(section(read('CHANGELOG.md'), '### Added'));
+    // The release that brought the fair slots, not whatever is unreleased above it.
+    const changelog = read('CHANGELOG.md');
+    const added = flat(section(changelog.slice(changelog.indexOf('\n## 0.3.0')), '### Added'));
     const config = flat(read('src/config.ts'));
     for (const text of [limits, added]) {
       // Each tenant with one write in flight and less use, a new one included, goes ahead once:

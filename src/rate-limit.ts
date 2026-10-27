@@ -91,6 +91,13 @@ export interface SlotlockRequestLimitsOptions {
   onIgnoredClientField?: (field: string) => void;
   /** Milliseconds, for tests; defaults to `performance.now`. */
   now?: () => number;
+  /**
+   * Budgets shared by every server (`SLOTLOCK_SHARED_LIMITS`): after this process's own buckets
+   * pass, each tenant budget (`tenant_*`, `app_*`) also takes a token from `take`, so N servers
+   * allow a tenant its rate once, not N times. `take` failing (the database away) lets the request
+   * through on this process's buckets alone, which still apply.
+   */
+  shared?: { take(bucket: string, rate: SlotlockRate): Promise<boolean> };
 }
 
 export interface SlotlockRequestLimits {
@@ -635,11 +642,11 @@ export function createSlotlockRequestLimits(
    * charged its own buckets, so its refused application calls cannot spend the application's.
    * False, with the refusal recorded, when one is short.
    */
-  function chargeRequest(
+  async function chargeRequest(
     state: RequestState,
     principal: SlotlockAgentPrincipal,
     classes: Array<'read' | 'write'>,
-  ): boolean {
+  ): Promise<boolean> {
     const due = classes.filter((kind) => !state.charged[kind]);
     if (due.length === 0) return true;
     const keyOf = `${principal.tenantRef}\0${principal.subject}`;
@@ -662,6 +669,26 @@ export function createSlotlockRequestLimits(
         fields: fieldsOf(outcome.verdict as Verdict, true),
       };
       return false;
+    }
+    if (options.shared) {
+      for (const check of checks) {
+        if (!check.name.startsWith('tenant_') && !check.name.startsWith('app_')) continue;
+        const policy = policies.get(check.name)?.policy;
+        if (!policy) continue;
+        let allowed = true;
+        try {
+          allowed = await options.shared.take(`${check.name}\0${check.key}`, policy.rate);
+        } catch {
+          // The shared budget is out of reach: this process's own buckets decided.
+        }
+        if (!allowed) {
+          state.refusal = {
+            reason: 'rate_limited',
+            fields: fieldsOf({ policy, remaining: 0, seconds: Math.max(1, Math.ceil(1 / policy.rate.perSecond)) }, true),
+          };
+          return false;
+        }
+      }
     }
     for (const kind of due) state.charged[kind] = true;
     if (outcome.verdict) state.tightest = outcome.verdict;
@@ -718,7 +745,7 @@ export function createSlotlockRequestLimits(
       // where consumeRateLimit would take it (on /mcp and /a2a a request is charged a read token
       // only): a write over its budget is refused at once, not after holding a place in the queue
       // for a slot it could not use.
-      if (!chargeRequest(state, principal, ['write'])) {
+      if (!(await chargeRequest(state, principal, ['write']))) {
         throw new SlotlockAgentOperationError('rate_limited', 429);
       }
       const slots = gates[kind];

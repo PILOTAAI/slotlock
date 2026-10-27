@@ -264,10 +264,10 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
       expect(counts['429']).toBeGreaterThan(1_000);
       expect(Object.keys(counts).sort()).toEqual(['200', '429']);
 
-      expect(refused?.body).toEqual({ error: { code: 'rate_limited' } });
+      expect(refused?.body).toEqual(expect.objectContaining({ status: 429, code: 'rate_limited', error: { code: 'rate_limited' } }));
       // The body is openapi.json's Error.
       expect(openApi.components.schemas.Error).toMatchObject({
-        required: ['error'],
+        required: expect.arrayContaining(['type', 'status', 'code', 'error']),
         properties: { error: { required: ['code'], properties: { code: { type: 'string' } } } },
       });
       const retryAfter = Number(refused?.headers.get('retry-after'));
@@ -590,7 +590,7 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
       );
       expect(outcomes['429'] ?? 0).toBeGreaterThan(40);
       const refused = writes.find(({ status }) => status === 429);
-      expect(refused?.body).toEqual({ error: { code: 'rate_limited' } });
+      expect(refused?.body).toEqual(expect.objectContaining({ status: 429, code: 'rate_limited', error: { code: 'rate_limited' } }));
       expect(Number(refused?.headers.get('retry-after'))).toBeGreaterThanOrEqual(1);
     } finally {
       await server.stop();

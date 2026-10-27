@@ -4,6 +4,41 @@
 // TypeScript 6 default) still loads @types/node.
 /// <reference types="node" preserve="true" />
 export { findNextAvailable, mergeIntervals, subtractBusy } from './engine.js';
+export {
+  type SlotlockBookingRule,
+  type SlotlockBookingRules,
+  bookingRuleBroken,
+  bookingSearch,
+  nextStepStart,
+  parseBookingRules,
+} from './booking-rules.js';
+export {
+  type CreateWebhookEndpointResult,
+  type ListChangesResult,
+  SLOTLOCK_CHANGE_RETENTION_DAYS,
+  SLOTLOCK_CHANGE_TYPES,
+  SLOTLOCK_MAX_WEBHOOK_ENDPOINTS,
+  SLOTLOCK_WEBHOOK_FAILING_LIMIT_MS,
+  type SlotlockChange,
+  type SlotlockChangeType,
+  type SlotlockEventFeed,
+  type SlotlockWebhookClaim,
+  type SlotlockWebhookEndpoint,
+} from './event-feed.js';
+export {
+  type SlotlockCloudEvent,
+  type SlotlockWebhookPassResult,
+  type SlotlockWebhookResponse,
+  type SlotlockWebhookScheduler,
+  type SlotlockWebhookSender,
+  createSlotlockWebhookSender,
+  deliverSlotlockWebhooks,
+  isPrivateAddress,
+  signSlotlockWebhook,
+  slotlockCloudEvent,
+  slotlockWebhookRetryDelayMs,
+  startSlotlockWebhookDelivery,
+} from './webhooks.js';
 export { expandRules } from './rules.js';
 export {
   availabilityRuleProblem,
@@ -13,6 +48,21 @@ export {
   weeklyHoursToRules,
 } from './weekly-hours.js';
 export type { HoursWindow, Weekday, WeeklyHours } from './weekly-hours.js';
+export {
+  emitVAvailability,
+  parseVAvailability,
+  recurrenceRuleFromRRule,
+  SLOTLOCK_MAX_VAVAILABILITY_CHARACTERS,
+  toJSCalendarEvent,
+} from './interop.js';
+export type {
+  EmitVAvailabilityOptions,
+  JSCalendarAlert,
+  JSCalendarEvent,
+  JSCalendarParticipant,
+  JSCalendarRecurrenceRule,
+  ParsedVAvailability,
+} from './interop.js';
 export {
   createTimeZoneConverter,
   zonedCalendarDate,

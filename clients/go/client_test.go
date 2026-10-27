@@ -197,7 +197,7 @@ func TestBooksHoldsAndReservationsWithoutDoubleBooking(t *testing.T) {
 		t.Fatalf("record_coverage: %v", coverage)
 	}
 	maintenance := s.must(c.RunMaintenance(s.ctx, RunMaintenanceInput{}))
-	for _, key := range []string{"extended", "conflicts", "refused", "pruned", "capped"} {
+	for _, key := range []string{"extended", "conflicts", "refused", "pruned", "zone_shifts", "stale_sources", "no_shows", "waitlist_offers", "capped"} {
 		if _, ok := maintenance[key]; !ok {
 			t.Fatalf("run_maintenance: %v", maintenance)
 		}
@@ -268,7 +268,7 @@ func TestRetriesAKeyedHoldAndRetiresAResource(t *testing.T) {
 	}
 	window.TTLSeconds = 60
 	_, err := c.AcquireHold(s.ctx, window)
-	s.refused(409, "idempotency_conflict", err)
+	s.refused(422, "idempotency_conflict", err)
 	holdID := hold["id"].(string)
 	if got := s.must(c.GetHold(s.ctx, GetHoldInput{HoldID: holdID}))["hold"]; !reflect.DeepEqual(got, hold) {
 		t.Fatalf("get_hold: %v", got)

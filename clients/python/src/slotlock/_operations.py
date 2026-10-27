@@ -13,7 +13,7 @@ OPERATIONS: dict[str, Operation] = {
         "GET",
         "/v1/resources",
         (),
-        ("cursor", "limit"),
+        ("cursor", "limit", "pool"),
     ),
     "slotlock_create_resource": Operation(
         "slotlock_create_resource",
@@ -35,6 +35,41 @@ OPERATIONS: dict[str, Operation] = {
         "/v1/next-available",
         (),
         ("resource_ids", "start", "end", "duration_minutes"),
+    ),
+    "slotlock_find_available_slots": Operation(
+        "slotlock_find_available_slots",
+        "GET",
+        "/v1/available-slots",
+        (),
+        ("resource_ids", "start", "end", "duration_minutes", "limit", "require_free"),
+    ),
+    "slotlock_hold_slots": Operation(
+        "slotlock_hold_slots",
+        "POST",
+        "/v1/slot-holds",
+        (),
+        (),
+    ),
+    "slotlock_book_together": Operation(
+        "slotlock_book_together",
+        "POST",
+        "/v1/bundles",
+        (),
+        (),
+    ),
+    "slotlock_book_pool": Operation(
+        "slotlock_book_pool",
+        "POST",
+        "/v1/pool-bookings",
+        (),
+        (),
+    ),
+    "slotlock_release_slots": Operation(
+        "slotlock_release_slots",
+        "DELETE",
+        "/v1/slot-holds/{hold_id}",
+        ("hold_id",),
+        (),
     ),
     "slotlock_list_events": Operation(
         "slotlock_list_events",
@@ -113,6 +148,62 @@ OPERATIONS: dict[str, Operation] = {
         ("resource_id",),
         (),
     ),
+    "slotlock_export_resource_availability": Operation(
+        "slotlock_export_resource_availability",
+        "GET",
+        "/v1/resources/{resource_id}/availability/ical",
+        ("resource_id",),
+        (),
+    ),
+    "slotlock_import_resource_availability": Operation(
+        "slotlock_import_resource_availability",
+        "PUT",
+        "/v1/resources/{resource_id}/availability/ical",
+        ("resource_id",),
+        (),
+    ),
+    "slotlock_set_resource_booking_rules": Operation(
+        "slotlock_set_resource_booking_rules",
+        "PUT",
+        "/v1/resources/{resource_id}/booking-rules",
+        ("resource_id",),
+        (),
+    ),
+    "slotlock_set_resource_pool": Operation(
+        "slotlock_set_resource_pool",
+        "PUT",
+        "/v1/resources/{resource_id}/pool",
+        ("resource_id",),
+        (),
+    ),
+    "slotlock_list_pools": Operation(
+        "slotlock_list_pools",
+        "GET",
+        "/v1/pools",
+        (),
+        (),
+    ),
+    "slotlock_get_resource_history": Operation(
+        "slotlock_get_resource_history",
+        "GET",
+        "/v1/resources/{resource_id}/history",
+        ("resource_id",),
+        ("limit", "before"),
+    ),
+    "slotlock_get_reservation_history": Operation(
+        "slotlock_get_reservation_history",
+        "GET",
+        "/v1/reservations/{reservation_ref}/history",
+        ("reservation_ref",),
+        ("limit", "before"),
+    ),
+    "slotlock_get_tenant_event_history": Operation(
+        "slotlock_get_tenant_event_history",
+        "GET",
+        "/v1/tenant/events/{event_id}/history",
+        ("event_id",),
+        ("limit", "before"),
+    ),
     "slotlock_set_tenant_availability": Operation(
         "slotlock_set_tenant_availability",
         "PUT",
@@ -183,10 +274,52 @@ OPERATIONS: dict[str, Operation] = {
         ("resource_id",),
         ("start", "end", "limit", "cursor"),
     ),
+    "slotlock_check_in_reservation": Operation(
+        "slotlock_check_in_reservation",
+        "POST",
+        "/v1/reservations/{reservation_ref}/check-in",
+        ("reservation_ref",),
+        (),
+    ),
+    "slotlock_list_waitlist": Operation(
+        "slotlock_list_waitlist",
+        "GET",
+        "/v1/waitlist",
+        (),
+        ("resource_id", "pool", "holder_ref", "limit"),
+    ),
+    "slotlock_join_waitlist": Operation(
+        "slotlock_join_waitlist",
+        "POST",
+        "/v1/waitlist",
+        (),
+        (),
+    ),
+    "slotlock_leave_waitlist": Operation(
+        "slotlock_leave_waitlist",
+        "DELETE",
+        "/v1/waitlist/{entry_id}",
+        ("entry_id",),
+        (),
+    ),
     "slotlock_record_coverage": Operation(
         "slotlock_record_coverage",
         "PUT",
         "/v1/resources/{resource_id}/coverage/{source}",
+        ("resource_id", "source"),
+        (),
+    ),
+    "slotlock_get_coverage": Operation(
+        "slotlock_get_coverage",
+        "GET",
+        "/v1/resources/{resource_id}/coverage",
+        ("resource_id",),
+        (),
+    ),
+    "slotlock_record_coverage_failure": Operation(
+        "slotlock_record_coverage_failure",
+        "POST",
+        "/v1/resources/{resource_id}/coverage/{source}/failure",
         ("resource_id", "source"),
         (),
     ),
@@ -211,6 +344,13 @@ OPERATIONS: dict[str, Operation] = {
         ("event_id",),
         ("expected_revision", "expected_resource_id", "idempotency_key"),
     ),
+    "slotlock_export_tenant_event": Operation(
+        "slotlock_export_tenant_event",
+        "GET",
+        "/v1/tenant/events/{event_id}/jscalendar",
+        ("event_id",),
+        (),
+    ),
     "slotlock_get_tenant": Operation(
         "slotlock_get_tenant",
         "GET",
@@ -232,6 +372,41 @@ OPERATIONS: dict[str, Operation] = {
         (),
         (),
     ),
+    "slotlock_list_changes": Operation(
+        "slotlock_list_changes",
+        "GET",
+        "/v1/changes",
+        (),
+        ("cursor", "limit"),
+    ),
+    "slotlock_list_webhooks": Operation(
+        "slotlock_list_webhooks",
+        "GET",
+        "/v1/webhooks",
+        (),
+        (),
+    ),
+    "slotlock_create_webhook": Operation(
+        "slotlock_create_webhook",
+        "POST",
+        "/v1/webhooks",
+        (),
+        (),
+    ),
+    "slotlock_delete_webhook": Operation(
+        "slotlock_delete_webhook",
+        "DELETE",
+        "/v1/webhooks/{webhook_id}",
+        ("webhook_id",),
+        (),
+    ),
+    "slotlock_enable_webhook": Operation(
+        "slotlock_enable_webhook",
+        "POST",
+        "/v1/webhooks/{webhook_id}/enable",
+        ("webhook_id",),
+        (),
+    ),
 }
 
 
@@ -243,16 +418,21 @@ class Operations(Transport):
         *,
         cursor: str | None = None,
         limit: int | None = None,
+        pool: str | None = None,
     ) -> dict[str, Any]:
         """List calendar resources.
 
-        List resources visible to the authenticated tenant principal.
+        List resources visible to the authenticated tenant principal, with the pool each belongs
+        to (a vehicle class, a room type). With pool, only that pool's members, in the order
+        slotlock_book_pool tries them.
         """
         values: dict[str, Any] = {}
         if cursor is not None:
             values["cursor"] = cursor
         if limit is not None:
             values["limit"] = limit
+        if pool is not None:
+            values["pool"] = pool
         return self.call("slotlock_list_resources", values)
 
     def create_resource(
@@ -305,6 +485,123 @@ class Operations(Transport):
         }
         return self.call("slotlock_find_next_available", values)
 
+    def find_available_slots(
+        self,
+        *,
+        resource_ids: list[str],
+        start: str,
+        end: str,
+        duration_minutes: int,
+        limit: int | None = None,
+        require_free: int | None = None,
+    ) -> dict[str, Any]:
+        """Find available slots.
+
+        List up to `limit` certain slots of the requested duration, earliest first across the
+        resources, each one free of busy time and inside the resource's hours, to offer a person a
+        choice. With require_free, only times when at least that many of the resources are free
+        together, each slot naming them in resource_ids: every resource for a booking that needs
+        them all (book it with slotlock_book_together), or any n of them. No slot is listed unless
+        every resource's coverage is certain.
+        """
+        values: dict[str, Any] = {
+            "resource_ids": resource_ids,
+            "start": start,
+            "end": end,
+            "duration_minutes": duration_minutes,
+        }
+        if limit is not None:
+            values["limit"] = limit
+        if require_free is not None:
+            values["require_free"] = require_free
+        return self.call("slotlock_find_available_slots", values)
+
+    def hold_slots(
+        self,
+        *,
+        slots: list[dict[str, Any]],
+        idempotency_key: str,
+        ttl_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        """Hold candidate slots.
+
+        Hold up to five candidate slots for a short time (30-900 seconds) while a person chooses,
+        as alternatives in one group: each free one is held, the others are listed with why not.
+        Book one by passing its hold_id to slotlock_create_event, which releases the rest;
+        unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at
+        once.
+        """
+        values: dict[str, Any] = {"slots": slots, "idempotency_key": idempotency_key}
+        if ttl_seconds is not None:
+            values["ttl_seconds"] = ttl_seconds
+        return self.call("slotlock_hold_slots", values)
+
+    def book_together(
+        self,
+        *,
+        resource_ids: list[str],
+        starts_at: str,
+        ends_at: str,
+        timezone: str,
+        idempotency_key: str,
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        """Book resources together.
+
+        Book the same time on 2-20 resources at once, all or none: a van with its driver, a room
+        with its projector. If any of them is taken, nothing is booked, and the refusal names that
+        resource_id. Find such a time with slotlock_find_available_slots and require_free. A retry
+        with the same idempotency_key answers the same events.
+        """
+        values: dict[str, Any] = {
+            "resource_ids": resource_ids,
+            "starts_at": starts_at,
+            "ends_at": ends_at,
+            "timezone": timezone,
+            "idempotency_key": idempotency_key,
+        }
+        if title is not None:
+            values["title"] = title
+        return self.call("slotlock_book_together", values)
+
+    def book_pool(
+        self,
+        *,
+        pool: str,
+        starts_at: str,
+        ends_at: str,
+        timezone: str,
+        idempotency_key: str,
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        """Book from a pool.
+
+        Book any one member of a pool (a vehicle class, a room type) for a time: members are tried
+        in a fixed order and the first that is free and allows the booking is booked, in one
+        transaction, so a class sells out exactly at its number of members. The event names the
+        member booked. 409 pool_full when none is free; 404 pool_not_found when the pool has no
+        member you may book. A retry with the same idempotency_key answers the same event.
+        """
+        values: dict[str, Any] = {
+            "pool": pool,
+            "starts_at": starts_at,
+            "ends_at": ends_at,
+            "timezone": timezone,
+            "idempotency_key": idempotency_key,
+        }
+        if title is not None:
+            values["title"] = title
+        return self.call("slotlock_book_pool", values)
+
+    def release_slots(self, hold_id: str) -> dict[str, Any]:
+        """Release held slots.
+
+        Release one of your holds, and the rest of its group, at once instead of letting them
+        expire. `released` is false when it was already gone.
+        """
+        values: dict[str, Any] = {"hold_id": hold_id}
+        return self.call("slotlock_release_slots", values)
+
     def list_events(
         self,
         *,
@@ -343,6 +640,7 @@ class Operations(Transport):
         attendees: list[dict[str, Any]] | None = None,
         reminders: list[dict[str, Any]] | None = None,
         recurrence_exceptions: list[dict[str, Any]] | None = None,
+        hold_id: str | None = None,
     ) -> dict[str, Any]:
         """Create resource event.
 
@@ -376,6 +674,8 @@ class Operations(Transport):
             values["reminders"] = reminders
         if recurrence_exceptions is not None:
             values["recurrence_exceptions"] = recurrence_exceptions
+        if hold_id is not None:
+            values["hold_id"] = hold_id
         return self.call("slotlock_create_event", values)
 
     def get_event(self, event_id: str) -> dict[str, Any]:
@@ -535,6 +835,125 @@ class Operations(Transport):
         values: dict[str, Any] = {"resource_id": resource_id, "rules": rules}
         return self.call("slotlock_set_resource_availability", values)
 
+    def export_resource_availability(self, resource_id: str) -> dict[str, Any]:
+        """Export a resource's bookable hours as iCalendar.
+
+        One resource's own weekly bookable hours as an iCalendar VAVAILABILITY (RFC 7953) for a
+        calendar or scheduling tool: an AVAILABLE per rule, its DTSTART's TZID the resource's IANA
+        time zone. `null` when the resource uses the server's default.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id}
+        return self.call("slotlock_export_resource_availability", values)
+
+    def import_resource_availability(self, resource_id: str, *, icalendar: str) -> dict[str, Any]:
+        """Import a resource's bookable hours from iCalendar.
+
+        Set one resource's own weekly bookable hours from an iCalendar VAVAILABILITY (RFC 7953),
+        as slotlock_set_resource_availability does from rules: each AVAILABLE a weekly RRULE with
+        a start time and DTEND or DURATION. Times must be in the resource's time zone (its TZID)
+        or floating. 400 invalid_availability names what weekly hours cannot say: a bounded
+        VAVAILABILITY, RDATE, EXDATE, a single window, another zone.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id, "icalendar": icalendar}
+        return self.call("slotlock_import_resource_availability", values)
+
+    def set_resource_booking_rules(
+        self,
+        resource_id: str,
+        *,
+        rules: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Set a resource's booking rules.
+
+        Set what a booking on one resource must satisfy from now on: minimum notice, how far
+        ahead, the step starts fall on (from local midnight in the resource's time zone), the
+        turnaround kept free after each booking, and whether bookings must lie inside its hours.
+        `null` clears them. Holds, reservations, moves and agents' events are refused with the
+        rule they break; searches offer only what they allow.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id, "rules": rules}
+        return self.call("slotlock_set_resource_booking_rules", values)
+
+    def set_resource_pool(self, resource_id: str, *, pool: str | None) -> dict[str, Any]:
+        """Set a resource's pool.
+
+        Make a resource a member of a pool, a class of interchangeable resources such as a vehicle
+        class or a room type, or take it out (`null`). Agents book the class with
+        slotlock_book_pool, which takes the first member free; the class's capacity is its number
+        of members. A resource is in one pool at most; pool names are 1-100 of a-z, 0-9, '.', '_'
+        and '-'.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id, "pool": pool}
+        return self.call("slotlock_set_resource_pool", values)
+
+    def list_pools(self) -> dict[str, Any]:
+        """List pools.
+
+        The tenant's pools by name, each with its capacity: how many members it has that are not
+        archived.
+        """
+        values: dict[str, Any] = {}
+        return self.call("slotlock_list_pools", values)
+
+    def get_resource_history(
+        self,
+        resource_id: str,
+        *,
+        limit: int | None = None,
+        before: str | None = None,
+    ) -> dict[str, Any]:
+        """A resource's history.
+
+        What happened on one of the tenant's resources, newest first: each hold, booking and event
+        made, moved, confirmed, released or cancelled, when, by whom (the API key or agent), and
+        for a change what it was before. Kept 30 days. Pass next_before as before for older
+        entries.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id}
+        if limit is not None:
+            values["limit"] = limit
+        if before is not None:
+            values["before"] = before
+        return self.call("slotlock_get_resource_history", values)
+
+    def get_reservation_history(
+        self,
+        reservation_ref: str,
+        *,
+        limit: int | None = None,
+        before: str | None = None,
+    ) -> dict[str, Any]:
+        """A booking's history.
+
+        What happened to one booking, by its reference, newest first: made, moved, cancelled, when
+        and by whom, as slotlock_get_resource_history.
+        """
+        values: dict[str, Any] = {"reservation_ref": reservation_ref}
+        if limit is not None:
+            values["limit"] = limit
+        if before is not None:
+            values["before"] = before
+        return self.call("slotlock_get_reservation_history", values)
+
+    def get_tenant_event_history(
+        self,
+        event_id: str,
+        *,
+        limit: int | None = None,
+        before: str | None = None,
+    ) -> dict[str, Any]:
+        """An event's history.
+
+        What happened to one calendar event of the tenant, by its id, newest first: created,
+        changed, cancelled, when and by whom, as slotlock_get_resource_history.
+        """
+        values: dict[str, Any] = {"event_id": event_id}
+        if limit is not None:
+            values["limit"] = limit
+        if before is not None:
+            values["before"] = before
+        return self.call("slotlock_get_tenant_event_history", values)
+
     def set_tenant_availability(self, *, rules: list[dict[str, Any]] | None) -> dict[str, Any]:
         """Set every resource's bookable hours.
 
@@ -564,11 +983,11 @@ class Operations(Transport):
         a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key
         (the Idempotency-Key header or idempotency_key), a retry answers the hold the first
         request made, until that hold would have expired, is released or is confirmed; the same
-        key with another request is 409 idempotency_conflict.
+        key with another request is 422 idempotency_conflict.
 
         Args:
             idempotency_key: A retry identity, also accepted as the Idempotency-Key header: the
-            same key with the same request answers what the first did; with another request, 409
+            same key with the same request answers what the first did; with another request, 422
             idempotency_conflict.
         """
         values: dict[str, Any] = {
@@ -708,6 +1127,82 @@ class Operations(Transport):
             values["cursor"] = cursor
         return self.call("slotlock_list_reservations", values)
 
+    def check_in_reservation(self, reservation_ref: str) -> dict[str, Any]:
+        """Check in a booking.
+
+        Claim a booking by its reference: the customer has arrived or picked up. On a resource
+        whose booking rules set check_in_minutes, a booking not checked in that long after its
+        start is released by maintenance (reservation.no_show on the feed) and offered to the
+        waitlist. Check-in opens an hour before the start (409 check_in_not_open before then) and
+        moving the booking to another start clears it. Checking in again keeps the first time; a
+        booking that has ended answers 409 reservation_ended.
+        """
+        values: dict[str, Any] = {"reservation_ref": reservation_ref}
+        return self.call("slotlock_check_in_reservation", values)
+
+    def list_waitlist(
+        self,
+        *,
+        resource_id: str | None = None,
+        pool: str | None = None,
+        holder_ref: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """List the waitlist.
+
+        The tenant's waitlist entries in the order they are offered (oldest first), with what each
+        was offered: optionally only those of one resource, pool or holder.
+        """
+        values: dict[str, Any] = {}
+        if resource_id is not None:
+            values["resource_id"] = resource_id
+        if pool is not None:
+            values["pool"] = pool
+        if holder_ref is not None:
+            values["holder_ref"] = holder_ref
+        if limit is not None:
+            values["limit"] = limit
+        return self.call("slotlock_list_waitlist", values)
+
+    def join_waitlist(
+        self,
+        *,
+        start: str,
+        end: str,
+        holder_ref: str,
+        resource_id: str | None = None,
+        pool: str | None = None,
+        offer_ttl_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        """Join the waitlist.
+
+        Wait for a window on one resource (resource_id) or on any member of a pool (pool) that is
+        taken now. When it comes free (a booking cancelled, a hold released or expired, a
+        no-show), the entries waiting for it are offered in the order they joined: the first gets
+        a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so
+        (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window
+        starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409
+        waitlist_limit_reached); a window is at most 31 days.
+        """
+        values: dict[str, Any] = {"start": start, "end": end, "holder_ref": holder_ref}
+        if resource_id is not None:
+            values["resource_id"] = resource_id
+        if pool is not None:
+            values["pool"] = pool
+        if offer_ttl_seconds is not None:
+            values["offer_ttl_seconds"] = offer_ttl_seconds
+        return self.call("slotlock_join_waitlist", values)
+
+    def leave_waitlist(self, entry_id: str) -> dict[str, Any]:
+        """Leave the waitlist.
+
+        Stop waiting. A hold offered and not yet confirmed is released with the entry, and the
+        time offered to the next who waits; one confirmed is a booking and stays. left is false
+        when there was no such entry.
+        """
+        values: dict[str, Any] = {"entry_id": entry_id}
+        return self.call("slotlock_leave_waitlist", values)
+
     def record_coverage(
         self,
         resource_id: str,
@@ -732,6 +1227,33 @@ class Operations(Transport):
             "revision": revision,
         }
         return self.call("slotlock_record_coverage", values)
+
+    def get_coverage(self, resource_id: str) -> dict[str, Any]:
+        """A resource's coverage and its health.
+
+        Each external calendar (source) that records coverage of a resource: the window it covers,
+        when it was last read, its last error, and whether it is stale (not read for a day, so the
+        time it covers is unproven, not free). A source that goes stale is also put on the change
+        feed once, as coverage.stale, until it is read again.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id}
+        return self.call("slotlock_get_coverage", values)
+
+    def record_coverage_failure(
+        self,
+        resource_id: str,
+        source: str,
+        *,
+        error: str,
+    ) -> dict[str, Any]:
+        """Record a failed read of a source.
+
+        Record that reading an external calendar failed (it answered 500, a token expired): kept
+        as the source's last error, shown by slotlock_get_coverage, while its coverage stays as it
+        was. 404 coverage_not_found for a source that has never recorded coverage of the resource.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id, "source": source, "error": error}
+        return self.call("slotlock_record_coverage_failure", values)
 
     def list_tenant_events(
         self,
@@ -783,7 +1305,7 @@ class Operations(Transport):
 
         Args:
             idempotency_key: A retry identity, also accepted as the Idempotency-Key header: the
-            same key with the same request answers what the first did; with another request, 409
+            same key with the same request answers what the first did; with another request, 422
             idempotency_conflict.
         """
         values: dict[str, Any] = {
@@ -794,6 +1316,18 @@ class Operations(Transport):
         if expected_resource_id is not None:
             values["expected_resource_id"] = expected_resource_id
         return self.call("slotlock_cancel_tenant_event", values)
+
+    def export_tenant_event(self, event_id: str) -> dict[str, Any]:
+        """Export an event as JSCalendar.
+
+        One of the tenant's events as a JSCalendar Event (RFC 8984), the JSON form of a calendar
+        event: uid is its id, sequence its revision, start a local time in timeZone with an exact
+        duration, its people participants, its reminders alerts, its recurrence recurrenceRules
+        and recurrenceOverrides (and the RRULE verbatim as slotlock.pylota.io:rrule). A cancelled
+        or unknown one answers 404 event_not_found.
+        """
+        values: dict[str, Any] = {"event_id": event_id}
+        return self.call("slotlock_export_tenant_event", values)
 
     def get_tenant(self) -> dict[str, Any]:
         """Get the tenant.
@@ -827,3 +1361,67 @@ class Operations(Transport):
         """
         values: dict[str, Any] = {}
         return self.call("slotlock_run_maintenance", values)
+
+    def list_changes(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """List changes.
+
+        What changed in the tenant, oldest first, as CloudEvents: holds made, confirmed, released
+        or expired; bookings made, moved or cancelled; calendar events created, changed or
+        cancelled (ids, times and states, never titles or attendees). Pass next_cursor as cursor
+        to read on; it is returned even when nothing is new, so poll with it. Only changes of
+        transactions that have ended are listed, so following the cursor never skips one. Changes
+        are kept 30 days: an older cursor answers 410 cursor_expired, so start again without one.
+        """
+        values: dict[str, Any] = {}
+        if cursor is not None:
+            values["cursor"] = cursor
+        if limit is not None:
+            values["limit"] = limit
+        return self.call("slotlock_list_changes", values)
+
+    def list_webhooks(self) -> dict[str, Any]:
+        """List webhooks.
+
+        The tenant's webhooks with how delivery is going: failed attempts, the last status, and
+        whether and why one is disabled.
+        """
+        values: dict[str, Any] = {}
+        return self.call("slotlock_list_webhooks", values)
+
+    def create_webhook(self, *, url: str, event_types: list[str] | None = None) -> dict[str, Any]:
+        """Add a webhook.
+
+        Send the changes slotlock_list_changes lists from now on to an https URL, each as a
+        CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature),
+        in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a
+        410, the webhook is disabled and the feed records webhook.disabled. The secret is returned
+        here only. At most 10 per tenant.
+        """
+        values: dict[str, Any] = {"url": url}
+        if event_types is not None:
+            values["event_types"] = event_types
+        return self.call("slotlock_create_webhook", values)
+
+    def delete_webhook(self, webhook_id: str) -> dict[str, Any]:
+        """Delete a webhook.
+
+        Stop sending to a webhook. deleted is false when the tenant has no such webhook.
+        """
+        values: dict[str, Any] = {"webhook_id": webhook_id}
+        return self.call("slotlock_delete_webhook", values)
+
+    def enable_webhook(self, webhook_id: str) -> dict[str, Any]:
+        """Enable a webhook.
+
+        Send to a disabled webhook again, from the first change it did not accept. 404
+        webhook_not_found when the tenant has no such webhook; 409 changes_pruned when what it
+        missed is older than the 30 days the feed keeps, since it would skip those unseen: delete
+        it, add it again, and read what it missed from slotlock_list_changes.
+        """
+        values: dict[str, Any] = {"webhook_id": webhook_id}
+        return self.call("slotlock_enable_webhook", values)

@@ -120,6 +120,7 @@ describe('Slotlock store-backed agent server adapter', () => {
     expect(getResource).toHaveBeenCalledWith({ tenantRef, id: resource.id, visibility: 'shared' });
     expect(withTenant).toHaveBeenCalledWith(tenantRef, expect.any(Function), {
       signal: context.signal,
+      actor: 'principal-a',
     });
 
     getResource.mockResolvedValueOnce(null);
@@ -830,6 +831,7 @@ describe('Slotlock store-backed agent server adapter', () => {
     expect(withTenant).toHaveBeenLastCalledWith(tenantRef, expect.any(Function), {
       isolation: 'read committed',
       signal: admin.signal,
+      actor: 'admin-a',
     });
   });
 });

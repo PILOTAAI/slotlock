@@ -9,6 +9,7 @@
 //
 // This module holds only the contract (names, schemas, routes); it imports nothing from the agent
 // server at runtime. The store-backed implementation is createSlotlockStoreApplicationBackend.
+import { SLOTLOCK_CHANGE_TYPES } from './event-feed.js';
 import { z } from 'zod';
 import type { SlotlockAgentPrincipal } from './agent-server.js';
 import { SLOTLOCK_EVENT_OUTPUT } from './event-schema.js';
@@ -24,6 +25,16 @@ export type SlotlockApplicationOperation =
   | 'slotlock_list_busy'
   | 'slotlock_set_resource_availability'
   | 'slotlock_set_tenant_availability'
+  | 'slotlock_export_resource_availability'
+  | 'slotlock_import_resource_availability'
+  | 'slotlock_set_resource_booking_rules'
+  | 'slotlock_set_resource_pool'
+  | 'slotlock_list_pools'
+  | 'slotlock_get_resource_history'
+  | 'slotlock_get_coverage'
+  | 'slotlock_record_coverage_failure'
+  | 'slotlock_get_reservation_history'
+  | 'slotlock_get_tenant_event_history'
   | 'slotlock_acquire_hold'
   | 'slotlock_get_hold'
   | 'slotlock_list_holds'
@@ -33,13 +44,23 @@ export type SlotlockApplicationOperation =
   | 'slotlock_list_reservations'
   | 'slotlock_put_reservation'
   | 'slotlock_cancel_reservation'
+  | 'slotlock_check_in_reservation'
+  | 'slotlock_join_waitlist'
+  | 'slotlock_list_waitlist'
+  | 'slotlock_leave_waitlist'
   | 'slotlock_record_coverage'
   | 'slotlock_list_tenant_events'
   | 'slotlock_get_tenant_event'
+  | 'slotlock_export_tenant_event'
   | 'slotlock_cancel_tenant_event'
   | 'slotlock_get_tenant'
   | 'slotlock_erase_tenant'
-  | 'slotlock_run_maintenance';
+  | 'slotlock_run_maintenance'
+  | 'slotlock_list_changes'
+  | 'slotlock_create_webhook'
+  | 'slotlock_list_webhooks'
+  | 'slotlock_delete_webhook'
+  | 'slotlock_enable_webhook';
 
 /** The scope an application operation needs, whichever operation it is. */
 export const SLOTLOCK_APPLICATION_SCOPE = 'admin';
@@ -71,6 +92,16 @@ export interface SlotlockApplicationBackend {
   listBusy: Handler;
   setResourceAvailability: Handler;
   setTenantAvailability: Handler;
+  exportResourceAvailability: Handler;
+  importResourceAvailability: Handler;
+  setResourceBookingRules: Handler;
+  setResourcePool: Handler;
+  listPools: Handler;
+  getResourceHistory: Handler;
+  getCoverage: Handler;
+  recordCoverageFailure: Handler;
+  getReservationHistory: Handler;
+  getTenantEventHistory: Handler;
   acquireHold: Handler;
   getHold: Handler;
   listHolds: Handler;
@@ -80,13 +111,23 @@ export interface SlotlockApplicationBackend {
   listReservations: Handler;
   putReservation: Handler;
   cancelReservation: Handler;
+  checkInReservation: Handler;
+  joinWaitlist: Handler;
+  listWaitlist: Handler;
+  leaveWaitlist: Handler;
   recordCoverage: Handler;
   listTenantEvents: Handler;
   getTenantEvent: Handler;
+  exportTenantEvent: Handler;
   cancelTenantEvent: Handler;
   getTenant: Handler;
   eraseTenant: Handler;
   runMaintenance: Handler;
+  listChanges: Handler;
+  createWebhook: Handler;
+  listWebhooks: Handler;
+  deleteWebhook: Handler;
+  enableWebhook: Handler;
 }
 
 export interface SlotlockApplicationOperationDefinition {
@@ -154,10 +195,10 @@ const VISIBILITY = z.enum(['shared', 'private']);
 /**
  * A retry identity, as the `Idempotency-Key` request header or this field (the same value, if both
  * are sent): the same key with the same request answers what the first did, and with another
- * request is 409 idempotency_conflict.
+ * request is 422 idempotency_conflict.
  */
 const IDEMPOTENCY_KEY = IDENTITY.describe(
-  'A retry identity, also accepted as the Idempotency-Key header: the same key with the same request answers what the first did; with another request, 409 idempotency_conflict.',
+  'A retry identity, also accepted as the Idempotency-Key header: the same key with the same request answers what the first did; with another request, 422 idempotency_conflict.',
 );
 
 /** Minutes after the end kept busy as well, for turnaround: at most 30 days. */
@@ -176,6 +217,20 @@ const AVAILABILITY_RULE = z
   .strict();
 const AVAILABILITY_RULES = z.array(AVAILABILITY_RULE).max(50);
 
+/** What a booking on a resource must satisfy; each rule optional (`SlotlockBookingRules`). */
+const BOOKING_RULES = z
+  .object({
+    min_notice_minutes: z.number().int().min(0).max(525_600).optional(),
+    max_advance_days: z.number().int().min(1).max(3_660).optional(),
+    slot_step_minutes: z.number().int().min(1).max(1_440).optional(),
+    turnaround_minutes: z.number().int().min(0).max(1_440).optional(),
+    enforce_hours: z.boolean().optional(),
+    check_in_minutes: z.number().int().min(1).max(1_440).optional(),
+  })
+  .strict();
+
+const POOL = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,99}$/);
+
 const RESOURCE = z
   .object({
     id: RESOURCE_ID,
@@ -183,10 +238,82 @@ const RESOURCE = z
     timezone: TIMEZONE,
     /** The resource's own weekly hours; `null` when it uses the default. */
     availability: AVAILABILITY_RULES.nullable(),
+    /** What a booking on it must satisfy; `null` when it has no rules. */
+    booking_rules: BOOKING_RULES.nullable(),
     /** `private` resources are never shown to agents; fixed when the resource is created. */
     visibility: VISIBILITY,
     /** When it was archived; `null` while it is in use. */
     archived_at: DATE_TIME.nullable(),
+    /** The pool it is a member of (a vehicle class, a room type); `null` when none. */
+    pool: POOL.nullable(),
+  })
+  .strict();
+
+const HISTORY_ENTRY = z
+  .object({
+    id: z.string().max(40),
+    type: z.string().max(100),
+    time: DATE_TIME,
+    /** Who made it: an API key, an agent's subject; `null` when not recorded. */
+    actor: z.string().max(200).nullable(),
+    /** The record as the change left it, with `before` for a change of an existing one. */
+    data: z.record(z.string(), z.unknown()),
+  })
+  .strict();
+
+const HISTORY_OUTPUT = z
+  .object({ history: z.array(HISTORY_ENTRY).max(100), next_before: z.string().max(40).nullable() })
+  .strict();
+
+const HISTORY_PAGE = {
+  limit: z.number().int().min(1).max(100).default(50),
+  before: z.string().regex(/^msg_[0-9]{1,19}$/).optional(),
+};
+
+const CHANGE = z
+  .object({
+    specversion: z.literal('1.0'),
+    id: z.string().max(40),
+    source: z.string().max(300),
+    type: z.string().max(100),
+    subject: z.string().max(500),
+    time: DATE_TIME,
+    datacontenttype: z.literal('application/json'),
+    data: z.record(z.string(), z.unknown()),
+  })
+  .strict();
+
+const WEBHOOK = z
+  .object({
+    id: z.string().uuid(),
+    url: z.string().max(2048),
+    event_types: z.array(z.enum(SLOTLOCK_CHANGE_TYPES)).nullable(),
+    created_at: DATE_TIME,
+    attempts: z.number().int().min(0),
+    failing_since: DATE_TIME.nullable(),
+    last_status: z.number().int().nullable(),
+    last_error: z.string().max(500).nullable(),
+    disabled_at: DATE_TIME.nullable(),
+    disabled_reason: z.enum(['gone', 'failing']).nullable(),
+  })
+  .strict();
+
+const WAITLIST_ENTRY = z
+  .object({
+    id: z.string().uuid(),
+    /** The resource it waits on; `null` when it waits on a pool. */
+    resource_id: RESOURCE_ID.nullable(),
+    pool: POOL.nullable(),
+    start: DATE_TIME,
+    end: DATE_TIME,
+    holder_ref: z.string().min(1).max(500),
+    offer_ttl_seconds: z.number().int().min(60).max(86_400),
+    /** waiting; offered (hold_id holds the window on offered_resource_id); expired (it started first). */
+    status: z.enum(['waiting', 'offered', 'expired']),
+    hold_id: z.string().uuid().nullable(),
+    offered_resource_id: RESOURCE_ID.nullable(),
+    offered_at: DATE_TIME.nullable(),
+    created_at: DATE_TIME,
   })
   .strict();
 
@@ -219,6 +346,22 @@ const RESERVATION = z
  * tenant-event routes take, `event_ref` the id its owner reads it by, and `owner_ref` who that is
  * (`internal` for the tenant's own code, `agent:<digest>` for an API key).
  */
+/** A JSCalendar Event (RFC 8984 §5.1); interop.ts's JSCalendarEvent names every property. */
+const JSCALENDAR_EVENT = z
+  .object({
+    '@type': z.literal('Event'),
+    uid: z.string().max(200),
+    updated: DATE_TIME,
+    sequence: z.number().int().min(0),
+    title: z.string(),
+    start: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/),
+    timeZone: TIMEZONE,
+    duration: z.string().regex(/^PT/),
+    status: z.enum(['confirmed', 'tentative']),
+    freeBusyStatus: z.enum(['free', 'busy']),
+  })
+  .passthrough();
+
 const TENANT_EVENT = SLOTLOCK_EVENT_OUTPUT.extend({
   event_ref: z.string().max(500),
   owner_ref: z.string().max(500),
@@ -335,6 +478,120 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       example: { resource_id: EXAMPLE_RESOURCE_ID, rules: EXAMPLE_RULES },
     },
     {
+      name: 'slotlock_export_resource_availability',
+      title: "Export a resource's bookable hours as iCalendar",
+      description:
+        "One resource's own weekly bookable hours as an iCalendar VAVAILABILITY (RFC 7953) for a calendar or scheduling tool: an AVAILABLE per rule, its DTSTART's TZID the resource's IANA time zone. `null` when the resource uses the server's default.",
+      method: 'GET',
+      path: '/v1/resources/{resource_id}/availability/ical',
+      input: z.object({ resource_id: RESOURCE_ID }).strict(),
+      output: z.object({ icalendar: z.string().max(200_000).nullable() }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'exportResourceAvailability',
+      example: { resource_id: EXAMPLE_RESOURCE_ID },
+    },
+    {
+      name: 'slotlock_import_resource_availability',
+      title: "Import a resource's bookable hours from iCalendar",
+      description:
+        "Set one resource's own weekly bookable hours from an iCalendar VAVAILABILITY (RFC 7953), as slotlock_set_resource_availability does from rules: each AVAILABLE a weekly RRULE with a start time and DTEND or DURATION. Times must be in the resource's time zone (its TZID) or floating. 400 invalid_availability names what weekly hours cannot say: a bounded VAVAILABILITY, RDATE, EXDATE, a single window, another zone.",
+      method: 'PUT',
+      path: '/v1/resources/{resource_id}/availability/ical',
+      input: z
+        .object({ resource_id: RESOURCE_ID, icalendar: z.string().min(1).max(65_536) })
+        .strict(),
+      output: z.object({ resource: RESOURCE }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'importResourceAvailability',
+      example: {
+        resource_id: EXAMPLE_RESOURCE_ID,
+        icalendar:
+          'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Example//EN\r\nBEGIN:VAVAILABILITY\r\nUID:hours-1\r\nDTSTAMP:20260101T000000Z\r\nBEGIN:AVAILABLE\r\nUID:hours-1-0\r\nDTSTAMP:20260101T000000Z\r\nDTSTART;TZID=Europe/London:20260105T090000\r\nDTEND;TZID=Europe/London:20260105T170000\r\nRRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR\r\nEND:AVAILABLE\r\nEND:VAVAILABILITY\r\nEND:VCALENDAR\r\n',
+      },
+    },
+    {
+      name: 'slotlock_set_resource_booking_rules',
+      title: "Set a resource's booking rules",
+      description:
+        "Set what a booking on one resource must satisfy from now on: minimum notice, how far ahead, the step starts fall on (from local midnight in the resource's time zone), the turnaround kept free after each booking, and whether bookings must lie inside its hours. `null` clears them. Holds, reservations, moves and agents' events are refused with the rule they break; searches offer only what they allow.",
+      method: 'PUT',
+      path: '/v1/resources/{resource_id}/booking-rules',
+      input: z.object({ resource_id: RESOURCE_ID, rules: BOOKING_RULES.nullable() }).strict(),
+      output: z.object({ resource: RESOURCE }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'setResourceBookingRules',
+      example: {
+        resource_id: EXAMPLE_RESOURCE_ID,
+        rules: { min_notice_minutes: 120, slot_step_minutes: 30, turnaround_minutes: 30, enforce_hours: true },
+      },
+    },
+    {
+      name: 'slotlock_set_resource_pool',
+      title: "Set a resource's pool",
+      description:
+        "Make a resource a member of a pool, a class of interchangeable resources such as a vehicle class or a room type, or take it out (`null`). Agents book the class with slotlock_book_pool, which takes the first member free; the class's capacity is its number of members. A resource is in one pool at most; pool names are 1-100 of a-z, 0-9, '.', '_' and '-'.",
+      method: 'PUT',
+      path: '/v1/resources/{resource_id}/pool',
+      input: z.object({ resource_id: RESOURCE_ID, pool: POOL.nullable() }).strict(),
+      output: z.object({ resource: RESOURCE }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'setResourcePool',
+      example: { resource_id: EXAMPLE_RESOURCE_ID, pool: 'van' },
+    },
+    {
+      name: 'slotlock_list_pools',
+      title: 'List pools',
+      description: "The tenant's pools by name, each with its capacity: how many members it has that are not archived.",
+      method: 'GET',
+      path: '/v1/pools',
+      input: z.object({}).strict(),
+      output: z
+        .object({ pools: z.array(z.object({ pool: POOL, capacity: z.number().int().min(1) }).strict()).max(1000) })
+        .strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'listPools',
+      example: {},
+    },
+    {
+      name: 'slotlock_get_resource_history',
+      title: "A resource's history",
+      description:
+        "What happened on one of the tenant's resources, newest first: each hold, booking and event made, moved, confirmed, released or cancelled, when, by whom (the API key or agent), and for a change what it was before. Kept 30 days. Pass next_before as before for older entries.",
+      method: 'GET',
+      path: '/v1/resources/{resource_id}/history',
+      input: z.object({ resource_id: RESOURCE_ID, ...HISTORY_PAGE }).strict(),
+      output: HISTORY_OUTPUT,
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'getResourceHistory',
+      example: { resource_id: EXAMPLE_RESOURCE_ID, limit: 20 },
+    },
+    {
+      name: 'slotlock_get_reservation_history',
+      title: "A booking's history",
+      description:
+        'What happened to one booking, by its reference, newest first: made, moved, cancelled, when and by whom, as slotlock_get_resource_history.',
+      method: 'GET',
+      path: '/v1/reservations/{reservation_ref}/history',
+      input: z.object({ reservation_ref: z.string().min(1).max(500), ...HISTORY_PAGE }).strict(),
+      output: HISTORY_OUTPUT,
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'getReservationHistory',
+      example: { reservation_ref: 'BK-42', limit: 20 },
+    },
+    {
+      name: 'slotlock_get_tenant_event_history',
+      title: "An event's history",
+      description:
+        'What happened to one calendar event of the tenant, by its id, newest first: created, changed, cancelled, when and by whom, as slotlock_get_resource_history.',
+      method: 'GET',
+      path: '/v1/tenant/events/{event_id}/history',
+      input: z.object({ event_id: z.string().uuid(), ...HISTORY_PAGE }).strict(),
+      output: HISTORY_OUTPUT,
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'getTenantEventHistory',
+      example: { event_id: '5e8ff9bf-55ba-4508-9d22-e984129be6b5', limit: 20 },
+    },
+    {
       name: 'slotlock_set_tenant_availability',
       title: "Set every resource's bookable hours",
       description:
@@ -351,7 +608,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_acquire_hold',
       title: 'Hold time',
       description:
-        'Occupy a window without booking it, for example while a customer pays. The hold blocks every other booking until it expires (the database clock, ttl_seconds from now), is confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the hold the first request made, until that hold would have expired, is released or is confirmed; the same key with another request is 409 idempotency_conflict.',
+        'Occupy a window without booking it, for example while a customer pays. The hold blocks every other booking until it expires (the database clock, ttl_seconds from now), is confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the hold the first request made, until that hold would have expired, is released or is confirmed; the same key with another request is 422 idempotency_conflict.',
       method: 'POST',
       path: '/v1/holds',
       input: z
@@ -518,6 +775,82 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       example: { reservation_ref: 'booking-BK-42', revision: 2 },
     },
     {
+      name: 'slotlock_check_in_reservation',
+      title: 'Check in a booking',
+      description:
+        "Claim a booking by its reference: the customer has arrived or picked up. On a resource whose booking rules set check_in_minutes, a booking not checked in that long after its start is released by maintenance (reservation.no_show on the feed) and offered to the waitlist. Check-in opens an hour before the start (409 check_in_not_open before then) and moving the booking to another start clears it. Checking in again keeps the first time; a booking that has ended answers 409 reservation_ended.",
+      method: 'POST',
+      path: '/v1/reservations/{reservation_ref}/check-in',
+      input: z.object({ reservation_ref: IDENTITY }).strict(),
+      output: z.object({ reference: IDENTITY, checked_in_at: DATE_TIME }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'checkInReservation',
+      example: { reservation_ref: 'booking-BK-42' },
+    },
+    {
+      name: 'slotlock_join_waitlist',
+      title: 'Join the waitlist',
+      description:
+        "Wait for a window on one resource (resource_id) or on any member of a pool (pool) that is taken now. When it comes free (a booking cancelled, a hold released or expired, a no-show), the entries waiting for it are offered in the order they joined: the first gets a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409 waitlist_limit_reached); a window is at most 31 days.",
+      method: 'POST',
+      path: '/v1/waitlist',
+      input: z
+        .object({
+          resource_id: RESOURCE_ID.optional(),
+          pool: POOL.optional(),
+          start: DATE_TIME,
+          end: DATE_TIME,
+          holder_ref: z.string().trim().min(1).max(500),
+          offer_ttl_seconds: z.number().int().min(60).max(86_400).optional(),
+        })
+        .strict()
+        .refine((input) => (input.resource_id === undefined) !== (input.pool === undefined), {
+          message: 'Name resource_id or pool, not both',
+        }),
+      output: z.object({ entry: WAITLIST_ENTRY }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: false },
+      invoke: 'joinWaitlist',
+      example: {
+        pool: 'van',
+        start: '2027-03-29T09:00:00Z',
+        end: '2027-03-29T17:00:00Z',
+        holder_ref: 'customer-42',
+      },
+    },
+    {
+      name: 'slotlock_list_waitlist',
+      title: 'List the waitlist',
+      description:
+        "The tenant's waitlist entries in the order they are offered (oldest first), with what each was offered: optionally only those of one resource, pool or holder.",
+      method: 'GET',
+      path: '/v1/waitlist',
+      input: z
+        .object({
+          resource_id: RESOURCE_ID.optional(),
+          pool: POOL.optional(),
+          holder_ref: z.string().trim().min(1).max(500).optional(),
+          limit: z.number().int().min(1).max(1_000).default(100),
+        })
+        .strict(),
+      output: z.object({ entries: z.array(WAITLIST_ENTRY).max(1_000) }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'listWaitlist',
+      example: { pool: 'van' },
+    },
+    {
+      name: 'slotlock_leave_waitlist',
+      title: 'Leave the waitlist',
+      description:
+        'Stop waiting. A hold offered and not yet confirmed is released with the entry, and the time offered to the next who waits; one confirmed is a booking and stays. left is false when there was no such entry.',
+      method: 'DELETE',
+      path: '/v1/waitlist/{entry_id}',
+      input: z.object({ entry_id: z.string().uuid() }).strict(),
+      output: z.object({ left: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'leaveWaitlist',
+      example: { entry_id: '1b4e28ba-2fa1-41d2-883f-0016d3cca427' },
+    },
+    {
       name: 'slotlock_record_coverage',
       title: 'Record calendar coverage',
       description:
@@ -544,6 +877,51 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
         end: '2027-06-01T00:00:00Z',
         revision: 7,
       },
+    },
+    {
+      name: 'slotlock_get_coverage',
+      title: "A resource's coverage and its health",
+      description:
+        "Each external calendar (source) that records coverage of a resource: the window it covers, when it was last read, its last error, and whether it is stale (not read for a day, so the time it covers is unproven, not free). A source that goes stale is also put on the change feed once, as coverage.stale, until it is read again.",
+      method: 'GET',
+      path: '/v1/resources/{resource_id}/coverage',
+      input: z.object({ resource_id: RESOURCE_ID }).strict(),
+      output: z
+        .object({
+          sources: z
+            .array(
+              z
+                .object({
+                  source: SOURCE,
+                  start: DATE_TIME,
+                  end: DATE_TIME,
+                  revision: REVISION,
+                  observed_at: DATE_TIME,
+                  last_error: z.string().max(500).nullable(),
+                  last_error_at: DATE_TIME.nullable(),
+                  stale: z.boolean(),
+                })
+                .strict(),
+            )
+            .max(100),
+        })
+        .strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'getCoverage',
+      example: { resource_id: EXAMPLE_RESOURCE_ID },
+    },
+    {
+      name: 'slotlock_record_coverage_failure',
+      title: 'Record a failed read of a source',
+      description:
+        "Record that reading an external calendar failed (it answered 500, a token expired): kept as the source's last error, shown by slotlock_get_coverage, while its coverage stays as it was. 404 coverage_not_found for a source that has never recorded coverage of the resource.",
+      method: 'POST',
+      path: '/v1/resources/{resource_id}/coverage/{source}/failure',
+      input: z.object({ resource_id: RESOURCE_ID, source: SOURCE, error: z.string().min(1).max(500) }).strict(),
+      output: z.object({ recorded: z.literal(true) }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'recordCoverageFailure',
+      example: { resource_id: EXAMPLE_RESOURCE_ID, source: 'google:fleet@example.com', error: 'HTTP 401 from the calendar API' },
     },
     {
       name: 'slotlock_list_tenant_events',
@@ -579,6 +957,19 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       output: z.object({ event: TENANT_EVENT }).strict(),
       risk: { readOnly: true, destructive: false, idempotent: true },
       invoke: 'getTenantEvent',
+      example: { event_id: EXAMPLE_EVENT_ID },
+    },
+    {
+      name: 'slotlock_export_tenant_event',
+      title: 'Export an event as JSCalendar',
+      description:
+        "One of the tenant's events as a JSCalendar Event (RFC 8984), the JSON form of a calendar event: uid is its id, sequence its revision, start a local time in timeZone with an exact duration, its people participants, its reminders alerts, its recurrence recurrenceRules and recurrenceOverrides (and the RRULE verbatim as slotlock.pylota.io:rrule). A cancelled or unknown one answers 404 event_not_found.",
+      method: 'GET',
+      path: '/v1/tenant/events/{event_id}/jscalendar',
+      input: z.object({ event_id: EVENT_ID }).strict(),
+      output: z.object({ event: JSCALENDAR_EVENT }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'exportTenantEvent',
       example: { event_id: EXAMPLE_EVENT_ID },
     },
     {
@@ -662,12 +1053,85 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           conflicts: z.number().int().min(0),
           refused: z.number().int().min(0),
           pruned: z.number().int().min(0),
+          zone_shifts: z.number().int().min(0),
+          stale_sources: z.number().int().min(0),
+          no_shows: z.number().int().min(0),
+          waitlist_offers: z.number().int().min(0),
           capped: z.boolean(),
         })
         .strict(),
       risk: { readOnly: false, destructive: false, idempotent: true },
       invoke: 'runMaintenance',
       example: {},
+    },
+    {
+      name: 'slotlock_list_changes',
+      title: 'List changes',
+      description:
+        "What changed in the tenant, oldest first, as CloudEvents: holds made, confirmed, released or expired; bookings made, moved or cancelled; calendar events created, changed or cancelled (ids, times and states, never titles or attendees). Pass next_cursor as cursor to read on; it is returned even when nothing is new, so poll with it. Only changes of transactions that have ended are listed, so following the cursor never skips one. Changes are kept 30 days: an older cursor answers 410 cursor_expired, so start again without one.",
+      method: 'GET',
+      path: '/v1/changes',
+      input: z
+        .object({ cursor: CURSOR.optional(), limit: z.number().int().min(1).max(500).default(100) })
+        .strict(),
+      output: z.object({ changes: z.array(CHANGE).max(500), next_cursor: z.string().max(500) }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'listChanges',
+      example: { limit: 100 },
+    },
+    {
+      name: 'slotlock_create_webhook',
+      title: 'Add a webhook',
+      description:
+        'Send the changes slotlock_list_changes lists from now on to an https URL, each as a CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature), in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a 410, the webhook is disabled and the feed records webhook.disabled. The secret is returned here only. At most 10 per tenant.',
+      method: 'POST',
+      path: '/v1/webhooks',
+      input: z
+        .object({
+          url: z.string().url().max(2048),
+          event_types: z.array(z.enum(SLOTLOCK_CHANGE_TYPES)).min(1).max(20).optional(),
+        })
+        .strict(),
+      output: z.object({ webhook: WEBHOOK, secret: z.string().regex(/^whsec_/) }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: false },
+      invoke: 'createWebhook',
+      example: { url: 'https://example.com/slotlock-webhook', event_types: ['reservation.created'] },
+    },
+    {
+      name: 'slotlock_list_webhooks',
+      title: 'List webhooks',
+      description: "The tenant's webhooks with how delivery is going: failed attempts, the last status, and whether and why one is disabled.",
+      method: 'GET',
+      path: '/v1/webhooks',
+      input: z.object({}).strict(),
+      output: z.object({ webhooks: z.array(WEBHOOK).max(10) }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'listWebhooks',
+      example: {},
+    },
+    {
+      name: 'slotlock_delete_webhook',
+      title: 'Delete a webhook',
+      description: 'Stop sending to a webhook. deleted is false when the tenant has no such webhook.',
+      method: 'DELETE',
+      path: '/v1/webhooks/{webhook_id}',
+      input: z.object({ webhook_id: z.string().uuid() }).strict(),
+      output: z.object({ deleted: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'deleteWebhook',
+      example: { webhook_id: '9b2f4c1e-6d3a-4e8b-a1c7-5f0e2d4b6a8c' },
+    },
+    {
+      name: 'slotlock_enable_webhook',
+      title: 'Enable a webhook',
+      description: 'Send to a disabled webhook again, from the first change it did not accept. 404 webhook_not_found when the tenant has no such webhook; 409 changes_pruned when what it missed is older than the 30 days the feed keeps, since it would skip those unseen: delete it, add it again, and read what it missed from slotlock_list_changes.',
+      method: 'POST',
+      path: '/v1/webhooks/{webhook_id}/enable',
+      input: z.object({ webhook_id: z.string().uuid() }).strict(),
+      output: z.object({ webhook: WEBHOOK }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'enableWebhook',
+      example: { webhook_id: '9b2f4c1e-6d3a-4e8b-a1c7-5f0e2d4b6a8c' },
     },
   ]);
 
