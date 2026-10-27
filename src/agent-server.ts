@@ -124,6 +124,68 @@ const EVENT_ID = z.string().trim().min(1).max(500);
 const IDEMPOTENCY_KEY = z.string().trim().min(1).max(200);
 const REVISION = z.number().int().positive();
 const MAX_AGENT_WINDOW_MS = SLOTLOCK_CALENDAR_HORIZON_DAYS * 24 * 60 * 60 * 1_000;
+/** How many slots `slotlock_find_available_slots` lists at most, and over how many resources. */
+const MAX_LISTED_SLOTS = 50;
+const MAX_SLOT_RESOURCES = 20;
+
+/**
+ * Slots for `slotlock_find_available_slots`, from the backend's own next-available search, so each
+ * one is checked against busy time, the resource's hours and coverage exactly as a single answer
+ * is. Each resource's earliest slot first, then the next one after whichever slot was listed: at
+ * most one search per resource plus one per listed slot. Like a single answer, the list is certain
+ * only when every resource's coverage is, and empty otherwise.
+ */
+async function findAvailableSlots(
+  backend: SlotlockAgentCalendarBackend,
+  context: SlotlockAgentInvocationContext,
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const end = input.end as string;
+  const durationMs = (input.duration_minutes as number) * 60_000;
+  const limit = input.limit as number;
+  const window = { start: new Date(input.start as string), end: new Date(end) };
+  const coverage = (certain: boolean) => ({
+    start: window.start.toISOString(),
+    end: window.end.toISOString(),
+    certainty: certain ? ('certain' as const) : ('uncertain' as const),
+    reason: certain ? null : 'coverage_incomplete',
+  });
+  type Slot = { resource_id: string; start: string; end: string };
+  const next = async (resourceId: string, from: string): Promise<Slot | null | 'uncertain'> => {
+    const found = await backend.findNextAvailable(context, {
+      resource_ids: [resourceId],
+      start: from,
+      end,
+      duration_minutes: input.duration_minutes,
+    });
+    if ((found.coverage as { certainty?: unknown } | undefined)?.certainty !== 'certain') {
+      return 'uncertain';
+    }
+    return typeof found.start === 'string' && typeof found.end === 'string'
+      ? { resource_id: resourceId, start: found.start, end: found.end }
+      : null;
+  };
+  const earliest = (a: Slot, b: Slot) =>
+    Date.parse(a.start) - Date.parse(b.start) || a.resource_id.localeCompare(b.resource_id);
+  const heads: Slot[] = [];
+  for (const resourceId of new Set(input.resource_ids as string[])) {
+    const head = await next(resourceId, window.start.toISOString());
+    if (head === 'uncertain') return { slots: [], coverage: coverage(false) };
+    if (head) heads.push(head);
+  }
+  const slots: Slot[] = [];
+  while (slots.length < limit && heads.length > 0) {
+    heads.sort(earliest);
+    const listed = heads.shift() as Slot;
+    slots.push(listed);
+    if (slots.length === limit || window.end.getTime() - Date.parse(listed.end) < durationMs) continue;
+    const after = await next(listed.resource_id, listed.end);
+    if (after === 'uncertain') return { slots: [], coverage: coverage(false) };
+    if (after) heads.push(after);
+  }
+  return { slots, coverage: coverage(true) };
+}
+
 /** The longest slot `slotlock_find_next_available` can look for: the whole search window. */
 const MAX_SLOT_MINUTES = SLOTLOCK_CALENDAR_HORIZON_DAYS * 24 * 60;
 const MAX_EVENT_DURATION_MS = SLOTLOCK_MAX_EVENT_DURATION_DAYS * 24 * 60 * 60 * 1_000;
@@ -221,6 +283,7 @@ export type SlotlockAgentOperation =
   | 'slotlock_list_resources'
   | 'slotlock_get_free_busy'
   | 'slotlock_find_next_available'
+  | 'slotlock_find_available_slots'
   | 'slotlock_create_event'
   | 'slotlock_get_event'
   | 'slotlock_list_events'
@@ -264,6 +327,7 @@ const OPERATION_SCOPES: Readonly<Record<SlotlockAgentOperation, SlotlockAgentSco
   slotlock_list_resources: 'read',
   slotlock_get_free_busy: 'read',
   slotlock_find_next_available: 'read',
+  slotlock_find_available_slots: 'read',
   slotlock_create_event: 'write',
   slotlock_get_event: 'read',
   slotlock_list_events: 'read',
@@ -609,7 +673,14 @@ interface OperationDefinition {
     destructive: boolean;
     idempotent: boolean;
   };
-  invoke: keyof SlotlockAgentCalendarBackend;
+  /** The backend method that answers it, or how it answers from the backend's own methods. */
+  invoke:
+    | keyof SlotlockAgentCalendarBackend
+    | ((
+        backend: SlotlockAgentCalendarBackend,
+        context: SlotlockAgentInvocationContext,
+        input: Record<string, unknown>,
+      ) => Promise<Record<string, unknown>>);
   /** Valid arguments, published as the A2A skill's invocation example (a test parses each one). */
   example: Record<string, unknown>;
 }
@@ -726,6 +797,33 @@ const OPERATION_DEFINITIONS = [
     risk: { readOnly: true, destructive: false, idempotent: true },
     invoke: 'findNextAvailable',
     example: { resource_ids: [EXAMPLE_RESOURCE_ID], ...EXAMPLE_WINDOW, duration_minutes: 120 },
+  },
+  {
+    name: 'slotlock_find_available_slots',
+    title: 'Find available slots',
+    description:
+      'List up to `limit` certain slots of the requested duration, earliest first across the resources, each one free of busy time and inside the resource\'s hours, to offer a person a choice. No slot is listed unless every resource\'s coverage is certain.',
+    input: z
+      .object({
+        resource_ids: z.array(RESOURCE_ID).min(1).max(MAX_SLOT_RESOURCES),
+        start: DATE_TIME,
+        end: DATE_TIME,
+        duration_minutes: z.number().int().min(1).max(MAX_SLOT_MINUTES),
+        limit: z.number().int().min(1).max(MAX_LISTED_SLOTS).default(10),
+      })
+      .strict()
+      .refine(boundedAgentWindow),
+    output: z
+      .object({
+        slots: z
+          .array(z.object({ resource_id: RESOURCE_ID, start: DATE_TIME, end: DATE_TIME }).strict())
+          .max(MAX_LISTED_SLOTS),
+        coverage: COVERAGE,
+      })
+      .strict(),
+    risk: { readOnly: true, destructive: false, idempotent: true },
+    invoke: findAvailableSlots,
+    example: { resource_ids: [EXAMPLE_RESOURCE_ID], ...EXAMPLE_WINDOW, duration_minutes: 60, limit: 10 },
   },
   {
     name: 'slotlock_create_event',
@@ -992,16 +1090,14 @@ export function slotlockAgentTools() {
       idempotentHint: operation.risk.idempotent,
       openWorldHint: false,
     },
-    ...(operation.risk.readOnly
-      ? {
-          _meta: {
-            ui: {
-              resourceUri: SLOTLOCK_MCP_APP_RESOURCE_URI,
-              visibility: ['model', 'app'] as const,
-            },
-          },
-        }
-      : {}),
+    // Reads render in the calendar view, which may call them again. A write is the model's to make
+    // through the normal path, where a person can be asked to confirm it: never a view's, which
+    // MCP Apps would otherwise allow (visibility defaults to model and app).
+    _meta: {
+      ui: operation.risk.readOnly
+        ? { resourceUri: SLOTLOCK_MCP_APP_RESOURCE_URI, visibility: ['model', 'app'] as const }
+        : { visibility: ['model'] as const },
+    },
   }));
 }
 
@@ -1316,17 +1412,23 @@ export async function invokeSlotlockAgentOperation(args: {
       });
       if (halt) return { ok: false, status: halt.status, code: halt.code };
     }
-    const method = args.options.backend[operation.invoke] as (
-      context: SlotlockAgentInvocationContext,
-      input: Record<string, unknown>,
-    ) => Promise<Record<string, unknown>>;
+    const invoke = operation.invoke;
+    const backend = args.options.backend;
+    const method =
+      typeof invoke === 'function'
+        ? (context: SlotlockAgentInvocationContext, input: Record<string, unknown>) =>
+            invoke(backend, context, input)
+        : (backend[invoke] as (
+            context: SlotlockAgentInvocationContext,
+            input: Record<string, unknown>,
+          ) => Promise<Record<string, unknown>>);
     const context: SlotlockAgentInvocationContext = {
       principal,
       operation: operation.name,
       signal: args.request.signal,
     };
     if (args.trace) context.trace = args.trace;
-    const data = await method.call(args.options.backend, context, parsed.data);
+    const data = await method.call(backend, context, parsed.data);
     if (!operation.output.safeParse(data).success) {
       // Neither the result nor the schema's complaint about it: either may hold tenant data.
       reportUnexpected(
@@ -1724,7 +1826,7 @@ function unref<T>(timer: T): T {
 /** Natural-language guidance `server/discover` gives the model on how to use these tools well. */
 const SLOTLOCK_MCP_INSTRUCTIONS = [
   'Slotlock is a tenant-isolated resource calendar (vehicles, rooms, equipment).',
-  'Check availability before booking: slotlock_get_free_busy returns busy intervals and slotlock_find_next_available the earliest free slot of a given length; an answer is certain only when coverage.certainty is "certain".',
+  'Check availability before booking: slotlock_get_free_busy returns busy intervals and slotlock_find_next_available the earliest free slot of a given length, and slotlock_find_available_slots up to 50 of them to offer a person a choice; an answer is certain only when coverage.certainty is "certain".',
   'slotlock_create_event needs an idempotency_key: retry with the same key and arguments, never a new key for the same booking. slotlock_update_event and slotlock_delete_event need the event revision you last read as expected_revision.',
   'Times are RFC 3339 with an offset; intervals are half-open [start, end).',
   'A failed call returns {"error":{"code":"…"}}; read the code before retrying (overlap means the slot is taken).',

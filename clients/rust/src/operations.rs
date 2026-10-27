@@ -37,6 +37,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &["resource_ids", "start", "end", "duration_minutes"],
     },
     Operation {
+        name: "slotlock_find_available_slots",
+        method: "GET",
+        path: "/v1/available-slots",
+        path_params: &[],
+        query: &["resource_ids", "start", "end", "duration_minutes", "limit"],
+    },
+    Operation {
         name: "slotlock_list_events",
         method: "GET",
         path: "/v1/events",
@@ -275,6 +282,17 @@ pub struct FindNextAvailableInput {
     pub start: String,
     pub end: String,
     pub duration_minutes: i64,
+}
+
+/// The arguments of [`Client::find_available_slots`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct FindAvailableSlotsInput {
+    pub resource_ids: Vec<String>,
+    pub start: String,
+    pub end: String,
+    pub duration_minutes: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
 }
 
 /// The arguments of [`Client::list_events`].
@@ -599,6 +617,15 @@ impl Client {
     /// 367-day search window, so a multi-month rental slot can be found).
     pub fn find_next_available(&self, input: &FindNextAvailableInput) -> Result<Value, Error> {
         self.call("slotlock_find_next_available", serde_json::to_value(input)?)
+    }
+
+    /// Find available slots.
+    ///
+    /// List up to `limit` certain slots of the requested duration, earliest first across the
+    /// resources, each one free of busy time and inside the resource's hours, to offer a person a
+    /// choice. No slot is listed unless every resource's coverage is certain.
+    pub fn find_available_slots(&self, input: &FindAvailableSlotsInput) -> Result<Value, Error> {
+        self.call("slotlock_find_available_slots", serde_json::to_value(input)?)
     }
 
     /// List resource events.

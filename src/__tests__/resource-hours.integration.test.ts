@@ -4,7 +4,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import type { SlotlockAgentInvocationContext } from '../agent-server.js';
+import { type SlotlockAgentInvocationContext, createSlotlockAgentServer } from '../agent-server.js';
 import { createSlotlockStoreAgentBackend } from '../agent-store-backend.js';
 import { createSlotlockStore } from '../store.js';
 import type { WeeklyAvailabilityRule } from '../types.js';
@@ -220,5 +220,74 @@ describe.skipIf(!url)('per-resource bookable hours (real Postgres)', () => {
 
     await setHours(tenantA, car.id, null);
     expect((await find()).start).toBe('2027-01-11T09:00:00.000Z');
+  });
+  it('lists the slots a person can pick inside those hours, around what is booked', async () => {
+    const car = await add(tenantA, 'car-slots');
+    await setHours(tenantA, car.id, AFTERNOONS);
+    const backend = createSlotlockStoreAgentBackend(store(), { availabilityRules: async () => [] });
+    await backend.createEvent(
+      {
+        principal: { subject: 'slots-agent', tenantRef: tenantA },
+        operation: 'slotlock_create_event',
+        signal: new AbortController().signal,
+      },
+      {
+        resource_id: car.id,
+        starts_at: '2027-01-11T13:00:00Z',
+        ends_at: '2027-01-11T13:30:00Z',
+        timezone: 'UTC',
+        transparency: 'opaque',
+        status: 'confirmed',
+        idempotency_key: `slots-${randomUUID()}`,
+      },
+    );
+    const server = createSlotlockAgentServer({
+      publicBaseUrl: 'http://localhost/slotlock',
+      allowInsecureLocalhost: true,
+      backend,
+      authenticate: async () => ({ subject: 'slots-agent', tenantRef: tenantA }),
+      authorize: async () => true,
+      health: async () => ({ ready: true, checks: [] }),
+    });
+    const listed = async (resourceIds: string[]) => {
+      const response = await server.fetch(
+        new Request('http://localhost/slotlock/mcp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'MCP-Protocol-Version': '2025-11-25' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'tools/call',
+            params: {
+              name: 'slotlock_find_available_slots',
+              arguments: {
+                resource_ids: resourceIds,
+                start: '2027-01-11T00:00:00Z',
+                end: '2027-01-12T00:00:00Z',
+                duration_minutes: 30,
+              },
+            },
+          }),
+        }),
+      );
+      return ((await response.json()) as { result: Record<string, unknown> }).result;
+    };
+
+    // Monday 11 January 2027: open 13:00 to 15:00, booked 13:00 to 13:30.
+    expect((await listed([car.id])).structuredContent).toEqual({
+      slots: ['13:30', '14:00', '14:30'].map((time) => ({
+        resource_id: car.id,
+        start: `2027-01-11T${time}:00.000Z`,
+        end: new Date(Date.parse(`2027-01-11T${time}:00Z`) + 30 * 60_000).toISOString(),
+      })),
+      coverage: {
+        start: '2027-01-11T00:00:00.000Z',
+        end: '2027-01-12T00:00:00.000Z',
+        certainty: 'certain',
+        reason: null,
+      },
+    });
+    // Another tenant's resource, or none, is refused as next-available refuses it.
+    expect(await listed([randomUUID()])).toMatchObject({ isError: true });
   });
 });

@@ -14,6 +14,7 @@ var operations = func() map[string]operation {
 		{name: "slotlock_create_resource", method: "POST", path: "/v1/resources", pathParams: nil, query: nil},
 		{name: "slotlock_get_free_busy", method: "GET", path: "/v1/free-busy", pathParams: nil, query: []string{"resource_ids", "start", "end"}},
 		{name: "slotlock_find_next_available", method: "GET", path: "/v1/next-available", pathParams: nil, query: []string{"resource_ids", "start", "end", "duration_minutes"}},
+		{name: "slotlock_find_available_slots", method: "GET", path: "/v1/available-slots", pathParams: nil, query: []string{"resource_ids", "start", "end", "duration_minutes", "limit"}},
 		{name: "slotlock_list_events", method: "GET", path: "/v1/events", pathParams: nil, query: []string{"resource_ids", "start", "end", "cursor", "limit"}},
 		{name: "slotlock_create_event", method: "POST", path: "/v1/events", pathParams: nil, query: nil},
 		{name: "slotlock_get_event", method: "GET", path: "/v1/events/{event_id}", pathParams: []string{"event_id"}, query: nil},
@@ -153,6 +154,39 @@ func (in FindNextAvailableInput) values() map[string]any {
 // can be found).
 func (c *Client) FindNextAvailable(ctx context.Context, in FindNextAvailableInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_find_next_available", in.values())
+}
+
+// FindAvailableSlotsInput holds the arguments of [Client.FindAvailableSlots].
+type FindAvailableSlotsInput struct {
+	ResourceIDs []string
+
+	Start string
+
+	End string
+
+	DurationMinutes int64
+
+	Limit *int64
+}
+
+func (in FindAvailableSlotsInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_ids"] = in.ResourceIDs
+	values["start"] = in.Start
+	values["end"] = in.End
+	values["duration_minutes"] = in.DurationMinutes
+	if in.Limit != nil {
+		values["limit"] = *in.Limit
+	}
+	return values
+}
+
+// FindAvailableSlots: Find available slots. List up to `limit` certain slots of the requested
+// duration, earliest first across the resources, each one free of busy time and inside the
+// resource's hours, to offer a person a choice. No slot is listed unless every resource's
+// coverage is certain.
+func (c *Client) FindAvailableSlots(ctx context.Context, in FindAvailableSlotsInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_find_available_slots", in.values())
 }
 
 // ListEventsInput holds the arguments of [Client.ListEvents].

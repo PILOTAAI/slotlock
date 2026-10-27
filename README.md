@@ -809,6 +809,7 @@ export async function startCalendarServer(config: CalendarServerConfig) {
 | `slotlock_list_resources` | Resources visible to the tenant | read-only |
 | `slotlock_get_free_busy` | Busy intervals plus coverage certainty | read-only |
 | `slotlock_find_next_available` | Earliest *certain* slot across resources | read-only |
+| `slotlock_find_available_slots` | Up to 50 *certain* slots, earliest first, to offer a choice | read-only |
 | `slotlock_list_events` | Events the caller created in a window | read-only |
 | `slotlock_get_event` | One event the caller created | read-only |
 | `slotlock_create_event` | Create an event of up to 3,660 days (idempotent) | write |
@@ -1214,6 +1215,18 @@ Send one `application/json` data part, `{"skill": "<id>", "arguments": {…}}`, 
 Read-only tools link to `ui://slotlock/calendar`, a self-contained calendar view that hosts
 supporting MCP Apps (`io.modelcontextprotocol/ui`) render in a sandbox. It makes no network requests
 and never writes.
+
+A person can pick a slot in it. After `slotlock_find_available_slots` or a certain
+`slotlock_find_next_available`, the view shows a strip of days and each day's times by morning,
+afternoon and evening, or the one next available time. Picking a time and pressing *Book this time*
+sends one chat message naming the resource id and the slot's start and end. The agent books it with
+`slotlock_create_event`, through confirmation if `SLOTLOCK_CONFIRM_WRITES` asks for it. The message
+carries nothing else from the result. If the host refuses the message, the view shows the text to
+send instead. Write tools are marked `visibility: ["model"]`, so a host never lets a view call them.
+
+The view takes its look from the host: its light or dark theme and its standard MCP Apps style
+variables (colours, fonts, sizes). It shows times in the person's locale, clock and time zone, with
+a 12h/24h switch.
 
 ## Operations
 

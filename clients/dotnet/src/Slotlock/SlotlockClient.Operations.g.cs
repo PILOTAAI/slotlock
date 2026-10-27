@@ -19,6 +19,7 @@ public sealed partial class SlotlockClient
         ["slotlock_create_resource"] = new("POST", "/v1/resources", [], []),
         ["slotlock_get_free_busy"] = new("GET", "/v1/free-busy", [], ["resource_ids", "start", "end"]),
         ["slotlock_find_next_available"] = new("GET", "/v1/next-available", [], ["resource_ids", "start", "end", "duration_minutes"]),
+        ["slotlock_find_available_slots"] = new("GET", "/v1/available-slots", [], ["resource_ids", "start", "end", "duration_minutes", "limit"]),
         ["slotlock_list_events"] = new("GET", "/v1/events", [], ["resource_ids", "start", "end", "cursor", "limit"]),
         ["slotlock_create_event"] = new("POST", "/v1/events", [], []),
         ["slotlock_get_event"] = new("GET", "/v1/events/{event_id}", ["event_id"], []),
@@ -157,6 +158,37 @@ public sealed partial class SlotlockClient
         values["end"] = Json.ToNode(end);
         values["duration_minutes"] = Json.ToNode(durationMinutes);
         return CallAsync("slotlock_find_next_available", values, cancellationToken);
+    }
+
+    /// <summary>Find available slots.</summary>
+    /// <remarks>
+    /// List up to `limit` certain slots of the requested duration, earliest first across the
+    /// resources, each one free of busy time and inside the resource's hours, to offer a person a
+    /// choice. No slot is listed unless every resource's coverage is certain.
+    /// </remarks>
+    /// <param name="resourceIds">resource_ids</param>
+    /// <param name="start">start</param>
+    /// <param name="end">end</param>
+    /// <param name="durationMinutes">duration_minutes</param>
+    /// <param name="limit">limit</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> FindAvailableSlotsAsync(
+        IEnumerable<string> resourceIds,
+        string start,
+        string end,
+        long durationMinutes,
+        Optional<long> limit = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_ids"] = Json.ToNode(resourceIds);
+        values["start"] = Json.ToNode(start);
+        values["end"] = Json.ToNode(end);
+        values["duration_minutes"] = Json.ToNode(durationMinutes);
+        if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
+        return CallAsync("slotlock_find_available_slots", values, cancellationToken);
     }
 
     /// <summary>List resource events.</summary>
