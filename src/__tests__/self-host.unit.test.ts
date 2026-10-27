@@ -3,9 +3,11 @@
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { slotlockAgentOperationScope, slotlockAgentTools } from '../agent-server.js';
 import { SLOTLOCK_CAP_NAMES, SLOTLOCK_DEFAULT_LIMITS, formatSlotlockRate } from '../config.js';
 import {
   SLOTLOCK_CLI_HELP,
+  authorizeSlotlockServeOperation,
   SLOTLOCK_ENVIRONMENT_VARIABLES,
   SlotlockConfigError,
   type SlotlockEnv,
@@ -51,6 +53,29 @@ async function run(argv: string[], env: SlotlockEnv = {}) {
   });
   return { code, stdout: stdout.join(''), stderr: stderr.join('') };
 }
+
+describe('what slotlock serve lets a key call', () => {
+  it('is every tool it lists, to a key with the scope the tool needs', () => {
+    // A tool listed but refused is one an agent sees and cannot use.
+    for (const { name } of slotlockAgentTools()) {
+      const scope = slotlockAgentOperationScope(name);
+      expect(
+        authorizeSlotlockServeOperation({
+          principal: { subject: 'key', tenantRef: 'tenant-a', scopes: [scope] },
+          operation: name,
+        }),
+        name,
+      ).toBe(true);
+      expect(
+        authorizeSlotlockServeOperation({
+          principal: { subject: 'key', tenantRef: 'tenant-a', scopes: scope === 'read' ? [] : ['read'] },
+          operation: name,
+        }),
+        name,
+      ).toBe(false);
+    }
+  });
+});
 
 describe('slotlock serve configuration', () => {
   it('defaults to loopback, port 8080, one tenant, no confirmation round and REST on', () => {
