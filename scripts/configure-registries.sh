@@ -53,22 +53,21 @@ trim() {
 pause() { [ "$DRY_RUN" -eq 1 ] || IFS= read -r -p '  Press Enter when done (or to skip) ' _ || true; }
 http_code() { curl --silent --output /dev/null --write-out '%{http_code}' --user-agent "$UA" "$@"; }
 
-# Temporary directories and worktrees, removed on every exit, an interrupted one included.
-TEMP_DIRS=()
+# One directory for the run, made in this shell so the exit trap removes it (an interrupted run
+# included) with every temporary keyring and worktree under it. A directory made inside a command
+# substitution, as `tree=$(temp_dir)` does, cannot register itself with this shell, so each lives here.
+WORK=$(mktemp -d)
+chmod 700 "$WORK"
 TEMP_WORKTREE=''
 cleanup() {
   if [ -n "$TEMP_WORKTREE" ]; then git -C "$ROOT" worktree remove --force "$TEMP_WORKTREE" 2>/dev/null || true; fi
-  if [ "${#TEMP_DIRS[@]}" -gt 0 ]; then rm -rf "${TEMP_DIRS[@]}"; fi
+  rm -rf "$WORK"
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
-temp_dir() {
-  local dir
-  dir=$(mktemp -d)
-  chmod 700 "$dir"
-  TEMP_DIRS+=("$dir")
-  printf '%s' "$dir"
-}
+# Short names: gpg-agent puts its socket in the keyring, and a Unix socket path stops at about 104
+# characters.
+temp_dir() { mktemp -d "$WORK/XXXXXX"; }
 
 DRY_RUN=0
 TAG=''
