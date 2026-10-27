@@ -224,7 +224,7 @@ class SlotlockClientTest {
     Map<String, Object> keyed = Map.of("idempotency_key", "java-hold-" + suffix);
     Map<String, Object> hold = map(client.acquireHold(id, at(9), at(10), 600, keyed).get("hold"));
     assertEquals(hold, client.acquireHold(id, at(9), at(10), 600, keyed).get("hold"));
-    refused(409, "idempotency_conflict", () -> client.acquireHold(id, at(9), at(10), 60, keyed));
+    refused(422, "idempotency_conflict", () -> client.acquireHold(id, at(9), at(10), 60, keyed));
     String holdId = (String) hold.get("id");
     assertEquals(hold, client.getHold(holdId).get("hold"));
     // Confirmed, it is the reservation its id names, cancelled by that reference.

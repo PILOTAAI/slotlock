@@ -337,7 +337,7 @@ class AgainstAServer(unittest.TestCase):
         hold = client.acquire_hold(**window, idempotency_key=key)["hold"]
         self.assertEqual(client.acquire_hold(**window, idempotency_key=key)["hold"], hold)
         self.refused(
-            409,
+            422,
             "idempotency_conflict",
             lambda: client.acquire_hold(**{**window, "ttl_seconds": 60}, idempotency_key=key),
         )
