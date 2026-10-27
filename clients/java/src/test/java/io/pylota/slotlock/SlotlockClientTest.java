@@ -166,7 +166,7 @@ class SlotlockClientTest {
         Map.of("revision", 1L, "replayed", false),
         client.recordCoverage(id, "ics:https://calendar.example.com/fleet.ics", at(0), at(24), 1));
     assertEquals(
-        java.util.Set.of("extended", "conflicts", "refused", "pruned", "zone_shifts", "stale_sources", "capped"), client.runMaintenance().keySet());
+        java.util.Set.of("extended", "conflicts", "refused", "pruned", "zone_shifts", "stale_sources", "no_shows", "waitlist_offers", "capped"), client.runMaintenance().keySet());
 
     boolean found = false;
     String cursor = null;

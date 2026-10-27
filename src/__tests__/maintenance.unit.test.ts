@@ -76,6 +76,12 @@ function fakeStore() {
         async reportStaleCoverage() {
           return 0;
         },
+        async releaseNoShows() {
+          return 0;
+        },
+        async offerWaitlist() {
+          return { offered: 0, expired: 0, next: null };
+        },
         async followZoneRules() {
           return { shifted: 0, moved: 0, conflicts: 0 };
         },
@@ -145,6 +151,8 @@ function fakeSql(held = new Set<string>()) {
 const result = (overrides: Partial<SlotlockMaintenanceResult> = {}): SlotlockMaintenanceResult => ({
   zoneShifts: 0,
   staleSources: 0,
+  noShows: 0,
+  waitlistOffers: 0,
   extended: 0,
   conflicts: 0,
   refused: 0,

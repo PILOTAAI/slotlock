@@ -22,12 +22,16 @@ export const SLOTLOCK_CHANGE_TYPES = Object.freeze([
   'reservation.created',
   'reservation.updated',
   'reservation.cancelled',
+  'reservation.checked_in',
+  'reservation.no_show',
   'event.created',
   'event.updated',
   'event.cancelled',
   'event.timezone_shifted',
   'event.timezone_conflict',
   'coverage.stale',
+  'waitlist.offered',
+  'waitlist.expired',
   'webhook.disabled',
 ] as const);
 

@@ -880,6 +880,10 @@ BEGIN
   DELETE FROM slotlock.hold_commands WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  erased_table := 'waitlist_entries';
+  DELETE FROM slotlock.waitlist_entries WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'resources';
   DELETE FROM slotlock.resources WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
@@ -1132,6 +1136,41 @@ CREATE TABLE IF NOT EXISTS slotlock.webhook_endpoints (
 ALTER TABLE slotlock.webhook_endpoints ADD COLUMN IF NOT EXISTS changes_pruned boolean NOT NULL DEFAULT false;
 CREATE INDEX IF NOT EXISTS slotlock_webhook_endpoints_tenant_idx
   ON slotlock.webhook_endpoints (tenant_ref, created_at);
+
+-- Who waits for time on a resource or in a pool, offered in order (offerWaitlist): the first whose
+-- window comes free gets a hold of it, for offer_ttl_ms, and the feed says so (waitlist.offered).
+CREATE TABLE IF NOT EXISTS slotlock.waitlist_entries (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_ref text NOT NULL,
+  resource_id uuid,
+  pool_ref text,
+  starts_at timestamptz NOT NULL,
+  ends_at timestamptz NOT NULL,
+  holder_ref text NOT NULL,
+  offer_ttl_ms bigint NOT NULL,
+  status text NOT NULL DEFAULT 'waiting',
+  hold_id uuid,
+  offered_resource_id uuid,
+  offered_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  -- The resource is the entry's own tenant's, as the database sees it, whatever wrote the row.
+  CONSTRAINT slotlock_waitlist_entries_resource_fk FOREIGN KEY (resource_id, tenant_ref)
+    REFERENCES slotlock.resources (id, tenant_ref) ON DELETE CASCADE,
+  CONSTRAINT slotlock_waitlist_entries_target_valid CHECK ((resource_id IS NULL) <> (pool_ref IS NULL)),
+  CONSTRAINT slotlock_waitlist_entries_window_valid CHECK (ends_at > starts_at),
+  CONSTRAINT slotlock_waitlist_entries_status_valid CHECK (status IN ('waiting', 'offered', 'expired')),
+  CONSTRAINT slotlock_waitlist_entries_identity_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500 AND octet_length(holder_ref) BETWEEN 1 AND 500
+  ),
+  CONSTRAINT slotlock_waitlist_entries_ttl_valid CHECK (offer_ttl_ms BETWEEN 60000 AND 86400000),
+  CONSTRAINT slotlock_waitlist_entries_offer_valid CHECK (
+    (status = 'offered') = (hold_id IS NOT NULL AND offered_at IS NOT NULL AND offered_resource_id IS NOT NULL)
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_waitlist_entries_queue_idx
+  ON slotlock.waitlist_entries (tenant_ref, created_at, id) WHERE status = 'waiting';
+CREATE INDEX IF NOT EXISTS slotlock_waitlist_entries_tenant_idx
+  ON slotlock.waitlist_entries (tenant_ref, starts_at);
 
 -- The tenant a reservation row belongs to: its own, or (a hold) its resource's.
 CREATE OR REPLACE FUNCTION slotlock.outbox_reservation_change()
@@ -1391,6 +1430,11 @@ ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS tenant_ref text;
 -- needs a constraint under a new name.
 ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS availability_rules jsonb;
 ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS booking_rules jsonb;
+-- Since when the booking rules have asked for check-in: only bookings made after it are released
+-- unclaimed (releaseNoShows), so turning the rule on releases none of the bookings already made.
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS check_in_since timestamptz;
+-- When the booking was claimed (checkInReservation); null while it has not been.
+ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS checked_in_at timestamptz;
 -- The pool (a vehicle class, a room type) whose interchangeable members this resource is one of.
 ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS pool_ref text;
 CREATE INDEX IF NOT EXISTS slotlock_resources_pool_idx
@@ -2558,6 +2602,7 @@ export const SLOTLOCK_TENANT_TABLES = Object.freeze([
   'hold_commands',
   'outbox',
   'webhook_endpoints',
+  'waitlist_entries',
 ] as const);
 
 const POSTGRES_SETTING_NAME = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/;
@@ -2638,6 +2683,8 @@ ALTER TABLE slotlock.outbox ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.outbox FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.webhook_endpoints ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.webhook_endpoints FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.waitlist_entries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.waitlist_entries FORCE ROW LEVEL SECURITY;
 
 -- One database must have one tenant-context contract. Re-applying with an adapter-specific
 -- setting deliberately rebinds the stable policies instead of silently keeping a prior setting.
@@ -2664,7 +2711,8 @@ BEGIN
          'calendar_coverage',
          'hold_commands',
          'outbox',
-         'webhook_endpoints'
+         'webhook_endpoints',
+         'waitlist_entries'
        )
   LOOP
     EXECUTE format(
@@ -2855,6 +2903,16 @@ BEGIN
       USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
       WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
   END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'waitlist_entries'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.waitlist_entries
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
 END
 $slotlock_rls$;
 
@@ -2887,6 +2945,8 @@ COMMENT ON POLICY tenant_isolation_v1 ON slotlock.hold_commands
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.outbox
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.webhook_endpoints
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.waitlist_entries
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 
 INSERT INTO slotlock.rls_policy_contracts (
@@ -2925,7 +2985,8 @@ WHERE schemaname = 'slotlock'
     'calendar_coverage',
     'hold_commands',
     'outbox',
-    'webhook_endpoints'
+    'webhook_endpoints',
+    'waitlist_entries'
   )
   AND policyname = 'tenant_isolation_v1'
 ON CONFLICT (table_name) DO UPDATE

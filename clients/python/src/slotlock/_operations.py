@@ -274,6 +274,34 @@ OPERATIONS: dict[str, Operation] = {
         ("resource_id",),
         ("start", "end", "limit", "cursor"),
     ),
+    "slotlock_check_in_reservation": Operation(
+        "slotlock_check_in_reservation",
+        "POST",
+        "/v1/reservations/{reservation_ref}/check-in",
+        ("reservation_ref",),
+        (),
+    ),
+    "slotlock_list_waitlist": Operation(
+        "slotlock_list_waitlist",
+        "GET",
+        "/v1/waitlist",
+        (),
+        ("resource_id", "pool", "holder_ref", "limit"),
+    ),
+    "slotlock_join_waitlist": Operation(
+        "slotlock_join_waitlist",
+        "POST",
+        "/v1/waitlist",
+        (),
+        (),
+    ),
+    "slotlock_leave_waitlist": Operation(
+        "slotlock_leave_waitlist",
+        "DELETE",
+        "/v1/waitlist/{entry_id}",
+        ("entry_id",),
+        (),
+    ),
     "slotlock_record_coverage": Operation(
         "slotlock_record_coverage",
         "PUT",
@@ -1098,6 +1126,82 @@ class Operations(Transport):
         if cursor is not None:
             values["cursor"] = cursor
         return self.call("slotlock_list_reservations", values)
+
+    def check_in_reservation(self, reservation_ref: str) -> dict[str, Any]:
+        """Check in a booking.
+
+        Claim a booking by its reference: the customer has arrived or picked up. On a resource
+        whose booking rules set check_in_minutes, a booking not checked in that long after its
+        start is released by maintenance (reservation.no_show on the feed) and offered to the
+        waitlist. Check-in opens an hour before the start (409 check_in_not_open before then) and
+        moving the booking to another start clears it. Checking in again keeps the first time; a
+        booking that has ended answers 409 reservation_ended.
+        """
+        values: dict[str, Any] = {"reservation_ref": reservation_ref}
+        return self.call("slotlock_check_in_reservation", values)
+
+    def list_waitlist(
+        self,
+        *,
+        resource_id: str | None = None,
+        pool: str | None = None,
+        holder_ref: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """List the waitlist.
+
+        The tenant's waitlist entries in the order they are offered (oldest first), with what each
+        was offered: optionally only those of one resource, pool or holder.
+        """
+        values: dict[str, Any] = {}
+        if resource_id is not None:
+            values["resource_id"] = resource_id
+        if pool is not None:
+            values["pool"] = pool
+        if holder_ref is not None:
+            values["holder_ref"] = holder_ref
+        if limit is not None:
+            values["limit"] = limit
+        return self.call("slotlock_list_waitlist", values)
+
+    def join_waitlist(
+        self,
+        *,
+        start: str,
+        end: str,
+        holder_ref: str,
+        resource_id: str | None = None,
+        pool: str | None = None,
+        offer_ttl_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        """Join the waitlist.
+
+        Wait for a window on one resource (resource_id) or on any member of a pool (pool) that is
+        taken now. When it comes free (a booking cancelled, a hold released or expired, a
+        no-show), the entries waiting for it are offered in the order they joined: the first gets
+        a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so
+        (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window
+        starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409
+        waitlist_limit_reached); a window is at most 31 days.
+        """
+        values: dict[str, Any] = {"start": start, "end": end, "holder_ref": holder_ref}
+        if resource_id is not None:
+            values["resource_id"] = resource_id
+        if pool is not None:
+            values["pool"] = pool
+        if offer_ttl_seconds is not None:
+            values["offer_ttl_seconds"] = offer_ttl_seconds
+        return self.call("slotlock_join_waitlist", values)
+
+    def leave_waitlist(self, entry_id: str) -> dict[str, Any]:
+        """Leave the waitlist.
+
+        Stop waiting. A hold offered and not yet confirmed is released with the entry, and the
+        time offered to the next who waits; one confirmed is a booking and stays. left is false
+        when there was no such entry.
+        """
+        values: dict[str, Any] = {"entry_id": entry_id}
+        return self.call("slotlock_leave_waitlist", values)
 
     def record_coverage(
         self,

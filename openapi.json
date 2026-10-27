@@ -296,6 +296,11 @@
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
+                                },
+                                "check_in_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
                                 }
                               },
                               "additionalProperties": false
@@ -4133,6 +4138,11 @@
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
+                                },
+                                "check_in_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
                                 }
                               },
                               "additionalProperties": false
@@ -4407,6 +4417,11 @@
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
+                                },
+                                "check_in_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
                                 }
                               },
                               "additionalProperties": false
@@ -4621,6 +4636,11 @@
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
+                                },
+                                "check_in_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
                                 }
                               },
                               "additionalProperties": false
@@ -4974,6 +4994,11 @@
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
+                                },
+                                "check_in_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
                                 }
                               },
                               "additionalProperties": false
@@ -5264,6 +5289,11 @@
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
+                                },
+                                "check_in_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
                                 }
                               },
                               "additionalProperties": false
@@ -5391,6 +5421,11 @@
                           },
                           "enforce_hours": {
                             "type": "boolean"
+                          },
+                          "check_in_minutes": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 1440
                           }
                         },
                         "additionalProperties": false
@@ -5517,6 +5552,11 @@
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
+                                },
+                                "check_in_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
                                 }
                               },
                               "additionalProperties": false
@@ -5745,6 +5785,11 @@
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
+                                },
+                                "check_in_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
                                 }
                               },
                               "additionalProperties": false
@@ -7597,6 +7642,563 @@
         }
       }
     },
+    "/v1/reservations/{reservation_ref}/check-in": {
+      "post": {
+        "operationId": "slotlock_check_in_reservation",
+        "summary": "Check in a booking",
+        "description": "Claim a booking by its reference: the customer has arrived or picked up. On a resource whose booking rules set check_in_minutes, a booking not checked in that long after its start is released by maintenance (reservation.no_show on the feed) and offered to the waitlist. Check-in opens an hour before the start (409 check_in_not_open before then) and moving the booking to another start clears it. Checking in again keeps the first time; a booking that has ended answers 409 reservation_ended.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "reservation_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "reference": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "checked_in_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "required": [
+                    "reference",
+                    "checked_in_at"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/waitlist": {
+      "post": {
+        "operationId": "slotlock_join_waitlist",
+        "summary": "Join the waitlist",
+        "description": "Wait for a window on one resource (resource_id) or on any member of a pool (pool) that is taken now. When it comes free (a booking cancelled, a hold released or expired, a no-show), the entries waiting for it are offered in the order they joined: the first gets a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409 waitlist_limit_reached); a window is at most 31 days.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "resource_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "pool": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                  },
+                  "start": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "end": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "holder_ref": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "offer_ttl_seconds": {
+                    "type": "integer",
+                    "minimum": 60,
+                    "maximum": 86400
+                  }
+                },
+                "required": [
+                  "start",
+                  "end",
+                  "holder_ref"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "entry": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "resource_id": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 200
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "pool": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "start": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "end": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "holder_ref": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "offer_ttl_seconds": {
+                          "type": "integer",
+                          "minimum": 60,
+                          "maximum": 86400
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "waiting",
+                            "offered",
+                            "expired"
+                          ]
+                        },
+                        "hold_id": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "uuid"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "offered_resource_id": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 200
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "offered_at": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "created_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "resource_id",
+                        "pool",
+                        "start",
+                        "end",
+                        "holder_ref",
+                        "offer_ttl_seconds",
+                        "status",
+                        "hold_id",
+                        "offered_resource_id",
+                        "offered_at",
+                        "created_at"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "entry"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "get": {
+        "operationId": "slotlock_list_waitlist",
+        "summary": "List the waitlist",
+        "description": "The tenant's waitlist entries in the order they are offered (oldest first), with what each was offered: optionally only those of one resource, pool or holder.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "parameters": [
+          {
+            "name": "resource_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          {
+            "name": "pool",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+            }
+          },
+          {
+            "name": "holder_ref",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "entries": {
+                      "maxItems": 1000,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "resource_id": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 200
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "pool": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "start": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "end": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "holder_ref": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 500
+                          },
+                          "offer_ttl_seconds": {
+                            "type": "integer",
+                            "minimum": 60,
+                            "maximum": 86400
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "waiting",
+                              "offered",
+                              "expired"
+                            ]
+                          },
+                          "hold_id": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "offered_resource_id": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 200
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "offered_at": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "created_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "resource_id",
+                          "pool",
+                          "start",
+                          "end",
+                          "holder_ref",
+                          "offer_ttl_seconds",
+                          "status",
+                          "hold_id",
+                          "offered_resource_id",
+                          "offered_at",
+                          "created_at"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "entries"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/waitlist/{entry_id}": {
+      "delete": {
+        "operationId": "slotlock_leave_waitlist",
+        "summary": "Leave the waitlist",
+        "description": "Stop waiting. A hold offered and not yet confirmed is released with the entry, and the time offered to the next who waits; one confirmed is a booking and stays. left is false when there was no such entry.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "parameters": [
+          {
+            "name": "entry_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "left": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "left"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/v1/resources/{resource_id}/coverage/{source}": {
       "put": {
         "operationId": "slotlock_record_coverage",
@@ -9162,6 +9764,16 @@
                       "minimum": 0,
                       "maximum": 9007199254740991
                     },
+                    "no_shows": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "waitlist_offers": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
                     "capped": {
                       "type": "boolean"
                     }
@@ -9173,6 +9785,8 @@
                     "pruned",
                     "zone_shifts",
                     "stale_sources",
+                    "no_shows",
+                    "waitlist_offers",
                     "capped"
                   ],
                   "additionalProperties": false
@@ -9373,12 +9987,16 @@
                         "reservation.created",
                         "reservation.updated",
                         "reservation.cancelled",
+                        "reservation.checked_in",
+                        "reservation.no_show",
                         "event.created",
                         "event.updated",
                         "event.cancelled",
                         "event.timezone_shifted",
                         "event.timezone_conflict",
                         "coverage.stale",
+                        "waitlist.offered",
+                        "waitlist.expired",
                         "webhook.disabled"
                       ]
                     }
@@ -9426,12 +10044,16 @@
                                   "reservation.created",
                                   "reservation.updated",
                                   "reservation.cancelled",
+                                  "reservation.checked_in",
+                                  "reservation.no_show",
                                   "event.created",
                                   "event.updated",
                                   "event.cancelled",
                                   "event.timezone_shifted",
                                   "event.timezone_conflict",
                                   "coverage.stale",
+                                  "waitlist.offered",
+                                  "waitlist.expired",
                                   "webhook.disabled"
                                 ]
                               }
@@ -9606,12 +10228,16 @@
                                     "reservation.created",
                                     "reservation.updated",
                                     "reservation.cancelled",
+                                    "reservation.checked_in",
+                                    "reservation.no_show",
                                     "event.created",
                                     "event.updated",
                                     "event.cancelled",
                                     "event.timezone_shifted",
                                     "event.timezone_conflict",
                                     "coverage.stale",
+                                    "waitlist.offered",
+                                    "waitlist.expired",
                                     "webhook.disabled"
                                   ]
                                 }
@@ -9866,12 +10492,16 @@
                                   "reservation.created",
                                   "reservation.updated",
                                   "reservation.cancelled",
+                                  "reservation.checked_in",
+                                  "reservation.no_show",
                                   "event.created",
                                   "event.updated",
                                   "event.cancelled",
                                   "event.timezone_shifted",
                                   "event.timezone_conflict",
                                   "coverage.stale",
+                                  "waitlist.offered",
+                                  "waitlist.expired",
                                   "webhook.disabled"
                                 ]
                               }

@@ -48,6 +48,10 @@ var operations = func() map[string]operation {
 		{name: "slotlock_put_reservation", method: "PUT", path: "/v1/reservations/{reservation_ref}", pathParams: []string{"reservation_ref"}, query: nil},
 		{name: "slotlock_cancel_reservation", method: "DELETE", path: "/v1/reservations/{reservation_ref}", pathParams: []string{"reservation_ref"}, query: []string{"revision"}},
 		{name: "slotlock_list_reservations", method: "GET", path: "/v1/resources/{resource_id}/reservations", pathParams: []string{"resource_id"}, query: []string{"start", "end", "limit", "cursor"}},
+		{name: "slotlock_check_in_reservation", method: "POST", path: "/v1/reservations/{reservation_ref}/check-in", pathParams: []string{"reservation_ref"}, query: nil},
+		{name: "slotlock_list_waitlist", method: "GET", path: "/v1/waitlist", pathParams: nil, query: []string{"resource_id", "pool", "holder_ref", "limit"}},
+		{name: "slotlock_join_waitlist", method: "POST", path: "/v1/waitlist", pathParams: nil, query: nil},
+		{name: "slotlock_leave_waitlist", method: "DELETE", path: "/v1/waitlist/{entry_id}", pathParams: []string{"entry_id"}, query: nil},
 		{name: "slotlock_record_coverage", method: "PUT", path: "/v1/resources/{resource_id}/coverage/{source}", pathParams: []string{"resource_id", "source"}, query: nil},
 		{name: "slotlock_get_coverage", method: "GET", path: "/v1/resources/{resource_id}/coverage", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_record_coverage_failure", method: "POST", path: "/v1/resources/{resource_id}/coverage/{source}/failure", pathParams: []string{"resource_id", "source"}, query: nil},
@@ -1173,6 +1177,123 @@ func (in ListReservationsInput) values() map[string]any {
 // bookings; slotlock_list_tenant_events lists them.
 func (c *Client) ListReservations(ctx context.Context, in ListReservationsInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_list_reservations", in.values())
+}
+
+// CheckInReservationInput holds the arguments of [Client.CheckInReservation].
+type CheckInReservationInput struct {
+	ReservationRef string
+}
+
+func (in CheckInReservationInput) values() map[string]any {
+	values := map[string]any{}
+	values["reservation_ref"] = in.ReservationRef
+	return values
+}
+
+// CheckInReservation: Check in a booking. Claim a booking by its reference: the customer has
+// arrived or picked up. On a resource whose booking rules set check_in_minutes, a booking not
+// checked in that long after its start is released by maintenance (reservation.no_show on the
+// feed) and offered to the waitlist. Check-in opens an hour before the start (409
+// check_in_not_open before then) and moving the booking to another start clears it. Checking in
+// again keeps the first time; a booking that has ended answers 409 reservation_ended.
+func (c *Client) CheckInReservation(ctx context.Context, in CheckInReservationInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_check_in_reservation", in.values())
+}
+
+// ListWaitlistInput holds the arguments of [Client.ListWaitlist].
+type ListWaitlistInput struct {
+	ResourceID *string
+
+	Pool *string
+
+	HolderRef *string
+
+	Limit *int64
+}
+
+func (in ListWaitlistInput) values() map[string]any {
+	values := map[string]any{}
+	if in.ResourceID != nil {
+		values["resource_id"] = *in.ResourceID
+	}
+	if in.Pool != nil {
+		values["pool"] = *in.Pool
+	}
+	if in.HolderRef != nil {
+		values["holder_ref"] = *in.HolderRef
+	}
+	if in.Limit != nil {
+		values["limit"] = *in.Limit
+	}
+	return values
+}
+
+// ListWaitlist: List the waitlist. The tenant's waitlist entries in the order they are offered
+// (oldest first), with what each was offered: optionally only those of one resource, pool or
+// holder.
+func (c *Client) ListWaitlist(ctx context.Context, in ListWaitlistInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_list_waitlist", in.values())
+}
+
+// JoinWaitlistInput holds the arguments of [Client.JoinWaitlist].
+type JoinWaitlistInput struct {
+	Start string
+
+	End string
+
+	HolderRef string
+
+	ResourceID *string
+
+	Pool *string
+
+	OfferTTLSeconds *int64
+}
+
+func (in JoinWaitlistInput) values() map[string]any {
+	values := map[string]any{}
+	values["start"] = in.Start
+	values["end"] = in.End
+	values["holder_ref"] = in.HolderRef
+	if in.ResourceID != nil {
+		values["resource_id"] = *in.ResourceID
+	}
+	if in.Pool != nil {
+		values["pool"] = *in.Pool
+	}
+	if in.OfferTTLSeconds != nil {
+		values["offer_ttl_seconds"] = *in.OfferTTLSeconds
+	}
+	return values
+}
+
+// JoinWaitlist: Join the waitlist. Wait for a window on one resource (resource_id) or on any
+// member of a pool (pool) that is taken now. When it comes free (a booking cancelled, a hold
+// released or expired, a no-show), the entries waiting for it are offered in the order they
+// joined: the first gets a hold of it for holder_ref, for offer_ttl_seconds (default 900), and
+// the feed says so (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose
+// window starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409
+// waitlist_limit_reached); a window is at most 31 days.
+func (c *Client) JoinWaitlist(ctx context.Context, in JoinWaitlistInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_join_waitlist", in.values())
+}
+
+// LeaveWaitlistInput holds the arguments of [Client.LeaveWaitlist].
+type LeaveWaitlistInput struct {
+	EntryID string
+}
+
+func (in LeaveWaitlistInput) values() map[string]any {
+	values := map[string]any{}
+	values["entry_id"] = in.EntryID
+	return values
+}
+
+// LeaveWaitlist: Leave the waitlist. Stop waiting. A hold offered and not yet confirmed is
+// released with the entry, and the time offered to the next who waits; one confirmed is a booking
+// and stays. left is false when there was no such entry.
+func (c *Client) LeaveWaitlist(ctx context.Context, in LeaveWaitlistInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_leave_waitlist", in.values())
 }
 
 // RecordCoverageInput holds the arguments of [Client.RecordCoverage].

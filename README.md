@@ -152,6 +152,7 @@ slotlock rules clear --resource vehicle-42
 | `slotStepMinutes` | starts on a step from local midnight in the resource's time zone |
 | `turnaroundMinutes` | keeps this long free after it: its trailing buffer, which the database enforces |
 | `enforceHours` | lies inside the resource's bookable hours |
+| `checkInMinutes` | is claimed (`checkInReservation`) this long after its start, or maintenance releases it |
 
 - Holds, reservations, moves and agents' events are checked when they are made, by the database's
   clock; a refusal names the rule (`booking_rule_violated` with `rule` in the store,
@@ -512,6 +513,18 @@ any number of servers; inside a REPEATABLE READ or SERIALIZABLE transaction they
 uses the default, `[]` closes it); `setTenantAvailability({ tenantRef, rules })` sets every resource
 of a tenant. `createSlotlockStoreAgentBackend` answers from a resource's own hours and calls
 `availabilityRules` only for resources without them.
+
+Waitlists: `joinWaitlist({ tenantRef, resourceId | pool, start, end, holderRef, offerTtlMs })`
+waits for a window that is taken now. When it comes free (a cancel, a released or expired hold, a
+no-show), `offerWaitlist` gives it to the entries in the order they joined: the first whose window
+is free, on its resource or the first free member of its pool, gets a hold for its holder, and the
+feed says so (`waitlist.offered`, with `hold_id`). Confirm the hold to book it; let it go and the next
+is offered. Cancels and releases through the API offer at once; maintenance offers the rest and
+expires entries whose window has started (`waitlist.expired`). With `checkInMinutes` in a
+resource's booking rules, maintenance releases a booking made since the rule was set that nobody
+checked in that long after its start, or after it was made for a walk-in (`reservation.no_show`),
+and the waitlist is offered its time. Check-in opens an hour before the start; moving a booking to
+another start clears it. Leaving the waitlist lets an offer not yet confirmed go with it.
 
 Calendar tools speak the standards: `emitVAvailability({ rules, timezone, uid })` writes rules as an
 iCalendar VAVAILABILITY (RFC 7953) and `parseVAvailability(text)` reads one back as

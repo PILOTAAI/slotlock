@@ -75,8 +75,13 @@ export const GROUPS = [
       'slotlock_get_reservation',
       'slotlock_list_reservations',
       'slotlock_cancel_reservation',
+      'slotlock_check_in_reservation',
       'slotlock_get_reservation_history',
     ],
+  },
+  {
+    name: 'Waitlist',
+    operations: ['slotlock_join_waitlist', 'slotlock_list_waitlist', 'slotlock_leave_waitlist'],
   },
   {
     name: 'Changes and webhooks',
@@ -287,6 +292,7 @@ const RUN_VARIABLES = {
   resource_id: { from: 'slotlock_create_resource', path: ['resource', 'id'] },
   event_id: { from: 'slotlock_create_event', path: ['event', 'id'] },
   hold_id: { from: 'slotlock_acquire_hold', path: ['hold', 'id'] },
+  entry_id: { from: 'slotlock_join_waitlist', path: ['entry', 'id'] },
   // The tenant routes name an event by the id their own list gives, at its current revision.
   tenant_event_id: { from: 'slotlock_list_tenant_events', path: ['events', '0', 'id'] },
   tenant_event_revision: { from: 'slotlock_get_tenant_event', path: ['event', 'revision'] },

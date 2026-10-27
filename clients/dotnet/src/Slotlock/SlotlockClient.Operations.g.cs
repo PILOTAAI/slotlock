@@ -53,6 +53,10 @@ public sealed partial class SlotlockClient
         ["slotlock_put_reservation"] = new("PUT", "/v1/reservations/{reservation_ref}", ["reservation_ref"], []),
         ["slotlock_cancel_reservation"] = new("DELETE", "/v1/reservations/{reservation_ref}", ["reservation_ref"], ["revision"]),
         ["slotlock_list_reservations"] = new("GET", "/v1/resources/{resource_id}/reservations", ["resource_id"], ["start", "end", "limit", "cursor"]),
+        ["slotlock_check_in_reservation"] = new("POST", "/v1/reservations/{reservation_ref}/check-in", ["reservation_ref"], []),
+        ["slotlock_list_waitlist"] = new("GET", "/v1/waitlist", [], ["resource_id", "pool", "holder_ref", "limit"]),
+        ["slotlock_join_waitlist"] = new("POST", "/v1/waitlist", [], []),
+        ["slotlock_leave_waitlist"] = new("DELETE", "/v1/waitlist/{entry_id}", ["entry_id"], []),
         ["slotlock_record_coverage"] = new("PUT", "/v1/resources/{resource_id}/coverage/{source}", ["resource_id", "source"], []),
         ["slotlock_get_coverage"] = new("GET", "/v1/resources/{resource_id}/coverage", ["resource_id"], []),
         ["slotlock_record_coverage_failure"] = new("POST", "/v1/resources/{resource_id}/coverage/{source}/failure", ["resource_id", "source"], []),
@@ -1211,6 +1215,112 @@ public sealed partial class SlotlockClient
         if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
         if (cursor.HasValue) values["cursor"] = Json.ToNode(cursor.Value);
         return CallAsync("slotlock_list_reservations", values, cancellationToken);
+    }
+
+    /// <summary>Check in a booking.</summary>
+    /// <remarks>
+    /// Claim a booking by its reference: the customer has arrived or picked up. On a resource
+    /// whose booking rules set check_in_minutes, a booking not checked in that long after its
+    /// start is released by maintenance (reservation.no_show on the feed) and offered to the
+    /// waitlist. Check-in opens an hour before the start (409 check_in_not_open before then) and
+    /// moving the booking to another start clears it. Checking in again keeps the first time; a
+    /// booking that has ended answers 409 reservation_ended.
+    /// </remarks>
+    /// <param name="reservationRef">reservation_ref</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> CheckInReservationAsync(
+        string reservationRef,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["reservation_ref"] = Json.ToNode(reservationRef);
+        return CallAsync("slotlock_check_in_reservation", values, cancellationToken);
+    }
+
+    /// <summary>List the waitlist.</summary>
+    /// <remarks>
+    /// The tenant's waitlist entries in the order they are offered (oldest first), with what each
+    /// was offered: optionally only those of one resource, pool or holder.
+    /// </remarks>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="pool">pool</param>
+    /// <param name="holderRef">holder_ref</param>
+    /// <param name="limit">limit</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ListWaitlistAsync(
+        Optional<string> resourceId = default,
+        Optional<string> pool = default,
+        Optional<string> holderRef = default,
+        Optional<long> limit = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        if (resourceId.HasValue) values["resource_id"] = Json.ToNode(resourceId.Value);
+        if (pool.HasValue) values["pool"] = Json.ToNode(pool.Value);
+        if (holderRef.HasValue) values["holder_ref"] = Json.ToNode(holderRef.Value);
+        if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
+        return CallAsync("slotlock_list_waitlist", values, cancellationToken);
+    }
+
+    /// <summary>Join the waitlist.</summary>
+    /// <remarks>
+    /// Wait for a window on one resource (resource_id) or on any member of a pool (pool) that is
+    /// taken now. When it comes free (a booking cancelled, a hold released or expired, a
+    /// no-show), the entries waiting for it are offered in the order they joined: the first gets
+    /// a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so
+    /// (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window
+    /// starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409
+    /// waitlist_limit_reached); a window is at most 31 days.
+    /// </remarks>
+    /// <param name="start">start</param>
+    /// <param name="end">end</param>
+    /// <param name="holderRef">holder_ref</param>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="pool">pool</param>
+    /// <param name="offerTtlSeconds">offer_ttl_seconds</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> JoinWaitlistAsync(
+        string start,
+        string end,
+        string holderRef,
+        Optional<string> resourceId = default,
+        Optional<string> pool = default,
+        Optional<long> offerTtlSeconds = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["start"] = Json.ToNode(start);
+        values["end"] = Json.ToNode(end);
+        values["holder_ref"] = Json.ToNode(holderRef);
+        if (resourceId.HasValue) values["resource_id"] = Json.ToNode(resourceId.Value);
+        if (pool.HasValue) values["pool"] = Json.ToNode(pool.Value);
+        if (offerTtlSeconds.HasValue) values["offer_ttl_seconds"] = Json.ToNode(offerTtlSeconds.Value);
+        return CallAsync("slotlock_join_waitlist", values, cancellationToken);
+    }
+
+    /// <summary>Leave the waitlist.</summary>
+    /// <remarks>
+    /// Stop waiting. A hold offered and not yet confirmed is released with the entry, and the
+    /// time offered to the next who waits; one confirmed is a booking and stays. left is false
+    /// when there was no such entry.
+    /// </remarks>
+    /// <param name="entryId">entry_id</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> LeaveWaitlistAsync(
+        string entryId,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["entry_id"] = Json.ToNode(entryId);
+        return CallAsync("slotlock_leave_waitlist", values, cancellationToken);
     }
 
     /// <summary>Record calendar coverage.</summary>

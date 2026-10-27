@@ -25,6 +25,12 @@ export interface SlotlockBookingRules {
   turnaroundMinutes?: number;
   /** A booking lies inside the resource's bookable hours. */
   enforceHours?: boolean;
+  /**
+   * A booking is claimed (checked in) within this many minutes of its start, or maintenance
+   * releases it for others (and offers it to the waitlist): 1-1,440. Only bookings made once the
+   * rule is set are released.
+   */
+  checkInMinutes?: number;
 }
 
 /** Which rule a write broke, as its refusal names it. */
@@ -38,6 +44,7 @@ const LIMITS = {
   maxAdvanceDays: [1, 3_660],
   slotStepMinutes: [1, DAY_MINUTES],
   turnaroundMinutes: [0, DAY_MINUTES],
+  checkInMinutes: [1, DAY_MINUTES],
 } as const;
 
 /** Booking rules from untrusted input, or a TypeError naming the field that is wrong. */

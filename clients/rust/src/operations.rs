@@ -275,6 +275,34 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &["start", "end", "limit", "cursor"],
     },
     Operation {
+        name: "slotlock_check_in_reservation",
+        method: "POST",
+        path: "/v1/reservations/{reservation_ref}/check-in",
+        path_params: &["reservation_ref"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_list_waitlist",
+        method: "GET",
+        path: "/v1/waitlist",
+        path_params: &[],
+        query: &["resource_id", "pool", "holder_ref", "limit"],
+    },
+    Operation {
+        name: "slotlock_join_waitlist",
+        method: "POST",
+        path: "/v1/waitlist",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_leave_waitlist",
+        method: "DELETE",
+        path: "/v1/waitlist/{entry_id}",
+        path_params: &["entry_id"],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_record_coverage",
         method: "PUT",
         path: "/v1/resources/{resource_id}/coverage/{source}",
@@ -763,6 +791,45 @@ pub struct ListReservationsInput {
     pub cursor: Option<String>,
 }
 
+/// The arguments of [`Client::check_in_reservation`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CheckInReservationInput {
+    pub reservation_ref: String,
+}
+
+/// The arguments of [`Client::list_waitlist`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ListWaitlistInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+}
+
+/// The arguments of [`Client::join_waitlist`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct JoinWaitlistInput {
+    pub start: String,
+    pub end: String,
+    pub holder_ref: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offer_ttl_seconds: Option<i64>,
+}
+
+/// The arguments of [`Client::leave_waitlist`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct LeaveWaitlistInput {
+    pub entry_id: String,
+}
+
 /// The arguments of [`Client::record_coverage`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct RecordCoverageInput {
@@ -1222,6 +1289,48 @@ impl Client {
     /// lists them.
     pub fn list_reservations(&self, input: &ListReservationsInput) -> Result<Value, Error> {
         self.call("slotlock_list_reservations", serde_json::to_value(input)?)
+    }
+
+    /// Check in a booking.
+    ///
+    /// Claim a booking by its reference: the customer has arrived or picked up. On a resource
+    /// whose booking rules set check_in_minutes, a booking not checked in that long after its
+    /// start is released by maintenance (reservation.no_show on the feed) and offered to the
+    /// waitlist. Check-in opens an hour before the start (409 check_in_not_open before then) and
+    /// moving the booking to another start clears it. Checking in again keeps the first time; a
+    /// booking that has ended answers 409 reservation_ended.
+    pub fn check_in_reservation(&self, input: &CheckInReservationInput) -> Result<Value, Error> {
+        self.call("slotlock_check_in_reservation", serde_json::to_value(input)?)
+    }
+
+    /// List the waitlist.
+    ///
+    /// The tenant's waitlist entries in the order they are offered (oldest first), with what each
+    /// was offered: optionally only those of one resource, pool or holder.
+    pub fn list_waitlist(&self, input: &ListWaitlistInput) -> Result<Value, Error> {
+        self.call("slotlock_list_waitlist", serde_json::to_value(input)?)
+    }
+
+    /// Join the waitlist.
+    ///
+    /// Wait for a window on one resource (resource_id) or on any member of a pool (pool) that is
+    /// taken now. When it comes free (a booking cancelled, a hold released or expired, a
+    /// no-show), the entries waiting for it are offered in the order they joined: the first gets
+    /// a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so
+    /// (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window
+    /// starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409
+    /// waitlist_limit_reached); a window is at most 31 days.
+    pub fn join_waitlist(&self, input: &JoinWaitlistInput) -> Result<Value, Error> {
+        self.call("slotlock_join_waitlist", serde_json::to_value(input)?)
+    }
+
+    /// Leave the waitlist.
+    ///
+    /// Stop waiting. A hold offered and not yet confirmed is released with the entry, and the
+    /// time offered to the next who waits; one confirmed is a booking and stays. left is false
+    /// when there was no such entry.
+    pub fn leave_waitlist(&self, input: &LeaveWaitlistInput) -> Result<Value, Error> {
+        self.call("slotlock_leave_waitlist", serde_json::to_value(input)?)
     }
 
     /// Record calendar coverage.

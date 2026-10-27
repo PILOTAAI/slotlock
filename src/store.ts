@@ -1,7 +1,7 @@
 // DB mechanics for the Slotlock core — explicit `postgres` client in, structured results out.
 // Domain policy (who may reserve, pricing, holds) belongs to future callers; this layer owns the
 // reliable how: idempotent schema apply, EXCLUDE-arbitrated inserts with a structured conflict.
-import { type SlotlockEventFeed, slotlockEventFeedMethods } from './event-feed.js';
+import { SLOTLOCK_CHANGE_RETENTION_DAYS, type SlotlockEventFeed, slotlockEventFeedMethods } from './event-feed.js';
 import {
   type SlotlockBookingRule,
   type SlotlockBookingRules,
@@ -120,6 +120,17 @@ export const SLOTLOCK_INTERNAL_EVENT_OWNER_REF = 'internal';
 
 /** How many live holds one holder (a keyed hold's principal) may have in a tenant at once. */
 export const SLOTLOCK_MAX_HOLDS_PER_HOLDER = 20;
+/** Windows one holder may wait for at once (joinWaitlist). */
+export const SLOTLOCK_MAX_WAITLIST_PER_HOLDER = 20;
+/** Waiting entries one tenant may have. */
+export const SLOTLOCK_MAX_WAITLIST_PER_TENANT = 10_000;
+/** The longest window one waitlist entry may wait for. */
+const MAX_WAITLIST_WINDOW_MS = 31 * 24 * 60 * 60 * 1000;
+const DEFAULT_OFFER_TTL_MS = 15 * 60 * 1000;
+/** How long before its start a booking may be checked in. */
+export const SLOTLOCK_CHECK_IN_OPENS_MINUTES = 60;
+/** Free-looking resources one entry tries before the next entry: a race can take one first. */
+const OFFER_CANDIDATES = 3;
 /** Default hard ceiling for retained active + tombstoned identities per agent principal. */
 export const SLOTLOCK_AGENT_OWNER_EVENT_QUOTA = 1_000;
 /** Hard retained command ceiling; includes reserved cancellation capacity for every identity. */
@@ -1537,6 +1548,41 @@ function pgCode(err: unknown): string | undefined {
 export const SLOTLOCK_MAX_POOL_MEMBERS = 100;
 
 /** A pool's name: 1-100 of a-z, 0-9, `.`, `_` and `-`, starting with a letter or digit. */
+interface WaitlistRow {
+  id: string;
+  resource_id: string | null;
+  pool_ref: string | null;
+  starts_at: Date;
+  ends_at: Date;
+  holder_ref: string;
+  offer_ttl_ms: string | number;
+  status: SlotlockWaitlistEntry['status'];
+  hold_id: string | null;
+  offered_resource_id: string | null;
+  offered_at: Date | null;
+  created_at: Date;
+}
+
+const WAITLIST_COLUMNS =
+  'id, resource_id, pool_ref, starts_at, ends_at, holder_ref, offer_ttl_ms, status, hold_id, offered_resource_id, offered_at, created_at';
+
+function toWaitlistEntry(row: WaitlistRow): SlotlockWaitlistEntry {
+  return {
+    id: row.id,
+    resourceId: row.resource_id,
+    pool: row.pool_ref,
+    start: row.starts_at,
+    end: row.ends_at,
+    holderRef: row.holder_ref,
+    offerTtlMs: Number(row.offer_ttl_ms),
+    status: row.status,
+    holdId: row.hold_id,
+    offeredResourceId: row.offered_resource_id,
+    offeredAt: row.offered_at,
+    createdAt: row.created_at,
+  };
+}
+
 export function isPoolName(value: unknown): value is string {
   return typeof value === 'string' && /^[a-z0-9][a-z0-9._-]{0,99}$/.test(value);
 }
@@ -2316,6 +2362,62 @@ export interface SlotlockStore extends SlotlockEventFeed {
    * (`coverage.stale`), until it is read again. Up to `limit` (default 100); how many.
    */
   reportStaleCoverage(params: { tenantRef: string; maxAgeMs?: number; limit?: number }): Promise<number>;
+  /**
+   * Claim a booking by its reference (check-in), so a resource whose booking rules ask for check-in
+   * (`checkInMinutes`) does not release it. Check-in opens `SLOTLOCK_CHECK_IN_OPENS_MINUTES` before
+   * the start (`check_in_not_open` sooner), and a move to another start clears it. Checking in again
+   * keeps the first time. Refused once the booking has ended (`reservation_ended`); a reference with
+   * no live booking is `reservation_not_found`. The feed says so (`reservation.checked_in`).
+   */
+  checkInReservation(params: { tenantRef: string; externalRef: string }): Promise<CheckInReservationResult>;
+  /**
+   * Release up to `limit` (default 100) bookings left unclaimed: on a resource whose booking rules
+   * ask for check-in, made since they did, not checked in `checkInMinutes` after the start, and not
+   * yet ended. Each is cancelled as `cancelExternalReservation` would (its reference retired at the
+   * next revision) and the feed says why (`reservation.no_show`). How many.
+   */
+  releaseNoShows(params: { tenantRef: string; limit?: number }): Promise<number>;
+  /**
+   * Wait for a window on one resource (`resourceId`) or any member of a pool (`pool`): when it comes
+   * free, `offerWaitlist` holds it for `holderRef` for `offerTtlMs` (1 minute to a day, default 15
+   * minutes), first come first offered. A holder may wait for `SLOTLOCK_MAX_WAITLIST_PER_HOLDER`
+   * windows at once and a tenant `SLOTLOCK_MAX_WAITLIST_PER_TENANT`.
+   */
+  joinWaitlist(params: {
+    tenantRef: string;
+    resourceId?: string;
+    pool?: string;
+    start: Date;
+    end: Date;
+    holderRef: string;
+    offerTtlMs?: number;
+  }): Promise<JoinWaitlistResult>;
+  /** The tenant's waitlist entries, oldest first, optionally of one resource, pool or holder. */
+  listWaitlist(params: {
+    tenantRef: string;
+    resourceId?: string;
+    pool?: string;
+    holderRef?: string;
+    limit?: number;
+  }): Promise<SlotlockWaitlistEntry[]>;
+  /**
+   * Stop waiting; with `holderRef`, only that holder's entry. A hold offered and not yet confirmed is
+   * released with it. False when there was none.
+   */
+  leaveWaitlist(params: { tenantRef: string; id: string; holderRef?: string }): Promise<boolean>;
+  /**
+   * Offer freed time to the waitlist, in the order entries joined: each waiting entry whose window
+   * is free (on its resource, or on the first free member of its pool) gets a hold for its holder
+   * and the feed says so (`waitlist.offered`, with the hold). Entries whose window has started are
+   * expired (`waitlist.expired`); finished ones older than the change feed's retention are deleted.
+   * One tenant's offers run one at a time. One page of `limit` (1-100, default 50) entries: pass
+   * `next` back as `after` for the next, until it is null.
+   */
+  offerWaitlist(params: {
+    tenantRef: string;
+    limit?: number;
+    after?: { createdAt: Date; id: string };
+  }): Promise<{ offered: number; expired: number; next: { createdAt: Date; id: string } | null }>;
   pruneBookingRetention(params: {
     tenantRef: string;
     /** Rows per class per call, 1-1000. Defaults to 100. */
@@ -2383,6 +2485,46 @@ export interface SlotlockStore extends SlotlockEventFeed {
     coverageMaxAgeMs?: number;
   }): Promise<Interval | null>;
 }
+
+/** One entry of a tenant's waitlist (joinWaitlist). */
+export interface SlotlockWaitlistEntry {
+  id: string;
+  /** The resource it waits on, or null when it waits on a pool. */
+  resourceId: string | null;
+  pool: string | null;
+  start: Date;
+  end: Date;
+  holderRef: string;
+  offerTtlMs: number;
+  /** `waiting`, `offered` (a hold was made: `holdId` on `offeredResourceId`) or `expired`. */
+  status: 'waiting' | 'offered' | 'expired';
+  holdId: string | null;
+  offeredResourceId: string | null;
+  offeredAt: Date | null;
+  createdAt: Date;
+}
+
+export type JoinWaitlistResult =
+  | { ok: true; entry: SlotlockWaitlistEntry }
+  | {
+      ok: false;
+      code:
+        | 'invalid_identity'
+        | 'invalid_window'
+        | 'invalid_ttl'
+        | 'invalid_pool'
+        | 'resource_not_found'
+        | 'resource_archived'
+        | 'pool_not_found'
+        | 'waitlist_limit_reached';
+    };
+
+export type CheckInReservationResult =
+  | { ok: true; reference: string; checkedInAt: Date }
+  | {
+      ok: false;
+      code: 'invalid_identity' | 'reservation_not_found' | 'reservation_ended' | 'check_in_not_open';
+    };
 
 /** One source's coverage of a resource, with its health (listCoverage). */
 export interface SlotlockCoverageHealth {
@@ -2850,6 +2992,9 @@ export const SLOTLOCK_TENANT_WRITE_METHODS = Object.freeze([
   'deleteWebhookEndpoint',
   'enableWebhookEndpoint',
   'recordCoverageFailure',
+  'checkInReservation',
+  'joinWaitlist',
+  'leaveWaitlist',
 ] as const satisfies readonly (keyof SlotlockStore)[]);
 
 function tenantSuspendedError(): Error & { code: 'tenant_suspended' } {
@@ -3372,7 +3517,13 @@ function buildSlotlockStore(
       }
       const rows = await sql<ResourceRow[]>`
         UPDATE slotlock.resources
-           SET booking_rules = ${rules === null ? null : sql.json({ ...rules })}::jsonb
+           SET booking_rules = ${rules === null ? null : sql.json({ ...rules })}::jsonb,
+               -- Kept while check-in stays asked for, from the moment it first was; cleared without.
+               check_in_since = CASE
+                 WHEN ${rules?.checkInMinutes ?? null}::int IS NULL THEN NULL
+                 WHEN booking_rules ? 'checkInMinutes' THEN COALESCE(check_in_since, statement_timestamp())
+                 ELSE statement_timestamp()
+               END
          WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
         RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref,
                   visibility, archived_at`;
@@ -3763,7 +3914,12 @@ function buildSlotlockStore(
                      ends_at = ${params.end},
                      buffer_after_ms = ${bufferAfterMs},
                      revision = ${params.revision},
-                     source = ${params.source ?? null}
+                     source = ${params.source ?? null},
+                     -- A check-in is for the time it was made for: a move to another start clears it.
+                     checked_in_at = CASE
+                       WHEN starts_at = ${params.start} AND resource_id = ${params.resourceId}
+                       THEN checked_in_at
+                     END
                WHERE id = ${found.id}
                RETURNING id, resource_id, tenant_ref, external_ref, starts_at, ends_at,
                          buffer_after_ms, revision, source`;
@@ -5427,6 +5583,303 @@ function buildSlotlockStore(
         )
         SELECT count(*)::int AS count FROM reported`;
       return rows[0]?.count ?? 0;
+    },
+
+    async checkInReservation(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidIdentity(params.externalRef)) {
+        return { ok: false, code: 'invalid_identity' };
+      }
+      return inTransaction(sql, async (tx): Promise<CheckInReservationResult> => {
+        const [row] = await tx<{ id: string; resource_id: string; checked_in_at: Date; ended: boolean; first: boolean }[]>`
+          WITH booking AS (
+            SELECT id, checked_in_at, ends_at <= statement_timestamp() AS ended,
+                   starts_at - make_interval(mins => ${SLOTLOCK_CHECK_IN_OPENS_MINUTES}) > statement_timestamp() AS early
+              FROM slotlock.reservations
+             WHERE tenant_ref = ${params.tenantRef} AND external_ref = ${params.externalRef}
+               AND calendar_event_id IS NULL AND status = 'confirmed'
+             FOR UPDATE
+          )
+          UPDATE slotlock.reservations reservation
+             SET checked_in_at = COALESCE(reservation.checked_in_at, statement_timestamp())
+            FROM booking
+           WHERE reservation.id = booking.id AND NOT booking.ended AND NOT booking.early
+          RETURNING reservation.id, reservation.resource_id, reservation.checked_in_at,
+                    false AS ended, booking.checked_in_at IS NULL AS first`;
+        if (!row) {
+          const [booking] = await tx<{ ended: boolean }[]>`
+            SELECT ends_at <= statement_timestamp() AS ended FROM slotlock.reservations
+             WHERE tenant_ref = ${params.tenantRef} AND external_ref = ${params.externalRef}
+               AND calendar_event_id IS NULL AND status = 'confirmed'`;
+          if (!booking) return { ok: false, code: 'reservation_not_found' };
+          return { ok: false, code: booking.ended ? 'reservation_ended' : 'check_in_not_open' };
+        }
+        if (row.first) {
+          await tx`
+            INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+            VALUES (${params.tenantRef}, ${row.resource_id}, 'reservation.checked_in', ${params.externalRef},
+                    jsonb_build_object('id', ${row.id}::uuid, 'reference', ${params.externalRef}::text,
+                                       'resource_id', ${row.resource_id}::uuid,
+                                       'checked_in_at', ${row.checked_in_at}::timestamptz),
+                    NULLIF(current_setting('slotlock.actor', true), ''))`;
+        }
+        return { ok: true, reference: params.externalRef, checkedInAt: row.checked_in_at };
+      });
+    },
+
+    async releaseNoShows(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const limit = params.limit ?? 100;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
+        throw invalidIdentityError('Slotlock no-show limit must be 1-1,000');
+      }
+      // A suspended tenant's bookings stay as they are.
+      if (refusal) return 0;
+      const tenantRef = params.tenantRef;
+      // The same test twice: to find them, then under each reference's lock, as a cancel takes it.
+      const due = (tx: StoreSql, externalRef: string | null) => tx<
+        { id: string; external_ref: string; revision: string | number; resource_id: string; minutes: number }[]
+      >`
+        SELECT reservation.id, reservation.external_ref, reservation.revision, reservation.resource_id,
+               (resource.booking_rules->>'checkInMinutes')::int AS minutes
+          FROM slotlock.reservations reservation
+          JOIN slotlock.resources resource ON resource.id = reservation.resource_id
+         WHERE reservation.tenant_ref = ${tenantRef} AND resource.tenant_ref = ${tenantRef}
+           AND (${externalRef}::text IS NULL OR reservation.external_ref = ${externalRef})
+           AND reservation.status = 'confirmed' AND reservation.calendar_event_id IS NULL
+           AND reservation.checked_in_at IS NULL
+           AND resource.check_in_since IS NOT NULL AND resource.booking_rules ? 'checkInMinutes'
+           AND reservation.created_at >= resource.check_in_since
+           -- A booking made after its start (a walk-in) has its window from when it was made.
+           AND GREATEST(reservation.starts_at, reservation.created_at)
+               + make_interval(mins => (resource.booking_rules->>'checkInMinutes')::int)
+               <= statement_timestamp()
+           AND reservation.ends_at > statement_timestamp()
+         ORDER BY reservation.starts_at, reservation.id
+         LIMIT ${externalRef === null ? limit : 1}
+         ${externalRef === null ? tx`` : tx`FOR UPDATE OF reservation`}`;
+      let released = 0;
+      for (const candidate of await due(sql, null)) {
+        const done = await inTransaction(sql, async (tx) => {
+          await lockExternalIdentity(tx, tenantRef, candidate.external_ref);
+          const [row] = await due(tx, candidate.external_ref);
+          if (!row || row.id !== candidate.id) return false;
+          const revision = Number(row.revision) + 1;
+          await tx`
+            INSERT INTO slotlock.reservation_tombstones (tenant_ref, external_ref, revision, stray)
+            VALUES (${tenantRef}, ${row.external_ref}, ${revision}, false)`;
+          await tx`DELETE FROM slotlock.reservations WHERE id = ${row.id}`;
+          await tx`
+            INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+            VALUES (${tenantRef}, ${row.resource_id}, 'reservation.no_show', ${row.external_ref},
+                    jsonb_build_object('id', ${row.id}::uuid, 'reference', ${row.external_ref}::text,
+                                       'resource_id', ${row.resource_id}::uuid, 'revision', ${revision}::bigint,
+                                       'check_in_minutes', ${row.minutes}::int),
+                    'slotlock:maintenance')`;
+          return true;
+        });
+        if (done) released += 1;
+      }
+      return released;
+    },
+
+    async joinWaitlist(params) {
+      const { tenantRef, holderRef } = params;
+      if (!isValidIdentity(tenantRef) || !isValidIdentity(holderRef)) return { ok: false, code: 'invalid_identity' };
+      if ((params.resourceId === undefined) === (params.pool === undefined)) {
+        return { ok: false, code: 'invalid_identity' };
+      }
+      if (params.resourceId !== undefined && !isValidResourceId(params.resourceId)) {
+        return { ok: false, code: 'resource_not_found' };
+      }
+      if (params.pool !== undefined && !isPoolName(params.pool)) return { ok: false, code: 'invalid_pool' };
+      const window = { start: params.start, end: params.end };
+      if (
+        !isFiniteWindow(window) ||
+        window.end.getTime() - window.start.getTime() > MAX_WAITLIST_WINDOW_MS
+      ) {
+        return { ok: false, code: 'invalid_window' };
+      }
+      const offerTtlMs = params.offerTtlMs ?? DEFAULT_OFFER_TTL_MS;
+      if (!Number.isSafeInteger(offerTtlMs) || offerTtlMs < 60_000 || offerTtlMs > 86_400_000) {
+        return { ok: false, code: 'invalid_ttl' };
+      }
+      return inTransaction(sql, async (tx): Promise<JoinWaitlistResult> => {
+        if (params.resourceId !== undefined) {
+          const [resource] = await tx<{ archived: boolean }[]>`
+            SELECT archived_at IS NOT NULL AS archived FROM slotlock.resources
+             WHERE id = ${params.resourceId} AND tenant_ref = ${tenantRef}`;
+          if (!resource) return { ok: false, code: 'resource_not_found' };
+          if (resource.archived) return { ok: false, code: 'resource_archived' };
+        } else {
+          const [member] = await tx`
+            SELECT 1 FROM slotlock.resources
+             WHERE tenant_ref = ${tenantRef} AND pool_ref = ${params.pool ?? null} AND archived_at IS NULL
+             LIMIT 1`;
+          if (!member) return { ok: false, code: 'pool_not_found' };
+        }
+        // Counted under the tenant's waitlist lock, which offers take too, so racing joins stop at the cap.
+        await tx`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify(['slotlock-waitlist', tenantRef])}, 0))`;
+        const [counts] = await tx<{ tenant: number; holder: number }[]>`
+          SELECT count(*)::int AS tenant, count(*) FILTER (WHERE holder_ref = ${holderRef})::int AS holder
+            FROM slotlock.waitlist_entries WHERE tenant_ref = ${tenantRef} AND status = 'waiting'`;
+        if (
+          (counts?.holder ?? 0) >= SLOTLOCK_MAX_WAITLIST_PER_HOLDER ||
+          (counts?.tenant ?? 0) >= SLOTLOCK_MAX_WAITLIST_PER_TENANT
+        ) {
+          return { ok: false, code: 'waitlist_limit_reached' };
+        }
+        const [row] = await tx<WaitlistRow[]>`
+          INSERT INTO slotlock.waitlist_entries
+            (tenant_ref, resource_id, pool_ref, starts_at, ends_at, holder_ref, offer_ttl_ms)
+          VALUES (${tenantRef}, ${params.resourceId ?? null}, ${params.pool ?? null}, ${window.start},
+                  ${window.end}, ${holderRef}, ${offerTtlMs})
+          RETURNING ${tx.unsafe(WAITLIST_COLUMNS)}`;
+        return { ok: true, entry: toWaitlistEntry(row as WaitlistRow) };
+      });
+    },
+
+    async listWaitlist(params) {
+      if (!isValidIdentity(params.tenantRef)) throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      if (params.resourceId !== undefined && !isValidResourceId(params.resourceId)) return [];
+      const limit = params.limit ?? 100;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
+        throw invalidIdentityError('Slotlock waitlist limit must be 1-1,000');
+      }
+      const rows = await sql<WaitlistRow[]>`
+        SELECT ${sql.unsafe(WAITLIST_COLUMNS)} FROM slotlock.waitlist_entries
+         WHERE tenant_ref = ${params.tenantRef}
+           AND (${params.resourceId ?? null}::uuid IS NULL OR resource_id = ${params.resourceId ?? null}::uuid)
+           AND (${params.pool ?? null}::text IS NULL OR pool_ref = ${params.pool ?? null})
+           AND (${params.holderRef ?? null}::text IS NULL OR holder_ref = ${params.holderRef ?? null})
+         ORDER BY created_at, id
+         LIMIT ${limit}`;
+      return rows.map(toWaitlistEntry);
+    },
+
+    async leaveWaitlist(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidResourceId(params.id)) return false;
+      return inTransaction(sql, async (tx) => {
+        // Waits for an offer pass that has this entry locked, so it leaves what that pass decided.
+        const [left] = await tx<{ hold_id: string | null }[]>`
+          DELETE FROM slotlock.waitlist_entries
+           WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
+             AND (${params.holderRef ?? null}::text IS NULL OR holder_ref = ${params.holderRef ?? null})
+          RETURNING hold_id`;
+        if (!left) return false;
+        // An offer not yet taken goes too, freeing the time for the next who waits; a confirmed
+        // one is a booking now and stays.
+        if (left.hold_id) {
+          await buildSlotlockStore(tx, options, null).releaseHold(left.hold_id, { tenantRef: params.tenantRef });
+        }
+        return true;
+      });
+    },
+
+    async offerWaitlist(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const limit = params.limit ?? 50;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+        throw invalidIdentityError('Slotlock waitlist offer limit must be 1-100');
+      }
+      // A suspended tenant gets no new holds.
+      if (refusal) return { offered: 0, expired: 0, next: null };
+      const tenantRef = params.tenantRef;
+      const after = params.after ?? null;
+      return inTransaction(sql, async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify(['slotlock-waitlist', tenantRef])}, 0))`;
+        let expired = 0;
+        if (!after) {
+          const [gone] = await tx<{ count: number }[]>`
+            WITH gone AS (
+              UPDATE slotlock.waitlist_entries SET status = 'expired'
+               WHERE tenant_ref = ${tenantRef} AND status = 'waiting' AND starts_at <= statement_timestamp()
+              RETURNING id, resource_id, pool_ref, starts_at, ends_at, holder_ref
+            ), reported AS (
+              INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+              SELECT ${tenantRef}, gone.resource_id, 'waitlist.expired', gone.id::text,
+                     jsonb_strip_nulls(jsonb_build_object(
+                       'id', gone.id, 'resource_id', gone.resource_id, 'pool', gone.pool_ref,
+                       'start', gone.starts_at, 'end', gone.ends_at, 'holder_ref', gone.holder_ref)),
+                     'slotlock:maintenance'
+                FROM gone
+              RETURNING 1
+            )
+            SELECT count(*)::int AS count FROM reported`;
+          expired = gone?.count ?? 0;
+          await tx`
+            DELETE FROM slotlock.waitlist_entries
+             WHERE tenant_ref = ${tenantRef} AND status <> 'waiting'
+               AND ends_at < statement_timestamp() - make_interval(days => ${SLOTLOCK_CHANGE_RETENTION_DAYS})`;
+        }
+        // One page in join order; the caller passes `next` back for the rest.
+        const waiting = await tx<WaitlistRow[]>`
+          SELECT ${tx.unsafe(WAITLIST_COLUMNS)} FROM slotlock.waitlist_entries
+           WHERE tenant_ref = ${tenantRef} AND status = 'waiting'
+             AND (${after?.createdAt ?? null}::timestamptz IS NULL
+                  OR (created_at, id) > (${after?.createdAt ?? null}::timestamptz, ${after?.id ?? null}::uuid))
+           ORDER BY created_at, id
+           LIMIT ${limit}`;
+        // Holds made through a store on this transaction, each in a savepoint of its own.
+        const inner = buildSlotlockStore(tx, options, null);
+        let offered = 0;
+        for (const entry of waiting) {
+          // Locked so a leave waits for this offer, and skipped if it left first.
+          const [still] = await tx`
+            SELECT 1 FROM slotlock.waitlist_entries
+             WHERE id = ${entry.id} AND status = 'waiting' FOR UPDATE`;
+          if (!still) continue;
+          // Only resources whose window looks free are tried: a hold refused keeps its locks
+          // until the transaction ends, so trying every member of a full pool would pile them up.
+          const candidates = await tx<{ id: string }[]>`
+            SELECT resource.id FROM slotlock.resources resource
+             WHERE resource.tenant_ref = ${tenantRef} AND resource.archived_at IS NULL
+               AND (resource.id = ${entry.resource_id}::uuid
+                    OR (${entry.resource_id}::uuid IS NULL AND resource.pool_ref = ${entry.pool_ref}))
+               AND NOT EXISTS (
+                 SELECT 1 FROM slotlock.reservations taken
+                  WHERE taken.resource_id = resource.id
+                    AND tstzrange(taken.starts_at, COALESCE(taken.occupied_ends_at, taken.ends_at), '[)')
+                        && tstzrange(${entry.starts_at}::timestamptz, ${entry.ends_at}::timestamptz, '[)')
+                    AND (taken.status <> 'held' OR taken.expires_at > statement_timestamp()))
+             ORDER BY resource.id
+             LIMIT ${OFFER_CANDIDATES}`;
+          for (const { id: resourceId } of candidates) {
+            const hold = await inner.acquireHold({
+              resourceId,
+              start: entry.starts_at,
+              end: entry.ends_at,
+              ttlMs: Number(entry.offer_ttl_ms),
+              tenantRef,
+              holderRef: entry.holder_ref,
+              source: 'slotlock:waitlist',
+            });
+            if (!hold.ok) continue;
+            await tx`
+              UPDATE slotlock.waitlist_entries
+                 SET status = 'offered', hold_id = ${hold.hold.id}, offered_resource_id = ${resourceId},
+                     offered_at = statement_timestamp()
+               WHERE id = ${entry.id}`;
+            await tx`
+              INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+              VALUES (${tenantRef}, ${resourceId}, 'waitlist.offered', ${entry.id},
+                      jsonb_strip_nulls(jsonb_build_object(
+                        'id', ${entry.id}::uuid, 'hold_id', ${hold.hold.id}::uuid,
+                        'resource_id', ${resourceId}::uuid, 'pool', ${entry.pool_ref}::text,
+                        'start', ${entry.starts_at}::timestamptz, 'end', ${entry.ends_at}::timestamptz,
+                        'expires_at', ${hold.hold.expiresAt}::timestamptz,
+                        'holder_ref', ${entry.holder_ref}::text)),
+                      'slotlock:maintenance')`;
+            offered += 1;
+            break;
+          }
+        }
+        const last = waiting.length === limit ? waiting[waiting.length - 1] : undefined;
+        return { offered, expired, next: last ? { createdAt: last.created_at, id: last.id } : null };
+      });
     },
 
     async getFreeBusy(params) {

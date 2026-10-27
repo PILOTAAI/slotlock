@@ -14,7 +14,12 @@ import { type SlotlockBookingRule, type SlotlockBookingRules, bookingSearch } fr
 import { findNextAvailable } from './engine.js';
 import { expandRules } from './rules.js';
 import { emitVAvailability, parseVAvailability, toJSCalendarEvent } from './interop.js';
-import { type SlotlockStore, type SlotlockTenantStore, calendarEventRollingHorizon } from './store.js';
+import {
+  type SlotlockStore,
+  type SlotlockTenantStore,
+  type SlotlockWaitlistEntry,
+  calendarEventRollingHorizon,
+} from './store.js';
 import type {
   CalendarAttendee,
   CalendarEventContent,
@@ -1099,6 +1104,36 @@ function applicationRefusal(code: string): SlotlockAgentOperationError {
   return new SlotlockAgentOperationError(code, 409);
 }
 
+function waitlistOutput(entry: SlotlockWaitlistEntry) {
+  return {
+    id: entry.id,
+    resource_id: entry.resourceId,
+    pool: entry.pool,
+    start: entry.start.toISOString(),
+    end: entry.end.toISOString(),
+    holder_ref: entry.holderRef,
+    offer_ttl_seconds: Math.round(entry.offerTtlMs / 1000),
+    status: entry.status,
+    hold_id: entry.holdId,
+    offered_resource_id: entry.offeredResourceId,
+    offered_at: entry.offeredAt?.toISOString() ?? null,
+    created_at: entry.createdAt.toISOString(),
+  };
+}
+
+/**
+ * Offer what a cancel or release just freed to the tenant's waitlist now, rather than at the next
+ * maintenance pass. Best effort, after the freeing transaction committed: maintenance offers
+ * whatever this misses.
+ */
+async function offerFreedTime(store: SlotlockStore, tenantRef: string): Promise<void> {
+  try {
+    await store.withTenant(tenantRef, (tenant) => tenant.offerWaitlist({ tenantRef, limit: 20 }));
+  } catch {
+    // Left to maintenance.
+  }
+}
+
 function webhookOutput(endpoint: SlotlockWebhookEndpoint) {
   return {
     id: endpoint.id,
@@ -1148,6 +1183,7 @@ function bookingRulesOutput(rules: SlotlockBookingRules | undefined) {
     ...(rules.slotStepMinutes !== undefined ? { slot_step_minutes: rules.slotStepMinutes } : {}),
     ...(rules.turnaroundMinutes !== undefined ? { turnaround_minutes: rules.turnaroundMinutes } : {}),
     ...(rules.enforceHours !== undefined ? { enforce_hours: rules.enforceHours } : {}),
+    ...(rules.checkInMinutes !== undefined ? { check_in_minutes: rules.checkInMinutes } : {}),
   };
 }
 
@@ -1160,6 +1196,7 @@ function bookingRulesInput(value: unknown): SlotlockBookingRules | null {
   if (input.slot_step_minutes !== undefined) rules.slotStepMinutes = input.slot_step_minutes as number;
   if (input.turnaround_minutes !== undefined) rules.turnaroundMinutes = input.turnaround_minutes as number;
   if (input.enforce_hours !== undefined) rules.enforceHours = input.enforce_hours as boolean;
+  if (input.check_in_minutes !== undefined) rules.checkInMinutes = input.check_in_minutes as number;
   return rules;
 }
 
@@ -1567,9 +1604,11 @@ export function createSlotlockStoreApplicationBackend(
       const id = input.hold_id as string;
       // An id that is not one the store issues names no hold: there is nothing to release.
       if (!STORE_ID_PATTERN.test(id)) return { released: false };
-      return withTenant(store, context, async (tenant) => ({
+      const released = await withTenant(store, context, async (tenant) => ({
         released: (await tenant.releaseHold(id, { tenantRef: tenantOf(context) })).released,
       }));
+      if (released.released) await offerFreedTime(store, tenantOf(context));
+      return released;
     },
 
     async getReservation(context, input) {
@@ -1625,7 +1664,7 @@ export function createSlotlockStoreApplicationBackend(
     },
 
     async cancelReservation(context, input) {
-      return withTenant(store, context, async (tenant) => {
+      const cancelled = await withTenant(store, context, async (tenant) => {
         const result = await tenant.cancelExternalReservation({
           tenantRef: tenantOf(context),
           externalRef: input.reservation_ref as string,
@@ -1634,6 +1673,58 @@ export function createSlotlockStoreApplicationBackend(
         if (!result.ok) throw applicationRefusal(result.code);
         return { cancelled: result.cancelled, revision: result.revision };
       }, WRITE);
+      if (cancelled.cancelled) await offerFreedTime(store, tenantOf(context));
+      return cancelled;
+    },
+
+    async checkInReservation(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const result = await tenant.checkInReservation({
+          tenantRef: tenantOf(context),
+          externalRef: input.reservation_ref as string,
+        });
+        if (!result.ok) throw applicationRefusal(result.code);
+        return { reference: result.reference, checked_in_at: result.checkedInAt.toISOString() };
+      });
+    },
+
+    async joinWaitlist(context, input) {
+      const ttl = input.offer_ttl_seconds as number | undefined;
+      return withTenant(store, context, async (tenant) => {
+        const result = await tenant.joinWaitlist({
+          tenantRef: tenantOf(context),
+          ...(input.resource_id !== undefined ? { resourceId: input.resource_id as string } : {}),
+          ...(input.pool !== undefined ? { pool: input.pool as string } : {}),
+          start: new Date(input.start as string),
+          end: new Date(input.end as string),
+          holderRef: input.holder_ref as string,
+          ...(ttl !== undefined ? { offerTtlMs: ttl * 1000 } : {}),
+        });
+        if (!result.ok) throw applicationRefusal(result.code);
+        return { entry: waitlistOutput(result.entry) };
+      });
+    },
+
+    async listWaitlist(context, input) {
+      return withTenant(store, context, async (tenant) => ({
+        entries: (
+          await tenant.listWaitlist({
+            tenantRef: tenantOf(context),
+            limit: input.limit as number,
+            ...(input.resource_id !== undefined ? { resourceId: input.resource_id as string } : {}),
+            ...(input.pool !== undefined ? { pool: input.pool as string } : {}),
+            ...(input.holder_ref !== undefined ? { holderRef: input.holder_ref as string } : {}),
+          })
+        ).map(waitlistOutput),
+      }));
+    },
+
+    async leaveWaitlist(context, input) {
+      const left = await withTenant(store, context, async (tenant) => ({
+        left: await tenant.leaveWaitlist({ tenantRef: tenantOf(context), id: input.entry_id as string }),
+      }));
+      if (left.left) await offerFreedTime(store, tenantOf(context));
+      return left;
     },
 
     async getCoverage(context, input) {
@@ -1734,7 +1825,7 @@ export function createSlotlockStoreApplicationBackend(
       ) {
         throw new SlotlockAgentOperationError('event_not_found', 404);
       }
-      return withTenant(store, context, async (tenant) => {
+      const cancelled = await withTenant(store, context, async (tenant) => {
         const result = await tenant.cancelCalendarEventById({
           tenantRef: tenantOf(context),
           eventId: id,
@@ -1750,6 +1841,8 @@ export function createSlotlockStoreApplicationBackend(
           replayed: result.idempotent,
         };
       }, WRITE);
+      if (!cancelled.replayed) await offerFreedTime(store, tenantOf(context));
+      return cancelled;
     },
 
     async getTenant(context) {
@@ -1837,11 +1930,17 @@ export function createSlotlockStoreApplicationBackend(
       assertActive(context);
       try {
         // A caller goes round again while `capped`; when to do so at once is the scheduler's.
-        const { rollPending: _, zoneShifts, staleSources, ...result } = await maintainSlotlockTenant(store, tenantOf(context), {
+        const { rollPending: _, zoneShifts, staleSources, noShows, waitlistOffers, ...result } = await maintainSlotlockTenant(store, tenantOf(context), {
           batches,
           signal: context.signal,
         });
-        return { ...result, zone_shifts: zoneShifts, stale_sources: staleSources };
+        return {
+          ...result,
+          zone_shifts: zoneShifts,
+          stale_sources: staleSources,
+          no_shows: noShows,
+          waitlist_offers: waitlistOffers,
+        };
       } catch (error) {
         if (context.signal.aborted) throw new SlotlockAgentOperationError('request_aborted', 503);
         throw error;

@@ -130,6 +130,10 @@ const backend = {
   exportResourceAvailability: vi.fn(),
   importResourceAvailability: vi.fn(),
   exportTenantEvent: vi.fn(),
+  checkInReservation: vi.fn(),
+  joinWaitlist: vi.fn(),
+  listWaitlist: vi.fn(),
+  leaveWaitlist: vi.fn(),
 } satisfies Record<keyof SlotlockApplicationBackend, ReturnType<typeof vi.fn>>;
 const authorizeApplication = vi.fn();
 const consumeRateLimit = vi.fn();
@@ -241,6 +245,21 @@ const WEBHOOK = {
   disabled_reason: null,
 };
 
+const WAITLIST_ENTRY = {
+    id: '1b4e28ba-2fa1-41d2-883f-0016d3cca427',
+    resource_id: null,
+    pool: 'van',
+    start: '2027-03-29T09:00:00.000Z',
+    end: '2027-03-29T17:00:00.000Z',
+    holder_ref: 'customer-42',
+    offer_ttl_seconds: 900,
+    status: 'waiting',
+    hold_id: null,
+    offered_resource_id: null,
+    offered_at: null,
+    created_at: '2027-03-01T09:00:00.000Z',
+  };
+
 const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>> = {
   createResource: { resource: RESOURCE },
   getResource: { resource: RESOURCE },
@@ -252,6 +271,10 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   setTenantAvailability: { resources_updated: 3 },
   exportResourceAvailability: { icalendar: 'BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n' },
   importResourceAvailability: { resource: RESOURCE },
+  checkInReservation: { reference: 'BK-42', checked_in_at: '2027-03-29T09:05:00.000Z' },
+  joinWaitlist: { entry: WAITLIST_ENTRY },
+  listWaitlist: { entries: [WAITLIST_ENTRY] },
+  leaveWaitlist: { left: true },
   exportTenantEvent: {
     event: {
       '@type': 'Event',
@@ -282,7 +305,7 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   cancelTenantEvent: { event_id: EVENT_ID, revision: 3, cancelled: true, replayed: false },
   getTenant: { tenant: { ref: 'tenant-a', suspended: false } },
   eraseTenant: { total: 12, rows: { resources: 2, reservations: 10 } },
-  runMaintenance: { extended: 0, conflicts: 0, refused: 0, pruned: 0, zone_shifts: 0, stale_sources: 0, capped: false },
+  runMaintenance: { extended: 0, conflicts: 0, refused: 0, pruned: 0, zone_shifts: 0, stale_sources: 0, no_shows: 0, waitlist_offers: 0, capped: false },
   listChanges: {
     changes: [
       {

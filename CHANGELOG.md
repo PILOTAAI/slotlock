@@ -7,6 +7,17 @@ versioning.
 
 ### Added
 
+- Waitlists: `POST /v1/waitlist` (`slotlock_join_waitlist`, `joinWaitlist`) waits for a window on a
+  resource or in a pool; `GET /v1/waitlist` and `DELETE /v1/waitlist/{entry_id}` list and leave it.
+  Freed time is offered in the order entries joined, as a hold for the waiter (`waitlist.offered` on
+  the feed): at once after a cancel or release through the API, and by maintenance otherwise, which
+  also expires entries whose window started (`waitlist.expired`).
+- Check-in and no-show release: the booking rule `checkInMinutes` (`check_in_minutes`) releases a
+  booking nobody claimed that long after its start (`reservation.no_show`), for bookings made once
+  the rule is set; `POST /v1/reservations/{reservation_ref}/check-in` (`slotlock_check_in_reservation`,
+  `checkInReservation`) claims one from an hour before its start (`reservation.checked_in`); a
+  move to another start clears it, and a walk-in's window runs from when it was booked. Maintenance results gain `noShows`
+  and `waitlistOffers` (`no_shows`, `waitlist_offers`). Run `slotlock migrate`.
 - Calendar interchange: `GET`/`PUT /v1/resources/{resource_id}/availability/ical`
   (`slotlock_export_resource_availability`, `slotlock_import_resource_availability`) write and read
   a resource's weekly bookable hours as an iCalendar VAVAILABILITY (RFC 7953); an import must be in
