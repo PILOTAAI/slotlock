@@ -1088,7 +1088,11 @@ not commit. A change carries ids, times and states, never titles, descriptions o
 - Changes go to each webhook in order, one at a time, until one fails; that one is retried after
   5 seconds, 5 minutes, 30 minutes, 2, 5, then every 10 hours. After a day of failures, or a `410`,
   the webhook is disabled and the feed records `webhook.disabled`; `POST /v1/webhooks/{id}/enable`
-  resumes it where it stopped. At most 10 webhooks per tenant.
+  resumes it where it stopped, or answers `409 changes_pruned` when what it missed is older than the
+  feed keeps (add it again and read what it missed from `/v1/changes`). The feed keeps every change
+  an enabled webhook has still to receive, however old. At most 10 webhooks per tenant.
+- Each request has 15 seconds in all, and a tenant's pass 30 seconds; tenants are delivered 8 at
+  a time, so a slow endpoint holds up only its own tenant.
 - `slotlock serve` delivers (`SLOTLOCK_WEBHOOKS`): never to an address on a private network, which
   it checks when it connects, and following no redirect. `private` allows those, for testing.
 - In the library: `listChanges`, `createWebhookEndpoint` and the rest are store methods, and

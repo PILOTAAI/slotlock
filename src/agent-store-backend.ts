@@ -1520,6 +1520,7 @@ export function createSlotlockStoreApplicationBackend(
           id: input.webhook_id as string,
         });
         if (!enabled) throw new SlotlockAgentOperationError('webhook_not_found', 404);
+        if ('code' in enabled) throw new SlotlockAgentOperationError(enabled.code, 409);
         return { webhook: webhookOutput(enabled) };
       }, WRITE);
     },

@@ -267,7 +267,8 @@ export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.tenant_suspended(text)',
   'slotlock.erase_tenant(text)',
   'slotlock.register_webhook_tenant(text)',
-  'slotlock.webhook_tenants()',
+  'slotlock.webhook_tenants(text)',
+  'slotlock.unregister_webhook_tenant(text)',
 ] as const);
 
 /**
@@ -946,16 +947,32 @@ AS $slotlock_register_webhook_tenant$
 $slotlock_register_webhook_tenant$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[2]} FROM PUBLIC;
 
-CREATE OR REPLACE FUNCTION slotlock.webhook_tenants()
+-- A page of 1,000 tenant names after \`after\` (NULL: from the start); a caller pages to the end.
+DROP FUNCTION IF EXISTS slotlock.webhook_tenants();
+CREATE OR REPLACE FUNCTION slotlock.webhook_tenants(after text)
 RETURNS SETOF text
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_webhook_tenants$
-  SELECT tenant_ref FROM slotlock.webhook_tenants ORDER BY tenant_ref LIMIT 10000;
+  SELECT tenant_ref FROM slotlock.webhook_tenants
+   WHERE after IS NULL OR tenant_ref > after
+   ORDER BY tenant_ref LIMIT 1000;
 $slotlock_webhook_tenants$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[3]} FROM PUBLIC;
+
+-- Called when a tenant's last endpoint is deleted, so the list holds only tenants with one.
+CREATE OR REPLACE FUNCTION slotlock.unregister_webhook_tenant(requested_tenant_ref text)
+RETURNS void
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_unregister_webhook_tenant$
+  DELETE FROM slotlock.webhook_tenants WHERE tenant_ref = requested_tenant_ref;
+$slotlock_unregister_webhook_tenant$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[4]} FROM PUBLIC;
 `;
 
 // A constraint an upgrade added NOT VALID (no table scan under its ACCESS EXCLUSIVE lock) is checked
@@ -1035,6 +1052,9 @@ CREATE TABLE IF NOT EXISTS slotlock.webhook_endpoints (
   event_types text[],
   cursor_txid xid8 NOT NULL,
   cursor_id bigint NOT NULL DEFAULT 0,
+  -- Set when maintenance pruned a change this (disabled) endpoint had not received: enabling it
+  -- again is refused rather than skipping that change unseen.
+  changes_pruned boolean NOT NULL DEFAULT false,
   attempts integer NOT NULL DEFAULT 0,
   next_attempt_at timestamptz,
   failing_since timestamptz,
@@ -1057,6 +1077,7 @@ CREATE TABLE IF NOT EXISTS slotlock.webhook_endpoints (
     last_error IS NULL OR char_length(last_error) <= 500
   )
 );
+ALTER TABLE slotlock.webhook_endpoints ADD COLUMN IF NOT EXISTS changes_pruned boolean NOT NULL DEFAULT false;
 CREATE INDEX IF NOT EXISTS slotlock_webhook_endpoints_tenant_idx
   ON slotlock.webhook_endpoints (tenant_ref, created_at);
 
@@ -1079,7 +1100,14 @@ BEGIN
     SELECT resource.tenant_ref INTO owner FROM slotlock.resources resource
      WHERE resource.id = changed.resource_id;
   END IF;
-  IF owner IS NULL OR owner = current_setting('slotlock.erasing', true) THEN RETURN NULL; END IF;
+  IF owner IS NULL THEN RETURN NULL; END IF;
+  -- Erasure (erase_tenant, running as the schema's owner) is not reported. The marker is an ordinary
+  -- setting, so it counts only when the owner set it: the serving role cannot hide its own writes.
+  IF owner = current_setting('slotlock.erasing', true)
+     AND current_user = (SELECT pg_catalog.pg_get_userbyid(nspowner) FROM pg_catalog.pg_namespace
+                          WHERE nspname = 'slotlock') THEN
+    RETURN NULL;
+  END IF;
   IF TG_OP = 'INSERT' THEN
     kind := CASE WHEN NEW.status = 'held' THEN 'hold.created' ELSE 'reservation.created' END;
   ELSIF TG_OP = 'UPDATE' THEN
@@ -1128,7 +1156,13 @@ DECLARE
   kind text;
 BEGIN
   changed := CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
-  IF changed.tenant_ref = current_setting('slotlock.erasing', true) THEN RETURN NULL; END IF;
+  -- Erasure (erase_tenant, running as the schema's owner) is not reported. The marker is an ordinary
+  -- setting, so it counts only when the owner set it: the serving role cannot hide its own writes.
+  IF changed.tenant_ref = current_setting('slotlock.erasing', true)
+     AND current_user = (SELECT pg_catalog.pg_get_userbyid(nspowner) FROM pg_catalog.pg_namespace
+                          WHERE nspname = 'slotlock') THEN
+    RETURN NULL;
+  END IF;
   IF TG_OP = 'INSERT' THEN
     kind := 'event.created';
   ELSIF TG_OP = 'UPDATE' THEN

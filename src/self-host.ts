@@ -786,10 +786,15 @@ export async function startSlotlockServer(
       const send = createSlotlockWebhookSender({ allowPrivateNetworks: config.webhooks === 'private' });
       webhooks = startSlotlockWebhookDelivery({
         // The tenants with a webhook, from the database: a restarted server finds them all.
-        tenants: async () =>
-          (await sql<{ tenant: string }[]>`SELECT slotlock.webhook_tenants() AS tenant`).map(
-            ({ tenant }) => tenant,
-          ),
+        tenants: async () => {
+          const tenants: string[] = [];
+          for (;;) {
+            const page = await sql<{ tenant: string }[]>`
+              SELECT slotlock.webhook_tenants(${tenants.at(-1) ?? null}::text) AS tenant`;
+            tenants.push(...page.map(({ tenant }) => tenant));
+            if (page.length < 1_000) return tenants;
+          }
+        },
         deliver: (tenantRef) =>
           deliverSlotlockWebhooks({
             tenantRef,

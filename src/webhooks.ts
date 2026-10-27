@@ -5,8 +5,8 @@
 // a worker that stops mid-batch loses nothing: the next one sends the rest, with the same ids.
 import { createHmac } from 'node:crypto';
 import { lookup as dnsLookup } from 'node:dns';
-import { request as httpRequest } from 'node:http';
-import { request as httpsRequest } from 'node:https';
+import { Agent as HttpAgent, request as httpRequest } from 'node:http';
+import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
 import { BlockList, isIP } from 'node:net';
 import type { SlotlockChange, SlotlockEventFeed } from './event-feed.js';
 import { ignoreRejection } from './hooks.js';
@@ -90,12 +90,17 @@ for (const [address, prefix] of [
 }
 const PRIVATE_IPV6 = new BlockList();
 for (const [address, prefix] of [
-  ['::', 128],
-  ['::1', 128],
-  ['64:ff9b::', 96],
-  ['fc00::', 7],
-  ['fe80::', 10],
-  ['ff00::', 8],
+  ['::', 96], // unspecified, loopback and IPv4-compatible
+  ['::ffff:0:0:0', 96], // IPv4-translated
+  ['64:ff9b::', 96], // NAT64
+  ['64:ff9b:1::', 48], // local-use NAT64
+  ['100::', 64], // discard
+  ['2001::', 32], // Teredo
+  ['2002::', 16], // 6to4
+  ['fc00::', 7], // unique local
+  ['fe80::', 10], // link-local
+  ['fec0::', 10], // site-local
+  ['ff00::', 8], // multicast
 ] as const) {
   PRIVATE_IPV6.addSubnet(address, prefix, 'ipv6');
 }
@@ -165,6 +170,9 @@ export function createSlotlockWebhookSender(
         {
           method: 'POST',
           headers: { ...request.headers, 'Content-Length': String(Buffer.byteLength(request.body)) },
+          // An agent of its own, never the global one: with NODE_USE_ENV_PROXY a proxy from the
+          // environment would connect for us, and the address check below would never run.
+          agent: url.protocol === 'https:' ? new HttpsAgent({ lookup }) : new HttpAgent({ lookup } as never),
           lookup,
           timeout: timeoutMs,
         },
@@ -185,7 +193,14 @@ export function createSlotlockWebhookSender(
           response.on('close', finish);
         },
       );
-      outgoing.on('timeout', () => outgoing.destroy(Object.assign(new Error('webhook request timed out'), { code: 'webhook_timeout' })));
+      const timedOut = () =>
+        outgoing.destroy(Object.assign(new Error('webhook request timed out'), { code: 'webhook_timeout' }));
+      outgoing.on('timeout', timedOut);
+      // `timeout` is idleness only: an answer dripped a byte at a time would hold the request
+      // open for hours. The whole exchange has this long.
+      const deadline = setTimeout(timedOut, timeoutMs);
+      deadline.unref?.();
+      outgoing.on('close', () => clearTimeout(deadline));
       outgoing.on('error', reject);
       outgoing.end(request.body);
     });
@@ -209,6 +224,8 @@ export async function deliverSlotlockWebhooks(params: {
   send: SlotlockWebhookSender;
   batch?: number;
   leaseMs?: number;
+  /** After this long (default 30,000 ms) no further change is sent this pass; the rest wait. */
+  budgetMs?: number;
   now?: () => number;
 }): Promise<SlotlockWebhookPassResult> {
   const now = params.now ?? Date.now;
@@ -219,12 +236,15 @@ export async function deliverSlotlockWebhooks(params: {
   });
   let delivered = 0;
   let failed = 0;
+  const stopAt = now() + (params.budgetMs ?? 30_000);
   await Promise.all(
     claims.map(async (claim) => {
       let last: string | undefined;
       let failure: { status: number | null; error: string; retryInMs: number; gone?: boolean } | undefined;
-      let attempts = 0;
+      // The failures before this pass set the delay: the schedule grows across passes.
+      let attempts = claim.endpoint.attempts;
       for (const change of claim.changes) {
+        if (now() >= stopAt) break;
         const body = JSON.stringify(slotlockCloudEvent(change));
         const timestamp = Math.floor(now() / 1_000);
         try {
@@ -249,7 +269,7 @@ export async function deliverSlotlockWebhooks(params: {
             delivered++;
             continue;
           }
-          attempts++;
+          attempts = last ? 1 : attempts + 1;
           failure = {
             status: response.status,
             error: `HTTP ${response.status}`,
@@ -257,7 +277,7 @@ export async function deliverSlotlockWebhooks(params: {
             ...(response.status === 410 ? { gone: true } : {}),
           };
         } catch (error) {
-          attempts++;
+          attempts = last ? 1 : attempts + 1;
           const code = (error as { code?: unknown }).code;
           failure = {
             status: null,
@@ -293,6 +313,8 @@ export interface SlotlockWebhookScheduler {
  */
 export function startSlotlockWebhookDelivery(options: {
   tenants: () => Promise<readonly string[]>;
+  /** Tenants delivered at once (1-64, default 8), so one slow tenant's endpoints hold up none other. */
+  concurrency?: number;
   deliver: (tenantRef: string) => Promise<SlotlockWebhookPassResult>;
   intervalMs?: number;
   onPass?: (tenantRef: string, result: SlotlockWebhookPassResult) => void;
@@ -305,17 +327,23 @@ export function startSlotlockWebhookDelivery(options: {
   const touched = new Set<string>();
   let closed = false;
   let running: Promise<void> | null = null;
+  const concurrency = options.concurrency ?? 8;
+  if (!(Number.isSafeInteger(concurrency) && concurrency >= 1 && concurrency <= 64)) {
+    throw new RangeError('Slotlock webhook concurrency must be 1-64');
+  }
   const pass = async () => {
-    const listed = new Set([...(await options.tenants()), ...touched]);
-    for (const tenantRef of listed) {
-      if (closed) return;
-      try {
-        const result = await options.deliver(tenantRef);
-        if (result.delivered + result.failed > 0) options.onPass?.(tenantRef, result);
-      } catch (error) {
-        options.onError?.(error);
+    const queue = [...new Set([...(await options.tenants()), ...touched])];
+    const worker = async () => {
+      for (let tenantRef = queue.shift(); tenantRef !== undefined && !closed; tenantRef = queue.shift()) {
+        try {
+          const result = await options.deliver(tenantRef);
+          if (result.delivered + result.failed > 0) options.onPass?.(tenantRef, result);
+        } catch (error) {
+          options.onError?.(error);
+        }
       }
-    }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, worker));
   };
   const timer = setInterval(() => {
     // A pass still running skips this tick rather than queue another behind it.

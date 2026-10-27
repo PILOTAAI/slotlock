@@ -799,7 +799,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
     {
       name: 'slotlock_enable_webhook',
       title: 'Enable a webhook',
-      description: 'Send to a disabled webhook again, from the first change it did not accept. 404 webhook_not_found when the tenant has no such webhook.',
+      description: 'Send to a disabled webhook again, from the first change it did not accept. 404 webhook_not_found when the tenant has no such webhook; 409 changes_pruned when what it missed is older than the 7 days the feed keeps, since it would skip those unseen: delete it, add it again, and read what it missed from slotlock_list_changes.',
       method: 'POST',
       path: '/v1/webhooks/{webhook_id}/enable',
       input: z.object({ webhook_id: z.string().uuid() }).strict(),

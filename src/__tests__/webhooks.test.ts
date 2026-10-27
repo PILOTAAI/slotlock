@@ -1,9 +1,12 @@
 // Webhook signing, retry schedule, address checks and the delivery pass, without a database. The
 // signature is checked with Standard Webhooks' reference library, not only against itself.
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { Webhook } from 'standardwebhooks';
 import { describe, expect, it, vi } from 'vitest';
 import type { SlotlockChange } from '../event-feed.js';
 import {
+  createSlotlockWebhookSender,
   deliverSlotlockWebhooks,
   isPrivateAddress,
   signSlotlockWebhook,
@@ -57,6 +60,9 @@ describe('private addresses', () => {
     for (const address of [
       '127.0.0.1', '10.1.2.3', '172.16.0.1', '192.168.1.1', '169.254.169.254', '100.64.0.1', '0.0.0.0',
       '::1', '::', 'fe80::1', 'fd00::1', '::ffff:127.0.0.1', '::ffff:a9fe:a9fe', '224.0.0.1', 'not-an-ip',
+      // IPv4 inside IPv6 by every other route a host may have set up.
+      '::7f00:1', '::ffff:0:7f00:1', '2002:7f00:1::', '2002:a9fe:a9fe::', '64:ff9b:1::a9fe:a9fe',
+      '2001:0:4136:e378::1', 'fec0::1', '100::1',
     ]) {
       expect(isPrivateAddress(address), address).toBe(true);
     }
@@ -71,8 +77,8 @@ describe('a delivery pass', () => {
     const settle = vi.fn(async () => {});
     const feed = {
       claimWebhookDeliveries: vi.fn(async () => [
-        { endpoint: { id: 'e1', url: 'https://a.example/h', secret: SECRET }, leaseToken: 't1', changes: [change(1), change(2), change(3)] },
-        { endpoint: { id: 'e2', url: 'https://b.example/h', secret: SECRET }, leaseToken: 't2', changes: [change(4)] },
+        { endpoint: { id: 'e1', url: 'https://a.example/h', secret: SECRET, attempts: 0 }, leaseToken: 't1', changes: [change(1), change(2), change(3)] },
+        { endpoint: { id: 'e2', url: 'https://b.example/h', secret: SECRET, attempts: 0 }, leaseToken: 't2', changes: [change(4)] },
       ]),
       settleWebhookDelivery: settle,
     };
@@ -96,5 +102,60 @@ describe('a delivery pass', () => {
     expect(settle).toHaveBeenCalledWith(
       expect.objectContaining({ endpointId: 'e2', failure: expect.objectContaining({ status: 410, gone: true }) }),
     );
+  });
+});
+
+describe('a delivery that will not finish', () => {
+  it('stops at the deadline however slowly the answer drips', async () => {
+    const server = createServer((_request, response) => {
+      response.writeHead(200);
+      const drip = setInterval(() => response.write('.'), 50);
+      response.on('close', () => clearInterval(drip));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    const started = Date.now();
+    try {
+      await expect(
+        createSlotlockWebhookSender({ allowPrivateNetworks: true, timeoutMs: 300 })({
+          url: `http://127.0.0.1:${port}/hook`,
+          headers: {},
+          body: '{}',
+        }),
+      ).rejects.toMatchObject({ code: 'webhook_timeout' });
+      expect(Date.now() - started).toBeLessThan(2_000);
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('backs off from the failures before this pass, and leaves what is past the budget', async () => {
+    const settle = vi.fn(async () => {});
+    let clock = 1_000_000;
+    await deliverSlotlockWebhooks({
+      feed: {
+        claimWebhookDeliveries: async () => [
+          { endpoint: { id: 'e1', url: 'https://a.example/h', secret: SECRET, attempts: 3 }, leaseToken: 't', changes: [change(1)] },
+          { endpoint: { id: 'e2', url: 'https://b.example/h', secret: SECRET, attempts: 0 }, leaseToken: 'u', changes: [change(2), change(3)] },
+        ],
+        settleWebhookDelivery: settle,
+      },
+      tenantRef: 'tenant-a',
+      budgetMs: 1_000,
+      now: () => clock,
+      send: async (request) => {
+        clock += 600;
+        return { status: request.url.startsWith('https://a') ? 503 : 204 };
+      },
+    });
+    // The fourth failure in a row waits two hours (±10%), not five seconds.
+    const first = (settle.mock.calls as unknown as [{ endpointId: string; failure?: { retryInMs: number } }][])
+      .map(([call]) => call)
+      .find((call) => call.endpointId === 'e1');
+    expect(first?.failure?.retryInMs).toBeGreaterThanOrEqual(6_480_000);
+    // Past the budget the second endpoint's last change waits for the next pass.
+    expect(settle).toHaveBeenCalledWith(expect.objectContaining({ endpointId: 'e2', delivered: 'p2' }));
+    expect(settle).not.toHaveBeenCalledWith(expect.objectContaining({ endpointId: 'e2', delivered: 'p3' }));
   });
 });

@@ -66,7 +66,8 @@ export interface SlotlockWebhookEndpoint {
 }
 
 export interface SlotlockWebhookClaim {
-  endpoint: { id: string; url: string; secret: string };
+  /** `attempts`: deliveries that have failed in a row so far, which sets the next retry's delay. */
+  endpoint: { id: string; url: string; secret: string; attempts: number };
   /** Settle the claim with it; another worker's claim on the same endpoint has another. */
   leaseToken: string;
   /** In order, at most `batch`. */
@@ -107,11 +108,15 @@ export interface SlotlockEventFeed {
   }): Promise<CreateWebhookEndpointResult>;
   listWebhookEndpoints(params: { tenantRef: string }): Promise<SlotlockWebhookEndpoint[]>;
   deleteWebhookEndpoint(params: { tenantRef: string; id: string }): Promise<{ deleted: boolean }>;
-  /** Deliver to a disabled endpoint again, from where it stopped; null when there is none. */
+  /**
+   * Deliver to a disabled endpoint again, from where it stopped; null when there is none. When
+   * the changes it missed are older than the feed keeps, `changes_pruned`: it would skip them
+   * unseen, so delete it, add it again, and read what it missed from listChanges.
+   */
   enableWebhookEndpoint(params: {
     tenantRef: string;
     id: string;
-  }): Promise<SlotlockWebhookEndpoint | null>;
+  }): Promise<SlotlockWebhookEndpoint | null | { code: 'changes_pruned' }>;
   /**
    * Lease the tenant's endpoints that have changes due, each with its next `batch` (1-100)
    * changes, for `leaseMs` (1,000-300,000). A lease that runs out is claimed again by any worker,
@@ -262,10 +267,12 @@ export function slotlockEventFeedMethods(sql: SlotlockSql): SlotlockEventFeed {
          LIMIT ${limit}`;
       const changes = rows.map(toChange);
       const last = changes.at(-1);
+      // With nothing new the position stays, dated now: a reader that is up to date stays current.
+      const here = after ?? { txid: '0', id: '0', at: 0 };
       return {
         ok: true,
         changes,
-        next: last?.position ?? params.after ?? encodePosition({ txid: '0', id: '0', at: Date.now() }),
+        next: last?.position ?? encodePosition({ ...here, at: Date.now() }),
       };
     },
 
@@ -315,16 +322,29 @@ export function slotlockEventFeedMethods(sql: SlotlockSql): SlotlockEventFeed {
     async deleteWebhookEndpoint(params) {
       if (!isIdentity(params.tenantRef)) throw identityError();
       if (!UUID.test(params.id)) return { deleted: false };
-      const rows = await sql`
-        DELETE FROM slotlock.webhook_endpoints
-         WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
-         RETURNING id`;
-      return { deleted: rows.length > 0 };
+      return inTransaction(sql, async (tx) => {
+        const rows = await tx`
+          DELETE FROM slotlock.webhook_endpoints
+           WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
+           RETURNING id`;
+        const [left] = await tx<{ count: number }[]>`
+          SELECT count(*)::int AS count FROM slotlock.webhook_endpoints
+           WHERE tenant_ref = ${params.tenantRef}`;
+        // The tenant's last endpoint takes it off the list servers deliver for.
+        if ((left?.count ?? 0) === 0) {
+          await tx`SELECT slotlock.unregister_webhook_tenant(${params.tenantRef}::text)`;
+        }
+        return { deleted: rows.length > 0 };
+      });
     },
 
     async enableWebhookEndpoint(params) {
       if (!isIdentity(params.tenantRef)) throw identityError();
       if (!UUID.test(params.id)) return null;
+      const [behind] = await sql<{ id: string }[]>`
+        SELECT id FROM slotlock.webhook_endpoints
+         WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id} AND changes_pruned`;
+      if (behind) return { code: 'changes_pruned' };
       const [row] = await sql<EndpointRow[]>`
         UPDATE slotlock.webhook_endpoints
            SET disabled_at = NULL, disabled_reason = NULL, attempts = 0, failing_since = NULL,
@@ -343,7 +363,7 @@ export function slotlockEventFeedMethods(sql: SlotlockSql): SlotlockEventFeed {
         throw new RangeError('Slotlock webhook batch must be 1-100 changes');
       }
       const endpoints = await sql<
-        { id: string; url: string; secret: string; lease_token: string; event_types: string[] | null; cursor_txid: string; cursor_id: string }[]
+        { id: string; url: string; secret: string; attempts: number; lease_token: string; event_types: string[] | null; cursor_txid: string; cursor_id: string }[]
       >`
         UPDATE slotlock.webhook_endpoints endpoint
            SET lease_until = now() + make_interval(secs => ${params.leaseMs / 1_000}),
@@ -363,7 +383,7 @@ export function slotlockEventFeedMethods(sql: SlotlockSql): SlotlockEventFeed {
               )
             FOR UPDATE SKIP LOCKED
          )
-         RETURNING endpoint.id, endpoint.url, endpoint.secret, endpoint.lease_token::text,
+         RETURNING endpoint.id, endpoint.url, endpoint.secret, endpoint.attempts, endpoint.lease_token::text,
                    endpoint.event_types, endpoint.cursor_txid::text, endpoint.cursor_id::text`;
       const claims: SlotlockWebhookClaim[] = [];
       for (const endpoint of endpoints) {
@@ -377,7 +397,7 @@ export function slotlockEventFeedMethods(sql: SlotlockSql): SlotlockEventFeed {
            ORDER BY txid, id
            LIMIT ${params.batch}`;
         claims.push({
-          endpoint: { id: endpoint.id, url: endpoint.url, secret: endpoint.secret },
+          endpoint: { id: endpoint.id, url: endpoint.url, secret: endpoint.secret, attempts: endpoint.attempts },
           leaseToken: endpoint.lease_token,
           changes: rows.map(toChange),
         });
@@ -393,13 +413,18 @@ export function slotlockEventFeedMethods(sql: SlotlockSql): SlotlockEventFeed {
       }
       const failure = params.failure;
       await inTransaction(sql, async (tx) => {
-        const [settled] = await tx<{ disabled: boolean; url: string }[]>`
+        const [settled] = await tx<{ disabled: boolean }[]>`
           UPDATE slotlock.webhook_endpoints
              SET cursor_txid = COALESCE(${delivered?.txid ?? null}::xid8, cursor_txid),
                  cursor_id = COALESCE(${delivered?.id ?? null}::bigint, cursor_id),
-                 attempts = CASE WHEN ${failure ? 1 : 0}::int = 1 THEN attempts + 1 ELSE 0 END,
-                 failing_since = CASE WHEN ${failure ? 1 : 0}::int = 1
-                                      THEN COALESCE(failing_since, now()) END,
+                 -- Progress before a failure starts the count again: an endpoint that keeps
+                 -- advancing is not failing, however often one change needs a retry.
+                 attempts = CASE WHEN ${failure ? 1 : 0}::int = 0 THEN 0
+                                 WHEN ${delivered ? 1 : 0}::int = 1 THEN 1
+                                 ELSE attempts + 1 END,
+                 failing_since = CASE WHEN ${failure ? 1 : 0}::int = 0 THEN NULL
+                                      WHEN ${delivered ? 1 : 0}::int = 1 THEN now()
+                                      ELSE COALESCE(failing_since, now()) END,
                  next_attempt_at = CASE WHEN ${failure ? 1 : 0}::int = 1
                                         THEN now() + make_interval(secs => ${(failure?.retryInMs ?? 0) / 1_000})
                                    END,
@@ -422,15 +447,16 @@ export function slotlockEventFeedMethods(sql: SlotlockSql): SlotlockEventFeed {
                  lease_token = NULL
            WHERE tenant_ref = ${params.tenantRef} AND id = ${params.endpointId}
              AND lease_token = ${params.leaseToken}::uuid
-           RETURNING disabled_at IS NOT NULL AS disabled, url`;
+           RETURNING disabled_at IS NOT NULL AS disabled`;
         if (settled?.disabled) {
           // The tenant hears of it on the feed, which every reader and other endpoint sees.
           await tx`
             INSERT INTO slotlock.outbox (tenant_ref, type, subject, data)
             VALUES (${params.tenantRef}, 'webhook.disabled', ${params.endpointId},
                     ${tx.json({
+                      // The id alone: the feed goes to the tenant's other endpoints, and a URL can
+                      // carry a token.
                       id: params.endpointId,
-                      url: settled.url,
                       reason: failure?.gone === true ? 'gone' : 'failing',
                       last_status: failure?.status ?? null,
                     })})`;
@@ -441,12 +467,26 @@ export function slotlockEventFeedMethods(sql: SlotlockSql): SlotlockEventFeed {
     async pruneChanges(params) {
       if (!isIdentity(params.tenantRef)) throw identityError();
       const rows = await sql<{ deleted: number }[]>`
-        WITH doomed AS (
+        WITH doomed AS MATERIALIZED (
           SELECT id FROM slotlock.outbox
            WHERE tenant_ref = ${params.tenantRef}
              AND occurred_at < now() - make_interval(days => ${SLOTLOCK_CHANGE_RETENTION_DAYS})
+             -- Nothing an enabled webhook has still to receive, however old.
+             AND NOT EXISTS (
+               SELECT 1 FROM slotlock.webhook_endpoints endpoint
+                WHERE endpoint.tenant_ref = outbox.tenant_ref AND endpoint.disabled_at IS NULL
+                  AND (outbox.txid, outbox.id) > (endpoint.cursor_txid, endpoint.cursor_id)
+             )
            ORDER BY occurred_at
            LIMIT ${params.limit}
+        ), missed AS (
+          -- A disabled endpoint that had not received one of them has lost it.
+          UPDATE slotlock.webhook_endpoints endpoint SET changes_pruned = true
+           WHERE endpoint.tenant_ref = ${params.tenantRef} AND endpoint.disabled_at IS NOT NULL
+             AND NOT endpoint.changes_pruned
+             AND EXISTS (
+               SELECT 1 FROM doomed JOIN slotlock.outbox change ON change.id = doomed.id
+                WHERE (change.txid, change.id) > (endpoint.cursor_txid, endpoint.cursor_id))
         ), deleted AS (
           DELETE FROM slotlock.outbox change USING doomed WHERE change.id = doomed.id RETURNING 1
         )

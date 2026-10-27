@@ -217,6 +217,8 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
     expect(gone?.disabledAt).toBeInstanceOf(Date);
     const tail = await changes();
     expect(tail.changes.at(-1)).toMatchObject({ type: 'webhook.disabled', data: { reason: 'gone', last_status: 410 } });
+    // The id alone: the feed goes to the tenant's other endpoints, and a URL can carry a token.
+    expect(tail.changes.at(-1)?.data).not.toHaveProperty('url');
 
     // Enabled again, it carries on from where it stopped.
     answer = () => 200;
@@ -245,6 +247,34 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
     expect(await store.listChanges({ tenantRef, after: old })).toEqual({ ok: false, code: 'cursor_expired' });
   });
 
+  it('keeps what an enabled webhook has not received, and will not skip what one disabled missed', async () => {
+    const other = `feed-keep-${randomUUID()}`;
+    const resource = await store.createResource({ tenantRef: other, externalRef: 'v', timezone: 'UTC' });
+    const hook = await store.createWebhookEndpoint({ tenantRef: other, url: 'https://example.com/hook' });
+    if (!hook.ok) throw new Error(hook.code);
+    await store.createExternalReservation({
+      tenantRef: other, externalRef: 'K-1', resourceId: resource.id, start: at(60), end: at(61), bufferAfterMs: 0, revision: 1,
+    });
+    await sql`UPDATE slotlock.outbox SET occurred_at = now() - interval '30 days' WHERE tenant_ref = ${other}`;
+    // Past the retention, but the enabled webhook has not had it: it stays.
+    expect(await store.pruneChanges({ tenantRef: other, limit: 100 })).toBe(0);
+    // Disabled long ago, the change it missed is pruned, and enabling it would skip it unseen.
+    await sql`UPDATE slotlock.webhook_endpoints
+                 SET disabled_at = now() - interval '20 days'
+               WHERE tenant_ref = ${other}`;
+    expect(await store.pruneChanges({ tenantRef: other, limit: 100 })).toBeGreaterThan(0);
+    expect(await store.enableWebhookEndpoint({ tenantRef: other, id: hook.endpoint.id })).toEqual({
+      code: 'changes_pruned',
+    });
+    // Its last webhook gone, the tenant is off the list servers deliver for.
+    const listed = async () =>
+      (await sql<{ t: string }[]>`SELECT slotlock.webhook_tenants(${null}::text) AS t`).map(({ t }) => t);
+    expect(await listed()).toContain(other);
+    expect(await store.deleteWebhookEndpoint({ tenantRef: other, id: hook.endpoint.id })).toEqual({ deleted: true });
+    expect(await listed()).not.toContain(other);
+    await store.eraseTenant({ tenantRef: other });
+  });
+
   it('is erased with the tenant', async () => {
     const other = `feed-erase-${randomUUID()}`;
     const resource = await store.createResource({ tenantRef: other, externalRef: 'v', timezone: 'UTC' });
@@ -258,6 +288,6 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
     const left = await sql`SELECT 1 FROM slotlock.outbox WHERE tenant_ref = ${other}
                            UNION ALL SELECT 1 FROM slotlock.webhook_endpoints WHERE tenant_ref = ${other}`;
     expect(left).toHaveLength(0);
-    expect(await sql`SELECT slotlock.webhook_tenants() AS t`).not.toContainEqual({ t: other });
+    expect(await sql`SELECT slotlock.webhook_tenants(${null}::text) AS t`).not.toContainEqual({ t: other });
   });
 });

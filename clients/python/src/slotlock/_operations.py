@@ -1022,7 +1022,9 @@ class Operations(Transport):
         """Enable a webhook.
 
         Send to a disabled webhook again, from the first change it did not accept. 404
-        webhook_not_found when the tenant has no such webhook.
+        webhook_not_found when the tenant has no such webhook; 409 changes_pruned when what it
+        missed is older than the 7 days the feed keeps, since it would skip those unseen: delete
+        it, add it again, and read what it missed from slotlock_list_changes.
         """
         values: dict[str, Any] = {"webhook_id": webhook_id}
         return self.call("slotlock_enable_webhook", values)
