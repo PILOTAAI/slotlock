@@ -211,9 +211,10 @@ survive a transaction pooler. It does not show Hyperdrive's own behaviour.
 | --- | --- | --- |
 | 1a exclusive locks wait for each other | pass | pass: second acquired 1 ms after the first released, on another backend |
 | 1b shared locks are held together | pass | pass: together for 3,005 ms |
+| 1e exclusive waits for shared, and shared for exclusive (`withTenant` against suspension and erasure) | pass | pass: each acquired 1 ms after the other's release |
 | 1c a rollback gives its lock up | pass | pass: next request waited 1 ms |
 | 1d no advisory lock outlives its transaction | pass | pass: 0 held |
-| 2a each tenant sees only its own rows | pass | pass |
+| 2a each tenant sees only its own rows, read with no filter but RLS | pass | pass: each read only its own |
 | 2b nothing of a tenant reaches the next request | pass | pass: 20 bare requests as `slotlock_app` saw no setting and no rows |
 | 3a overlap refused as on a direct connection | pass | pass: `overlap` both ways |
 | 3b ten racing bookings, one wins | pass | pass: 1 booked, 9 `overlap` |
@@ -225,9 +226,11 @@ The control is why the RFC replaces maintenance's session lock with a lease: beh
 session lock stays with a server connection after its request ends, and the next client that
 connection serves inherits it.
 
-While building the harness, a first version of check 1d counted every advisory lock in the
-database, so the control's deliberate leak from an earlier run turned the next run red. The check
-now counts only its own run's lock keys.
+The checks can fail. With row-level security switched off on `slotlock.resources`, 2a fails
+(each tenant's unfiltered read returns both tenants' rows) and so does 2b. The store's own reads
+filter by tenant, so they alone would have passed. A first version of check 1d counted every
+advisory lock in the database, so the control's deliberate leak from an earlier run turned the next
+run red. The check now counts only its own run's lock keys.
 
 ## Delivery
 

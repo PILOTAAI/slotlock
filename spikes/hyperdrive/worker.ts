@@ -108,13 +108,22 @@ async function context(env: SpikeEnv, params: URLSearchParams): Promise<Response
              (SELECT count(*)::int FROM slotlock.resources) AS visible,
              current_user AS role`;
     let inside: (string | null)[] | null = null;
+    let unfiltered: { tenant: string | null; ref: string | null }[] | null = null;
     if (tenantRef) {
       const store = createSlotlockStore(sql);
       inside = await store.withTenant(tenantRef, async (tenant) =>
         (await tenant.listResources({ tenantRef })).map((resource) => resource.externalRef),
       );
+      // The store's own reads filter by tenant, so they pass with row-level security off. This
+      // read sets the tenant as withTenant does and filters nothing: only RLS keeps another
+      // tenant's rows out of it.
+      unfiltered = await sql.begin(async (tx) => {
+        await tx`SELECT set_config(${SLOTLOCK_TENANT_CONTEXT_SETTING}, ${tenantRef}, true)`;
+        return tx<{ tenant: string | null; ref: string | null }[]>`
+          SELECT tenant_ref AS tenant, external_ref AS ref FROM slotlock.resources ORDER BY ref`;
+      });
     }
-    return json({ ok: true, outside, inside });
+    return json({ ok: true, outside, inside, unfiltered });
   } catch (error) {
     return json({ ok: false, error: errorOf(error) }, 500);
   } finally {

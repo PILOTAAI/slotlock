@@ -7,6 +7,7 @@
 //   SPIKE_OWNER_URL      a direct connection as the schema's owner
 //   SPIKE_APP_URL        a direct connection as slotlock_app, the role Hyperdrive connects as
 //   SPIKE_STREAM_SECONDS how long check 4 keeps its stream open (default 600)
+//   SPIKE_DEPLOY=0       skip deploying the schema (to run against a database left as it is)
 import { randomUUID } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import postgres from 'postgres';
@@ -102,6 +103,24 @@ async function check1() {
     `held together for ${ms(s2.acquiredAt, s1.releasedAt)} ms`,
   );
 
+  // Shared against exclusive, as withTenant (shared) against suspension and erasure (exclusive):
+  // whichever asks second waits for the first transaction to end, in both orders.
+  const later = (ms, path, params) =>
+    new Promise((resolve) => setTimeout(resolve, ms)).then(() => call(path, params));
+  for (const [firstMode, secondMode] of [['shared', 'exclusive'], ['exclusive', 'shared']]) {
+    const key = `m-${firstMode}-${run}`;
+    const [held, waited] = await Promise.all([
+      call('/lock', { key, mode: firstMode, hold: 3000 }),
+      later(500, '/lock', { key, mode: secondMode, hold: 0 }),
+    ]);
+    raw[`mixed-${firstMode}`] = { held, waited };
+    record(
+      `1e ${secondMode} waits for ${firstMode}`,
+      held.ok && waited.ok && ms(waited.askedAt, held.releasedAt) > 0 && ms(held.releasedAt, waited.acquiredAt) >= 0,
+      `asked ${ms(held.acquiredAt, waited.askedAt)} ms into the ${firstMode} hold, acquired ${ms(held.releasedAt, waited.acquiredAt)} ms after its release`,
+    );
+  }
+
   const rolledBack = await call('/lock', { key: `r-${run}`, hold: 1000, fail: 1 });
   const after = await call('/lock', { key: `r-${run}` });
   raw.rollback = { rolledBack, after };
@@ -112,7 +131,7 @@ async function check1() {
   );
 
   await new Promise((resolve) => setTimeout(resolve, 1000));
-  const held = await advisoryLocksHeld([`x-${run}`, `s-${run}`, `r-${run}`]);
+  const held = await advisoryLocksHeld([`x-${run}`, `s-${run}`, `r-${run}`, `m-shared-${run}`, `m-exclusive-${run}`]);
   record('1d no advisory lock outlives its transaction', held === 0, `${held} advisory locks held`);
 
   // The control, reported rather than judged: a session lock (maintenance.ts today) taken and
@@ -135,10 +154,13 @@ async function check2() {
   const seenA = await call('/context', { tenant: a });
   const seenB = await call('/context', { tenant: b });
   raw.tenants = { ra, rb, seenA, seenB };
+  const refs = (seen) => JSON.stringify(seen.unfiltered?.map((row) => row.ref));
   record(
-    '2a each tenant sees only its own rows',
-    ra.ok && rb.ok && JSON.stringify(seenA.inside) === '["a-1"]' && JSON.stringify(seenB.inside) === '["b-1"]',
-    `${a} sees ${JSON.stringify(seenA.inside)}, ${b} sees ${JSON.stringify(seenB.inside)}`,
+    '2a each tenant sees only its own rows, with no filter but RLS',
+    ra.ok && rb.ok &&
+      JSON.stringify(seenA.inside) === '["a-1"]' && JSON.stringify(seenB.inside) === '["b-1"]' &&
+      refs(seenA) === '["a-1"]' && refs(seenB) === '["b-1"]',
+    `unfiltered: ${a} reads ${refs(seenA)}, ${b} reads ${refs(seenB)}; store: ${JSON.stringify(seenA.inside)}, ${JSON.stringify(seenB.inside)}`,
   );
 
   // Interleave tenant transactions with bare requests: a pooled connection that kept a tenant's
@@ -265,7 +287,7 @@ async function check5() {
   );
 }
 
-await deploy();
+if (process.env.SPIKE_DEPLOY !== '0') await deploy();
 await check1();
 const scope = await check2();
 await check3(scope);
