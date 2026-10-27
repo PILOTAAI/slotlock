@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, NamedTuple
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 _LOOPBACK = {"localhost", "127.0.0.1", "::1"}
 

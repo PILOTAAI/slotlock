@@ -3,7 +3,7 @@
   "name": "io.github.PILOTAAI/slotlock",
   "title": "Slotlock",
   "description": "Calendars for AI agents: free/busy, next free slot, and bookings PostgreSQL never double-books.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "websiteUrl": "https://slotlock.pylota.io",
   "repository": {
     "url": "https://github.com/PILOTAAI/slotlock",
@@ -12,7 +12,7 @@
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/pilotaai/slotlock:0.2.0",
+      "identifier": "ghcr.io/pilotaai/slotlock:0.3.0",
       "runtimeHint": "docker",
       "transport": {
         "type": "streamable-http",
