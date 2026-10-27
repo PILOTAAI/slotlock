@@ -384,6 +384,7 @@ describe('consumer-neutral Slotlock agent server', () => {
     expect(await health.json()).toEqual({
       status: 'ready',
       version: SLOTLOCK_AGENT_SERVER_VERSION,
+      tzdata: process.versions.tz,
       checks: ['database', 'worker'],
     });
     const card = await server.fetch(

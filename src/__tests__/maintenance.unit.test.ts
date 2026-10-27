@@ -73,6 +73,9 @@ function fakeStore() {
         async pruneChanges() {
           return 0;
         },
+        async followZoneRules() {
+          return { shifted: 0, moved: 0, conflicts: 0 };
+        },
         async pruneBookingRetention(params: Record<string, unknown>) {
           calls.push({ tenantRef, task: 'purge', params });
           return purges.get(tenantRef)?.shift() ?? DONE_PURGE;
@@ -137,6 +140,7 @@ function fakeSql(held = new Set<string>()) {
 }
 
 const result = (overrides: Partial<SlotlockMaintenanceResult> = {}): SlotlockMaintenanceResult => ({
+  zoneShifts: 0,
   extended: 0,
   conflicts: 0,
   refused: 0,

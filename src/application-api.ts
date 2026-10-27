@@ -833,6 +833,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           conflicts: z.number().int().min(0),
           refused: z.number().int().min(0),
           pruned: z.number().int().min(0),
+          zone_shifts: z.number().int().min(0),
           capped: z.boolean(),
         })
         .strict(),

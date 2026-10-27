@@ -1746,11 +1746,11 @@ export function createSlotlockStoreApplicationBackend(
       assertActive(context);
       try {
         // A caller goes round again while `capped`; when to do so at once is the scheduler's.
-        const { rollPending: _, ...result } = await maintainSlotlockTenant(store, tenantOf(context), {
+        const { rollPending: _, zoneShifts, ...result } = await maintainSlotlockTenant(store, tenantOf(context), {
           batches,
           signal: context.signal,
         });
-        return result;
+        return { ...result, zone_shifts: zoneShifts };
       } catch (error) {
         if (context.signal.aborted) throw new SlotlockAgentOperationError('request_aborted', 503);
         throw error;

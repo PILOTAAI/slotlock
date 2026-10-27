@@ -39,6 +39,7 @@ const UPKEEP = [
   'claimWebhookDeliveries',
   'settleWebhookDelivery',
   'pruneChanges',
+  'followZoneRules',
 ];
 const ADMINISTRATION = [
   'applySchema',

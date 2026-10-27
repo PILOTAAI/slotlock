@@ -197,7 +197,7 @@ func TestBooksHoldsAndReservationsWithoutDoubleBooking(t *testing.T) {
 		t.Fatalf("record_coverage: %v", coverage)
 	}
 	maintenance := s.must(c.RunMaintenance(s.ctx, RunMaintenanceInput{}))
-	for _, key := range []string{"extended", "conflicts", "refused", "pruned", "capped"} {
+	for _, key := range []string{"extended", "conflicts", "refused", "pruned", "zone_shifts", "capped"} {
 		if _, ok := maintenance[key]; !ok {
 			t.Fatalf("run_maintenance: %v", maintenance)
 		}

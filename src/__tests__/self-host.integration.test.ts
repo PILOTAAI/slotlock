@@ -345,6 +345,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         level: expect.any(String),
         time: expect.any(String),
         event: 'maintenance',
+        zoneShifts: 0,
         extended: 0,
         conflicts: 0,
         refused: 0,
@@ -359,6 +360,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       expect(await health.json()).toEqual({
         status: 'ready',
         version: packageVersion,
+        tzdata: process.versions.tz,
         checks: ['database'],
       });
 
@@ -749,7 +751,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       });
       expect(await rest(application.key, 'POST', '/v1/maintenance', {})).toEqual({
         status: 200,
-        body: { extended: 0, conflicts: 0, refused: 0, pruned: 0, capped: false },
+        body: { extended: 0, conflicts: 0, refused: 0, pruned: 0, zone_shifts: 0, capped: false },
       });
 
       expect((await run(['key', 'revoke', application.id])).code).toBe(0);
@@ -935,6 +937,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     expect(first.code).toBe(0);
     expect(first.stderr.text()).toBe('');
     expect(JSON.parse(first.stdout.text())).toEqual({
+      zoneShifts: 0,
       extended: 0,
       conflicts: 0,
       refused: 0,

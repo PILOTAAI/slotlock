@@ -25,6 +25,8 @@ export const SLOTLOCK_CHANGE_TYPES = Object.freeze([
   'event.created',
   'event.updated',
   'event.cancelled',
+  'event.timezone_shifted',
+  'event.timezone_conflict',
   'webhook.disabled',
 ] as const);
 

@@ -3913,6 +3913,9 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
           return json(health.ready ? 200 : 503, {
             status: health.ready ? 'ready' : 'not_ready',
             version: SLOTLOCK_AGENT_SERVER_VERSION,
+            // The time zone rules this process resolves zones with: when they change, maintenance
+            // finds the bookings whose wall time moved (store.followZoneRules).
+            tzdata: process.versions.tz ?? null,
             checks: [...health.checks]
               .slice(0, 100)
               .map((check) => (/^[a-z][a-z0-9_-]{0,63}$/.test(check) ? check : 'invalid')),
@@ -3921,6 +3924,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
           return json(503, {
             status: 'not_ready',
             version: SLOTLOCK_AGENT_SERVER_VERSION,
+            tzdata: process.versions.tz ?? null,
             checks: [],
           });
         }

@@ -7,6 +7,12 @@ versioning.
 
 ### Added
 
+- Time zone rule changes: each calendar event keeps the wall time it was booked for in its zone,
+  and maintenance reports a future one-off event whose wall time now falls at another instant
+  (`event.timezone_shifted` on the feed, once), or with `followZoneRules` moves it there as a new
+  revision unless that overlaps (`event.timezone_conflict`). `store.followZoneRules` runs it alone.
+  Maintenance results gain `zoneShifts` (`zone_shifts` in the API); `/healthz` gains `tzdata`. Run
+  `slotlock migrate`.
 - History: every change to a booking, hold or event records who made it (the API key or agent:
   `withTenant`'s new `actor`, which the agent and application backends set to the principal's
   subject) and, for a change of an existing record, what it was before. Read it newest first with

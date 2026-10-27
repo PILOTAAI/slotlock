@@ -385,7 +385,7 @@ describe.skipIf(!url)('the application API on the real store', () => {
   it("runs maintenance for the caller's tenant", async () => {
     expect(await call('a', 'POST', '/v1/maintenance', {})).toEqual({
       status: 200,
-      body: { extended: 0, conflicts: 0, refused: 0, pruned: 0, capped: false },
+      body: { extended: 0, conflicts: 0, refused: 0, pruned: 0, zone_shifts: 0, capped: false },
     });
     expect(await call('agent', 'POST', '/v1/maintenance', {})).toEqual(refused(403, 'forbidden'));
   });

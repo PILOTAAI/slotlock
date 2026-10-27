@@ -361,6 +361,7 @@ try {
   assert.deepEqual(await health.json(), {
     status: 'ready',
     version: ${JSON.stringify(manifest.version)},
+    tzdata: process.versions.tz,
     checks: ['backend'],
   });
 

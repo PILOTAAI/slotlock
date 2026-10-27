@@ -22,6 +22,11 @@ export interface SlotlockMaintenanceResult {
    * booking and feed changes, deleted. A cancelled booking's tombstone stays.
    */
   pruned: number;
+  /**
+   * Future one-off events whose wall time now falls at another instant (time zone rules changed):
+   * reported on the feed, or moved with `followZoneRules` (store.followZoneRules).
+   */
+  zoneShifts: number;
   /** More was left than one pass does: run another. */
   capped: boolean;
   /**
@@ -40,7 +45,7 @@ export interface SlotlockMaintenanceResult {
 export async function maintainSlotlockTenant(
   store: SlotlockStore,
   tenantRef: string,
-  options: { batches?: number; signal?: AbortSignal } = {},
+  options: { batches?: number; signal?: AbortSignal; followZoneRules?: boolean } = {},
 ): Promise<SlotlockMaintenanceResult> {
   const batches = options.batches ?? 10;
   if (!(Number.isSafeInteger(batches) && batches >= 1 && batches <= 100)) {
@@ -103,12 +108,17 @@ export async function maintainSlotlockTenant(
       changesLeft = deleted === CHANGE_PRUNE_BATCH;
     }
   }
+  options.signal?.throwIfAborted();
+  const zones = await store.withTenant(tenantRef, (tenant) =>
+    tenant.followZoneRules({ tenantRef, move: options.followZoneRules === true }),
+  );
   if (rollFailure) throw rollFailure.error;
   return {
     extended,
     conflicts,
     refused,
     pruned,
+    zoneShifts: zones.shifted,
     capped: rollCapped || eventsLeft || bookingsLeft || changesLeft,
     rollPending: rollCapped && after !== null && (after.rollRetryAt ?? null) === null,
   };
