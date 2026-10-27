@@ -12,7 +12,7 @@ Anyone can take a Slotlock release and run the API (MCP, A2A, REST) and the dash
 domain, in one of two places, with one command each:
 
 ```sh
-npx slotlock deploy vps --domain calendar.example.com
+npx slotlock deploy vps --ssh root@203.0.113.10 --domain calendar.example.com
 npx slotlock deploy cloudflare --domain calendar.example.com --database <postgres url>
 ```
 
@@ -28,8 +28,8 @@ npx slotlock deploy cloudflare --domain calendar.example.com --database <postgre
 
 ## Goals
 
-1. **VPS:** one command on a fresh machine with Docker serves the API and dashboard over HTTPS on the
-   given domain, with Postgres on the same machine.
+1. **VPS:** one command from a laptop, to a fresh machine with Docker and SSH, serves the API and
+   dashboard over HTTPS on the given domain, with Postgres on the same machine.
 2. **Cloudflare:** one command from a laptop deploys the API, dashboard and maintenance as one
    Worker, using the deployer's own Cloudflare account and a Postgres database they choose.
 3. Both run the same released code, pass the same suites, and keep every guarantee 0.3.0 makes:
@@ -69,7 +69,7 @@ the remaining blockers:
 | Today | On Workers | Change |
 | --- | --- | --- |
 | One `postgres` pool per process (`self-host.ts`) | A Worker may not reuse a client from another request | A client per request through Hyperdrive, at most 5 connections, as `workers/dashboard` does |
-| Maintenance takes a **session** advisory lock per tenant (`maintenance.ts`, `pg_try_advisory_lock`) on a reserved connection | Hyperdrive lists advisory locks and per-session state as unsupported | Replace it with a lease row (`tenant_ref`, `holder`, `expires_at`), claimed with `UPDATE … WHERE expires_at < now()`. This also works behind PgBouncer in transaction mode |
+| Maintenance takes a **session** advisory lock per tenant (`maintenance.ts`, `pg_try_advisory_lock`) on a reserved connection | Hyperdrive lists advisory locks and per-session state as unsupported | Replace it with a lease row, checked by every batch ([Maintenance lease](#maintenance-lease)). This also works behind PgBouncer in transaction mode |
 | Maintenance runs on `setInterval` | No timers outside a request | A Cron Trigger calls the same `maintainSlotlockTenant` pass, with a lease, for the tenants due |
 | Every tenant transaction takes **transaction** advisory locks (`store.ts`, `ddl.ts`) | Also on Hyperdrive's unsupported list, but released at commit, which is all a transaction pooler needs | **Gate:** prove on real Hyperdrive before anything else is built (see [Spike](#spike-gates-the-rest)) |
 | Rate limits in process memory (`rate-limit.ts`) | Many isolates, each with its own memory | Workers rate limiting bindings bound floods across isolates, as the dashboard's three do. The per-isolate caps stay as a second line. The README says these counts are per location and approximate |
@@ -80,6 +80,29 @@ the remaining blockers:
 
 CPU: the Workers Free plan allows 10 ms per request, too little for validation and recurrence
 expansion. The Cloudflare target requires Workers Paid, where the default limit is 30 s.
+
+### Maintenance lease
+
+A pass (`maintainSlotlockTenant`) runs up to `batches` transactions, so a lease claimed once at the
+start could expire while the pass is still writing. Instead, every batch fences itself:
+
+- `slotlock.maintenance_leases (tenant_ref primary key, holder uuid, expires_at)`. A pass claims
+  the row with `INSERT … ON CONFLICT (tenant_ref) DO UPDATE … WHERE maintenance_leases.expires_at
+  < now()`, under a fresh `holder`. No row returned means another holder has it: skip the tenant.
+- Each batch's first statement is `UPDATE maintenance_leases SET expires_at = now() + interval
+  '5 minutes' WHERE tenant_ref = $1 AND holder = $2 AND expires_at > now()`, in the batch's own
+  transaction. No row updated means the lease was lost: the batch rolls back and the pass stops.
+  The updated row stays locked until the batch commits. A competing claim waits for that commit,
+  then re-reads the renewed `expires_at` and fails, however long the batch took. Correctness never
+  rests on a batch finishing within the lease; the lease only decides when a silent holder is
+  presumed gone.
+- At the end of the pass, the holder releases the lease by setting `expires_at = now()`. A pass
+  that crashes leaves a lease that expires on its own.
+
+Test: holder A claims and runs a batch, then pauses past expiry. B claims the lease and runs. When
+A resumes, its next batch updates no lease row, writes nothing, and A's pass stops with a
+lease-lost result. A second test has B's claim race A's renewal in flight: B waits, then finds the
+lease renewed and skips the tenant.
 
 ## The Worker
 
@@ -109,13 +132,28 @@ disk or sent anywhere but Cloudflare's API:
    source and never appear in arguments or output.
 6. Wait for `https://<domain>/healthz` and print the MCP URL and the dashboard URL.
 
-**VPS**, run on the machine itself:
-1. Write `.env` with generated secrets (as `scripts/quickstart-env.sh` does today).
-2. Run `docker compose --profile https up -d`. A new `caddy` service in that profile takes the
-   domain, gets a certificate from Let's Encrypt or ZeroSSL over ports 80 and 443, and proxies to
-   the server. The server keeps listening on the machine only.
-3. Register the sign-in app as above, with a callback on the domain.
+**VPS**, run from the deployer's laptop as `slotlock deploy vps --ssh user@host --domain …`. It
+drives a machine that has Docker over SSH, so the GitHub step runs in the laptop's browser exactly
+as it does for Cloudflare. No repository checkout is needed on either machine:
+1. Register the sign-in app on the laptop, as in step 4 above. The manifest's callback is the
+   laptop's one-time `127.0.0.1` listener. The app's own sign-in callback is a different URL,
+   `https://<domain>/dashboard/callback`, which the dashboard serves once deployed.
+2. Over SSH, write `/opt/slotlock/` (or `--dir`):
+   - a `compose.yaml` the command ships for its own release. It runs
+     `ghcr.io/pilotaai/slotlock:<version>@sha256:<digest>`, pinned by the digest the release
+     published, never `build: .`;
+   - a `Caddyfile` for the domain;
+   - an `.env` (mode 600) with the generated secrets and the GitHub app's, sent on SSH's stdin,
+     never in arguments.
+3. Run `docker compose up -d` there. The `caddy` service gets the domain's certificate from Let's
+   Encrypt or ZeroSSL over ports 80 and 443, and proxies to the server. The server keeps listening
+   on the machine only.
 4. Wait for `https://<domain>/healthz` and print the same URLs.
+
+Run on the VPS itself without `--ssh`, the command prints one `ssh -L` line to forward the
+manifest's callback port from the laptop, and waits for it.
+
+This needs the image at `ghcr.io/pilotaai/slotlock` to be public.
 
 ## Security
 
@@ -128,7 +166,8 @@ disk or sent anywhere but Cloudflare's API:
 - **No cached reads.** Hyperdrive caching stays off, so authentication and sign-out are never
   served from a cache. The deploy command refuses a configuration with caching on.
 - **The manifest flow is CSRF-protected.** Its `state` is random and checked, its callback listens
-  only on `127.0.0.1`, and it stops after one use.
+  only on `127.0.0.1` on the deployer's laptop (forwarded by SSH when run on the VPS), and it stops
+  after one use. The manifest's callback is never a route on the deployed domain.
 - **Rate limits are approximate on Workers**, per location and eventually consistent. The README
   says so, and the per-key and per-tenant caps in the database still bound writes.
 
@@ -155,10 +194,10 @@ plus a VPS-hosted API, and this RFC is revised before any other work starts.
 | PR | Contents | Proof |
 | --- | --- | --- |
 | 1 | The spike's results added to this RFC | Script and output in the PR |
-| 2 | Maintenance lease row in place of the session lock | DB suites: two maintainers race, one wins, the lease expires and is reclaimed; PgBouncer in transaction mode |
+| 2 | Maintenance lease row in place of the session lock | DB suites: the two lease tests above, a crashed holder's lease reclaimed after expiry, and the same through PgBouncer in transaction mode |
 | 3 | `workers/server`: API, dashboard and cron on Workers | A CI job runs the agent, REST and dashboard suites against `wrangler dev` (workerd), with a local Hyperdrive string pointing at CI's Postgres |
 | 4 | `slotlock deploy cloudflare` | A stand-in Cloudflare API: one create per resource; a re-run changes nothing; a failed run resumes |
-| 5 | `--profile https` and `slotlock deploy vps` | A CI job brings Compose up with Caddy on an internal CA and checks HTTPS reaches `/healthz` and `/dashboard` |
+| 5 | `slotlock deploy vps`, its shipped `compose.yaml` and `Caddyfile` | A CI job runs the command from an empty directory outside any checkout, over SSH to a Docker host, with Caddy on an internal CA, and checks HTTPS reaches `/healthz` and `/dashboard`; a re-run changes nothing |
 | 6 | README and site: one page, Deploy, with both targets; CHANGELOG | Link check; quickstart steps run in CI |
 
 ## Open questions
