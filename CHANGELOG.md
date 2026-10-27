@@ -7,6 +7,11 @@ versioning.
 
 ### Added
 
+- Shared request budgets: `SLOTLOCK_SHARED_LIMITS=on` makes every server of a deployment draw a
+  tenant's `tenant_*` and `app_*` budgets from one token bucket in PostgreSQL
+  (`slotlock.take_rate_token`, keyed by a digest), after its own buckets pass; a database that
+  cannot be reached leaves each server's own budgets in charge. `createSlotlockRequestLimits` takes
+  `shared`. Run `slotlock migrate`.
 - Feed health: `GET /v1/resources/{resource_id}/coverage` (`slotlock_get_coverage`, `listCoverage`)
   shows each source's window, last read, last error and whether it is stale;
   `POST /v1/resources/{resource_id}/coverage/{source}/failure` (`slotlock_record_coverage_failure`,

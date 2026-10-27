@@ -110,6 +110,9 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
   and the rest wait their turn, so a tenant's writes waiting on its own locks leave the others to
   other tenants and key lookups; a server with one tenant can set `tenant_transactions=10`. A
   request whose transaction waits more than 5 seconds for a lock gets 503 `server_busy`.
+  With more than one server, `SLOTLOCK_SHARED_LIMITS=on` shares the tenant budgets (`tenant_*`,
+  `app_*`) through the database, so N servers allow a tenant its rate once, not N times; each server
+  checks its own buckets first, and goes on with them alone if the database cannot be reached.
   `SLOTLOCK_LIMITS` changes the limits; behind a proxy, set `SLOTLOCK_TRUSTED_PROXY_HEADER` to the field it puts the
   client's address in (`CF-Connecting-IP` behind Cloudflare) before the server takes traffic, or
   every client shares the proxy's budget: the server logs a `client_address_field_ignored` warning
