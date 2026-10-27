@@ -16,6 +16,7 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_create_resource", new Operation("POST", "/v1/resources", List.of(), List.of())),
           Map.entry("slotlock_get_free_busy", new Operation("GET", "/v1/free-busy", List.of(), List.of("resource_ids", "start", "end"))),
           Map.entry("slotlock_find_next_available", new Operation("GET", "/v1/next-available", List.of(), List.of("resource_ids", "start", "end", "duration_minutes"))),
+          Map.entry("slotlock_find_available_slots", new Operation("GET", "/v1/available-slots", List.of(), List.of("resource_ids", "start", "end", "duration_minutes", "limit"))),
           Map.entry("slotlock_list_events", new Operation("GET", "/v1/events", List.of(), List.of("resource_ids", "start", "end", "cursor", "limit"))),
           Map.entry("slotlock_create_event", new Operation("POST", "/v1/events", List.of(), List.of())),
           Map.entry("slotlock_get_event", new Operation("GET", "/v1/events/{event_id}", List.of("event_id"), List.of())),
@@ -161,6 +162,45 @@ public abstract class SlotlockOperations {
     values.put("end", end);
     values.put("duration_minutes", durationMinutes);
     return call("slotlock_find_next_available", values);
+  }
+
+  /**
+   * Find available slots. List up to `limit` certain slots of the requested duration, earliest
+   * first across the resources, each one free of busy time and inside the resource's hours, to
+   * offer a person a choice. No slot is listed unless every resource's coverage is certain.
+   *
+   * @param resourceIds {@code resource_ids}, list of string
+   * @param start {@code start}, string
+   * @param end {@code end}, string
+   * @param durationMinutes {@code duration_minutes}, integer
+   * @param optional the optional arguments, or null: {@code limit} (integer)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> findAvailableSlots(List<?> resourceIds, String start, String end, long durationMinutes, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("resource_ids", resourceIds);
+    values.put("start", start);
+    values.put("end", end);
+    values.put("duration_minutes", durationMinutes);
+    putOptional(values, optional, Set.of("limit"), "slotlock_find_available_slots");
+    return call("slotlock_find_available_slots", values);
+  }
+
+  /**
+   * Find available slots. List up to `limit` certain slots of the requested duration, earliest
+   * first across the resources, each one free of busy time and inside the resource's hours, to
+   * offer a person a choice. No slot is listed unless every resource's coverage is certain.
+   *
+   * @param resourceIds {@code resource_ids}, list of string
+   * @param start {@code start}, string
+   * @param end {@code end}, string
+   * @param durationMinutes {@code duration_minutes}, integer
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> findAvailableSlots(List<?> resourceIds, String start, String end, long durationMinutes) {
+    return findAvailableSlots(resourceIds, start, end, durationMinutes, null);
   }
 
   /**

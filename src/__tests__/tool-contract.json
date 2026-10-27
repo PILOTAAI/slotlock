@@ -373,6 +373,144 @@
     }
   },
   {
+    "name": "slotlock_find_available_slots",
+    "title": "Find available slots",
+    "description": "List up to `limit` certain slots of the requested duration, earliest first across the resources, each one free of busy time and inside the resource's hours, to offer a person a choice. No slot is listed unless every resource's coverage is certain.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "resource_ids": {
+          "minItems": 1,
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "duration_minutes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 528480
+        },
+        "limit": {
+          "default": 10,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        }
+      },
+      "required": [
+        "resource_ids",
+        "start",
+        "end",
+        "duration_minutes"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "slots": {
+          "maxItems": 50,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "resource_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "start": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "resource_id",
+              "start",
+              "end"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "coverage": {
+          "type": "object",
+          "properties": {
+            "start": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "end": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "certainty": {
+              "type": "string",
+              "enum": [
+                "certain",
+                "uncertain"
+              ]
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 100
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "start",
+            "end",
+            "certainty",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "slots",
+        "coverage"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "Find available slots",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "ui": {
+        "resourceUri": "ui://slotlock/calendar",
+        "visibility": [
+          "model",
+          "app"
+        ]
+      }
+    }
+  },
+  {
     "name": "slotlock_create_event",
     "title": "Create resource event",
     "description": "Create an event of up to 3,660 days (a booking, lease or long rental); opaque occurrences use the database overlap arbiter.",
@@ -873,6 +1011,13 @@
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false
+    },
+    "_meta": {
+      "ui": {
+        "visibility": [
+          "model"
+        ]
+      }
     }
   },
   {
@@ -2127,6 +2272,13 @@
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false
+    },
+    "_meta": {
+      "ui": {
+        "visibility": [
+          "model"
+        ]
+      }
     }
   },
   {
@@ -2194,6 +2346,13 @@
       "destructiveHint": true,
       "idempotentHint": true,
       "openWorldHint": false
+    },
+    "_meta": {
+      "ui": {
+        "visibility": [
+          "model"
+        ]
+      }
     }
   }
 ]

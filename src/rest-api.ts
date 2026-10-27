@@ -32,6 +32,12 @@ export const SLOTLOCK_REST_ROUTES: readonly SlotlockRestRoute[] = Object.freeze(
     operation: 'slotlock_find_next_available',
     refusals: [404],
   },
+  {
+    method: 'GET',
+    path: '/v1/available-slots',
+    operation: 'slotlock_find_available_slots',
+    refusals: [404],
+  },
   { method: 'GET', path: '/v1/events', operation: 'slotlock_list_events', refusals: [404] },
   { method: 'POST', path: '/v1/events', operation: 'slotlock_create_event', refusals: [404, 409] },
   { method: 'GET', path: '/v1/events/{event_id}', operation: 'slotlock_get_event', refusals: [404] },

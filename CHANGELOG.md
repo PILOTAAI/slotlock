@@ -5,6 +5,25 @@ versioning.
 
 ## Unreleased
 
+### Added
+
+- `slotlock_find_available_slots` (REST `GET /v1/available-slots`) lists up to 50 certain slots of
+  a duration, earliest first across up to 20 resources, each found the way
+  `slotlock_find_next_available` finds one: free of busy time, inside the resource's hours, and
+  only when every resource's coverage is certain.
+- The MCP Apps calendar view lets a person pick one of those slots: a strip of days, each day's times
+  by part of the day, and *Book this time*. It sends the agent a chat message naming the slot
+  (`ui/message`), so the agent books it through the normal, confirmable path, and shows the text to
+  send when the host refuses.
+- The view follows the host: its theme and its standard style variables, which it now applies (it
+  only read them before, so it looked the same, and light, in every host). It shows times in the
+  person's locale, clock and time zone, and reports its size to the host.
+
+### Changed
+
+- The three write tools carry `_meta.ui.visibility: ["model"]`: MCP Apps hosts no longer let a view
+  call them (the default is model and app).
+
 ### Fixed
 
 - The OpenAPI document declares the `404` and `409` the agent-tool routes answer: `404` on

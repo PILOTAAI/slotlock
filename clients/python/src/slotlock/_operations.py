@@ -36,6 +36,13 @@ OPERATIONS: dict[str, Operation] = {
         (),
         ("resource_ids", "start", "end", "duration_minutes"),
     ),
+    "slotlock_find_available_slots": Operation(
+        "slotlock_find_available_slots",
+        "GET",
+        "/v1/available-slots",
+        (),
+        ("resource_ids", "start", "end", "duration_minutes", "limit"),
+    ),
     "slotlock_list_events": Operation(
         "slotlock_list_events",
         "GET",
@@ -304,6 +311,31 @@ class Operations(Transport):
             "duration_minutes": duration_minutes,
         }
         return self.call("slotlock_find_next_available", values)
+
+    def find_available_slots(
+        self,
+        *,
+        resource_ids: list[str],
+        start: str,
+        end: str,
+        duration_minutes: int,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Find available slots.
+
+        List up to `limit` certain slots of the requested duration, earliest first across the
+        resources, each one free of busy time and inside the resource's hours, to offer a person a
+        choice. No slot is listed unless every resource's coverage is certain.
+        """
+        values: dict[str, Any] = {
+            "resource_ids": resource_ids,
+            "start": start,
+            "end": end,
+            "duration_minutes": duration_minutes,
+        }
+        if limit is not None:
+            values["limit"] = limit
+        return self.call("slotlock_find_available_slots", values)
 
     def list_events(
         self,
