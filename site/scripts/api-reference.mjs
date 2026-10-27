@@ -472,7 +472,7 @@ An error is \`{"error":{"code":"…"}}\` with an HTTP status. Act on the \`code\
 | \`400\` | The request is malformed or out of bounds | \`invalid_arguments\`, \`calendar_work_limit\` |
 | \`401\` | No key, or a revoked or expired one | \`authentication_required\` |
 | \`403\` | The key lacks the route's scope | \`forbidden\` |
-| \`404\` | Not this tenant's, or gone | \`resource_not_found\`, \`event_not_found\`, \`hold_not_found\`, \`reservation_not_found\` |
+| \`404\` | Not this tenant's, or gone | \`not_found\` on the agent tools; \`resource_not_found\`, \`event_not_found\`, \`hold_not_found\`, \`reservation_not_found\` on the application API |
 | \`409\` | It conflicts with what is stored | \`overlap\`, \`stale_revision\`, \`resource_in_use\`, \`idempotency_conflict\` |
 | \`428\` | A person must confirm this write first | \`confirmation_required\` |
 | \`429\` | Rate limited, or an agent's own quota is full | \`rate_limited\` (retry after the \`Retry-After\` header's seconds), \`owner_event_quota_exceeded\`, \`owner_command_quota_exceeded\` |
