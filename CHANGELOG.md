@@ -3,7 +3,7 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
-## Unreleased
+## 0.3.0 - 2026-10-27
 
 0.3.0 fixes the double bookings 0.2.0 could accept around daylight-saving changes and makes
 `slotlock serve` safe to share between tenants. Its themes: a recurrence engine that keeps every
