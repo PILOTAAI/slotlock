@@ -20,6 +20,7 @@ export const GROUPS = [
       'slotlock_set_resource_booking_rules',
       'slotlock_set_resource_pool',
       'slotlock_list_pools',
+      'slotlock_get_resource_history',
     ],
   },
   {
@@ -49,6 +50,7 @@ export const GROUPS = [
       'slotlock_list_tenant_events',
       'slotlock_get_tenant_event',
       'slotlock_cancel_tenant_event',
+      'slotlock_get_tenant_event_history',
     ],
   },
   {
@@ -68,6 +70,7 @@ export const GROUPS = [
       'slotlock_get_reservation',
       'slotlock_list_reservations',
       'slotlock_cancel_reservation',
+      'slotlock_get_reservation_history',
     ],
   },
   {
@@ -93,7 +96,7 @@ const STATUS = {
   403: 'The key lacks the scope this route needs',
   404: "Not this tenant's, or gone",
   409: 'A conflict with what is stored: an overlap, a stale revision, a resource in use',
-  410: 'The change cursor is older than the 7 days the feed keeps (`cursor_expired`): read from the start',
+  410: 'The change cursor is older than the 30 days the feed keeps (`cursor_expired`): read from the start',
   422: 'The idempotency key was used with another request (`idempotency_conflict`)',
   428: 'The server asks a person to confirm this write first (`confirmation_required`)',
   429: 'Rate limited: retry after `Retry-After` seconds',

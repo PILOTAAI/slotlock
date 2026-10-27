@@ -38,6 +38,9 @@ public sealed partial class SlotlockClient
         ["slotlock_set_resource_booking_rules"] = new("PUT", "/v1/resources/{resource_id}/booking-rules", ["resource_id"], []),
         ["slotlock_set_resource_pool"] = new("PUT", "/v1/resources/{resource_id}/pool", ["resource_id"], []),
         ["slotlock_list_pools"] = new("GET", "/v1/pools", [], []),
+        ["slotlock_get_resource_history"] = new("GET", "/v1/resources/{resource_id}/history", ["resource_id"], ["limit", "before"]),
+        ["slotlock_get_reservation_history"] = new("GET", "/v1/reservations/{reservation_ref}/history", ["reservation_ref"], ["limit", "before"]),
+        ["slotlock_get_tenant_event_history"] = new("GET", "/v1/tenant/events/{event_id}/history", ["event_id"], ["limit", "before"]),
         ["slotlock_set_tenant_availability"] = new("PUT", "/v1/availability", [], []),
         ["slotlock_acquire_hold"] = new("POST", "/v1/holds", [], []),
         ["slotlock_get_hold"] = new("GET", "/v1/holds/{hold_id}", ["hold_id"], []),
@@ -814,6 +817,80 @@ public sealed partial class SlotlockClient
         return CallAsync("slotlock_list_pools", values, cancellationToken);
     }
 
+    /// <summary>A resource's history.</summary>
+    /// <remarks>
+    /// What happened on one of the tenant's resources, newest first: each hold, booking and event
+    /// made, moved, confirmed, released or cancelled, when, by whom (the API key or agent), and
+    /// for a change what it was before. Kept 30 days. Pass next_before as before for older
+    /// entries.
+    /// </remarks>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="limit">limit</param>
+    /// <param name="before">before</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> GetResourceHistoryAsync(
+        string resourceId,
+        Optional<long> limit = default,
+        Optional<string> before = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_id"] = Json.ToNode(resourceId);
+        if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
+        if (before.HasValue) values["before"] = Json.ToNode(before.Value);
+        return CallAsync("slotlock_get_resource_history", values, cancellationToken);
+    }
+
+    /// <summary>A booking's history.</summary>
+    /// <remarks>
+    /// What happened to one booking, by its reference, newest first: made, moved, cancelled, when
+    /// and by whom, as slotlock_get_resource_history.
+    /// </remarks>
+    /// <param name="reservationRef">reservation_ref</param>
+    /// <param name="limit">limit</param>
+    /// <param name="before">before</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> GetReservationHistoryAsync(
+        string reservationRef,
+        Optional<long> limit = default,
+        Optional<string> before = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["reservation_ref"] = Json.ToNode(reservationRef);
+        if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
+        if (before.HasValue) values["before"] = Json.ToNode(before.Value);
+        return CallAsync("slotlock_get_reservation_history", values, cancellationToken);
+    }
+
+    /// <summary>An event's history.</summary>
+    /// <remarks>
+    /// What happened to one calendar event of the tenant, by its id, newest first: created,
+    /// changed, cancelled, when and by whom, as slotlock_get_resource_history.
+    /// </remarks>
+    /// <param name="eventId">event_id</param>
+    /// <param name="limit">limit</param>
+    /// <param name="before">before</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> GetTenantEventHistoryAsync(
+        string eventId,
+        Optional<long> limit = default,
+        Optional<string> before = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["event_id"] = Json.ToNode(eventId);
+        if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
+        if (before.HasValue) values["before"] = Json.ToNode(before.Value);
+        return CallAsync("slotlock_get_tenant_event_history", values, cancellationToken);
+    }
+
     /// <summary>Set every resource's bookable hours.</summary>
     /// <remarks>
     /// Set the weekly bookable hours of every resource the tenant has, as
@@ -1263,7 +1340,7 @@ public sealed partial class SlotlockClient
     /// cancelled (ids, times and states, never titles or attendees). Pass next_cursor as cursor
     /// to read on; it is returned even when nothing is new, so poll with it. Only changes of
     /// transactions that have ended are listed, so following the cursor never skips one. Changes
-    /// are kept 7 days: an older cursor answers 410 cursor_expired, so start again without one.
+    /// are kept 30 days: an older cursor answers 410 cursor_expired, so start again without one.
     /// </remarks>
     /// <param name="cursor">cursor</param>
     /// <param name="limit">limit</param>
@@ -1341,7 +1418,7 @@ public sealed partial class SlotlockClient
     /// <remarks>
     /// Send to a disabled webhook again, from the first change it did not accept. 404
     /// webhook_not_found when the tenant has no such webhook; 409 changes_pruned when what it
-    /// missed is older than the 7 days the feed keeps, since it would skip those unseen: delete
+    /// missed is older than the 30 days the feed keeps, since it would skip those unseen: delete
     /// it, add it again, and read what it missed from slotlock_list_changes.
     /// </remarks>
     /// <param name="webhookId">webhook_id</param>

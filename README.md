@@ -1097,7 +1097,7 @@ not commit. A change carries ids, times and states, never titles, descriptions o
 - `GET /v1/changes?cursor=…` lists them oldest first as [CloudEvents 1.0](https://cloudevents.io)
   (`io.pylota.slotlock.hold.created`, `.reservation.cancelled`, `.event.updated`, …). Follow
   `next_cursor`, which comes back even when nothing is new: it never skips a change, even one whose
-  transaction commits after a later one's. Changes are kept 7 days; an older cursor answers
+  transaction commits after a later one's. Changes are kept 30 days; an older cursor answers
   `410 cursor_expired`.
 - `POST /v1/webhooks` with an https `url` (and `event_types`, optionally) sends each change from
   then on as a [Standard Webhooks](https://www.standardwebhooks.com) request: `webhook-id` (the
@@ -1112,6 +1112,12 @@ not commit. A change carries ids, times and states, never titles, descriptions o
   an enabled webhook has still to receive, however old. At most 10 webhooks per tenant.
 - Each request has 15 seconds in all, and a tenant's pass 30 seconds; tenants are delivered 8 at
   a time, so a slow endpoint holds up only its own tenant.
+- History reads the same record backwards, with who made each change (the API key or agent) and,
+  for a change of an existing booking or event, what it was before:
+  `GET /v1/resources/{id}/history`, `GET /v1/reservations/{reference}/history`,
+  `GET /v1/tenant/events/{id}/history`, newest first, paged by `before`. In the library, pass
+  `actor` to `withTenant` and read `listHistory`. It is kept as long as the feed and erased with
+  the tenant.
 - `slotlock serve` delivers (`SLOTLOCK_WEBHOOKS`): never to an address on a private network, which
   it checks when it connects, and following no redirect. `private` allows those, for testing.
 - In the library: `listChanges`, `createWebhookEndpoint` and the rest are store methods, and

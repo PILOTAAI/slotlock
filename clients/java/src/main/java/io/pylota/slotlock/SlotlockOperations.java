@@ -35,6 +35,9 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_set_resource_booking_rules", new Operation("PUT", "/v1/resources/{resource_id}/booking-rules", List.of("resource_id"), List.of())),
           Map.entry("slotlock_set_resource_pool", new Operation("PUT", "/v1/resources/{resource_id}/pool", List.of("resource_id"), List.of())),
           Map.entry("slotlock_list_pools", new Operation("GET", "/v1/pools", List.of(), List.of())),
+          Map.entry("slotlock_get_resource_history", new Operation("GET", "/v1/resources/{resource_id}/history", List.of("resource_id"), List.of("limit", "before"))),
+          Map.entry("slotlock_get_reservation_history", new Operation("GET", "/v1/reservations/{reservation_ref}/history", List.of("reservation_ref"), List.of("limit", "before"))),
+          Map.entry("slotlock_get_tenant_event_history", new Operation("GET", "/v1/tenant/events/{event_id}/history", List.of("event_id"), List.of("limit", "before"))),
           Map.entry("slotlock_set_tenant_availability", new Operation("PUT", "/v1/availability", List.of(), List.of())),
           Map.entry("slotlock_acquire_hold", new Operation("POST", "/v1/holds", List.of(), List.of())),
           Map.entry("slotlock_get_hold", new Operation("GET", "/v1/holds/{hold_id}", List.of("hold_id"), List.of())),
@@ -665,6 +668,97 @@ public abstract class SlotlockOperations {
   }
 
   /**
+   * A resource's history. What happened on one of the tenant's resources, newest first: each
+   * hold, booking and event made, moved, confirmed, released or cancelled, when, by whom (the API
+   * key or agent), and for a change what it was before. Kept 30 days. Pass next_before as before
+   * for older entries.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param optional the optional arguments, or null: {@code limit} (integer), {@code before}
+   * (string)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> getResourceHistory(String resourceId, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("resource_id", resourceId);
+    putOptional(values, optional, Set.of("limit", "before"), "slotlock_get_resource_history");
+    return call("slotlock_get_resource_history", values);
+  }
+
+  /**
+   * A resource's history. What happened on one of the tenant's resources, newest first: each
+   * hold, booking and event made, moved, confirmed, released or cancelled, when, by whom (the API
+   * key or agent), and for a change what it was before. Kept 30 days. Pass next_before as before
+   * for older entries.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> getResourceHistory(String resourceId) {
+    return getResourceHistory(resourceId, null);
+  }
+
+  /**
+   * A booking's history. What happened to one booking, by its reference, newest first: made,
+   * moved, cancelled, when and by whom, as slotlock_get_resource_history.
+   *
+   * @param reservationRef {@code reservation_ref}, string
+   * @param optional the optional arguments, or null: {@code limit} (integer), {@code before}
+   * (string)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> getReservationHistory(String reservationRef, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("reservation_ref", reservationRef);
+    putOptional(values, optional, Set.of("limit", "before"), "slotlock_get_reservation_history");
+    return call("slotlock_get_reservation_history", values);
+  }
+
+  /**
+   * A booking's history. What happened to one booking, by its reference, newest first: made,
+   * moved, cancelled, when and by whom, as slotlock_get_resource_history.
+   *
+   * @param reservationRef {@code reservation_ref}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> getReservationHistory(String reservationRef) {
+    return getReservationHistory(reservationRef, null);
+  }
+
+  /**
+   * An event's history. What happened to one calendar event of the tenant, by its id, newest
+   * first: created, changed, cancelled, when and by whom, as slotlock_get_resource_history.
+   *
+   * @param eventId {@code event_id}, string
+   * @param optional the optional arguments, or null: {@code limit} (integer), {@code before}
+   * (string)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> getTenantEventHistory(String eventId, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("event_id", eventId);
+    putOptional(values, optional, Set.of("limit", "before"), "slotlock_get_tenant_event_history");
+    return call("slotlock_get_tenant_event_history", values);
+  }
+
+  /**
+   * An event's history. What happened to one calendar event of the tenant, by its id, newest
+   * first: created, changed, cancelled, when and by whom, as slotlock_get_resource_history.
+   *
+   * @param eventId {@code event_id}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> getTenantEventHistory(String eventId) {
+    return getTenantEventHistory(eventId, null);
+  }
+
+  /**
    * Set every resource's bookable hours. Set the weekly bookable hours of every resource the
    * tenant has, as slotlock_set_resource_availability does for one. `null` makes them all use the
    * server's default. Returns how many resources changed.
@@ -1093,7 +1187,7 @@ public abstract class SlotlockOperations {
    * changed or cancelled (ids, times and states, never titles or attendees). Pass next_cursor as
    * cursor to read on; it is returned even when nothing is new, so poll with it. Only changes of
    * transactions that have ended are listed, so following the cursor never skips one. Changes are
-   * kept 7 days: an older cursor answers 410 cursor_expired, so start again without one.
+   * kept 30 days: an older cursor answers 410 cursor_expired, so start again without one.
    *
    * @param optional the optional arguments, or null: {@code cursor} (string), {@code limit}
    * (integer)
@@ -1112,7 +1206,7 @@ public abstract class SlotlockOperations {
    * changed or cancelled (ids, times and states, never titles or attendees). Pass next_cursor as
    * cursor to read on; it is returned even when nothing is new, so poll with it. Only changes of
    * transactions that have ended are listed, so following the cursor never skips one. Changes are
-   * kept 7 days: an older cursor answers 410 cursor_expired, so start again without one.
+   * kept 30 days: an older cursor answers 410 cursor_expired, so start again without one.
    *
    * @return the response body
    * @throws SlotlockException when the server refuses the call
@@ -1183,7 +1277,7 @@ public abstract class SlotlockOperations {
   /**
    * Enable a webhook. Send to a disabled webhook again, from the first change it did not accept.
    * 404 webhook_not_found when the tenant has no such webhook; 409 changes_pruned when what it
-   * missed is older than the 7 days the feed keeps, since it would skip those unseen: delete it,
+   * missed is older than the 30 days the feed keeps, since it would skip those unseen: delete it,
    * add it again, and read what it missed from slotlock_list_changes.
    *
    * @param webhookId {@code webhook_id}, string

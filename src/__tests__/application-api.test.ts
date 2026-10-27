@@ -118,6 +118,9 @@ const backend = {
   listChanges: vi.fn(),
   setResourcePool: vi.fn(),
   listPools: vi.fn(),
+  getResourceHistory: vi.fn(),
+  getReservationHistory: vi.fn(),
+  getTenantEventHistory: vi.fn(),
   createWebhook: vi.fn(),
   listWebhooks: vi.fn(),
   deleteWebhook: vi.fn(),
@@ -207,6 +210,19 @@ function exampleRequest(name: string, token = 'admin'): Request {
   return call(definition.method, path, { body: rest, token });
 }
 
+const HISTORY = {
+    history: [
+      {
+        id: 'msg_2',
+        type: 'reservation.updated',
+        time: '2027-03-01T09:00:00.000Z',
+        actor: 'api_key:1',
+        data: { reference: 'BK-42', before: { revision: 1 } },
+      },
+    ],
+    next_before: null,
+  };
+
 const WEBHOOK = {
   id: '9b2f4c1e-6d3a-4e8b-a1c7-5f0e2d4b6a8c',
   url: 'https://example.com/slotlock-webhook',
@@ -265,6 +281,9 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   listWebhooks: { webhooks: [WEBHOOK] },
   setResourcePool: { resource: { ...RESOURCE, pool: 'van' } },
   listPools: { pools: [{ pool: 'van', capacity: 5 }] },
+  getResourceHistory: HISTORY,
+  getReservationHistory: HISTORY,
+  getTenantEventHistory: HISTORY,
   deleteWebhook: { deleted: true },
   enableWebhook: { webhook: WEBHOOK },
 };

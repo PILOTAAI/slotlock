@@ -31,7 +31,7 @@ export const SLOTLOCK_CHANGE_TYPES = Object.freeze([
 export type SlotlockChangeType = (typeof SLOTLOCK_CHANGE_TYPES)[number];
 
 /** How long the feed keeps a change, and so how far back a cursor may reach. */
-export const SLOTLOCK_CHANGE_RETENTION_DAYS = 7;
+export const SLOTLOCK_CHANGE_RETENTION_DAYS = 30;
 /** Webhook endpoints one tenant may have. */
 export const SLOTLOCK_MAX_WEBHOOK_ENDPOINTS = 10;
 /** After this long failing, an endpoint is disabled and the feed says so (`webhook.disabled`). */
@@ -46,6 +46,8 @@ export interface SlotlockChange {
   subject: string;
   data: Record<string, unknown>;
   occurredAt: Date;
+  /** Who made it (withTenant's `actor`: an API key, an agent), or null when unrecorded. */
+  actor: string | null;
   /** Pass as `after` to read what follows this change. */
   position: string;
 }
@@ -140,6 +142,19 @@ export interface SlotlockEventFeed {
     delivered?: string;
     failure?: { status: number | null; error: string; retryInMs: number; gone?: boolean };
   }): Promise<void>;
+  /**
+   * History: the changes to one resource (`resourceId`) or one record (`subject`: a booking's
+   * reference, an event's or hold's id), newest first, `limit` (1-100) at a time, each with who
+   * made it and, for a change of an existing record, what it was before. Pass the last one's
+   * `id` as `before` for the page after. Kept as long as the feed keeps changes.
+   */
+  listHistory(params: {
+    tenantRef: string;
+    resourceId?: string;
+    subject?: string;
+    limit?: number;
+    before?: string;
+  }): Promise<SlotlockChange[]>;
   /** Delete up to `limit` of the tenant's changes older than the retention; how many went. */
   pruneChanges(params: { tenantRef: string; limit: number }): Promise<number>;
 }
@@ -168,6 +183,7 @@ interface ChangeRow {
   subject: string;
   data: Record<string, unknown>;
   occurred_at: Date;
+  actor: string | null;
 }
 
 function toChange(row: ChangeRow): SlotlockChange {
@@ -178,6 +194,7 @@ function toChange(row: ChangeRow): SlotlockChange {
     subject: row.subject,
     data: row.data,
     occurredAt: row.occurred_at,
+    actor: row.actor,
     position: encodePosition({ txid: row.txid, id: row.id, at: row.occurred_at.getTime() }),
   };
 }
@@ -257,7 +274,7 @@ export function slotlockEventFeedMethods(sql: SlotlockSql): SlotlockEventFeed {
         return { ok: false, code: 'cursor_expired' };
       }
       const rows = await sql<ChangeRow[]>`
-        SELECT id::text, txid::text, type, resource_id, subject, data, occurred_at
+        SELECT id::text, txid::text, type, resource_id, subject, data, occurred_at, actor
           FROM slotlock.outbox
          WHERE tenant_ref = ${params.tenantRef}
            AND txid < pg_snapshot_xmin(pg_current_snapshot())
@@ -388,7 +405,7 @@ export function slotlockEventFeedMethods(sql: SlotlockSql): SlotlockEventFeed {
       const claims: SlotlockWebhookClaim[] = [];
       for (const endpoint of endpoints) {
         const rows = await sql<ChangeRow[]>`
-          SELECT id::text, txid::text, type, resource_id, subject, data, occurred_at
+          SELECT id::text, txid::text, type, resource_id, subject, data, occurred_at, actor
             FROM slotlock.outbox
            WHERE tenant_ref = ${params.tenantRef}
              AND txid < pg_snapshot_xmin(pg_current_snapshot())
@@ -462,6 +479,31 @@ export function slotlockEventFeedMethods(sql: SlotlockSql): SlotlockEventFeed {
                     })})`;
         }
       });
+    },
+
+    async listHistory(params) {
+      if (!isIdentity(params.tenantRef)) throw identityError();
+      if ((params.resourceId === undefined) === (params.subject === undefined)) {
+        throw new TypeError('Slotlock history is of one resource or one record: give resourceId or subject');
+      }
+      if (params.resourceId !== undefined && !UUID.test(params.resourceId)) return [];
+      if (params.subject !== undefined && !isIdentity(params.subject)) return [];
+      const limit = params.limit ?? 50;
+      if (!(Number.isSafeInteger(limit) && limit >= 1 && limit <= 100)) {
+        throw new RangeError('Slotlock history page limit must be 1-100');
+      }
+      const before = params.before === undefined ? null : /^msg_(\d{1,19})$/.exec(params.before)?.[1];
+      if (before === undefined) return [];
+      const rows = await sql<ChangeRow[]>`
+        SELECT id::text, txid::text, type, resource_id, subject, data, occurred_at, actor
+          FROM slotlock.outbox
+         WHERE tenant_ref = ${params.tenantRef}
+           AND (${params.resourceId ?? null}::uuid IS NULL OR resource_id = ${params.resourceId ?? null}::uuid)
+           AND (${params.subject ?? null}::text IS NULL OR subject = ${params.subject ?? null})
+           AND (${before}::bigint IS NULL OR id < ${before}::bigint)
+         ORDER BY id DESC
+         LIMIT ${limit}`;
+      return rows.map(toChange);
     },
 
     async pruneChanges(params) {

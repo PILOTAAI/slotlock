@@ -7,6 +7,12 @@ versioning.
 
 ### Added
 
+- History: every change to a booking, hold or event records who made it (the API key or agent:
+  `withTenant`'s new `actor`, which the agent and application backends set to the principal's
+  subject) and, for a change of an existing record, what it was before. Read it newest first with
+  `GET /v1/resources/{resource_id}/history`, `GET /v1/reservations/{reservation_ref}/history` and
+  `GET /v1/tenant/events/{event_id}/history`, or `listHistory`. A backend of your own implements
+  `getHistory`. The feed and history now keep changes 30 days. Run `slotlock migrate`.
 - Pools: interchangeable resources sharing a class (a vehicle class, a room type).
   `PUT /v1/resources/{resource_id}/pool` (`slotlock_set_resource_pool`, `setResourcePool`) puts a
   resource in one; `GET /v1/pools` lists them with their capacity. `slotlock_book_pool` (REST
@@ -26,7 +32,7 @@ versioning.
 - An event feed and webhooks. Every committed change to a tenant's holds, bookings and calendar
   events is recorded in the same transaction by trigger: ids, times and states, never titles or
   attendees. `GET /v1/changes` (`slotlock_list_changes`, `listChanges`) lists them as CloudEvents
-  by a cursor that no late-committing transaction can be skipped behind; changes are kept 7 days.
+  by a cursor that no late-committing transaction can be skipped behind; changes are kept 30 days.
   `POST /v1/webhooks` (`slotlock_create_webhook` and list, delete, enable) sends them in order,
   signed as Standard Webhooks, at least once per `webhook-id`, retried with backoff for a day and
   then disabled (`webhook.disabled` on the feed). `slotlock serve` delivers (`SLOTLOCK_WEBHOOKS`),

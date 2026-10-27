@@ -170,6 +170,27 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
+        name: "slotlock_get_resource_history",
+        method: "GET",
+        path: "/v1/resources/{resource_id}/history",
+        path_params: &["resource_id"],
+        query: &["limit", "before"],
+    },
+    Operation {
+        name: "slotlock_get_reservation_history",
+        method: "GET",
+        path: "/v1/reservations/{reservation_ref}/history",
+        path_params: &["reservation_ref"],
+        query: &["limit", "before"],
+    },
+    Operation {
+        name: "slotlock_get_tenant_event_history",
+        method: "GET",
+        path: "/v1/tenant/events/{event_id}/history",
+        path_params: &["event_id"],
+        query: &["limit", "before"],
+    },
+    Operation {
         name: "slotlock_set_tenant_availability",
         method: "PUT",
         path: "/v1/availability",
@@ -574,6 +595,36 @@ pub struct SetResourcePoolInput {
 pub struct ListPoolsInput {
 }
 
+/// The arguments of [`Client::get_resource_history`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GetResourceHistoryInput {
+    pub resource_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+}
+
+/// The arguments of [`Client::get_reservation_history`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GetReservationHistoryInput {
+    pub reservation_ref: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+}
+
+/// The arguments of [`Client::get_tenant_event_history`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GetTenantEventHistoryInput {
+    pub event_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+}
+
 /// The arguments of [`Client::set_tenant_availability`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SetTenantAvailabilityInput {
@@ -964,6 +1015,32 @@ impl Client {
         self.call("slotlock_list_pools", serde_json::to_value(input)?)
     }
 
+    /// A resource's history.
+    ///
+    /// What happened on one of the tenant's resources, newest first: each hold, booking and event
+    /// made, moved, confirmed, released or cancelled, when, by whom (the API key or agent), and
+    /// for a change what it was before. Kept 30 days. Pass next_before as before for older
+    /// entries.
+    pub fn get_resource_history(&self, input: &GetResourceHistoryInput) -> Result<Value, Error> {
+        self.call("slotlock_get_resource_history", serde_json::to_value(input)?)
+    }
+
+    /// A booking's history.
+    ///
+    /// What happened to one booking, by its reference, newest first: made, moved, cancelled, when
+    /// and by whom, as slotlock_get_resource_history.
+    pub fn get_reservation_history(&self, input: &GetReservationHistoryInput) -> Result<Value, Error> {
+        self.call("slotlock_get_reservation_history", serde_json::to_value(input)?)
+    }
+
+    /// An event's history.
+    ///
+    /// What happened to one calendar event of the tenant, by its id, newest first: created,
+    /// changed, cancelled, when and by whom, as slotlock_get_resource_history.
+    pub fn get_tenant_event_history(&self, input: &GetTenantEventHistoryInput) -> Result<Value, Error> {
+        self.call("slotlock_get_tenant_event_history", serde_json::to_value(input)?)
+    }
+
     /// Set every resource's bookable hours.
     ///
     /// Set the weekly bookable hours of every resource the tenant has, as
@@ -1135,7 +1212,7 @@ impl Client {
     /// cancelled (ids, times and states, never titles or attendees). Pass next_cursor as cursor
     /// to read on; it is returned even when nothing is new, so poll with it. Only changes of
     /// transactions that have ended are listed, so following the cursor never skips one. Changes
-    /// are kept 7 days: an older cursor answers 410 cursor_expired, so start again without one.
+    /// are kept 30 days: an older cursor answers 410 cursor_expired, so start again without one.
     pub fn list_changes(&self, input: &ListChangesInput) -> Result<Value, Error> {
         self.call("slotlock_list_changes", serde_json::to_value(input)?)
     }
@@ -1170,7 +1247,7 @@ impl Client {
     ///
     /// Send to a disabled webhook again, from the first change it did not accept. 404
     /// webhook_not_found when the tenant has no such webhook; 409 changes_pruned when what it
-    /// missed is older than the 7 days the feed keeps, since it would skip those unseen: delete
+    /// missed is older than the 30 days the feed keeps, since it would skip those unseen: delete
     /// it, add it again, and read what it missed from slotlock_list_changes.
     pub fn enable_webhook(&self, input: &EnableWebhookInput) -> Result<Value, Error> {
         self.call("slotlock_enable_webhook", serde_json::to_value(input)?)

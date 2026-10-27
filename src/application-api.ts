@@ -28,6 +28,9 @@ export type SlotlockApplicationOperation =
   | 'slotlock_set_resource_booking_rules'
   | 'slotlock_set_resource_pool'
   | 'slotlock_list_pools'
+  | 'slotlock_get_resource_history'
+  | 'slotlock_get_reservation_history'
+  | 'slotlock_get_tenant_event_history'
   | 'slotlock_acquire_hold'
   | 'slotlock_get_hold'
   | 'slotlock_list_holds'
@@ -83,6 +86,9 @@ export interface SlotlockApplicationBackend {
   setResourceBookingRules: Handler;
   setResourcePool: Handler;
   listPools: Handler;
+  getResourceHistory: Handler;
+  getReservationHistory: Handler;
+  getTenantEventHistory: Handler;
   acquireHold: Handler;
   getHold: Handler;
   listHolds: Handler;
@@ -223,6 +229,27 @@ const RESOURCE = z
     pool: POOL.nullable(),
   })
   .strict();
+
+const HISTORY_ENTRY = z
+  .object({
+    id: z.string().max(40),
+    type: z.string().max(100),
+    time: DATE_TIME,
+    /** Who made it: an API key, an agent's subject; `null` when not recorded. */
+    actor: z.string().max(200).nullable(),
+    /** The record as the change left it, with `before` for a change of an existing one. */
+    data: z.record(z.string(), z.unknown()),
+  })
+  .strict();
+
+const HISTORY_OUTPUT = z
+  .object({ history: z.array(HISTORY_ENTRY).max(100), next_before: z.string().max(40).nullable() })
+  .strict();
+
+const HISTORY_PAGE = {
+  limit: z.number().int().min(1).max(100).default(50),
+  before: z.string().regex(/^msg_[0-9]{1,19}$/).optional(),
+};
 
 const CHANGE = z
   .object({
@@ -438,6 +465,45 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       risk: { readOnly: true, destructive: false, idempotent: true },
       invoke: 'listPools',
       example: {},
+    },
+    {
+      name: 'slotlock_get_resource_history',
+      title: "A resource's history",
+      description:
+        "What happened on one of the tenant's resources, newest first: each hold, booking and event made, moved, confirmed, released or cancelled, when, by whom (the API key or agent), and for a change what it was before. Kept 30 days. Pass next_before as before for older entries.",
+      method: 'GET',
+      path: '/v1/resources/{resource_id}/history',
+      input: z.object({ resource_id: RESOURCE_ID, ...HISTORY_PAGE }).strict(),
+      output: HISTORY_OUTPUT,
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'getResourceHistory',
+      example: { resource_id: EXAMPLE_RESOURCE_ID, limit: 20 },
+    },
+    {
+      name: 'slotlock_get_reservation_history',
+      title: "A booking's history",
+      description:
+        'What happened to one booking, by its reference, newest first: made, moved, cancelled, when and by whom, as slotlock_get_resource_history.',
+      method: 'GET',
+      path: '/v1/reservations/{reservation_ref}/history',
+      input: z.object({ reservation_ref: z.string().min(1).max(500), ...HISTORY_PAGE }).strict(),
+      output: HISTORY_OUTPUT,
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'getReservationHistory',
+      example: { reservation_ref: 'BK-42', limit: 20 },
+    },
+    {
+      name: 'slotlock_get_tenant_event_history',
+      title: "An event's history",
+      description:
+        'What happened to one calendar event of the tenant, by its id, newest first: created, changed, cancelled, when and by whom, as slotlock_get_resource_history.',
+      method: 'GET',
+      path: '/v1/tenant/events/{event_id}/history',
+      input: z.object({ event_id: z.string().uuid(), ...HISTORY_PAGE }).strict(),
+      output: HISTORY_OUTPUT,
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'getTenantEventHistory',
+      example: { event_id: '5e8ff9bf-55ba-4508-9d22-e984129be6b5', limit: 20 },
     },
     {
       name: 'slotlock_set_tenant_availability',
@@ -778,7 +844,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_list_changes',
       title: 'List changes',
       description:
-        "What changed in the tenant, oldest first, as CloudEvents: holds made, confirmed, released or expired; bookings made, moved or cancelled; calendar events created, changed or cancelled (ids, times and states, never titles or attendees). Pass next_cursor as cursor to read on; it is returned even when nothing is new, so poll with it. Only changes of transactions that have ended are listed, so following the cursor never skips one. Changes are kept 7 days: an older cursor answers 410 cursor_expired, so start again without one.",
+        "What changed in the tenant, oldest first, as CloudEvents: holds made, confirmed, released or expired; bookings made, moved or cancelled; calendar events created, changed or cancelled (ids, times and states, never titles or attendees). Pass next_cursor as cursor to read on; it is returned even when nothing is new, so poll with it. Only changes of transactions that have ended are listed, so following the cursor never skips one. Changes are kept 30 days: an older cursor answers 410 cursor_expired, so start again without one.",
       method: 'GET',
       path: '/v1/changes',
       input: z
@@ -834,7 +900,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
     {
       name: 'slotlock_enable_webhook',
       title: 'Enable a webhook',
-      description: 'Send to a disabled webhook again, from the first change it did not accept. 404 webhook_not_found when the tenant has no such webhook; 409 changes_pruned when what it missed is older than the 7 days the feed keeps, since it would skip those unseen: delete it, add it again, and read what it missed from slotlock_list_changes.',
+      description: 'Send to a disabled webhook again, from the first change it did not accept. 404 webhook_not_found when the tenant has no such webhook; 409 changes_pruned when what it missed is older than the 30 days the feed keeps, since it would skip those unseen: delete it, add it again, and read what it missed from slotlock_list_changes.',
       method: 'POST',
       path: '/v1/webhooks/{webhook_id}/enable',
       input: z.object({ webhook_id: z.string().uuid() }).strict(),
