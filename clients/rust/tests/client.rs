@@ -265,7 +265,17 @@ fn books_holds_and_reservations_without_double_booking() {
     keys.sort();
     assert_eq!(
         keys,
-        ["capped", "conflicts", "extended", "pruned", "refused"]
+        [
+            "capped",
+            "conflicts",
+            "extended",
+            "no_shows",
+            "pruned",
+            "refused",
+            "stale_sources",
+            "waitlist_offers",
+            "zone_shifts"
+        ]
     );
 
     let (mut found, mut cursor) = (false, None);
@@ -274,6 +284,7 @@ fn books_holds_and_reservations_without_double_booking() {
             .list_resources(&ListResourcesInput {
                 cursor: cursor.clone(),
                 limit: Some(100),
+                pool: None,
             })
             .unwrap();
         found |= page["resources"]
@@ -391,7 +402,7 @@ fn retries_a_keyed_hold_and_retires_a_resource() {
             ttl_seconds: 60,
             ..window.clone()
         }),
-        409,
+        422,
         "idempotency_conflict",
     );
     let hold_id = hold["id"].as_str().unwrap().to_string();

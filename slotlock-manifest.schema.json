@@ -43,6 +43,7 @@
         "enum": [
           "availability-rules",
           "find-next-available",
+          "find-available-slots",
           "atomic-holds",
           "conflict-safe-reservations",
           "revisioned-external-commands",

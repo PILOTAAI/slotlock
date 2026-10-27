@@ -5,6 +5,131 @@ versioning.
 
 ## Unreleased
 
+### Added
+
+- Waitlists: `POST /v1/waitlist` (`slotlock_join_waitlist`, `joinWaitlist`) waits for a window on a
+  resource or in a pool; `GET /v1/waitlist` and `DELETE /v1/waitlist/{entry_id}` list and leave it.
+  Freed time is offered in the order entries joined, as a hold for the waiter (`waitlist.offered` on
+  the feed): at once after a cancel or release through the API, and by maintenance otherwise, which
+  also expires entries whose window started (`waitlist.expired`).
+- Check-in and no-show release: the booking rule `checkInMinutes` (`check_in_minutes`) releases a
+  booking nobody claimed that long after its start (`reservation.no_show`), for bookings made once
+  the rule is set; `POST /v1/reservations/{reservation_ref}/check-in` (`slotlock_check_in_reservation`,
+  `checkInReservation`) claims one from an hour before its start (`reservation.checked_in`); a
+  move to another start clears it, and a walk-in's window runs from when it was booked. Maintenance results gain `noShows`
+  and `waitlistOffers` (`no_shows`, `waitlist_offers`). Run `slotlock migrate`.
+- Calendar interchange: `GET`/`PUT /v1/resources/{resource_id}/availability/ical`
+  (`slotlock_export_resource_availability`, `slotlock_import_resource_availability`) write and read
+  a resource's weekly bookable hours as an iCalendar VAVAILABILITY (RFC 7953); an import must be in
+  the resource's zone or floating, and anything weekly hours cannot say answers 400
+  `invalid_availability`. `GET /v1/tenant/events/{event_id}/jscalendar`
+  (`slotlock_export_tenant_event`) answers an event as a JSCalendar Event (RFC 8984). The library
+  exports `emitVAvailability`, `parseVAvailability` and `toJSCalendarEvent`.
+- `npm run bench` (`scripts/bench.mjs`, `bench/*.sql`): RFC 0002's pgbench workloads, Slotlock's
+  range constraint against one row per 15-minute slot, reproducible on any scratch database. A new
+  Scaling page covers partitioning by resource (PostgreSQL 16, 17+), Citus, a home region per tenant,
+  read replicas, tracing and SLOs, backups and point-in-time recovery, and committing a solver's
+  plan through Slotlock.
+- Shared request budgets: `SLOTLOCK_SHARED_LIMITS=on` makes every server of a deployment draw a
+  tenant's `tenant_*` and `app_*` budgets from one token bucket in PostgreSQL
+  (`slotlock.take_rate_token`, keyed by a digest), after its own buckets pass; a database that
+  cannot be reached leaves each server's own budgets in charge. `createSlotlockRequestLimits` takes
+  `shared`. Run `slotlock migrate`.
+- Feed health: `GET /v1/resources/{resource_id}/coverage` (`slotlock_get_coverage`, `listCoverage`)
+  shows each source's window, last read, last error and whether it is stale;
+  `POST /v1/resources/{resource_id}/coverage/{source}/failure` (`slotlock_record_coverage_failure`,
+  `recordCoverageFailure`) records a failed read. Maintenance puts a source that has gone stale on the
+  feed once (`coverage.stale`, `reportStaleCoverage`) and counts `staleSources` (`stale_sources`).
+  Unread time stays unproven, never free. Run `slotlock migrate`.
+- Time zone rule changes: each calendar event keeps the wall time it was booked for in its zone,
+  and maintenance reports a future one-off event whose wall time now falls at another instant
+  (`event.timezone_shifted` on the feed, once), or with `followZoneRules` moves it there as a new
+  revision unless that overlaps (`event.timezone_conflict`). `store.followZoneRules` runs it alone.
+  Maintenance results gain `zoneShifts` (`zone_shifts` in the API); `/healthz` gains `tzdata`. Run
+  `slotlock migrate`.
+- History: every change to a booking, hold or event records who made it (the API key or agent:
+  `withTenant`'s new `actor`, which the agent and application backends set to the principal's
+  subject) and, for a change of an existing record, what it was before. Read it newest first with
+  `GET /v1/resources/{resource_id}/history`, `GET /v1/reservations/{reservation_ref}/history` and
+  `GET /v1/tenant/events/{event_id}/history`, or `listHistory`. A backend of your own implements
+  `getHistory`. The feed and history now keep changes 30 days. Run `slotlock migrate`.
+- Pools: interchangeable resources sharing a class (a vehicle class, a room type).
+  `PUT /v1/resources/{resource_id}/pool` (`slotlock_set_resource_pool`, `setResourcePool`) puts a
+  resource in one; `GET /v1/pools` lists them with their capacity. `slotlock_book_pool` (REST
+  `POST /v1/pool-bookings`) books the first member free and allowed in one transaction, so a class
+  sells out exactly at its size however many race (`pool_full`), and replays to the member it
+  booked. `slotlock_list_resources` shows each resource's `pool` and takes `pool` to list one's
+  members. Resources in the application API have `pool`. A backend of your own implements
+  `setResourcePool` and `listPools`, and the optional `bookPool`. Run `slotlock migrate`.
+- Bookings across resources: `slotlock_book_together` (REST `POST /v1/bundles`) books the same
+  time on 2-20 resources in one transaction, all or none, and its refusal names the `resource_id`
+  that refused; bundles lock in one order, so racing ones never deadlock. It is a write that
+  `SLOTLOCK_CONFIRM_WRITES` can guard. `slotlock_find_available_slots` takes `require_free` for
+  times when every resource, or any n, is free together, each slot naming them in `resource_ids`.
+  A backend of your own implements the optional `bookTogether`, else `bundles_unavailable`.
+- `SlotlockAgentOperationError` takes `details` (at most five short fields, such as
+  `resource_id`), which every protocol carries beside `code`.
+- An event feed and webhooks. Every committed change to a tenant's holds, bookings and calendar
+  events is recorded in the same transaction by trigger: ids, times and states, never titles or
+  attendees. `GET /v1/changes` (`slotlock_list_changes`, `listChanges`) lists them as CloudEvents
+  by a cursor that no late-committing transaction can be skipped behind; changes are kept 30 days.
+  `POST /v1/webhooks` (`slotlock_create_webhook` and list, delete, enable) sends them in order,
+  signed as Standard Webhooks, at least once per `webhook-id`, retried with backoff for a day and
+  then disabled (`webhook.disabled` on the feed). `slotlock serve` delivers (`SLOTLOCK_WEBHOOKS`),
+  never to a private network address. Maintenance prunes the feed. A backend of your own
+  implements the five new `SlotlockApplicationBackend` methods. Run `slotlock migrate`.
+- Booking rules per resource (`SlotlockBookingRules`): minimum notice, how far ahead, the step
+  starts fall on in the resource's time zone, a turnaround kept free after each booking (as its
+  trailing buffer, which the exclusion constraint enforces), and whether bookings must lie inside
+  its hours. Holds, reservations, moves and agents' events are refused with the rule they break
+  (`booking_rule_violated`; to an agent `booking_rule_min_notice`, `_max_advance`, `_slot_step`,
+  `_outside_hours`), by the database's clock; searches offer only what the rules allow. Set them
+  with `slotlock rules set`, `PUT /v1/resources/{resource_id}/booking-rules`
+  (`slotlock_set_resource_booking_rules`) or `setResourceBookingRules`. `putCalendarEvent` checks
+  them with `enforceBookingRules`; an imported event is not checked. `createSlotlockStore` takes
+  `defaultAvailabilityRules` for resources without hours of their own (`slotlock serve` passes
+  `SLOTLOCK_AVAILABILITY`). Run `slotlock migrate`.
+- Agent holds: `slotlock_hold_slots` (REST `POST /v1/slot-holds`) holds up to five candidate slots
+  for 30-900 seconds as one group while a person chooses, listing the taken ones by index;
+  `slotlock_create_event`'s `hold_id` books one, releasing the others in the same transaction; and
+  `slotlock_release_slots` (`DELETE /v1/slot-holds/{hold_id}`) releases a group at once. A hold is
+  its agent's alone, and one agent may have 20 live (`SLOTLOCK_MAX_HOLDS_PER_HOLDER`). In the
+  library, `acquireHold` takes `holderRef` and `groupId`, `releaseHold` a `holderRef`, and
+  `putCalendarEvent` `fromHold` (refused with `hold_not_found` or `hold_mismatch`). A backend of
+  your own implements the optional `holdSlots` and `releaseSlots`; without them the tools answer
+  `holds_unavailable`. Run `slotlock migrate`. In an MCP Apps host the calendar view renders the
+  held slots, with when they expire, and its message names the hold, so the person picks from time
+  nobody can take while they decide.
+- `slotlock_find_available_slots` (REST `GET /v1/available-slots`) lists up to 50 certain slots of
+  a duration, earliest first across up to 20 resources, each found the way
+  `slotlock_find_next_available` finds one: free of busy time, inside the resource's hours, and
+  only when every resource's coverage is certain.
+- The MCP Apps calendar view lets a person pick one of those slots: a strip of days, each day's times
+  by part of the day, and *Book this time*. It sends the agent a chat message naming the slot
+  (`ui/message`), so the agent books it through the normal, confirmable path, and shows the text to
+  send when the host refuses.
+- The view follows the host: its theme and its standard style variables, which it now applies (it
+  only read them before, so it looked the same, and light, in every host). It shows times in the
+  person's locale, clock and time zone, and reports its size to the host.
+
+### Changed
+
+- REST refusals are RFC 9457 problem details (`application/problem+json`): `type` (a tag URI, one per
+  code), `title`, `status` and `code`, with `error.code` kept so existing clients read them as
+  before, and a `Link: rel="describedby"` header to the error docs. An `overlap` names the
+  `resource_id`, `start` and `end` it refused.
+- The same idempotency key with another request answers REST `422 idempotency_conflict` (was 409),
+  as draft-ietf-httpapi-idempotency-key-header-08 says. MCP and A2A answer the same code.
+- Every REST write that keeps an `idempotency_key` (the agent tools' as well as the application's)
+  takes it as the `Idempotency-Key` header, as a Structured Field String (`"…"`) or bare; a write
+  that requires one and gets neither answers `400 idempotency_key_required`. Keys are kept 30 days
+  for event writes and while the hold could be live for holds; the docs publish the policy.
+
+- The application API's resource has `booking_rules` (`null` when it has none), and
+  `SlotlockApplicationBackend` has `setResourceBookingRules`: a backend of your own implements it.
+- The three write tools carry `_meta.ui.visibility: ["model"]`: MCP Apps hosts no longer let a view
+  call them (the default is model and app).
+
 ### Fixed
 
 - A hold's expiry is judged at each statement (`statement_timestamp()`), not at the start of the

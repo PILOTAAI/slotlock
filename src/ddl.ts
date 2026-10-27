@@ -254,7 +254,11 @@ export const SLOTLOCK_SCHEMA_FUNCTIONS = Object.freeze([
 ] as const);
 
 /** The table of suspended tenants: they may read, and write nothing (store.ts withTenant). */
-export const SLOTLOCK_TENANT_ADMIN_TABLES = Object.freeze(['tenant_suspensions'] as const);
+export const SLOTLOCK_TENANT_ADMIN_TABLES = Object.freeze([
+  'tenant_suspensions',
+  'webhook_tenants',
+  'rate_buckets',
+] as const);
 
 /**
  * The SECURITY DEFINER functions through which a server checks a tenant's suspension and erases a
@@ -263,6 +267,10 @@ export const SLOTLOCK_TENANT_ADMIN_TABLES = Object.freeze(['tenant_suspensions']
 export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.tenant_suspended(text)',
   'slotlock.erase_tenant(text)',
+  'slotlock.register_webhook_tenant(text)',
+  'slotlock.webhook_tenants(text)',
+  'slotlock.unregister_webhook_tenant(text)',
+  'slotlock.take_rate_token(text, double precision, double precision)',
 ] as const);
 
 /**
@@ -817,6 +825,9 @@ BEGIN
     previous := previous || jsonb_build_object(setting, current_setting(setting, true));
     PERFORM set_config(setting, requested_tenant_ref, true);
   END LOOP;
+  -- What erasure deletes is not a change anyone is told of: the feed goes with the tenant.
+  previous := previous || jsonb_build_object('slotlock.erasing', current_setting('slotlock.erasing', true));
+  PERFORM set_config('slotlock.erasing', requested_tenant_ref, true);
 
   erased_table := 'calendar_event_attendees';
   DELETE FROM slotlock.calendar_event_attendees WHERE tenant_ref = requested_tenant_ref;
@@ -869,8 +880,25 @@ BEGIN
   DELETE FROM slotlock.hold_commands WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  erased_table := 'waitlist_entries';
+  DELETE FROM slotlock.waitlist_entries WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'resources';
   DELETE FROM slotlock.resources WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  -- After every booking table: what their deletion just appended goes with the rest.
+  erased_table := 'outbox';
+  DELETE FROM slotlock.outbox WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'webhook_endpoints';
+  DELETE FROM slotlock.webhook_endpoints WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'webhook_tenants';
+  DELETE FROM slotlock.webhook_tenants WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
   erased_table := 'api_keys';
@@ -900,6 +928,101 @@ BEGIN
 END
 $slotlock_erase_tenant$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[1]} FROM PUBLIC;
+
+-- The tenants with a webhook endpoint, which a server delivers for. Row-level security hides every
+-- other tenant's endpoints from the serving role, so this list (names only) is how a server that
+-- restarted finds the tenants whose events still wait. No role but its owner reads it.
+CREATE TABLE IF NOT EXISTS slotlock.webhook_tenants (
+  tenant_ref text PRIMARY KEY,
+  registered_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT slotlock_webhook_tenants_tenant_ref_valid
+    CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500)
+);
+ALTER TABLE slotlock.webhook_tenants ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.webhook_tenants FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION slotlock.register_webhook_tenant(requested_tenant_ref text)
+RETURNS void
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_register_webhook_tenant$
+  INSERT INTO slotlock.webhook_tenants (tenant_ref) VALUES (requested_tenant_ref)
+  ON CONFLICT (tenant_ref) DO NOTHING;
+$slotlock_register_webhook_tenant$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[2]} FROM PUBLIC;
+
+-- A page of 1,000 tenant names after \`after\` (NULL: from the start); a caller pages to the end.
+DROP FUNCTION IF EXISTS slotlock.webhook_tenants();
+CREATE OR REPLACE FUNCTION slotlock.webhook_tenants(after text)
+RETURNS SETOF text
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_webhook_tenants$
+  SELECT tenant_ref FROM slotlock.webhook_tenants
+   WHERE after IS NULL OR tenant_ref > after
+   ORDER BY tenant_ref LIMIT 1000;
+$slotlock_webhook_tenants$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[3]} FROM PUBLIC;
+
+-- Called when a tenant's last endpoint is deleted, so the list holds only tenants with one.
+CREATE OR REPLACE FUNCTION slotlock.unregister_webhook_tenant(requested_tenant_ref text)
+RETURNS void
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_unregister_webhook_tenant$
+  DELETE FROM slotlock.webhook_tenants WHERE tenant_ref = requested_tenant_ref;
+$slotlock_unregister_webhook_tenant$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[4]} FROM PUBLIC;
+
+-- Request budgets shared by every server of a deployment (SLOTLOCK_SHARED_LIMITS): one token bucket
+-- per limit and tenant, keyed by a digest, refilled and taken in one statement so racing servers
+-- never both take the last token. No role but its owner reads it.
+CREATE TABLE IF NOT EXISTS slotlock.rate_buckets (
+  bucket text PRIMARY KEY,
+  tokens double precision NOT NULL,
+  at timestamptz NOT NULL,
+  CONSTRAINT slotlock_rate_buckets_bucket_valid CHECK (bucket ~ '^[0-9a-f]{64}$')
+);
+ALTER TABLE slotlock.rate_buckets ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.rate_buckets FROM PUBLIC;
+
+-- True when a token was taken: the bucket refills at per_second up to burst, and starts full.
+CREATE OR REPLACE FUNCTION slotlock.take_rate_token(
+  requested_bucket text, per_second double precision, burst double precision
+)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_take_rate_token$
+DECLARE
+  taken boolean;
+BEGIN
+  IF requested_bucket !~ '^[0-9a-f]{64}$' OR NOT (per_second > 0) OR NOT (burst >= 1) THEN
+    RAISE EXCEPTION 'Slotlock rate bucket arguments are invalid' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  INSERT INTO slotlock.rate_buckets AS kept (bucket, tokens, at)
+  VALUES (requested_bucket, burst - 1, clock_timestamp())
+  ON CONFLICT (bucket) DO UPDATE
+     SET tokens = LEAST(burst, kept.tokens + EXTRACT(EPOCH FROM clock_timestamp() - kept.at) * per_second) - 1,
+         at = clock_timestamp()
+   WHERE LEAST(burst, kept.tokens + EXTRACT(EPOCH FROM clock_timestamp() - kept.at) * per_second) >= 1
+  RETURNING true INTO taken;
+  -- Now and then, buckets idle for an hour (full again long since) are dropped.
+  IF random() < 0.001 THEN
+    DELETE FROM slotlock.rate_buckets WHERE at < clock_timestamp() - interval '1 hour';
+  END IF;
+  RETURN COALESCE(taken, false);
+END
+$slotlock_take_rate_token$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[5]} FROM PUBLIC;
 `;
 
 // A constraint an upgrade added NOT VALID (no table scan under its ACCESS EXCLUSIVE lock) is checked
@@ -945,6 +1068,292 @@ VALUES (true, ${SLOTLOCK_SCHEMA_VERSION}, now())
 ON CONFLICT (singleton) DO UPDATE
 SET version = EXCLUDED.version, ddl_sha256 = NULL, catalog_sha256 = NULL,
     applied_at = EXCLUDED.applied_at;
+`;
+
+// The event feed (RFC 0002 P1-5). Every committed change to a tenant's holds, bookings and calendar
+// events appends a row here in the same transaction, by trigger, so no write path can skip it and
+// nothing is recorded that did not commit. Rows carry ids, times and states, never titles,
+// descriptions or attendees. A reader orders rows by (txid, id) and reads only transactions below
+// its snapshot's xmin: every one of those has ended, so a transaction that commits late can never
+// add a row behind a position a reader has passed. Maintenance deletes rows past the retention.
+const SLOTLOCK_OUTBOX_DDL = `
+CREATE TABLE IF NOT EXISTS slotlock.outbox (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  txid xid8 NOT NULL DEFAULT pg_current_xact_id(),
+  tenant_ref text NOT NULL,
+  resource_id uuid,
+  type text NOT NULL,
+  subject text NOT NULL,
+  data jsonb NOT NULL,
+  occurred_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_outbox_tenant_ref_valid CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500),
+  CONSTRAINT slotlock_outbox_type_valid CHECK (type ~ '^[a-z]+\\.[a-z_]+$')
+);
+-- Who made the change (withTenant's actor: an API key, an agent), for the history.
+ALTER TABLE slotlock.outbox ADD COLUMN IF NOT EXISTS actor text;
+CREATE INDEX IF NOT EXISTS slotlock_outbox_tenant_resource_idx
+  ON slotlock.outbox (tenant_ref, resource_id, id) WHERE resource_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS slotlock_outbox_tenant_subject_idx
+  ON slotlock.outbox (tenant_ref, subject, id);
+CREATE INDEX IF NOT EXISTS slotlock_outbox_tenant_position_idx
+  ON slotlock.outbox (tenant_ref, txid, id);
+CREATE INDEX IF NOT EXISTS slotlock_outbox_tenant_time_idx
+  ON slotlock.outbox (tenant_ref, occurred_at);
+
+CREATE TABLE IF NOT EXISTS slotlock.webhook_endpoints (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_ref text NOT NULL,
+  url text NOT NULL,
+  secret text NOT NULL,
+  event_types text[],
+  cursor_txid xid8 NOT NULL,
+  cursor_id bigint NOT NULL DEFAULT 0,
+  -- Set when maintenance pruned a change this (disabled) endpoint had not received: enabling it
+  -- again is refused rather than skipping that change unseen.
+  changes_pruned boolean NOT NULL DEFAULT false,
+  attempts integer NOT NULL DEFAULT 0,
+  next_attempt_at timestamptz,
+  failing_since timestamptz,
+  last_status integer,
+  last_error text,
+  disabled_at timestamptz,
+  disabled_reason text,
+  lease_until timestamptz,
+  lease_token uuid,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT slotlock_webhook_endpoints_identity_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND octet_length(url) BETWEEN 1 AND 2048
+    AND secret ~ '^whsec_[A-Za-z0-9+/]{43}=$'
+  ),
+  CONSTRAINT slotlock_webhook_endpoints_types_valid CHECK (
+    event_types IS NULL OR cardinality(event_types) BETWEEN 1 AND 20
+  ),
+  CONSTRAINT slotlock_webhook_endpoints_error_valid CHECK (
+    last_error IS NULL OR char_length(last_error) <= 500
+  )
+);
+ALTER TABLE slotlock.webhook_endpoints ADD COLUMN IF NOT EXISTS changes_pruned boolean NOT NULL DEFAULT false;
+CREATE INDEX IF NOT EXISTS slotlock_webhook_endpoints_tenant_idx
+  ON slotlock.webhook_endpoints (tenant_ref, created_at);
+
+-- Who waits for time on a resource or in a pool, offered in order (offerWaitlist): the first whose
+-- window comes free gets a hold of it, for offer_ttl_ms, and the feed says so (waitlist.offered).
+CREATE TABLE IF NOT EXISTS slotlock.waitlist_entries (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_ref text NOT NULL,
+  resource_id uuid,
+  pool_ref text,
+  starts_at timestamptz NOT NULL,
+  ends_at timestamptz NOT NULL,
+  holder_ref text NOT NULL,
+  offer_ttl_ms bigint NOT NULL,
+  status text NOT NULL DEFAULT 'waiting',
+  hold_id uuid,
+  offered_resource_id uuid,
+  offered_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  -- The resource is the entry's own tenant's, as the database sees it, whatever wrote the row.
+  CONSTRAINT slotlock_waitlist_entries_resource_fk FOREIGN KEY (resource_id, tenant_ref)
+    REFERENCES slotlock.resources (id, tenant_ref) ON DELETE CASCADE,
+  CONSTRAINT slotlock_waitlist_entries_target_valid CHECK ((resource_id IS NULL) <> (pool_ref IS NULL)),
+  CONSTRAINT slotlock_waitlist_entries_window_valid CHECK (ends_at > starts_at),
+  CONSTRAINT slotlock_waitlist_entries_status_valid CHECK (status IN ('waiting', 'offered', 'expired')),
+  CONSTRAINT slotlock_waitlist_entries_identity_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500 AND octet_length(holder_ref) BETWEEN 1 AND 500
+  ),
+  CONSTRAINT slotlock_waitlist_entries_ttl_valid CHECK (offer_ttl_ms BETWEEN 60000 AND 86400000),
+  CONSTRAINT slotlock_waitlist_entries_offer_valid CHECK (
+    (status = 'offered') = (hold_id IS NOT NULL AND offered_at IS NOT NULL AND offered_resource_id IS NOT NULL)
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_waitlist_entries_queue_idx
+  ON slotlock.waitlist_entries (tenant_ref, created_at, id) WHERE status = 'waiting';
+CREATE INDEX IF NOT EXISTS slotlock_waitlist_entries_tenant_idx
+  ON slotlock.waitlist_entries (tenant_ref, starts_at);
+
+-- The tenant a reservation row belongs to: its own, or (a hold) its resource's.
+CREATE OR REPLACE FUNCTION slotlock.outbox_reservation_change()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_outbox_reservation$
+DECLARE
+  changed slotlock.reservations%ROWTYPE;
+  owner text;
+  kind text;
+BEGIN
+  changed := CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+  -- A calendar event's occupation is reported as the event's change.
+  IF changed.calendar_event_id IS NOT NULL THEN RETURN NULL; END IF;
+  owner := changed.tenant_ref;
+  IF owner IS NULL THEN
+    SELECT resource.tenant_ref INTO owner FROM slotlock.resources resource
+     WHERE resource.id = changed.resource_id;
+  END IF;
+  IF owner IS NULL THEN RETURN NULL; END IF;
+  -- Erasure (erase_tenant, running as the schema's owner) is not reported. The marker is an ordinary
+  -- setting, so it counts only when the owner set it: the serving role cannot hide its own writes.
+  IF owner = current_setting('slotlock.erasing', true)
+     AND current_user = (SELECT pg_catalog.pg_get_userbyid(nspowner) FROM pg_catalog.pg_namespace
+                          WHERE nspname = 'slotlock') THEN
+    RETURN NULL;
+  END IF;
+  IF TG_OP = 'INSERT' THEN
+    kind := CASE WHEN NEW.status = 'held' THEN 'hold.created' ELSE 'reservation.created' END;
+  ELSIF TG_OP = 'UPDATE' THEN
+    IF OLD.status = 'held' AND NEW.status <> 'held' THEN
+      kind := 'hold.confirmed';
+    ELSIF (OLD.starts_at, OLD.ends_at, OLD.resource_id, OLD.revision, OLD.buffer_after_ms)
+          IS NOT DISTINCT FROM
+          (NEW.starts_at, NEW.ends_at, NEW.resource_id, NEW.revision, NEW.buffer_after_ms) THEN
+      RETURN NULL;
+    ELSE
+      kind := CASE WHEN NEW.status = 'held' THEN 'hold.updated' ELSE 'reservation.updated' END;
+    END IF;
+  ELSE
+    kind := CASE
+      WHEN OLD.status <> 'held' THEN 'reservation.cancelled'
+      WHEN OLD.expires_at <= statement_timestamp() THEN 'hold.expired'
+      ELSE 'hold.released'
+    END;
+  END IF;
+  INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+  VALUES (
+    owner, changed.resource_id, kind,
+    COALESCE(changed.external_ref, changed.id::text),
+    jsonb_strip_nulls(jsonb_build_object(
+      'id', changed.id,
+      'reference', changed.external_ref,
+      'resource_id', changed.resource_id,
+      'start', changed.starts_at,
+      'end', changed.ends_at,
+      'buffer_after_ms', changed.buffer_after_ms,
+      'revision', CASE WHEN changed.status = 'held' THEN NULL ELSE changed.revision END,
+      'expires_at', CASE WHEN changed.status = 'held' THEN changed.expires_at END,
+      -- A move says where it came from.
+      'before', CASE WHEN TG_OP = 'UPDATE' THEN jsonb_build_object(
+        'resource_id', OLD.resource_id, 'start', OLD.starts_at, 'end', OLD.ends_at,
+        'revision', OLD.revision) END
+    )),
+    NULLIF(current_setting('slotlock.actor', true), '')
+  );
+  RETURN NULL;
+END
+$slotlock_outbox_reservation$;
+
+CREATE OR REPLACE FUNCTION slotlock.outbox_calendar_event_change()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_outbox_calendar_event$
+DECLARE
+  changed slotlock.calendar_events%ROWTYPE;
+  kind text;
+BEGIN
+  changed := CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+  -- Erasure (erase_tenant, running as the schema's owner) is not reported. The marker is an ordinary
+  -- setting, so it counts only when the owner set it: the serving role cannot hide its own writes.
+  IF changed.tenant_ref = current_setting('slotlock.erasing', true)
+     AND current_user = (SELECT pg_catalog.pg_get_userbyid(nspowner) FROM pg_catalog.pg_namespace
+                          WHERE nspname = 'slotlock') THEN
+    RETURN NULL;
+  END IF;
+  IF TG_OP = 'INSERT' THEN
+    kind := 'event.created';
+  ELSIF TG_OP = 'UPDATE' THEN
+    -- Extending a series to the rolling horizon changes nothing anyone wrote.
+    IF OLD.revision = NEW.revision AND OLD.resource_id = NEW.resource_id THEN RETURN NULL; END IF;
+    kind := 'event.updated';
+  ELSE
+    kind := 'event.cancelled';
+  END IF;
+  INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+  VALUES (
+    changed.tenant_ref, changed.resource_id, kind, changed.id::text,
+    jsonb_strip_nulls(jsonb_build_object(
+      'id', changed.id,
+      'resource_id', changed.resource_id,
+      'start', changed.starts_at,
+      'end', changed.ends_at,
+      'timezone', changed.timezone,
+      'status', changed.status,
+      'transparency', changed.transparency,
+      'recurring', changed.recurrence_rule IS NOT NULL,
+      'revision', changed.revision,
+      'before', CASE WHEN TG_OP = 'UPDATE' THEN jsonb_build_object(
+        'resource_id', OLD.resource_id, 'start', OLD.starts_at, 'end', OLD.ends_at,
+        'status', OLD.status, 'transparency', OLD.transparency, 'revision', OLD.revision) END
+    )),
+    NULLIF(current_setting('slotlock.actor', true), '')
+  );
+  RETURN NULL;
+END
+$slotlock_outbox_calendar_event$;
+
+-- Time zone rules change (tzdata): an event is kept as the wall-clock time it was booked for in its
+-- zone as well as the instant, so maintenance can find a future one-off event whose wall time now
+-- falls at another instant. PostgreSQL's own tzdata resolves both. A zone it does not know gives
+-- NULL rather than an error, and such an event is left alone.
+CREATE OR REPLACE FUNCTION slotlock.zoned_wall(instant timestamptz, zone text)
+RETURNS timestamp LANGUAGE plpgsql STABLE SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_zoned_wall$
+BEGIN
+  RETURN instant AT TIME ZONE zone;
+EXCEPTION WHEN OTHERS THEN
+  RETURN NULL;
+END
+$slotlock_zoned_wall$;
+CREATE OR REPLACE FUNCTION slotlock.zoned_instant(wall timestamp, zone text)
+RETURNS timestamptz LANGUAGE plpgsql STABLE SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_zoned_instant$
+BEGIN
+  RETURN wall AT TIME ZONE zone;
+EXCEPTION WHEN OTHERS THEN
+  RETURN NULL;
+END
+$slotlock_zoned_instant$;
+ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS wall_starts_at timestamp;
+ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS wall_ends_at timestamp;
+-- Set when a shift was reported, so it is reported once; any change of the event's time clears it.
+ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS zone_shift_reported_at timestamptz;
+CREATE OR REPLACE FUNCTION slotlock.calendar_event_wall_time()
+RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_calendar_event_wall_time$
+BEGIN
+  IF TG_OP = 'INSERT'
+     OR NEW.starts_at IS DISTINCT FROM OLD.starts_at OR NEW.ends_at IS DISTINCT FROM OLD.ends_at
+     OR NEW.timezone IS DISTINCT FROM OLD.timezone THEN
+    NEW.wall_starts_at := slotlock.zoned_wall(NEW.starts_at, NEW.timezone);
+    NEW.wall_ends_at := slotlock.zoned_wall(NEW.ends_at, NEW.timezone);
+    NEW.zone_shift_reported_at := NULL;
+  END IF;
+  RETURN NEW;
+END
+$slotlock_calendar_event_wall_time$;
+DROP TRIGGER IF EXISTS slotlock_calendar_event_wall_time ON slotlock.calendar_events;
+CREATE TRIGGER slotlock_calendar_event_wall_time
+  BEFORE INSERT OR UPDATE ON slotlock.calendar_events
+  FOR EACH ROW EXECUTE FUNCTION slotlock.calendar_event_wall_time();
+-- Events written before this release: their wall time as the rules read now.
+UPDATE slotlock.calendar_events
+   SET wall_starts_at = slotlock.zoned_wall(starts_at, timezone),
+       wall_ends_at = slotlock.zoned_wall(ends_at, timezone)
+ WHERE wall_starts_at IS NULL AND ends_at > now();
+
+-- Feed health: a source's last failure, and when its staleness was last reported on the feed.
+ALTER TABLE slotlock.calendar_coverage ADD COLUMN IF NOT EXISTS last_error text;
+ALTER TABLE slotlock.calendar_coverage ADD COLUMN IF NOT EXISTS last_error_at timestamptz;
+ALTER TABLE slotlock.calendar_coverage ADD COLUMN IF NOT EXISTS stale_reported_at timestamptz;
+
+DROP TRIGGER IF EXISTS slotlock_outbox_reservation_change ON slotlock.reservations;
+CREATE TRIGGER slotlock_outbox_reservation_change
+  AFTER INSERT OR UPDATE OR DELETE ON slotlock.reservations
+  FOR EACH ROW EXECUTE FUNCTION slotlock.outbox_reservation_change();
+DROP TRIGGER IF EXISTS slotlock_outbox_calendar_event_change ON slotlock.calendar_events;
+CREATE TRIGGER slotlock_outbox_calendar_event_change
+  AFTER INSERT OR UPDATE OR DELETE ON slotlock.calendar_events
+  FOR EACH ROW EXECUTE FUNCTION slotlock.outbox_calendar_event_change();
 `;
 
 // btree_gist is created in slotlock when it is missing; one installed elsewhere stays where it is.
@@ -1020,6 +1429,16 @@ ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS tenant_ref text;
 -- Its CHECK holds SLOTLOCK_MAX_AVAILABILITY_RULES as it was when first added: changing the cap
 -- needs a constraint under a new name.
 ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS availability_rules jsonb;
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS booking_rules jsonb;
+-- Since when the booking rules have asked for check-in: only bookings made after it are released
+-- unclaimed (releaseNoShows), so turning the rule on releases none of the bookings already made.
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS check_in_since timestamptz;
+-- When the booking was claimed (checkInReservation); null while it has not been.
+ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS checked_in_at timestamptz;
+-- The pool (a vehicle class, a room type) whose interchangeable members this resource is one of.
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS pool_ref text;
+CREATE INDEX IF NOT EXISTS slotlock_resources_pool_idx
+  ON slotlock.resources (tenant_ref, pool_ref, id) WHERE pool_ref IS NOT NULL;
 -- Who sees a resource: 'shared' ones are listed to agents and booked through them, 'private' ones
 -- (a tax-deadline calendar, say) only by the tenant's own code. Fixed when the resource is created.
 ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS visibility text NOT NULL DEFAULT 'shared';
@@ -1029,6 +1448,14 @@ ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS tenant_ref text;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS external_ref text;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS buffer_after_ms bigint NOT NULL DEFAULT 0;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS occupied_ends_at timestamptz;
+-- A keyed hold's holder (its principal) and the group of alternatives it was taken in: an agent
+-- releases or books only its own holds, and booking one releases the rest of its group.
+ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS holder_ref text;
+ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS hold_group_id uuid;
+CREATE INDEX IF NOT EXISTS slotlock_reservations_hold_group_idx
+  ON slotlock.reservations (hold_group_id) WHERE hold_group_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS slotlock_reservations_holder_idx
+  ON slotlock.reservations (holder_ref, expires_at) WHERE status = 'held' AND holder_ref IS NOT NULL;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS revision bigint NOT NULL DEFAULT 1;
 
 -- timestamptz + interval is STABLE (session timezone aware), so PostgreSQL correctly refuses it
@@ -1244,6 +1671,25 @@ BEGIN
         OR CASE WHEN jsonb_typeof(availability_rules) = 'array'
                 THEN jsonb_array_length(availability_rules) <= ${SLOTLOCK_MAX_AVAILABILITY_RULES}
                 ELSE false END
+      );
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'slotlock_resources_pool_ref_valid'
+  ) THEN
+    ALTER TABLE slotlock.resources
+      ADD CONSTRAINT slotlock_resources_pool_ref_valid CHECK (
+        pool_ref IS NULL OR (char_length(pool_ref) BETWEEN 1 AND 100 AND pool_ref ~ '^[a-z0-9][a-z0-9._-]*$')
+      ) NOT VALID;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'slotlock_resources_booking_rules_valid'
+       AND conrelid = 'slotlock.resources'::regclass
+  ) THEN
+    ALTER TABLE slotlock.resources
+      ADD CONSTRAINT slotlock_resources_booking_rules_valid CHECK (
+        booking_rules IS NULL OR jsonb_typeof(booking_rules) = 'object'
       );
   END IF;
   IF NOT EXISTS (
@@ -1584,6 +2030,11 @@ ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS roll_retry_at time
 -- when its rule has no end, or none Slotlock could follow it to. NULL: not worked out yet (a series
 -- from before 0.3, until its next roll), and so treated as going on. Unused for a one-off event.
 ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS recurrence_ends_by timestamptz;
+-- The turnaround a booked event keeps after each occurrence (its resource's, when it was booked), so
+-- the occurrences a later roll adds keep it too. At most a day.
+ALTER TABLE slotlock.calendar_events
+  ADD COLUMN IF NOT EXISTS buffer_after_ms integer NOT NULL DEFAULT 0
+  CONSTRAINT slotlock_calendar_events_buffer_valid CHECK (buffer_after_ms BETWEEN 0 AND 86400000);
 ALTER TABLE slotlock.calendar_events
   DROP CONSTRAINT IF EXISTS slotlock_calendar_events_recurrence_cursor_bounded;
 DO $slotlock_calendar_event_recurrence_cursor$
@@ -2117,7 +2568,7 @@ CREATE INDEX IF NOT EXISTS slotlock_calendar_event_occurrences_resource_time_idx
   ON slotlock.calendar_event_occurrences (tenant_ref, starts_at, ends_at);
 CREATE INDEX IF NOT EXISTS slotlock_reservations_calendar_event_idx
   ON slotlock.reservations (calendar_event_id) WHERE calendar_event_id IS NOT NULL;
-${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_DASHBOARD_DDL}${SLOTLOCK_TENANT_ADMIN_DDL}${DEPLOYMENT_RECORD_VERSION}`;
+${SLOTLOCK_OUTBOX_DDL}${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_DASHBOARD_DDL}${SLOTLOCK_TENANT_ADMIN_DDL}${DEPLOYMENT_RECORD_VERSION}`;
 
 /** The whole deployment DDL, run in one transaction: the schema, then its constraints validated. */
 export const SLOTLOCK_CORE_DDL: string = `${CORE_DDL_BODY}${DEPLOYMENT_VALIDATE_CONSTRAINTS}${DEPLOYMENT_RESTORE_FORCED_ROW_SECURITY}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
@@ -2149,6 +2600,9 @@ export const SLOTLOCK_TENANT_TABLES = Object.freeze([
   'calendar_event_commands',
   'calendar_coverage',
   'hold_commands',
+  'outbox',
+  'webhook_endpoints',
+  'waitlist_entries',
 ] as const);
 
 const POSTGRES_SETTING_NAME = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/;
@@ -2225,6 +2679,12 @@ ALTER TABLE slotlock.calendar_coverage ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.calendar_coverage FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.hold_commands ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.hold_commands FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.outbox ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.outbox FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.webhook_endpoints ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.webhook_endpoints FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.waitlist_entries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.waitlist_entries FORCE ROW LEVEL SECURITY;
 
 -- One database must have one tenant-context contract. Re-applying with an adapter-specific
 -- setting deliberately rebinds the stable policies instead of silently keeping a prior setting.
@@ -2249,7 +2709,10 @@ BEGIN
          'calendar_event_tombstones',
          'calendar_event_commands',
          'calendar_coverage',
-         'hold_commands'
+         'hold_commands',
+         'outbox',
+         'webhook_endpoints',
+         'waitlist_entries'
        )
   LOOP
     EXECUTE format(
@@ -2420,6 +2883,36 @@ BEGIN
       USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
       WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
   END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'outbox'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.outbox
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'webhook_endpoints'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.webhook_endpoints
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'waitlist_entries'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.waitlist_entries
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
 END
 $slotlock_rls$;
 
@@ -2448,6 +2941,12 @@ COMMENT ON POLICY tenant_isolation_v1 ON slotlock.calendar_event_commands
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.calendar_coverage
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.hold_commands
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.outbox
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.webhook_endpoints
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.waitlist_entries
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 
 INSERT INTO slotlock.rls_policy_contracts (
@@ -2484,7 +2983,10 @@ WHERE schemaname = 'slotlock'
     'calendar_event_tombstones',
     'calendar_event_commands',
     'calendar_coverage',
-    'hold_commands'
+    'hold_commands',
+    'outbox',
+    'webhook_endpoints',
+    'waitlist_entries'
   )
   AND policyname = 'tenant_isolation_v1'
 ON CONFLICT (table_name) DO UPDATE

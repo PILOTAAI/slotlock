@@ -166,7 +166,7 @@ class SlotlockClientTest {
         Map.of("revision", 1L, "replayed", false),
         client.recordCoverage(id, "ics:https://calendar.example.com/fleet.ics", at(0), at(24), 1));
     assertEquals(
-        java.util.Set.of("extended", "conflicts", "refused", "pruned", "capped"), client.runMaintenance().keySet());
+        java.util.Set.of("extended", "conflicts", "refused", "pruned", "zone_shifts", "stale_sources", "no_shows", "waitlist_offers", "capped"), client.runMaintenance().keySet());
 
     boolean found = false;
     String cursor = null;
@@ -224,7 +224,7 @@ class SlotlockClientTest {
     Map<String, Object> keyed = Map.of("idempotency_key", "java-hold-" + suffix);
     Map<String, Object> hold = map(client.acquireHold(id, at(9), at(10), 600, keyed).get("hold"));
     assertEquals(hold, client.acquireHold(id, at(9), at(10), 600, keyed).get("hold"));
-    refused(409, "idempotency_conflict", () -> client.acquireHold(id, at(9), at(10), 60, keyed));
+    refused(422, "idempotency_conflict", () -> client.acquireHold(id, at(9), at(10), 60, keyed));
     String holdId = (String) hold.get("id");
     assertEquals(hold, client.getHold(holdId).get("hold"));
     // Confirmed, it is the reservation its id names, cancelled by that reference.

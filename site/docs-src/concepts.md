@@ -26,6 +26,9 @@ length, evaluated in the resource's time zone (09:00 stays 09:00 across daylight
 - A resource can have rules of its own (`slotlock hours set`, the dashboard, or
   `setResourceAvailability`); otherwise it uses the server's (`SLOTLOCK_AVAILABILITY`).
 - No rule means never bookable, not open all week.
+- Booking rules add what a booking must satisfy: minimum notice, how far ahead, the step starts fall
+  on, the turnaround kept free after it, and whether it must lie inside these hours
+  (`slotlock rules set`, or `setResourceBookingRules`). Searches offer only what they allow.
 - A rule Slotlock cannot evaluate adds nothing, and the CLI and store refuse it: anything but
   `FREQ=WEEKLY`, `BYDAY`, `INTERVAL=1` and a UTC `UNTIL` on a real date (so no `COUNT`, `BYHOUR`,
   `DTSTART` or 31 February).

@@ -69,7 +69,11 @@ describe.skipIf(!url)('the application API on the real store', () => {
     );
     return { status: response.status, body: (await response.json()) as Record<string, any> };
   };
-  const refused = (status: number, code: string) => ({ status, body: { error: { code } } });
+  // RFC 9457 problem details, which still carry `error.code`.
+  const refused = (status: number, code: string) => ({
+    status,
+    body: expect.objectContaining({ status, code, error: { code } }),
+  });
 
   const day = (offset: number, time = '00:00:00') =>
     `${new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10)}T${time}.000Z`;
@@ -107,8 +111,10 @@ describe.skipIf(!url)('the application API on the real store', () => {
           external_ref: 'van-1',
           timezone: 'Europe/London',
           availability: null,
+          booking_rules: null,
           visibility: 'shared',
           archived_at: null,
+          pool: null,
         },
       },
     });
@@ -325,14 +331,16 @@ describe.skipIf(!url)('the application API on the real store', () => {
     ).toEqual(refused(409, 'overlap'));
     // Another reference over it overlaps; the same reference at a different revision-1 payload conflicts.
     expect(await call('a', 'PUT', `/v1/reservations/other-${randomUUID()}`, booking)).toEqual(refused(409, 'overlap'));
-    expect((await call('a', 'PUT', path, { ...booking, end: day(23, '09:00:00') })).status).toBe(409);
+    expect(await call('a', 'PUT', path, { ...booking, end: day(23, '09:00:00') })).toEqual(
+      refused(422, 'idempotency_conflict'),
+    );
 
     // Tenant B cannot book on A's resource, and its own reference with the same text is its own.
     expect(await call('b', 'PUT', path, booking)).toEqual(refused(404, 'resource_not_found'));
 
     const moved = await call('a', 'PUT', path, { ...booking, start: day(24, '09:00:00'), end: day(25, '09:00:00'), revision: 2 });
     expect(moved.body).toMatchObject({ reservation: { start: day(24, '09:00:00'), revision: 2 }, replayed: false });
-    expect(await call('a', 'PUT', path, { ...booking, revision: 2 })).toMatchObject({ status: 409 });
+    expect(await call('a', 'PUT', path, { ...booking, revision: 2 })).toEqual(refused(422, 'idempotency_conflict'));
     expect(await call('a', 'PUT', path, { ...booking, revision: 9 })).toMatchObject({ status: 409 });
     // The old window is free again.
     expect(
@@ -377,7 +385,7 @@ describe.skipIf(!url)('the application API on the real store', () => {
   it("runs maintenance for the caller's tenant", async () => {
     expect(await call('a', 'POST', '/v1/maintenance', {})).toEqual({
       status: 200,
-      body: { extended: 0, conflicts: 0, refused: 0, pruned: 0, capped: false },
+      body: { extended: 0, conflicts: 0, refused: 0, pruned: 0, zone_shifts: 0, stale_sources: 0, no_shows: 0, waitlist_offers: 0, capped: false },
     });
     expect(await call('agent', 'POST', '/v1/maintenance', {})).toEqual(refused(403, 'forbidden'));
   });
@@ -437,7 +445,7 @@ describe.skipIf(!url)('the application API on the real store', () => {
     // The retry answers the same hold rather than overlapping it; another body under the key is refused.
     expect(await call('a', 'POST', '/v1/holds', first, key)).toEqual(held);
     expect(await call('a', 'POST', '/v1/holds', { ...first, ttl_seconds: 900 }, key)).toEqual(
-      refused(409, 'idempotency_conflict'),
+      refused(422, 'idempotency_conflict'),
     );
     // Another key's same text is its own: here it overlaps the first hold.
     expect(await call('a', 'POST', '/v1/holds', first, { headers: { 'Idempotency-Key': 'other-key' } })).toEqual(
@@ -542,6 +550,78 @@ describe.skipIf(!url)('the application API on the real store', () => {
     ]);
     const read = await call('a', 'GET', `/v1/tenant/events/${listed.body.events[0].id}`);
     expect(read.status).toBe(200);
+  });
+
+  it('exports hours as a VAVAILABILITY, imports one back, and exports an event as JSCalendar', async () => {
+    const resource = (
+      await call('a', 'POST', '/v1/resources', { external_ref: `ical-van-${randomUUID()}`, timezone: 'Europe/London' })
+    ).body.resource;
+    const path = `/v1/resources/${resource.id}/availability/ical`;
+    // On the default there is nothing of its own to export.
+    expect(await call('a', 'GET', path)).toEqual({ status: 200, body: { icalendar: null } });
+    const rules = [
+      { rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR', start_minutes: 540, duration_minutes: 480 },
+      { rrule: 'FREQ=WEEKLY;BYDAY=SA', start_minutes: 600, duration_minutes: 120 },
+    ];
+    await call('a', 'PUT', `/v1/resources/${resource.id}/availability`, { rules });
+    const exported = await call('a', 'GET', path);
+    expect(exported.status).toBe(200);
+    expect(exported.body.icalendar).toContain('DTSTART;TZID=Europe/London:20240108T090000');
+
+    // Cleared, then imported from the export: the same rules.
+    await call('a', 'PUT', `/v1/resources/${resource.id}/availability`, { rules: [] });
+    const imported = await call('a', 'PUT', path, { icalendar: exported.body.icalendar });
+    expect(imported.status).toBe(200);
+    expect(imported.body.resource.availability).toEqual(rules);
+
+    // Another zone's times would land elsewhere; another tenant has no such resource.
+    const paris = (exported.body.icalendar as string).replaceAll('Europe/London', 'Europe/Paris');
+    expect(await call('a', 'PUT', path, { icalendar: paris })).toEqual(refused(400, 'invalid_availability'));
+    expect(await call('a', 'PUT', path, { icalendar: 'BEGIN:VCALENDAR' })).toEqual(refused(400, 'invalid_availability'));
+    expect(await call('b', 'GET', path)).toEqual(refused(404, 'resource_not_found'));
+    expect(await call('b', 'PUT', path, { icalendar: exported.body.icalendar })).toEqual(
+      refused(404, 'resource_not_found'),
+    );
+    expect((await call('a', 'GET', `/v1/resources/${resource.id}`)).body.resource.availability).toEqual(rules);
+
+    const put = await store.putCalendarEvent({
+      tenantRef: tenantA,
+      externalRef: `jscal-${randomUUID()}`,
+      idempotencyKey: `jscal-${randomUUID()}`,
+      expectedRevision: 0,
+      resourceId: resource.id,
+      start: new Date(day(40, '12:00:00')),
+      end: new Date(day(40, '13:30:00')),
+      timezone: 'UTC',
+      summary: 'Handover',
+      reminders: [{ action: 'display', minutesBeforeStart: 10 }],
+    });
+    expect(put.ok).toBe(true);
+    const eventId = (put as { eventId: string }).eventId;
+    const event = await call('a', 'GET', `/v1/tenant/events/${eventId}/jscalendar`);
+    expect(event).toEqual({
+      status: 200,
+      body: {
+        event: expect.objectContaining({
+          '@type': 'Event',
+          uid: eventId,
+          sequence: 1,
+          title: 'Handover',
+          start: day(40, '12:00:00').slice(0, 19),
+          timeZone: 'UTC',
+          duration: 'PT1H30M',
+          freeBusyStatus: 'busy',
+          alerts: {
+            a1: {
+              '@type': 'Alert',
+              trigger: { '@type': 'OffsetTrigger', offset: '-PT10M', relativeTo: 'start' },
+              action: 'display',
+            },
+          },
+        }),
+      },
+    });
+    expect(await call('b', 'GET', `/v1/tenant/events/${eventId}/jscalendar`)).toEqual(refused(404, 'event_not_found'));
   });
 
   it('stops reading busy time at the first interval past what one read may return', async () => {

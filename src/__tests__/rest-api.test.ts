@@ -9,7 +9,7 @@ import {
   createSlotlockAgentServer,
   slotlockAgentTools,
 } from '../agent-server.js';
-import { SLOTLOCK_REST_ROUTES } from '../rest-api.js';
+import { SLOTLOCK_REST_ROUTES, parseIdempotencyKeyHeader } from '../rest-api.js';
 
 const listResources = vi.fn();
 const listEvents = vi.fn();
@@ -193,6 +193,7 @@ describe('the OpenAPI document', () => {
       parameters: { name: string; in: string; required: boolean }[];
     };
     expect(removal.parameters.map(({ name, in: where }) => `${where}:${name}`).sort()).toEqual([
+      'header:Idempotency-Key',
       'path:event_id',
       'query:expected_revision',
       'query:idempotency_key',
@@ -203,6 +204,60 @@ describe('the OpenAPI document', () => {
     expect(list.parameters.find(({ name }) => name === 'resource_ids')).toMatchObject({
       required: true,
       schema: { type: 'array' },
+    });
+  });
+});
+
+describe('the Idempotency-Key header', () => {
+  it('reads a Structured Field String, or the bare key earlier clients sent', () => {
+    expect(parseIdempotencyKeyHeader('"8e03978e-40d5-43e8-bc93-6894a57f9324"')).toBe(
+      '8e03978e-40d5-43e8-bc93-6894a57f9324',
+    );
+    expect(parseIdempotencyKeyHeader('"say \\"hi\\" \\\\ ok"')).toBe('say "hi" \\ ok');
+    expect(parseIdempotencyKeyHeader('booking-BK-42')).toBe('booking-BK-42');
+    for (const malformed of ['"open', '"a"b"', '"bad \\x escape"', '"tab\there"', '"é"']) {
+      expect(parseIdempotencyKeyHeader(malformed), malformed).toBeNull();
+    }
+  });
+
+  it('keys an agent write, requires a key where the tool does, and answers a reused one 422', async () => {
+    const server = buildServer();
+    const { idempotency_key: _key, ...unkeyed } = BOOKING;
+    createEvent.mockResolvedValueOnce({ event: EVENT, replayed: false });
+    const headed = await server.fetch(
+      call('POST', '/v1/events', { body: unkeyed, headers: { 'Idempotency-Key': '"handover-1"' } }),
+    );
+    expect(headed.status).toBe(200);
+    expect(createEvent.mock.calls.at(-1)?.[1]).toMatchObject({ idempotency_key: 'handover-1' });
+
+    const missing = await server.fetch(call('POST', '/v1/events', { body: unkeyed }));
+    expect(missing.status).toBe(400);
+    expect(await missing.json()).toMatchObject({
+      title: 'Idempotency-Key is missing',
+      code: 'idempotency_key_required',
+    });
+    const malformed = await server.fetch(
+      call('POST', '/v1/events', { body: unkeyed, headers: { 'Idempotency-Key': '"open' } }),
+    );
+    expect(await errorCode(malformed)).toBe('invalid_idempotency_key');
+    const unequal = await server.fetch(
+      call('POST', '/v1/events', { body: BOOKING, headers: { 'Idempotency-Key': 'another' } }),
+    );
+    expect(await errorCode(unequal)).toBe('invalid_arguments');
+    // A read keeps no key: a header there would promise a replay it never gives.
+    const read = await server.fetch(
+      call('GET', '/v1/resources', { headers: { 'Idempotency-Key': '"k"' } }),
+    );
+    expect([read.status, await errorCode(read)]).toEqual([400, 'idempotency_key_not_supported']);
+
+    createEvent.mockRejectedValueOnce(new SlotlockAgentOperationError('idempotency_conflict', 409));
+    const reused = await server.fetch(call('POST', '/v1/events', { body: BOOKING }));
+    expect(reused.status).toBe(422);
+    expect(await reused.json()).toMatchObject({
+      type: 'tag:slotlock.pylota.io,2026:problem:idempotency_conflict',
+      title: 'Idempotency-Key is already used',
+      status: 422,
+      error: { code: 'idempotency_conflict' },
     });
   });
 });
@@ -385,15 +440,29 @@ describe('a REST call', () => {
     createEvent.mockRejectedValueOnce(new SlotlockAgentOperationError('overlap', 409));
     const overlap = await server.fetch(call('POST', '/v1/events', { body: BOOKING }));
     expect(overlap.status).toBe(409);
-    expect(await overlap.json()).toEqual({ error: { code: 'overlap' } });
+    expect(overlap.headers.get('content-type')).toBe('application/problem+json');
+    expect(overlap.headers.get('link')).toBe(
+      '<https://slotlock.pylota.io/docs/api/#errors>; rel="describedby"; type="text/html"',
+    );
+    // RFC 9457 problem details, naming what it refused; error.code is what earlier clients read.
+    expect(await overlap.json()).toEqual({
+      type: 'tag:slotlock.pylota.io,2026:problem:overlap',
+      title: 'The time is taken',
+      status: 409,
+      code: 'overlap',
+      resource_id: BOOKING.resource_id,
+      start: BOOKING.starts_at,
+      end: BOOKING.ends_at,
+      error: { code: 'overlap' },
+    });
     getEvent.mockRejectedValueOnce(new Error('connection reset by 10.0.0.7'));
     const broken = await server.fetch(call('GET', `/v1/events/${encodeURIComponent(EVENT_ID)}`));
     expect(broken.status).toBe(500);
-    expect(await broken.json()).toEqual({ error: { code: 'internal_error' } });
+    expect(await broken.json()).toEqual(expect.objectContaining({ status: 500, code: 'internal_error', error: { code: 'internal_error' } }));
     listResources.mockResolvedValueOnce({ resources: 'not a list' });
     const malformed = await server.fetch(call('GET', '/v1/resources'));
     expect(malformed.status).toBe(500);
-    expect(await malformed.json()).toEqual({ error: { code: 'internal_error' } });
+    expect(await malformed.json()).toEqual(expect.objectContaining({ status: 500, code: 'internal_error', error: { code: 'internal_error' } }));
   });
 
   it('answers 404 for an unknown path and 405, with Allow, for a method a path lacks', async () => {

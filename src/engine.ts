@@ -52,10 +52,16 @@ export function findNextAvailable(params: {
   busy: Interval[];
   windows: Interval[];
   durationMs: number;
+  /**
+   * Optional: the first allowed start at or after a candidate (a booking rule's step, say). It
+   * must not move a start backwards.
+   */
+  align?: (start: Date) => Date;
 }): Interval | null {
   const { busy, windows, durationMs } = params;
   if (!Number.isFinite(durationMs) || durationMs <= 0) return null;
   const slotAt = (start: Date): Interval => ({ start, end: new Date(start.getTime() + durationMs) });
+  const align = params.align ?? ((start: Date) => start);
   // One walk of the merged busy list alongside the merged windows, both by start: a busy interval
   // ending by a window's start ends before every later one too.
   const merged = mergeIntervals(busy);
@@ -68,10 +74,12 @@ export function findNextAvailable(params: {
     for (let index = next; index < merged.length; index++) {
       const taken = merged[index] as Interval;
       if (taken.start.getTime() >= window.end.getTime()) break;
-      if (taken.start.getTime() - cursor.getTime() >= durationMs) return slotAt(cursor);
+      const start = align(cursor);
+      if (taken.start.getTime() - start.getTime() >= durationMs) return slotAt(start);
       if (taken.end.getTime() > cursor.getTime()) cursor = taken.end;
     }
-    if (window.end.getTime() - cursor.getTime() >= durationMs) return slotAt(cursor);
+    const start = align(cursor);
+    if (window.end.getTime() - start.getTime() >= durationMs) return slotAt(start);
   }
   return null;
 }

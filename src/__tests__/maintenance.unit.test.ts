@@ -69,6 +69,22 @@ function fakeStore() {
           calls.push({ tenantRef, task: 'prune', params });
           return prunes.get(tenantRef)?.shift() ?? DONE_PRUNE;
         },
+        // The feed: nothing past its retention here (event-feed.integration covers it).
+        async pruneChanges() {
+          return 0;
+        },
+        async reportStaleCoverage() {
+          return 0;
+        },
+        async releaseNoShows() {
+          return 0;
+        },
+        async offerWaitlist() {
+          return { offered: 0, expired: 0, next: null };
+        },
+        async followZoneRules() {
+          return { shifted: 0, moved: 0, conflicts: 0 };
+        },
         async pruneBookingRetention(params: Record<string, unknown>) {
           calls.push({ tenantRef, task: 'purge', params });
           return purges.get(tenantRef)?.shift() ?? DONE_PURGE;
@@ -133,6 +149,10 @@ function fakeSql(held = new Set<string>()) {
 }
 
 const result = (overrides: Partial<SlotlockMaintenanceResult> = {}): SlotlockMaintenanceResult => ({
+  zoneShifts: 0,
+  staleSources: 0,
+  noShows: 0,
+  waitlistOffers: 0,
   extended: 0,
   conflicts: 0,
   refused: 0,
