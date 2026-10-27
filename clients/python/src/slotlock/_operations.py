@@ -148,6 +148,20 @@ OPERATIONS: dict[str, Operation] = {
         ("resource_id",),
         (),
     ),
+    "slotlock_export_resource_availability": Operation(
+        "slotlock_export_resource_availability",
+        "GET",
+        "/v1/resources/{resource_id}/availability/ical",
+        ("resource_id",),
+        (),
+    ),
+    "slotlock_import_resource_availability": Operation(
+        "slotlock_import_resource_availability",
+        "PUT",
+        "/v1/resources/{resource_id}/availability/ical",
+        ("resource_id",),
+        (),
+    ),
     "slotlock_set_resource_booking_rules": Operation(
         "slotlock_set_resource_booking_rules",
         "PUT",
@@ -301,6 +315,13 @@ OPERATIONS: dict[str, Operation] = {
         "/v1/tenant/events/{event_id}",
         ("event_id",),
         ("expected_revision", "expected_resource_id", "idempotency_key"),
+    ),
+    "slotlock_export_tenant_event": Operation(
+        "slotlock_export_tenant_event",
+        "GET",
+        "/v1/tenant/events/{event_id}/jscalendar",
+        ("event_id",),
+        (),
     ),
     "slotlock_get_tenant": Operation(
         "slotlock_get_tenant",
@@ -786,6 +807,28 @@ class Operations(Transport):
         values: dict[str, Any] = {"resource_id": resource_id, "rules": rules}
         return self.call("slotlock_set_resource_availability", values)
 
+    def export_resource_availability(self, resource_id: str) -> dict[str, Any]:
+        """Export a resource's bookable hours as iCalendar.
+
+        One resource's own weekly bookable hours as an iCalendar VAVAILABILITY (RFC 7953) for a
+        calendar or scheduling tool: an AVAILABLE per rule, its DTSTART's TZID the resource's IANA
+        time zone. `null` when the resource uses the server's default.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id}
+        return self.call("slotlock_export_resource_availability", values)
+
+    def import_resource_availability(self, resource_id: str, *, icalendar: str) -> dict[str, Any]:
+        """Import a resource's bookable hours from iCalendar.
+
+        Set one resource's own weekly bookable hours from an iCalendar VAVAILABILITY (RFC 7953),
+        as slotlock_set_resource_availability does from rules: each AVAILABLE a weekly RRULE with
+        a start time and DTEND or DURATION. Times must be in the resource's time zone (its TZID)
+        or floating. 400 invalid_availability names what weekly hours cannot say: a bounded
+        VAVAILABILITY, RDATE, EXDATE, a single window, another zone.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id, "icalendar": icalendar}
+        return self.call("slotlock_import_resource_availability", values)
+
     def set_resource_booking_rules(
         self,
         resource_id: str,
@@ -1169,6 +1212,18 @@ class Operations(Transport):
         if expected_resource_id is not None:
             values["expected_resource_id"] = expected_resource_id
         return self.call("slotlock_cancel_tenant_event", values)
+
+    def export_tenant_event(self, event_id: str) -> dict[str, Any]:
+        """Export an event as JSCalendar.
+
+        One of the tenant's events as a JSCalendar Event (RFC 8984), the JSON form of a calendar
+        event: uid is its id, sequence its revision, start a local time in timeZone with an exact
+        duration, its people participants, its reminders alerts, its recurrence recurrenceRules
+        and recurrenceOverrides (and the RRULE verbatim as slotlock.pylota.io:rrule). A cancelled
+        or unknown one answers 404 event_not_found.
+        """
+        values: dict[str, Any] = {"event_id": event_id}
+        return self.call("slotlock_export_tenant_event", values)
 
     def get_tenant(self) -> dict[str, Any]:
         """Get the tenant.

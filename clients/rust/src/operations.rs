@@ -149,6 +149,20 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
+        name: "slotlock_export_resource_availability",
+        method: "GET",
+        path: "/v1/resources/{resource_id}/availability/ical",
+        path_params: &["resource_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_import_resource_availability",
+        method: "PUT",
+        path: "/v1/resources/{resource_id}/availability/ical",
+        path_params: &["resource_id"],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_set_resource_booking_rules",
         method: "PUT",
         path: "/v1/resources/{resource_id}/booking-rules",
@@ -301,6 +315,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         path: "/v1/tenant/events/{event_id}",
         path_params: &["event_id"],
         query: &["expected_revision", "expected_resource_id", "idempotency_key"],
+    },
+    Operation {
+        name: "slotlock_export_tenant_event",
+        method: "GET",
+        path: "/v1/tenant/events/{event_id}/jscalendar",
+        path_params: &["event_id"],
+        query: &[],
     },
     Operation {
         name: "slotlock_get_tenant",
@@ -590,6 +611,19 @@ pub struct SetResourceAvailabilityInput {
     pub rules: Option<Vec<Value>>,
 }
 
+/// The arguments of [`Client::export_resource_availability`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ExportResourceAvailabilityInput {
+    pub resource_id: String,
+}
+
+/// The arguments of [`Client::import_resource_availability`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ImportResourceAvailabilityInput {
+    pub resource_id: String,
+    pub icalendar: String,
+}
+
 /// The arguments of [`Client::set_resource_booking_rules`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SetResourceBookingRulesInput {
@@ -781,6 +815,12 @@ pub struct CancelTenantEventInput {
     pub idempotency_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_resource_id: Option<String>,
+}
+
+/// The arguments of [`Client::export_tenant_event`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ExportTenantEventInput {
+    pub event_id: String,
 }
 
 /// The arguments of [`Client::get_tenant`].
@@ -1013,6 +1053,26 @@ impl Client {
         self.call("slotlock_set_resource_availability", serde_json::to_value(input)?)
     }
 
+    /// Export a resource's bookable hours as iCalendar.
+    ///
+    /// One resource's own weekly bookable hours as an iCalendar VAVAILABILITY (RFC 7953) for a
+    /// calendar or scheduling tool: an AVAILABLE per rule, its DTSTART's TZID the resource's IANA
+    /// time zone. `null` when the resource uses the server's default.
+    pub fn export_resource_availability(&self, input: &ExportResourceAvailabilityInput) -> Result<Value, Error> {
+        self.call("slotlock_export_resource_availability", serde_json::to_value(input)?)
+    }
+
+    /// Import a resource's bookable hours from iCalendar.
+    ///
+    /// Set one resource's own weekly bookable hours from an iCalendar VAVAILABILITY (RFC 7953),
+    /// as slotlock_set_resource_availability does from rules: each AVAILABLE a weekly RRULE with
+    /// a start time and DTEND or DURATION. Times must be in the resource's time zone (its TZID)
+    /// or floating. 400 invalid_availability names what weekly hours cannot say: a bounded
+    /// VAVAILABILITY, RDATE, EXDATE, a single window, another zone.
+    pub fn import_resource_availability(&self, input: &ImportResourceAvailabilityInput) -> Result<Value, Error> {
+        self.call("slotlock_import_resource_availability", serde_json::to_value(input)?)
+    }
+
     /// Set a resource's booking rules.
     ///
     /// Set what a booking on one resource must satisfy from now on: minimum notice, how far
@@ -1220,6 +1280,17 @@ impl Client {
     /// (replayed: true).
     pub fn cancel_tenant_event(&self, input: &CancelTenantEventInput) -> Result<Value, Error> {
         self.call("slotlock_cancel_tenant_event", serde_json::to_value(input)?)
+    }
+
+    /// Export an event as JSCalendar.
+    ///
+    /// One of the tenant's events as a JSCalendar Event (RFC 8984), the JSON form of a calendar
+    /// event: uid is its id, sequence its revision, start a local time in timeZone with an exact
+    /// duration, its people participants, its reminders alerts, its recurrence recurrenceRules
+    /// and recurrenceOverrides (and the RRULE verbatim as slotlock.pylota.io:rrule). A cancelled
+    /// or unknown one answers 404 event_not_found.
+    pub fn export_tenant_event(&self, input: &ExportTenantEventInput) -> Result<Value, Error> {
+        self.call("slotlock_export_tenant_event", serde_json::to_value(input)?)
     }
 
     /// Get the tenant.

@@ -25,6 +25,8 @@ export type SlotlockApplicationOperation =
   | 'slotlock_list_busy'
   | 'slotlock_set_resource_availability'
   | 'slotlock_set_tenant_availability'
+  | 'slotlock_export_resource_availability'
+  | 'slotlock_import_resource_availability'
   | 'slotlock_set_resource_booking_rules'
   | 'slotlock_set_resource_pool'
   | 'slotlock_list_pools'
@@ -45,6 +47,7 @@ export type SlotlockApplicationOperation =
   | 'slotlock_record_coverage'
   | 'slotlock_list_tenant_events'
   | 'slotlock_get_tenant_event'
+  | 'slotlock_export_tenant_event'
   | 'slotlock_cancel_tenant_event'
   | 'slotlock_get_tenant'
   | 'slotlock_erase_tenant'
@@ -85,6 +88,8 @@ export interface SlotlockApplicationBackend {
   listBusy: Handler;
   setResourceAvailability: Handler;
   setTenantAvailability: Handler;
+  exportResourceAvailability: Handler;
+  importResourceAvailability: Handler;
   setResourceBookingRules: Handler;
   setResourcePool: Handler;
   listPools: Handler;
@@ -105,6 +110,7 @@ export interface SlotlockApplicationBackend {
   recordCoverage: Handler;
   listTenantEvents: Handler;
   getTenantEvent: Handler;
+  exportTenantEvent: Handler;
   cancelTenantEvent: Handler;
   getTenant: Handler;
   eraseTenant: Handler;
@@ -312,6 +318,22 @@ const RESERVATION = z
  * tenant-event routes take, `event_ref` the id its owner reads it by, and `owner_ref` who that is
  * (`internal` for the tenant's own code, `agent:<digest>` for an API key).
  */
+/** A JSCalendar Event (RFC 8984 §5.1); interop.ts's JSCalendarEvent names every property. */
+const JSCALENDAR_EVENT = z
+  .object({
+    '@type': z.literal('Event'),
+    uid: z.string().max(200),
+    updated: DATE_TIME,
+    sequence: z.number().int().min(0),
+    title: z.string(),
+    start: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/),
+    timeZone: TIMEZONE,
+    duration: z.string().regex(/^PT/),
+    status: z.enum(['confirmed', 'tentative']),
+    freeBusyStatus: z.enum(['free', 'busy']),
+  })
+  .passthrough();
+
 const TENANT_EVENT = SLOTLOCK_EVENT_OUTPUT.extend({
   event_ref: z.string().max(500),
   owner_ref: z.string().max(500),
@@ -426,6 +448,38 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       risk: { readOnly: false, destructive: false, idempotent: true },
       invoke: 'setResourceAvailability',
       example: { resource_id: EXAMPLE_RESOURCE_ID, rules: EXAMPLE_RULES },
+    },
+    {
+      name: 'slotlock_export_resource_availability',
+      title: "Export a resource's bookable hours as iCalendar",
+      description:
+        "One resource's own weekly bookable hours as an iCalendar VAVAILABILITY (RFC 7953) for a calendar or scheduling tool: an AVAILABLE per rule, its DTSTART's TZID the resource's IANA time zone. `null` when the resource uses the server's default.",
+      method: 'GET',
+      path: '/v1/resources/{resource_id}/availability/ical',
+      input: z.object({ resource_id: RESOURCE_ID }).strict(),
+      output: z.object({ icalendar: z.string().max(200_000).nullable() }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'exportResourceAvailability',
+      example: { resource_id: EXAMPLE_RESOURCE_ID },
+    },
+    {
+      name: 'slotlock_import_resource_availability',
+      title: "Import a resource's bookable hours from iCalendar",
+      description:
+        "Set one resource's own weekly bookable hours from an iCalendar VAVAILABILITY (RFC 7953), as slotlock_set_resource_availability does from rules: each AVAILABLE a weekly RRULE with a start time and DTEND or DURATION. Times must be in the resource's time zone (its TZID) or floating. 400 invalid_availability names what weekly hours cannot say: a bounded VAVAILABILITY, RDATE, EXDATE, a single window, another zone.",
+      method: 'PUT',
+      path: '/v1/resources/{resource_id}/availability/ical',
+      input: z
+        .object({ resource_id: RESOURCE_ID, icalendar: z.string().min(1).max(65_536) })
+        .strict(),
+      output: z.object({ resource: RESOURCE }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'importResourceAvailability',
+      example: {
+        resource_id: EXAMPLE_RESOURCE_ID,
+        icalendar:
+          'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Example//EN\r\nBEGIN:VAVAILABILITY\r\nUID:hours-1\r\nDTSTAMP:20260101T000000Z\r\nBEGIN:AVAILABLE\r\nUID:hours-1-0\r\nDTSTAMP:20260101T000000Z\r\nDTSTART;TZID=Europe/London:20260105T090000\r\nDTEND;TZID=Europe/London:20260105T170000\r\nRRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR\r\nEND:AVAILABLE\r\nEND:VAVAILABILITY\r\nEND:VCALENDAR\r\n',
+      },
     },
     {
       name: 'slotlock_set_resource_booking_rules',
@@ -799,6 +853,19 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       output: z.object({ event: TENANT_EVENT }).strict(),
       risk: { readOnly: true, destructive: false, idempotent: true },
       invoke: 'getTenantEvent',
+      example: { event_id: EXAMPLE_EVENT_ID },
+    },
+    {
+      name: 'slotlock_export_tenant_event',
+      title: 'Export an event as JSCalendar',
+      description:
+        "One of the tenant's events as a JSCalendar Event (RFC 8984), the JSON form of a calendar event: uid is its id, sequence its revision, start a local time in timeZone with an exact duration, its people participants, its reminders alerts, its recurrence recurrenceRules and recurrenceOverrides (and the RRULE verbatim as slotlock.pylota.io:rrule). A cancelled or unknown one answers 404 event_not_found.",
+      method: 'GET',
+      path: '/v1/tenant/events/{event_id}/jscalendar',
+      input: z.object({ event_id: EVENT_ID }).strict(),
+      output: z.object({ event: JSCALENDAR_EVENT }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'exportTenantEvent',
       example: { event_id: EXAMPLE_EVENT_ID },
     },
     {

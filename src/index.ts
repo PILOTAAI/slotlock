@@ -49,6 +49,21 @@ export {
 } from './weekly-hours.js';
 export type { HoursWindow, Weekday, WeeklyHours } from './weekly-hours.js';
 export {
+  emitVAvailability,
+  parseVAvailability,
+  recurrenceRuleFromRRule,
+  SLOTLOCK_MAX_VAVAILABILITY_CHARACTERS,
+  toJSCalendarEvent,
+} from './interop.js';
+export type {
+  EmitVAvailabilityOptions,
+  JSCalendarAlert,
+  JSCalendarEvent,
+  JSCalendarParticipant,
+  JSCalendarRecurrenceRule,
+  ParsedVAvailability,
+} from './interop.js';
+export {
   createTimeZoneConverter,
   zonedCalendarDate,
   zonedDateTimeToUtc,

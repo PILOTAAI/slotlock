@@ -35,6 +35,8 @@ public sealed partial class SlotlockClient
         ["slotlock_restore_resource"] = new("POST", "/v1/resources/{resource_id}/restore", ["resource_id"], []),
         ["slotlock_list_busy"] = new("GET", "/v1/resources/{resource_id}/busy", ["resource_id"], ["start", "end"]),
         ["slotlock_set_resource_availability"] = new("PUT", "/v1/resources/{resource_id}/availability", ["resource_id"], []),
+        ["slotlock_export_resource_availability"] = new("GET", "/v1/resources/{resource_id}/availability/ical", ["resource_id"], []),
+        ["slotlock_import_resource_availability"] = new("PUT", "/v1/resources/{resource_id}/availability/ical", ["resource_id"], []),
         ["slotlock_set_resource_booking_rules"] = new("PUT", "/v1/resources/{resource_id}/booking-rules", ["resource_id"], []),
         ["slotlock_set_resource_pool"] = new("PUT", "/v1/resources/{resource_id}/pool", ["resource_id"], []),
         ["slotlock_list_pools"] = new("GET", "/v1/pools", [], []),
@@ -57,6 +59,7 @@ public sealed partial class SlotlockClient
         ["slotlock_list_tenant_events"] = new("GET", "/v1/tenant/events", [], ["resource_id", "start", "end", "limit", "cursor"]),
         ["slotlock_get_tenant_event"] = new("GET", "/v1/tenant/events/{event_id}", ["event_id"], []),
         ["slotlock_cancel_tenant_event"] = new("DELETE", "/v1/tenant/events/{event_id}", ["event_id"], ["expected_revision", "expected_resource_id", "idempotency_key"]),
+        ["slotlock_export_tenant_event"] = new("GET", "/v1/tenant/events/{event_id}/jscalendar", ["event_id"], []),
         ["slotlock_get_tenant"] = new("GET", "/v1/tenant", [], []),
         ["slotlock_erase_tenant"] = new("POST", "/v1/tenant/erase", [], []),
         ["slotlock_run_maintenance"] = new("POST", "/v1/maintenance", [], []),
@@ -756,6 +759,49 @@ public sealed partial class SlotlockClient
         return CallAsync("slotlock_set_resource_availability", values, cancellationToken);
     }
 
+    /// <summary>Export a resource's bookable hours as iCalendar.</summary>
+    /// <remarks>
+    /// One resource's own weekly bookable hours as an iCalendar VAVAILABILITY (RFC 7953) for a
+    /// calendar or scheduling tool: an AVAILABLE per rule, its DTSTART's TZID the resource's IANA
+    /// time zone. `null` when the resource uses the server's default.
+    /// </remarks>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ExportResourceAvailabilityAsync(
+        string resourceId,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_id"] = Json.ToNode(resourceId);
+        return CallAsync("slotlock_export_resource_availability", values, cancellationToken);
+    }
+
+    /// <summary>Import a resource's bookable hours from iCalendar.</summary>
+    /// <remarks>
+    /// Set one resource's own weekly bookable hours from an iCalendar VAVAILABILITY (RFC 7953),
+    /// as slotlock_set_resource_availability does from rules: each AVAILABLE a weekly RRULE with
+    /// a start time and DTEND or DURATION. Times must be in the resource's time zone (its TZID)
+    /// or floating. 400 invalid_availability names what weekly hours cannot say: a bounded
+    /// VAVAILABILITY, RDATE, EXDATE, a single window, another zone.
+    /// </remarks>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="icalendar">icalendar</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ImportResourceAvailabilityAsync(
+        string resourceId,
+        string icalendar,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_id"] = Json.ToNode(resourceId);
+        values["icalendar"] = Json.ToNode(icalendar);
+        return CallAsync("slotlock_import_resource_availability", values, cancellationToken);
+    }
+
     /// <summary>Set a resource's booking rules.</summary>
     /// <remarks>
     /// Set what a booking on one resource must satisfy from now on: minimum notice, how far
@@ -1324,6 +1370,27 @@ public sealed partial class SlotlockClient
         values["idempotency_key"] = Json.ToNode(idempotencyKey);
         if (expectedResourceId.HasValue) values["expected_resource_id"] = Json.ToNode(expectedResourceId.Value);
         return CallAsync("slotlock_cancel_tenant_event", values, cancellationToken);
+    }
+
+    /// <summary>Export an event as JSCalendar.</summary>
+    /// <remarks>
+    /// One of the tenant's events as a JSCalendar Event (RFC 8984), the JSON form of a calendar
+    /// event: uid is its id, sequence its revision, start a local time in timeZone with an exact
+    /// duration, its people participants, its reminders alerts, its recurrence recurrenceRules
+    /// and recurrenceOverrides (and the RRULE verbatim as slotlock.pylota.io:rrule). A cancelled
+    /// or unknown one answers 404 event_not_found.
+    /// </remarks>
+    /// <param name="eventId">event_id</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ExportTenantEventAsync(
+        string eventId,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["event_id"] = Json.ToNode(eventId);
+        return CallAsync("slotlock_export_tenant_event", values, cancellationToken);
     }
 
     /// <summary>Get the tenant.</summary>

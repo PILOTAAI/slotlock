@@ -513,6 +513,12 @@ uses the default, `[]` closes it); `setTenantAvailability({ tenantRef, rules })`
 of a tenant. `createSlotlockStoreAgentBackend` answers from a resource's own hours and calls
 `availabilityRules` only for resources without them.
 
+Calendar tools speak the standards: `emitVAvailability({ rules, timezone, uid })` writes rules as an
+iCalendar VAVAILABILITY (RFC 7953) and `parseVAvailability(text)` reads one back as
+`{ timezone, rules }`; `toJSCalendarEvent(event)` answers a calendar event as a JSCalendar Event
+(RFC 8984). The API serves them at `/v1/resources/{resource_id}/availability/ical` and
+`/v1/tenant/events/{event_id}/jscalendar`.
+
 Writing rules:
 
 - Create with `expectedRevision: 0`; update with the revision you last read and a new idempotency
