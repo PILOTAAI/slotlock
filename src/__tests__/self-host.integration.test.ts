@@ -997,6 +997,33 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     }
   });
 
+  it('refuses to confirm writes on a schema that cannot record an accepted confirmation', async () => {
+    // As 0.3.0 left the table, which held no confirmations.
+    await admin`DELETE FROM slotlock.dashboard_tokens WHERE kind = 'confirmation'`;
+    await admin`ALTER TABLE slotlock.dashboard_tokens DROP CONSTRAINT slotlock_dashboard_tokens_kind_valid`;
+    await admin`ALTER TABLE slotlock.dashboard_tokens ADD CONSTRAINT slotlock_dashboard_tokens_kind_valid
+                  CHECK (kind IN ('sign_in', 'form', 'ended_session'))`;
+    try {
+      const stdout = output();
+      const stderr = output();
+      const code = await runSlotlockCli(['serve'], {
+        env: {
+          ...env,
+          SLOTLOCK_CONFIRM_WRITES: 'all',
+          SLOTLOCK_CONFIRMATION_SECRET: randomBytes(32).toString('hex'),
+        },
+        stdout,
+        stderr,
+        signal: AbortSignal.timeout(3_000),
+      });
+      expect(code).not.toBe(0);
+      expect(stderr.text()).toMatch(/SLOTLOCK_CONFIRM_WRITES.*slotlock migrate/);
+      expect(stdout.events().find(({ event }) => event === 'listening')).toBeUndefined();
+    } finally {
+      expect((await run(['migrate'])).code).toBe(0);
+    }
+  });
+
   it('serves the GitHub sign-in dashboard beside MCP when configured, and keeps its secrets out of the log', async () => {
     const clientSecret = randomBytes(20).toString('hex');
     const sessionSecret = randomBytes(32).toString('hex');

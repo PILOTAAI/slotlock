@@ -30,6 +30,7 @@ import {
 import {
   createSlotlockDashboard,
   createSlotlockDashboardResources,
+  createSlotlockAcceptanceRecords,
   createSlotlockDashboardState,
 } from './dashboard.js';
 import {
@@ -612,6 +613,24 @@ export async function startSlotlockServer(
         }
       }
     }
+    if (config.confirmationSecret !== undefined) {
+      // Accepted confirmations are recorded once each (0.3.1); an older schema cannot hold them.
+      const [recordable] = await sql<{ ready: boolean }[]>`
+        SELECT EXISTS (
+          SELECT 1 FROM pg_catalog.pg_constraint
+           WHERE conname = 'slotlock_dashboard_tokens_kind_valid'
+             AND conrelid = to_regclass('slotlock.dashboard_tokens')
+             AND pg_catalog.pg_get_constraintdef(oid) LIKE '%confirmation%'
+        ) AND has_function_privilege(to_regprocedure(${SLOTLOCK_DASHBOARD_FUNCTIONS[0] as string}), 'EXECUTE') AS ready`;
+      if (!recordable?.ready) {
+        throw Object.assign(
+          new Error(
+            'SLOTLOCK_CONFIRM_WRITES records each accepted confirmation, which this schema cannot: run `slotlock migrate` (or `slotlock serve --migrate`) with this release',
+          ),
+          { code: 'schema_outdated' },
+        );
+      }
+    }
     const { caps } = config.limits;
     const store = createSlotlockServeStore(sql, caps);
     const publicUrl = new URL(config.publicUrl);
@@ -710,6 +729,7 @@ export async function startSlotlockServer(
             confirmation: {
               operations: config.confirmWrites,
               secrets: [config.confirmationSecret],
+              consumeAcceptance: createSlotlockAcceptanceRecords(sql),
             },
           }
         : {}),

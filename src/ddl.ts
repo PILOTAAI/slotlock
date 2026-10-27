@@ -588,12 +588,30 @@ CREATE TABLE IF NOT EXISTS slotlock.dashboard_tokens (
   owner_hash bytea,
   expires_at timestamptz NOT NULL,
   CONSTRAINT slotlock_dashboard_tokens_pkey PRIMARY KEY (kind, token_hash),
-  CONSTRAINT slotlock_dashboard_tokens_kind_valid CHECK (kind IN ('sign_in', 'form', 'ended_session')),
+  CONSTRAINT slotlock_dashboard_tokens_kind_valid
+    CHECK (kind IN ('sign_in', 'form', 'ended_session', 'confirmation')),
   CONSTRAINT slotlock_dashboard_tokens_hash_valid CHECK (octet_length(token_hash) = 32),
   CONSTRAINT slotlock_dashboard_tokens_owner_valid
     CHECK (owner_hash IS NULL OR octet_length(owner_hash) = 32),
   CONSTRAINT slotlock_dashboard_tokens_form_owner CHECK (kind <> 'form' OR owner_hash IS NOT NULL)
 );
+-- 0.3.1 records accepted write confirmations here too (kind 'confirmation'). A schema from an
+-- earlier release has the narrower check; replace it only then, so a migration with nothing to
+-- change takes no lock on the table.
+DO $slotlock_dashboard_token_kinds$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint
+     WHERE conrelid = 'slotlock.dashboard_tokens'::regclass
+       AND conname = 'slotlock_dashboard_tokens_kind_valid'
+       AND pg_catalog.pg_get_constraintdef(oid) LIKE '%confirmation%'
+  ) THEN
+    ALTER TABLE slotlock.dashboard_tokens DROP CONSTRAINT IF EXISTS slotlock_dashboard_tokens_kind_valid;
+    ALTER TABLE slotlock.dashboard_tokens ADD CONSTRAINT slotlock_dashboard_tokens_kind_valid
+      CHECK (kind IN ('sign_in', 'form', 'ended_session', 'confirmation'));
+  END IF;
+END
+$slotlock_dashboard_token_kinds$;
 CREATE INDEX IF NOT EXISTS slotlock_dashboard_tokens_expiry_idx
   ON slotlock.dashboard_tokens (expires_at);
 CREATE INDEX IF NOT EXISTS slotlock_dashboard_tokens_owner_idx

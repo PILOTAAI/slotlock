@@ -249,6 +249,41 @@ describe('confirm-before-write (MCP 2026-07-28 input_required)', () => {
     });
   });
 
+  it('runs an accepted confirmation once: the same acceptance sent again is refused', async () => {
+    const seen = new Set<string>();
+    const consumeAcceptance = vi.fn(async ({ nonce, expiresAt }: { nonce: string; expiresAt: Date }) => {
+      expect(expiresAt.getTime()).toBeGreaterThan(Date.now());
+      if (seen.has(nonce)) return false;
+      seen.add(nonce);
+      return true;
+    });
+    const server = buildServer({
+      confirmation: {
+        operations: ['slotlock_create_event'],
+        secrets: [SECRET],
+        consumeAcceptance,
+      },
+    });
+    const { requestState } = await prompt(server);
+    const accept = answer(requestState, 'accept', { confirm: true });
+    const first = await server.fetch(toolCall('slotlock_create_event', BOOKING, accept));
+    expect(await first.json()).toMatchObject({ result: { resultType: 'complete' } });
+    // The state binds these exact arguments, so a replay reaches the backend only as a replay of
+    // the same idempotency key; recorded, it does not reach it at all.
+    const replayed = await server.fetch(toolCall('slotlock_create_event', BOOKING, accept));
+    expect(replayed.status).toBe(400);
+    expect(await replayed.json()).toMatchObject({
+      error: { code: -32602, message: 'Invalid confirmation state or response' },
+    });
+    expect(createEvent).toHaveBeenCalledTimes(1);
+    expect(onEvent).toHaveBeenCalledWith({
+      type: 'confirmation',
+      operation: 'slotlock_create_event',
+      outcome: 'refused',
+    });
+    expect(consumeAcceptance).toHaveBeenCalledTimes(2);
+  });
+
   it('never writes on a decline, a cancel or an unticked box', async () => {
     const server = buildServer();
     const { requestState } = await prompt(server);
