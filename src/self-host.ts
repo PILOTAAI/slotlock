@@ -43,6 +43,7 @@ import {
   SlotlockConfigError,
   type SlotlockEnv,
   type SlotlockLimits,
+  type SlotlockRate,
   type SlotlockServeDashboardConfig,
   formatSlotlockRate,
   optional,
@@ -95,6 +96,7 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_AVAILABILITY',
   'SLOTLOCK_REST_API',
   'SLOTLOCK_WEBHOOKS',
+  'SLOTLOCK_SHARED_LIMITS',
   'SLOTLOCK_LIMITS',
   'SLOTLOCK_TRUSTED_PROXY_HEADER',
   'SLOTLOCK_GITHUB_CLIENT_ID',
@@ -197,6 +199,8 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
   restApi: boolean;
   /** Webhook delivery (SLOTLOCK_WEBHOOKS: on unless off; private also reaches private networks). */
   webhooks: 'on' | 'off' | 'private';
+  /** Tenant request budgets shared with every server through PostgreSQL (SLOTLOCK_SHARED_LIMITS=on). */
+  sharedLimits: boolean;
   /** Request limits (SLOTLOCK_LIMITS over SLOTLOCK_DEFAULT_LIMITS): the server's only rate limit. */
   limits: SlotlockLimits;
   /** The lower-case request field a trusted proxy sets to the client address; else the socket's. */
@@ -287,6 +291,14 @@ function readWebhooks(env: SlotlockEnv): 'on' | 'off' | 'private' {
   return value;
 }
 
+function readSharedLimits(env: SlotlockEnv): boolean {
+  const value = optional(env, 'SLOTLOCK_SHARED_LIMITS') ?? 'off';
+  if (value !== 'on' && value !== 'off') {
+    throw new SlotlockConfigError('SLOTLOCK_SHARED_LIMITS must be on or off');
+  }
+  return value === 'on';
+}
+
 function readRestApi(env: SlotlockEnv): boolean {
   const value = optional(env, 'SLOTLOCK_REST_API') ?? 'on';
   if (value !== 'on' && value !== 'off') {
@@ -324,6 +336,7 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
     availability: readAvailability(env),
     restApi: readRestApi(env),
     webhooks: readWebhooks(env),
+    sharedLimits: readSharedLimits(env),
     limits: readLimits(env),
   };
   const trustedProxyHeader = readTrustedProxyHeader(env);
@@ -663,6 +676,19 @@ export async function startSlotlockServer(
     const basePath = publicUrl.pathname.replace(/\/$/, '');
     const limits = createSlotlockRequestLimits({
       limits: config.limits,
+      ...(config.sharedLimits
+        ? {
+            shared: {
+              // Keyed by a digest: the table keeps no tenant name.
+              take: async (bucket: string, rate: SlotlockRate) => {
+                const digest = createHash('sha256').update(bucket).digest('hex');
+                const [row] = await sql<{ taken: boolean }[]>`
+                  SELECT slotlock.take_rate_token(${digest}, ${rate.perSecond}, ${rate.burst}) AS taken`;
+                return row?.taken === true;
+              },
+            },
+          }
+        : {}),
       ...(config.trustedProxyHeader !== undefined
         ? { trustedProxyHeader: config.trustedProxyHeader }
         : {}),
@@ -826,6 +852,7 @@ export async function startSlotlockServer(
       availability_rules: config.availability.length,
       rest: config.restApi ? `${config.publicUrl}/openapi.json` : null,
       webhooks: config.webhooks,
+      shared_limits: config.sharedLimits,
       tzdata: process.versions.tz ?? null,
       maintenance_interval_minutes: SERVE_MAINTENANCE_INTERVAL_MS / 60_000,
       limits: {
@@ -1290,6 +1317,9 @@ Environment:
   SLOTLOCK_REST_API              on (default): also serve the tools as a REST API under /v1, and
                                  the application API for admin keys, described at /openapi.json;
                                  off: MCP and A2A only
+  SLOTLOCK_SHARED_LIMITS         on: tenant request budgets are shared by every server through the
+                                 database, so N servers allow a tenant its rate once; off (default):
+                                 each server keeps its own
   SLOTLOCK_WEBHOOKS              on (default): deliver each tenant's changes to its webhooks,
                                  never to a private network address; private: those too, for
                                  testing; off: keep the change feed, send nothing

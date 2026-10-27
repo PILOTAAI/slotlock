@@ -257,6 +257,7 @@ export const SLOTLOCK_SCHEMA_FUNCTIONS = Object.freeze([
 export const SLOTLOCK_TENANT_ADMIN_TABLES = Object.freeze([
   'tenant_suspensions',
   'webhook_tenants',
+  'rate_buckets',
 ] as const);
 
 /**
@@ -269,6 +270,7 @@ export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.register_webhook_tenant(text)',
   'slotlock.webhook_tenants(text)',
   'slotlock.unregister_webhook_tenant(text)',
+  'slotlock.take_rate_token(text, double precision, double precision)',
 ] as const);
 
 /**
@@ -973,6 +975,50 @@ AS $slotlock_unregister_webhook_tenant$
   DELETE FROM slotlock.webhook_tenants WHERE tenant_ref = requested_tenant_ref;
 $slotlock_unregister_webhook_tenant$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[4]} FROM PUBLIC;
+
+-- Request budgets shared by every server of a deployment (SLOTLOCK_SHARED_LIMITS): one token bucket
+-- per limit and tenant, keyed by a digest, refilled and taken in one statement so racing servers
+-- never both take the last token. No role but its owner reads it.
+CREATE TABLE IF NOT EXISTS slotlock.rate_buckets (
+  bucket text PRIMARY KEY,
+  tokens double precision NOT NULL,
+  at timestamptz NOT NULL,
+  CONSTRAINT slotlock_rate_buckets_bucket_valid CHECK (bucket ~ '^[0-9a-f]{64}$')
+);
+ALTER TABLE slotlock.rate_buckets ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.rate_buckets FROM PUBLIC;
+
+-- True when a token was taken: the bucket refills at per_second up to burst, and starts full.
+CREATE OR REPLACE FUNCTION slotlock.take_rate_token(
+  requested_bucket text, per_second double precision, burst double precision
+)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_take_rate_token$
+DECLARE
+  taken boolean;
+BEGIN
+  IF requested_bucket !~ '^[0-9a-f]{64}$' OR NOT (per_second > 0) OR NOT (burst >= 1) THEN
+    RAISE EXCEPTION 'Slotlock rate bucket arguments are invalid' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  INSERT INTO slotlock.rate_buckets AS kept (bucket, tokens, at)
+  VALUES (requested_bucket, burst - 1, clock_timestamp())
+  ON CONFLICT (bucket) DO UPDATE
+     SET tokens = LEAST(burst, kept.tokens + EXTRACT(EPOCH FROM clock_timestamp() - kept.at) * per_second) - 1,
+         at = clock_timestamp()
+   WHERE LEAST(burst, kept.tokens + EXTRACT(EPOCH FROM clock_timestamp() - kept.at) * per_second) >= 1
+  RETURNING true INTO taken;
+  -- Now and then, buckets idle for an hour (full again long since) are dropped.
+  IF random() < 0.001 THEN
+    DELETE FROM slotlock.rate_buckets WHERE at < clock_timestamp() - interval '1 hour';
+  END IF;
+  RETURN COALESCE(taken, false);
+END
+$slotlock_take_rate_token$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[5]} FROM PUBLIC;
 `;
 
 // A constraint an upgrade added NOT VALID (no table scan under its ACCESS EXCLUSIVE lock) is checked
