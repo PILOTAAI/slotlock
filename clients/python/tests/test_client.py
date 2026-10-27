@@ -283,7 +283,7 @@ class AgainstAServer(unittest.TestCase):
         coverage = client.record_coverage(resource_id, source, start=self.at(0), end=self.at(24), revision=1)
         self.assertEqual(coverage, {"revision": 1, "replayed": False})
         maintenance = client.run_maintenance()
-        self.assertEqual(set(maintenance), {"extended", "conflicts", "refused", "pruned", "capped"})
+        self.assertEqual(set(maintenance), {"extended", "conflicts", "refused", "pruned", "zone_shifts", "stale_sources", "capped"})
 
         found, cursor = False, None
         while not found:
