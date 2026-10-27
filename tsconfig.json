@@ -19,6 +19,6 @@
     "useDefineForClassFields": true,
     "types": ["node", "vitest/globals"]
   },
-  "include": ["src", "clients/generate.ts", "workers/dashboard/worker.ts", "vitest.config.ts"],
+  "include": ["src", "clients/generate.ts", "workers/dashboard/worker.ts", "spikes/hyperdrive/worker.ts", "vitest.config.ts"],
   "exclude": ["src/__tests__/examples.integration.test.ts"]
 }

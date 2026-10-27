@@ -1,0 +1,18 @@
+// RFC 0001's spike Worker. Deploy it to a throwaway account or Worker name, run run.mjs against it,
+// then delete it with its Hyperdrive configuration (README.md).
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "slotlock-hyperdrive-spike",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "preview_urls": false,
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      // Yours: `wrangler hyperdrive create … --caching-disabled` prints it (README.md).
+      "id": "00000000000000000000000000000000"
+    }
+  ],
+  "limits": { "cpu_ms": 30000 }
+}
