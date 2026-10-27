@@ -125,6 +125,7 @@ const DATE_TIME = z.string().datetime({ offset: true });
 const RESOURCE_ID = z.string().trim().min(1).max(200);
 const EVENT_ID = z.string().trim().min(1).max(500);
 const HOLD_ID = z.string().uuid();
+const POOL = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,99}$/);
 const IDEMPOTENCY_KEY = z.string().trim().min(1).max(200);
 const REVISION = z.number().int().positive();
 const MAX_AGENT_WINDOW_MS = SLOTLOCK_CALENDAR_HORIZON_DAYS * 24 * 60 * 60 * 1_000;
@@ -140,6 +141,16 @@ function holdSlots(
 ): Promise<Record<string, unknown>> {
   if (!backend.holdSlots) throw new SlotlockAgentOperationError('holds_unavailable', 409);
   return backend.holdSlots(context, input);
+}
+
+/** `slotlock_book_pool`, from a backend that books pools, as `holdSlots`. */
+function bookPool(
+  backend: SlotlockAgentCalendarBackend,
+  context: SlotlockAgentInvocationContext,
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  if (!backend.bookPool) throw new SlotlockAgentOperationError('pools_unavailable', 409);
+  return backend.bookPool(context, input);
 }
 
 /** `slotlock_book_together`, from a backend that books bundles, as `holdSlots`. */
@@ -388,6 +399,7 @@ export type SlotlockAgentOperation =
   | 'slotlock_hold_slots'
   | 'slotlock_release_slots'
   | 'slotlock_book_together'
+  | 'slotlock_book_pool'
   | 'slotlock_create_event'
   | 'slotlock_get_event'
   | 'slotlock_list_events'
@@ -434,6 +446,7 @@ const OPERATION_SCOPES: Readonly<Record<SlotlockAgentOperation, SlotlockAgentSco
   slotlock_find_available_slots: 'read',
   slotlock_hold_slots: 'write',
   slotlock_book_together: 'write',
+  slotlock_book_pool: 'write',
   slotlock_release_slots: 'write',
   slotlock_create_event: 'write',
   slotlock_get_event: 'read',
@@ -562,6 +575,11 @@ export interface SlotlockAgentCalendarBackend {
     context: SlotlockAgentInvocationContext,
     input: Record<string, unknown>,
   ): Promise<Record<string, unknown>>;
+  /** Optional. Book any one free member of a pool (`slotlock_book_pool`), else `pools_unavailable`. */
+  bookPool?(
+    context: SlotlockAgentInvocationContext,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
   /**
    * Optional. Book one interval on several resources in one transaction, all or none
    * (`slotlock_book_together`); a tool without it answers `bundles_unavailable`.
@@ -598,7 +616,11 @@ export interface SlotlockAgentServerOAuthOptions {
 /** The operations that change a calendar; the only ones a confirmation can guard. */
 export type SlotlockAgentWriteOperation = Extract<
   SlotlockAgentOperation,
-  'slotlock_create_event' | 'slotlock_update_event' | 'slotlock_delete_event' | 'slotlock_book_together'
+  | 'slotlock_create_event'
+  | 'slotlock_update_event'
+  | 'slotlock_delete_event'
+  | 'slotlock_book_together'
+  | 'slotlock_book_pool'
 >;
 
 /**
@@ -860,11 +882,13 @@ const OPERATION_DEFINITIONS = [
   {
     name: 'slotlock_list_resources',
     title: 'List calendar resources',
-    description: 'List resources visible to the authenticated tenant principal.',
+    description:
+      'List resources visible to the authenticated tenant principal, with the pool each belongs to (a vehicle class, a room type). With pool, only that pool\'s members, in the order slotlock_book_pool tries them.',
     input: z
       .object({
         cursor: z.string().max(500).optional(),
         limit: z.number().int().min(1).max(100).default(50),
+        pool: POOL.optional(),
       })
       .strict(),
     output: z
@@ -876,6 +900,7 @@ const OPERATION_DEFINITIONS = [
                 id: RESOURCE_ID,
                 external_ref: z.string().max(500).nullable(),
                 timezone: z.string().min(1).max(100),
+                pool: POOL.optional(),
               })
               .strict(),
           )
@@ -997,6 +1022,34 @@ const OPERATION_DEFINITIONS = [
       timezone: 'Europe/London',
       title: 'Vehicle handover',
       idempotency_key: 'create-handover-2027-03-02',
+    },
+  },
+  {
+    name: 'slotlock_book_pool',
+    title: 'Book from a pool',
+    description:
+      'Book any one member of a pool (a vehicle class, a room type) for a time: members are tried in a fixed order and the first that is free and allows the booking is booked, in one transaction, so a class sells out exactly at its number of members. The event names the member booked. 409 pool_full when none is free; 404 pool_not_found when the pool has no member you may book. A retry with the same idempotency_key answers the same event.',
+    input: z
+      .object({
+        pool: POOL,
+        starts_at: DATE_TIME,
+        ends_at: DATE_TIME,
+        timezone: z.string().min(1).max(100),
+        title: z.string().trim().min(1).max(500).optional(),
+        idempotency_key: IDEMPOTENCY_KEY,
+      })
+      .strict()
+      .refine((value) => boundedEventSpan(value.starts_at, value.ends_at)),
+    output: z.object({ event: EVENT, replayed: z.boolean() }).strict(),
+    risk: { readOnly: false, destructive: false, idempotent: true },
+    invoke: bookPool,
+    example: {
+      pool: 'van',
+      starts_at: '2027-03-02T09:00:00Z',
+      ends_at: '2027-03-03T09:00:00Z',
+      timezone: 'Europe/London',
+      title: 'Van hire',
+      idempotency_key: 'van-hire-2027-03-02',
     },
   },
   {
@@ -2104,6 +2157,7 @@ const SLOTLOCK_MCP_INSTRUCTIONS = [
 const WRITE_OPERATIONS: ReadonlySet<SlotlockAgentOperation> = new Set([
   'slotlock_create_event',
   'slotlock_book_together',
+  'slotlock_book_pool',
   'slotlock_update_event',
   'slotlock_delete_event',
 ]);
@@ -2589,6 +2643,12 @@ async function confirmationMessage(
   input: Record<string, unknown>,
   lookup: ConfirmationLookup,
 ): Promise<string> {
+  if (operation === 'slotlock_book_pool') {
+    const zone = promptZone([[input.timezone, false]]);
+    const title =
+      typeof input.title === 'string' && input.title.length > 0 ? `: ${promptQuoted(input.title)}` : '';
+    return `Book any one of pool ${promptText(input.pool, 100)} for ${promptRange(promptInstantOf(input.starts_at), promptInstantOf(input.ends_at), zone)}${title}.`;
+  }
   if (operation === 'slotlock_book_together') {
     const ids = Array.isArray(input.resource_ids) ? (input.resource_ids as unknown[]) : [];
     const resources = await Promise.all(ids.map((id) => lookup.resource(id)));

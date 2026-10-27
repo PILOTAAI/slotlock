@@ -10,13 +10,14 @@ import "context"
 // operations is every operation, by name: its method, path, path parameters and query parameters.
 var operations = func() map[string]operation {
 	list := []operation{
-		{name: "slotlock_list_resources", method: "GET", path: "/v1/resources", pathParams: nil, query: []string{"cursor", "limit"}},
+		{name: "slotlock_list_resources", method: "GET", path: "/v1/resources", pathParams: nil, query: []string{"cursor", "limit", "pool"}},
 		{name: "slotlock_create_resource", method: "POST", path: "/v1/resources", pathParams: nil, query: nil},
 		{name: "slotlock_get_free_busy", method: "GET", path: "/v1/free-busy", pathParams: nil, query: []string{"resource_ids", "start", "end"}},
 		{name: "slotlock_find_next_available", method: "GET", path: "/v1/next-available", pathParams: nil, query: []string{"resource_ids", "start", "end", "duration_minutes"}},
 		{name: "slotlock_find_available_slots", method: "GET", path: "/v1/available-slots", pathParams: nil, query: []string{"resource_ids", "start", "end", "duration_minutes", "limit", "require_free"}},
 		{name: "slotlock_hold_slots", method: "POST", path: "/v1/slot-holds", pathParams: nil, query: nil},
 		{name: "slotlock_book_together", method: "POST", path: "/v1/bundles", pathParams: nil, query: nil},
+		{name: "slotlock_book_pool", method: "POST", path: "/v1/pool-bookings", pathParams: nil, query: nil},
 		{name: "slotlock_release_slots", method: "DELETE", path: "/v1/slot-holds/{hold_id}", pathParams: []string{"hold_id"}, query: nil},
 		{name: "slotlock_list_events", method: "GET", path: "/v1/events", pathParams: nil, query: []string{"resource_ids", "start", "end", "cursor", "limit"}},
 		{name: "slotlock_create_event", method: "POST", path: "/v1/events", pathParams: nil, query: nil},
@@ -30,6 +31,8 @@ var operations = func() map[string]operation {
 		{name: "slotlock_list_busy", method: "GET", path: "/v1/resources/{resource_id}/busy", pathParams: []string{"resource_id"}, query: []string{"start", "end"}},
 		{name: "slotlock_set_resource_availability", method: "PUT", path: "/v1/resources/{resource_id}/availability", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_set_resource_booking_rules", method: "PUT", path: "/v1/resources/{resource_id}/booking-rules", pathParams: []string{"resource_id"}, query: nil},
+		{name: "slotlock_set_resource_pool", method: "PUT", path: "/v1/resources/{resource_id}/pool", pathParams: []string{"resource_id"}, query: nil},
+		{name: "slotlock_list_pools", method: "GET", path: "/v1/pools", pathParams: nil, query: nil},
 		{name: "slotlock_set_tenant_availability", method: "PUT", path: "/v1/availability", pathParams: nil, query: nil},
 		{name: "slotlock_acquire_hold", method: "POST", path: "/v1/holds", pathParams: nil, query: nil},
 		{name: "slotlock_get_hold", method: "GET", path: "/v1/holds/{hold_id}", pathParams: []string{"hold_id"}, query: nil},
@@ -65,6 +68,8 @@ type ListResourcesInput struct {
 	Cursor *string
 
 	Limit *int64
+
+	Pool *string
 }
 
 func (in ListResourcesInput) values() map[string]any {
@@ -75,11 +80,15 @@ func (in ListResourcesInput) values() map[string]any {
 	if in.Limit != nil {
 		values["limit"] = *in.Limit
 	}
+	if in.Pool != nil {
+		values["pool"] = *in.Pool
+	}
 	return values
 }
 
 // ListResources: List calendar resources. List resources visible to the authenticated tenant
-// principal.
+// principal, with the pool each belongs to (a vehicle class, a room type). With pool, only that
+// pool's members, in the order slotlock_book_pool tries them.
 func (c *Client) ListResources(ctx context.Context, in ListResourcesInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_list_resources", in.values())
 }
@@ -267,6 +276,43 @@ func (in BookTogetherInput) values() map[string]any {
 // the same events.
 func (c *Client) BookTogether(ctx context.Context, in BookTogetherInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_book_together", in.values())
+}
+
+// BookPoolInput holds the arguments of [Client.BookPool].
+type BookPoolInput struct {
+	Pool string
+
+	StartsAt string
+
+	EndsAt string
+
+	Timezone string
+
+	IdempotencyKey string
+
+	Title *string
+}
+
+func (in BookPoolInput) values() map[string]any {
+	values := map[string]any{}
+	values["pool"] = in.Pool
+	values["starts_at"] = in.StartsAt
+	values["ends_at"] = in.EndsAt
+	values["timezone"] = in.Timezone
+	values["idempotency_key"] = in.IdempotencyKey
+	if in.Title != nil {
+		values["title"] = *in.Title
+	}
+	return values
+}
+
+// BookPool: Book from a pool. Book any one member of a pool (a vehicle class, a room type) for a
+// time: members are tried in a fixed order and the first that is free and allows the booking is
+// booked, in one transaction, so a class sells out exactly at its number of members. The event
+// names the member booked. 409 pool_full when none is free; 404 pool_not_found when the pool has
+// no member you may book. A retry with the same idempotency_key answers the same event.
+func (c *Client) BookPool(ctx context.Context, in BookPoolInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_book_pool", in.values())
 }
 
 // ReleaseSlotsInput holds the arguments of [Client.ReleaseSlots].
@@ -685,6 +731,46 @@ func (in SetResourceBookingRulesInput) values() map[string]any {
 // events are refused with the rule they break; searches offer only what they allow.
 func (c *Client) SetResourceBookingRules(ctx context.Context, in SetResourceBookingRulesInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_set_resource_booking_rules", in.values())
+}
+
+// SetResourcePoolInput holds the arguments of [Client.SetResourcePool].
+type SetResourcePoolInput struct {
+	ResourceID string
+
+	Pool Nullable[string]
+}
+
+func (in SetResourcePoolInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_id"] = in.ResourceID
+	if value, ok := in.Pool.get(); ok {
+		values["pool"] = value
+	}
+	return values
+}
+
+// SetResourcePool: Set a resource's pool. Make a resource a member of a pool, a class of
+// interchangeable resources such as a vehicle class or a room type, or take it out (`null`).
+// Agents book the class with slotlock_book_pool, which takes the first member free; the class's
+// capacity is its number of members. A resource is in one pool at most; pool names are 1-100 of
+// a-z, 0-9, '.', '_' and '-'.
+func (c *Client) SetResourcePool(ctx context.Context, in SetResourcePoolInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_set_resource_pool", in.values())
+}
+
+// ListPoolsInput holds the arguments of [Client.ListPools].
+type ListPoolsInput struct {
+}
+
+func (in ListPoolsInput) values() map[string]any {
+	values := map[string]any{}
+	return values
+}
+
+// ListPools: List pools. The tenant's pools by name, each with its capacity: how many members it
+// has that are not archived.
+func (c *Client) ListPools(ctx context.Context, in ListPoolsInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_list_pools", in.values())
 }
 
 // SetTenantAvailabilityInput holds the arguments of [Client.SetTenantAvailability].

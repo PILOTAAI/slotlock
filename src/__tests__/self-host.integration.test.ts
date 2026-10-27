@@ -327,6 +327,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         confirm_writes: [
           'slotlock_create_event',
           'slotlock_book_together',
+          'slotlock_book_pool',
           'slotlock_update_event',
           'slotlock_delete_event',
         ],
@@ -401,6 +402,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         ({ name }) => name,
       );
       expect(toolNames.sort()).toEqual([
+        'slotlock_book_pool',
         'slotlock_book_together',
         'slotlock_create_event',
         'slotlock_delete_event',

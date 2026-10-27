@@ -1275,6 +1275,10 @@ ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS tenant_ref text;
 -- needs a constraint under a new name.
 ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS availability_rules jsonb;
 ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS booking_rules jsonb;
+-- The pool (a vehicle class, a room type) whose interchangeable members this resource is one of.
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS pool_ref text;
+CREATE INDEX IF NOT EXISTS slotlock_resources_pool_idx
+  ON slotlock.resources (tenant_ref, pool_ref, id) WHERE pool_ref IS NOT NULL;
 -- Who sees a resource: 'shared' ones are listed to agents and booked through them, 'private' ones
 -- (a tax-deadline calendar, say) only by the tenant's own code. Fixed when the resource is created.
 ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS visibility text NOT NULL DEFAULT 'shared';
@@ -1508,6 +1512,15 @@ BEGIN
                 THEN jsonb_array_length(availability_rules) <= ${SLOTLOCK_MAX_AVAILABILITY_RULES}
                 ELSE false END
       );
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'slotlock_resources_pool_ref_valid'
+  ) THEN
+    ALTER TABLE slotlock.resources
+      ADD CONSTRAINT slotlock_resources_pool_ref_valid CHECK (
+        pool_ref IS NULL OR (char_length(pool_ref) BETWEEN 1 AND 100 AND pool_ref ~ '^[a-z0-9][a-z0-9._-]*$')
+      ) NOT VALID;
   END IF;
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint

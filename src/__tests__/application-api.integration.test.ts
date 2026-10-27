@@ -114,6 +114,7 @@ describe.skipIf(!url)('the application API on the real store', () => {
           booking_rules: null,
           visibility: 'shared',
           archived_at: null,
+          pool: null,
         },
       },
     });

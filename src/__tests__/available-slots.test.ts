@@ -168,6 +168,7 @@ it('lets a calendar view call reads, and only the model call writes', async () =
     );
   }
   expect(tools.filter((tool) => !tool.annotations.readOnlyHint).map((tool) => tool.name).sort()).toEqual([
+    'slotlock_book_pool',
     'slotlock_book_together',
     'slotlock_create_event',
     'slotlock_delete_event',

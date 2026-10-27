@@ -1449,6 +1449,7 @@ async function bookingJudge(
     timezone: row.timezone,
     availability_rules: row.availability_rules,
     booking_rules: row.booking_rules,
+    pool_ref: null,
     visibility: 'shared',
     archived_at: null,
   });
@@ -1532,6 +1533,20 @@ function pgCode(err: unknown): string | undefined {
   return undefined;
 }
 
+/** Members a pool booking or search considers at most, in id order. */
+export const SLOTLOCK_MAX_POOL_MEMBERS = 100;
+
+/** A pool's name: 1-100 of a-z, 0-9, `.`, `_` and `-`, starting with a letter or digit. */
+export function isPoolName(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-z0-9][a-z0-9._-]{0,99}$/.test(value);
+}
+
+function invalidPoolError(): Error & { code: 'invalid_pool' } {
+  return Object.assign(new Error('Slotlock pool must be 1-100 of a-z, 0-9, ".", "_" and "-"'), {
+    code: 'invalid_pool' as const,
+  });
+}
+
 type ResourceRow = {
   id: string;
   external_ref: string | null;
@@ -1539,6 +1554,7 @@ type ResourceRow = {
   timezone: string;
   availability_rules: unknown;
   booking_rules: unknown;
+  pool_ref: string | null;
   visibility: NonNullable<SlotlockResource['visibility']>;
   archived_at: Date | null;
 };
@@ -1552,6 +1568,7 @@ function toResource(row: ResourceRow): SlotlockResource {
     visibility: row.visibility,
   };
   if (row.archived_at !== null) resource.archivedAt = row.archived_at;
+  if (row.pool_ref !== null && row.pool_ref !== undefined) resource.pool = row.pool_ref;
   if (row.availability_rules !== null && row.availability_rules !== undefined) {
     // Written through setResourceAvailability, which validates; anything else reads as closed.
     try {
@@ -1608,7 +1625,7 @@ async function upsertResource(
         WHERE tenant_ref IS NOT NULL AND external_ref IS NOT NULL
       DO UPDATE SET timezone = EXCLUDED.timezone
       WHERE ${asked}::text IS NULL OR slotlock.resources.visibility = ${asked}::text
-      RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, visibility, archived_at`;
+      RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref, visibility, archived_at`;
   } else if (params.externalRef !== undefined) {
     rows = await executor<ResourceIdentityRow[]>`
       INSERT INTO slotlock.resources (external_ref, tenant_ref, timezone, visibility)
@@ -1617,12 +1634,12 @@ async function upsertResource(
         WHERE tenant_ref IS NULL AND external_ref IS NOT NULL
       DO UPDATE SET external_ref = EXCLUDED.external_ref
       WHERE ${asked}::text IS NULL OR slotlock.resources.visibility = ${asked}::text
-      RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, visibility, archived_at`;
+      RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref, visibility, archived_at`;
   } else {
     rows = await executor<ResourceIdentityRow[]>`
       INSERT INTO slotlock.resources (external_ref, tenant_ref, timezone, visibility)
       VALUES (NULL, NULL, ${params.timezone ?? 'UTC'}, ${visibility})
-      RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, visibility, archived_at`;
+      RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref, visibility, archived_at`;
   }
   const row = rows[0];
   if (!row) {
@@ -1990,6 +2007,27 @@ export interface SlotlockStore extends SlotlockEventFeed {
     id: string;
     rules: SlotlockBookingRules | null;
   }): Promise<SlotlockResource | null>;
+  /**
+   * Put one resource in a pool, or take it out (`null`): `pool` is 1-100 characters of a-z, 0-9,
+   * `.`, `_` and `-`, starting with a letter or digit (`invalid_pool` otherwise). A resource is in
+   * one pool at most. Null for an id that is not the tenant's.
+   */
+  setResourcePool(params: {
+    tenantRef: string;
+    id: string;
+    pool: string | null;
+  }): Promise<SlotlockResource | null>;
+  /**
+   * The members of one of the tenant's pools that may be booked, in the order a pool booking tries
+   * them (by id): archived ones left out, and with `visibility: 'shared'` private ones too.
+   */
+  listPoolMembers(params: {
+    tenantRef: string;
+    pool: string;
+    visibility?: 'shared';
+  }): Promise<SlotlockResource[]>;
+  /** The tenant's pools by name, with how many members each has that may be booked (its capacity). */
+  listPools(params: { tenantRef: string; visibility?: 'shared' }): Promise<{ pool: string; capacity: number }[]>;
   /** Set (or clear, with `null`) the bookable hours of every resource the tenant has; returns how many. */
   setTenantAvailability(params: {
     tenantRef: string;
@@ -2735,6 +2773,7 @@ export const SLOTLOCK_TENANT_WRITE_METHODS = Object.freeze([
   'deleteResource',
   'setResourceAvailability',
   'setResourceBookingRules',
+  'setResourcePool',
   'setTenantAvailability',
   'createReservation',
   'createExternalReservation',
@@ -3221,7 +3260,7 @@ function buildSlotlockStore(
         });
       }
       const rows = await sql<ResourceRow[]>`
-        SELECT id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, visibility, archived_at
+        SELECT id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref, visibility, archived_at
           FROM slotlock.resources
          WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
            AND (${params.visibility ?? null}::text IS NULL OR visibility = ${params.visibility ?? null})`;
@@ -3240,7 +3279,7 @@ function buildSlotlockStore(
         UPDATE slotlock.resources
            SET availability_rules = ${rules}::jsonb
          WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
-        RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, visibility, archived_at`;
+        RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref, visibility, archived_at`;
       const row = rows[0];
       return row ? toResource(row) : null;
     },
@@ -3265,10 +3304,54 @@ function buildSlotlockStore(
         UPDATE slotlock.resources
            SET booking_rules = ${rules === null ? null : sql.json({ ...rules })}::jsonb
          WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
-        RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules,
+        RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref,
                   visibility, archived_at`;
       const row = rows[0];
       return row ? toResource(row) : null;
+    },
+
+    async setResourcePool(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidResourceId(params.id)) {
+        throw Object.assign(new Error('Slotlock resource identity is invalid'), {
+          code: 'invalid_identity' as const,
+        });
+      }
+      if (params.pool !== null && !isPoolName(params.pool)) throw invalidPoolError();
+      const rows = await sql<ResourceRow[]>`
+        UPDATE slotlock.resources SET pool_ref = ${params.pool}
+         WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
+        RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref,
+                  visibility, archived_at`;
+      const row = rows[0];
+      return row ? toResource(row) : null;
+    },
+
+    async listPoolMembers(params) {
+      if (!isValidIdentity(params.tenantRef)) throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      if (!isPoolName(params.pool)) throw invalidPoolError();
+      const rows = await sql<ResourceRow[]>`
+        SELECT id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref,
+               visibility, archived_at
+          FROM slotlock.resources
+         WHERE tenant_ref = ${params.tenantRef} AND pool_ref = ${params.pool}
+           AND archived_at IS NULL
+           AND (${params.visibility ?? null}::text IS NULL OR visibility = ${params.visibility ?? null})
+         ORDER BY id
+         LIMIT ${SLOTLOCK_MAX_POOL_MEMBERS}`;
+      return rows.map(toResource);
+    },
+
+    async listPools(params) {
+      if (!isValidIdentity(params.tenantRef)) throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      const rows = await sql<{ pool: string; capacity: number }[]>`
+        SELECT pool_ref AS pool, count(*)::int AS capacity
+          FROM slotlock.resources
+         WHERE tenant_ref = ${params.tenantRef} AND pool_ref IS NOT NULL AND archived_at IS NULL
+           AND (${params.visibility ?? null}::text IS NULL OR visibility = ${params.visibility ?? null})
+         GROUP BY pool_ref
+         ORDER BY pool_ref
+         LIMIT 1000`;
+      return rows;
     },
 
     async setTenantAvailability(params) {
@@ -3303,7 +3386,7 @@ function buildSlotlockStore(
         });
       }
       const rows = await sql<ResourceRow[]>`
-        SELECT id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, visibility, archived_at
+        SELECT id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref, visibility, archived_at
           FROM slotlock.resources
          WHERE tenant_ref = ${params.tenantRef}
            AND (${params.visibility ?? null}::text IS NULL OR visibility = ${params.visibility ?? null})
@@ -3324,7 +3407,7 @@ function buildSlotlockStore(
         UPDATE slotlock.resources
            SET archived_at = COALESCE(archived_at, clock_timestamp())
          WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
-        RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, visibility, archived_at`;
+        RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref, visibility, archived_at`;
       return row ? toResource(row) : null;
     },
 
@@ -3336,7 +3419,7 @@ function buildSlotlockStore(
         UPDATE slotlock.resources
            SET archived_at = NULL
          WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
-        RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, visibility, archived_at`;
+        RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref, visibility, archived_at`;
       return row ? toResource(row) : null;
     },
 
@@ -5283,7 +5366,7 @@ function buildSlotlockStore(
         });
       if (!isValidResourceId(params.resourceId)) throw notFound();
       const [row] = await sql<(ResourceRow & { now: Date })[]>`
-        SELECT id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, visibility,
+        SELECT id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref, visibility,
                archived_at, statement_timestamp() AS now
           FROM slotlock.resources
          WHERE id = ${params.resourceId} AND tenant_ref IS NOT DISTINCT FROM ${tenantRef}`;

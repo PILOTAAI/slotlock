@@ -18,6 +18,8 @@ export const GROUPS = [
       'slotlock_restore_resource',
       'slotlock_delete_resource',
       'slotlock_set_resource_booking_rules',
+      'slotlock_set_resource_pool',
+      'slotlock_list_pools',
     ],
   },
   {
@@ -38,6 +40,7 @@ export const GROUPS = [
       'slotlock_hold_slots',
       'slotlock_release_slots',
       'slotlock_book_together',
+      'slotlock_book_pool',
       'slotlock_create_event',
       'slotlock_list_events',
       'slotlock_get_event',

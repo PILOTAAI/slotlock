@@ -36,7 +36,7 @@
       "get": {
         "operationId": "slotlock_list_resources",
         "summary": "List calendar resources",
-        "description": "List resources visible to the authenticated tenant principal.",
+        "description": "List resources visible to the authenticated tenant principal, with the pool each belongs to (a vehicle class, a room type). With pool, only that pool's members, in the order slotlock_book_pool tries them.",
         "tags": [
           "Agent tools"
         ],
@@ -60,6 +60,15 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 100
+            }
+          },
+          {
+            "name": "pool",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
             }
           }
         ],
@@ -97,6 +106,10 @@
                             "type": "string",
                             "minLength": 1,
                             "maxLength": 100
+                          },
+                          "pool": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
                           }
                         },
                         "required": [
@@ -309,6 +322,17 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "pool": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -318,7 +342,8 @@
                         "availability",
                         "booking_rules",
                         "visibility",
-                        "archived_at"
+                        "archived_at",
+                        "pool"
                       ],
                       "additionalProperties": false
                     }
@@ -1446,6 +1471,414 @@
                   },
                   "required": [
                     "events",
+                    "replayed"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/pool-bookings": {
+      "post": {
+        "operationId": "slotlock_book_pool",
+        "summary": "Book from a pool",
+        "description": "Book any one member of a pool (a vehicle class, a room type) for a time: members are tried in a fixed order and the first that is free and allows the booking is booked, in one transaction, so a class sells out exactly at its number of members. The event names the member booked. 409 pool_full when none is free; 404 pool_not_found when the pool has no member you may book. A retry with the same idempotency_key answers the same event.",
+        "tags": [
+          "Agent tools"
+        ],
+        "x-slotlock-scope": "write",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "pool": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                  },
+                  "starts_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "ends_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "timezone": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "idempotency_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "required": [
+                  "pool",
+                  "starts_at",
+                  "ends_at",
+                  "timezone",
+                  "idempotency_key"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Stands in for idempotency_key: a Structured Field String (`\"8e03978e-40d5-43e8-bc93-6894a57f9324\"`, draft-ietf-httpapi-idempotency-key-header-08) or the bare key; when both are sent they must be equal. A retry with the same key and request answers what the first did; the same key with another request is 422 idempotency_conflict. An event write keeps its key for 30 days (maintenance removes it after that), a hold until the hold would have expired, is released or is confirmed. Where the key is required and neither is sent: 400 idempotency_key_required.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 502
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "event": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "resource_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "starts_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "ends_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "timezone": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 100
+                        },
+                        "title": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "description": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 16384
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "location": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 16384
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "organizer": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "address": {
+                                  "type": "string",
+                                  "minLength": 3,
+                                  "maxLength": 320
+                                },
+                                "name": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "maxLength": 1024
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "address",
+                                "name"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "attendees": {
+                          "maxItems": 100,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "address": {
+                                "type": "string",
+                                "minLength": 3,
+                                "maxLength": 320
+                              },
+                              "name": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "maxLength": 1024
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "role": {
+                                "type": "string",
+                                "enum": [
+                                  "chair",
+                                  "required",
+                                  "optional",
+                                  "non_participant"
+                                ]
+                              },
+                              "participation_status": {
+                                "type": "string",
+                                "enum": [
+                                  "needs_action",
+                                  "accepted",
+                                  "declined",
+                                  "tentative",
+                                  "delegated"
+                                ]
+                              },
+                              "rsvp": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "address",
+                              "name",
+                              "role",
+                              "participation_status",
+                              "rsvp"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "reminders": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "minutes_before": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 527040
+                              },
+                              "channel": {
+                                "type": "string",
+                                "enum": [
+                                  "display",
+                                  "email"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "minutes_before",
+                              "channel"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "tentative",
+                            "confirmed",
+                            "cancelled"
+                          ]
+                        },
+                        "transparency": {
+                          "type": "string",
+                          "enum": [
+                            "opaque",
+                            "transparent"
+                          ]
+                        },
+                        "sequence": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "revision": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "recurrence_rule": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "recurrence_exceptions": {
+                          "maxItems": 1000,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "recurrence_id": {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              "cancelled": {
+                                "type": "boolean"
+                              },
+                              "starts_at": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "format": "date-time"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "ends_at": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "format": "date-time"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            "required": [
+                              "recurrence_id",
+                              "cancelled",
+                              "starts_at",
+                              "ends_at"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "recurrence_id": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "resource_id",
+                        "starts_at",
+                        "ends_at",
+                        "timezone",
+                        "title",
+                        "description",
+                        "location",
+                        "organizer",
+                        "attendees",
+                        "reminders",
+                        "status",
+                        "transparency",
+                        "sequence",
+                        "revision",
+                        "recurrence_rule",
+                        "recurrence_exceptions",
+                        "recurrence_id"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "replayed": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "event",
                     "replayed"
                   ],
                   "additionalProperties": false
@@ -3726,6 +4159,17 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "pool": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -3735,7 +4179,8 @@
                         "availability",
                         "booking_rules",
                         "visibility",
-                        "archived_at"
+                        "archived_at",
+                        "pool"
                       ],
                       "additionalProperties": false
                     }
@@ -3988,6 +4433,17 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "pool": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -3997,7 +4453,8 @@
                         "availability",
                         "booking_rules",
                         "visibility",
-                        "archived_at"
+                        "archived_at",
+                        "pool"
                       ],
                       "additionalProperties": false
                     }
@@ -4190,6 +4647,17 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "pool": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -4199,7 +4667,8 @@
                         "availability",
                         "booking_rules",
                         "visibility",
-                        "archived_at"
+                        "archived_at",
+                        "pool"
                       ],
                       "additionalProperties": false
                     }
@@ -4531,6 +5000,17 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "pool": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -4540,7 +5020,8 @@
                         "availability",
                         "booking_rules",
                         "visibility",
-                        "archived_at"
+                        "archived_at",
+                        "pool"
                       ],
                       "additionalProperties": false
                     }
@@ -4772,6 +5253,17 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "pool": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -4781,7 +5273,8 @@
                         "availability",
                         "booking_rules",
                         "visibility",
-                        "archived_at"
+                        "archived_at",
+                        "pool"
                       ],
                       "additionalProperties": false
                     }
@@ -4807,6 +5300,304 @@
             "$ref": "#/components/responses/Error"
           },
           "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/resources/{resource_id}/pool": {
+      "put": {
+        "operationId": "slotlock_set_resource_pool",
+        "summary": "Set a resource's pool",
+        "description": "Make a resource a member of a pool, a class of interchangeable resources such as a vehicle class or a room type, or take it out (`null`). Agents book the class with slotlock_book_pool, which takes the first member free; the class's capacity is its number of members. A resource is in one pool at most; pool names are 1-100 of a-z, 0-9, '.', '_' and '-'.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "pool": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "pool"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "resource_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "resource": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "external_ref": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 500
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "timezone": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 100
+                        },
+                        "availability": {
+                          "anyOf": [
+                            {
+                              "maxItems": 50,
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "rrule": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 500
+                                  },
+                                  "start_minutes": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 1439
+                                  },
+                                  "duration_minutes": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 10080
+                                  }
+                                },
+                                "required": [
+                                  "rrule",
+                                  "start_minutes",
+                                  "duration_minutes"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "booking_rules": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "min_notice_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "max_advance_days": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 3660
+                                },
+                                "slot_step_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
+                                },
+                                "turnaround_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1440
+                                },
+                                "enforce_hours": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "visibility": {
+                          "type": "string",
+                          "enum": [
+                            "shared",
+                            "private"
+                          ]
+                        },
+                        "archived_at": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "pool": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "external_ref",
+                        "timezone",
+                        "availability",
+                        "booking_rules",
+                        "visibility",
+                        "archived_at",
+                        "pool"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "resource"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/pools": {
+      "get": {
+        "operationId": "slotlock_list_pools",
+        "summary": "List pools",
+        "description": "The tenant's pools by name, each with its capacity: how many members it has that are not archived.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "pools": {
+                      "maxItems": 1000,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "pool": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                          },
+                          "capacity": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "pool",
+                          "capacity"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "pools"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
             "$ref": "#/components/responses/Error"
           },
           "429": {

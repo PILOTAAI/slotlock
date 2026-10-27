@@ -7,6 +7,14 @@ versioning.
 
 ### Added
 
+- Pools: interchangeable resources sharing a class (a vehicle class, a room type).
+  `PUT /v1/resources/{resource_id}/pool` (`slotlock_set_resource_pool`, `setResourcePool`) puts a
+  resource in one; `GET /v1/pools` lists them with their capacity. `slotlock_book_pool` (REST
+  `POST /v1/pool-bookings`) books the first member free and allowed in one transaction, so a class
+  sells out exactly at its size however many race (`pool_full`), and replays to the member it
+  booked. `slotlock_list_resources` shows each resource's `pool` and takes `pool` to list one's
+  members. Resources in the application API have `pool`. A backend of your own implements
+  `setResourcePool` and `listPools`, and the optional `bookPool`. Run `slotlock migrate`.
 - Bookings across resources: `slotlock_book_together` (REST `POST /v1/bundles`) books the same
   time on 2-20 resources in one transaction, all or none, and its refusal names the `resource_id`
   that refused; bundles lock in one order, so racing ones never deadlock. It is a write that

@@ -20,6 +20,7 @@ export const SUMMARIES = {
     'Hold up to five candidate slots for a few minutes while a person chooses, as one group.',
   slotlock_release_slots: 'Release one of your holds and the rest of its group at once.',
   slotlock_book_together: 'Book the same time on 2-20 resources at once, all or none.',
+  slotlock_book_pool: 'Book any one member of a pool, such as a vehicle class, for a time.',
   slotlock_create_event:
     'Book time on a resource. If the time is taken, the database refuses it with `overlap`.',
   slotlock_get_event: 'Read one event this caller created.',
@@ -38,6 +39,8 @@ export const DETAILS = {
     'Each slot is free of busy time and inside the resource’s bookable hours, found the way `slotlock_find_next_available` finds one, and they never overlap on one resource. The list is empty unless the coverage of every resource asked about is `certain`. In an MCP Apps host the calendar view lets the person pick one, and sends the agent a message naming it.',
   slotlock_hold_slots:
     'Each free candidate is held for `ttl_seconds`, busy for everyone else; a taken one is listed in `refused` with its code. Book one with `slotlock_create_event`’s `hold_id`: the others are released in the same transaction. A hold is yours alone, and one agent may have 20 live at once.',
+  slotlock_book_pool:
+    'Members are tried in a fixed order (the order `slotlock_list_resources` with `pool` lists them) and the first that is free and allows the booking is booked, in one transaction: a class of five sells exactly five bookings for a time, however many race. The event names the member. A retry with the same key answers the member it booked, even if an earlier one has since come free.',
   slotlock_book_together:
     'One event per resource, in one transaction: if any resource is taken or breaks its booking rules, nothing is booked and the refusal names that `resource_id`. Bundles take their resources in one order, so two racing over the same ones end with one booked and one refused, never stuck. Find the time first with `slotlock_find_available_slots` and `require_free`.',
   slotlock_release_slots:
@@ -83,6 +86,8 @@ export const INPUT_NOTES = {
   'slotlock_find_available_slots.require_free':
     'Only times when at least this many of `resource_ids` are free together: all of them for a bundle, or any n.',
   'slotlock_book_together.resource_ids': 'Every resource to book: `id`s from `slotlock_list_resources`.',
+  pool: 'A pool name, such as `van`: the `pool` of the resources `slotlock_list_resources` lists.',
+  'slotlock_list_resources.pool': 'Only this pool\u2019s members, in the order `slotlock_book_pool` tries them.',
   'slotlock_hold_slots.ttl_seconds': 'How long each hold lasts, by the database clock.',
   'slotlock_release_slots.hold_id': 'Any `hold_id` of the group.',
   'slotlock_update_event.resource_id': 'Moves the event to this resource.',
@@ -121,6 +126,7 @@ export const OUTPUT_NOTES = {
   'slotlock_find_available_slots.slots[].resource_ids':
     'With `require_free`: the resources free together for this slot.',
   'slotlock_book_together.events': 'One per resource, by resource id.',
+  'slotlock_list_resources.resources[].pool': 'The pool it is a member of, if any.',
   'slotlock_hold_slots.group_id': 'Shared by the holds this call made.',
   'slotlock_hold_slots.holds': 'The candidates held, in the order sent.',
   'slotlock_hold_slots.refused': 'The candidates not held, by `index` in `slots`, with why.',
@@ -167,6 +173,13 @@ export const TOOL_ERRORS = {
   slotlock_find_available_slots: ['resource_not_found', 'invalid_arguments'],
   slotlock_hold_slots: ['holds_unavailable', 'idempotency_conflict'],
   slotlock_release_slots: ['holds_unavailable'],
+  slotlock_book_pool: [
+    'pool_full',
+    'pool_not_found',
+    'idempotency_conflict',
+    'pools_unavailable',
+    'owner_event_quota_exceeded',
+  ],
   slotlock_book_together: [
     'overlap',
     'resource_not_found',

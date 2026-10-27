@@ -13,7 +13,7 @@ OPERATIONS: dict[str, Operation] = {
         "GET",
         "/v1/resources",
         (),
-        ("cursor", "limit"),
+        ("cursor", "limit", "pool"),
     ),
     "slotlock_create_resource": Operation(
         "slotlock_create_resource",
@@ -54,6 +54,13 @@ OPERATIONS: dict[str, Operation] = {
         "slotlock_book_together",
         "POST",
         "/v1/bundles",
+        (),
+        (),
+    ),
+    "slotlock_book_pool": Operation(
+        "slotlock_book_pool",
+        "POST",
+        "/v1/pool-bookings",
         (),
         (),
     ),
@@ -146,6 +153,20 @@ OPERATIONS: dict[str, Operation] = {
         "PUT",
         "/v1/resources/{resource_id}/booking-rules",
         ("resource_id",),
+        (),
+    ),
+    "slotlock_set_resource_pool": Operation(
+        "slotlock_set_resource_pool",
+        "PUT",
+        "/v1/resources/{resource_id}/pool",
+        ("resource_id",),
+        (),
+    ),
+    "slotlock_list_pools": Operation(
+        "slotlock_list_pools",
+        "GET",
+        "/v1/pools",
+        (),
         (),
     ),
     "slotlock_set_tenant_availability": Operation(
@@ -313,16 +334,21 @@ class Operations(Transport):
         *,
         cursor: str | None = None,
         limit: int | None = None,
+        pool: str | None = None,
     ) -> dict[str, Any]:
         """List calendar resources.
 
-        List resources visible to the authenticated tenant principal.
+        List resources visible to the authenticated tenant principal, with the pool each belongs
+        to (a vehicle class, a room type). With pool, only that pool's members, in the order
+        slotlock_book_pool tries them.
         """
         values: dict[str, Any] = {}
         if cursor is not None:
             values["cursor"] = cursor
         if limit is not None:
             values["limit"] = limit
+        if pool is not None:
+            values["pool"] = pool
         return self.call("slotlock_list_resources", values)
 
     def create_resource(
@@ -453,6 +479,35 @@ class Operations(Transport):
         if title is not None:
             values["title"] = title
         return self.call("slotlock_book_together", values)
+
+    def book_pool(
+        self,
+        *,
+        pool: str,
+        starts_at: str,
+        ends_at: str,
+        timezone: str,
+        idempotency_key: str,
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        """Book from a pool.
+
+        Book any one member of a pool (a vehicle class, a room type) for a time: members are tried
+        in a fixed order and the first that is free and allows the booking is booked, in one
+        transaction, so a class sells out exactly at its number of members. The event names the
+        member booked. 409 pool_full when none is free; 404 pool_not_found when the pool has no
+        member you may book. A retry with the same idempotency_key answers the same event.
+        """
+        values: dict[str, Any] = {
+            "pool": pool,
+            "starts_at": starts_at,
+            "ends_at": ends_at,
+            "timezone": timezone,
+            "idempotency_key": idempotency_key,
+        }
+        if title is not None:
+            values["title"] = title
+        return self.call("slotlock_book_pool", values)
 
     def release_slots(self, hold_id: str) -> dict[str, Any]:
         """Release held slots.
@@ -712,6 +767,27 @@ class Operations(Transport):
         """
         values: dict[str, Any] = {"resource_id": resource_id, "rules": rules}
         return self.call("slotlock_set_resource_booking_rules", values)
+
+    def set_resource_pool(self, resource_id: str, *, pool: str | None) -> dict[str, Any]:
+        """Set a resource's pool.
+
+        Make a resource a member of a pool, a class of interchangeable resources such as a vehicle
+        class or a room type, or take it out (`null`). Agents book the class with
+        slotlock_book_pool, which takes the first member free; the class's capacity is its number
+        of members. A resource is in one pool at most; pool names are 1-100 of a-z, 0-9, '.', '_'
+        and '-'.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id, "pool": pool}
+        return self.call("slotlock_set_resource_pool", values)
+
+    def list_pools(self) -> dict[str, Any]:
+        """List pools.
+
+        The tenant's pools by name, each with its capacity: how many members it has that are not
+        archived.
+        """
+        values: dict[str, Any] = {}
+        return self.call("slotlock_list_pools", values)
 
     def set_tenant_availability(self, *, rules: list[dict[str, Any]] | None) -> dict[str, Any]:
         """Set every resource's bookable hours.

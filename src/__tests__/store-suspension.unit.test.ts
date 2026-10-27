@@ -12,6 +12,8 @@ import {
 } from '../store.js';
 
 const READS = [
+  'listPoolMembers',
+  'listPools',
   'listChanges',
   'listWebhookEndpoints',
   'getResource',
