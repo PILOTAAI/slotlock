@@ -30,6 +30,22 @@ and the other jobs carry on; re-run the failed job once the setup is in place.
 Run `scripts/configure-github.sh` first: it creates the five environments, each limited to `v*`
 tags, with you as the required reviewer.
 
+Then `scripts/configure-registries.sh --tag v<version>` does the rest that can be done from a
+terminal, and prints the exact values for each web form that cannot:
+
+- **PyPI, NuGet and crates.io trusted publishing:** each is added only in that registry's web form.
+  The script prints the four values (owner, repository, `release.yml`, environment).
+- **crates.io's first version:** published from the tag with a token you paste once.
+- **NuGet:** the `NUGET_USER` variable.
+- **Maven Central:** the Portal token (checked with the Portal before it is stored), and a new
+  signing key, which it proves can sign, sends to keyserver.ubuntu.com and stores. Gradle reads only
+  the ASCII-armored secret key with its line breaks: base64 of it, or the public key, fails with
+  "Could not read PGP secret key".
+- **Cloudflare:** the site secrets, through `configure-github.sh --site-secrets`.
+- **The release:** the failed jobs of the tag's run, re-run.
+
+The sections below are what it automates, step by step.
+
 ### PyPI
 
 1. Sign in to pypi.org with two-factor authentication.
