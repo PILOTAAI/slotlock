@@ -114,6 +114,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
+        name: "slotlock_set_resource_booking_rules",
+        method: "PUT",
+        path: "/v1/resources/{resource_id}/booking-rules",
+        path_params: &["resource_id"],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_set_tenant_availability",
         method: "PUT",
         path: "/v1/availability",
@@ -408,6 +415,13 @@ pub struct SetResourceAvailabilityInput {
     pub rules: Option<Vec<Value>>,
 }
 
+/// The arguments of [`Client::set_resource_booking_rules`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SetResourceBookingRulesInput {
+    pub resource_id: String,
+    pub rules: Option<Value>,
+}
+
 /// The arguments of [`Client::set_tenant_availability`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SetTenantAvailabilityInput {
@@ -678,6 +692,17 @@ impl Client {
     /// start_minutes after midnight, lasting duration_minutes.
     pub fn set_resource_availability(&self, input: &SetResourceAvailabilityInput) -> Result<Value, Error> {
         self.call("slotlock_set_resource_availability", serde_json::to_value(input)?)
+    }
+
+    /// Set a resource's booking rules.
+    ///
+    /// Set what a booking on one resource must satisfy from now on: minimum notice, how far
+    /// ahead, the step starts fall on (from local midnight in the resource's time zone), the
+    /// turnaround kept free after each booking, and whether bookings must lie inside its hours.
+    /// `null` clears them. Holds, reservations, moves and agents' events are refused with the
+    /// rule they break; searches offer only what they allow.
+    pub fn set_resource_booking_rules(&self, input: &SetResourceBookingRulesInput) -> Result<Value, Error> {
+        self.call("slotlock_set_resource_booking_rules", serde_json::to_value(input)?)
     }
 
     /// Set every resource's bookable hours.

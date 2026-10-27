@@ -113,6 +113,13 @@ OPERATIONS: dict[str, Operation] = {
         ("resource_id",),
         (),
     ),
+    "slotlock_set_resource_booking_rules": Operation(
+        "slotlock_set_resource_booking_rules",
+        "PUT",
+        "/v1/resources/{resource_id}/booking-rules",
+        ("resource_id",),
+        (),
+    ),
     "slotlock_set_tenant_availability": Operation(
         "slotlock_set_tenant_availability",
         "PUT",
@@ -534,6 +541,23 @@ class Operations(Transport):
         """
         values: dict[str, Any] = {"resource_id": resource_id, "rules": rules}
         return self.call("slotlock_set_resource_availability", values)
+
+    def set_resource_booking_rules(
+        self,
+        resource_id: str,
+        *,
+        rules: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Set a resource's booking rules.
+
+        Set what a booking on one resource must satisfy from now on: minimum notice, how far
+        ahead, the step starts fall on (from local midnight in the resource's time zone), the
+        turnaround kept free after each booking, and whether bookings must lie inside its hours.
+        `null` clears them. Holds, reservations, moves and agents' events are refused with the
+        rule they break; searches offer only what they allow.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id, "rules": rules}
+        return self.call("slotlock_set_resource_booking_rules", values)
 
     def set_tenant_availability(self, *, rules: list[dict[str, Any]] | None) -> dict[str, Any]:
         """Set every resource's bookable hours.

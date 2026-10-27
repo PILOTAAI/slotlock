@@ -24,6 +24,7 @@ export type SlotlockApplicationOperation =
   | 'slotlock_list_busy'
   | 'slotlock_set_resource_availability'
   | 'slotlock_set_tenant_availability'
+  | 'slotlock_set_resource_booking_rules'
   | 'slotlock_acquire_hold'
   | 'slotlock_get_hold'
   | 'slotlock_list_holds'
@@ -71,6 +72,7 @@ export interface SlotlockApplicationBackend {
   listBusy: Handler;
   setResourceAvailability: Handler;
   setTenantAvailability: Handler;
+  setResourceBookingRules: Handler;
   acquireHold: Handler;
   getHold: Handler;
   listHolds: Handler;
@@ -176,6 +178,17 @@ const AVAILABILITY_RULE = z
   .strict();
 const AVAILABILITY_RULES = z.array(AVAILABILITY_RULE).max(50);
 
+/** What a booking on a resource must satisfy; each rule optional (`SlotlockBookingRules`). */
+const BOOKING_RULES = z
+  .object({
+    min_notice_minutes: z.number().int().min(0).max(525_600).optional(),
+    max_advance_days: z.number().int().min(1).max(3_660).optional(),
+    slot_step_minutes: z.number().int().min(1).max(1_440).optional(),
+    turnaround_minutes: z.number().int().min(0).max(1_440).optional(),
+    enforce_hours: z.boolean().optional(),
+  })
+  .strict();
+
 const RESOURCE = z
   .object({
     id: RESOURCE_ID,
@@ -183,6 +196,8 @@ const RESOURCE = z
     timezone: TIMEZONE,
     /** The resource's own weekly hours; `null` when it uses the default. */
     availability: AVAILABILITY_RULES.nullable(),
+    /** What a booking on it must satisfy; `null` when it has no rules. */
+    booking_rules: BOOKING_RULES.nullable(),
     /** `private` resources are never shown to agents; fixed when the resource is created. */
     visibility: VISIBILITY,
     /** When it was archived; `null` while it is in use. */
@@ -333,6 +348,22 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       risk: { readOnly: false, destructive: false, idempotent: true },
       invoke: 'setResourceAvailability',
       example: { resource_id: EXAMPLE_RESOURCE_ID, rules: EXAMPLE_RULES },
+    },
+    {
+      name: 'slotlock_set_resource_booking_rules',
+      title: "Set a resource's booking rules",
+      description:
+        "Set what a booking on one resource must satisfy from now on: minimum notice, how far ahead, the step starts fall on (from local midnight in the resource's time zone), the turnaround kept free after each booking, and whether bookings must lie inside its hours. `null` clears them. Holds, reservations, moves and agents' events are refused with the rule they break; searches offer only what they allow.",
+      method: 'PUT',
+      path: '/v1/resources/{resource_id}/booking-rules',
+      input: z.object({ resource_id: RESOURCE_ID, rules: BOOKING_RULES.nullable() }).strict(),
+      output: z.object({ resource: RESOURCE }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'setResourceBookingRules',
+      example: {
+        resource_id: EXAMPLE_RESOURCE_ID,
+        rules: { min_notice_minutes: 120, slot_step_minutes: 30, turnaround_minutes: 30, enforce_hours: true },
+      },
     },
     {
       name: 'slotlock_set_tenant_availability',

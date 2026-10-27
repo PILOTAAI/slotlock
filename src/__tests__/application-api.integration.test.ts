@@ -107,6 +107,7 @@ describe.skipIf(!url)('the application API on the real store', () => {
           external_ref: 'van-1',
           timezone: 'Europe/London',
           availability: null,
+          booking_rules: null,
           visibility: 'shared',
           archived_at: null,
         },

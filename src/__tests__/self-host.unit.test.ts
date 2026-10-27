@@ -563,7 +563,7 @@ describe('slotlock command line', () => {
     [['hours', 'set', '[]'], /hours set needs --resource <ref> or --all/],
     [['hours', 'clear', '--resource', 'van', '--all'], /hours clear needs --resource <ref> or --all/],
     [['hours', 'show', '--all'], /--all applies only to hours set and hours clear/],
-    [['resource', 'list', '--resource', 'van'], /--resource applies only to hours commands/],
+    [['resource', 'list', '--resource', 'van'], /--resource applies only to hours and rules commands/],
     [['hours', 'set', 'Mon 9-5', '--all'], /hours must be a JSON array of weekly rules/],
     [
       ['hours', 'set', '[{"rrule":"FREQ=DAILY","startMinutes":540,"durationMinutes":60}]', '--all'],

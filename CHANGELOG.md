@@ -5,6 +5,25 @@ versioning.
 
 ## Unreleased
 
+### Added
+
+- Booking rules per resource (`SlotlockBookingRules`): minimum notice, how far ahead, the step
+  starts fall on in the resource's time zone, a turnaround kept free after each booking (as its
+  trailing buffer, which the exclusion constraint enforces), and whether bookings must lie inside
+  its hours. Holds, reservations, moves and agents' events are refused with the rule they break
+  (`booking_rule_violated`; to an agent `booking_rule_min_notice`, `_max_advance`, `_slot_step`,
+  `_outside_hours`), by the database's clock; searches offer only what the rules allow. Set them
+  with `slotlock rules set`, `PUT /v1/resources/{resource_id}/booking-rules`
+  (`slotlock_set_resource_booking_rules`) or `setResourceBookingRules`. `putCalendarEvent` checks
+  them with `enforceBookingRules`; an imported event is not checked. `createSlotlockStore` takes
+  `defaultAvailabilityRules` for resources without hours of their own (`slotlock serve` passes
+  `SLOTLOCK_AVAILABILITY`). Run `slotlock migrate`.
+
+### Changed
+
+- The application API's resource has `booking_rules` (`null` when it has none), and
+  `SlotlockApplicationBackend` has `setResourceBookingRules`: a backend of your own implements it.
+
 ### Fixed
 
 - The OpenAPI document declares the `404` and `409` the agent-tool routes answer: `404` on

@@ -30,6 +30,7 @@ public sealed partial class SlotlockClient
         ["slotlock_restore_resource"] = new("POST", "/v1/resources/{resource_id}/restore", ["resource_id"], []),
         ["slotlock_list_busy"] = new("GET", "/v1/resources/{resource_id}/busy", ["resource_id"], ["start", "end"]),
         ["slotlock_set_resource_availability"] = new("PUT", "/v1/resources/{resource_id}/availability", ["resource_id"], []),
+        ["slotlock_set_resource_booking_rules"] = new("PUT", "/v1/resources/{resource_id}/booking-rules", ["resource_id"], []),
         ["slotlock_set_tenant_availability"] = new("PUT", "/v1/availability", [], []),
         ["slotlock_acquire_hold"] = new("POST", "/v1/holds", [], []),
         ["slotlock_get_hold"] = new("GET", "/v1/holds/{hold_id}", ["hold_id"], []),
@@ -523,6 +524,30 @@ public sealed partial class SlotlockClient
         values["resource_id"] = Json.ToNode(resourceId);
         values["rules"] = Json.ToNode(rules);
         return CallAsync("slotlock_set_resource_availability", values, cancellationToken);
+    }
+
+    /// <summary>Set a resource's booking rules.</summary>
+    /// <remarks>
+    /// Set what a booking on one resource must satisfy from now on: minimum notice, how far
+    /// ahead, the step starts fall on (from local midnight in the resource's time zone), the
+    /// turnaround kept free after each booking, and whether bookings must lie inside its hours.
+    /// `null` clears them. Holds, reservations, moves and agents' events are refused with the
+    /// rule they break; searches offer only what they allow.
+    /// </remarks>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="rules">rules</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> SetResourceBookingRulesAsync(
+        string resourceId,
+        JsonObject? rules,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_id"] = Json.ToNode(resourceId);
+        values["rules"] = Json.ToNode(rules);
+        return CallAsync("slotlock_set_resource_booking_rules", values, cancellationToken);
     }
 
     /// <summary>Set every resource's bookable hours.</summary>

@@ -1020,6 +1020,7 @@ ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS tenant_ref text;
 -- Its CHECK holds SLOTLOCK_MAX_AVAILABILITY_RULES as it was when first added: changing the cap
 -- needs a constraint under a new name.
 ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS availability_rules jsonb;
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS booking_rules jsonb;
 -- Who sees a resource: 'shared' ones are listed to agents and booked through them, 'private' ones
 -- (a tax-deadline calendar, say) only by the tenant's own code. Fixed when the resource is created.
 ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS visibility text NOT NULL DEFAULT 'shared';
@@ -1244,6 +1245,16 @@ BEGIN
         OR CASE WHEN jsonb_typeof(availability_rules) = 'array'
                 THEN jsonb_array_length(availability_rules) <= ${SLOTLOCK_MAX_AVAILABILITY_RULES}
                 ELSE false END
+      );
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'slotlock_resources_booking_rules_valid'
+       AND conrelid = 'slotlock.resources'::regclass
+  ) THEN
+    ALTER TABLE slotlock.resources
+      ADD CONSTRAINT slotlock_resources_booking_rules_valid CHECK (
+        booking_rules IS NULL OR jsonb_typeof(booking_rules) = 'object'
       );
   END IF;
   IF NOT EXISTS (
@@ -1584,6 +1595,11 @@ ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS roll_retry_at time
 -- when its rule has no end, or none Slotlock could follow it to. NULL: not worked out yet (a series
 -- from before 0.3, until its next roll), and so treated as going on. Unused for a one-off event.
 ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS recurrence_ends_by timestamptz;
+-- The turnaround a booked event keeps after each occurrence (its resource's, when it was booked), so
+-- the occurrences a later roll adds keep it too. At most a day.
+ALTER TABLE slotlock.calendar_events
+  ADD COLUMN IF NOT EXISTS buffer_after_ms integer NOT NULL DEFAULT 0
+  CONSTRAINT slotlock_calendar_events_buffer_valid CHECK (buffer_after_ms BETWEEN 0 AND 86400000);
 ALTER TABLE slotlock.calendar_events
   DROP CONSTRAINT IF EXISTS slotlock_calendar_events_recurrence_cursor_bounded;
 DO $slotlock_calendar_event_recurrence_cursor$
