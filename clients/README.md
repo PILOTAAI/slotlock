@@ -5,19 +5,18 @@ Slotlock's REST API from Python, Go, Rust, Java and .NET: the agent tools (`/v1/
 hours, holds, reservations, coverage, maintenance). Each client has one method per operation, and
 each runs the same scenario against a real server in CI.
 
-| Language | Directory | Needs | Install, until it is on its registry |
+| Language | Directory | Needs | Install |
 | --- | --- | --- | --- |
-| Python | [`python`](python) | Python 3.10+, no dependencies | `pip install "git+https://github.com/PILOTAAI/slotlock.git#subdirectory=clients/python"` |
-| Go | [`go`](go) | Go 1.22+, no dependencies | `go get github.com/PILOTAAI/slotlock/clients/go@main` |
-| Rust | [`rust`](rust) | Rust 1.85+, `ureq`, `serde` | `slotlock = { git = "https://github.com/PILOTAAI/slotlock" }` |
-| Java | [`java`](java) | Java 17+, no dependencies | `gradle jar` in `clients/java` |
-| .NET | [`dotnet`](dotnet) | .NET 8 or 10, no dependencies | `dotnet pack clients/dotnet/src/Slotlock` |
+| Python | [`python`](python) | Python 3.10+, no dependencies | `pip install slotlock` |
+| Go | [`go`](go) | Go 1.22+, no dependencies | `go get github.com/PILOTAAI/slotlock/clients/go` |
+| Rust | [`rust`](rust) | Rust 1.85+, `ureq`, `serde` | `cargo add slotlock` |
+| Java | [`java`](java) | Java 17+, no dependencies | `io.pylota:slotlock` from Maven Central |
+| .NET | [`dotnet`](dotnet) | .NET 8 or 10, no dependencies | `dotnet add package Slotlock.Client` |
 
-Each release publishes them at the package's version, once its tests have passed and a maintainer
-has approved each registry: `slotlock` on PyPI and crates.io, `Slotlock.Client` on NuGet,
+Each release publishes every client at the package's version, once its tests have passed and a
+maintainer has approved each registry: `slotlock` on PyPI and crates.io, `Slotlock.Client` on NuGet,
 `io.pylota:slotlock` on Maven Central, and the Go module's `clients/go/v<version>` tags
-([docs/release/clients.md](../docs/release/clients.md)). None is on a registry yet, so until a
-release says otherwise, install from the repository as above.
+([docs/release/clients.md](../docs/release/clients.md)).
 
 ## What they share
 
@@ -61,8 +60,14 @@ Each suite checks what it can without a server, and runs the full scenario when 
 `SLOTLOCK_ADMIN_KEY` point at one that confirms only deletes:
 
 ```sh
-SLOTLOCK_CONFIRM_WRITES=slotlock_delete_event slotlock serve --migrate
-slotlock key create "Client suites" --scope read,write,admin
+export DATABASE_URL=postgresql://slotlock_app:…@localhost:5432/slotlock
+export SLOTLOCK_MIGRATE_DATABASE_URL=postgresql://<owner>:…@localhost:5432/slotlock
+export SLOTLOCK_CONFIRMATION_SECRET="$(openssl rand -hex 32)"
+npx slotlock migrate      # first, so the key below has a schema to go in
+export SLOTLOCK_ADMIN_KEY="$(npx slotlock key create "Client suites" --scope read,write,admin | jq -r .key)"
+SLOTLOCK_CONFIRM_WRITES=slotlock_delete_event npx slotlock serve &
+export SLOTLOCK_URL=http://localhost:8080
+until curl -fs "$SLOTLOCK_URL/healthz" > /dev/null; do sleep 1; done
 ```
 
 | Language | Command, in its directory |

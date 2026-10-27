@@ -4,7 +4,7 @@ A client for [Slotlock](https://slotlock.pylota.io)'s REST API: the agent tools 
 API, one method per operation. Python 3.10+, standard library only.
 
 ```sh
-pip install "git+https://github.com/PILOTAAI/slotlock.git#subdirectory=clients/python"
+pip install slotlock
 ```
 
 ```python

@@ -6,10 +6,12 @@ Where to see whether hosted Slotlock is up, and how that is kept honest.
 
 - **Current incidents:** open issues labelled `status`,
   <https://github.com/PILOTAAI/slotlock/issues?q=is%3Aissue%20label%3Astatus%20is%3Aopen>.
-  None open means both checks below passed at the last probe.
+  The probe is off until the service opens ([Turning it on](#turning-it-on)); until then, no open
+  issue means nothing, not "up".
 - **History:** the closed ones, each with the time it opened and the time it recovered.
-- **The API's own answer:** `https://slotlock-api.pylota.io/healthz` returns
-  `{"status":"ready","version":"…"}` while the server and its database answer, and `503` otherwise.
+- **The API's own answer:** once the service is open, `https://slotlock-api.pylota.io/healthz`
+  returns `{"status":"ready","version":"…","checks":["database"]}` while the server and its database
+  answer, and `503` otherwise.
 
 Planned maintenance is announced the same way, as a `status` issue opened before it starts.
 

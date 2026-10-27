@@ -26,6 +26,18 @@ caller, and an agent's write can be made to wait for a person.
 [SECURITY.md](https://github.com/PILOTAAI/slotlock/blob/main/SECURITY.md#security-model) has the full
 threat model, including what the role check does not read.
 
+## Dashboard sign-in
+
+- Sign-in asks GitHub for no scope, uses `state` and PKCE, and keeps only the GitHub user id and
+  login. The GitHub token is used once and dropped.
+- A session is a signed, HttpOnly cookie that lasts 12 hours. The allowlist
+  (`SLOTLOCK_DASHBOARD_USERS`) is checked on every request, dashboard and API alike.
+- Every form carries a token bound to the session and must come from the server's own origin. The
+  pages run no inline script, under a Content-Security-Policy that allows only their own files.
+- A callback works once, a signed-out cookie stays out, and a reloaded form does not create or
+  rotate a key twice. Each is recorded in PostgreSQL as a SHA-256 digest, so this holds on every
+  server sharing the database. The database's clock decides when anything has expired.
+
 ## Live updates
 
 At most {{subscriptionsPerPrincipal}} open streams per caller and {{subscriptionsTotal}} per server.
@@ -33,7 +45,7 @@ Each re-read checks the caller's credentials again, so a revoked token ends its 
 
 ## Quotas and retention
 
-Each agent may keep 1,000 events and 10,000 idempotency records, so one agent cannot fill the
+Each agent may keep {{eventQuota}} events and {{commandQuota}} idempotency records, so one agent cannot fill the
 database. Pruning frees quota; it is not erasure. See
 [Operations](/docs/operations/).
 

@@ -8,9 +8,11 @@ description: Slotlock is the calendar AI agents cannot double-book. Each resourc
 ## Start here
 
 - [Quickstart](/docs/quickstart/): run Slotlock with Docker and have Claude Code book a slot.
-- [Hosted Slotlock](/docs/hosted/): sign in with GitHub and use ours instead.
+- [Set up with a coding agent](/docs/agent-setup/): one prompt for Claude Code, Cursor or Codex.
 - [Connect an agent](/docs/connect/): Cursor, VS Code, the Claude API, MCP and A2A SDKs.
-- [API keys and dashboard](/docs/keys/): a key per agent, or a GitHub sign-in to make your own.
+- [REST API](/docs/api/): every route, with Postman and OpenAPI imports.
+- [Self-hosting](/docs/self-host/): the image, configuration and commands.
+- [API keys](/docs/keys/) and the [dashboard](/docs/dashboard/): a key per agent, or a GitHub sign-in to make your own.
 - [Tools reference](/docs/tools/): every `slotlock_*` tool's input, output and errors.
 - [TypeScript library](/docs/library/) or [your own server](/docs/reference/): build on it.
 

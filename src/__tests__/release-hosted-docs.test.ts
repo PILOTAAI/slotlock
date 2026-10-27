@@ -313,8 +313,9 @@ describe('the site', () => {
       ['terms', 'TERMS.md'],
       ['acceptable-use', 'ACCEPTABLE-USE.md'],
       ['versioning', 'VERSIONING.md'],
-      ['clients', 'clients/README.md'],
-      ['operations', 'README.md#operations body'],
+      ['clients', 'clients/python/README.md snippet'],
+      ['clients', 'clients/dotnet/README.md snippet'],
+      ['operations', 'README.md#operations body promote'],
     ]) {
       expect(read(`site/docs-src/${page}.md`), page).toContain(`<!-- include ${include} -->`);
       expect(config, page).toContain(`'docs/${page}'`);
@@ -358,12 +359,19 @@ describe('the site', () => {
       'operations',
     ];
     const included = pages.flatMap((page) =>
-      [...read(`site/docs-src/${page}.md`).matchAll(/<!-- include ([^#\s>]+)/g)].map(
+      [...read(`site/docs-src/${page}.md`).matchAll(/<!-- (?:include|code) ([^#\s>]+)/g)].map(
         ([, file]) => file as string,
       ),
     );
-    expect(included.length).toBe(pages.length);
-    for (const file of [...included, 'openapi.json']) expect(covered(file), file).toBe(true);
+    // Every page includes at least one document; the clients page one per language.
+    expect(included.length).toBeGreaterThanOrEqual(pages.length);
+    const examples = [...read('site/docs-src/library.md').matchAll(/<!-- code ([^#\s>]+)/g)].map(
+      ([, file]) => file as string,
+    );
+    expect(examples.length, 'the library page shows the tested examples').toBeGreaterThan(0);
+    for (const file of [...included, ...examples, 'openapi.json']) {
+      expect(covered(file), file).toBe(true);
+    }
   });
 
   it('tells agents in llms.txt about hosted Slotlock, and about 0.2 only while it is current', async () => {
