@@ -124,6 +124,7 @@ const SERVE_MAINTENANCE_INTERVAL_MS = 60 * 60 * 1_000;
 const MAINTAIN_MAX_PASSES = 100;
 const WRITE_OPERATIONS: readonly SlotlockAgentWriteOperation[] = [
   'slotlock_create_event',
+  'slotlock_book_together',
   'slotlock_update_event',
   'slotlock_delete_event',
 ];
@@ -138,6 +139,7 @@ const SERVED_OPERATIONS: ReadonlySet<SlotlockAgentOperation> = new Set([
   'slotlock_find_available_slots',
   'slotlock_hold_slots',
   'slotlock_release_slots',
+  'slotlock_book_together',
   'slotlock_create_event',
   'slotlock_get_event',
   'slotlock_list_events',

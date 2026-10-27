@@ -19,8 +19,9 @@ public sealed partial class SlotlockClient
         ["slotlock_create_resource"] = new("POST", "/v1/resources", [], []),
         ["slotlock_get_free_busy"] = new("GET", "/v1/free-busy", [], ["resource_ids", "start", "end"]),
         ["slotlock_find_next_available"] = new("GET", "/v1/next-available", [], ["resource_ids", "start", "end", "duration_minutes"]),
-        ["slotlock_find_available_slots"] = new("GET", "/v1/available-slots", [], ["resource_ids", "start", "end", "duration_minutes", "limit"]),
+        ["slotlock_find_available_slots"] = new("GET", "/v1/available-slots", [], ["resource_ids", "start", "end", "duration_minutes", "limit", "require_free"]),
         ["slotlock_hold_slots"] = new("POST", "/v1/slot-holds", [], []),
+        ["slotlock_book_together"] = new("POST", "/v1/bundles", [], []),
         ["slotlock_release_slots"] = new("DELETE", "/v1/slot-holds/{hold_id}", ["hold_id"], []),
         ["slotlock_list_events"] = new("GET", "/v1/events", [], ["resource_ids", "start", "end", "cursor", "limit"]),
         ["slotlock_create_event"] = new("POST", "/v1/events", [], []),
@@ -171,13 +172,17 @@ public sealed partial class SlotlockClient
     /// <remarks>
     /// List up to `limit` certain slots of the requested duration, earliest first across the
     /// resources, each one free of busy time and inside the resource's hours, to offer a person a
-    /// choice. No slot is listed unless every resource's coverage is certain.
+    /// choice. With require_free, only times when at least that many of the resources are free
+    /// together, each slot naming them in resource_ids: every resource for a booking that needs
+    /// them all (book it with slotlock_book_together), or any n of them. No slot is listed unless
+    /// every resource's coverage is certain.
     /// </remarks>
     /// <param name="resourceIds">resource_ids</param>
     /// <param name="start">start</param>
     /// <param name="end">end</param>
     /// <param name="durationMinutes">duration_minutes</param>
     /// <param name="limit">limit</param>
+    /// <param name="requireFree">require_free</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -187,6 +192,7 @@ public sealed partial class SlotlockClient
         string end,
         long durationMinutes,
         Optional<long> limit = default,
+        Optional<long> requireFree = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -195,6 +201,7 @@ public sealed partial class SlotlockClient
         values["end"] = Json.ToNode(end);
         values["duration_minutes"] = Json.ToNode(durationMinutes);
         if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
+        if (requireFree.HasValue) values["require_free"] = Json.ToNode(requireFree.Value);
         return CallAsync("slotlock_find_available_slots", values, cancellationToken);
     }
 
@@ -223,6 +230,41 @@ public sealed partial class SlotlockClient
         values["idempotency_key"] = Json.ToNode(idempotencyKey);
         if (ttlSeconds.HasValue) values["ttl_seconds"] = Json.ToNode(ttlSeconds.Value);
         return CallAsync("slotlock_hold_slots", values, cancellationToken);
+    }
+
+    /// <summary>Book resources together.</summary>
+    /// <remarks>
+    /// Book the same time on 2-20 resources at once, all or none: a van with its driver, a room
+    /// with its projector. If any of them is taken, nothing is booked, and the refusal names that
+    /// resource_id. Find such a time with slotlock_find_available_slots and require_free. A retry
+    /// with the same idempotency_key answers the same events.
+    /// </remarks>
+    /// <param name="resourceIds">resource_ids</param>
+    /// <param name="startsAt">starts_at</param>
+    /// <param name="endsAt">ends_at</param>
+    /// <param name="timezone">timezone</param>
+    /// <param name="idempotencyKey">idempotency_key</param>
+    /// <param name="title">title</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> BookTogetherAsync(
+        IEnumerable<string> resourceIds,
+        string startsAt,
+        string endsAt,
+        string timezone,
+        string idempotencyKey,
+        Optional<string> title = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_ids"] = Json.ToNode(resourceIds);
+        values["starts_at"] = Json.ToNode(startsAt);
+        values["ends_at"] = Json.ToNode(endsAt);
+        values["timezone"] = Json.ToNode(timezone);
+        values["idempotency_key"] = Json.ToNode(idempotencyKey);
+        if (title.HasValue) values["title"] = Json.ToNode(title.Value);
+        return CallAsync("slotlock_book_together", values, cancellationToken);
     }
 
     /// <summary>Release held slots.</summary>

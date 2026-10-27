@@ -812,6 +812,7 @@ export async function startCalendarServer(config: CalendarServerConfig) {
 | `slotlock_find_available_slots` | Up to 50 *certain* slots, earliest first, to offer a choice | read-only |
 | `slotlock_hold_slots` | Hold up to 5 candidates for 30-900 seconds while a person chooses | write |
 | `slotlock_release_slots` | Release a hold and the rest of its group | write |
+| `slotlock_book_together` | Book the same time on 2-20 resources, all or none | write |
 | `slotlock_list_events` | Events the caller created in a window | read-only |
 | `slotlock_get_event` | One event the caller created | read-only |
 | `slotlock_create_event` | Create an event of up to 3,660 days (idempotent) | write |
@@ -826,7 +827,14 @@ decides: `slotlock_hold_slots` holds each free candidate in one group (and lists
 `refused`), and `slotlock_create_event` with one `hold_id` books that time and releases the rest in
 the same transaction. A hold belongs to the agent that took it: another agent can neither book nor
 release it. One agent may have 20 live holds at once; unbooked ones expire by the database clock.
-Notice was judged when the time was held, so booking the hold does not judge it again. The older names `calendar.<verb>` and `calendar_<verb>` still work and
+Notice was judged when the time was held, so booking the hold does not judge it again.
+
+A booking that needs several resources at once (a van and its driver, a room and its projector)
+uses `slotlock_find_available_slots` with `require_free` (every resource, or any n of them, free
+together, each judged by its own hours and rules) and books with `slotlock_book_together`: one event
+per resource in one transaction, all or none. A refusal names the `resource_id` that refused, on
+MCP and A2A in the error beside its `code`, on REST in the problem. Bundles take their resources
+in one order, so two racing over the same ones end with one booked, never a deadlock. The older names `calendar.<verb>` and `calendar_<verb>` still work and
 are no longer advertised.
 
 ### Errors
@@ -965,6 +973,7 @@ never cached. W3C `traceparent`, `tracestate` and `baggage` reach your backend a
 | `GET /v1/available-slots` | `slotlock_find_available_slots` |
 | `POST /v1/slot-holds` | `slotlock_hold_slots` |
 | `DELETE /v1/slot-holds/{hold_id}` | `slotlock_release_slots` |
+| `POST /v1/bundles` | `slotlock_book_together` |
 | `GET /v1/events` | `slotlock_list_events` |
 | `POST /v1/events` | `slotlock_create_event` |
 | `GET /v1/events/{event_id}` | `slotlock_get_event` |

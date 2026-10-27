@@ -506,6 +506,72 @@ export function createSlotlockStoreAgentBackend(
       });
     },
 
+    async bookTogether(context, rawInput) {
+      const input = rawInput as {
+        resource_ids: string[];
+        starts_at: string;
+        ends_at: string;
+        timezone: string;
+        title?: string;
+        idempotency_key: string;
+      };
+      // In one order for every bundle, so two over the same resources wait on each other in turn
+      // and never deadlock.
+      const resourceIds = [...new Set(input.resource_ids)].sort();
+      if (resourceIds.length < 2) throw new SlotlockAgentOperationError('invalid_arguments', 400);
+      const content: CalendarEventContent = {
+        start: new Date(input.starts_at),
+        end: new Date(input.ends_at),
+        timezone: input.timezone,
+        summary: eventSummary(input.title),
+        status: 'confirmed',
+        transparency: 'opaque',
+        attendees: [],
+        reminders: [],
+      };
+      return withTenant(store, context, async (tenantStore) => {
+        for (const resourceId of resourceIds) {
+          try {
+            await requireAgentResource(tenantStore, context.principal.tenantRef, resourceId);
+          } catch (error) {
+            if (!(error instanceof SlotlockAgentOperationError)) throw error;
+            throw new SlotlockAgentOperationError(error.code, error.status, { resource_id: resourceId });
+          }
+        }
+        const events: Record<string, unknown>[] = [];
+        let replayed = true;
+        for (const resourceId of resourceIds) {
+          const key = `${input.idempotency_key}\0${resourceId}`;
+          const result = await tenantStore.putCalendarEvent({
+            tenantRef: context.principal.tenantRef,
+            ownerRef: agentOwnerRef(context),
+            externalRef: agentExternalRef(context, key),
+            resourceId,
+            expectedRevision: 0,
+            idempotencyKey: agentCommandIdempotencyKey(context, key),
+            source: 'agent-server',
+            ...content,
+            materializationWindow: materializationWindow(content),
+            enforceBookingRules: true,
+          });
+          // Thrown, so the whole transaction rolls back: the events already put go with it.
+          if (!result.ok) {
+            const refusal = operationError(result);
+            throw new SlotlockAgentOperationError(refusal.code, refusal.status, { resource_id: resourceId });
+          }
+          const created = await tenantStore.getCalendarEvent({
+            tenantRef: context.principal.tenantRef,
+            ownerRef: agentOwnerRef(context),
+            externalRef: result.externalRef,
+          });
+          if (!created) throw new SlotlockAgentOperationError('store_inconsistent', 503);
+          events.push(projectSlotlockCalendarEvent(created));
+          replayed &&= result.idempotent;
+        }
+        return { events, replayed };
+      }, WRITE);
+    },
+
     async releaseSlots(context, input) {
       const id = input.hold_id as string;
       if (!STORE_ID_PATTERN.test(id)) return { released: false };

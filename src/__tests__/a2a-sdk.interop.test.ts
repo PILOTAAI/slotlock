@@ -68,7 +68,7 @@ describe('Slotlock with the official A2A JavaScript SDK', () => {
     const card = AgentCard.fromJSON(raw);
 
     expect(card.securityRequirements).toEqual([{ schemes: { bearer: { list: [] } } }]);
-    expect(card.skills).toHaveLength(11);
+    expect(card.skills).toHaveLength(12);
     for (const skill of card.skills) {
       expect(skill.examples.length).toBeGreaterThan(0);
       expect(JSON.parse(skill.examples[0] ?? '{}')).toMatchObject({ skill: skill.id });

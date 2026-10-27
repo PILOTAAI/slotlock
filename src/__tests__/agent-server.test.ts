@@ -1086,7 +1086,7 @@ describe('consumer-neutral Slotlock agent server', () => {
   describe('portable operation names', () => {
     it('advertises only names every tool-calling API accepts', () => {
       const names = slotlockAgentTools().map((tool) => tool.name);
-      expect(names).toHaveLength(11);
+      expect(names).toHaveLength(12);
       for (const name of names) {
         // Claude: ^[a-zA-Z0-9_-]{1,128}$. OpenAI function names: the same characters, at most 64.
         expect(name).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
@@ -2123,6 +2123,7 @@ describe('principal scopes', () => {
       slotlock_find_available_slots: 'read',
       slotlock_hold_slots: 'write',
       slotlock_release_slots: 'write',
+      slotlock_book_together: 'write',
       slotlock_create_event: 'write',
       slotlock_get_event: 'read',
       slotlock_list_events: 'read',
@@ -2155,6 +2156,40 @@ describe('principal scopes', () => {
     const read = await (await server.fetch(call('slotlock_list_resources', { limit: 5 }))).json();
     expect(read).toMatchObject({ result: { structuredContent: { next_cursor: null } } });
     expect(authorize).toHaveBeenCalledTimes(1);
+  });
+
+  it('names the resource a bundle was refused on, over MCP, A2A and REST', async () => {
+    const bookTogether = vi.fn(async () => {
+      throw new SlotlockAgentOperationError('overlap', 409, { resource_id: 'driver-1', 'Bad Name': 'x' });
+    });
+    const server = buildServer({ ...asPrincipal(['read', 'write']), backend: { ...backend, bookTogether }, rest: true });
+    const args = {
+      resource_ids: ['van-1', 'driver-1'],
+      starts_at: '2027-03-02T09:00:00Z',
+      ends_at: '2027-03-02T10:00:00Z',
+      timezone: 'UTC',
+      idempotency_key: 'bundle-1',
+    };
+    const mcp = (await (await server.fetch(call('slotlock_book_together', args))).json()) as {
+      result: { content: { text: string }[] };
+    };
+    // Only well-formed detail names travel; `code` stays the code.
+    expect(JSON.parse(mcp.result.content[0]?.text ?? '')).toEqual({ error: { code: 'overlap', resource_id: 'driver-1' } });
+    expect(
+      await a2aReplyData(await server.fetch(a2aSendMessage({ skill: 'slotlock_book_together', arguments: args }))),
+    ).toEqual({ error: { code: 'overlap', resource_id: 'driver-1' } });
+    const rest = await server.fetch(
+      new Request('http://localhost/slotlock/v1/bundles', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer valid', 'Content-Type': 'application/json' },
+        body: JSON.stringify(args),
+      }),
+    );
+    expect(rest.status).toBe(409);
+    expect(await rest.json()).toMatchObject({ code: 'overlap', resource_id: 'driver-1', start: args.starts_at });
+
+    const without = buildServer(asPrincipal(['read', 'write']));
+    expectToolError(await (await without.fetch(call('slotlock_book_together', args))).json(), 'bundles_unavailable');
   });
 
   it('holds through a backend that holds, and answers holds_unavailable from one that does not', async () => {

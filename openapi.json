@@ -688,7 +688,7 @@
       "get": {
         "operationId": "slotlock_find_available_slots",
         "summary": "Find available slots",
-        "description": "List up to `limit` certain slots of the requested duration, earliest first across the resources, each one free of busy time and inside the resource's hours, to offer a person a choice. No slot is listed unless every resource's coverage is certain.",
+        "description": "List up to `limit` certain slots of the requested duration, earliest first across the resources, each one free of busy time and inside the resource's hours, to offer a person a choice. With require_free, only times when at least that many of the resources are free together, each slot naming them in resource_ids: every resource for a booking that needs them all (book it with slotlock_book_together), or any n of them. No slot is listed unless every resource's coverage is certain.",
         "tags": [
           "Agent tools"
         ],
@@ -747,6 +747,16 @@
               "minimum": 1,
               "maximum": 50
             }
+          },
+          {
+            "name": "require_free",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            }
           }
         ],
         "responses": {
@@ -775,6 +785,16 @@
                           "end": {
                             "type": "string",
                             "format": "date-time"
+                          },
+                          "resource_ids": {
+                            "minItems": 1,
+                            "maxItems": 20,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 200
+                            }
                           }
                         },
                         "required": [
@@ -1024,6 +1044,425 @@
             "$ref": "#/components/responses/Error"
           },
           "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/bundles": {
+      "post": {
+        "operationId": "slotlock_book_together",
+        "summary": "Book resources together",
+        "description": "Book the same time on 2-20 resources at once, all or none: a van with its driver, a room with its projector. If any of them is taken, nothing is booked, and the refusal names that resource_id. Find such a time with slotlock_find_available_slots and require_free. A retry with the same idempotency_key answers the same events.",
+        "tags": [
+          "Agent tools"
+        ],
+        "x-slotlock-scope": "write",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "resource_ids": {
+                    "minItems": 2,
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    }
+                  },
+                  "starts_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "ends_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "timezone": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "idempotency_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "required": [
+                  "resource_ids",
+                  "starts_at",
+                  "ends_at",
+                  "timezone",
+                  "idempotency_key"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Stands in for idempotency_key: a Structured Field String (`\"8e03978e-40d5-43e8-bc93-6894a57f9324\"`, draft-ietf-httpapi-idempotency-key-header-08) or the bare key; when both are sent they must be equal. A retry with the same key and request answers what the first did; the same key with another request is 422 idempotency_conflict. An event write keeps its key for 30 days (maintenance removes it after that), a hold until the hold would have expired, is released or is confirmed. Where the key is required and neither is sent: 400 idempotency_key_required.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 502
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "events": {
+                      "minItems": 2,
+                      "maxItems": 20,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 500
+                          },
+                          "resource_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "starts_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "ends_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "timezone": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 100
+                          },
+                          "title": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 4096
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "description": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 16384
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "location": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 16384
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "organizer": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "address": {
+                                    "type": "string",
+                                    "minLength": 3,
+                                    "maxLength": 320
+                                  },
+                                  "name": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string",
+                                        "maxLength": 1024
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "address",
+                                  "name"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "attendees": {
+                            "maxItems": 100,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "address": {
+                                  "type": "string",
+                                  "minLength": 3,
+                                  "maxLength": 320
+                                },
+                                "name": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "maxLength": 1024
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "role": {
+                                  "type": "string",
+                                  "enum": [
+                                    "chair",
+                                    "required",
+                                    "optional",
+                                    "non_participant"
+                                  ]
+                                },
+                                "participation_status": {
+                                  "type": "string",
+                                  "enum": [
+                                    "needs_action",
+                                    "accepted",
+                                    "declined",
+                                    "tentative",
+                                    "delegated"
+                                  ]
+                                },
+                                "rsvp": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "required": [
+                                "address",
+                                "name",
+                                "role",
+                                "participation_status",
+                                "rsvp"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "reminders": {
+                            "maxItems": 20,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "minutes_before": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 527040
+                                },
+                                "channel": {
+                                  "type": "string",
+                                  "enum": [
+                                    "display",
+                                    "email"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "minutes_before",
+                                "channel"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "tentative",
+                              "confirmed",
+                              "cancelled"
+                            ]
+                          },
+                          "transparency": {
+                            "type": "string",
+                            "enum": [
+                              "opaque",
+                              "transparent"
+                            ]
+                          },
+                          "sequence": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "revision": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "recurrence_rule": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 4096
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "recurrence_exceptions": {
+                            "maxItems": 1000,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "recurrence_id": {
+                                  "type": "string",
+                                  "format": "date-time"
+                                },
+                                "cancelled": {
+                                  "type": "boolean"
+                                },
+                                "starts_at": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "format": "date-time"
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "ends_at": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "format": "date-time"
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "recurrence_id",
+                                "cancelled",
+                                "starts_at",
+                                "ends_at"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "recurrence_id": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "resource_id",
+                          "starts_at",
+                          "ends_at",
+                          "timezone",
+                          "title",
+                          "description",
+                          "location",
+                          "organizer",
+                          "attendees",
+                          "reminders",
+                          "status",
+                          "transparency",
+                          "sequence",
+                          "revision",
+                          "recurrence_rule",
+                          "recurrence_exceptions",
+                          "recurrence_id"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "replayed": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "events",
+                    "replayed"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
             "$ref": "#/components/responses/Error"
           },
           "409": {

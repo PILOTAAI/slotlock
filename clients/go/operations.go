@@ -14,8 +14,9 @@ var operations = func() map[string]operation {
 		{name: "slotlock_create_resource", method: "POST", path: "/v1/resources", pathParams: nil, query: nil},
 		{name: "slotlock_get_free_busy", method: "GET", path: "/v1/free-busy", pathParams: nil, query: []string{"resource_ids", "start", "end"}},
 		{name: "slotlock_find_next_available", method: "GET", path: "/v1/next-available", pathParams: nil, query: []string{"resource_ids", "start", "end", "duration_minutes"}},
-		{name: "slotlock_find_available_slots", method: "GET", path: "/v1/available-slots", pathParams: nil, query: []string{"resource_ids", "start", "end", "duration_minutes", "limit"}},
+		{name: "slotlock_find_available_slots", method: "GET", path: "/v1/available-slots", pathParams: nil, query: []string{"resource_ids", "start", "end", "duration_minutes", "limit", "require_free"}},
 		{name: "slotlock_hold_slots", method: "POST", path: "/v1/slot-holds", pathParams: nil, query: nil},
+		{name: "slotlock_book_together", method: "POST", path: "/v1/bundles", pathParams: nil, query: nil},
 		{name: "slotlock_release_slots", method: "DELETE", path: "/v1/slot-holds/{hold_id}", pathParams: []string{"hold_id"}, query: nil},
 		{name: "slotlock_list_events", method: "GET", path: "/v1/events", pathParams: nil, query: []string{"resource_ids", "start", "end", "cursor", "limit"}},
 		{name: "slotlock_create_event", method: "POST", path: "/v1/events", pathParams: nil, query: nil},
@@ -174,6 +175,8 @@ type FindAvailableSlotsInput struct {
 	DurationMinutes int64
 
 	Limit *int64
+
+	RequireFree *int64
 }
 
 func (in FindAvailableSlotsInput) values() map[string]any {
@@ -185,13 +188,18 @@ func (in FindAvailableSlotsInput) values() map[string]any {
 	if in.Limit != nil {
 		values["limit"] = *in.Limit
 	}
+	if in.RequireFree != nil {
+		values["require_free"] = *in.RequireFree
+	}
 	return values
 }
 
 // FindAvailableSlots: Find available slots. List up to `limit` certain slots of the requested
 // duration, earliest first across the resources, each one free of busy time and inside the
-// resource's hours, to offer a person a choice. No slot is listed unless every resource's
-// coverage is certain.
+// resource's hours, to offer a person a choice. With require_free, only times when at least that
+// many of the resources are free together, each slot naming them in resource_ids: every resource
+// for a booking that needs them all (book it with slotlock_book_together), or any n of them. No
+// slot is listed unless every resource's coverage is certain.
 func (c *Client) FindAvailableSlots(ctx context.Context, in FindAvailableSlotsInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_find_available_slots", in.values())
 }
@@ -222,6 +230,43 @@ func (in HoldSlotsInput) values() map[string]any {
 // 20 live at once.
 func (c *Client) HoldSlots(ctx context.Context, in HoldSlotsInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_hold_slots", in.values())
+}
+
+// BookTogetherInput holds the arguments of [Client.BookTogether].
+type BookTogetherInput struct {
+	ResourceIDs []string
+
+	StartsAt string
+
+	EndsAt string
+
+	Timezone string
+
+	IdempotencyKey string
+
+	Title *string
+}
+
+func (in BookTogetherInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_ids"] = in.ResourceIDs
+	values["starts_at"] = in.StartsAt
+	values["ends_at"] = in.EndsAt
+	values["timezone"] = in.Timezone
+	values["idempotency_key"] = in.IdempotencyKey
+	if in.Title != nil {
+		values["title"] = *in.Title
+	}
+	return values
+}
+
+// BookTogether: Book resources together. Book the same time on 2-20 resources at once, all or
+// none: a van with its driver, a room with its projector. If any of them is taken, nothing is
+// booked, and the refusal names that resource_id. Find such a time with
+// slotlock_find_available_slots and require_free. A retry with the same idempotency_key answers
+// the same events.
+func (c *Client) BookTogether(ctx context.Context, in BookTogetherInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_book_together", in.values())
 }
 
 // ReleaseSlotsInput holds the arguments of [Client.ReleaseSlots].
