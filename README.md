@@ -1069,6 +1069,35 @@ curl -X PUT "http://localhost:8080/v1/reservations/BK-42" \
   `{ backend: createSlotlockStoreApplicationBackend(store, { maxTenantResources }), authorize }`.
   A principal with `scopes` needs `admin`; then `authorize` decides.
 
+### Changes and webhooks
+
+Every committed change to a tenant's holds, bookings and calendar events is recorded in the same
+transaction (by a database trigger, so no write path skips it), and nothing is recorded that did
+not commit. A change carries ids, times and states, never titles, descriptions or attendees.
+
+- `GET /v1/changes?cursor=…` lists them oldest first as [CloudEvents 1.0](https://cloudevents.io)
+  (`io.pylota.slotlock.hold.created`, `.reservation.cancelled`, `.event.updated`, …). Follow
+  `next_cursor`, which comes back even when nothing is new: it never skips a change, even one whose
+  transaction commits after a later one's. Changes are kept 7 days; an older cursor answers
+  `410 cursor_expired`.
+- `POST /v1/webhooks` with an https `url` (and `event_types`, optionally) sends each change from
+  then on as a [Standard Webhooks](https://www.standardwebhooks.com) request: `webhook-id` (the
+  change's id, the same on every retry), `webhook-timestamp` and `webhook-signature`, keyed by the
+  `whsec_` secret the call returns once. Verify it with any Standard Webhooks library, and use
+  `webhook-id` to drop a repeat: delivery is at least once.
+- Changes go to each webhook in order, one at a time, until one fails; that one is retried after
+  5 seconds, 5 minutes, 30 minutes, 2, 5, then every 10 hours. After a day of failures, or a `410`,
+  the webhook is disabled and the feed records `webhook.disabled`; `POST /v1/webhooks/{id}/enable`
+  resumes it where it stopped, or answers `409 changes_pruned` when what it missed is older than the
+  feed keeps (add it again and read what it missed from `/v1/changes`). The feed keeps every change
+  an enabled webhook has still to receive, however old. At most 10 webhooks per tenant.
+- Each request has 15 seconds in all, and a tenant's pass 30 seconds; tenants are delivered 8 at
+  a time, so a slow endpoint holds up only its own tenant.
+- `slotlock serve` delivers (`SLOTLOCK_WEBHOOKS`): never to an address on a private network, which
+  it checks when it connects, and following no redirect. `private` allows those, for testing.
+- In the library: `listChanges`, `createWebhookEndpoint` and the rest are store methods, and
+  `startSlotlockWebhookDelivery` with `deliverSlotlockWebhooks` runs delivery in your own process.
+
 ## Connect an agent
 
 MCP and A2A are wire protocols, so an agent in any language connects with its own MCP or A2A client

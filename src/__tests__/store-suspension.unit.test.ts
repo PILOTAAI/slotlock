@@ -12,6 +12,8 @@ import {
 } from '../store.js';
 
 const READS = [
+  'listChanges',
+  'listWebhookEndpoints',
   'getResource',
   'listResources',
   'getHold',
@@ -26,7 +28,15 @@ const READS = [
   'findNextAvailableFor',
   'isTenantSuspended',
 ];
-const UPKEEP = ['rollCalendarEventHorizon', 'pruneCalendarEventRetention', 'pruneBookingRetention'];
+const UPKEEP = [
+  'rollCalendarEventHorizon',
+  'pruneCalendarEventRetention',
+  'pruneBookingRetention',
+  // Delivering what already happened reads the feed; a suspension stops new changes, not these.
+  'claimWebhookDeliveries',
+  'settleWebhookDelivery',
+  'pruneChanges',
+];
 const ADMINISTRATION = [
   'applySchema',
   'applyTenantRls',

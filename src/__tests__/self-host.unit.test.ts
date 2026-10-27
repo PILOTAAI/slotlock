@@ -91,8 +91,17 @@ describe('slotlock serve configuration', () => {
       confirmWrites: [],
       availability: [],
       restApi: true,
+      webhooks: 'on',
       limits: SLOTLOCK_DEFAULT_LIMITS,
     });
+  });
+
+  it('delivers webhooks unless off, and to private networks only when asked', () => {
+    expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_WEBHOOKS: 'off' })).webhooks).toBe('off');
+    expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_WEBHOOKS: 'private' })).webhooks).toBe('private');
+    expect(() => readSlotlockServeConfig(serveEnv({ SLOTLOCK_WEBHOOKS: 'yes' }))).toThrow(
+      'SLOTLOCK_WEBHOOKS must be on, off or private',
+    );
   });
 
   it('reads request limits over the defaults, and the trusted client-address field', () => {

@@ -7,6 +7,15 @@ versioning.
 
 ### Added
 
+- An event feed and webhooks. Every committed change to a tenant's holds, bookings and calendar
+  events is recorded in the same transaction by trigger: ids, times and states, never titles or
+  attendees. `GET /v1/changes` (`slotlock_list_changes`, `listChanges`) lists them as CloudEvents
+  by a cursor that no late-committing transaction can be skipped behind; changes are kept 7 days.
+  `POST /v1/webhooks` (`slotlock_create_webhook` and list, delete, enable) sends them in order,
+  signed as Standard Webhooks, at least once per `webhook-id`, retried with backoff for a day and
+  then disabled (`webhook.disabled` on the feed). `slotlock serve` delivers (`SLOTLOCK_WEBHOOKS`),
+  never to a private network address. Maintenance prunes the feed. A backend of your own
+  implements the five new `SlotlockApplicationBackend` methods. Run `slotlock migrate`.
 - Booking rules per resource (`SlotlockBookingRules`): minimum notice, how far ahead, the step
   starts fall on in the resource's time zone, a turnaround kept free after each booking (as its
   trailing buffer, which the exclusion constraint enforces), and whether bookings must lie inside

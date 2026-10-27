@@ -9,6 +9,7 @@
 //
 // This module holds only the contract (names, schemas, routes); it imports nothing from the agent
 // server at runtime. The store-backed implementation is createSlotlockStoreApplicationBackend.
+import { SLOTLOCK_CHANGE_TYPES } from './event-feed.js';
 import { z } from 'zod';
 import type { SlotlockAgentPrincipal } from './agent-server.js';
 import { SLOTLOCK_EVENT_OUTPUT } from './event-schema.js';
@@ -40,7 +41,12 @@ export type SlotlockApplicationOperation =
   | 'slotlock_cancel_tenant_event'
   | 'slotlock_get_tenant'
   | 'slotlock_erase_tenant'
-  | 'slotlock_run_maintenance';
+  | 'slotlock_run_maintenance'
+  | 'slotlock_list_changes'
+  | 'slotlock_create_webhook'
+  | 'slotlock_list_webhooks'
+  | 'slotlock_delete_webhook'
+  | 'slotlock_enable_webhook';
 
 /** The scope an application operation needs, whichever operation it is. */
 export const SLOTLOCK_APPLICATION_SCOPE = 'admin';
@@ -89,6 +95,11 @@ export interface SlotlockApplicationBackend {
   getTenant: Handler;
   eraseTenant: Handler;
   runMaintenance: Handler;
+  listChanges: Handler;
+  createWebhook: Handler;
+  listWebhooks: Handler;
+  deleteWebhook: Handler;
+  enableWebhook: Handler;
 }
 
 export interface SlotlockApplicationOperationDefinition {
@@ -202,6 +213,34 @@ const RESOURCE = z
     visibility: VISIBILITY,
     /** When it was archived; `null` while it is in use. */
     archived_at: DATE_TIME.nullable(),
+  })
+  .strict();
+
+const CHANGE = z
+  .object({
+    specversion: z.literal('1.0'),
+    id: z.string().max(40),
+    source: z.string().max(300),
+    type: z.string().max(100),
+    subject: z.string().max(500),
+    time: DATE_TIME,
+    datacontenttype: z.literal('application/json'),
+    data: z.record(z.string(), z.unknown()),
+  })
+  .strict();
+
+const WEBHOOK = z
+  .object({
+    id: z.string().uuid(),
+    url: z.string().max(2048),
+    event_types: z.array(z.enum(SLOTLOCK_CHANGE_TYPES)).nullable(),
+    created_at: DATE_TIME,
+    attempts: z.number().int().min(0),
+    failing_since: DATE_TIME.nullable(),
+    last_status: z.number().int().nullable(),
+    last_error: z.string().max(500).nullable(),
+    disabled_at: DATE_TIME.nullable(),
+    disabled_reason: z.enum(['gone', 'failing']).nullable(),
   })
   .strict();
 
@@ -699,6 +738,75 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       risk: { readOnly: false, destructive: false, idempotent: true },
       invoke: 'runMaintenance',
       example: {},
+    },
+    {
+      name: 'slotlock_list_changes',
+      title: 'List changes',
+      description:
+        "What changed in the tenant, oldest first, as CloudEvents: holds made, confirmed, released or expired; bookings made, moved or cancelled; calendar events created, changed or cancelled (ids, times and states, never titles or attendees). Pass next_cursor as cursor to read on; it is returned even when nothing is new, so poll with it. Only changes of transactions that have ended are listed, so following the cursor never skips one. Changes are kept 7 days: an older cursor answers 410 cursor_expired, so start again without one.",
+      method: 'GET',
+      path: '/v1/changes',
+      input: z
+        .object({ cursor: CURSOR.optional(), limit: z.number().int().min(1).max(500).default(100) })
+        .strict(),
+      output: z.object({ changes: z.array(CHANGE).max(500), next_cursor: z.string().max(500) }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'listChanges',
+      example: { limit: 100 },
+    },
+    {
+      name: 'slotlock_create_webhook',
+      title: 'Add a webhook',
+      description:
+        'Send the changes slotlock_list_changes lists from now on to an https URL, each as a CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature), in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a 410, the webhook is disabled and the feed records webhook.disabled. The secret is returned here only. At most 10 per tenant.',
+      method: 'POST',
+      path: '/v1/webhooks',
+      input: z
+        .object({
+          url: z.string().url().max(2048),
+          event_types: z.array(z.enum(SLOTLOCK_CHANGE_TYPES)).min(1).max(20).optional(),
+        })
+        .strict(),
+      output: z.object({ webhook: WEBHOOK, secret: z.string().regex(/^whsec_/) }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: false },
+      invoke: 'createWebhook',
+      example: { url: 'https://example.com/slotlock-webhook', event_types: ['reservation.created'] },
+    },
+    {
+      name: 'slotlock_list_webhooks',
+      title: 'List webhooks',
+      description: "The tenant's webhooks with how delivery is going: failed attempts, the last status, and whether and why one is disabled.",
+      method: 'GET',
+      path: '/v1/webhooks',
+      input: z.object({}).strict(),
+      output: z.object({ webhooks: z.array(WEBHOOK).max(10) }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'listWebhooks',
+      example: {},
+    },
+    {
+      name: 'slotlock_delete_webhook',
+      title: 'Delete a webhook',
+      description: 'Stop sending to a webhook. deleted is false when the tenant has no such webhook.',
+      method: 'DELETE',
+      path: '/v1/webhooks/{webhook_id}',
+      input: z.object({ webhook_id: z.string().uuid() }).strict(),
+      output: z.object({ deleted: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'deleteWebhook',
+      example: { webhook_id: '9b2f4c1e-6d3a-4e8b-a1c7-5f0e2d4b6a8c' },
+    },
+    {
+      name: 'slotlock_enable_webhook',
+      title: 'Enable a webhook',
+      description: 'Send to a disabled webhook again, from the first change it did not accept. 404 webhook_not_found when the tenant has no such webhook; 409 changes_pruned when what it missed is older than the 7 days the feed keeps, since it would skip those unseen: delete it, add it again, and read what it missed from slotlock_list_changes.',
+      method: 'POST',
+      path: '/v1/webhooks/{webhook_id}/enable',
+      input: z.object({ webhook_id: z.string().uuid() }).strict(),
+      output: z.object({ webhook: WEBHOOK }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'enableWebhook',
+      example: { webhook_id: '9b2f4c1e-6d3a-4e8b-a1c7-5f0e2d4b6a8c' },
     },
   ]);
 

@@ -3,7 +3,10 @@
 // serves MCP on a real socket until its signal aborts. Skipped without DATABASE_URL.
 import { randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import postgres from 'postgres';
+import { Webhook } from 'standardwebhooks';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { SLOTLOCK_MCP_LEGACY_PROTOCOL_VERSION } from '../agent-server.js';
 import { SLOTLOCK_DASHBOARD_FUNCTIONS } from '../ddl.js';
@@ -754,6 +757,86 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     for (const key of [application.key, agent.key, elsewhere.key]) {
       expect(stdout.text()).not.toContain(key);
     }
+  });
+
+  it("delivers a tenant's changes to its webhook as the granted role, signed, and lists them", async () => {
+    const made = await run(['key', 'create', 'Webhook site', '--scope', 'admin']);
+    expect(made.code, made.stderr.text()).toBe(0);
+    const { key } = JSON.parse(made.stdout.text()) as { key: string };
+    const deliveries: { id: string; type: string }[] = [];
+    let secret = '';
+    const receiver = createServer((request, response) => {
+      let body = '';
+      request.on('data', (chunk) => {
+        body += chunk;
+      });
+      request.on('end', () => {
+        const event = new Webhook(secret).verify(body, request.headers as Record<string, string>) as { type: string };
+        deliveries.push({ id: request.headers['webhook-id'] as string, type: event.type });
+        response.writeHead(204).end();
+      });
+    });
+    await new Promise<void>((resolve) => receiver.listen(0, '127.0.0.1', resolve));
+    const hookUrl = `http://localhost:${(receiver.address() as AddressInfo).port}/hook`;
+    const shutdown = new AbortController();
+    const stdout = output();
+    const stderr = output();
+    const serving = runSlotlockCli(['serve'], {
+      env: { ...env, SLOTLOCK_WEBHOOKS: 'private' },
+      stdout,
+      stderr,
+      signal: shutdown.signal,
+    });
+    try {
+      const listening = await eventually(() => stdout.events().find(({ event }) => event === 'listening'));
+      expect(listening.webhooks).toBe('private');
+      const origin = listening.address as string;
+      const rest = async (method: string, path: string, body?: unknown) => {
+        const response = await fetch(`${origin}${path}`, {
+          method,
+          headers: { Authorization: `Bearer ${key}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        });
+        return { status: response.status, body: (await response.json()) as Record<string, any> };
+      };
+      const start = (await rest('GET', '/v1/changes')).body.next_cursor as string;
+      const hook = await rest('POST', '/v1/webhooks', { url: hookUrl, event_types: ['hold.created'] });
+      expect(hook.status).toBe(200);
+      secret = hook.body.secret as string;
+      const created = await rest('POST', '/v1/resources', { external_ref: 'webhook-van', timezone: 'UTC' });
+      const resourceId = created.body.resource.id as string;
+      const held = await rest('POST', '/v1/holds', {
+        resource_id: resourceId,
+        start: '2027-06-01T09:00:00Z',
+        end: '2027-06-01T10:00:00Z',
+        ttl_seconds: 600,
+      });
+      expect(held.status).toBe(200);
+      const delivered = await eventually(() => deliveries[0], 15_000);
+      expect(delivered.type).toBe('io.pylota.slotlock.hold.created');
+      const listed = await rest('GET', `/v1/changes?cursor=${encodeURIComponent(start)}`);
+      expect(listed.body.changes).toContainEqual(
+        expect.objectContaining({ id: delivered.id, type: 'io.pylota.slotlock.hold.created', subject: held.body.hold.id }),
+      );
+      expect(await rest('GET', '/v1/changes?cursor=nope')).toMatchObject({ status: 400, body: { code: 'invalid_cursor' } });
+      // A cursor past the 7 days the feed keeps is gone, not a server fault.
+      const old = Buffer.from(`1:1:1:${Date.now() - 8 * 86_400_000}`).toString('base64url');
+      expect(await rest('GET', `/v1/changes?cursor=${old}`)).toMatchObject({
+        status: 410,
+        body: { code: 'cursor_expired', title: 'Gone' },
+      });
+      expect((await rest('GET', '/v1/webhooks')).body.webhooks).toEqual([
+        expect.objectContaining({ url: hookUrl, attempts: 0, disabled_at: null }),
+      ]);
+      expect(await rest('DELETE', `/v1/webhooks/${hook.body.webhook.id}`)).toEqual({ status: 200, body: { deleted: true } });
+      expect(stdout.events().some(({ event, delivered: count }) => event === 'webhooks' && count === 1)).toBe(true);
+      expect(stdout.text()).not.toContain(secret);
+    } finally {
+      shutdown.abort();
+      await new Promise((resolve) => receiver.close(resolve));
+      await admin`DELETE FROM slotlock.resources WHERE tenant_ref = ${tenantRef} AND external_ref = 'webhook-van'`;
+    }
+    expect(await serving, stderr.text()).toBe(0);
   });
 
   it("bounds what one tenant's application API can store: holds, reservations and coverage", async () => {

@@ -98,6 +98,8 @@ const expectedFiles = new Set([
   'booking-rules.d.ts',
   'cli.js',
   'cli.d.ts',
+  'event-feed.js',
+  'event-feed.d.ts',
   'config.js',
   'config.d.ts',
   'dashboard.js',
@@ -142,6 +144,8 @@ const expectedFiles = new Set([
   'timezone.d.ts',
   'types.js',
   'types.d.ts',
+  'webhooks.js',
+  'webhooks.d.ts',
   'weekly-hours.js',
   'weekly-hours.d.ts',
 ]);

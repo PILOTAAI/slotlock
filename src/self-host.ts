@@ -3,6 +3,12 @@
 // supplies it the same way and nothing is read from a file or a request. A missing or weak secret
 // stops a command before it connects anywhere, and no secret is written to a log line or an error.
 // The one exception is the API key `key create` prints: that output is the key's only copy.
+import {
+  type SlotlockWebhookScheduler,
+  createSlotlockWebhookSender,
+  deliverSlotlockWebhooks,
+  startSlotlockWebhookDelivery,
+} from './webhooks.js';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import postgres from 'postgres';
@@ -88,6 +94,7 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_TENANT',
   'SLOTLOCK_AVAILABILITY',
   'SLOTLOCK_REST_API',
+  'SLOTLOCK_WEBHOOKS',
   'SLOTLOCK_LIMITS',
   'SLOTLOCK_TRUSTED_PROXY_HEADER',
   'SLOTLOCK_GITHUB_CLIENT_ID',
@@ -184,6 +191,8 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
    * (SLOTLOCK_REST_API: on unless off).
    */
   restApi: boolean;
+  /** Webhook delivery (SLOTLOCK_WEBHOOKS: on unless off; private also reaches private networks). */
+  webhooks: 'on' | 'off' | 'private';
   /** Request limits (SLOTLOCK_LIMITS over SLOTLOCK_DEFAULT_LIMITS): the server's only rate limit. */
   limits: SlotlockLimits;
   /** The lower-case request field a trusted proxy sets to the client address; else the socket's. */
@@ -266,6 +275,14 @@ export function readSlotlockDatabaseConfig(env: SlotlockEnv): SlotlockDatabaseCo
   return config;
 }
 
+function readWebhooks(env: SlotlockEnv): 'on' | 'off' | 'private' {
+  const value = optional(env, 'SLOTLOCK_WEBHOOKS') ?? 'on';
+  if (value !== 'on' && value !== 'off' && value !== 'private') {
+    throw new SlotlockConfigError('SLOTLOCK_WEBHOOKS must be on, off or private');
+  }
+  return value;
+}
+
 function readRestApi(env: SlotlockEnv): boolean {
   const value = optional(env, 'SLOTLOCK_REST_API') ?? 'on';
   if (value !== 'on' && value !== 'off') {
@@ -302,6 +319,7 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
     confirmWrites,
     availability: readAvailability(env),
     restApi: readRestApi(env),
+    webhooks: readWebhooks(env),
     limits: readLimits(env),
   };
   const trustedProxyHeader = readTrustedProxyHeader(env);
@@ -637,6 +655,7 @@ export async function startSlotlockServer(
           });
     // Set once the listener is up; the authenticator tells it which tenants this server serves.
     let maintenance: SlotlockMaintenanceScheduler | undefined;
+    let webhooks: SlotlockWebhookScheduler | undefined;
     const basePath = publicUrl.pathname.replace(/\/$/, '');
     const limits = createSlotlockRequestLimits({
       limits: config.limits,
@@ -762,6 +781,36 @@ export async function startSlotlockServer(
       onPass: (result) => log.info('maintenance', { ...result }),
       onError: (error) => log.error('maintenance_failed', describeError(error)),
     });
+    if (config.webhooks !== 'off') {
+      const deliveryStore = createSlotlockStore(sql);
+      const send = createSlotlockWebhookSender({ allowPrivateNetworks: config.webhooks === 'private' });
+      webhooks = startSlotlockWebhookDelivery({
+        // The tenants with a webhook, from the database: a restarted server finds them all.
+        tenants: async () => {
+          const tenants: string[] = [];
+          for (;;) {
+            const page = await sql<{ tenant: string }[]>`
+              SELECT slotlock.webhook_tenants(${tenants.at(-1) ?? null}::text) AS tenant`;
+            tenants.push(...page.map(({ tenant }) => tenant));
+            if (page.length < 1_000) return tenants;
+          }
+        },
+        deliver: (tenantRef) =>
+          deliverSlotlockWebhooks({
+            tenantRef,
+            send,
+            feed: {
+              claimWebhookDeliveries: (params) =>
+                deliveryStore.withTenant(tenantRef, (tenant) => tenant.claimWebhookDeliveries(params)),
+              settleWebhookDelivery: (params) =>
+                deliveryStore.withTenant(tenantRef, (tenant) => tenant.settleWebhookDelivery(params)),
+            },
+          }),
+        // Counts only, never the tenant or a URL.
+        onPass: (_tenant, result) => log.info('webhooks', { ...result }),
+        onError: (error) => log.error('webhooks_failed', describeError(error)),
+      });
+    }
     log.info('listening', {
       address: address.origin,
       mcp: `${config.publicUrl}/mcp`,
@@ -772,6 +821,7 @@ export async function startSlotlockServer(
       confirm_writes: config.confirmWrites,
       availability_rules: config.availability.length,
       rest: config.restApi ? `${config.publicUrl}/openapi.json` : null,
+      webhooks: config.webhooks,
       maintenance_interval_minutes: SERVE_MAINTENANCE_INTERVAL_MS / 60_000,
       limits: {
         ...Object.fromEntries(
@@ -789,6 +839,7 @@ export async function startSlotlockServer(
         const result = await listener.close();
         limits.close();
         await maintenance?.close();
+        await webhooks?.close();
         await sql.end({ timeout: 5 });
         return result;
       },
@@ -1223,6 +1274,9 @@ Environment:
   SLOTLOCK_REST_API              on (default): also serve the tools as a REST API under /v1, and
                                  the application API for admin keys, described at /openapi.json;
                                  off: MCP and A2A only
+  SLOTLOCK_WEBHOOKS              on (default): deliver each tenant's changes to its webhooks,
+                                 never to a private network address; private: those too, for
+                                 testing; off: keep the change feed, send nothing
   SLOTLOCK_LIMITS                Request limits, comma-separated name=value over the defaults:
                                  rates as <count>/<s|m|h>[:<burst>] or off for address (50/s:100,
                                  every request per client, before any key lookup), key_read,

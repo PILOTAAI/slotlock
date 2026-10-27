@@ -47,7 +47,12 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_cancel_tenant_event", new Operation("DELETE", "/v1/tenant/events/{event_id}", List.of("event_id"), List.of("expected_revision", "expected_resource_id", "idempotency_key"))),
           Map.entry("slotlock_get_tenant", new Operation("GET", "/v1/tenant", List.of(), List.of())),
           Map.entry("slotlock_erase_tenant", new Operation("POST", "/v1/tenant/erase", List.of(), List.of())),
-          Map.entry("slotlock_run_maintenance", new Operation("POST", "/v1/maintenance", List.of(), List.of())));
+          Map.entry("slotlock_run_maintenance", new Operation("POST", "/v1/maintenance", List.of(), List.of())),
+          Map.entry("slotlock_list_changes", new Operation("GET", "/v1/changes", List.of(), List.of("cursor", "limit"))),
+          Map.entry("slotlock_list_webhooks", new Operation("GET", "/v1/webhooks", List.of(), List.of())),
+          Map.entry("slotlock_create_webhook", new Operation("POST", "/v1/webhooks", List.of(), List.of())),
+          Map.entry("slotlock_delete_webhook", new Operation("DELETE", "/v1/webhooks/{webhook_id}", List.of("webhook_id"), List.of())),
+          Map.entry("slotlock_enable_webhook", new Operation("POST", "/v1/webhooks/{webhook_id}/enable", List.of("webhook_id"), List.of())));
 
   /**
    * Runs an operation by its name with its arguments, path parameters included.
@@ -945,6 +950,115 @@ public abstract class SlotlockOperations {
   public Map<String, Object> runMaintenance() {
     Map<String, Object> values = new LinkedHashMap<>();
     return call("slotlock_run_maintenance", values);
+  }
+
+  /**
+   * List changes. What changed in the tenant, oldest first, as CloudEvents: holds made,
+   * confirmed, released or expired; bookings made, moved or cancelled; calendar events created,
+   * changed or cancelled (ids, times and states, never titles or attendees). Pass next_cursor as
+   * cursor to read on; it is returned even when nothing is new, so poll with it. Only changes of
+   * transactions that have ended are listed, so following the cursor never skips one. Changes are
+   * kept 7 days: an older cursor answers 410 cursor_expired, so start again without one.
+   *
+   * @param optional the optional arguments, or null: {@code cursor} (string), {@code limit}
+   * (integer)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> listChanges(Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    putOptional(values, optional, Set.of("cursor", "limit"), "slotlock_list_changes");
+    return call("slotlock_list_changes", values);
+  }
+
+  /**
+   * List changes. What changed in the tenant, oldest first, as CloudEvents: holds made,
+   * confirmed, released or expired; bookings made, moved or cancelled; calendar events created,
+   * changed or cancelled (ids, times and states, never titles or attendees). Pass next_cursor as
+   * cursor to read on; it is returned even when nothing is new, so poll with it. Only changes of
+   * transactions that have ended are listed, so following the cursor never skips one. Changes are
+   * kept 7 days: an older cursor answers 410 cursor_expired, so start again without one.
+   *
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> listChanges() {
+    return listChanges(null);
+  }
+
+  /**
+   * List webhooks. The tenant's webhooks with how delivery is going: failed attempts, the last
+   * status, and whether and why one is disabled.
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> listWebhooks() {
+    Map<String, Object> values = new LinkedHashMap<>();
+    return call("slotlock_list_webhooks", values);
+  }
+
+  /**
+   * Add a webhook. Send the changes slotlock_list_changes lists from now on to an https URL, each
+   * as a CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp,
+   * webhook-signature), in order, until a 2xx. A failure is retried with backoff; after 24 hours
+   * of failures, or a 410, the webhook is disabled and the feed records webhook.disabled. The
+   * secret is returned here only. At most 10 per tenant.
+   *
+   * @param url {@code url}, string
+   * @param optional the optional arguments, or null: {@code event_types} (list of string)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> createWebhook(String url, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("url", url);
+    putOptional(values, optional, Set.of("event_types"), "slotlock_create_webhook");
+    return call("slotlock_create_webhook", values);
+  }
+
+  /**
+   * Add a webhook. Send the changes slotlock_list_changes lists from now on to an https URL, each
+   * as a CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp,
+   * webhook-signature), in order, until a 2xx. A failure is retried with backoff; after 24 hours
+   * of failures, or a 410, the webhook is disabled and the feed records webhook.disabled. The
+   * secret is returned here only. At most 10 per tenant.
+   *
+   * @param url {@code url}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> createWebhook(String url) {
+    return createWebhook(url, null);
+  }
+
+  /**
+   * Delete a webhook. Stop sending to a webhook. deleted is false when the tenant has no such
+   * webhook.
+   *
+   * @param webhookId {@code webhook_id}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> deleteWebhook(String webhookId) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("webhook_id", webhookId);
+    return call("slotlock_delete_webhook", values);
+  }
+
+  /**
+   * Enable a webhook. Send to a disabled webhook again, from the first change it did not accept.
+   * 404 webhook_not_found when the tenant has no such webhook; 409 changes_pruned when what it
+   * missed is older than the 7 days the feed keeps, since it would skip those unseen: delete it,
+   * add it again, and read what it missed from slotlock_list_changes.
+   *
+   * @param webhookId {@code webhook_id}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> enableWebhook(String webhookId) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("webhook_id", webhookId);
+    return call("slotlock_enable_webhook", values);
   }
 
 }

@@ -411,7 +411,7 @@ export class SlotlockAgentOperationError extends Error {
     super(code);
     this.name = 'SlotlockAgentOperationError';
     this.code = /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : 'operation_failed';
-    this.status = [400, 403, 404, 409, 429, 503].includes(status) ? status : 500;
+    this.status = [400, 403, 404, 409, 410, 429, 503].includes(status) ? status : 500;
   }
 }
 

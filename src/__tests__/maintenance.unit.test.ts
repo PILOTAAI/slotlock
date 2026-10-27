@@ -69,6 +69,10 @@ function fakeStore() {
           calls.push({ tenantRef, task: 'prune', params });
           return prunes.get(tenantRef)?.shift() ?? DONE_PRUNE;
         },
+        // The feed: nothing past its retention here (event-feed.integration covers it).
+        async pruneChanges() {
+          return 0;
+        },
         async pruneBookingRetention(params: Record<string, unknown>) {
           calls.push({ tenantRef, task: 'purge', params });
           return purges.get(tenantRef)?.shift() ?? DONE_PURGE;

@@ -12,6 +12,33 @@ export {
   nextStepStart,
   parseBookingRules,
 } from './booking-rules.js';
+export {
+  type CreateWebhookEndpointResult,
+  type ListChangesResult,
+  SLOTLOCK_CHANGE_RETENTION_DAYS,
+  SLOTLOCK_CHANGE_TYPES,
+  SLOTLOCK_MAX_WEBHOOK_ENDPOINTS,
+  SLOTLOCK_WEBHOOK_FAILING_LIMIT_MS,
+  type SlotlockChange,
+  type SlotlockChangeType,
+  type SlotlockEventFeed,
+  type SlotlockWebhookClaim,
+  type SlotlockWebhookEndpoint,
+} from './event-feed.js';
+export {
+  type SlotlockCloudEvent,
+  type SlotlockWebhookPassResult,
+  type SlotlockWebhookResponse,
+  type SlotlockWebhookScheduler,
+  type SlotlockWebhookSender,
+  createSlotlockWebhookSender,
+  deliverSlotlockWebhooks,
+  isPrivateAddress,
+  signSlotlockWebhook,
+  slotlockCloudEvent,
+  slotlockWebhookRetryDelayMs,
+  startSlotlockWebhookDelivery,
+} from './webhooks.js';
 export { expandRules } from './rules.js';
 export {
   availabilityRuleProblem,

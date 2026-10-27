@@ -1,6 +1,7 @@
 // DB mechanics for the Slotlock core — explicit `postgres` client in, structured results out.
 // Domain policy (who may reserve, pricing, holds) belongs to future callers; this layer owns the
 // reliable how: idempotent schema apply, EXCLUDE-arbitrated inserts with a structured conflict.
+import { type SlotlockEventFeed, slotlockEventFeedMethods } from './event-feed.js';
 import {
   type SlotlockBookingRule,
   type SlotlockBookingRules,
@@ -1867,7 +1868,7 @@ async function rollSeriesBehind(
   }
 }
 
-export interface SlotlockStore {
+export interface SlotlockStore extends SlotlockEventFeed {
   /**
    * Apply the Slotlock DDL (idempotent). Owns the `slotlock` schema on the connected DB. Refuses
    * (`unsafe_slotlock_schema`, with the `reasons` found) a `slotlock` schema that a role other than the
@@ -2746,6 +2747,9 @@ export const SLOTLOCK_TENANT_WRITE_METHODS = Object.freeze([
   'cancelCalendarEvent',
   'cancelCalendarEventById',
   'recordCalendarCoverage',
+  'createWebhookEndpoint',
+  'deleteWebhookEndpoint',
+  'enableWebhookEndpoint',
 ] as const satisfies readonly (keyof SlotlockStore)[]);
 
 function tenantSuspendedError(): Error & { code: 'tenant_suspended' } {
@@ -2906,6 +2910,7 @@ function buildSlotlockStore(
   }
 
   const store: SlotlockStore = {
+    ...slotlockEventFeedMethods(sql),
     async applySchema(migrationOptions) {
       // PostgreSQL's IF NOT EXISTS DDL is idempotent after commit but not race-free: two fresh
       // application instances can still collide on pg_namespace/pg_extension unique indexes.

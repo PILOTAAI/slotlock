@@ -114,6 +114,11 @@ const backend = {
   eraseTenant: vi.fn(),
   runMaintenance: vi.fn(),
   setResourceBookingRules: vi.fn(),
+  listChanges: vi.fn(),
+  createWebhook: vi.fn(),
+  listWebhooks: vi.fn(),
+  deleteWebhook: vi.fn(),
+  enableWebhook: vi.fn(),
 } satisfies Record<keyof SlotlockApplicationBackend, ReturnType<typeof vi.fn>>;
 const authorizeApplication = vi.fn();
 const consumeRateLimit = vi.fn();
@@ -199,6 +204,19 @@ function exampleRequest(name: string, token = 'admin'): Request {
   return call(definition.method, path, { body: rest, token });
 }
 
+const WEBHOOK = {
+  id: '9b2f4c1e-6d3a-4e8b-a1c7-5f0e2d4b6a8c',
+  url: 'https://example.com/slotlock-webhook',
+  event_types: null,
+  created_at: '2027-03-01T00:00:00.000Z',
+  attempts: 0,
+  failing_since: null,
+  last_status: null,
+  last_error: null,
+  disabled_at: null,
+  disabled_reason: null,
+};
+
 const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>> = {
   createResource: { resource: RESOURCE },
   getResource: { resource: RESOURCE },
@@ -225,6 +243,25 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   getTenant: { tenant: { ref: 'tenant-a', suspended: false } },
   eraseTenant: { total: 12, rows: { resources: 2, reservations: 10 } },
   runMaintenance: { extended: 0, conflicts: 0, refused: 0, pruned: 0, capped: false },
+  listChanges: {
+    changes: [
+      {
+        specversion: '1.0',
+        id: 'msg_1',
+        source: '/slotlock/resources/0f8b6c1e-2d4a-4c7e-9b1a-3e5f7a9c2d4b',
+        type: 'io.pylota.slotlock.reservation.created',
+        subject: 'BK-42',
+        time: '2027-03-01T09:00:00.000Z',
+        datacontenttype: 'application/json',
+        data: { reference: 'BK-42' },
+      },
+    ],
+    next_cursor: 'MToxOjE6MA',
+  },
+  createWebhook: { webhook: WEBHOOK, secret: `whsec_${'A'.repeat(43)}=` },
+  listWebhooks: { webhooks: [WEBHOOK] },
+  deleteWebhook: { deleted: true },
+  enableWebhook: { webhook: WEBHOOK },
 };
 
 beforeEach(() => {

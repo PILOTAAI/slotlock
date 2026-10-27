@@ -46,6 +46,11 @@ var operations = func() map[string]operation {
 		{name: "slotlock_get_tenant", method: "GET", path: "/v1/tenant", pathParams: nil, query: nil},
 		{name: "slotlock_erase_tenant", method: "POST", path: "/v1/tenant/erase", pathParams: nil, query: nil},
 		{name: "slotlock_run_maintenance", method: "POST", path: "/v1/maintenance", pathParams: nil, query: nil},
+		{name: "slotlock_list_changes", method: "GET", path: "/v1/changes", pathParams: nil, query: []string{"cursor", "limit"}},
+		{name: "slotlock_list_webhooks", method: "GET", path: "/v1/webhooks", pathParams: nil, query: nil},
+		{name: "slotlock_create_webhook", method: "POST", path: "/v1/webhooks", pathParams: nil, query: nil},
+		{name: "slotlock_delete_webhook", method: "DELETE", path: "/v1/webhooks/{webhook_id}", pathParams: []string{"webhook_id"}, query: nil},
+		{name: "slotlock_enable_webhook", method: "POST", path: "/v1/webhooks/{webhook_id}/enable", pathParams: []string{"webhook_id"}, query: nil},
 	}
 	byName := make(map[string]operation, len(list))
 	for _, op := range list {
@@ -1073,4 +1078,109 @@ func (in RunMaintenanceInput) values() map[string]any {
 // serve does). capped is true when there was more than one call does: call again.
 func (c *Client) RunMaintenance(ctx context.Context, in RunMaintenanceInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_run_maintenance", in.values())
+}
+
+// ListChangesInput holds the arguments of [Client.ListChanges].
+type ListChangesInput struct {
+	Cursor *string
+
+	Limit *int64
+}
+
+func (in ListChangesInput) values() map[string]any {
+	values := map[string]any{}
+	if in.Cursor != nil {
+		values["cursor"] = *in.Cursor
+	}
+	if in.Limit != nil {
+		values["limit"] = *in.Limit
+	}
+	return values
+}
+
+// ListChanges: List changes. What changed in the tenant, oldest first, as CloudEvents: holds
+// made, confirmed, released or expired; bookings made, moved or cancelled; calendar events
+// created, changed or cancelled (ids, times and states, never titles or attendees). Pass
+// next_cursor as cursor to read on; it is returned even when nothing is new, so poll with it.
+// Only changes of transactions that have ended are listed, so following the cursor never skips
+// one. Changes are kept 7 days: an older cursor answers 410 cursor_expired, so start again
+// without one.
+func (c *Client) ListChanges(ctx context.Context, in ListChangesInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_list_changes", in.values())
+}
+
+// ListWebhooksInput holds the arguments of [Client.ListWebhooks].
+type ListWebhooksInput struct {
+}
+
+func (in ListWebhooksInput) values() map[string]any {
+	values := map[string]any{}
+	return values
+}
+
+// ListWebhooks: List webhooks. The tenant's webhooks with how delivery is going: failed attempts,
+// the last status, and whether and why one is disabled.
+func (c *Client) ListWebhooks(ctx context.Context, in ListWebhooksInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_list_webhooks", in.values())
+}
+
+// CreateWebhookInput holds the arguments of [Client.CreateWebhook].
+type CreateWebhookInput struct {
+	URL string
+
+	EventTypes []string
+}
+
+func (in CreateWebhookInput) values() map[string]any {
+	values := map[string]any{}
+	values["url"] = in.URL
+	if in.EventTypes != nil {
+		values["event_types"] = in.EventTypes
+	}
+	return values
+}
+
+// CreateWebhook: Add a webhook. Send the changes slotlock_list_changes lists from now on to an
+// https URL, each as a CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp,
+// webhook-signature), in order, until a 2xx. A failure is retried with backoff; after 24 hours of
+// failures, or a 410, the webhook is disabled and the feed records webhook.disabled. The secret
+// is returned here only. At most 10 per tenant.
+func (c *Client) CreateWebhook(ctx context.Context, in CreateWebhookInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_create_webhook", in.values())
+}
+
+// DeleteWebhookInput holds the arguments of [Client.DeleteWebhook].
+type DeleteWebhookInput struct {
+	WebhookID string
+}
+
+func (in DeleteWebhookInput) values() map[string]any {
+	values := map[string]any{}
+	values["webhook_id"] = in.WebhookID
+	return values
+}
+
+// DeleteWebhook: Delete a webhook. Stop sending to a webhook. deleted is false when the tenant
+// has no such webhook.
+func (c *Client) DeleteWebhook(ctx context.Context, in DeleteWebhookInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_delete_webhook", in.values())
+}
+
+// EnableWebhookInput holds the arguments of [Client.EnableWebhook].
+type EnableWebhookInput struct {
+	WebhookID string
+}
+
+func (in EnableWebhookInput) values() map[string]any {
+	values := map[string]any{}
+	values["webhook_id"] = in.WebhookID
+	return values
+}
+
+// EnableWebhook: Enable a webhook. Send to a disabled webhook again, from the first change it did
+// not accept. 404 webhook_not_found when the tenant has no such webhook; 409 changes_pruned when
+// what it missed is older than the 7 days the feed keeps, since it would skip those unseen:
+// delete it, add it again, and read what it missed from slotlock_list_changes.
+func (c *Client) EnableWebhook(ctx context.Context, in EnableWebhookInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_enable_webhook", in.values())
 }

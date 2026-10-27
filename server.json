@@ -105,6 +105,11 @@
           "default": "on"
         },
         {
+          "name": "SLOTLOCK_WEBHOOKS",
+          "description": "on: deliver each tenant's changes to its webhooks (POST /v1/webhooks), signed as Standard Webhooks; never to a private network address. private: those too, for testing. off: keep the change feed (GET /v1/changes), send nothing.",
+          "default": "on"
+        },
+        {
           "name": "SLOTLOCK_TENANT",
           "description": "The tenant SLOTLOCK_AUTH_TOKEN acts in; API keys act in their own tenant.",
           "default": "default"
