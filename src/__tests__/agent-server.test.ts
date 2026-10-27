@@ -1082,7 +1082,7 @@ describe('consumer-neutral Slotlock agent server', () => {
   describe('portable operation names', () => {
     it('advertises only names every tool-calling API accepts', () => {
       const names = slotlockAgentTools().map((tool) => tool.name);
-      expect(names).toHaveLength(9);
+      expect(names).toHaveLength(11);
       for (const name of names) {
         // Claude: ^[a-zA-Z0-9_-]{1,128}$. OpenAI function names: the same characters, at most 64.
         expect(name).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
@@ -2117,6 +2117,8 @@ describe('principal scopes', () => {
       slotlock_get_free_busy: 'read',
       slotlock_find_next_available: 'read',
       slotlock_find_available_slots: 'read',
+      slotlock_hold_slots: 'write',
+      slotlock_release_slots: 'write',
       slotlock_create_event: 'write',
       slotlock_get_event: 'read',
       slotlock_list_events: 'read',
@@ -2149,6 +2151,35 @@ describe('principal scopes', () => {
     const read = await (await server.fetch(call('slotlock_list_resources', { limit: 5 }))).json();
     expect(read).toMatchObject({ result: { structuredContent: { next_cursor: null } } });
     expect(authorize).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds through a backend that holds, and answers holds_unavailable from one that does not', async () => {
+    const holdArgs = {
+      slots: [{ resource_id: 'van-1', start: '2027-03-02T09:00:00Z', end: '2027-03-02T10:00:00Z' }],
+      idempotency_key: 'hold-1',
+    };
+    const releaseArgs = { hold_id: '7d3f8c2a-4b1e-4f6a-9c2d-1e5b7a9f3c4d' };
+    const without = buildServer();
+    expectToolError(await (await without.fetch(call('slotlock_hold_slots', holdArgs))).json(), 'holds_unavailable');
+    expectToolError(
+      await (await without.fetch(call('slotlock_release_slots', releaseArgs))).json(),
+      'holds_unavailable',
+    );
+
+    const holdSlots = vi.fn(async () => ({ group_id: releaseArgs.hold_id, holds: [], refused: [] }));
+    const releaseSlots = vi.fn(async () => ({ released: true }));
+    const holding = buildServer({ backend: { ...backend, holdSlots, releaseSlots } });
+    const held = await (await holding.fetch(call('slotlock_hold_slots', holdArgs))).json();
+    expect(held).toMatchObject({ result: { structuredContent: { refused: [] } } });
+    // The default ttl reaches the backend.
+    expect(holdSlots).toHaveBeenCalledWith(expect.anything(), { ...holdArgs, ttl_seconds: 300 });
+    const released = await (await holding.fetch(call('slotlock_release_slots', releaseArgs))).json();
+    expect(released).toMatchObject({ result: { structuredContent: { released: true } } });
+
+    // Both are writes: a read principal gets neither.
+    const reader = buildServer({ ...asPrincipal(['read']), backend: { ...backend, holdSlots, releaseSlots } });
+    expectToolError(await (await reader.fetch(call('slotlock_hold_slots', holdArgs))).json(), 'forbidden');
+    expect(holdSlots).toHaveBeenCalledTimes(1);
   });
 
   it.each([

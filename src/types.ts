@@ -153,6 +153,8 @@ export interface SlotlockHold {
   bufferAfterMs: number;
   expiresAt: Date;
   source: string | null;
+  /** The alternatives it was held with (`groupId` when acquired); absent when held alone. */
+  groupId?: string;
 }
 
 export type AcquireHoldResult =
@@ -306,6 +308,14 @@ export interface PutCalendarEventCommand extends CalendarEventContent {
    * elsewhere. The agent tools set it.
    */
   enforceBookingRules?: boolean;
+  /**
+   * Book the time a live hold keeps: the hold must be `holderRef`'s (`acquireHold`'s
+   * `principalRef`), on this resource, and cover the event, a single occurrence. In one transaction
+   * the hold and the rest of its group are released and the event takes the time, so no rival can
+   * come between. Its notice and advance were judged when it was held; step and hours are judged
+   * again.
+   */
+  fromHold?: { holdId: string; holderRef: string };
 }
 
 export type PutCalendarEventResult =
@@ -330,6 +340,10 @@ export type PutCalendarEventResult =
   | { ok: false; code: 'resource_archived' }
   | { ok: false; code: 'event_cancelled'; currentRevision: number }
   | { ok: false; code: 'revision_conflict'; currentRevision: number }
+  /** `fromHold` names no live hold of that holder's: released, booked, expired, or another's. */
+  | { ok: false; code: 'hold_not_found' }
+  /** `fromHold`'s hold is on another resource, or does not cover the event. */
+  | { ok: false; code: 'hold_mismatch' }
   /**
    * A recurring event on the resource is not stored as far as this write reaches, and cannot be
    * extended that far (past the rolling horizon, or blocked): the time cannot be proven free.

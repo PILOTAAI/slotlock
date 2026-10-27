@@ -121,12 +121,33 @@ export const SLOTLOCK_A2A_TASK_STATES = Object.freeze([
 const DATE_TIME = z.string().datetime({ offset: true });
 const RESOURCE_ID = z.string().trim().min(1).max(200);
 const EVENT_ID = z.string().trim().min(1).max(500);
+const HOLD_ID = z.string().uuid();
 const IDEMPOTENCY_KEY = z.string().trim().min(1).max(200);
 const REVISION = z.number().int().positive();
 const MAX_AGENT_WINDOW_MS = SLOTLOCK_CALENDAR_HORIZON_DAYS * 24 * 60 * 60 * 1_000;
 /** How many slots `slotlock_find_available_slots` lists at most, and over how many resources. */
 const MAX_LISTED_SLOTS = 50;
 const MAX_SLOT_RESOURCES = 20;
+
+/** `slotlock_hold_slots`, from a backend that holds; one without it answers `holds_unavailable`. */
+function holdSlots(
+  backend: SlotlockAgentCalendarBackend,
+  context: SlotlockAgentInvocationContext,
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  if (!backend.holdSlots) throw new SlotlockAgentOperationError('holds_unavailable', 409);
+  return backend.holdSlots(context, input);
+}
+
+/** `slotlock_release_slots`, as `holdSlots`. */
+function releaseSlots(
+  backend: SlotlockAgentCalendarBackend,
+  context: SlotlockAgentInvocationContext,
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  if (!backend.releaseSlots) throw new SlotlockAgentOperationError('holds_unavailable', 409);
+  return backend.releaseSlots(context, input);
+}
 
 /**
  * Slots for `slotlock_find_available_slots`, from the backend's own next-available search, so each
@@ -284,6 +305,8 @@ export type SlotlockAgentOperation =
   | 'slotlock_get_free_busy'
   | 'slotlock_find_next_available'
   | 'slotlock_find_available_slots'
+  | 'slotlock_hold_slots'
+  | 'slotlock_release_slots'
   | 'slotlock_create_event'
   | 'slotlock_get_event'
   | 'slotlock_list_events'
@@ -328,6 +351,8 @@ const OPERATION_SCOPES: Readonly<Record<SlotlockAgentOperation, SlotlockAgentSco
   slotlock_get_free_busy: 'read',
   slotlock_find_next_available: 'read',
   slotlock_find_available_slots: 'read',
+  slotlock_hold_slots: 'write',
+  slotlock_release_slots: 'write',
   slotlock_create_event: 'write',
   slotlock_get_event: 'read',
   slotlock_list_events: 'read',
@@ -431,6 +456,19 @@ export interface SlotlockAgentCalendarBackend {
     context: SlotlockAgentInvocationContext,
     resourceId: string,
   ): Promise<{ name: string | null; timezone: string | null } | null>;
+  /**
+   * Optional. Hold up to five candidate slots for this principal, as alternatives in one group
+   * (`slotlock_hold_slots`); a tool without it answers `holds_unavailable`.
+   */
+  holdSlots?(
+    context: SlotlockAgentInvocationContext,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+  /** Optional. Release one of this principal's holds with its group (`slotlock_release_slots`). */
+  releaseSlots?(
+    context: SlotlockAgentInvocationContext,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
 }
 
 /**
@@ -706,6 +744,8 @@ const EVENT_CREATE_INPUT = z
     reminders: z.array(REMINDER_INPUT).max(20).optional(),
     idempotency_key: IDEMPOTENCY_KEY,
     recurrence_exceptions: z.array(RECURRENCE_EXCEPTION_INPUT).max(500).optional(),
+    /** Book the time one of your holds keeps (slotlock_hold_slots); its alternatives are released. */
+    hold_id: HOLD_ID.optional(),
   })
   .strict()
   .refine((value) => boundedEventSpan(value.starts_at, value.ends_at));
@@ -963,9 +1003,72 @@ const OPERATION_DEFINITIONS = [
       idempotency_key: 'cancel-handover-2027-03-02',
     },
   },
+  {
+    name: 'slotlock_hold_slots',
+    title: 'Hold candidate slots',
+    description:
+      'Hold up to five candidate slots for a short time (30-900 seconds) while a person chooses, as alternatives in one group: each free one is held, the others are listed with why not. Book one by passing its hold_id to slotlock_create_event, which releases the rest; unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at once.',
+    input: z
+      .object({
+        slots: z
+          .array(
+            z
+              .object({ resource_id: RESOURCE_ID, start: DATE_TIME, end: DATE_TIME })
+              .strict()
+              .refine((value) => boundedEventSpan(value.start, value.end)),
+          )
+          .min(1)
+          .max(5),
+        ttl_seconds: z.number().int().min(30).max(900).default(300),
+        idempotency_key: IDEMPOTENCY_KEY,
+      })
+      .strict(),
+    output: z
+      .object({
+        group_id: HOLD_ID,
+        holds: z
+          .array(
+            z
+              .object({
+                hold_id: HOLD_ID,
+                resource_id: RESOURCE_ID,
+                start: DATE_TIME,
+                end: DATE_TIME,
+                expires_at: DATE_TIME,
+              })
+              .strict(),
+          )
+          .max(5),
+        refused: z
+          .array(z.object({ index: z.number().int().min(0).max(4), code: z.string().max(64) }).strict())
+          .max(5),
+      })
+      .strict(),
+    risk: { readOnly: false, destructive: false, idempotent: true },
+    invoke: holdSlots,
+    example: {
+      slots: [
+        { resource_id: EXAMPLE_RESOURCE_ID, start: '2027-03-02T09:00:00Z', end: '2027-03-02T10:00:00Z' },
+        { resource_id: EXAMPLE_RESOURCE_ID, start: '2027-03-02T14:00:00Z', end: '2027-03-02T15:00:00Z' },
+      ],
+      ttl_seconds: 300,
+      idempotency_key: 'hold-handover-2027-03-02',
+    },
+  },
+  {
+    name: 'slotlock_release_slots',
+    title: 'Release held slots',
+    description:
+      'Release one of your holds, and the rest of its group, at once instead of letting them expire. `released` is false when it was already gone.',
+    input: z.object({ hold_id: HOLD_ID }).strict(),
+    output: z.object({ released: z.boolean() }).strict(),
+    risk: { readOnly: false, destructive: false, idempotent: true },
+    invoke: releaseSlots,
+    example: { hold_id: '7d3f8c2a-4b1e-4f6a-9c2d-1e5b7a9f3c4d' },
+  },
 ] as const satisfies readonly OperationDefinition[];
 
-const FORMATS_WITHOUT_PATTERN = new Set(['date-time', 'email']);
+const FORMATS_WITHOUT_PATTERN = new Set(['date-time', 'email', 'uuid']);
 
 function toJsonSchema(schema: ObjectSchema, io: 'input' | 'output'): JsonSchema {
   // Zod's own converter: zod-to-json-schema reads only Zod 3 schemas (for a Zod 4 one it returns {})
@@ -975,7 +1078,7 @@ function toJsonSchema(schema: ObjectSchema, io: 'input' | 'output'): JsonSchema 
     io,
     unrepresentable: 'throw',
     override: ({ jsonSchema }) => {
-      // Zod 4.6 writes its validation regex beside `format` for dates and emails (288 and 102
+      // Zod 4.6 writes its validation regex beside `format` for dates, emails and UUIDs (288 and 102
       // characters, on 60 fields): the format already says it, and every agent reads the list.
       if (FORMATS_WITHOUT_PATTERN.has(String(jsonSchema.format))) delete jsonSchema.pattern;
     },

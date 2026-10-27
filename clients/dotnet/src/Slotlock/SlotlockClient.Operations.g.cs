@@ -20,6 +20,8 @@ public sealed partial class SlotlockClient
         ["slotlock_get_free_busy"] = new("GET", "/v1/free-busy", [], ["resource_ids", "start", "end"]),
         ["slotlock_find_next_available"] = new("GET", "/v1/next-available", [], ["resource_ids", "start", "end", "duration_minutes"]),
         ["slotlock_find_available_slots"] = new("GET", "/v1/available-slots", [], ["resource_ids", "start", "end", "duration_minutes", "limit"]),
+        ["slotlock_hold_slots"] = new("POST", "/v1/slot-holds", [], []),
+        ["slotlock_release_slots"] = new("DELETE", "/v1/slot-holds/{hold_id}", ["hold_id"], []),
         ["slotlock_list_events"] = new("GET", "/v1/events", [], ["resource_ids", "start", "end", "cursor", "limit"]),
         ["slotlock_create_event"] = new("POST", "/v1/events", [], []),
         ["slotlock_get_event"] = new("GET", "/v1/events/{event_id}", ["event_id"], []),
@@ -191,6 +193,51 @@ public sealed partial class SlotlockClient
         return CallAsync("slotlock_find_available_slots", values, cancellationToken);
     }
 
+    /// <summary>Hold candidate slots.</summary>
+    /// <remarks>
+    /// Hold up to five candidate slots for a short time (30-900 seconds) while a person chooses,
+    /// as alternatives in one group: each free one is held, the others are listed with why not.
+    /// Book one by passing its hold_id to slotlock_create_event, which releases the rest;
+    /// unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at
+    /// once.
+    /// </remarks>
+    /// <param name="slots">slots</param>
+    /// <param name="idempotencyKey">idempotency_key</param>
+    /// <param name="ttlSeconds">ttl_seconds</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> HoldSlotsAsync(
+        JsonArray slots,
+        string idempotencyKey,
+        Optional<long> ttlSeconds = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["slots"] = Json.ToNode(slots);
+        values["idempotency_key"] = Json.ToNode(idempotencyKey);
+        if (ttlSeconds.HasValue) values["ttl_seconds"] = Json.ToNode(ttlSeconds.Value);
+        return CallAsync("slotlock_hold_slots", values, cancellationToken);
+    }
+
+    /// <summary>Release held slots.</summary>
+    /// <remarks>
+    /// Release one of your holds, and the rest of its group, at once instead of letting them
+    /// expire. `released` is false when it was already gone.
+    /// </remarks>
+    /// <param name="holdId">hold_id</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ReleaseSlotsAsync(
+        string holdId,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["hold_id"] = Json.ToNode(holdId);
+        return CallAsync("slotlock_release_slots", values, cancellationToken);
+    }
+
     /// <summary>List resource events.</summary>
     /// <remarks>
     /// List bounded events intersecting a time window.
@@ -240,6 +287,7 @@ public sealed partial class SlotlockClient
     /// <param name="attendees">attendees</param>
     /// <param name="reminders">reminders</param>
     /// <param name="recurrenceExceptions">recurrence_exceptions</param>
+    /// <param name="holdId">hold_id</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -259,6 +307,7 @@ public sealed partial class SlotlockClient
         Optional<JsonArray> attendees = default,
         Optional<JsonArray> reminders = default,
         Optional<JsonArray> recurrenceExceptions = default,
+        Optional<string> holdId = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -277,8 +326,48 @@ public sealed partial class SlotlockClient
         if (attendees.HasValue) values["attendees"] = Json.ToNode(attendees.Value);
         if (reminders.HasValue) values["reminders"] = Json.ToNode(reminders.Value);
         if (recurrenceExceptions.HasValue) values["recurrence_exceptions"] = Json.ToNode(recurrenceExceptions.Value);
+        if (holdId.HasValue) values["hold_id"] = Json.ToNode(holdId.Value);
         return CallAsync("slotlock_create_event", values, cancellationToken);
     }
+
+    /// <summary>Slotlock.Client 0.2.0's parameters for <c>CreateEventAsync</c>, kept so code
+    /// written against them compiles.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public Task<JsonObject> CreateEventAsync(
+        string resourceId,
+        string startsAt,
+        string endsAt,
+        string timezone,
+        string idempotencyKey,
+        Optional<string> title,
+        Optional<string> description,
+        Optional<string> location,
+        Optional<JsonObject> organizer,
+        Optional<string> transparency,
+        Optional<string> status,
+        Optional<string> recurrenceRule,
+        Optional<JsonArray> attendees,
+        Optional<JsonArray> reminders,
+        Optional<JsonArray> recurrenceExceptions,
+        CancellationToken cancellationToken) =>
+        CreateEventAsync(
+            resourceId: resourceId,
+            startsAt: startsAt,
+            endsAt: endsAt,
+            timezone: timezone,
+            idempotencyKey: idempotencyKey,
+            title: title,
+            description: description,
+            location: location,
+            organizer: organizer,
+            transparency: transparency,
+            status: status,
+            recurrenceRule: recurrenceRule,
+            attendees: attendees,
+            reminders: reminders,
+            recurrenceExceptions: recurrenceExceptions,
+            cancellationToken: cancellationToken,
+            holdId: default);
 
     /// <summary>Get resource event.</summary>
     /// <remarks>

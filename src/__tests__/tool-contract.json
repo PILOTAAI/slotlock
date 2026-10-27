@@ -693,6 +693,10 @@
             ],
             "additionalProperties": false
           }
+        },
+        "hold_id": {
+          "type": "string",
+          "format": "uuid"
         }
       },
       "required": [
@@ -2344,6 +2348,195 @@
       "title": "Delete resource event",
       "readOnlyHint": false,
       "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "ui": {
+        "visibility": [
+          "model"
+        ]
+      }
+    }
+  },
+  {
+    "name": "slotlock_hold_slots",
+    "title": "Hold candidate slots",
+    "description": "Hold up to five candidate slots for a short time (30-900 seconds) while a person chooses, as alternatives in one group: each free one is held, the others are listed with why not. Book one by passing its hold_id to slotlock_create_event, which releases the rest; unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at once.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "slots": {
+          "minItems": 1,
+          "maxItems": 5,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "resource_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "start": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "resource_id",
+              "start",
+              "end"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "ttl_seconds": {
+          "default": 300,
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 900
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "slots",
+        "idempotency_key"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "group_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "holds": {
+          "maxItems": 5,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "hold_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "resource_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "start": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "expires_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "hold_id",
+              "resource_id",
+              "start",
+              "end",
+              "expires_at"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "refused": {
+          "maxItems": 5,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4
+              },
+              "code": {
+                "type": "string",
+                "maxLength": 64
+              }
+            },
+            "required": [
+              "index",
+              "code"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "group_id",
+        "holds",
+        "refused"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "Hold candidate slots",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "ui": {
+        "visibility": [
+          "model"
+        ]
+      }
+    }
+  },
+  {
+    "name": "slotlock_release_slots",
+    "title": "Release held slots",
+    "description": "Release one of your holds, and the rest of its group, at once instead of letting them expire. `released` is false when it was already gone.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "hold_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "hold_id"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "released": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "released"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "Release held slots",
+      "readOnlyHint": false,
+      "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false
     },

@@ -79,6 +79,7 @@ interface AgentEventInput {
   transparency?: CalendarEventContent['transparency'];
   status?: CalendarEventContent['status'];
   recurrence_rule?: string | null;
+  hold_id?: string;
   recurrence_exceptions?: AgentRecurrenceExceptionInput[];
   idempotency_key: string;
 }
@@ -252,6 +253,13 @@ function agentPrincipalDigest(
     .digest('hex');
 }
 
+/** A version-4-shaped UUID from a digest: a stable id for a value that names one thing. */
+function uuidFromDigest(value: string): string {
+  const hex = createHash('sha256').update(value).digest('hex');
+  const variant = ((Number.parseInt(hex[16] as string, 16) & 0x3) | 0x8).toString(16);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
 function agentOwnerRef(context: SlotlockAgentInvocationContext): string {
   return `agent:${createHash('sha256')
     .update(`${context.principal.tenantRef}\0${context.principal.subject}`)
@@ -352,7 +360,11 @@ function operationError(
         ? (BOOKING_RULE_CODES[refusal.rule as SlotlockBookingRule] ?? refusal.code)
         : refusal.code;
   const status = slotlockAgentErrorStatus(code);
-  return new SlotlockAgentOperationError(status === 404 ? 'not_found' : code, status);
+  // A gone hold is named, so the agent holds again; it covers expired and another holder's alike.
+  return new SlotlockAgentOperationError(
+    status === 404 && code !== 'hold_not_found' ? 'not_found' : code,
+    status,
+  );
 }
 
 /** Resource and event ids: the UUIDs the store issues and validates. */
@@ -447,6 +459,62 @@ export function createSlotlockStoreAgentBackend(
   options: SlotlockStoreAgentBackendOptions,
 ): SlotlockAgentCalendarBackend {
   return {
+    async holdSlots(context, input) {
+      const slots = input.slots as { resource_id: string; start: string; end: string }[];
+      const key = input.idempotency_key as string;
+      const holderRef = agentOwnerRef(context);
+      // One group per agent and key, so a retry answers with the same holds and group.
+      const groupId = uuidFromDigest(`slotlock-hold-group\0${holderRef}\0${key}`);
+      return withTenant(store, context, async (tenantStore) => {
+        const holds: Record<string, unknown>[] = [];
+        const refused: { index: number; code: string }[] = [];
+        for (const [index, slot] of slots.entries()) {
+          try {
+            await requireAgentResource(tenantStore, context.principal.tenantRef, slot.resource_id);
+          } catch (error) {
+            if (!(error instanceof SlotlockAgentOperationError)) throw error;
+            refused.push({ index, code: error.code });
+            continue;
+          }
+          const result = await tenantStore.acquireHold({
+            tenantRef: context.principal.tenantRef,
+            principalRef: holderRef,
+            holderRef,
+            idempotencyKey: agentCommandIdempotencyKey(context, `${key}\0${index}`),
+            groupId,
+            resourceId: slot.resource_id,
+            start: new Date(slot.start),
+            end: new Date(slot.end),
+            ttlMs: (input.ttl_seconds as number) * 1_000,
+            source: 'agent-server',
+          });
+          if (result.ok) {
+            holds.push({
+              hold_id: result.hold.id,
+              resource_id: result.hold.resourceId,
+              start: result.hold.start.toISOString(),
+              end: result.hold.end.toISOString(),
+              expires_at: result.hold.expiresAt.toISOString(),
+            });
+          } else {
+            refused.push({ index, code: operationError(result).code });
+          }
+        }
+        return { group_id: groupId, holds, refused };
+      });
+    },
+
+    async releaseSlots(context, input) {
+      const id = input.hold_id as string;
+      if (!STORE_ID_PATTERN.test(id)) return { released: false };
+      return withTenant(store, context, async (tenantStore) =>
+        tenantStore.releaseHold(id, {
+          tenantRef: context.principal.tenantRef,
+          holderRef: agentOwnerRef(context),
+        }).then(({ released }) => ({ released })),
+      );
+    },
+
     async describeResource(context, resourceId) {
       if (!STORE_ID_PATTERN.test(resourceId)) return null;
       return withTenant(store, context, async (tenantStore) => {
@@ -638,6 +706,10 @@ export function createSlotlockStoreAgentBackend(
           materializationWindow: materializationWindow(content),
           // An agent's event is a booking made now: the resource's booking rules apply.
           enforceBookingRules: true,
+          // Booking a held time: only this agent's hold, which gives way in the same transaction.
+          ...(typeof input.hold_id === 'string'
+            ? { fromHold: { holdId: input.hold_id, holderRef: agentOwnerRef(context) } }
+            : {}),
         });
         if (!result.ok) throw operationError(result);
         const created = await tenantStore.getCalendarEvent({

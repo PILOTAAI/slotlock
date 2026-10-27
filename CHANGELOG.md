@@ -18,6 +18,15 @@ versioning.
   them with `enforceBookingRules`; an imported event is not checked. `createSlotlockStore` takes
   `defaultAvailabilityRules` for resources without hours of their own (`slotlock serve` passes
   `SLOTLOCK_AVAILABILITY`). Run `slotlock migrate`.
+- Agent holds: `slotlock_hold_slots` (REST `POST /v1/slot-holds`) holds up to five candidate slots
+  for 30-900 seconds as one group while a person chooses, listing the taken ones by index;
+  `slotlock_create_event`'s `hold_id` books one, releasing the others in the same transaction; and
+  `slotlock_release_slots` (`DELETE /v1/slot-holds/{hold_id}`) releases a group at once. A hold is
+  its agent's alone, and one agent may have 20 live (`SLOTLOCK_MAX_HOLDS_PER_HOLDER`). In the
+  library, `acquireHold` takes `holderRef` and `groupId`, `releaseHold` a `holderRef`, and
+  `putCalendarEvent` `fromHold` (refused with `hold_not_found` or `hold_mismatch`). A backend of
+  your own implements the optional `holdSlots` and `releaseSlots`; without them the tools answer
+  `holds_unavailable`. Run `slotlock migrate`.
 - `slotlock_find_available_slots` (REST `GET /v1/available-slots`) lists up to 50 certain slots of
   a duration, earliest first across up to 20 resources, each found the way
   `slotlock_find_next_available` finds one: free of busy time, inside the resource's hours, and

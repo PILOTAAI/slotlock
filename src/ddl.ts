@@ -1030,6 +1030,14 @@ ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS tenant_ref text;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS external_ref text;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS buffer_after_ms bigint NOT NULL DEFAULT 0;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS occupied_ends_at timestamptz;
+-- A keyed hold's holder (its principal) and the group of alternatives it was taken in: an agent
+-- releases or books only its own holds, and booking one releases the rest of its group.
+ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS holder_ref text;
+ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS hold_group_id uuid;
+CREATE INDEX IF NOT EXISTS slotlock_reservations_hold_group_idx
+  ON slotlock.reservations (hold_group_id) WHERE hold_group_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS slotlock_reservations_holder_idx
+  ON slotlock.reservations (holder_ref, expires_at) WHERE status = 'held' AND holder_ref IS NOT NULL;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS revision bigint NOT NULL DEFAULT 1;
 
 -- timestamptz + interval is STABLE (session timezone aware), so PostgreSQL correctly refuses it

@@ -43,6 +43,20 @@ OPERATIONS: dict[str, Operation] = {
         (),
         ("resource_ids", "start", "end", "duration_minutes", "limit"),
     ),
+    "slotlock_hold_slots": Operation(
+        "slotlock_hold_slots",
+        "POST",
+        "/v1/slot-holds",
+        (),
+        (),
+    ),
+    "slotlock_release_slots": Operation(
+        "slotlock_release_slots",
+        "DELETE",
+        "/v1/slot-holds/{hold_id}",
+        ("hold_id",),
+        (),
+    ),
     "slotlock_list_events": Operation(
         "slotlock_list_events",
         "GET",
@@ -344,6 +358,35 @@ class Operations(Transport):
             values["limit"] = limit
         return self.call("slotlock_find_available_slots", values)
 
+    def hold_slots(
+        self,
+        *,
+        slots: list[dict[str, Any]],
+        idempotency_key: str,
+        ttl_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        """Hold candidate slots.
+
+        Hold up to five candidate slots for a short time (30-900 seconds) while a person chooses,
+        as alternatives in one group: each free one is held, the others are listed with why not.
+        Book one by passing its hold_id to slotlock_create_event, which releases the rest;
+        unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at
+        once.
+        """
+        values: dict[str, Any] = {"slots": slots, "idempotency_key": idempotency_key}
+        if ttl_seconds is not None:
+            values["ttl_seconds"] = ttl_seconds
+        return self.call("slotlock_hold_slots", values)
+
+    def release_slots(self, hold_id: str) -> dict[str, Any]:
+        """Release held slots.
+
+        Release one of your holds, and the rest of its group, at once instead of letting them
+        expire. `released` is false when it was already gone.
+        """
+        values: dict[str, Any] = {"hold_id": hold_id}
+        return self.call("slotlock_release_slots", values)
+
     def list_events(
         self,
         *,
@@ -382,6 +425,7 @@ class Operations(Transport):
         attendees: list[dict[str, Any]] | None = None,
         reminders: list[dict[str, Any]] | None = None,
         recurrence_exceptions: list[dict[str, Any]] | None = None,
+        hold_id: str | None = None,
     ) -> dict[str, Any]:
         """Create resource event.
 
@@ -415,6 +459,8 @@ class Operations(Transport):
             values["reminders"] = reminders
         if recurrence_exceptions is not None:
             values["recurrence_exceptions"] = recurrence_exceptions
+        if hold_id is not None:
+            values["hold_id"] = hold_id
         return self.call("slotlock_create_event", values)
 
     def get_event(self, event_id: str) -> dict[str, Any]:

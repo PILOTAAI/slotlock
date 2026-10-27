@@ -35,6 +35,8 @@ export const GROUPS = [
   {
     name: 'Events',
     operations: [
+      'slotlock_hold_slots',
+      'slotlock_release_slots',
       'slotlock_create_event',
       'slotlock_list_events',
       'slotlock_get_event',

@@ -287,6 +287,8 @@ export function createSourceReader(source, external = {}) {
         return { ...inner, format: 'email' };
       case 'datetime':
         return { ...inner, format: 'date-time' };
+      case 'uuid':
+        return { ...inner, format: 'uuid' };
       case 'refine':
         return { ...inner, refinements: [...(inner.refinements ?? []), node.text] };
       case 'trim':

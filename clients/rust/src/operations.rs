@@ -44,6 +44,20 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &["resource_ids", "start", "end", "duration_minutes", "limit"],
     },
     Operation {
+        name: "slotlock_hold_slots",
+        method: "POST",
+        path: "/v1/slot-holds",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_release_slots",
+        method: "DELETE",
+        path: "/v1/slot-holds/{hold_id}",
+        path_params: &["hold_id"],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_list_events",
         method: "GET",
         path: "/v1/events",
@@ -295,6 +309,21 @@ pub struct FindAvailableSlotsInput {
     pub limit: Option<i64>,
 }
 
+/// The arguments of [`Client::hold_slots`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct HoldSlotsInput {
+    pub slots: Vec<Value>,
+    pub idempotency_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<i64>,
+}
+
+/// The arguments of [`Client::release_slots`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ReleaseSlotsInput {
+    pub hold_id: String,
+}
+
 /// The arguments of [`Client::list_events`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ListEventsInput {
@@ -335,6 +364,8 @@ pub struct CreateEventInput {
     pub reminders: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recurrence_exceptions: Option<Vec<Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hold_id: Option<String>,
 }
 
 /// The arguments of [`Client::get_event`].
@@ -626,6 +657,25 @@ impl Client {
     /// choice. No slot is listed unless every resource's coverage is certain.
     pub fn find_available_slots(&self, input: &FindAvailableSlotsInput) -> Result<Value, Error> {
         self.call("slotlock_find_available_slots", serde_json::to_value(input)?)
+    }
+
+    /// Hold candidate slots.
+    ///
+    /// Hold up to five candidate slots for a short time (30-900 seconds) while a person chooses,
+    /// as alternatives in one group: each free one is held, the others are listed with why not.
+    /// Book one by passing its hold_id to slotlock_create_event, which releases the rest;
+    /// unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at
+    /// once.
+    pub fn hold_slots(&self, input: &HoldSlotsInput) -> Result<Value, Error> {
+        self.call("slotlock_hold_slots", serde_json::to_value(input)?)
+    }
+
+    /// Release held slots.
+    ///
+    /// Release one of your holds, and the rest of its group, at once instead of letting them
+    /// expire. `released` is false when it was already gone.
+    pub fn release_slots(&self, input: &ReleaseSlotsInput) -> Result<Value, Error> {
+        self.call("slotlock_release_slots", serde_json::to_value(input)?)
     }
 
     /// List resource events.
