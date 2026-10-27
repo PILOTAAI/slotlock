@@ -7,6 +7,11 @@ versioning.
 
 ### Added
 
+- `npm run bench` (`scripts/bench.mjs`, `bench/*.sql`): RFC 0002's pgbench workloads, Slotlock's
+  range constraint against one row per 15-minute slot, reproducible on any scratch database. A new
+  Scaling page covers partitioning by resource (PostgreSQL 16, 17+), Citus, a home region per tenant,
+  read replicas, tracing and SLOs, backups and point-in-time recovery, and committing a solver's
+  plan through Slotlock.
 - Shared request budgets: `SLOTLOCK_SHARED_LIMITS=on` makes every server of a deployment draw a
   tenant's `tenant_*` and `app_*` budgets from one token bucket in PostgreSQL
   (`slotlock.take_rate_token`, keyed by a digest), after its own buckets pass; a database that

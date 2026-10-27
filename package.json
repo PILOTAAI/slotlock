@@ -57,7 +57,8 @@
     "clean": "node scripts/clean-dist.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc -p tsconfig.examples.json",
     "test": "vitest run && npm run build && npm run verify:package",
-    "verify:package": "node scripts/verify-package.mjs"
+    "verify:package": "node scripts/verify-package.mjs",
+    "bench": "node scripts/bench.mjs"
   },
   "dependencies": {
     "ical.js": "2.2.1",
