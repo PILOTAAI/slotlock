@@ -243,7 +243,7 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
       createSlotlockWebhookSender()({ url: 'https://localhost:1/hook', headers: {}, body: '{}' }),
     ).rejects.toMatchObject({ code: 'webhook_private_address' });
     expect(await store.listChanges({ tenantRef, after: 'not-a-cursor!' })).toEqual({ ok: false, code: 'invalid_cursor' });
-    const old = Buffer.from(`1:1:1:${Date.now() - 8 * 86_400_000}`).toString('base64url');
+    const old = Buffer.from(`1:1:1:${Date.now() - 31 * 86_400_000}`).toString('base64url');
     expect(await store.listChanges({ tenantRef, after: old })).toEqual({ ok: false, code: 'cursor_expired' });
   });
 

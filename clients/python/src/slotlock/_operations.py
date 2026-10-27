@@ -169,6 +169,27 @@ OPERATIONS: dict[str, Operation] = {
         (),
         (),
     ),
+    "slotlock_get_resource_history": Operation(
+        "slotlock_get_resource_history",
+        "GET",
+        "/v1/resources/{resource_id}/history",
+        ("resource_id",),
+        ("limit", "before"),
+    ),
+    "slotlock_get_reservation_history": Operation(
+        "slotlock_get_reservation_history",
+        "GET",
+        "/v1/reservations/{reservation_ref}/history",
+        ("reservation_ref",),
+        ("limit", "before"),
+    ),
+    "slotlock_get_tenant_event_history": Operation(
+        "slotlock_get_tenant_event_history",
+        "GET",
+        "/v1/tenant/events/{event_id}/history",
+        ("event_id",),
+        ("limit", "before"),
+    ),
     "slotlock_set_tenant_availability": Operation(
         "slotlock_set_tenant_availability",
         "PUT",
@@ -789,6 +810,65 @@ class Operations(Transport):
         values: dict[str, Any] = {}
         return self.call("slotlock_list_pools", values)
 
+    def get_resource_history(
+        self,
+        resource_id: str,
+        *,
+        limit: int | None = None,
+        before: str | None = None,
+    ) -> dict[str, Any]:
+        """A resource's history.
+
+        What happened on one of the tenant's resources, newest first: each hold, booking and event
+        made, moved, confirmed, released or cancelled, when, by whom (the API key or agent), and
+        for a change what it was before. Kept 30 days. Pass next_before as before for older
+        entries.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id}
+        if limit is not None:
+            values["limit"] = limit
+        if before is not None:
+            values["before"] = before
+        return self.call("slotlock_get_resource_history", values)
+
+    def get_reservation_history(
+        self,
+        reservation_ref: str,
+        *,
+        limit: int | None = None,
+        before: str | None = None,
+    ) -> dict[str, Any]:
+        """A booking's history.
+
+        What happened to one booking, by its reference, newest first: made, moved, cancelled, when
+        and by whom, as slotlock_get_resource_history.
+        """
+        values: dict[str, Any] = {"reservation_ref": reservation_ref}
+        if limit is not None:
+            values["limit"] = limit
+        if before is not None:
+            values["before"] = before
+        return self.call("slotlock_get_reservation_history", values)
+
+    def get_tenant_event_history(
+        self,
+        event_id: str,
+        *,
+        limit: int | None = None,
+        before: str | None = None,
+    ) -> dict[str, Any]:
+        """An event's history.
+
+        What happened to one calendar event of the tenant, by its id, newest first: created,
+        changed, cancelled, when and by whom, as slotlock_get_resource_history.
+        """
+        values: dict[str, Any] = {"event_id": event_id}
+        if limit is not None:
+            values["limit"] = limit
+        if before is not None:
+            values["before"] = before
+        return self.call("slotlock_get_tenant_event_history", values)
+
     def set_tenant_availability(self, *, rules: list[dict[str, Any]] | None) -> dict[str, Any]:
         """Set every resource's bookable hours.
 
@@ -1095,7 +1175,7 @@ class Operations(Transport):
         cancelled (ids, times and states, never titles or attendees). Pass next_cursor as cursor
         to read on; it is returned even when nothing is new, so poll with it. Only changes of
         transactions that have ended are listed, so following the cursor never skips one. Changes
-        are kept 7 days: an older cursor answers 410 cursor_expired, so start again without one.
+        are kept 30 days: an older cursor answers 410 cursor_expired, so start again without one.
         """
         values: dict[str, Any] = {}
         if cursor is not None:
@@ -1140,7 +1220,7 @@ class Operations(Transport):
 
         Send to a disabled webhook again, from the first change it did not accept. 404
         webhook_not_found when the tenant has no such webhook; 409 changes_pruned when what it
-        missed is older than the 7 days the feed keeps, since it would skip those unseen: delete
+        missed is older than the 30 days the feed keeps, since it would skip those unseen: delete
         it, add it again, and read what it missed from slotlock_list_changes.
         """
         values: dict[str, Any] = {"webhook_id": webhook_id}

@@ -1935,7 +1935,15 @@ export interface SlotlockStore extends SlotlockEventFeed {
   withTenant<T>(
     tenantRef: string,
     callback: (store: SlotlockTenantStore) => Promise<T>,
-    options?: { isolation?: 'read committed'; signal?: AbortSignal },
+    options?: {
+      isolation?: 'read committed';
+      signal?: AbortSignal;
+      /**
+       * Who is making these changes (an API key's id, an agent's subject), 1-200 characters
+       * without control characters: the history (listHistory) records it with each change.
+       */
+      actor?: string;
+    },
   ): Promise<T>;
   /**
    * INVARIANT (erasure completeness): a tenant integration must use a stable, erasable business
@@ -3138,6 +3146,12 @@ function buildSlotlockStore(
       }
       const isolation = options?.isolation;
       if (isolation !== undefined && isolation !== 'read committed') throw invalidIsolationError();
+      const actor = options?.actor;
+      if (actor !== undefined && !/^[^\u0000-\u001f\u007f]{1,200}$/u.test(actor)) {
+        throw Object.assign(new Error('Slotlock actor must be 1-200 characters without control characters'), {
+          code: 'invalid_identity' as const,
+        });
+      }
       const release = await tenantSlots?.(tenantRef, options?.signal);
       // A lock wait that timed out leaves the transaction unusable, so the reset below fails with
       // another error in its place: noted here as it happens.
@@ -3152,14 +3166,16 @@ function buildSlotlockStore(
           // Held shared until the transaction ends: suspension and erasure, which take it
           // exclusively, wait for this transaction, and one that starts after them reads them below
           // (READ COMMITTED: a statement after the lock sees what committed before it was granted).
-          const previous = await tx<{ value: string | null; isolation: string }[]>`
+          const previous = await tx<{ value: string | null; isolation: string; actor: string | null }[]>`
             SELECT current_setting(${configuredTenantSetting}, true) AS value,
+                   current_setting('slotlock.actor', true) AS actor,
                    current_setting('transaction_isolation') AS isolation,
                    pg_advisory_xact_lock_shared(
                      hashtextextended(${slotlockTenantLockKey(tenantRef)}, 0)
                    ) AS locked`;
           const [context] = await tx<{ suspended: boolean }[]>`
             SELECT set_config(${configuredTenantSetting}, ${tenantRef}, true) AS tenant,
+                   set_config('slotlock.actor', ${actor ?? ''}, true) AS actor,
                    slotlock.tenant_suspended(${tenantRef}) AS suspended`.catch((error: unknown) => {
             throw suspensionCheckRefusal(error);
           });
@@ -3180,7 +3196,8 @@ function buildSlotlockStore(
             if (pgCode(error) === LOCK_NOT_AVAILABLE) timedOut = true;
             throw error;
           } finally {
-            await tx`SELECT set_config(${configuredTenantSetting}, ${previous[0]?.value ?? ''}, true)`;
+            await tx`SELECT set_config(${configuredTenantSetting}, ${previous[0]?.value ?? ''}, true),
+                            set_config('slotlock.actor', ${previous[0]?.actor ?? ''}, true)`;
           }
         },
         'read committed',

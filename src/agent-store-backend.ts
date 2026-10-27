@@ -95,8 +95,16 @@ const WRITE = { isolation: 'read committed' } as const;
 
 /** What tenant scoping needs of an agent or application call. */
 interface TenantCallContext {
-  principal: { tenantRef: string };
+  principal: { tenantRef: string; subject?: string };
   signal: AbortSignal;
+}
+
+/** Who a call's changes are recorded as in the history: the principal's subject, kept short. */
+function actorOf(context: TenantCallContext): string | undefined {
+  const subject = context.principal.subject;
+  if (typeof subject !== 'string' || subject.length === 0) return undefined;
+  const clean = subject.replace(/[\u0000-\u001f\u007f]/g, '');
+  return clean.length === 0 ? undefined : clean.slice(0, 200);
 }
 
 function assertActive(context: TenantCallContext): void {
@@ -112,9 +120,11 @@ async function withTenant<T>(
   assertActive(context);
   let value: T;
   try {
+    const actor = actorOf(context);
     value = await store.withTenant(context.principal.tenantRef, callback, {
       ...options,
       signal: context.signal,
+      ...(actor !== undefined ? { actor } : {}),
     });
   } catch (error) {
     const code = (error as { code?: unknown } | null)?.code;
@@ -1246,6 +1256,35 @@ export function createSlotlockStoreApplicationBackend(
   const tenantErasure = options.tenantErasure === true;
   const tenantOf = (context: SlotlockApplicationInvocationContext) => context.principal.tenantRef;
 
+  async function history(context: SlotlockApplicationInvocationContext, input: Record<string, unknown>) {
+    const page = {
+      tenantRef: tenantOf(context),
+      limit: input.limit as number,
+      ...(input.before !== undefined ? { before: input.before as string } : {}),
+    };
+    return withTenant(store, context, async (tenant) => {
+      let entries;
+      if (typeof input.resource_id === 'string') {
+        await requireResource(tenant, tenantOf(context), input.resource_id);
+        entries = await tenant.listHistory({ ...page, resourceId: input.resource_id });
+      } else {
+        const subject = (input.reservation_ref ?? input.event_id) as string;
+        entries = await tenant.listHistory({ ...page, subject });
+      }
+      const limit = input.limit as number;
+      return {
+        history: entries.map((entry) => ({
+          id: entry.id,
+          type: entry.type,
+          time: entry.occurredAt.toISOString(),
+          actor: entry.actor,
+          data: entry.data,
+        })),
+        next_before: entries.length === limit ? (entries.at(-1)?.id ?? null) : null,
+      };
+    });
+  }
+
   return {
     async createResource(context, input) {
       // A capped create counts under READ COMMITTED; withTenant opens it for the call.
@@ -1376,6 +1415,18 @@ export function createSlotlockStoreApplicationBackend(
         if (!resource) throw new SlotlockAgentOperationError('resource_not_found', 404);
         return { resource: resourceOutput(resource) };
       }, WRITE);
+    },
+
+    async getResourceHistory(context, input) {
+      return history(context, input);
+    },
+
+    async getReservationHistory(context, input) {
+      return history(context, input);
+    },
+
+    async getTenantEventHistory(context, input) {
+      return history(context, input);
     },
 
     async listPools(context) {

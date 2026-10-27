@@ -12,6 +12,7 @@ import {
 } from '../store.js';
 
 const READS = [
+  'listHistory',
   'listPoolMembers',
   'listPools',
   'listChanges',

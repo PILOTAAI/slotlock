@@ -1039,6 +1039,12 @@ CREATE TABLE IF NOT EXISTS slotlock.outbox (
   CONSTRAINT slotlock_outbox_tenant_ref_valid CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500),
   CONSTRAINT slotlock_outbox_type_valid CHECK (type ~ '^[a-z]+\\.[a-z_]+$')
 );
+-- Who made the change (withTenant's actor: an API key, an agent), for the history.
+ALTER TABLE slotlock.outbox ADD COLUMN IF NOT EXISTS actor text;
+CREATE INDEX IF NOT EXISTS slotlock_outbox_tenant_resource_idx
+  ON slotlock.outbox (tenant_ref, resource_id, id) WHERE resource_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS slotlock_outbox_tenant_subject_idx
+  ON slotlock.outbox (tenant_ref, subject, id);
 CREATE INDEX IF NOT EXISTS slotlock_outbox_tenant_position_idx
   ON slotlock.outbox (tenant_ref, txid, id);
 CREATE INDEX IF NOT EXISTS slotlock_outbox_tenant_time_idx
@@ -1127,7 +1133,7 @@ BEGIN
       ELSE 'hold.released'
     END;
   END IF;
-  INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data)
+  INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
   VALUES (
     owner, changed.resource_id, kind,
     COALESCE(changed.external_ref, changed.id::text),
@@ -1139,8 +1145,13 @@ BEGIN
       'end', changed.ends_at,
       'buffer_after_ms', changed.buffer_after_ms,
       'revision', CASE WHEN changed.status = 'held' THEN NULL ELSE changed.revision END,
-      'expires_at', CASE WHEN changed.status = 'held' THEN changed.expires_at END
-    ))
+      'expires_at', CASE WHEN changed.status = 'held' THEN changed.expires_at END,
+      -- A move says where it came from.
+      'before', CASE WHEN TG_OP = 'UPDATE' THEN jsonb_build_object(
+        'resource_id', OLD.resource_id, 'start', OLD.starts_at, 'end', OLD.ends_at,
+        'revision', OLD.revision) END
+    )),
+    NULLIF(current_setting('slotlock.actor', true), '')
   );
   RETURN NULL;
 END
@@ -1172,7 +1183,7 @@ BEGIN
   ELSE
     kind := 'event.cancelled';
   END IF;
-  INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data)
+  INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
   VALUES (
     changed.tenant_ref, changed.resource_id, kind, changed.id::text,
     jsonb_strip_nulls(jsonb_build_object(
@@ -1184,8 +1195,12 @@ BEGIN
       'status', changed.status,
       'transparency', changed.transparency,
       'recurring', changed.recurrence_rule IS NOT NULL,
-      'revision', changed.revision
-    ))
+      'revision', changed.revision,
+      'before', CASE WHEN TG_OP = 'UPDATE' THEN jsonb_build_object(
+        'resource_id', OLD.resource_id, 'start', OLD.starts_at, 'end', OLD.ends_at,
+        'status', OLD.status, 'transparency', OLD.transparency, 'revision', OLD.revision) END
+    )),
+    NULLIF(current_setting('slotlock.actor', true), '')
   );
   RETURN NULL;
 END

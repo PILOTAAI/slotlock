@@ -828,7 +828,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       );
       expect(await rest('GET', '/v1/changes?cursor=nope')).toMatchObject({ status: 400, body: { code: 'invalid_cursor' } });
       // A cursor past the 7 days the feed keeps is gone, not a server fault.
-      const old = Buffer.from(`1:1:1:${Date.now() - 8 * 86_400_000}`).toString('base64url');
+      const old = Buffer.from(`1:1:1:${Date.now() - 31 * 86_400_000}`).toString('base64url');
       expect(await rest('GET', `/v1/changes?cursor=${old}`)).toMatchObject({
         status: 410,
         body: { code: 'cursor_expired', title: 'Gone' },

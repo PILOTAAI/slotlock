@@ -33,6 +33,9 @@ var operations = func() map[string]operation {
 		{name: "slotlock_set_resource_booking_rules", method: "PUT", path: "/v1/resources/{resource_id}/booking-rules", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_set_resource_pool", method: "PUT", path: "/v1/resources/{resource_id}/pool", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_list_pools", method: "GET", path: "/v1/pools", pathParams: nil, query: nil},
+		{name: "slotlock_get_resource_history", method: "GET", path: "/v1/resources/{resource_id}/history", pathParams: []string{"resource_id"}, query: []string{"limit", "before"}},
+		{name: "slotlock_get_reservation_history", method: "GET", path: "/v1/reservations/{reservation_ref}/history", pathParams: []string{"reservation_ref"}, query: []string{"limit", "before"}},
+		{name: "slotlock_get_tenant_event_history", method: "GET", path: "/v1/tenant/events/{event_id}/history", pathParams: []string{"event_id"}, query: []string{"limit", "before"}},
 		{name: "slotlock_set_tenant_availability", method: "PUT", path: "/v1/availability", pathParams: nil, query: nil},
 		{name: "slotlock_acquire_hold", method: "POST", path: "/v1/holds", pathParams: nil, query: nil},
 		{name: "slotlock_get_hold", method: "GET", path: "/v1/holds/{hold_id}", pathParams: []string{"hold_id"}, query: nil},
@@ -773,6 +776,90 @@ func (c *Client) ListPools(ctx context.Context, in ListPoolsInput) (map[string]a
 	return c.Call(ctx, "slotlock_list_pools", in.values())
 }
 
+// GetResourceHistoryInput holds the arguments of [Client.GetResourceHistory].
+type GetResourceHistoryInput struct {
+	ResourceID string
+
+	Limit *int64
+
+	Before *string
+}
+
+func (in GetResourceHistoryInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_id"] = in.ResourceID
+	if in.Limit != nil {
+		values["limit"] = *in.Limit
+	}
+	if in.Before != nil {
+		values["before"] = *in.Before
+	}
+	return values
+}
+
+// GetResourceHistory: A resource's history. What happened on one of the tenant's resources,
+// newest first: each hold, booking and event made, moved, confirmed, released or cancelled, when,
+// by whom (the API key or agent), and for a change what it was before. Kept 30 days. Pass
+// next_before as before for older entries.
+func (c *Client) GetResourceHistory(ctx context.Context, in GetResourceHistoryInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_get_resource_history", in.values())
+}
+
+// GetReservationHistoryInput holds the arguments of [Client.GetReservationHistory].
+type GetReservationHistoryInput struct {
+	ReservationRef string
+
+	Limit *int64
+
+	Before *string
+}
+
+func (in GetReservationHistoryInput) values() map[string]any {
+	values := map[string]any{}
+	values["reservation_ref"] = in.ReservationRef
+	if in.Limit != nil {
+		values["limit"] = *in.Limit
+	}
+	if in.Before != nil {
+		values["before"] = *in.Before
+	}
+	return values
+}
+
+// GetReservationHistory: A booking's history. What happened to one booking, by its reference,
+// newest first: made, moved, cancelled, when and by whom, as slotlock_get_resource_history.
+func (c *Client) GetReservationHistory(ctx context.Context, in GetReservationHistoryInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_get_reservation_history", in.values())
+}
+
+// GetTenantEventHistoryInput holds the arguments of [Client.GetTenantEventHistory].
+type GetTenantEventHistoryInput struct {
+	EventID string
+
+	Limit *int64
+
+	Before *string
+}
+
+func (in GetTenantEventHistoryInput) values() map[string]any {
+	values := map[string]any{}
+	values["event_id"] = in.EventID
+	if in.Limit != nil {
+		values["limit"] = *in.Limit
+	}
+	if in.Before != nil {
+		values["before"] = *in.Before
+	}
+	return values
+}
+
+// GetTenantEventHistory: An event's history. What happened to one calendar event of the tenant,
+// by its id, newest first: created, changed, cancelled, when and by whom, as
+// slotlock_get_resource_history.
+func (c *Client) GetTenantEventHistory(ctx context.Context, in GetTenantEventHistoryInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_get_tenant_event_history", in.values())
+}
+
 // SetTenantAvailabilityInput holds the arguments of [Client.SetTenantAvailability].
 type SetTenantAvailabilityInput struct {
 	Rules Nullable[[]map[string]any]
@@ -1234,7 +1321,7 @@ func (in ListChangesInput) values() map[string]any {
 // created, changed or cancelled (ids, times and states, never titles or attendees). Pass
 // next_cursor as cursor to read on; it is returned even when nothing is new, so poll with it.
 // Only changes of transactions that have ended are listed, so following the cursor never skips
-// one. Changes are kept 7 days: an older cursor answers 410 cursor_expired, so start again
+// one. Changes are kept 30 days: an older cursor answers 410 cursor_expired, so start again
 // without one.
 func (c *Client) ListChanges(ctx context.Context, in ListChangesInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_list_changes", in.values())
@@ -1310,7 +1397,7 @@ func (in EnableWebhookInput) values() map[string]any {
 
 // EnableWebhook: Enable a webhook. Send to a disabled webhook again, from the first change it did
 // not accept. 404 webhook_not_found when the tenant has no such webhook; 409 changes_pruned when
-// what it missed is older than the 7 days the feed keeps, since it would skip those unseen:
+// what it missed is older than the 30 days the feed keeps, since it would skip those unseen:
 // delete it, add it again, and read what it missed from slotlock_list_changes.
 func (c *Client) EnableWebhook(ctx context.Context, in EnableWebhookInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_enable_webhook", in.values())

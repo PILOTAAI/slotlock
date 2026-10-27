@@ -5609,6 +5609,419 @@
         }
       }
     },
+    "/v1/resources/{resource_id}/history": {
+      "get": {
+        "operationId": "slotlock_get_resource_history",
+        "summary": "A resource's history",
+        "description": "What happened on one of the tenant's resources, newest first: each hold, booking and event made, moved, confirmed, released or cancelled, when, by whom (the API key or agent), and for a change what it was before. Kept 30 days. Pass next_before as before for older entries.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "parameters": [
+          {
+            "name": "resource_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^msg_[0-9]{1,19}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "history": {
+                      "maxItems": 100,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "maxLength": 40
+                          },
+                          "type": {
+                            "type": "string",
+                            "maxLength": 100
+                          },
+                          "time": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "actor": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 200
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "data": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string"
+                            },
+                            "additionalProperties": {}
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "type",
+                          "time",
+                          "actor",
+                          "data"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "next_before": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 40
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "history",
+                    "next_before"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/reservations/{reservation_ref}/history": {
+      "get": {
+        "operationId": "slotlock_get_reservation_history",
+        "summary": "A booking's history",
+        "description": "What happened to one booking, by its reference, newest first: made, moved, cancelled, when and by whom, as slotlock_get_resource_history.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "parameters": [
+          {
+            "name": "reservation_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^msg_[0-9]{1,19}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "history": {
+                      "maxItems": 100,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "maxLength": 40
+                          },
+                          "type": {
+                            "type": "string",
+                            "maxLength": 100
+                          },
+                          "time": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "actor": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 200
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "data": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string"
+                            },
+                            "additionalProperties": {}
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "type",
+                          "time",
+                          "actor",
+                          "data"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "next_before": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 40
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "history",
+                    "next_before"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/tenant/events/{event_id}/history": {
+      "get": {
+        "operationId": "slotlock_get_tenant_event_history",
+        "summary": "An event's history",
+        "description": "What happened to one calendar event of the tenant, by its id, newest first: created, changed, cancelled, when and by whom, as slotlock_get_resource_history.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^msg_[0-9]{1,19}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "history": {
+                      "maxItems": 100,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "maxLength": 40
+                          },
+                          "type": {
+                            "type": "string",
+                            "maxLength": 100
+                          },
+                          "time": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "actor": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 200
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "data": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string"
+                            },
+                            "additionalProperties": {}
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "type",
+                          "time",
+                          "actor",
+                          "data"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "next_before": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 40
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "history",
+                    "next_before"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/v1/availability": {
       "put": {
         "operationId": "slotlock_set_tenant_availability",
@@ -8146,7 +8559,7 @@
       "get": {
         "operationId": "slotlock_list_changes",
         "summary": "List changes",
-        "description": "What changed in the tenant, oldest first, as CloudEvents: holds made, confirmed, released or expired; bookings made, moved or cancelled; calendar events created, changed or cancelled (ids, times and states, never titles or attendees). Pass next_cursor as cursor to read on; it is returned even when nothing is new, so poll with it. Only changes of transactions that have ended are listed, so following the cursor never skips one. Changes are kept 7 days: an older cursor answers 410 cursor_expired, so start again without one.",
+        "description": "What changed in the tenant, oldest first, as CloudEvents: holds made, confirmed, released or expired; bookings made, moved or cancelled; calendar events created, changed or cancelled (ids, times and states, never titles or attendees). Pass next_cursor as cursor to read on; it is returned even when nothing is new, so poll with it. Only changes of transactions that have ended are listed, so following the cursor never skips one. Changes are kept 30 days: an older cursor answers 410 cursor_expired, so start again without one.",
         "tags": [
           "Application"
         ],
@@ -8732,7 +9145,7 @@
       "post": {
         "operationId": "slotlock_enable_webhook",
         "summary": "Enable a webhook",
-        "description": "Send to a disabled webhook again, from the first change it did not accept. 404 webhook_not_found when the tenant has no such webhook; 409 changes_pruned when what it missed is older than the 7 days the feed keeps, since it would skip those unseen: delete it, add it again, and read what it missed from slotlock_list_changes.",
+        "description": "Send to a disabled webhook again, from the first change it did not accept. 404 webhook_not_found when the tenant has no such webhook; 409 changes_pruned when what it missed is older than the 30 days the feed keeps, since it would skip those unseen: delete it, add it again, and read what it missed from slotlock_list_changes.",
         "tags": [
           "Application"
         ],
