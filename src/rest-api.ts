@@ -39,6 +39,7 @@ export const SLOTLOCK_REST_ROUTES: readonly SlotlockRestRoute[] = Object.freeze(
     refusals: [404],
   },
   { method: 'POST', path: '/v1/slot-holds', operation: 'slotlock_hold_slots', refusals: [409] },
+  { method: 'POST', path: '/v1/bundles', operation: 'slotlock_book_together', refusals: [404, 409] },
   {
     method: 'DELETE',
     path: '/v1/slot-holds/{hold_id}',

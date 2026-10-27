@@ -19,6 +19,7 @@ export const SUMMARIES = {
   slotlock_hold_slots:
     'Hold up to five candidate slots for a few minutes while a person chooses, as one group.',
   slotlock_release_slots: 'Release one of your holds and the rest of its group at once.',
+  slotlock_book_together: 'Book the same time on 2-20 resources at once, all or none.',
   slotlock_create_event:
     'Book time on a resource. If the time is taken, the database refuses it with `overlap`.',
   slotlock_get_event: 'Read one event this caller created.',
@@ -37,6 +38,8 @@ export const DETAILS = {
     'Each slot is free of busy time and inside the resource’s bookable hours, found the way `slotlock_find_next_available` finds one, and they never overlap on one resource. The list is empty unless the coverage of every resource asked about is `certain`. In an MCP Apps host the calendar view lets the person pick one, and sends the agent a message naming it.',
   slotlock_hold_slots:
     'Each free candidate is held for `ttl_seconds`, busy for everyone else; a taken one is listed in `refused` with its code. Book one with `slotlock_create_event`’s `hold_id`: the others are released in the same transaction. A hold is yours alone, and one agent may have 20 live at once.',
+  slotlock_book_together:
+    'One event per resource, in one transaction: if any resource is taken or breaks its booking rules, nothing is booked and the refusal names that `resource_id`. Bundles take their resources in one order, so two racing over the same ones end with one booked and one refused, never stuck. Find the time first with `slotlock_find_available_slots` and `require_free`.',
   slotlock_release_slots:
     'Holds expire on their own; release them when the person walks away, so the time is free sooner.',
   slotlock_create_event:
@@ -77,6 +80,9 @@ export const INPUT_NOTES = {
   'slotlock_create_event.hold_id':
     'One of your live holds from `slotlock_hold_slots` covering this time: the event takes its place and its group is released, without judging notice again.',
   'slotlock_hold_slots.slots': 'The candidates, for example the times you offered.',
+  'slotlock_find_available_slots.require_free':
+    'Only times when at least this many of `resource_ids` are free together: all of them for a bundle, or any n.',
+  'slotlock_book_together.resource_ids': 'Every resource to book: `id`s from `slotlock_list_resources`.',
   'slotlock_hold_slots.ttl_seconds': 'How long each hold lasts, by the database clock.',
   'slotlock_release_slots.hold_id': 'Any `hold_id` of the group.',
   'slotlock_update_event.resource_id': 'Moves the event to this resource.',
@@ -112,6 +118,9 @@ export const OUTPUT_NOTES = {
   'slotlock_find_next_available.start': 'Start of the slot, or `null`.',
   'slotlock_find_next_available.end': 'End of the slot, or `null`.',
   'slotlock_find_available_slots.slots': 'Earliest first; on one resource, back to back at most.',
+  'slotlock_find_available_slots.slots[].resource_ids':
+    'With `require_free`: the resources free together for this slot.',
+  'slotlock_book_together.events': 'One per resource, by resource id.',
   'slotlock_hold_slots.group_id': 'Shared by the holds this call made.',
   'slotlock_hold_slots.holds': 'The candidates held, in the order sent.',
   'slotlock_hold_slots.refused': 'The candidates not held, by `index` in `slots`, with why.',
@@ -155,9 +164,20 @@ export const TOOL_ERRORS = {
   slotlock_list_resources: [],
   slotlock_get_free_busy: ['resource_not_found'],
   slotlock_find_next_available: ['resource_not_found'],
-  slotlock_find_available_slots: ['resource_not_found'],
+  slotlock_find_available_slots: ['resource_not_found', 'invalid_arguments'],
   slotlock_hold_slots: ['holds_unavailable', 'idempotency_conflict'],
   slotlock_release_slots: ['holds_unavailable'],
+  slotlock_book_together: [
+    'overlap',
+    'resource_not_found',
+    'idempotency_conflict',
+    'booking_rule_min_notice',
+    'booking_rule_max_advance',
+    'booking_rule_slot_step',
+    'booking_rule_outside_hours',
+    'bundles_unavailable',
+    'owner_event_quota_exceeded',
+  ],
   slotlock_create_event: [
     'overlap',
     'idempotency_conflict',

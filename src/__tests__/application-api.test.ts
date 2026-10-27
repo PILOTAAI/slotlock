@@ -520,6 +520,7 @@ describe('the application API over REST', () => {
       .sort();
     expect(headed).toEqual([
       'slotlock_acquire_hold',
+      'slotlock_book_together',
       'slotlock_cancel_tenant_event',
       'slotlock_create_event',
       'slotlock_delete_event',

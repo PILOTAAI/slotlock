@@ -16,8 +16,9 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_create_resource", new Operation("POST", "/v1/resources", List.of(), List.of())),
           Map.entry("slotlock_get_free_busy", new Operation("GET", "/v1/free-busy", List.of(), List.of("resource_ids", "start", "end"))),
           Map.entry("slotlock_find_next_available", new Operation("GET", "/v1/next-available", List.of(), List.of("resource_ids", "start", "end", "duration_minutes"))),
-          Map.entry("slotlock_find_available_slots", new Operation("GET", "/v1/available-slots", List.of(), List.of("resource_ids", "start", "end", "duration_minutes", "limit"))),
+          Map.entry("slotlock_find_available_slots", new Operation("GET", "/v1/available-slots", List.of(), List.of("resource_ids", "start", "end", "duration_minutes", "limit", "require_free"))),
           Map.entry("slotlock_hold_slots", new Operation("POST", "/v1/slot-holds", List.of(), List.of())),
+          Map.entry("slotlock_book_together", new Operation("POST", "/v1/bundles", List.of(), List.of())),
           Map.entry("slotlock_release_slots", new Operation("DELETE", "/v1/slot-holds/{hold_id}", List.of("hold_id"), List.of())),
           Map.entry("slotlock_list_events", new Operation("GET", "/v1/events", List.of(), List.of("resource_ids", "start", "end", "cursor", "limit"))),
           Map.entry("slotlock_create_event", new Operation("POST", "/v1/events", List.of(), List.of())),
@@ -175,13 +176,17 @@ public abstract class SlotlockOperations {
   /**
    * Find available slots. List up to `limit` certain slots of the requested duration, earliest
    * first across the resources, each one free of busy time and inside the resource's hours, to
-   * offer a person a choice. No slot is listed unless every resource's coverage is certain.
+   * offer a person a choice. With require_free, only times when at least that many of the
+   * resources are free together, each slot naming them in resource_ids: every resource for a
+   * booking that needs them all (book it with slotlock_book_together), or any n of them. No slot
+   * is listed unless every resource's coverage is certain.
    *
    * @param resourceIds {@code resource_ids}, list of string
    * @param start {@code start}, string
    * @param end {@code end}, string
    * @param durationMinutes {@code duration_minutes}, integer
-   * @param optional the optional arguments, or null: {@code limit} (integer)
+   * @param optional the optional arguments, or null: {@code limit} (integer), {@code
+   * require_free} (integer)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -191,14 +196,17 @@ public abstract class SlotlockOperations {
     values.put("start", start);
     values.put("end", end);
     values.put("duration_minutes", durationMinutes);
-    putOptional(values, optional, Set.of("limit"), "slotlock_find_available_slots");
+    putOptional(values, optional, Set.of("limit", "require_free"), "slotlock_find_available_slots");
     return call("slotlock_find_available_slots", values);
   }
 
   /**
    * Find available slots. List up to `limit` certain slots of the requested duration, earliest
    * first across the resources, each one free of busy time and inside the resource's hours, to
-   * offer a person a choice. No slot is listed unless every resource's coverage is certain.
+   * offer a person a choice. With require_free, only times when at least that many of the
+   * resources are free together, each slot naming them in resource_ids: every resource for a
+   * booking that needs them all (book it with slotlock_book_together), or any n of them. No slot
+   * is listed unless every resource's coverage is certain.
    *
    * @param resourceIds {@code resource_ids}, list of string
    * @param start {@code start}, string
@@ -246,6 +254,50 @@ public abstract class SlotlockOperations {
    */
   public Map<String, Object> holdSlots(List<?> slots, String idempotencyKey) {
     return holdSlots(slots, idempotencyKey, null);
+  }
+
+  /**
+   * Book resources together. Book the same time on 2-20 resources at once, all or none: a van
+   * with its driver, a room with its projector. If any of them is taken, nothing is booked, and
+   * the refusal names that resource_id. Find such a time with slotlock_find_available_slots and
+   * require_free. A retry with the same idempotency_key answers the same events.
+   *
+   * @param resourceIds {@code resource_ids}, list of string
+   * @param startsAt {@code starts_at}, string
+   * @param endsAt {@code ends_at}, string
+   * @param timezone {@code timezone}, string
+   * @param idempotencyKey {@code idempotency_key}, string
+   * @param optional the optional arguments, or null: {@code title} (string)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> bookTogether(List<?> resourceIds, String startsAt, String endsAt, String timezone, String idempotencyKey, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("resource_ids", resourceIds);
+    values.put("starts_at", startsAt);
+    values.put("ends_at", endsAt);
+    values.put("timezone", timezone);
+    values.put("idempotency_key", idempotencyKey);
+    putOptional(values, optional, Set.of("title"), "slotlock_book_together");
+    return call("slotlock_book_together", values);
+  }
+
+  /**
+   * Book resources together. Book the same time on 2-20 resources at once, all or none: a van
+   * with its driver, a room with its projector. If any of them is taken, nothing is booked, and
+   * the refusal names that resource_id. Find such a time with slotlock_find_available_slots and
+   * require_free. A retry with the same idempotency_key answers the same events.
+   *
+   * @param resourceIds {@code resource_ids}, list of string
+   * @param startsAt {@code starts_at}, string
+   * @param endsAt {@code ends_at}, string
+   * @param timezone {@code timezone}, string
+   * @param idempotencyKey {@code idempotency_key}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> bookTogether(List<?> resourceIds, String startsAt, String endsAt, String timezone, String idempotencyKey) {
+    return bookTogether(resourceIds, startsAt, endsAt, timezone, idempotencyKey, null);
   }
 
   /**

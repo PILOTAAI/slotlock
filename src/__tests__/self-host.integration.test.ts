@@ -324,7 +324,12 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         mcp: 'http://localhost:8080/mcp',
         a2a: 'http://localhost:8080/a2a',
         tenant: tenantRef,
-        confirm_writes: ['slotlock_create_event', 'slotlock_update_event', 'slotlock_delete_event'],
+        confirm_writes: [
+          'slotlock_create_event',
+          'slotlock_book_together',
+          'slotlock_update_event',
+          'slotlock_delete_event',
+        ],
         availability_rules: 1,
         rest: 'http://localhost:8080/openapi.json',
         maintenance_interval_minutes: 60,
@@ -396,6 +401,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         ({ name }) => name,
       );
       expect(toolNames.sort()).toEqual([
+        'slotlock_book_together',
         'slotlock_create_event',
         'slotlock_delete_event',
         'slotlock_find_available_slots',

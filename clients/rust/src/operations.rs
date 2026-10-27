@@ -41,12 +41,19 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "GET",
         path: "/v1/available-slots",
         path_params: &[],
-        query: &["resource_ids", "start", "end", "duration_minutes", "limit"],
+        query: &["resource_ids", "start", "end", "duration_minutes", "limit", "require_free"],
     },
     Operation {
         name: "slotlock_hold_slots",
         method: "POST",
         path: "/v1/slot-holds",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_book_together",
+        method: "POST",
+        path: "/v1/bundles",
         path_params: &[],
         query: &[],
     },
@@ -342,6 +349,8 @@ pub struct FindAvailableSlotsInput {
     pub duration_minutes: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_free: Option<i64>,
 }
 
 /// The arguments of [`Client::hold_slots`].
@@ -351,6 +360,18 @@ pub struct HoldSlotsInput {
     pub idempotency_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl_seconds: Option<i64>,
+}
+
+/// The arguments of [`Client::book_together`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BookTogetherInput {
+    pub resource_ids: Vec<String>,
+    pub starts_at: String,
+    pub ends_at: String,
+    pub timezone: String,
+    pub idempotency_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// The arguments of [`Client::release_slots`].
@@ -723,7 +744,10 @@ impl Client {
     ///
     /// List up to `limit` certain slots of the requested duration, earliest first across the
     /// resources, each one free of busy time and inside the resource's hours, to offer a person a
-    /// choice. No slot is listed unless every resource's coverage is certain.
+    /// choice. With require_free, only times when at least that many of the resources are free
+    /// together, each slot naming them in resource_ids: every resource for a booking that needs
+    /// them all (book it with slotlock_book_together), or any n of them. No slot is listed unless
+    /// every resource's coverage is certain.
     pub fn find_available_slots(&self, input: &FindAvailableSlotsInput) -> Result<Value, Error> {
         self.call("slotlock_find_available_slots", serde_json::to_value(input)?)
     }
@@ -737,6 +761,16 @@ impl Client {
     /// once.
     pub fn hold_slots(&self, input: &HoldSlotsInput) -> Result<Value, Error> {
         self.call("slotlock_hold_slots", serde_json::to_value(input)?)
+    }
+
+    /// Book resources together.
+    ///
+    /// Book the same time on 2-20 resources at once, all or none: a van with its driver, a room
+    /// with its projector. If any of them is taken, nothing is booked, and the refusal names that
+    /// resource_id. Find such a time with slotlock_find_available_slots and require_free. A retry
+    /// with the same idempotency_key answers the same events.
+    pub fn book_together(&self, input: &BookTogetherInput) -> Result<Value, Error> {
+        self.call("slotlock_book_together", serde_json::to_value(input)?)
     }
 
     /// Release held slots.

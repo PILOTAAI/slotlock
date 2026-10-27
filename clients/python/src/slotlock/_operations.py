@@ -41,12 +41,19 @@ OPERATIONS: dict[str, Operation] = {
         "GET",
         "/v1/available-slots",
         (),
-        ("resource_ids", "start", "end", "duration_minutes", "limit"),
+        ("resource_ids", "start", "end", "duration_minutes", "limit", "require_free"),
     ),
     "slotlock_hold_slots": Operation(
         "slotlock_hold_slots",
         "POST",
         "/v1/slot-holds",
+        (),
+        (),
+    ),
+    "slotlock_book_together": Operation(
+        "slotlock_book_together",
+        "POST",
+        "/v1/bundles",
         (),
         (),
     ),
@@ -376,12 +383,16 @@ class Operations(Transport):
         end: str,
         duration_minutes: int,
         limit: int | None = None,
+        require_free: int | None = None,
     ) -> dict[str, Any]:
         """Find available slots.
 
         List up to `limit` certain slots of the requested duration, earliest first across the
         resources, each one free of busy time and inside the resource's hours, to offer a person a
-        choice. No slot is listed unless every resource's coverage is certain.
+        choice. With require_free, only times when at least that many of the resources are free
+        together, each slot naming them in resource_ids: every resource for a booking that needs
+        them all (book it with slotlock_book_together), or any n of them. No slot is listed unless
+        every resource's coverage is certain.
         """
         values: dict[str, Any] = {
             "resource_ids": resource_ids,
@@ -391,6 +402,8 @@ class Operations(Transport):
         }
         if limit is not None:
             values["limit"] = limit
+        if require_free is not None:
+            values["require_free"] = require_free
         return self.call("slotlock_find_available_slots", values)
 
     def hold_slots(
@@ -412,6 +425,34 @@ class Operations(Transport):
         if ttl_seconds is not None:
             values["ttl_seconds"] = ttl_seconds
         return self.call("slotlock_hold_slots", values)
+
+    def book_together(
+        self,
+        *,
+        resource_ids: list[str],
+        starts_at: str,
+        ends_at: str,
+        timezone: str,
+        idempotency_key: str,
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        """Book resources together.
+
+        Book the same time on 2-20 resources at once, all or none: a van with its driver, a room
+        with its projector. If any of them is taken, nothing is booked, and the refusal names that
+        resource_id. Find such a time with slotlock_find_available_slots and require_free. A retry
+        with the same idempotency_key answers the same events.
+        """
+        values: dict[str, Any] = {
+            "resource_ids": resource_ids,
+            "starts_at": starts_at,
+            "ends_at": ends_at,
+            "timezone": timezone,
+            "idempotency_key": idempotency_key,
+        }
+        if title is not None:
+            values["title"] = title
+        return self.call("slotlock_book_together", values)
 
     def release_slots(self, hold_id: str) -> dict[str, Any]:
         """Release held slots.

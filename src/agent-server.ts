@@ -142,6 +142,16 @@ function holdSlots(
   return backend.holdSlots(context, input);
 }
 
+/** `slotlock_book_together`, from a backend that books bundles, as `holdSlots`. */
+function bookTogether(
+  backend: SlotlockAgentCalendarBackend,
+  context: SlotlockAgentInvocationContext,
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  if (!backend.bookTogether) throw new SlotlockAgentOperationError('bundles_unavailable', 409);
+  return backend.bookTogether(context, input);
+}
+
 /** `slotlock_release_slots`, as `holdSlots`. */
 function releaseSlots(
   backend: SlotlockAgentCalendarBackend,
@@ -150,6 +160,62 @@ function releaseSlots(
 ): Promise<Record<string, unknown>> {
   if (!backend.releaseSlots) throw new SlotlockAgentOperationError('holds_unavailable', 409);
   return backend.releaseSlots(context, input);
+}
+
+/** Next-available searches one collective search may make, across its resources. */
+const MAX_TOGETHER_SEARCHES = 500;
+
+/**
+ * Times when at least `needed` of the resources are free together for the duration, earliest
+ * first. Each resource's next certain start at or after a candidate time comes from the backend's
+ * own search (hours, booking rules, coverage, as a single answer judges them); the candidate is
+ * the `needed`-th earliest of those starts, and it is a slot when that many start there. Otherwise
+ * the search moves on to it, where the resources that start earlier are asked again. A resource's
+ * start stays valid until the candidate passes it, so most are asked once per slot at most.
+ */
+async function freeTogether(
+  resourceIds: readonly string[],
+  needed: number,
+  next: (
+    resourceId: string,
+    from: string,
+  ) => Promise<{ resource_id: string; start: string; end: string } | null | 'uncertain'>,
+  options: { window: { start: Date; end: Date }; durationMs: number; limit: number },
+): Promise<{ resource_id: string; start: string; end: string; resource_ids: string[] }[] | 'uncertain'> {
+  if (needed > resourceIds.length) throw new SlotlockAgentOperationError('invalid_arguments', 400);
+  const known = new Map<string, number | null>();
+  const slots: { resource_id: string; start: string; end: string; resource_ids: string[] }[] = [];
+  let from = options.window.start.getTime();
+  let searches = 0;
+  while (slots.length < options.limit && from + options.durationMs <= options.window.end.getTime()) {
+    for (const resourceId of resourceIds) {
+      const start = known.get(resourceId);
+      if (start === null || (start !== undefined && start >= from)) continue;
+      if (++searches > MAX_TOGETHER_SEARCHES) return slots;
+      const found = await next(resourceId, new Date(from).toISOString());
+      if (found === 'uncertain') return 'uncertain';
+      known.set(resourceId, found ? Date.parse(found.start) : null);
+    }
+    const starts = resourceIds
+      .map((resourceId) => known.get(resourceId))
+      .filter((start): start is number => typeof start === 'number')
+      .sort((a, b) => a - b);
+    const candidate = starts[needed - 1];
+    if (candidate === undefined) return slots;
+    const free = resourceIds.filter((resourceId) => known.get(resourceId) === candidate);
+    if (free.length >= needed) {
+      slots.push({
+        resource_id: free[0] as string,
+        start: new Date(candidate).toISOString(),
+        end: new Date(candidate + options.durationMs).toISOString(),
+        resource_ids: free,
+      });
+      from = candidate + options.durationMs;
+    } else {
+      from = candidate;
+    }
+  }
+  return slots;
 }
 
 /**
@@ -189,10 +255,21 @@ async function findAvailableSlots(
       ? { resource_id: resourceId, start: found.start, end: found.end }
       : null;
   };
+  const resourceIds = [...new Set(input.resource_ids as string[])];
+  if (typeof input.require_free === 'number') {
+    const together = await freeTogether(resourceIds, input.require_free as number, next, {
+      window,
+      durationMs,
+      limit,
+    });
+    return together === 'uncertain'
+      ? { slots: [], coverage: coverage(false) }
+      : { slots: together, coverage: coverage(true) };
+  }
   const earliest = (a: Slot, b: Slot) =>
     Date.parse(a.start) - Date.parse(b.start) || a.resource_id.localeCompare(b.resource_id);
   const heads: Slot[] = [];
-  for (const resourceId of new Set(input.resource_ids as string[])) {
+  for (const resourceId of resourceIds) {
     const head = await next(resourceId, window.start.toISOString());
     if (head === 'uncertain') return { slots: [], coverage: coverage(false) };
     if (head) heads.push(head);
@@ -310,6 +387,7 @@ export type SlotlockAgentOperation =
   | 'slotlock_find_available_slots'
   | 'slotlock_hold_slots'
   | 'slotlock_release_slots'
+  | 'slotlock_book_together'
   | 'slotlock_create_event'
   | 'slotlock_get_event'
   | 'slotlock_list_events'
@@ -355,6 +433,7 @@ const OPERATION_SCOPES: Readonly<Record<SlotlockAgentOperation, SlotlockAgentSco
   slotlock_find_next_available: 'read',
   slotlock_find_available_slots: 'read',
   slotlock_hold_slots: 'write',
+  slotlock_book_together: 'write',
   slotlock_release_slots: 'write',
   slotlock_create_event: 'write',
   slotlock_get_event: 'read',
@@ -406,12 +485,28 @@ export interface SlotlockAgentInvocationContext {
 export class SlotlockAgentOperationError extends Error {
   readonly code: string;
   readonly status: number;
+  /**
+   * What the refusal is about, beside its code (the resource a bundle was refused on, say): at most
+   * five snake_case names with text values of up to 200 characters; anything else is dropped. Every
+   * protocol carries them next to `code`.
+   */
+  readonly details?: Readonly<Record<string, string>>;
 
-  constructor(code: string, status: number) {
+  constructor(code: string, status: number, details?: Record<string, string>) {
     super(code);
     this.name = 'SlotlockAgentOperationError';
     this.code = /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : 'operation_failed';
     this.status = [400, 403, 404, 409, 410, 429, 503].includes(status) ? status : 500;
+    const kept = Object.entries(details ?? {})
+      .filter(
+        ([name, value]) =>
+          /^[a-z][a-z0-9_]{0,39}$/.test(name) &&
+          name !== 'code' &&
+          typeof value === 'string' &&
+          value.length <= 200,
+      )
+      .slice(0, 5);
+    if (kept.length > 0) this.details = Object.freeze(Object.fromEntries(kept));
   }
 }
 
@@ -467,6 +562,14 @@ export interface SlotlockAgentCalendarBackend {
     context: SlotlockAgentInvocationContext,
     input: Record<string, unknown>,
   ): Promise<Record<string, unknown>>;
+  /**
+   * Optional. Book one interval on several resources in one transaction, all or none
+   * (`slotlock_book_together`); a tool without it answers `bundles_unavailable`.
+   */
+  bookTogether?(
+    context: SlotlockAgentInvocationContext,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
   /** Optional. Release one of this principal's holds with its group (`slotlock_release_slots`). */
   releaseSlots?(
     context: SlotlockAgentInvocationContext,
@@ -495,7 +598,7 @@ export interface SlotlockAgentServerOAuthOptions {
 /** The operations that change a calendar; the only ones a confirmation can guard. */
 export type SlotlockAgentWriteOperation = Extract<
   SlotlockAgentOperation,
-  'slotlock_create_event' | 'slotlock_update_event' | 'slotlock_delete_event'
+  'slotlock_create_event' | 'slotlock_update_event' | 'slotlock_delete_event' | 'slotlock_book_together'
 >;
 
 /**
@@ -701,7 +804,7 @@ export interface SlotlockAgentOperationDispatchOptions {
 
 export type SlotlockAgentOperationDispatchResult =
   | { ok: true; data: Record<string, unknown> }
-  | { ok: false; status: number; code: string };
+  | { ok: false; status: number; code: string; details?: Readonly<Record<string, string>> };
 
 interface OperationDefinition {
   name: SlotlockAgentOperation;
@@ -845,7 +948,7 @@ const OPERATION_DEFINITIONS = [
     name: 'slotlock_find_available_slots',
     title: 'Find available slots',
     description:
-      'List up to `limit` certain slots of the requested duration, earliest first across the resources, each one free of busy time and inside the resource\'s hours, to offer a person a choice. No slot is listed unless every resource\'s coverage is certain.',
+      'List up to `limit` certain slots of the requested duration, earliest first across the resources, each one free of busy time and inside the resource\'s hours, to offer a person a choice. With require_free, only times when at least that many of the resources are free together, each slot naming them in resource_ids: every resource for a booking that needs them all (book it with slotlock_book_together), or any n of them. No slot is listed unless every resource\'s coverage is certain.',
     input: z
       .object({
         resource_ids: z.array(RESOURCE_ID).min(1).max(MAX_SLOT_RESOURCES),
@@ -853,13 +956,23 @@ const OPERATION_DEFINITIONS = [
         end: DATE_TIME,
         duration_minutes: z.number().int().min(1).max(MAX_SLOT_MINUTES),
         limit: z.number().int().min(1).max(MAX_LISTED_SLOTS).default(10),
+        require_free: z.number().int().min(1).max(MAX_SLOT_RESOURCES).optional(),
       })
       .strict()
       .refine(boundedAgentWindow),
     output: z
       .object({
         slots: z
-          .array(z.object({ resource_id: RESOURCE_ID, start: DATE_TIME, end: DATE_TIME }).strict())
+          .array(
+            z
+              .object({
+                resource_id: RESOURCE_ID,
+                start: DATE_TIME,
+                end: DATE_TIME,
+                resource_ids: z.array(RESOURCE_ID).min(1).max(MAX_SLOT_RESOURCES).optional(),
+              })
+              .strict(),
+          )
           .max(MAX_LISTED_SLOTS),
         coverage: COVERAGE,
       })
@@ -884,6 +997,36 @@ const OPERATION_DEFINITIONS = [
       timezone: 'Europe/London',
       title: 'Vehicle handover',
       idempotency_key: 'create-handover-2027-03-02',
+    },
+  },
+  {
+    name: 'slotlock_book_together',
+    title: 'Book resources together',
+    description:
+      'Book the same time on 2-20 resources at once, all or none: a van with its driver, a room with its projector. If any of them is taken, nothing is booked, and the refusal names that resource_id. Find such a time with slotlock_find_available_slots and require_free. A retry with the same idempotency_key answers the same events.',
+    input: z
+      .object({
+        resource_ids: z.array(RESOURCE_ID).min(2).max(MAX_SLOT_RESOURCES),
+        starts_at: DATE_TIME,
+        ends_at: DATE_TIME,
+        timezone: z.string().min(1).max(100),
+        title: z.string().trim().min(1).max(500).optional(),
+        idempotency_key: IDEMPOTENCY_KEY,
+      })
+      .strict()
+      .refine((value) => boundedEventSpan(value.starts_at, value.ends_at)),
+    output: z
+      .object({ events: z.array(EVENT).min(2).max(MAX_SLOT_RESOURCES), replayed: z.boolean() })
+      .strict(),
+    risk: { readOnly: false, destructive: false, idempotent: true },
+    invoke: bookTogether,
+    example: {
+      resource_ids: [EXAMPLE_RESOURCE_ID, '1f8b6c1e-2d4a-4c7e-9b1a-3e5f7a9c2d4b'],
+      starts_at: '2027-03-02T09:00:00Z',
+      ends_at: '2027-03-02T10:00:00Z',
+      timezone: 'Europe/London',
+      title: 'Handover with driver',
+      idempotency_key: 'bundle-handover-2027-03-02',
     },
   },
   {
@@ -1567,7 +1710,12 @@ export async function invokeSlotlockAgentOperation(args: {
     return { ok: true, data };
   } catch (error) {
     if (error instanceof SlotlockAgentOperationError) {
-      return { ok: false, status: error.status, code: error.code };
+      return {
+        ok: false,
+        status: error.status,
+        code: error.code,
+        ...(error.details ? { details: error.details } : {}),
+      };
     }
     reportUnexpected(args.options.onError, error, resolvedOperation);
     return { ok: false, status: 500, code: 'internal_error' };
@@ -1955,6 +2103,7 @@ const SLOTLOCK_MCP_INSTRUCTIONS = [
 
 const WRITE_OPERATIONS: ReadonlySet<SlotlockAgentOperation> = new Set([
   'slotlock_create_event',
+  'slotlock_book_together',
   'slotlock_update_event',
   'slotlock_delete_event',
 ]);
@@ -2440,6 +2589,19 @@ async function confirmationMessage(
   input: Record<string, unknown>,
   lookup: ConfirmationLookup,
 ): Promise<string> {
+  if (operation === 'slotlock_book_together') {
+    const ids = Array.isArray(input.resource_ids) ? (input.resource_ids as unknown[]) : [];
+    const resources = await Promise.all(ids.map((id) => lookup.resource(id)));
+    const zone = promptZone([
+      ...resources.map((resource) => [resource.timezone, true] as [unknown, boolean]),
+      [input.timezone, false],
+    ]);
+    const labels = resources.map((resource) => resource.label);
+    const all = labels.length > 1 ? `${labels.slice(0, -1).join(', ')} and ${labels.at(-1)}` : (labels[0] ?? '');
+    const title =
+      typeof input.title === 'string' && input.title.length > 0 ? `: ${promptQuoted(input.title)}` : '';
+    return `Book ${all} together, all or none, for ${promptRange(promptInstantOf(input.starts_at), promptInstantOf(input.ends_at), zone)}${title}.`;
+  }
   if (operation === 'slotlock_create_event') {
     const resource = await lookup.resource(input.resource_id);
     const zone = promptZone([
@@ -3005,7 +3167,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     }
     return modernResult(
       id,
-      slotlockMcpToolResult(outcome.ok ? outcome : { ok: false, code: outcome.code }),
+      slotlockMcpToolResult(outcome),
     );
   }
 
@@ -3488,7 +3650,12 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       return { ok: true, data };
     } catch (error) {
       if (error instanceof SlotlockAgentOperationError) {
-        return { ok: false, status: error.status, code: error.code };
+        return {
+          ok: false,
+          status: error.status,
+          code: error.code,
+          ...(error.details ? { details: error.details } : {}),
+        };
       }
       reportUnexpected(options.onError, error, definition.name);
       return { ok: false, status: 500, code: 'internal_error' };
@@ -3637,7 +3804,10 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     // The same key with another request is 422 (the Idempotency-Key draft); on MCP and A2A, where
     // no status is seen, it is the same code.
     if (outcome.code === 'idempotency_conflict') return refuse(422, outcome.code);
-    return refuse(status, outcome.code, {}, outcome.code === 'overlap' ? refusedInterval(given) : {});
+    return refuse(status, outcome.code, {}, {
+      ...(outcome.code === 'overlap' ? refusedInterval(given) : {}),
+      ...outcome.details,
+    });
   }
 
   return {
@@ -3906,7 +4076,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
             200,
             rpcResult(
               id,
-              slotlockMcpToolResult(outcome.ok ? outcome : { ok: false, code: outcome.code }),
+              slotlockMcpToolResult(outcome),
             ),
           );
         } catch {
@@ -4052,7 +4222,9 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
               role: 'ROLE_AGENT',
               parts: [
                 {
-                  data: outcome.ok ? outcome.data : { error: { code: outcome.code } },
+                  data: outcome.ok
+                    ? outcome.data
+                    : { error: { ...outcome.details, code: outcome.code } },
                   mediaType: 'application/json',
                 },
               ],

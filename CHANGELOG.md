@@ -7,6 +7,14 @@ versioning.
 
 ### Added
 
+- Bookings across resources: `slotlock_book_together` (REST `POST /v1/bundles`) books the same
+  time on 2-20 resources in one transaction, all or none, and its refusal names the `resource_id`
+  that refused; bundles lock in one order, so racing ones never deadlock. It is a write that
+  `SLOTLOCK_CONFIRM_WRITES` can guard. `slotlock_find_available_slots` takes `require_free` for
+  times when every resource, or any n, is free together, each slot naming them in `resource_ids`.
+  A backend of your own implements the optional `bookTogether`, else `bundles_unavailable`.
+- `SlotlockAgentOperationError` takes `details` (at most five short fields, such as
+  `resource_id`), which every protocol carries beside `code`.
 - An event feed and webhooks. Every committed change to a tenant's holds, bookings and calendar
   events is recorded in the same transaction by trigger: ids, times and states, never titles or
   attendees. `GET /v1/changes` (`slotlock_list_changes`, `listChanges`) lists them as CloudEvents

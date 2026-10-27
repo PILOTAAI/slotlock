@@ -212,6 +212,7 @@ describe('slotlock serve configuration', () => {
     const optedIn = readSlotlockServeConfig(serveEnv({ SLOTLOCK_CONFIRM_WRITES: 'all' }));
     expect(optedIn.confirmWrites).toEqual([
       'slotlock_create_event',
+      'slotlock_book_together',
       'slotlock_update_event',
       'slotlock_delete_event',
     ]);
