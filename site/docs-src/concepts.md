@@ -65,6 +65,8 @@ if (held.ok) await tenant.confirmHold(held.hold.id);
 
 - It expires on the database clock, after at most {{maxHoldDays}} days, and the next writer that
   wants its time removes it. No cron job.
+- The clock is read at each statement, so a hold that expires during your own long transaction is
+  expired inside it too.
 - `confirmHold` turns it into a reservation and is safe to retry; `releaseHold` frees it at once.
 
 Holds are in the TypeScript store and in the REST application API, for keys with the `admin`

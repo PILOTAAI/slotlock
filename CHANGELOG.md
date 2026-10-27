@@ -7,6 +7,11 @@ versioning.
 
 ### Fixed
 
+- A hold's expiry is judged at each statement (`statement_timestamp()`), not at the start of the
+  transaction (`now()`). A store made from a caller's transaction runs in savepoints of it, so a hold
+  that expired while that transaction ran still looked live there and could be confirmed after its
+  expiry. Its time to live also starts when it is asked for, not when the caller's transaction did.
+
 - The OpenAPI document declares the `404` and `409` the agent-tool routes answer: `404` on
   free/busy, next available and reading or listing events, and `404` and `409` (`overlap`, a stale
   revision) on creating, changing and cancelling one. Clients generated from it now type an overlap
