@@ -182,12 +182,52 @@ this RFC:
 3. An overlapping reservation is refused with the same error code and message as on a direct
    connection.
 4. A `subscriptions/listen` stream stays open for 10 minutes, and still delivers updates.
-5. A request's 5 connections under load; the error a 6th gets.
+5. Eight clients at once in one request. A Worker lets six connections wait for their first
+   response at a time, and queues a seventh rather than refusing it.
 6. Sign-in through a GitHub App's user authorization, created from a manifest, with the dashboard
    unchanged.
 
 If 1 fails, the API stays off Workers. The Cloudflare target is then only the dashboard Worker
 plus a VPS-hosted API, and this RFC is revised before any other work starts.
+
+The harness is [`spikes/hyperdrive`](../../spikes/hyperdrive/README.md): a Worker that runs
+Slotlock's store through its Hyperdrive binding, and a driver that judges checks 1–5. Check 4's
+stream polls free/busy, as a live-updates subscription does, rather than running the full MCP
+server, which arrives in delivery PR 3.
+
+### Spike results
+
+**Real Hyperdrive: not run yet.** It needs a Workers Paid account and a throwaway PostgreSQL that
+Hyperdrive can reach. The README says how to run it. Its table replaces the local one below, and
+gates delivery PR 2 onwards.
+
+**Local, 2026-10-27:** workerd (Wrangler 4.151.2) and PostgreSQL 16. Run once with the binding
+connected directly, and once through PgBouncer 1.22 in transaction mode with a pool of 3 server
+connections, which reuses connections across requests harder than Hyperdrive's pool does. This
+shows that Slotlock's store, its row-level security and its locks run on the Workers runtime and
+survive a transaction pooler. It does not show Hyperdrive's own behaviour.
+
+| Check | Direct | Transaction pooler |
+| --- | --- | --- |
+| 1a exclusive locks wait for each other | pass | pass: second acquired 1 ms after the first released, on another backend |
+| 1b shared locks are held together | pass | pass: together for 3,005 ms |
+| 1c a rollback gives its lock up | pass | pass: next request waited 1 ms |
+| 1d no advisory lock outlives its transaction | pass | pass: 0 held |
+| 2a each tenant sees only its own rows | pass | pass |
+| 2b nothing of a tenant reaches the next request | pass | pass: 20 bare requests as `slotlock_app` saw no setting and no rows |
+| 3a overlap refused as on a direct connection | pass | pass: `overlap` both ways |
+| 3b ten racing bookings, one wins | pass | pass: 1 booked, 9 `overlap` |
+| 4 stream keeps its client and sees a write | pass (8 s) | pass (60 s): busy 0, 0, 1, 1 |
+| 5 eight clients at once | pass | pass: the pool of 3 queued them, slowest at 6 s |
+| Control: a session lock never released | released when the request ended | **still held** after the request ended |
+
+The control is why the RFC replaces maintenance's session lock with a lease: behind a pooler, a
+session lock stays with a server connection after its request ends, and the next client that
+connection serves inherits it.
+
+While building the harness, a first version of check 1d counted every advisory lock in the
+database, so the control's deliberate leak from an earlier run turned the next run red. The check
+now counts only its own run's lock keys.
 
 ## Delivery
 

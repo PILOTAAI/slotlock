@@ -1,0 +1,21 @@
+{
+  "name": "slotlock-spike-hyperdrive",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "RFC 0001's spike: Slotlock's PostgreSQL needs, asked through Hyperdrive.",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "wrangler dev --port 8789",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.151.2"
+  },
+  "overrides": {
+    "undici@7.29.1": "7.30.1"
+  }
+}
