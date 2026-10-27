@@ -6,7 +6,7 @@
 // maintains the tenants it is configured with and the ones whose keys it has served.
 import type { Sql } from 'postgres';
 import { ignoreRejection } from './hooks.js';
-import { type SlotlockStore, calendarEventRollingHorizon } from './store.js';
+import { SLOTLOCK_MAX_WAITLIST_PER_TENANT, type SlotlockStore, calendarEventRollingHorizon } from './store.js';
 import type { CalendarHorizonRollCursor, CalendarHorizonRollResult } from './types.js';
 
 export interface SlotlockMaintenanceResult {
@@ -121,7 +121,20 @@ export async function maintainSlotlockTenant(
   const staleSources = await store.withTenant(tenantRef, (tenant) => tenant.reportStaleCoverage({ tenantRef }));
   // No-shows first: the time they free is offered to the waitlist in the same pass.
   const noShows = await store.withTenant(tenantRef, (tenant) => tenant.releaseNoShows({ tenantRef }));
-  const offers = await store.withTenant(tenantRef, (tenant) => tenant.offerWaitlist({ tenantRef }));
+  // The whole waitlist, in join order, a page at a time and each page its own transaction, so a
+  // later entry whose window is free is offered however many wait before it.
+  let waitlistOffers = 0;
+  let page: WaitlistPage | null = null;
+  for (let pages = 0; pages < WAITLIST_PAGES; pages++) {
+    options.signal?.throwIfAborted();
+    const from: WaitlistPage | null = page;
+    const offers: { offered: number; next: WaitlistPage | null } = await store.withTenant(tenantRef, (tenant) =>
+      tenant.offerWaitlist({ tenantRef, ...(from ? { after: from } : {}) }),
+    );
+    waitlistOffers += offers.offered;
+    page = offers.next;
+    if (!page) break;
+  }
   if (rollFailure) throw rollFailure.error;
   return {
     extended,
@@ -131,11 +144,15 @@ export async function maintainSlotlockTenant(
     zoneShifts: zones.shifted,
     staleSources,
     noShows,
-    waitlistOffers: offers.offered,
+    waitlistOffers,
     capped: rollCapped || eventsLeft || bookingsLeft || changesLeft,
     rollPending: rollCapped && after !== null && (after.rollRetryAt ?? null) === null,
   };
 }
+
+type WaitlistPage = { createdAt: Date; id: string };
+/** Pages of 50 that cover a tenant's whole waitlist (SLOTLOCK_MAX_WAITLIST_PER_TENANT). */
+const WAITLIST_PAGES = Math.ceil(SLOTLOCK_MAX_WAITLIST_PER_TENANT / 50);
 
 /** Feed changes past the retention deleted per batch. */
 const CHANGE_PRUNE_BATCH = 1_000;

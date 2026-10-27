@@ -778,7 +778,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_check_in_reservation',
       title: 'Check in a booking',
       description:
-        "Claim a booking by its reference: the customer has arrived or picked up. On a resource whose booking rules set check_in_minutes, a booking not checked in that long after its start is released by maintenance (reservation.no_show on the feed) and offered to the waitlist. Checking in again keeps the first time; a booking that has ended answers 409 reservation_ended.",
+        "Claim a booking by its reference: the customer has arrived or picked up. On a resource whose booking rules set check_in_minutes, a booking not checked in that long after its start is released by maintenance (reservation.no_show on the feed) and offered to the waitlist. Check-in opens an hour before the start (409 check_in_not_open before then) and moving the booking to another start clears it. Checking in again keeps the first time; a booking that has ended answers 409 reservation_ended.",
       method: 'POST',
       path: '/v1/reservations/{reservation_ref}/check-in',
       input: z.object({ reservation_ref: IDENTITY }).strict(),
@@ -841,7 +841,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_leave_waitlist',
       title: 'Leave the waitlist',
       description:
-        'Stop waiting. A hold already offered stays until it is confirmed, released or expires. left is false when there was no such entry.',
+        'Stop waiting. A hold offered and not yet confirmed is released with the entry, and the time offered to the next who waits; one confirmed is a booking and stays. left is false when there was no such entry.',
       method: 'DELETE',
       path: '/v1/waitlist/{entry_id}',
       input: z.object({ entry_id: z.string().uuid() }).strict(),

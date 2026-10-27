@@ -522,7 +522,9 @@ feed says so (`waitlist.offered`, with `hold_id`). Confirm the hold to book it; 
 is offered. Cancels and releases through the API offer at once; maintenance offers the rest and
 expires entries whose window has started (`waitlist.expired`). With `checkInMinutes` in a
 resource's booking rules, maintenance releases a booking made since the rule was set that nobody
-checked in that long after its start (`reservation.no_show`), and the waitlist is offered its time.
+checked in that long after its start, or after it was made for a walk-in (`reservation.no_show`),
+and the waitlist is offered its time. Check-in opens an hour before the start; moving a booking to
+another start clears it. Leaving the waitlist lets an offer not yet confirmed go with it.
 
 Calendar tools speak the standards: `emitVAvailability({ rules, timezone, uid })` writes rules as an
 iCalendar VAVAILABILITY (RFC 7953) and `parseVAvailability(text)` reads one back as

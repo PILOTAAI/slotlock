@@ -55,6 +55,16 @@ describe.skipIf(!url)('waitlists and check-in (real Postgres)', () => {
       SELECT subject, data, actor FROM slotlock.outbox WHERE tenant_ref = ${tenantRef} AND type = ${type}
        ORDER BY id`;
 
+  /** As if check-in was asked for on `resources` two hours ago, and `bookings` made an hour ago. */
+  const backdate = async (resources: string[], bookings: string[]) => {
+    await sql`
+      UPDATE slotlock.resources SET check_in_since = now() - interval '2 hours'
+       WHERE id = ANY(${sql.array(resources)}::uuid[])`;
+    await sql`
+      UPDATE slotlock.reservations SET created_at = now() - interval '1 hour'
+       WHERE tenant_ref = ${tenantRef} AND external_ref = ANY(${sql.array(bookings)}::text[])`;
+  };
+
   beforeAll(async () => {
     sql = postgres(url as string, { max: 10, onnotice: () => {} });
     store = createSlotlockStore(sql);
@@ -74,7 +84,7 @@ describe.skipIf(!url)('waitlists and check-in (real Postgres)', () => {
     const second = await join({ resourceId: van, start: at(10), end: at(12), holderRef: 'second' });
     expect(first.ok && second.ok).toBe(true);
     // Nothing free yet: nothing offered.
-    expect(await offer()).toEqual({ offered: 0, expired: 0 });
+    expect(await offer()).toMatchObject({ offered: 0, expired: 0 });
 
     // The cancel offers at once, without waiting for maintenance.
     expect(
@@ -105,7 +115,7 @@ describe.skipIf(!url)('waitlists and check-in (real Postgres)', () => {
     const onA = await book(a as string, at(30), at(40));
     await book(b as string, at(30), at(40));
     expect(await join({ pool: 'suv', start: at(31), end: at(33), holderRef: 'pooled' })).toMatchObject({ ok: true });
-    expect(await offer()).toEqual({ offered: 0, expired: 0 });
+    expect(await offer()).toMatchObject({ offered: 0, expired: 0 });
     await store.cancelExternalReservation({ tenantRef, externalRef: onA, revision: 2 });
     // Maintenance offers what a cancel elsewhere freed.
     const pass = await maintainSlotlockTenant(store, tenantRef);
@@ -199,6 +209,8 @@ describe.skipIf(!url)('waitlists and check-in (real Postgres)', () => {
     const unclaimed = await book(desk2, new Date(now - 20 * MINUTE), new Date(now + HOUR));
     const claimed = await book(desk3, new Date(now - 20 * MINUTE), new Date(now + HOUR));
     const early = await book(desk4, new Date(now - 5 * MINUTE), new Date(now + HOUR));
+    // Booked an hour ago, once the rules asked for check-in two hours ago.
+    await backdate([desk2, desk3, desk4], [unclaimed, claimed, early]);
     expect(
       await application.checkInReservation(context('slotlock_check_in_reservation'), { reservation_ref: claimed }),
     ).toMatchObject({ reference: claimed, checked_in_at: expect.any(String) });
@@ -241,5 +253,126 @@ describe.skipIf(!url)('waitlists and check-in (real Postgres)', () => {
     await expect(
       application.checkInReservation(context('slotlock_check_in_reservation'), { reservation_ref: 'no-such' }),
     ).rejects.toMatchObject({ code: 'reservation_not_found', status: 404 });
+  });
+
+  // What the independent review reproduced, each kept as a test.
+  describe('under load and races', () => {
+    const fullPool = async (pool: string, members: number) => {
+      const ids: string[] = [];
+      for (let n = 0; n < members; n++) ids.push(await resource(pool));
+      await sql`
+        INSERT INTO slotlock.reservations (resource_id, tenant_ref, external_ref, starts_at, ends_at)
+        SELECT id, ${tenantRef}, 'full-' || id, ${at(200)}, ${at(400)} FROM unnest(${sql.array(ids)}::uuid[]) AS id`;
+      return ids;
+    };
+
+    it('tries no hold on a pool that is full, so a pass holds a handful of locks, not thousands', async () => {
+      await fullPool('crowded', 100);
+      for (let n = 0; n < 10; n++) {
+        expect((await join({ pool: 'crowded', start: at(210 + n), end: at(211 + n), holderRef: `crowd-${n}` })).ok).toBe(true);
+      }
+      const { result, locks } = await sql.begin(async (tx) => {
+        const result = await createSlotlockStore(tx).offerWaitlist({ tenantRef });
+        const [held] = await tx<{ count: number }[]>`
+          SELECT count(*)::int AS count FROM pg_locks
+           WHERE pid = pg_backend_pid() AND locktype = 'transactionid'`;
+        return { result, locks: held?.count ?? 0 };
+      });
+      expect(result.offered).toBe(0);
+      // Before: two per refused hold, 2,000 for this pass.
+      expect(locks).toBeLessThan(20);
+    }, 120_000);
+
+    it('offers an entry whose window is free however many older ones wait', async () => {
+      const full = await resource();
+      await book(full, at(300), at(310));
+      for (let n = 0; n < 120; n++) {
+        const joined = await join({ resourceId: full, start: at(301), end: at(302), holderRef: `queue-${n % 6}-${Math.floor(n / 6)}` });
+        expect(joined.ok).toBe(true);
+      }
+      const free = await resource();
+      expect((await join({ resourceId: free, start: at(301), end: at(302), holderRef: 'late' })).ok).toBe(true);
+      const pass = await maintainSlotlockTenant(store, tenantRef);
+      expect(pass.waitlistOffers).toBeGreaterThanOrEqual(1);
+      expect((await entries({ resourceId: free }))[0]?.status).toBe('offered');
+    }, 120_000);
+
+    it('lets an offer go with the entry that leaves, even mid-offer', async () => {
+      const van = await resource();
+      const joined = await join({ resourceId: van, start: at(320), end: at(321), holderRef: 'leaver' });
+      const id = joined.ok ? joined.entry.id : '';
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let locked = () => {};
+      const isLocked = new Promise<void>((resolve) => {
+        locked = resolve;
+      });
+      // Stalls the offer's hold, after it has read and locked the entry.
+      const blocker = sql.begin(async (tx) => {
+        await tx`SELECT id FROM slotlock.resources WHERE id = ${van} FOR UPDATE`;
+        locked();
+        await gate;
+      });
+      await isLocked;
+      const pending = offer();
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const leaving = store.withTenant(tenantRef, (tenant) => tenant.leaveWaitlist({ tenantRef, id }));
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      release();
+      await blocker;
+      await pending;
+      expect(await leaving).toBe(true);
+      expect(await sql`SELECT 1 FROM slotlock.waitlist_entries WHERE id = ${id}`).toHaveLength(0);
+      expect(
+        await sql`SELECT 1 FROM slotlock.reservations WHERE resource_id = ${van} AND status = 'held'`,
+      ).toHaveLength(0);
+    }, 30_000);
+
+    it('opens check-in an hour before the start, and a move to another start clears it', async () => {
+      const desk = await resource();
+      await store.setResourceBookingRules({ tenantRef, id: desk, rules: { checkInMinutes: 15 } });
+      const now = Date.now();
+      const ref = await book(desk, new Date(now + 72 * HOUR), new Date(now + 73 * HOUR));
+      await expect(
+        application.checkInReservation(context('slotlock_check_in_reservation'), { reservation_ref: ref }),
+      ).rejects.toMatchObject({ code: 'check_in_not_open', status: 409 });
+      const soon = await book(desk, new Date(now + 30 * MINUTE), new Date(now + 90 * MINUTE));
+      expect(await store.checkInReservation({ tenantRef, externalRef: soon })).toMatchObject({ ok: true });
+      // Moved to a start that passed 20 minutes ago: no longer claimed, so released.
+      const moved = await store.rescheduleExternalReservation({
+        tenantRef,
+        externalRef: soon,
+        resourceId: desk,
+        start: new Date(now - 20 * MINUTE),
+        end: new Date(now + 30 * MINUTE),
+        bufferAfterMs: 0,
+        revision: 2,
+      });
+      expect(moved.ok).toBe(true);
+      await backdate([desk], [soon]);
+      const released = await store.withTenant(tenantRef, (tenant) => tenant.releaseNoShows({ tenantRef }));
+      expect(released).toBe(1);
+      expect(await store.getReservation({ tenantRef, externalRef: soon })).toBeNull();
+    });
+
+    it("gives a walk-in made after its start its own check-in window", async () => {
+      const desk = await resource();
+      await store.setResourceBookingRules({ tenantRef, id: desk, rules: { checkInMinutes: 15 } });
+      const now = Date.now();
+      const walkIn = await book(desk, new Date(now - 30 * MINUTE), new Date(now + HOUR));
+      expect(await store.withTenant(tenantRef, (tenant) => tenant.releaseNoShows({ tenantRef }))).toBe(0);
+      expect(await store.getReservation({ tenantRef, externalRef: walkIn })).not.toBeNull();
+    });
+
+    it("refuses, in the database, an entry on another tenant's resource", async () => {
+      const theirs = await store.createResource({ tenantRef: otherTenant, externalRef: `x-${randomUUID()}`, timezone: 'UTC' });
+      await expect(sql`
+        INSERT INTO slotlock.waitlist_entries (tenant_ref, resource_id, starts_at, ends_at, holder_ref, offer_ttl_ms)
+        VALUES (${tenantRef}, ${theirs.id}, ${at(1)}, ${at(2)}, 'intruder', 900000)`).rejects.toMatchObject({
+        code: '23503',
+      });
+    });
   });
 });

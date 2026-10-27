@@ -15,7 +15,8 @@ versioning.
 - Check-in and no-show release: the booking rule `checkInMinutes` (`check_in_minutes`) releases a
   booking nobody claimed that long after its start (`reservation.no_show`), for bookings made once
   the rule is set; `POST /v1/reservations/{reservation_ref}/check-in` (`slotlock_check_in_reservation`,
-  `checkInReservation`) claims one (`reservation.checked_in`). Maintenance results gain `noShows`
+  `checkInReservation`) claims one from an hour before its start (`reservation.checked_in`); a
+  move to another start clears it, and a walk-in's window runs from when it was booked. Maintenance results gain `noShows`
   and `waitlistOffers` (`no_shows`, `waitlist_offers`). Run `slotlock migrate`.
 - Calendar interchange: `GET`/`PUT /v1/resources/{resource_id}/availability/ical`
   (`slotlock_export_resource_availability`, `slotlock_import_resource_availability`) write and read

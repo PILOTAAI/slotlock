@@ -80,7 +80,7 @@ function fakeStore() {
           return 0;
         },
         async offerWaitlist() {
-          return { offered: 0, expired: 0 };
+          return { offered: 0, expired: 0, next: null };
         },
         async followZoneRules() {
           return { shifted: 0, moved: 0, conflicts: 0 };

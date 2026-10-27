@@ -1064,8 +1064,9 @@ public abstract class SlotlockOperations {
    * Check in a booking. Claim a booking by its reference: the customer has arrived or picked up.
    * On a resource whose booking rules set check_in_minutes, a booking not checked in that long
    * after its start is released by maintenance (reservation.no_show on the feed) and offered to
-   * the waitlist. Checking in again keeps the first time; a booking that has ended answers 409
-   * reservation_ended.
+   * the waitlist. Check-in opens an hour before the start (409 check_in_not_open before then) and
+   * moving the booking to another start clears it. Checking in again keeps the first time; a
+   * booking that has ended answers 409 reservation_ended.
    *
    * @param reservationRef {@code reservation_ref}, string
    * @return the response body
@@ -1149,8 +1150,9 @@ public abstract class SlotlockOperations {
   }
 
   /**
-   * Leave the waitlist. Stop waiting. A hold already offered stays until it is confirmed,
-   * released or expires. left is false when there was no such entry.
+   * Leave the waitlist. Stop waiting. A hold offered and not yet confirmed is released with the
+   * entry, and the time offered to the next who waits; one confirmed is a booking and stays. left
+   * is false when there was no such entry.
    *
    * @param entryId {@code entry_id}, string
    * @return the response body

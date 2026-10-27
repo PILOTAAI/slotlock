@@ -1142,7 +1142,7 @@ CREATE INDEX IF NOT EXISTS slotlock_webhook_endpoints_tenant_idx
 CREATE TABLE IF NOT EXISTS slotlock.waitlist_entries (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_ref text NOT NULL,
-  resource_id uuid REFERENCES slotlock.resources(id) ON DELETE CASCADE,
+  resource_id uuid,
   pool_ref text,
   starts_at timestamptz NOT NULL,
   ends_at timestamptz NOT NULL,
@@ -1153,6 +1153,9 @@ CREATE TABLE IF NOT EXISTS slotlock.waitlist_entries (
   offered_resource_id uuid,
   offered_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  -- The resource is the entry's own tenant's, as the database sees it, whatever wrote the row.
+  CONSTRAINT slotlock_waitlist_entries_resource_fk FOREIGN KEY (resource_id, tenant_ref)
+    REFERENCES slotlock.resources (id, tenant_ref) ON DELETE CASCADE,
   CONSTRAINT slotlock_waitlist_entries_target_valid CHECK ((resource_id IS NULL) <> (pool_ref IS NULL)),
   CONSTRAINT slotlock_waitlist_entries_window_valid CHECK (ends_at > starts_at),
   CONSTRAINT slotlock_waitlist_entries_status_valid CHECK (status IN ('waiting', 'offered', 'expired')),

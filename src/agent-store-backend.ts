@@ -1720,9 +1720,11 @@ export function createSlotlockStoreApplicationBackend(
     },
 
     async leaveWaitlist(context, input) {
-      return withTenant(store, context, async (tenant) => ({
+      const left = await withTenant(store, context, async (tenant) => ({
         left: await tenant.leaveWaitlist({ tenantRef: tenantOf(context), id: input.entry_id as string }),
       }));
+      if (left.left) await offerFreedTime(store, tenantOf(context));
+      return left;
     },
 
     async getCoverage(context, input) {

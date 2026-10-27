@@ -1296,8 +1296,9 @@ impl Client {
     /// Claim a booking by its reference: the customer has arrived or picked up. On a resource
     /// whose booking rules set check_in_minutes, a booking not checked in that long after its
     /// start is released by maintenance (reservation.no_show on the feed) and offered to the
-    /// waitlist. Checking in again keeps the first time; a booking that has ended answers 409
-    /// reservation_ended.
+    /// waitlist. Check-in opens an hour before the start (409 check_in_not_open before then) and
+    /// moving the booking to another start clears it. Checking in again keeps the first time; a
+    /// booking that has ended answers 409 reservation_ended.
     pub fn check_in_reservation(&self, input: &CheckInReservationInput) -> Result<Value, Error> {
         self.call("slotlock_check_in_reservation", serde_json::to_value(input)?)
     }
@@ -1325,8 +1326,9 @@ impl Client {
 
     /// Leave the waitlist.
     ///
-    /// Stop waiting. A hold already offered stays until it is confirmed, released or expires.
-    /// left is false when there was no such entry.
+    /// Stop waiting. A hold offered and not yet confirmed is released with the entry, and the
+    /// time offered to the next who waits; one confirmed is a booking and stays. left is false
+    /// when there was no such entry.
     pub fn leave_waitlist(&self, input: &LeaveWaitlistInput) -> Result<Value, Error> {
         self.call("slotlock_leave_waitlist", serde_json::to_value(input)?)
     }
