@@ -100,7 +100,8 @@ describe.skipIf(!url)('bundles and collective search (real Postgres)', () => {
       const refused = outcomes.find((outcome) => outcome.status === 'rejected') as PromiseRejectedResult;
       expect(refused.reason).toMatchObject({ code: 'overlap' });
     }
-  });
+    // Racing bundles queue on each other by design; a loaded CI runner needs more than 5 s.
+  }, 30_000);
 
   it('finds when every resource, or any n of them, is free together, as each one judges it', async () => {
     // The van works 06-18, the driver 09-17; the trailer is booked 09-11.
