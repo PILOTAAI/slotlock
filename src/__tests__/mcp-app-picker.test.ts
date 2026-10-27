@@ -124,6 +124,38 @@ describe('the calendar view', () => {
     dom.window.close();
   });
 
+  it('offers held slots to pick from, and names the hold in the message', () => {
+    const HOLD_A = '7d3f8c2a-4b1e-4f6a-9c2d-1e5b7a9f3c4d';
+    const HOLD_B = '8d3f8c2a-4b1e-4f6a-9c2d-1e5b7a9f3c4d';
+    const { dom, document, times, book, messages } = view({
+      group_id: HOLD_A,
+      holds: [
+        { hold_id: HOLD_A, resource_id: VAN, start: '2027-03-01T09:00:00Z', end: '2027-03-01T10:00:00Z', expires_at: '2027-02-28T12:05:00Z' },
+        { hold_id: HOLD_B, resource_id: VAN, start: '2027-03-01T14:00:00Z', end: '2027-03-01T15:00:00Z', expires_at: '2027-02-28T12:05:00Z' },
+        // A hold whose id is not plain is not offered: its id goes into the message.
+        { hold_id: 'x"; drop', resource_id: VAN, start: '2027-03-01T16:00:00Z', end: '2027-03-01T17:00:00Z', expires_at: '2027-02-28T12:05:00Z' },
+      ],
+      refused: [{ index: 2, code: 'overlap' }],
+    });
+    expect(times().map((time) => time.textContent)).toEqual(['09:00', '14:00']);
+    expect(document.querySelector('#pickMeta')?.textContent).toContain('Held until 12:05');
+    times()[1]?.click();
+    book().click();
+    expect(messages()[0]).toMatchObject({
+      params: {
+        content: {
+          text: `Book the slot I picked: hold ${HOLD_B}, resource ${VAN}, from 2027-03-01T14:00:00.000Z to 2027-03-01T15:00:00.000Z (Mon 1 Mar, 14:00 to 15:00 UTC).`,
+        },
+      },
+    });
+    dom.window.close();
+
+    const none = view({ group_id: HOLD_A, holds: [], refused: [{ index: 0, code: 'overlap' }] });
+    expect(none.times()).toEqual([]);
+    expect(none.document.querySelector('.item-title')?.textContent).toBe('Nothing held');
+    none.dom.window.close();
+  });
+
   it('offers the single answer of slotlock_find_next_available as the next available time', () => {
     const { dom, document, book, messages } = view({
       resource_id: VAN,

@@ -559,6 +559,10 @@ describe('consumer-neutral Slotlock agent server', () => {
     expect(tools.result.tools.find((tool) => tool.name === 'slotlock_create_event')?._meta).toEqual({
       ui: { visibility: ['model'] },
     });
+    // Held slots render in the view to pick from; still only the model holds.
+    expect(tools.result.tools.find((tool) => tool.name === 'slotlock_hold_slots')?._meta).toEqual({
+      ui: { resourceUri: SLOTLOCK_MCP_APP_RESOURCE_URI, visibility: ['model'] },
+    });
   });
 
   it('serves one self-contained, network-dark calendar UI through MCP resources', async () => {

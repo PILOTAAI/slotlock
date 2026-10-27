@@ -1196,10 +1196,13 @@ export function slotlockAgentTools() {
     // Reads render in the calendar view, which may call them again. A write is the model's to make
     // through the normal path, where a person can be asked to confirm it: never a view's, which
     // MCP Apps would otherwise allow (visibility defaults to model and app).
+    // Held slots render there too, to pick from, but only the model holds.
     _meta: {
       ui: operation.risk.readOnly
         ? { resourceUri: SLOTLOCK_MCP_APP_RESOURCE_URI, visibility: ['model', 'app'] as const }
-        : { visibility: ['model'] as const },
+        : operation.name === 'slotlock_hold_slots'
+          ? { resourceUri: SLOTLOCK_MCP_APP_RESOURCE_URI, visibility: ['model'] as const }
+          : { visibility: ['model'] as const },
     },
   }));
 }

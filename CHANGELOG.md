@@ -26,7 +26,9 @@ versioning.
   library, `acquireHold` takes `holderRef` and `groupId`, `releaseHold` a `holderRef`, and
   `putCalendarEvent` `fromHold` (refused with `hold_not_found` or `hold_mismatch`). A backend of
   your own implements the optional `holdSlots` and `releaseSlots`; without them the tools answer
-  `holds_unavailable`. Run `slotlock migrate`.
+  `holds_unavailable`. Run `slotlock migrate`. In an MCP Apps host the calendar view renders the
+  held slots, with when they expire, and its message names the hold, so the person picks from time
+  nobody can take while they decide.
 - `slotlock_find_available_slots` (REST `GET /v1/available-slots`) lists up to 50 certain slots of
   a duration, earliest first across up to 20 resources, each found the way
   `slotlock_find_next_available` finds one: free of busy time, inside the resource's hours, and

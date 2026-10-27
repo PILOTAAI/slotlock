@@ -2498,6 +2498,7 @@
     },
     "_meta": {
       "ui": {
+        "resourceUri": "ui://slotlock/calendar",
         "visibility": [
           "model"
         ]

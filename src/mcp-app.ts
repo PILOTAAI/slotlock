@@ -135,13 +135,23 @@ export const SLOTLOCK_MCP_APP_HTML = `<!doctype html>
       // characters and two instants it parsed itself, never a title or any other server text.
       const SAFE_ID = /^[A-Za-z0-9._:-]{1,200}$/;
       const instant = (value) => { const time = typeof value === 'string' ? Date.parse(value) : NaN; return Number.isFinite(time) ? new Date(time) : null; };
+      const HOLD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       const pickable = (slot) => {
         if (!slot || typeof slot.resource_id !== 'string' || !SAFE_ID.test(slot.resource_id)) return null;
         const start = instant(slot.start); const end = instant(slot.end);
-        return start && end && end > start ? { resource_id: slot.resource_id, start, end } : null;
+        if (!start || !end || end <= start) return null;
+        if (slot.hold_id === undefined) return { resource_id: slot.resource_id, start, end };
+        // A held time (slotlock_hold_slots): booking it names the hold, so it needs a plain id.
+        const expires = instant(slot.expires_at);
+        return typeof slot.hold_id === 'string' && HOLD_ID.test(slot.hold_id) && expires
+          ? { resource_id: slot.resource_id, start, end, hold_id: slot.hold_id, expires }
+          : null;
       };
       const slotsOf = (data) => {
-        if (!data || typeof data !== 'object' || data.error || data.coverage?.certainty !== 'certain') return [];
+        if (!data || typeof data !== 'object' || data.error) return [];
+        // Held time is free for this agent alone until it expires: certain by being held.
+        if (Array.isArray(data.holds)) return data.holds.map(pickable).filter((slot) => slot && slot.hold_id);
+        if (data.coverage?.certainty !== 'certain') return [];
         const listed = Array.isArray(data.slots) ? data.slots : 'start' in data ? [data] : [];
         return listed.map(pickable).filter(Boolean);
       };
@@ -166,7 +176,7 @@ export const SLOTLOCK_MCP_APP_HTML = `<!doctype html>
       };
       const minutes = (slot) => Math.round((slot.end - slot.start) / 60000);
       const lengthLabel = (total) => total < 60 ? total + ' min' : Math.floor(total / 60) + ' h' + (total % 60 ? ' ' + (total % 60) + ' min' : '');
-      const sentence = (slot) => 'Book the slot I picked: resource ' + slot.resource_id + ', from ' + slot.start.toISOString() + ' to ' + slot.end.toISOString() + ' (' + dayLabel(slot.start) + ', ' + timeLabel(slot.start) + ' to ' + timeLabel(slot.end) + (state.timeZone ? ' ' + state.timeZone : '') + ').';
+      const sentence = (slot) => 'Book the slot I picked: ' + (slot.hold_id ? 'hold ' + slot.hold_id + ', ' : '') + 'resource ' + slot.resource_id + ', from ' + slot.start.toISOString() + ' to ' + slot.end.toISOString() + ' (' + dayLabel(slot.start) + ', ' + timeLabel(slot.start) + ' to ' + timeLabel(slot.end) + (state.timeZone ? ' ' + state.timeZone : '') + ').';
 
       const renderPicker = (slots) => {
         const resources = [...new Set(slots.map((slot) => slot.resource_id))];
@@ -175,6 +185,8 @@ export const SLOTLOCK_MCP_APP_HTML = `<!doctype html>
         if (lengths.size === 1) pickMeta.append(el('span', '', lengthLabel(minutes(slots[0]))));
         if (resources.length > 1) pickMeta.append(el('span', '', resources.length + ' resources'));
         pickMeta.append(el('span', '', state.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'Local time'));
+        const held = slots.filter((slot) => slot.expires).map((slot) => slot.expires).sort((a, b) => a - b)[0];
+        if (held) pickMeta.append(el('span', 'held', 'Held until ' + timeLabel(held)));
         h12.setAttribute('aria-pressed', String(hour12())); h24.setAttribute('aria-pressed', String(!hour12()));
         const byDay = new Map();
         slots.forEach((slot) => { const key = dayKey(slot.start); if (!byDay.has(key)) byDay.set(key, []); byDay.get(key).push(slot); });
@@ -275,6 +287,7 @@ export const SLOTLOCK_MCP_APP_HTML = `<!doctype html>
           if (data.coverage?.certainty !== 'certain') return [{ title: 'Availability unproven', detail: 'Required calendar coverage is incomplete.', badge: data.coverage?.certainty || 'uncertain' }];
           return data.slots.length === 0 ? [{ title: 'No free time', detail: 'Nothing of that length is free in the window.', badge: 'certain' }] : data.slots.map((slot) => ({ title: slot.resource_id, detail: intervalText(slot), badge: 'free' }));
         }
+        if (Array.isArray(data.holds)) return [{ title: 'Nothing held', detail: 'Every time asked for was taken.', badge: 'refused' }];
         if (Array.isArray(data.events)) return data.events.map((event) => ({ title: event.title || event.id, detail: intervalText(event), badge: event.status || event.transparency || 'event' }));
         if (data.event && typeof data.event === 'object') return [{ title: data.event.title || data.event.id, detail: intervalText(data.event), badge: data.event.status || 'event' }];
         if ('start' in data || 'end' in data) {
