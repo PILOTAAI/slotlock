@@ -53,6 +53,23 @@ trim() {
 pause() { [ "$DRY_RUN" -eq 1 ] || IFS= read -r -p '  Press Enter when done (or to skip) ' _ || true; }
 http_code() { curl --silent --output /dev/null --write-out '%{http_code}' --user-agent "$UA" "$@"; }
 
+# Temporary directories and worktrees, removed on every exit, an interrupted one included.
+TEMP_DIRS=()
+TEMP_WORKTREE=''
+cleanup() {
+  if [ -n "$TEMP_WORKTREE" ]; then git -C "$ROOT" worktree remove --force "$TEMP_WORKTREE" 2>/dev/null || true; fi
+  if [ "${#TEMP_DIRS[@]}" -gt 0 ]; then rm -rf "${TEMP_DIRS[@]}"; fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+temp_dir() {
+  local dir
+  dir=$(mktemp -d)
+  chmod 700 "$dir"
+  TEMP_DIRS+=("$dir")
+  printf '%s' "$dir"
+}
+
 DRY_RUN=0
 TAG=''
 ONLY=''
@@ -138,8 +155,9 @@ step_crates() {
       token=$(trim "$token")
       if [ -n "$token" ]; then
         git -C "$ROOT" fetch --quiet origin "refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || true
-        tree=$(mktemp -d)
+        tree=$(temp_dir)
         git -C "$ROOT" worktree add --quiet --detach "$tree/src" "$TAG"
+        TEMP_WORKTREE="$tree/src"
         # The toolchain CI builds the client with, as release.yml publishes it.
         cargo=(cargo)
         if command -v rustup >/dev/null; then
@@ -152,8 +170,6 @@ step_crates() {
           warn 'cargo publish failed: nothing else was changed'
         fi
         token=''
-        git -C "$ROOT" worktree remove --force "$tree/src"
-        rm -rf "$tree"
       fi
     fi
   else
@@ -189,7 +205,7 @@ step_nuget() {
 
 step_maven() {
   say 'Maven Central (io.pylota:slotlock)'
-  local existing user password token code email passphrase fpr gnupg input
+  local existing user password token code email passphrase fpr gnupg input saved
   if [ "$DRY_RUN" -eq 1 ]; then
     note '(dry run) would check and store CENTRAL_PORTAL_TOKEN, then create a signing key, send it to'
     note 'keyserver.ubuntu.com and store MAVEN_SIGNING_KEY and MAVEN_SIGNING_PASSWORD in maven-central'
@@ -227,40 +243,54 @@ step_maven() {
     fi
   fi
 
-  if printf '%s\n' "$existing" | grep -qx MAVEN_SIGNING_KEY && [ "${REPLACE:-0}" != 1 ]; then
-    note 'MAVEN_SIGNING_KEY is already set (REPLACE=1 makes a new key).'
+  if printf '%s\n' "$existing" | grep -qx MAVEN_SIGNING_KEY &&
+    printf '%s\n' "$existing" | grep -qx MAVEN_SIGNING_PASSWORD && [ "${REPLACE:-0}" != 1 ]; then
+    note 'MAVEN_SIGNING_KEY and MAVEN_SIGNING_PASSWORD are already set (REPLACE=1 stores them again).'
     pause
     return 0
   fi
-  email=$(git -C "$ROOT" config user.email || true)
-  IFS= read -r -p "  Email for the signing key [$email]: " input || true
-  email=$(trim "${input:-$email}")
-  [ -n "$email" ] || die 'the signing key needs an email'
-  passphrase=$(openssl rand -base64 30 | tr -d '\n/+=')
-  gnupg=$(mktemp -d)
-  chmod 700 "$gnupg"
-  printf '%s' "$passphrase" | GNUPGHOME=$gnupg gpg --batch --quiet --pinentry-mode loopback \
-    --passphrase-fd 0 --quick-generate-key "Slotlock release signing <$email>" rsa4096 sign 3y
-  fpr=$(GNUPGHOME=$gnupg gpg --batch --with-colons --list-secret-keys | awk -F: '/^fpr:/ {print $10; exit}')
+  gnupg=$(temp_dir)
+  # A key an earlier run made and saved is reused, so a run stopped after it was created (by a
+  # failed upload, or between the two secrets) resumes with the same key instead of a second one.
+  saved=$(find "$KEY_HOME" -maxdepth 1 -name '*.asc' 2>/dev/null | head -n 1 || true)
+  if [ -n "$saved" ] && [ -f "${saved%.asc}.passphrase" ] && [ "${NEW_KEY:-0}" != 1 ]; then
+    fpr=$(basename "${saved%.asc}")
+    passphrase=$(head -n 1 "${saved%.asc}.passphrase")
+    printf '%s' "$passphrase" | GNUPGHOME=$gnupg gpg --batch --quiet --pinentry-mode loopback \
+      --passphrase-fd 0 --import "$saved"
+    note "Reusing the signing key $fpr saved in $KEY_HOME (NEW_KEY=1 makes a new one)."
+  else
+    email=$(git -C "$ROOT" config user.email || true)
+    IFS= read -r -p "  Email for the signing key [$email]: " input || true
+    email=$(trim "${input:-$email}")
+    [ -n "$email" ] || die 'the signing key needs an email'
+    passphrase=$(openssl rand -base64 30 | tr -d '\n/+=')
+    printf '%s' "$passphrase" | GNUPGHOME=$gnupg gpg --batch --quiet --pinentry-mode loopback \
+      --passphrase-fd 0 --quick-generate-key "Slotlock release signing <$email>" rsa4096 sign 3y
+    fpr=$(GNUPGHOME=$gnupg gpg --batch --with-colons --list-secret-keys | awk -F: '/^fpr:/ {print $10; exit}')
+    mkdir -p "$KEY_HOME"
+    chmod 700 "$KEY_HOME"
+    printf '%s' "$passphrase" | GNUPGHOME=$gnupg gpg --batch --armor --pinentry-mode loopback \
+      --passphrase-fd 0 --export-secret-keys "$fpr" >"$KEY_HOME/$fpr.asc"
+    printf '%s\n' "$passphrase" >"$KEY_HOME/$fpr.passphrase"
+    chmod 600 "$KEY_HOME/$fpr.asc" "$KEY_HOME/$fpr.passphrase"
+    note "Signing key $fpr created and saved in $KEY_HOME."
+  fi
   # The key Gradle reads must sign with this passphrase: prove it before storing anything.
   printf 'slotlock' >"$gnupg/probe"
   printf '%s' "$passphrase" | GNUPGHOME=$gnupg gpg --batch --quiet --pinentry-mode loopback \
     --passphrase-fd 0 --detach-sign --armor --output "$gnupg/probe.asc" "$gnupg/probe"
   GNUPGHOME=$gnupg gpg --batch --quiet --verify "$gnupg/probe.asc" "$gnupg/probe" 2>/dev/null ||
-    die 'the new key does not sign: nothing stored'
+    die 'the key does not sign with its passphrase: nothing stored'
+  # Central checks every signature against a key server, so a key it cannot find there is useless:
+  # stop before storing it. A re-run reuses the saved key and tries the upload again.
   GNUPGHOME=$gnupg gpg --batch --quiet --keyserver hkps://keyserver.ubuntu.com --send-keys "$fpr" ||
-    warn "could not send the public key; send it later: gpg --keyserver keyserver.ubuntu.com --send-keys $fpr"
-  mkdir -p "$KEY_HOME"
-  chmod 700 "$KEY_HOME"
-  GNUPGHOME=$gnupg gpg --batch --armor --pinentry-mode loopback --passphrase "$passphrase" \
-    --export-secret-keys "$fpr" >"$KEY_HOME/$fpr.asc"
-  printf '%s\n' "$passphrase" >"$KEY_HOME/$fpr.passphrase"
-  chmod 600 "$KEY_HOME/$fpr.asc" "$KEY_HOME/$fpr.passphrase"
+    die "could not send the public key to keyserver.ubuntu.com: nothing stored; run this again"
   gh secret set MAVEN_SIGNING_KEY --env maven-central --repo "$OWNER/$REPO" <"$KEY_HOME/$fpr.asc"
   printf '%s' "$passphrase" | gh secret set MAVEN_SIGNING_PASSWORD --env maven-central --repo "$OWNER/$REPO"
   passphrase=''
-  rm -rf "$gnupg"
-  note "Signing key $fpr created, sent to keyserver.ubuntu.com and stored."
+  note "Signing key $fpr sent to keyserver.ubuntu.com, and MAVEN_SIGNING_KEY and"
+  note 'MAVEN_SIGNING_PASSWORD stored.'
   note "A passphrase-protected copy and its passphrase are in $KEY_HOME: move them to a password"
   note 'manager and delete them there.'
   pause
