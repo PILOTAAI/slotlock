@@ -265,7 +265,15 @@ fn books_holds_and_reservations_without_double_booking() {
     keys.sort();
     assert_eq!(
         keys,
-        ["capped", "conflicts", "extended", "pruned", "refused", "zone_shifts"]
+        [
+            "capped",
+            "conflicts",
+            "extended",
+            "pruned",
+            "refused",
+            "stale_sources",
+            "zone_shifts"
+        ]
     );
 
     let (mut found, mut cursor) = (false, None);
