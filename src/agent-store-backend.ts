@@ -82,6 +82,13 @@ interface AgentEventInput {
   idempotency_key: string;
 }
 
+/**
+ * A write runs under READ COMMITTED whatever the role's default: a store given tenant limits (as
+ * `slotlock serve`'s is) counts it against them under the tenant's lock, which needs that level,
+ * and refuses it otherwise.
+ */
+const WRITE = { isolation: 'read committed' } as const;
+
 /** What tenant scoping needs of an agent or application call. */
 interface TenantCallContext {
   principal: { tenantRef: string };
@@ -99,12 +106,66 @@ async function withTenant<T>(
   options?: { isolation?: 'read committed' },
 ): Promise<T> {
   assertActive(context);
-  const value =
-    options === undefined
-      ? await store.withTenant(context.principal.tenantRef, callback)
-      : await store.withTenant(context.principal.tenantRef, callback, options);
+  let value: T;
+  try {
+    value = await store.withTenant(context.principal.tenantRef, callback, {
+      ...options,
+      signal: context.signal,
+    });
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    // A suspended tenant may read; a write it asks for is forbidden, not a server failure.
+    if (code === 'tenant_suspended') throw new SlotlockAgentOperationError('tenant_suspended', 403);
+    // Waited past the store's lock timeout behind the tenant's own writes: retry later.
+    if (code === 'lock_timeout') throw new SlotlockAgentOperationError('server_busy', 503);
+    assertActive(context);
+    throw error;
+  }
   assertActive(context);
   return value;
+}
+
+/**
+ * Busy intervals one free/busy read or search may gather across all the resources it names: as many
+ * as the store reads for one resource. Without it, a request naming 100 resources at that limit, or
+ * one resource 100 times, did 100 times the work of one.
+ */
+const MAX_REQUEST_BUSY_INTERVALS = 10_000;
+
+/**
+ * Bookable windows one search may expand from its resources' availability rules in all: five
+ * resources of 50 daily rules over a year, or a hundred of two. Without it, a search of 100 such
+ * resources over a year expanded 1.8 million windows and held the process for seven seconds.
+ */
+const MAX_REQUEST_RULE_WINDOWS = 100_000;
+
+/** The resources a request names, each once, in the order first named. */
+function distinctResourceIds(input: Record<string, unknown>): string[] {
+  return [...new Set(input.resource_ids as string[])];
+}
+
+/** Counts a request's busy intervals against MAX_REQUEST_BUSY_INTERVALS, refusing past it. */
+function busyBudget(): (intervals: number) => void {
+  let left = MAX_REQUEST_BUSY_INTERVALS;
+  return (intervals) => {
+    left -= intervals;
+    if (left < 0) throw new SlotlockAgentOperationError('calendar_work_limit', 400);
+  };
+}
+
+/** The store's free/busy read, its refusal to read past its limit answered as the caller's to narrow. */
+async function readFreeBusy(
+  tenantStore: SlotlockTenantStore,
+  params: Parameters<SlotlockTenantStore['getFreeBusy']>[0],
+): Promise<Awaited<ReturnType<SlotlockTenantStore['getFreeBusy']>>> {
+  try {
+    return await tenantStore.getFreeBusy(params);
+  } catch (error) {
+    if ((error as { code?: unknown } | null)?.code === 'calendar_work_limit') {
+      throw new SlotlockAgentOperationError('calendar_work_limit', 400);
+    }
+    throw error;
+  }
 }
 
 function interval(input: { start: string; end: string }): Interval {
@@ -306,11 +367,19 @@ function parseEventCursor(value: unknown): { start: Date; id: string } | undefin
   }
 }
 
-function encodeEventCursor(event: SlotlockCalendarEvent): string {
+/** The cursor after one row of a page ordered by start then id: an event, a hold or a booking. */
+function encodeEventCursor(row: { start: Date; id: string }): string {
   return Buffer.from(
-    JSON.stringify({ start: event.start.toISOString(), id: event.id }),
+    JSON.stringify({ start: row.start.toISOString(), id: row.id }),
     'utf8',
   ).toString('base64url');
+}
+
+/** One page of rows read with one more than `limit`, and the cursor to the next when there is one. */
+function page<T extends { start: Date; id: string }>(rows: T[], limit: number) {
+  const shown = rows.slice(0, limit);
+  const last = shown.at(-1);
+  return { shown, next: rows.length > limit && last ? encodeEventCursor(last) : null };
 }
 
 /**
@@ -318,19 +387,34 @@ function encodeEventCursor(event: SlotlockCalendarEvent): string {
  * send (an external reference such as `vehicle-42`, the nil UUID, a version 7 UUID). The store
  * issues version 4 UUIDs (gen_random_uuid) and refuses an id that is not a version 1 to 5 UUID as an
  * invalid identity, so such an id names no resource: it is not found, like a well-formed id that
- * names nothing or another tenant's resource.
+ * names nothing or another tenant's resource. With `visibility`, a resource of the other is not
+ * found either: agents ask for `shared`, so a private resource is invisible to them.
  */
 async function requireResource(
   tenantStore: SlotlockTenantStore,
   tenantRef: string,
   resourceId: string,
+  visibility?: 'shared',
 ): Promise<SlotlockResource> {
   if (!STORE_ID_PATTERN.test(resourceId)) {
     throw new SlotlockAgentOperationError('resource_not_found', 404);
   }
-  const resource = await tenantStore.getResource({ tenantRef, id: resourceId });
+  const resource = await tenantStore.getResource({
+    tenantRef,
+    id: resourceId,
+    ...(visibility !== undefined ? { visibility } : {}),
+  });
   if (!resource) throw new SlotlockAgentOperationError('resource_not_found', 404);
   return resource;
+}
+
+/** The caller's shared resource with this id: what an agent may see and book. */
+function requireAgentResource(
+  tenantStore: SlotlockTenantStore,
+  tenantRef: string,
+  resourceId: string,
+): Promise<SlotlockResource> {
+  return requireResource(tenantStore, tenantRef, resourceId, 'shared');
 }
 
 /** Bind the protocol server to the production store without giving a request control of tenancy. */
@@ -345,6 +429,7 @@ export function createSlotlockStoreAgentBackend(
         const resource = await tenantStore.getResource({
           tenantRef: context.principal.tenantRef,
           id: resourceId,
+          visibility: 'shared',
         });
         return resource
           ? { name: resource.externalRef ?? null, timezone: resource.timezone }
@@ -358,6 +443,7 @@ export function createSlotlockStoreAgentBackend(
         const limit = input.limit as number;
         const resources = await tenantStore.listResources({
           tenantRef: context.principal.tenantRef,
+          visibility: 'shared',
           limit: limit + 1,
           ...(cursor !== undefined ? { after: cursor } : {}),
         });
@@ -375,17 +461,18 @@ export function createSlotlockStoreAgentBackend(
 
     async getFreeBusy(context, input) {
       const window = interval(input as { start: string; end: string });
-      const resourceIds = input.resource_ids as string[];
+      const resourceIds = distinctResourceIds(input);
+      const charge = busyBudget();
       return withTenant(store, context, async (tenantStore) => {
         const resources = [];
         for (const resourceId of resourceIds) {
-          const resource = await requireResource(
+          const resource = await requireAgentResource(
             tenantStore,
             context.principal.tenantRef,
             resourceId,
           );
           const sources = await requiredSources(options, context, resource);
-          const result = await tenantStore.getFreeBusy({
+          const result = await readFreeBusy(tenantStore, {
             tenantRef: context.principal.tenantRef,
             resourceId,
             window,
@@ -394,6 +481,7 @@ export function createSlotlockStoreAgentBackend(
               ? { coverageMaxAgeMs: options.coverageMaxAgeMs }
               : {}),
           });
+          charge(result.busy.length);
           resources.push({
             resource_id: resourceId,
             busy: result.busy.map((busy) => ({
@@ -409,19 +497,21 @@ export function createSlotlockStoreAgentBackend(
 
     async findNextAvailable(context, input) {
       const window = interval(input as { start: string; end: string });
-      const resourceIds = input.resource_ids as string[];
+      const resourceIds = distinctResourceIds(input);
       const durationMs = (input.duration_minutes as number) * 60_000;
+      const charge = busyBudget();
+      let windowsLeft = MAX_REQUEST_RULE_WINDOWS;
       return withTenant(store, context, async (tenantStore) => {
         let best: { resourceId: string; interval: Interval } | null = null;
         let incomplete = false;
         for (const resourceId of resourceIds) {
-          const resource = await requireResource(
+          const resource = await requireAgentResource(
             tenantStore,
             context.principal.tenantRef,
             resourceId,
           );
           const sources = await requiredSources(options, context, resource);
-          const freeBusy = await tenantStore.getFreeBusy({
+          const freeBusy = await readFreeBusy(tenantStore, {
             tenantRef: context.principal.tenantRef,
             resourceId,
             window,
@@ -430,17 +520,17 @@ export function createSlotlockStoreAgentBackend(
               ? { coverageMaxAgeMs: options.coverageMaxAgeMs }
               : {}),
           });
+          charge(freeBusy.busy.length);
           if (freeBusy.coverage.state !== 'complete') {
             incomplete = true;
             continue;
           }
           const rules =
             resource.availabilityRules ?? (await options.availabilityRules(context, resource));
-          const candidate = findNextAvailable({
-            busy: freeBusy.busy,
-            windows: expandRules(rules, window, resource.timezone),
-            durationMs,
-          });
+          const windows = expandRules(rules, window, resource.timezone);
+          windowsLeft -= windows.length;
+          if (windowsLeft < 0) throw new SlotlockAgentOperationError('calendar_work_limit', 400);
+          const candidate = findNextAvailable({ busy: freeBusy.busy, windows, durationMs });
           if (
             candidate &&
             (!best ||
@@ -467,7 +557,7 @@ export function createSlotlockStoreAgentBackend(
     async createEvent(context, rawInput) {
       const input = rawInput as unknown as AgentEventInput;
       return withTenant(store, context, async (tenantStore) => {
-        await requireResource(tenantStore, context.principal.tenantRef, input.resource_id);
+        await requireAgentResource(tenantStore, context.principal.tenantRef, input.resource_id);
         const recurrence = recurrenceFromInput(input.recurrence_rule, input.recurrence_exceptions);
         const content: CalendarEventContent = {
           start: new Date(input.starts_at),
@@ -509,7 +599,7 @@ export function createSlotlockStoreAgentBackend(
         });
         if (!created) throw new SlotlockAgentOperationError('store_inconsistent', 503);
         return { event: projectSlotlockCalendarEvent(created), replayed: result.idempotent };
-      });
+      }, WRITE);
     },
 
     async getEvent(context, input) {
@@ -526,13 +616,13 @@ export function createSlotlockStoreAgentBackend(
 
     async listEvents(context, input) {
       const window = interval(input as { start: string; end: string });
-      const resourceIds = input.resource_ids as string[];
+      const resourceIds = distinctResourceIds(input);
       const limit = input.limit as number;
       const after = parseEventCursor(input.cursor);
       return withTenant(store, context, async (tenantStore) => {
         const combined: SlotlockCalendarEvent[] = [];
         for (const resourceId of resourceIds) {
-          await requireResource(tenantStore, context.principal.tenantRef, resourceId);
+          await requireAgentResource(tenantStore, context.principal.tenantRef, resourceId);
           combined.push(
             ...(await tenantStore.listCalendarEvents({
               tenantRef: context.principal.tenantRef,
@@ -561,7 +651,15 @@ export function createSlotlockStoreAgentBackend(
       const input = rawInput as unknown as AgentEventInput & {
         event_id: string;
         expected_revision: number;
+        expected_resource_id?: string;
       };
+      // No event is on a resource the store never issued (an external reference, say).
+      if (
+        input.expected_resource_id !== undefined &&
+        !STORE_ID_PATTERN.test(input.expected_resource_id)
+      ) {
+        throw new SlotlockAgentOperationError('event_not_found', 404);
+      }
       return withTenant(store, context, async (tenantStore) => {
         const current = await tenantStore.getCalendarEvent({
           tenantRef: context.principal.tenantRef,
@@ -571,7 +669,7 @@ export function createSlotlockStoreAgentBackend(
         if (!current) throw new SlotlockAgentOperationError('event_not_found', 404);
         const resourceId = input.resource_id ?? current.resourceId;
         if (resourceId !== current.resourceId) {
-          await requireResource(tenantStore, context.principal.tenantRef, resourceId);
+          await requireAgentResource(tenantStore, context.principal.tenantRef, resourceId);
         }
         const recurrence: CalendarRecurrence | undefined =
           input.recurrence_rule === null
@@ -633,6 +731,9 @@ export function createSlotlockStoreAgentBackend(
           tenantRef: context.principal.tenantRef,
           ownerRef: agentOwnerRef(context),
           externalRef: current.externalRef,
+          // The caller's fence when it sent one, checked under the event's lock; otherwise the
+          // resource just read, so a move between that read and the write is not overwritten.
+          expectedResourceId: input.expected_resource_id ?? current.resourceId,
           resourceId,
           expectedRevision: input.expected_revision,
           idempotencyKey: agentCommandIdempotencyKey(context, input.idempotency_key),
@@ -648,7 +749,7 @@ export function createSlotlockStoreAgentBackend(
         });
         if (!updated) throw new SlotlockAgentOperationError('store_inconsistent', 503);
         return { event: projectSlotlockCalendarEvent(updated), replayed: result.idempotent };
-      });
+      }, WRITE);
     },
 
     async deleteEvent(context, input) {
@@ -664,6 +765,7 @@ export function createSlotlockStoreAgentBackend(
           tenantRef: context.principal.tenantRef,
           ownerRef: agentOwnerRef(context),
           externalRef,
+          expectedResourceId: current.resourceId,
           idempotencyKey: agentCommandIdempotencyKey(context, input.idempotency_key as string),
           expectedRevision: input.expected_revision as number,
         });
@@ -674,7 +776,7 @@ export function createSlotlockStoreAgentBackend(
           deleted: true,
           replayed: result.idempotent,
         };
-      });
+      }, WRITE);
     },
   };
 }
@@ -687,13 +789,21 @@ export interface SlotlockStoreApplicationBackendOptions {
   maxTenantResources?: number;
   /** Batches of each maintenance task one `slotlock_run_maintenance` call runs, 1-100 (default 10). */
   maintenanceBatches?: number;
+  /**
+   * Let an admin key erase its own tenant (`slotlock_erase_tenant`), everything it has and every
+   * key it holds, with its tenant reference as confirmation. Off unless true: erasure cannot be
+   * undone, and an operator may owe a tenant's data a retention or review first.
+   */
+  tenantErasure?: boolean;
 }
 
 /** A store failure thrown with a `code` the caller may see, or the error itself to report. */
 function storeRefusal(error: unknown): unknown {
   const code = (error as { code?: unknown } | null)?.code;
   if (typeof code !== 'string') return error;
-  if (code === 'resource_limit_reached') return new SlotlockAgentOperationError(code, 409);
+  if (code === 'resource_limit_reached' || code === 'resource_visibility_conflict') {
+    return new SlotlockAgentOperationError(code, 409);
+  }
   if (code.startsWith('invalid_') && code !== 'invalid_transaction_isolation') {
     return new SlotlockAgentOperationError(code, 400);
   }
@@ -741,6 +851,18 @@ function resourceOutput(resource: SlotlockResource) {
     external_ref: resource.externalRef,
     timezone: resource.timezone,
     availability: rulesOutput(resource.availabilityRules),
+    visibility: resource.visibility ?? 'shared',
+    archived_at: resource.archivedAt?.toISOString() ?? null,
+  };
+}
+
+/** Any of a tenant's events: the store's id, which the tenant-event routes take, and its owner's. */
+function tenantEventOutput(event: SlotlockCalendarEvent) {
+  return {
+    ...projectSlotlockCalendarEvent(event),
+    id: event.id,
+    event_ref: event.externalRef,
+    owner_ref: event.ownerRef,
   };
 }
 
@@ -770,6 +892,32 @@ function reservationOutput(reservation: SlotlockReservation) {
 }
 
 /**
+ * The namespace an application caller's idempotency keys live in: a digest of its tenant and
+ * subject, so the authenticated subject never lands in a durable row.
+ */
+function applicationPrincipalRef(context: SlotlockApplicationInvocationContext): string {
+  return `application:${createHash('sha256')
+    .update(`${context.principal.tenantRef}\0${context.principal.subject}`)
+    .digest('hex')}`;
+}
+
+/**
+ * An application caller's event command key: its tenant, subject and own key, digested, so one
+ * caller's key never replays another's command and neither the subject nor the raw key is stored.
+ */
+function applicationCommandKey(
+  context: SlotlockApplicationInvocationContext,
+  idempotencyKey: string,
+): string {
+  return `application-command:${createHash('sha256')
+    .update(`${context.principal.tenantRef}\0${context.principal.subject}\0${idempotencyKey}`)
+    .digest('hex')}`;
+}
+
+/** The most busy intervals one slotlock_list_busy answers, as one free/busy request reads. */
+const MAX_LISTED_BUSY = MAX_REQUEST_BUSY_INTERVALS;
+
+/**
  * Serve the application API (application-api.ts) from the production store, in the principal's
  * tenant. Every resource an operation names must be the tenant's, or it is not found; holds are
  * reservations under the tenant's row-level security, so another tenant's hold is not found either.
@@ -786,6 +934,7 @@ export function createSlotlockStoreApplicationBackend(
   if (!(Number.isSafeInteger(batches) && batches >= 1 && batches <= 100)) {
     throw new RangeError('maintenanceBatches must be a whole number from 1 to 100');
   }
+  const tenantErasure = options.tenantErasure === true;
   const tenantOf = (context: SlotlockApplicationInvocationContext) => context.principal.tenantRef;
 
   return {
@@ -800,6 +949,9 @@ export function createSlotlockStoreApplicationBackend(
               tenantRef: tenantOf(context),
               externalRef: input.external_ref as string,
               timezone: input.timezone as string,
+              ...(input.visibility !== undefined
+                ? { visibility: input.visibility as 'shared' | 'private' }
+                : {}),
               ...(max !== undefined ? { maxTenantResources: max } : {}),
             });
             return { resource: resourceOutput(resource) };
@@ -817,6 +969,57 @@ export function createSlotlockStoreApplicationBackend(
           await requireResource(tenant, tenantOf(context), input.resource_id as string),
         ),
       }));
+    },
+
+    async archiveResource(context, input) {
+      const id = input.resource_id as string;
+      if (!STORE_ID_PATTERN.test(id)) throw new SlotlockAgentOperationError('resource_not_found', 404);
+      return withTenant(store, context, async (tenant) => {
+        const resource = await tenant.archiveResource({ tenantRef: tenantOf(context), id });
+        if (!resource) throw new SlotlockAgentOperationError('resource_not_found', 404);
+        return { resource: resourceOutput(resource) };
+      }, WRITE);
+    },
+
+    async restoreResource(context, input) {
+      const id = input.resource_id as string;
+      if (!STORE_ID_PATTERN.test(id)) throw new SlotlockAgentOperationError('resource_not_found', 404);
+      return withTenant(store, context, async (tenant) => {
+        const resource = await tenant.restoreResource({ tenantRef: tenantOf(context), id });
+        if (!resource) throw new SlotlockAgentOperationError('resource_not_found', 404);
+        return { resource: resourceOutput(resource) };
+      }, WRITE);
+    },
+
+    async deleteResource(context, input) {
+      const id = input.resource_id as string;
+      // An id the store never issues names no resource: there is nothing to delete.
+      if (!STORE_ID_PATTERN.test(id)) return { deleted: false };
+      return withTenant(store, context, async (tenant) => {
+        const result = await tenant.deleteResource({ tenantRef: tenantOf(context), id });
+        if (!result.ok) throw applicationRefusal(result.code);
+        return { deleted: result.deleted };
+      }, WRITE);
+    },
+
+    async listBusy(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const resource = await requireResource(tenant, tenantOf(context), input.resource_id as string);
+        // One row past the cap is enough to refuse: the rest is never read.
+        const busy = await tenant.listBusy(resource.id, interval(input as { start: string; end: string }), {
+          tenantRef: tenantOf(context),
+          limit: MAX_LISTED_BUSY + 1,
+        });
+        if (busy.length > MAX_LISTED_BUSY) {
+          throw new SlotlockAgentOperationError('calendar_work_limit', 400);
+        }
+        return {
+          busy: busy.map((occupied) => ({
+            start: occupied.start.toISOString(),
+            end: occupied.end.toISOString(),
+          })),
+        };
+      });
     },
 
     async setResourceAvailability(context, input) {
@@ -855,14 +1058,53 @@ export function createSlotlockStoreApplicationBackend(
       return withTenant(store, context, async (tenant) => {
         const resource = await requireResource(tenant, tenantOf(context), input.resource_id as string);
         const result = await tenant.acquireHold({
+          tenantRef: tenantOf(context),
           resourceId: resource.id,
           start: new Date(input.start as string),
           end: new Date(input.end as string),
           ttlMs: (input.ttl_seconds as number) * 1_000,
           ...(input.source !== undefined ? { source: input.source as string } : {}),
+          ...(input.buffer_after_minutes !== undefined
+            ? { bufferAfterMs: (input.buffer_after_minutes as number) * 60_000 }
+            : {}),
+          // A retried request with the caller's key answers the hold the first one made.
+          ...(input.idempotency_key !== undefined
+            ? {
+                idempotencyKey: input.idempotency_key as string,
+                principalRef: applicationPrincipalRef(context),
+              }
+            : {}),
         });
         if (!result.ok) throw applicationRefusal(result.code);
         return { hold: holdOutput(result.hold) };
+      }, WRITE);
+    },
+
+    async getHold(context, input) {
+      const id = input.hold_id as string;
+      if (!STORE_ID_PATTERN.test(id)) throw new SlotlockAgentOperationError('hold_not_found', 404);
+      return withTenant(store, context, async (tenant) => {
+        const hold = await tenant.getHold({ tenantRef: tenantOf(context), holdId: id });
+        if (!hold) throw new SlotlockAgentOperationError('hold_not_found', 404);
+        return { hold: holdOutput(hold) };
+      });
+    },
+
+    async listHolds(context, input) {
+      const limit = input.limit as number;
+      const after = parseEventCursor(input.cursor);
+      return withTenant(store, context, async (tenant) => {
+        const resource = await requireResource(tenant, tenantOf(context), input.resource_id as string);
+        const { shown, next } = page(
+          await tenant.listHolds({
+            tenantRef: tenantOf(context),
+            resourceId: resource.id,
+            limit: limit + 1,
+            ...(after ? { after } : {}),
+          }),
+          limit,
+        );
+        return { holds: shown.map(holdOutput), next_cursor: next };
       });
     },
 
@@ -873,7 +1115,7 @@ export function createSlotlockStoreApplicationBackend(
         const result = await tenant.confirmHold(id, { tenantRef: tenantOf(context) });
         if (!result.ok) throw applicationRefusal(result.code);
         return { reservation: reservationOutput(result.reservation) };
-      });
+      }, WRITE);
     },
 
     async releaseHold(context, input) {
@@ -883,6 +1125,36 @@ export function createSlotlockStoreApplicationBackend(
       return withTenant(store, context, async (tenant) => ({
         released: (await tenant.releaseHold(id, { tenantRef: tenantOf(context) })).released,
       }));
+    },
+
+    async getReservation(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const reservation = await tenant.getReservation({
+          tenantRef: tenantOf(context),
+          externalRef: input.reservation_ref as string,
+        });
+        if (!reservation) throw new SlotlockAgentOperationError('reservation_not_found', 404);
+        return { reservation: reservationOutput(reservation) };
+      });
+    },
+
+    async listReservations(context, input) {
+      const limit = input.limit as number;
+      const after = parseEventCursor(input.cursor);
+      return withTenant(store, context, async (tenant) => {
+        const resource = await requireResource(tenant, tenantOf(context), input.resource_id as string);
+        const { shown, next } = page(
+          await tenant.listReservations({
+            tenantRef: tenantOf(context),
+            resourceId: resource.id,
+            window: interval(input as { start: string; end: string }),
+            limit: limit + 1,
+            ...(after ? { after } : {}),
+          }),
+          limit,
+        );
+        return { reservations: shown.map(reservationOutput), next_cursor: next };
+      });
     },
 
     async putReservation(context, input) {
@@ -904,7 +1176,7 @@ export function createSlotlockStoreApplicationBackend(
             : await tenant.rescheduleExternalReservation(command);
         if (!result.ok) throw applicationRefusal(result.code);
         return { reservation: reservationOutput(result.reservation), replayed: result.idempotent };
-      });
+      }, WRITE);
     },
 
     async cancelReservation(context, input) {
@@ -916,7 +1188,7 @@ export function createSlotlockStoreApplicationBackend(
         });
         if (!result.ok) throw applicationRefusal(result.code);
         return { cancelled: result.cancelled, revision: result.revision };
-      });
+      }, WRITE);
     },
 
     async recordCoverage(context, input) {
@@ -931,18 +1203,102 @@ export function createSlotlockStoreApplicationBackend(
         });
         if (!result.ok) throw applicationRefusal(result.code);
         return { revision: result.revision, replayed: result.idempotent };
+      }, WRITE);
+    },
+
+    async listTenantEvents(context, input) {
+      const limit = input.limit as number;
+      const after = parseEventCursor(input.cursor);
+      return withTenant(store, context, async (tenant) => {
+        const resource = await requireResource(tenant, tenantOf(context), input.resource_id as string);
+        const { shown, next } = page(
+          await tenant.listCalendarEvents({
+            tenantRef: tenantOf(context),
+            allOwners: true,
+            resourceId: resource.id,
+            window: interval(input as { start: string; end: string }),
+            limit: limit + 1,
+            ...(after ? { after } : {}),
+          }),
+          limit,
+        );
+        return { events: shown.map(tenantEventOutput), next_cursor: next };
       });
+    },
+
+    async getTenantEvent(context, input) {
+      const id = input.event_id as string;
+      if (!STORE_ID_PATTERN.test(id)) throw new SlotlockAgentOperationError('event_not_found', 404);
+      return withTenant(store, context, async (tenant) => {
+        const event = await tenant.getCalendarEventById({ tenantRef: tenantOf(context), eventId: id });
+        if (!event) throw new SlotlockAgentOperationError('event_not_found', 404);
+        return { event: tenantEventOutput(event) };
+      });
+    },
+
+    async cancelTenantEvent(context, input) {
+      const id = input.event_id as string;
+      const expectedResourceId = input.expected_resource_id as string | undefined;
+      // An id the store never issues names no event, and no event is on a resource it never issued.
+      if (
+        !STORE_ID_PATTERN.test(id) ||
+        (expectedResourceId !== undefined && !STORE_ID_PATTERN.test(expectedResourceId))
+      ) {
+        throw new SlotlockAgentOperationError('event_not_found', 404);
+      }
+      return withTenant(store, context, async (tenant) => {
+        const result = await tenant.cancelCalendarEventById({
+          tenantRef: tenantOf(context),
+          eventId: id,
+          idempotencyKey: applicationCommandKey(context, input.idempotency_key as string),
+          expectedRevision: input.expected_revision as number,
+          ...(expectedResourceId !== undefined ? { expectedResourceId } : {}),
+        });
+        if (!result.ok) throw applicationRefusal(result.code);
+        return {
+          event_id: result.eventId,
+          revision: result.revision,
+          cancelled: true,
+          replayed: result.idempotent,
+        };
+      }, WRITE);
+    },
+
+    async getTenant(context) {
+      return withTenant(store, context, async (tenant) => ({
+        tenant: {
+          ref: tenantOf(context),
+          suspended: await tenant.isTenantSuspended({ tenantRef: tenantOf(context) }),
+        },
+      }));
+    },
+
+    async eraseTenant(context, input) {
+      if (!tenantErasure) throw new SlotlockAgentOperationError('tenant_erasure_disabled', 403);
+      // The reference, not a yes: a key of another tenant than the caller believes cannot erase it.
+      if (input.confirm_tenant_ref !== tenantOf(context)) {
+        throw new SlotlockAgentOperationError('invalid_confirmation', 400);
+      }
+      return withTenant(store, context, async (tenant) => {
+        // Read under the tenant's lock, which a suspension waits for: a suspended tenant's data is
+        // kept for its operator, who erases it (slotlock tenant erase) when they decide to.
+        if (await tenant.isTenantSuspended({ tenantRef: tenantOf(context) })) {
+          throw new SlotlockAgentOperationError('tenant_suspended', 403);
+        }
+        const erased = await tenant.eraseTenant({ tenantRef: tenantOf(context) });
+        return { total: erased.total, rows: erased.rows };
+      }, WRITE);
     },
 
     async runMaintenance(context) {
       assertActive(context);
       try {
-        return {
-          ...(await maintainSlotlockTenant(store, tenantOf(context), {
-            batches,
-            signal: context.signal,
-          })),
-        };
+        // A caller goes round again while `capped`; when to do so at once is the scheduler's.
+        const { rollPending: _, ...result } = await maintainSlotlockTenant(store, tenantOf(context), {
+          batches,
+          signal: context.signal,
+        });
+        return result;
       } catch (error) {
         if (context.signal.aborted) throw new SlotlockAgentOperationError('request_aborted', 503);
         throw error;

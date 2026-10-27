@@ -13,8 +13,9 @@ normally need two maintainer approvals are made until a second maintainer joins.
   [SECURITY.md](./SECURITY.md). Never a public issue.
 - **Code of conduct concerns:** [clever.eziogor@pylota.io](mailto:clever.eziogor@pylota.io), as described in
   [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md#reporting).
-- **Everything else:** an issue or discussion on
-  [github.com/PILOTAAI/slotlock](https://github.com/PILOTAAI/slotlock).
+- **Hosted Slotlock** (support, abuse, privacy): the addresses in
+  [.github/SUPPORT.md](.github/SUPPORT.md).
+- **Everything else:** an issue on [github.com/PILOTAAI/slotlock](https://github.com/PILOTAAI/slotlock).
 
 ## Becoming a maintainer
 

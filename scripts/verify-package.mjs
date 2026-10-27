@@ -7,6 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Ajv2020 from 'ajv/dist/2020.js';
 import postgres from 'postgres';
+import { checkNotice } from './notice.mjs';
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const artifactRoot = join(packageRoot, 'dist');
@@ -32,6 +33,7 @@ assert.equal(manifest.exports?.['./node-server']?.types, './node-server.d.ts');
 assert.equal(manifest.exports?.['./node-server']?.import, './node-server.js');
 assert.equal(manifest.exports?.['./manifest'], './slotlock.manifest.json');
 assert.equal(manifest.exports?.['./manifest.schema'], './slotlock-manifest.schema.json');
+assert.equal(manifest.exports?.['./openapi.json'], './openapi.json');
 assert.deepEqual(sourceManifest.bin, { slotlock: './dist/cli.js' });
 assert.deepEqual(manifest.bin, { slotlock: 'cli.js' }, 'the artifact must carry the slotlock bin');
 assert.match(
@@ -51,19 +53,13 @@ assert.ok(
 assert.deepEqual(manifest.peerDependencies, { postgres: '^3.4.5' });
 assert.equal(manifest.dependencies?.postgres, undefined, 'postgres must be a peer dependency');
 
-const notice = readFileSync(join(artifactRoot, 'NOTICE'), 'utf8');
-assert.match(notice, /^Copyright \d{4} TREFT LTD$/m, 'NOTICE must name the copyright holder');
 assert.match(
   readFileSync(join(artifactRoot, 'LICENSE'), 'utf8'),
   /^ {3}Copyright \d{4} TREFT LTD$/m,
   'the LICENSE appendix must name the copyright holder',
 );
-for (const [name, version] of Object.entries(manifest.dependencies ?? {})) {
-  assert.ok(notice.includes(`${name} ${version},`), `NOTICE must list ${name} ${version}`);
-}
-for (const [name, range] of Object.entries(manifest.peerDependencies)) {
-  assert.ok(notice.includes(`(${name}) ${range},`), `NOTICE must list peer ${name} ${range}`);
-}
+// Every dependency at the exact version the artifact declares, every peer at its range.
+assert.deepEqual(checkNotice(readFileSync(join(artifactRoot, 'NOTICE'), 'utf8'), manifest), []);
 
 const packed = JSON.parse(
   execFileSync(
@@ -89,6 +85,7 @@ const expectedFiles = new Set([
   'MAINTAINERS.md',
   'slotlock.manifest.json',
   'slotlock-manifest.schema.json',
+  'openapi.json',
   'agent-server.js',
   'agent-server.d.ts',
   'agent-store-backend.js',
@@ -107,6 +104,8 @@ const expectedFiles = new Set([
   'ddl.d.ts',
   'engine.js',
   'engine.d.ts',
+  'event-schema.js',
+  'event-schema.d.ts',
   'hooks.js',
   'hooks.d.ts',
   'ical-worker.js',
@@ -125,6 +124,8 @@ const expectedFiles = new Set([
   'node-server.d.ts',
   'package-version.js',
   'package-version.d.ts',
+  'rate-limit.js',
+  'rate-limit.d.ts',
   'rest-api.js',
   'rest-api.d.ts',
   'rules.js',
@@ -222,9 +223,20 @@ for (const capability of [
   'mcp-calendar-resources',
   'mcp-live-updates',
   'trace-context-propagation',
+  'rest-api',
+  'application-api',
+  'api-keys',
+  'dashboard',
+  'maintenance',
 ]) {
   assert.ok(capabilityManifest.capabilities.includes(capability), capability);
 }
+// The packed OpenAPI document is the repository's, byte for byte.
+assert.equal(
+  readFileSync(join(artifactRoot, 'openapi.json'), 'utf8'),
+  readFileSync(join(packageRoot, 'openapi.json'), 'utf8'),
+);
+assert.equal(JSON.parse(readFileSync(join(artifactRoot, 'openapi.json'), 'utf8')).openapi, '3.1.0');
 
 writeFileSync(
   join(consumerRoot, 'package.json'),
@@ -559,7 +571,7 @@ const ordinary = [
   'END:VEVENT',
   'END:VCALENDAR',
 ].join('\\r\\n');
-// Refused by the parser's own one-second limit: a zone whose rule never occurs, read slowly.
+// Refused at the end of the parser's step budget: a zone whose rule never occurs, read slowly.
 const slow = [
   'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Slotlock verify//EN',
   'BEGIN:VTIMEZONE', 'TZID:Custom/Slow', 'BEGIN:STANDARD', 'DTSTART:19700101T000000',
@@ -681,6 +693,7 @@ if (databaseUrl) {
         DATABASE_URL: servingUrl.href,
         SLOTLOCK_MIGRATE_DATABASE_URL: databaseUrl,
         SLOTLOCK_AUTH_TOKEN: token,
+        SLOTLOCK_CONFIRM_WRITES: 'all',
         SLOTLOCK_CONFIRMATION_SECRET: randomBytes(32).toString('hex'),
         SLOTLOCK_TENANT: 'package-verification',
         SLOTLOCK_REST_API: 'on',
@@ -742,7 +755,7 @@ if (databaseUrl) {
       );
       assert.equal((await tools.json()).result.tools.length, 8);
       // The REST API: its document is public, its routes take the same token, and a write that
-      // waits for a person (SLOTLOCK_CONFIRM_WRITES defaults to all) answers 428.
+      // waits for a person (SLOTLOCK_CONFIRM_WRITES=all, set above; the default is none) answers 428.
       const openApi = await fetch(`${listening.address}/openapi.json`);
       assert.equal(openApi.status, 200);
       assert.equal((await openApi.json()).openapi, '3.1.0');

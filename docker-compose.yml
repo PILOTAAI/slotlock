@@ -1,8 +1,9 @@
-# Slotlock quickstart: PostgreSQL 16 and the Slotlock MCP/A2A server, reachable only from this
-# machine.
-#   cp .env.example .env     then fill in every empty value (openssl rand -hex 32)
+# Slotlock quickstart: PostgreSQL 18 and the Slotlock MCP/A2A/REST server, reachable only from this
+# machine. CI runs it end to end (ci.yml, Compose quickstart), and the database suites on this image.
+#   cp .env.example .env     then fill in every empty value (openssl rand -hex 32),
+#                            or: scripts/quickstart-env.sh > .env
 #   docker compose up --build
-# MCP: http://localhost:8080/mcp   A2A: http://localhost:8080/a2a   health: /healthz
+# MCP: http://localhost:8080/mcp   A2A: http://localhost:8080/a2a   REST: /v1   health: /healthz
 #
 # Two database roles, as the README recommends. `db-roles` creates slotlock_app, a role that owns
 # nothing and cannot bypass row-level security; `migrate` applies the schema as the database owner
@@ -81,6 +82,8 @@ services:
       SLOTLOCK_TENANT: ${SLOTLOCK_TENANT:-default}
       SLOTLOCK_AVAILABILITY: ${SLOTLOCK_AVAILABILITY:-}
       SLOTLOCK_REST_API: ${SLOTLOCK_REST_API:-on}
+      SLOTLOCK_LIMITS: ${SLOTLOCK_LIMITS:-}
+      SLOTLOCK_TRUSTED_PROXY_HEADER: ${SLOTLOCK_TRUSTED_PROXY_HEADER:-}
       # The GitHub sign-in dashboard at $SLOTLOCK_PUBLIC_URL/dashboard: off while all four are empty,
       # and serve refuses to start with only some of them.
       SLOTLOCK_GITHUB_CLIENT_ID: ${SLOTLOCK_GITHUB_CLIENT_ID:-}

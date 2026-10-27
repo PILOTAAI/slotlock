@@ -97,6 +97,9 @@ function run(
         resolve({ code: typeof code === 'number' ? code : 1, output: `${stdout}${stderr}` });
       },
     );
+    // A script that refuses before reading its input closes the pipe first: that is its answer,
+    // not an error of the test's.
+    child.stdin?.on('error', () => {});
     child.stdin?.end(input);
   });
 }

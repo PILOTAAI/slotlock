@@ -5,8 +5,8 @@
 # ready, so a run GitHub dropped for a later one tags the same commit) and pushes it.
 #
 # The push uses the deploy key in the release-tag environment, not GITHUB_TOKEN: a tag pushed with
-# GITHUB_TOKEN starts no workflow, and a deploy-key push starts release.yml (npm) and image.yml (the
-# image, then the MCP Registry) through their own tag trigger, from the tagged commit. The "Release
+# GITHUB_TOKEN starts no workflow, and a deploy-key push starts release.yml (npm, then, once its suite
+# passes, the image and the MCP Registry) through its tag trigger, from the tagged commit. The "Release
 # tags" ruleset lets only admins and deploy keys create a v* tag, and only admins move or delete one;
 # the environment hands the key only to runs on main. A maintainer can still push a tag by hand; this
 # job then sees the tag exists and does nothing.
@@ -69,5 +69,5 @@ jobs:
           git push "git@github.com:$GITHUB_REPOSITORY.git" "refs/tags/$TAG"
           {
             echo "### Released $TAG"
-            echo "Tagged $COMMIT. The push starts Release (npm, then the GitHub release) and Image (GHCR, then the MCP Registry)."
+            echo "Tagged $COMMIT. The push starts Release (npm, then the GitHub release; GHCR, then the MCP Registry)."
           } >> "$GITHUB_STEP_SUMMARY"

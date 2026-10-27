@@ -700,6 +700,36 @@ describe('a confirmation question a person can trust', () => {
     expect(describeResource).not.toHaveBeenCalled();
   });
 
+  it('states no dates for a series it could not read when the update names no zone', async () => {
+    // The store expands the series in the event's own zone, which an unread event does not show:
+    // the question said "so it books 10 times ... (UTC)" where New York booked six an hour earlier.
+    const writeOnly = buildServer({
+      backend: { ...backend, describeResource } as SlotlockAgentCalendarBackend,
+      authenticate: async () => ({ subject, tenantRef: 'tenant-a', scopes: ['write'] }),
+    });
+    const update = {
+      event_id: EVENT.id,
+      expected_revision: 1,
+      idempotency_key: 'update-1',
+      starts_at: '2027-03-01T12:00:00Z',
+      ends_at: '2027-03-01T13:00:00Z',
+      recurrence_rule: 'FREQ=WEEKLY;BYDAY=MO,WE;UNTIL=20270405T000000Z',
+    };
+    const unzoned = await prompt(writeOnly, 'slotlock_update_event', update);
+    const message = unzoned.inputRequests.slotlock_confirm?.params.message ?? '';
+    expect(message).not.toMatch(/books \d+ time/);
+    expect(message).toContain(
+      "repeats FREQ=WEEKLY;BYDAY=MO,WE;UNTIL=20270405T000000Z, on dates that follow the event's existing time zone",
+    );
+    // A zone the update names is the one the store expands in.
+    const zoned = await prompt(writeOnly, 'slotlock_update_event', {
+      ...update,
+      timezone: 'America/New_York',
+    });
+    expect(zoned.inputRequests.slotlock_confirm?.params.message).toMatch(/so it books 10 times/);
+    expect(getEvent).not.toHaveBeenCalled();
+  });
+
   it('names by id when authorize refuses the read, though it allows the write', async () => {
     authorize.mockImplementation(
       async ({ operation }: { operation: string }) =>
@@ -823,13 +853,18 @@ describe('a confirmation question a person can trust', () => {
       'FREQ=DAILY;BYMONTH=2;BYMONTHDAY=29',
       'FREQ=DAILY;BYHOUR=9,13',
       'FREQ=MONTHLY;BYDAY=-1FR',
-      'FREQ=MONTHLY;BYMONTHDAY=31;BYMONTH=2',
-      'FREQ=YEARLY;BYWEEKNO=1;BYDAY=MO',
       'freq=weekly;interval=2;byday=mo,we',
     ]) {
       expect(isBookableRecurrenceRule(rule), rule).toBe(true);
     }
-    expect(isBookableRecurrenceRule('FREQ=YEARLY;BYWEEKNO=1;BYDAY=1MO')).toBe(false);
+    // Shapes ical.js expands wrongly (sync.ts, recurShapeProblem) are not booked.
+    for (const rule of [
+      'FREQ=MONTHLY;BYMONTHDAY=31;BYMONTH=2',
+      'FREQ=YEARLY;BYWEEKNO=1;BYDAY=MO',
+      'FREQ=YEARLY;BYWEEKNO=1;BYDAY=1MO',
+    ]) {
+      expect(isBookableRecurrenceRule(rule), rule).toBe(false);
+    }
   });
 
   it('accepts RFC 5545 rules in any case and order, and shows their canonical form', () => {
@@ -858,10 +893,10 @@ describe('a confirmation question a person can trust', () => {
       expect(
         await asked({ ...BOOKING, recurrence_rule: 'FREQ=MONTHLY;UNTIL=20281231T000000Z' }),
       ).toBe(
-        'Book vehicle-42 8 times before 2027-10-11, from 2027-03-02 09:00–10:00 to 2027-10-02 09:00–10:00 (Europe/London), repeating FREQ=MONTHLY;UNTIL=20281231T000000Z, until 2028-12-31: "Vehicle handover".',
+        'Book vehicle-42 8 times before 2027-10-13, from 2027-03-02 09:00–10:00 to 2027-10-02 09:00–10:00 (Europe/London), repeating FREQ=MONTHLY;UNTIL=20281231T000000Z, until 2028-12-31: "Vehicle handover".',
       );
       expect(await asked({ ...BOOKING, recurrence_rule: 'FREQ=WEEKLY;BYDAY=TU;COUNT=40' })).toBe(
-        'Book vehicle-42 32 times before 2027-10-11, from 2027-03-02 09:00–10:00 to 2027-10-05 09:00–10:00 (Europe/London), repeating FREQ=WEEKLY;COUNT=40;BYDAY=TU, 40 counted by its rule, moved and cancelled ones included: "Vehicle handover".',
+        'Book vehicle-42 33 times before 2027-10-13, from 2027-03-02 09:00–10:00 to 2027-10-12 09:00–10:00 (Europe/London), repeating FREQ=WEEKLY;COUNT=40;BYDAY=TU, 40 counted by its rule, moved and cancelled ones included: "Vehicle handover".',
       );
     });
 
@@ -869,7 +904,7 @@ describe('a confirmation question a person can trust', () => {
       expect(
         await asked({ ...BOOKING, recurrence_rule: 'FREQ=WEEKLY;BYDAY=TU', status: 'tentative' }),
       ).toBe(
-        'Book vehicle-42 32 times before 2027-10-11, from 2027-03-02 09:00–10:00 to 2027-10-05 09:00–10:00 (Europe/London), repeating FREQ=WEEKLY;BYDAY=TU, with no end, tentatively: "Vehicle handover".',
+        'Book vehicle-42 33 times before 2027-10-13, from 2027-03-02 09:00–10:00 to 2027-10-12 09:00–10:00 (Europe/London), repeating FREQ=WEEKLY;BYDAY=TU, with no end, tentatively: "Vehicle handover".',
       );
     });
 
@@ -903,7 +938,22 @@ describe('a confirmation question a person can trust', () => {
           ],
         }),
       ).toBe(
-        'Book vehicle-42 2 times before 2027-10-11, from 2027-03-02 09:00–10:00 to 2027-03-13 03:00–04:00 (Europe/London), repeating FREQ=WEEKLY;COUNT=3;BYDAY=TU, 3 counted by its rule, moved and cancelled ones included, 1 moved (2027-03-16 09:00 to 2027-03-13 03:00–04:00): "Vehicle handover".',
+        'Book vehicle-42 2 times before 2027-10-13, from 2027-03-02 09:00–10:00 to 2027-03-13 03:00–04:00 (Europe/London), repeating FREQ=WEEKLY;COUNT=3;BYDAY=TU, 3 counted by its rule, moved and cancelled ones included, 1 moved (2027-03-16 09:00 to 2027-03-13 03:00–04:00): "Vehicle handover".',
+      );
+    });
+
+    it('calls an occurrence moved only when an exception moves it, not when the clocks change', async () => {
+      // London, daily 00:00-06:00 from 24 October 2026: the night the clocks go back, the store
+      // books the seven hours the wall clock reads, but nothing moved the occurrence.
+      expect(
+        await asked({
+          ...BOOKING,
+          starts_at: '2026-10-23T23:00:00Z',
+          ends_at: '2026-10-24T05:00:00Z',
+          recurrence_rule: 'FREQ=DAILY;COUNT=3',
+        }),
+      ).toBe(
+        'Book vehicle-42 3 times, from 2026-10-24 00:00–06:00 UTC+01:00 to 2026-10-26 00:00–06:00 UTC+00:00 (Europe/London), repeating FREQ=DAILY;COUNT=3: "Vehicle handover".',
       );
     });
 
@@ -920,9 +970,10 @@ describe('a confirmation question a person can trust', () => {
           recurrence_exceptions: [moved],
         }),
       ).toBe(
-        'Book vehicle-42 1 time before 2027-10-11, from 2027-03-02 09:00–10:00 to 2027-03-02 09:00–10:00 (Europe/London), repeating FREQ=DAILY;COUNT=2, 2 counted by its rule, moved and cancelled ones included, 1 moved past 2027-10-11 (2027-03-03 09:00 to 2027-10-31 13:00–18:00 UTC+00:00): "Vehicle handover".',
+        'Book vehicle-42 1 time before 2027-10-13, from 2027-03-02 09:00–10:00 to 2027-03-02 09:00–10:00 (Europe/London), repeating FREQ=DAILY;COUNT=2, 2 counted by its rule, moved and cancelled ones included, 1 moved past 2027-10-13 (2027-03-03 09:00 to 2027-10-31 13:00–18:00 UTC+00:00): "Vehicle handover".',
       );
-      // An exception for an occurrence the rule never makes moves nothing, there or here.
+      // An exception for an occurrence the rule never makes is refused by the store, so the
+      // dates are not worked out here either.
       expect(
         await asked({
           ...BOOKING,
@@ -930,12 +981,12 @@ describe('a confirmation question a person can trust', () => {
           recurrence_exceptions: [{ ...moved, recurrence_id: '2027-03-05T09:00:00Z' }],
         }),
       ).toBe(
-        'Book vehicle-42 2 times, from 2027-03-02 09:00–10:00 to 2027-03-03 09:00–10:00 (Europe/London), repeating FREQ=DAILY;COUNT=2: "Vehicle handover".',
+        'Book vehicle-42 from 2027-03-02 09:00–10:00 (Europe/London), on dates Slotlock could not work out, repeating FREQ=DAILY;COUNT=2: "Vehicle handover".',
       );
     });
 
     it('names only the occurrences the store actually moves, all of them up to ten', async () => {
-      // An exception for an occurrence the rule never makes moves nothing.
+      // An exception for an occurrence the rule never makes is refused by the store.
       expect(
         await asked({
           ...BOOKING,
@@ -949,7 +1000,7 @@ describe('a confirmation question a person can trust', () => {
           ],
         }),
       ).toBe(
-        'Book vehicle-42 2 times, from 2027-03-02 09:00–10:00 to 2027-03-03 09:00–10:00 (Europe/London), repeating FREQ=DAILY;COUNT=2: "Vehicle handover".',
+        'Book vehicle-42 from 2027-03-02 09:00–10:00 (Europe/London), on dates Slotlock could not work out, repeating FREQ=DAILY;COUNT=2: "Vehicle handover".',
       );
       const moved = Array.from({ length: 12 }, (_, index) => {
         const day = String(index + 2).padStart(2, '0');

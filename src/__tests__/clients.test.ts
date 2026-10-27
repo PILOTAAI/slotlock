@@ -26,7 +26,8 @@ describe('the language clients', () => {
       /<Version>([^<]+)<\/Version>/.exec(read('clients/dotnet/src/Slotlock/Slotlock.csproj'))?.[1],
       /const string Version = "([^"]+)"/.exec(read('clients/dotnet/src/Slotlock/SlotlockClient.cs'))?.[1],
     ];
-    expect(new Set(versions)).toEqual(new Set(['0.1.0']));
+    // The package's: the release scripts move them together (scripts/client-versions.sh).
+    expect(new Set(versions)).toEqual(new Set([JSON.parse(read('package.json')).version]));
   });
 
   it.each(Object.entries(SUITES))('%s runs the shared scenario against a server', (_language, path) => {

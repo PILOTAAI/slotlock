@@ -55,6 +55,36 @@ function expectCanonical(set: readonly Interval[]) {
   }
 }
 
+describe('the next free slot, walked once', () => {
+  it('finds what carving each window out of the busy list found', () => {
+    // The search before it filtered the whole busy list for every window.
+    const carved = (busy: Interval[], windows: Interval[], durationMs: number) => {
+      for (const window of mergeIntervals(windows)) {
+        for (const free of subtractBusy(window, busy)) {
+          if (free.end.getTime() - free.start.getTime() >= durationMs) {
+            return { start: free.start, end: new Date(free.start.getTime() + durationMs) };
+          }
+        }
+      }
+      return null;
+    };
+    fc.assert(
+      fc.property(
+        fc.array(interval, { maxLength: 40 }),
+        fc.array(interval, { maxLength: 40 }),
+        fc.integer({ min: 1, max: 600 }),
+        (busy, windows, minutes) => {
+          const durationMs = minutes * MINUTE;
+          expect(findNextAvailable({ busy, windows, durationMs })).toEqual(
+            carved(busy, windows, durationMs),
+          );
+        },
+      ),
+      { numRuns: 2_000 },
+    );
+  });
+});
+
 describe('interval arithmetic', () => {
   it('mergeIntervals covers exactly the union, sorted and separated, and leaves its input alone', () => {
     fc.assert(
@@ -227,8 +257,10 @@ describe('weekly rule expansion', () => {
           const expanded = expandRules(rules, shifted, timezone);
           expectCanonical(expanded);
           const converter = createTimeZoneConverter(timezone);
+          // A window's edge the clocks skip stands where the skipped hour ends (SPEC.md, "Time
+          // and intervals"), so a window wholly inside one holds no time.
           const toUtc = (localDay: number, minutes: number) =>
-            converter.wallFrameToUtc(localDay + minutes * MINUTE).getTime();
+            converter.wallFrameToUtc(localDay + minutes * MINUTE, { gap: 'end' }).getTime();
           const oracle = (t: number) => {
             const { date } = zonedCalendarDate(new Date(t), timezone);
             const today = Date.parse(`${date}T00:00:00Z`);

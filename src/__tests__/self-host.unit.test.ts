@@ -1,7 +1,9 @@
 // The `slotlock` command's configuration: defaults, every refusal, and that no refusal or usage error
 // echoes a secret. Nothing here connects to a database; a refused configuration never gets that far.
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { SLOTLOCK_CAP_NAMES, SLOTLOCK_DEFAULT_LIMITS, formatSlotlockRate } from '../config.js';
 import {
   SLOTLOCK_CLI_HELP,
   SLOTLOCK_ENVIRONMENT_VARIABLES,
@@ -51,7 +53,7 @@ async function run(argv: string[], env: SlotlockEnv = {}) {
 }
 
 describe('slotlock serve configuration', () => {
-  it('defaults to loopback, port 8080, one tenant, confirmation on every write and REST on', () => {
+  it('defaults to loopback, port 8080, one tenant, no confirmation round and REST on', () => {
     const env = serveEnv();
     const config = readSlotlockServeConfig(env);
     expect(config).toEqual({
@@ -61,11 +63,126 @@ describe('slotlock serve configuration', () => {
       port: 8080,
       publicUrl: 'http://localhost:8080',
       authToken: env.SLOTLOCK_AUTH_TOKEN,
-      confirmWrites: ['slotlock_create_event', 'slotlock_update_event', 'slotlock_delete_event'],
-      confirmationSecret: env.SLOTLOCK_CONFIRMATION_SECRET,
+      confirmWrites: [],
       availability: [],
       restApi: true,
+      limits: SLOTLOCK_DEFAULT_LIMITS,
     });
+  });
+
+  it('reads request limits over the defaults, and the trusted client-address field', () => {
+    const config = readSlotlockServeConfig(
+      serveEnv({
+        SLOTLOCK_LIMITS: ' tenant_write=2/s:10, global_read=6000/m ,address=off,sign_in=5/h,key_lookup_queue=0 ',
+        SLOTLOCK_TRUSTED_PROXY_HEADER: 'CF-Connecting-IP',
+      }),
+    );
+    expect(config.trustedProxyHeader).toBe('cf-connecting-ip');
+    expect(config.limits.rates).toEqual({
+      ...SLOTLOCK_DEFAULT_LIMITS.rates,
+      tenant_write: { perSecond: 2, burst: 10 },
+      global_read: { perSecond: 100, burst: 6000 },
+      address: null,
+      sign_in: { perSecond: 5 / 3600, burst: 5 },
+    });
+    expect(config.limits.caps).toEqual({ ...SLOTLOCK_DEFAULT_LIMITS.caps, key_lookup_queue: 0 });
+    // The defaults the owner set for the hosted service (2026-10-24): about 20 reads and 5 writes a
+    // second per tenant with small bursts, 50 writes a second for the whole server.
+    expect(SLOTLOCK_DEFAULT_LIMITS.rates).toMatchObject({
+      tenant_read: { perSecond: 20 },
+      tenant_write: { perSecond: 5 },
+      global_write: { perSecond: 50 },
+    });
+    expect('trustedProxyHeader' in readSlotlockServeConfig(serveEnv())).toBe(false);
+  });
+
+  it('reads the maintenance cap, apart from the series-write caps, and names every cap in --help (P11)', () => {
+    // An application-API maintenance run held the one series-write slot for its whole run, so it
+    // has a cap of its own.
+    const config = readSlotlockServeConfig(serveEnv({ SLOTLOCK_LIMITS: 'maintenance_runs=2' }));
+    expect(config.limits.caps).toEqual({ ...SLOTLOCK_DEFAULT_LIMITS.caps, maintenance_runs: 2 });
+    expect(SLOTLOCK_DEFAULT_LIMITS.caps).toMatchObject({ maintenance_runs: 1, series_writes: 1 });
+    for (const name of SLOTLOCK_CAP_NAMES) expect(SLOTLOCK_CLI_HELP).toContain(name);
+  });
+
+  it("reads each tenant's share of the pool, 2 of 10 unless set, up to the whole pool", () => {
+    expect(SLOTLOCK_DEFAULT_LIMITS.caps.tenant_transactions).toBe(2);
+    for (const value of [1, 10]) {
+      const config = readSlotlockServeConfig(serveEnv({ SLOTLOCK_LIMITS: `tenant_transactions=${value}` }));
+      expect(config.limits.caps).toEqual({ ...SLOTLOCK_DEFAULT_LIMITS.caps, tenant_transactions: value });
+    }
+  });
+
+  it('writes each rate back in the smallest whole unit, as the listening line shows it', () => {
+    expect(
+      Object.fromEntries(
+        Object.entries(SLOTLOCK_DEFAULT_LIMITS.rates).map(([name, rate]) => [
+          name,
+          formatSlotlockRate(rate),
+        ]),
+      ),
+    ).toEqual({
+      address: '50/s:100',
+      key_read: '20/s:40',
+      key_write: '5/s:20',
+      tenant_read: '20/s:40',
+      tenant_write: '5/s:20',
+      global_read: '500/s:1000',
+      global_write: '50/s:100',
+      app_read: '20/s:40',
+      app_write: '5/s:20',
+      sign_in: '20/m:20',
+    });
+    expect(formatSlotlockRate({ perSecond: 5 / 3600, burst: 5 })).toBe('5/h:5');
+    expect(formatSlotlockRate(null)).toBe('off');
+    // What it writes reads back as the same rate.
+    const written = 'tenant_write=7/m:3,sign_in=5/h:5';
+    const read = readSlotlockServeConfig(serveEnv({ SLOTLOCK_LIMITS: written })).limits.rates;
+    expect(`tenant_write=${formatSlotlockRate(read.tenant_write)},sign_in=${formatSlotlockRate(read.sign_in)}`).toBe(
+      written,
+    );
+  });
+
+  it.each([
+    ['an unknown limit', 'tenant_reads=1/s', /tenant_reads is not a limit/],
+    ['a rate without a period', 'tenant_read=20', /tenant_read must be <count>\/<s\|m\|h>/],
+    ['a rate of zero', 'tenant_read=0/s', /tenant_read must be/],
+    ['a burst of zero', 'tenant_read=1/s:0', /tenant_read must be/],
+    ['a fractional rate', 'tenant_read=0.5/s', /tenant_read must be/],
+    ['a cap that is a rate', 'series_writes=1/s', /series_writes must be a whole number from 1 to 100/],
+    ['a cap of zero', 'tenant_series_writes=0', /tenant_series_writes must be a whole number/],
+    ['more key lookups than the pool can spare', 'key_lookups=9', /key_lookups must be a whole number from 1 to 8/],
+    ['more tenant transactions than the pool holds', 'tenant_transactions=11', /tenant_transactions must be a whole number from 1 to 10/],
+    ['no tenant transactions', 'tenant_transactions=0', /tenant_transactions must be a whole number from 1 to 10/],
+    ['a limit set twice', 'address=off,address=1/s', /address is set twice/],
+    ['an entry without a value', 'address', /is not name=value/],
+  ])('refuses SLOTLOCK_LIMITS with %s', (_case, value, message) => {
+    expect(refusal(serveEnv({ SLOTLOCK_LIMITS: value })).message).toMatch(message);
+  });
+
+  it.each(['Authorization', 'Host', 'X Forwarded For', 'x'.repeat(65)])(
+    'refuses %s as the trusted client-address field',
+    (value) => {
+      expect(refusal(serveEnv({ SLOTLOCK_TRUSTED_PROXY_HEADER: value })).message).toMatch(
+        /SLOTLOCK_TRUSTED_PROXY_HEADER must be the name of a request field/,
+      );
+    },
+  );
+
+  it('serves without a confirmation secret unless writes are guarded (SURF-4, PROD-16)', () => {
+    // The owner's hosted policy: every authenticated write takes effect at once. The confirmation
+    // round is a setting a self-hoster opts into.
+    const config = readSlotlockServeConfig({ DATABASE_URL });
+    expect(config.confirmWrites).toEqual([]);
+    expect('confirmationSecret' in config).toBe(false);
+    const optedIn = readSlotlockServeConfig(serveEnv({ SLOTLOCK_CONFIRM_WRITES: 'all' }));
+    expect(optedIn.confirmWrites).toEqual([
+      'slotlock_create_event',
+      'slotlock_update_event',
+      'slotlock_delete_event',
+    ]);
+    expect(optedIn.confirmationSecret).toBeDefined();
+    expect(SLOTLOCK_CLI_HELP).toMatch(/SLOTLOCK_CONFIRM_WRITES +none \(default\), all,/);
   });
 
   it('reads every optional setting', () => {
@@ -135,12 +252,12 @@ describe('slotlock serve configuration', () => {
     ],
     [
       'the confirmation secret is missing while writes are guarded',
-      { SLOTLOCK_CONFIRMATION_SECRET: undefined },
+      { SLOTLOCK_CONFIRM_WRITES: 'all', SLOTLOCK_CONFIRMATION_SECRET: undefined },
       /SLOTLOCK_CONFIRMATION_SECRET is required/,
     ],
     [
       'the confirmation secret is weak',
-      { SLOTLOCK_CONFIRMATION_SECRET: 'x'.repeat(40) },
+      { SLOTLOCK_CONFIRM_WRITES: 'all', SLOTLOCK_CONFIRMATION_SECRET: 'x'.repeat(40) },
       /SLOTLOCK_CONFIRMATION_SECRET is too weak/,
     ],
     [
@@ -350,6 +467,17 @@ describe('slotlock command line', () => {
     expect(version.stdout).toMatch(/^\d+\.\d+\.\d+\n$/);
   });
 
+  it('describes the server token as read and write, never as every scope (SEC-16)', () => {
+    // The token is granted SLOTLOCK_API_KEY_DEFAULT_SCOPES: an operator reading "every scope" would
+    // believe it reaches the application API, which needs admin.
+    const entry = /^ {2}SLOTLOCK_AUTH_TOKEN +([\s\S]*?)\n {2}[A-Z]/m.exec(SLOTLOCK_CLI_HELP)?.[1];
+    expect(entry, 'canary: the token is listed in --help').toBeDefined();
+    expect(entry?.replace(/\s+/g, ' ')).toMatch(/with read and write access/);
+    const source = readFileSync(new URL('../self-host.ts', import.meta.url), 'utf8');
+    expect(source).toContain('SLOTLOCK_AUTH_TOKEN');
+    expect(source).not.toMatch(/every\s+scope/);
+  });
+
   it('lists every variable the commands read in --help', () => {
     // Every variable set, so each reader takes the branch that reads the most; the proxy records
     // what the code asks for, including any name this test has never heard of.
@@ -419,6 +547,15 @@ describe('slotlock command line', () => {
     [['key', 'create', 'agent', '--expires-in-days', '0'], /--expires-in-days must be/],
     [['key', 'create', 'agent', '--expires-in-days', '3651'], /--expires-in-days must be/],
     [['key', 'create', 'agent', '--expires-in-days', '7.5'], /--expires-in-days must be/],
+    [['resource', 'archive'], /wrong number of arguments for "resource archive"/],
+    [['resource', 'delete', 'van', 'now'], /wrong number of arguments for "resource delete"/],
+    [['tenant'], /unknown command "tenant"/],
+    [['tenant', 'delete'], /unknown command "tenant delete"/],
+    [['tenant', 'status', 'fleet'], /wrong number of arguments for "tenant status"/],
+    [['tenant', 'erase'], /tenant erase needs --confirm <tenant>/],
+    [['tenant', 'erase', '--confirm', 'someone-else'], /--confirm must repeat SLOTLOCK_TENANT/],
+    [['tenant', 'suspend', '--confirm', 'default'], /--confirm applies only to tenant erase/],
+    [['tenant', 'unsuspend', '--reason', 'abuse'], /--reason applies only to tenant suspend/],
     [['hours'], /unknown command "hours"/],
     [['hours', 'delete'], /unknown command "hours delete"/],
     [['hours', 'set', '--all'], /wrong number of arguments for "hours set"/],

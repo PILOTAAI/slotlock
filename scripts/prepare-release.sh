@@ -1,7 +1,8 @@
 #!/bin/sh
 # Prepares the release of <version> in a checkout of main, for release-version.yml. It sets the
 # version in package.json and package-lock.json (npm version), in server.json (the version and the
-# image tag) and in slotlock.manifest.json, and turns CHANGELOG.md's "## Unreleased" heading into
+# image tag), in slotlock.manifest.json and in each language client (scripts/client-versions.sh: its
+# manifest and its User-Agent constant), and turns CHANGELOG.md's "## Unreleased" heading into
 # "## <version> - <today, UTC>". Merged to main, that change is a release: tag-release.yml tags it.
 # It refuses a version that is not later than package.json's, one already tagged, and a CHANGELOG.md
 # whose "## Unreleased" section is missing or empty, since the release notes are that section.
@@ -16,44 +17,13 @@ fail() {
   echo "::error::$1" >&2
   exit 1
 }
+# later and is_version, shared with scripts/dist-tag.sh; the clients' version files.
+. "$(dirname "$0")/semver.sh"
+. "$(dirname "$0")/client-versions.sh"
 new=$1
-# grep reads a line at a time: anything but the characters of a version (a line break, say) first.
-case $new in
-*[!0-9A-Za-z.-]*) fail "$new is not a version like 1.2.3 or 1.2.3-rc.1 (no leading v)." ;;
-esac
-printf '%s' "$new" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' ||
-  fail "$new is not a version like 1.2.3 or 1.2.3-rc.1 (no leading v)."
+is_version "$new" || fail "$new is not a version like 1.2.3 or 1.2.3-rc.1 (no leading v)."
 current=$(jq -r .version package.json)
 
-# later A B: A is a later version than B. Major, minor and patch compare as numbers; with those
-# equal, a release is later than its prereleases, and two prereleases compare as text.
-later() {
-  a=$1
-  b=$2
-  old_ifs=$IFS
-  IFS=.
-  # shellcheck disable=SC2086 # split each core into its three numbers
-  set -- ${a%%-*} ${b%%-*}
-  IFS=$old_ifs
-  [ "$1" -ne "$4" ] && {
-    [ "$1" -gt "$4" ]
-    return
-  }
-  [ "$2" -ne "$5" ] && {
-    [ "$2" -gt "$5" ]
-    return
-  }
-  [ "$3" -ne "$6" ] && {
-    [ "$3" -gt "$6" ]
-    return
-  }
-  case "$a,$b" in
-    *-*,*-*) [ "$a" != "$b" ] && [ "$(printf '%s\n%s\n' "$a" "$b" | LC_ALL=C sort | tail -n 1)" = "$a" ] ;;
-    *-*,*) return 1 ;;
-    *,*-*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
 later "$new" "$current" || fail "$new is not later than package.json's $current."
 if git rev-parse --verify --quiet "refs/tags/v$new" >/dev/null; then
   fail "v$new is already tagged."
@@ -64,6 +34,11 @@ grep -q '^## Unreleased$' CHANGELOG.md ||
 notes=$(awk '$0 == "## Unreleased" { found = 1; next } found && /^## / { exit } found && NF { print }' CHANGELOG.md)
 [ -n "$notes" ] ||
   fail "CHANGELOG.md's '## Unreleased' section is empty: add this release's changes under it first."
+# A client behind the package would be published at a version it does not have: refuse before
+# changing anything.
+if lagging=$(client_versions_check "$current"); then :; else
+  fail "$lagging is not at package.json's $current: bring the clients to it first."
+fi
 
 # replace FILE OLD NEW: every OLD in FILE becomes NEW, the rest of the file byte for byte.
 replace() {
@@ -84,6 +59,9 @@ npm version "$new" --no-git-tag-version --ignore-scripts >/dev/null
 replace server.json "\"version\": \"$current\"" "\"version\": \"$new\""
 replace server.json "ghcr.io/pilotaai/slotlock:$current" "ghcr.io/pilotaai/slotlock:$new"
 replace slotlock.manifest.json "\"version\": \"$current\"" "\"version\": \"$new\""
+if lagging=$(client_versions_set "$current" "$new"); then :; else
+  fail "$lagging is not at $new."
+fi
 
 # Every copy of the version moved, or nothing is committed.
 [ "$(jq -r .version package.json)" = "$new" ] || fail "package.json is not at $new."

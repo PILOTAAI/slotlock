@@ -121,8 +121,13 @@ describe.skipIf(!url)('store audit fixes (real Postgres)', () => {
         externalRef: event.ref,
         revision: 2,
       });
-      // What a reference no booking holds gets: a tombstone, and nothing cancelled.
+      // Nothing cancelled, and nothing retired: the reference is the event's, not a booking's, so
+      // no tombstone is written for it (one was, and nothing ever pruned it).
       expect(cancelled).toEqual({ ok: true, cancelled: false, revision: 2 });
+      const [tombstones] = await sql<{ count: number }[]>`
+        SELECT count(*)::int AS count FROM slotlock.reservation_tombstones
+         WHERE tenant_ref = ${event.tenantRef}`;
+      expect(tombstones?.count).toBe(0);
       await stillOccupies(event);
       await expect(
         store.getCalendarEvent({
@@ -387,10 +392,11 @@ describe.skipIf(!url)('store audit fixes (real Postgres)', () => {
     ];
 
     it('refuses a search window longer than 367 days with invalid_window', async () => {
-      const { resourceId } = await freshTenant();
+      const { tenantRef, resourceId } = await freshTenant();
       const start = d('2026-01-01T00:00:00Z');
       await expect(
         store.findNextAvailableFor({
+          tenantRef,
           resourceId,
           rules,
           searchWindow: { start, end: new Date(start.getTime() + 367 * DAY + 1) },
@@ -400,6 +406,7 @@ describe.skipIf(!url)('store audit fixes (real Postgres)', () => {
       const started = performance.now();
       await expect(
         store.findNextAvailableFor({
+          tenantRef,
           resourceId,
           rules: Array.from({ length: 50 }, () => rules[0] as (typeof rules)[number]),
           searchWindow: { start, end: d('2126-01-01T00:00:00Z') },
@@ -410,10 +417,11 @@ describe.skipIf(!url)('store audit fixes (real Postgres)', () => {
     });
 
     it('still searches a window of exactly 367 days', async () => {
-      const { resourceId } = await freshTenant();
+      const { tenantRef, resourceId } = await freshTenant();
       const start = d('2026-01-01T00:00:00Z');
       await expect(
         store.findNextAvailableFor({
+          tenantRef,
           resourceId,
           rules,
           searchWindow: { start, end: new Date(start.getTime() + 367 * DAY) },

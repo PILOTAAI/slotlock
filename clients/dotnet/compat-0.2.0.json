@@ -1,0 +1,139 @@
+{
+  "about": "Each operation's .NET parameter list as Slotlock.Client 0.2.0 generated it, defaults left out. clients/generate.ts emits an overload with this exact list, forwarding to the current method, wherever the current list differs, so 0.2.0 callers still compile. Never edit an entry: it is what 0.2.0 shipped.",
+  "methods": {
+    "slotlock_list_resources": [
+      "Optional<string> cursor",
+      "Optional<long> limit",
+      "CancellationToken cancellationToken"
+    ],
+    "slotlock_create_resource": [
+      "string externalRef",
+      "Optional<string> timezone",
+      "CancellationToken cancellationToken"
+    ],
+    "slotlock_get_free_busy": [
+      "IEnumerable<string> resourceIds",
+      "string start",
+      "string end",
+      "CancellationToken cancellationToken"
+    ],
+    "slotlock_find_next_available": [
+      "IEnumerable<string> resourceIds",
+      "string start",
+      "string end",
+      "long durationMinutes",
+      "CancellationToken cancellationToken"
+    ],
+    "slotlock_list_events": [
+      "IEnumerable<string> resourceIds",
+      "string start",
+      "string end",
+      "Optional<string> cursor",
+      "Optional<long> limit",
+      "CancellationToken cancellationToken"
+    ],
+    "slotlock_create_event": [
+      "string resourceId",
+      "string startsAt",
+      "string endsAt",
+      "string timezone",
+      "string idempotencyKey",
+      "Optional<string> title",
+      "Optional<string> description",
+      "Optional<string> location",
+      "Optional<JsonObject> organizer",
+      "Optional<string> transparency",
+      "Optional<string> status",
+      "Optional<string> recurrenceRule",
+      "Optional<JsonArray> attendees",
+      "Optional<JsonArray> reminders",
+      "Optional<JsonArray> recurrenceExceptions",
+      "CancellationToken cancellationToken"
+    ],
+    "slotlock_get_event": [
+      "string eventId",
+      "CancellationToken cancellationToken"
+    ],
+    "slotlock_update_event": [
+      "string eventId",
+      "long expectedRevision",
+      "string idempotencyKey",
+      "Optional<string> resourceId",
+      "Optional<string> startsAt",
+      "Optional<string> endsAt",
+      "Optional<string> timezone",
+      "Optional<string?> title",
+      "Optional<string?> description",
+      "Optional<string?> location",
+      "Optional<JsonObject?> organizer",
+      "Optional<JsonArray> attendees",
+      "Optional<JsonArray> reminders",
+      "Optional<string> transparency",
+      "Optional<string> status",
+      "Optional<string?> recurrenceRule",
+      "Optional<JsonArray> recurrenceExceptions",
+      "CancellationToken cancellationToken"
+    ],
+    "slotlock_delete_event": [
+      "string eventId",
+      "long expectedRevision",
+      "string idempotencyKey",
+      "CancellationToken cancellationToken"
+    ],
+    "slotlock_get_resource": [
+      "string resourceId",
+      "CancellationToken cancellationToken"
+    ],
+    "slotlock_set_resource_availability": [
+      "string resourceId",
+      "JsonArray? rules",
+      "CancellationToken cancellationToken"
+    ],
+    "slotlock_set_tenant_availability": [
+      "JsonArray? rules",
+      "CancellationToken cancellationToken"
+    ],
+    "slotlock_acquire_hold": [
+      "string resourceId",
+      "string start",
+      "string end",
+      "long ttlSeconds",
+      "Optional<string> source",
+      "CancellationToken cancellationToken"
+    ],
+    "slotlock_confirm_hold": [
+      "string holdId",
+      "CancellationToken cancellationToken"
+    ],
+    "slotlock_release_hold": [
+      "string holdId",
+      "CancellationToken cancellationToken"
+    ],
+    "slotlock_put_reservation": [
+      "string reservationRef",
+      "string resourceId",
+      "string start",
+      "string end",
+      "long revision",
+      "Optional<long> bufferAfterMinutes",
+      "Optional<string> source",
+      "CancellationToken cancellationToken"
+    ],
+    "slotlock_cancel_reservation": [
+      "string reservationRef",
+      "long revision",
+      "CancellationToken cancellationToken"
+    ],
+    "slotlock_record_coverage": [
+      "string resourceId",
+      "string source",
+      "string start",
+      "string end",
+      "long revision",
+      "CancellationToken cancellationToken"
+    ],
+    "slotlock_run_maintenance": [
+      "CancellationToken cancellationToken"
+    ]
+  }
+}

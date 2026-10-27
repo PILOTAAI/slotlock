@@ -64,6 +64,7 @@ describe.skipIf(!url)('the dashboard Worker (real Postgres)', () => {
       SLOTLOCK_DASHBOARD_USERS: '*',
       SLOTLOCK_CLIENT_RATE_LIMIT: limiter(),
       SLOTLOCK_SIGN_IN_RATE_LIMIT: limiter(),
+      SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT: limiter(),
     };
   });
 
@@ -247,7 +248,7 @@ describe.skipIf(!url)('the dashboard Worker (real Postgres)', () => {
   it('bounds sign-ins from every client together, wherever they come from', async () => {
     const signIn = limiter(2);
     const worker = createSlotlockDashboardWorker({ fetch: github });
-    const limited = { ...env, SLOTLOCK_SIGN_IN_RATE_LIMIT: signIn };
+    const limited = { ...env, SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT: signIn };
     const statuses: number[] = [];
     for (const address of ['192.0.2.1', '192.0.2.2', '192.0.2.3']) {
       const response = await worker.fetch(

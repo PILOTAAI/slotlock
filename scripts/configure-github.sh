@@ -8,11 +8,16 @@
 #   scripts/configure-github.sh                  apply
 #   scripts/configure-github.sh --site-secrets   only replace the Cloudflare secrets, after
 #                                                checking them with Cloudflare
-#   scripts/configure-github.sh --require-approval
-#                                                also make you approve each run of the npm and
-#                                                mcp-registry environments
 #   scripts/configure-github.sh --rotate-tag-key replace the deploy key tag-release.yml pushes
 #                                                release tags with
+#   scripts/configure-github.sh --allow-actions-pull-requests
+#                                                also let GITHUB_TOKEN open (and approve) pull
+#                                                requests, for release-version.yml without the
+#                                                release app
+#
+# The person who runs it becomes the required reviewer of every job that publishes (the npm, ghcr
+# and mcp-registry environments), and, once "CI passed" has succeeded on main, nobody, admins
+# included, can merge into main past its pull request rule or its required checks.
 #
 # Needs bash 3.2 or newer, curl, jq 1.6 or newer, ssh-keygen, and gh logged in as an admin of the
 # repository.
@@ -36,7 +41,6 @@
 #   https://docs.github.com/en/rest/secret-scanning/secret-scanning#about-secret-scanning
 #   https://docs.github.com/en/rest/code-scanning/code-scanning#get-a-code-scanning-default-setup-configuration
 #   https://docs.github.com/en/rest/code-scanning/code-scanning#update-a-code-scanning-default-setup-configuration
-#   https://docs.github.com/en/rest/branches/branches#get-a-branch
 #   https://docs.github.com/en/rest/deployments/environments#create-or-update-an-environment
 #   https://docs.github.com/en/rest/deployments/branch-policies (list, create, delete)
 #   https://docs.github.com/en/rest/actions/secrets#list-environment-secrets
@@ -70,14 +74,13 @@ API_VERSION=2026-03-10
 HOMEPAGE=https://slotlock.pylota.io
 TOPICS='["agents","calendar","mcp","a2a","postgresql","scheduling","availability","booking"]'
 
-# The checks a pull request must pass. These are the job names that ci.yml and dco.yml report
-# on pull_request. A matrix job is reported under its evaluated name, so ci.yml's
-# "Test (Node.js ${{ matrix.node }})" becomes one check per Node.js version, with nothing
-# appended because the name already uses the matrix value (checked on 2026-10-09 against the
-# check runs of another workflow whose matrix job is named this way). site.yml is left out: it
-# only runs when certain paths change, and a required check from a skipped workflow stays
-# "Pending" and blocks the pull request.
-REQUIRED_CHECKS='["Test (Node.js 22)","Test (Node.js 24)","Docker image","Signed-off-by"]'
+# The checks a pull request must pass: ci.yml's "CI passed", which passes only when every other CI
+# job did (the suites on each Node.js and PostgreSQL, the image, the language clients and the
+# Compose quickstart), and dco.yml's "Signed-off-by". One aggregate check means a CI job added
+# later is required without changing this list. site.yml is left out: it only runs when certain
+# paths change, and a required check from a skipped workflow stays "Pending" and blocks the pull
+# request.
+REQUIRED_CHECKS='["CI passed","Signed-off-by"]'
 
 # The GitHub Actions app (GET /apps/github-actions returned id 15368 on 2026-10-09). Pinning the
 # checks to it means a commit status with the same name from anyone else does not count.
@@ -90,6 +93,7 @@ ADMIN_ROLE_ID=5
 
 BRANCH_RULESET='Protect main'
 TAG_RULESET='Release tags'
+TAG_KEEP_RULESET='Release tags are permanent'
 
 # tag-release.yml's deploy key: its title on GitHub, and the release-tag environment secret that
 # holds its private half.
@@ -102,13 +106,13 @@ usage() {
 
 DRY_RUN=0
 SITE_SECRETS_ONLY=0
-REQUIRE_APPROVAL=0
 ROTATE_TAG_KEY=0
+ACTIONS_PULL_REQUESTS=0
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
-    --require-approval) REQUIRE_APPROVAL=1 ;;
     --rotate-tag-key) ROTATE_TAG_KEY=1 ;;
+    --allow-actions-pull-requests) ACTIONS_PULL_REQUESTS=1 ;;
     --site-secrets) SITE_SECRETS_ONLY=1 ;;
     -h | --help)
       usage
@@ -182,26 +186,6 @@ gh_get() {
     "$1"
 }
 
-# branch_exists NAME: true when the branch exists, false on a 404, stops on any other error.
-branch_exists() {
-  local err
-  if [ "$DRY_RUN" -eq 1 ]; then
-    printf '\n> GET /repos/%s/%s/branches/%s\n  (dry run: not sent, assuming it exists)\n' \
-      "$OWNER" "$REPO" "$1" >&3
-    return 0
-  fi
-  if err=$(gh api --method GET \
-    -H 'Accept: application/vnd.github+json' \
-    -H "X-GitHub-Api-Version: $API_VERSION" \
-    --silent "repos/$OWNER/$REPO/branches/$1" 2>&1); then
-    return 0
-  fi
-  case "$err" in
-    *'(HTTP 404)'*) return 1 ;;
-  esac
-  die "could not read branch $1: $err"
-}
-
 preflight() {
   local repo
   command -v jq >/dev/null 2>&1 || die 'jq is required (https://jqlang.org)'
@@ -215,8 +199,7 @@ preflight() {
   fi
   command -v gh >/dev/null 2>&1 || die 'gh is required (https://cli.github.com)'
 
-  # With --require-approval, the required reviewer on the npm and mcp-registry environments is
-  # whoever runs this.
+  # The required reviewer on the npm, ghcr and mcp-registry environments is whoever runs this.
   REVIEWER_ID=$(gh api user -H "X-GitHub-Api-Version: $API_VERSION" --jq .id)
   REVIEWER_LOGIN=$(gh api user -H "X-GitHub-Api-Version: $API_VERSION" --jq .login)
   case "$REVIEWER_ID" in
@@ -248,10 +231,7 @@ check_workflow_names() {
     warn "no .github/workflows next to this script; required check names not compared"
     return 0
   fi
-  # shellcheck disable=SC2016 # the ${{ }} is workflow text, not shell
-  if ! grep -Fq 'name: Test (Node.js ${{ matrix.node }})' "$dir/.github/workflows/ci.yml" ||
-    ! grep -Fq "node: ['22', '24']" "$dir/.github/workflows/ci.yml" ||
-    ! grep -Fq 'name: Docker image' "$dir/.github/workflows/ci.yml" ||
+  if ! grep -Fq 'name: CI passed' "$dir/.github/workflows/ci.yml" ||
     ! grep -Fq 'name: Signed-off-by' "$dir/.github/workflows/dco.yml"; then
     warn "ci.yml or dco.yml no longer names its jobs as REQUIRED_CHECKS expects; update REQUIRED_CHECKS"
   fi
@@ -284,32 +264,21 @@ configure_security() {
   gh_api PUT "repos/$OWNER/$REPO/automated-security-fixes" >/dev/null
   result 'Dependabot alerts and security updates: enabled'
 
-  # CodeQL default setup for the two languages here: TypeScript (src/, site/, scripts/) and the
-  # workflows themselves (actions). The extended suite adds more security queries, which suits a
-  # library that parses untrusted calendar data. Default setup needs code on the default branch.
-  if branch_exists main; then
-    current=$(gh_get "repos/$OWNER/$REPO/code-scanning/default-setup" '{"state":"not-configured"}')
-    if printf '%s' "$current" | jq -e '.state == "configured"
-        and ((.languages // []) | sort) == ["actions", "javascript-typescript"]
-        and .query_suite == "extended"' >/dev/null; then
-      result 'CodeQL default setup: already configured'
-    # A refusal here must not stop the environments and rulesets below. GitHub can refuse a
-    # language main does not contain yet, as when main holds only the README the repository was
-    # created with.
-    elif out=$(gh_api PATCH "repos/$OWNER/$REPO/code-scanning/default-setup" "$(jq -n '{
-        state: "configured",
-        languages: ["actions", "javascript-typescript"],
-        query_suite: "extended",
-        runner_type: "standard"
-      }')" 2>&1); then
-      result 'CodeQL default setup: configured (javascript-typescript, actions)'
-    else
-      CODEQL_SKIPPED=1
-      warn "GitHub refused CodeQL default setup: $out"
-    fi
+  # CodeQL runs from .github/workflows/codeql.yml (advanced setup) over the two languages here,
+  # TypeScript (src/, site/, scripts/) and the workflows themselves (actions), with the extended
+  # suite, which suits a library that parses untrusted calendar data. Its configuration drops one
+  # false positive with the reason beside it (.github/codeql/codeql-config.yml). GitHub runs default
+  # setup or advanced setup, not both, so default setup is turned off. A dry run assumes it is on.
+  current=$(gh_get "repos/$OWNER/$REPO/code-scanning/default-setup" '{"state":"configured"}')
+  if printf '%s' "$current" | jq -e '.state == "not-configured"' >/dev/null; then
+    result 'CodeQL default setup: already off (codeql.yml runs CodeQL)'
+  # A refusal here must not stop the environments and rulesets below.
+  elif out=$(gh_api PATCH "repos/$OWNER/$REPO/code-scanning/default-setup" \
+    "$(jq -n '{state: "not-configured"}')" 2>&1); then
+    result 'CodeQL default setup: turned off (codeql.yml runs CodeQL)'
   else
     CODEQL_SKIPPED=1
-    warn 'main has no commits yet, so CodeQL default setup cannot start. Push main, then run this again.'
+    warn "GitHub refused to turn CodeQL default setup off: $out"
   fi
 }
 
@@ -407,24 +376,34 @@ configure_site_secrets() {
 
 # 2. Deployment environments. Each one is limited to the refs its workflow runs on.
 configure_environments() {
-  local reviewers='[]'
+  local reviewers
   step '2. Environments'
-  # Merging a dated version to main releases it (tag-release.yml), so by default no run waits for
-  # a reviewer: only an admin or tag-release.yml, running on main, can create a v* tag (step 4), and
-  # npm still holds each version until a maintainer approves it with two-factor authentication
-  # (GOVERNANCE.md, Releases). --require-approval adds you as a required reviewer of the npm and
-  # mcp-registry environments anyway.
-  if [ "$REQUIRE_APPROVAL" -eq 1 ]; then
-    reviewers=$(jq -n --argjson id "$REVIEWER_ID" '[{type: "User", id: $id}]')
-  fi
+  # Every job that publishes waits for you: the npm stage, the image push and the MCP Registry entry.
+  # Only an admin or tag-release.yml, running on main, can create a v* tag (step 4), and npm still
+  # holds each staged version until a maintainer approves it with two-factor authentication
+  # (GOVERNANCE.md, Releases); the image and the registry entry have no such second step, so the
+  # environment is their human gate, and npm's is the same.
+  reviewers=$(jq -n --argjson id "$REVIEWER_ID" '[{type: "User", id: $id}]')
 
   # npm: release.yml's "Stage on npm" job. It runs on v* tags and stages the package with a
   # short-lived OIDC credential.
   configure_environment npm "$reviewers" tag 'v*'
 
+  # ghcr: image.yml's job that pushes and attests the server image, which release.yml calls for the
+  # v* tag once its suite has passed.
+  configure_environment ghcr "$reviewers" tag 'v*'
+
   # mcp-registry: mcp-registry.yml's publish job, called by image.yml for the same v* tag. A
   # registry version can be published once only; it names the image this tag pushed.
   configure_environment mcp-registry "$reviewers" tag 'v*'
+
+  # The language clients' publish jobs in release.yml, one environment per registry, so each
+  # registry's trusted publisher (PyPI, crates.io, NuGet) can name its own environment and a
+  # maintainer approves each one. maven-central holds the Central Portal token and the signing key
+  # (docs/release/clients.md); go-module pushes the clients/go/v* tag with GITHUB_TOKEN.
+  for name in pypi crates-io nuget maven-central go-module; do
+    configure_environment "$name" "$reviewers" tag 'v*'
+  done
 
   # release-tag: tag-release.yml's job, on a push to main or a manual run on main. It holds the
   # deploy key that job pushes release tags with, so only runs on main can read it. No reviewer:
@@ -444,7 +423,7 @@ configure_environments() {
 }
 
 # The deploy key tag-release.yml pushes release tags with: a tag pushed with GITHUB_TOKEN starts no
-# workflow, and one pushed with a deploy key starts release.yml and image.yml. Like every deploy key
+# workflow, and one pushed with a deploy key starts release.yml. Like every deploy key
 # with write access it can do what a repository admin can, so its private half exists only in the
 # release-tag environment secret, which GitHub hands to runs on main alone. It is generated here in
 # a private temporary directory, its public half sent to GitHub and its private half to the secret
@@ -543,11 +522,11 @@ verify_bypass() {
 # is true.
 branch_ruleset_body() {
   jq -n --arg name "$BRANCH_RULESET" --argjson checks "$REQUIRED_CHECKS" \
-    --argjson app "$ACTIONS_APP_ID" --argjson role "$ADMIN_ROLE_ID" --argjson pin "$1" '{
+    --argjson app "$ACTIONS_APP_ID" --argjson pin "$1" '{
     name: $name,
     target: "branch",
     enforcement: "active",
-    bypass_actors: [{actor_id: $role, actor_type: "RepositoryRole", bypass_mode: "pull_request"}],
+    bypass_actors: [],
     conditions: {ref_name: {include: ["refs/heads/main"], exclude: []}},
     rules: [
       {type: "deletion"},
@@ -570,6 +549,18 @@ branch_ruleset_body() {
   }'
 }
 
+# main_ci_passed: true when GitHub Actions' "CI passed" has run on main's latest commit and every
+# latest run of it succeeded. GET /repos/{owner}/{repo}/commits/{ref}/check-runs takes check_name
+# and app_id, and its filter defaults to `latest`, "the most recent check runs" (REST docs, "List
+# check runs for a Git reference", read 2026-10-24).
+main_ci_passed() {
+  local runs
+  runs=$(gh_get "repos/$OWNER/$REPO/commits/main/check-runs?check_name=CI%20passed&app_id=$ACTIONS_APP_ID" \
+    '{"total_count":1,"check_runs":[{"conclusion":"success"}]}') || return 1
+  printf '%s' "$runs" |
+    jq -e '(.check_runs | length) > 0 and all(.check_runs[]; .conclusion == "success")' >/dev/null
+}
+
 # 3. The main branch.
 configure_branch_ruleset() {
   step "3. Ruleset '$BRANCH_RULESET' (refs/heads/main)"
@@ -580,10 +571,20 @@ configure_branch_ruleset() {
   # The checks must pass on a branch that is up to date with main (strict). Force pushes and
   # deletion of main are blocked.
   #
-  # Bypass: the admin role, for pull requests only. An admin can merge a pull request whose
-  # checks cannot pass or cannot run, such as an initial import whose commits carry no
-  # Signed-off-by line, but cannot push to main directly or force-push it. Every bypass goes
-  # through a pull request, so it stays visible and in the audit log.
+  # Bypass: nobody, the admin role included. GOVERNANCE.md says routine changes need green required
+  # checks, and from 2026-10-23 four merges went in past failing or missing ones (#59 and #61 with
+  # both test checks failing), which left main unable to release. A change whose checks cannot pass
+  # is fixed in another pull request first.
+  #
+  # So it is applied only once "CI passed" has succeeded on main's latest commit: with no bypass, a
+  # CI job that cannot pass (one that has never run anywhere, say) would block every pull request,
+  # the one that fixes it included, until an admin edited the ruleset by hand. Until then the
+  # ruleset is left as it is and the checklist asks for this script to be run again.
+  if ! main_ci_passed; then
+    BRANCH_RULESET_SKIPPED=1
+    warn "\"CI passed\" has not succeeded on main's latest commit, so '$BRANCH_RULESET' is left as it is"
+    return 0
+  fi
   if ! upsert_ruleset branch "$BRANCH_RULESET" "$(branch_ruleset_body true)"; then
     case "$RULESET_ERROR" in
       *'(HTTP 422)'*)
@@ -596,18 +597,21 @@ configure_branch_ruleset() {
       *) die "$RULESET_ERROR" ;;
     esac
   fi
-  verify_bypass "$RULESET_ID" pull_requests_only
+  verify_bypass "$RULESET_ID" never
 }
 
 # 4. Release tags.
 configure_tag_ruleset() {
-  step "4. Ruleset '$TAG_RULESET' (refs/tags/v*)"
-  # A v* tag starts release.yml and image.yml, which stage the npm package and push the image,
+  step "4. Rulesets '$TAG_RULESET' and '$TAG_KEEP_RULESET' (refs/tags/v*)"
+  # A v* tag starts release.yml, which stages the npm package and pushes the image (image.yml),
   # running the workflow files of the tagged commit. GOVERNANCE.md says releases come only from a
-  # protected v<version> tag. Only the admin role may create, move or delete one, and deploy keys
-  # may create one: tag-release.yml pushes a merged version's tag with the release-tag deploy key
-  # (step 2), the only deploy key this script adds. Tag rulesets allow no "pull requests only" mode,
-  # and a deploy key bypass only "always", so both bypasses are "always".
+  # protected v<version> tag. Only the admin role and deploy keys may create one: tag-release.yml
+  # pushes a merged version's tag with the release-tag deploy key (step 2), the only deploy key
+  # this script adds. A DeployKey bypass cannot name that key (the REST docs: its actor_id "should
+  # be null"), so it covers any write deploy key; that is accepted, and kept to creation by a
+  # second ruleset in which only the admin role may move or delete a release tag. Tag rulesets
+  # allow no "pull requests only" mode, and a deploy key bypass only "always", so every bypass is
+  # "always".
   upsert_ruleset tag "$TAG_RULESET" "$(jq -n --arg name "$TAG_RULESET" --argjson role "$ADMIN_ROLE_ID" '{
     name: $name,
     target: "tag",
@@ -617,7 +621,19 @@ configure_tag_ruleset() {
       {actor_id: null, actor_type: "DeployKey", bypass_mode: "always"}
     ],
     conditions: {ref_name: {include: ["refs/tags/v*"], exclude: []}},
-    rules: [{type: "creation"}, {type: "update"}, {type: "deletion"}]
+    rules: [{type: "creation"}]
+  }')" || die "$RULESET_ERROR"
+  verify_bypass "$RULESET_ID" always
+  # The Go client's clients/go/v* tags are module versions, which must never move either. Creating
+  # one is left to write access: release.yml's go-module job pushes it with GITHUB_TOKEN, which a
+  # ruleset could let through only by trusting every workflow's token.
+  upsert_ruleset tag "$TAG_KEEP_RULESET" "$(jq -n --arg name "$TAG_KEEP_RULESET" --argjson role "$ADMIN_ROLE_ID" '{
+    name: $name,
+    target: "tag",
+    enforcement: "active",
+    bypass_actors: [{actor_id: $role, actor_type: "RepositoryRole", bypass_mode: "always"}],
+    conditions: {ref_name: {include: ["refs/tags/v*", "refs/tags/clients/go/v*"], exclude: []}},
+    rules: [{type: "update"}, {type: "deletion"}]
   }')" || die "$RULESET_ERROR"
   verify_bypass "$RULESET_ID" always
 }
@@ -650,22 +666,28 @@ configure_repository() {
   gh_api PUT "repos/$OWNER/$REPO/topics" "$(jq -n --argjson names "$TOPICS" '{names: $names}')" >/dev/null
   result "topics: $(printf '%s' "$TOPICS" | jq -r 'join(", ")')"
 
-  # GitHub Actions may open pull requests: release-version.yml opens the release's with
-  # GITHUB_TOKEN. GitHub's one switch for it also lets Actions approve a pull request, which adds
-  # nothing while the "Protect main" ruleset requires no approval. GITHUB_TOKEN stays read-only
-  # unless a workflow asks for more. An organization can hold the switch (GitHub answers 409).
-  if out=$(gh_api PUT "repos/$OWNER/$REPO/actions/permissions/workflow" "$(jq -n '{
+  # GITHUB_TOKEN stays read-only unless a workflow asks for more, and may not open or approve pull
+  # requests: the release app (scripts/create-release-app.mjs) opens and merges release pull
+  # requests, and GitHub's one switch that lets GITHUB_TOKEN open them also lets it approve them.
+  # --allow-actions-pull-requests turns it on for release-version.yml without the app. An
+  # organization can hold the switch (GitHub answers 409).
+  if out=$(gh_api PUT "repos/$OWNER/$REPO/actions/permissions/workflow" "$(jq -n \
+    --argjson allow "$([ "$ACTIONS_PULL_REQUESTS" -eq 1 ] && echo true || echo false)" '{
       default_workflow_permissions: "read",
-      can_approve_pull_request_reviews: true
+      can_approve_pull_request_reviews: $allow
     }')" 2>&1); then
-    result 'GitHub Actions: GITHUB_TOKEN read-only by default; may open pull requests'
+    if [ "$ACTIONS_PULL_REQUESTS" -eq 1 ]; then
+      result 'GitHub Actions: GITHUB_TOKEN read-only by default; may open pull requests'
+    else
+      result 'GitHub Actions: GITHUB_TOKEN read-only by default; may not open or approve pull requests'
+    fi
   else
     ACTIONS_PULL_REQUESTS_SKIPPED=1
     warn "GitHub refused to let Actions open pull requests: $out"
   fi
 
-  # Discussions: on. MAINTAINERS.md sends questions to "an issue or discussion". The documented
-  # "Update a repository" body has no has_discussions field, so it is in the checklist below.
+  # Discussions stay a choice: MAINTAINERS.md and .github/SUPPORT.md send questions to issues. The
+  # documented "Update a repository" body has no has_discussions field, so it is in the checklist.
 }
 
 # 6. What this script cannot do.
@@ -673,24 +695,25 @@ print_checklist() {
   step '6. Left for you to do by hand'
   cat <<EOF
 
-[ ] Turn on Discussions. MAINTAINERS.md points people to them, and the REST "Update a
-    repository" endpoint documents no field for them. Settings > General > Features >
-    Discussions: https://github.com/$OWNER/$REPO/settings
+[ ] Optional: turn on Discussions for questions (MAINTAINERS.md and .github/SUPPORT.md send them
+    to issues until then). The REST "Update a repository" endpoint documents no field for it.
+    Settings > General > Features > Discussions: https://github.com/$OWNER/$REPO/settings
     (gh repo edit $OWNER/$REPO --enable-discussions does it through a has_discussions field
     that gh 2.83.2 sends to the same endpoint, outside the documented body.)
 
-[ ] Create the release app once, so release pull requests run their checks without anyone
-    approving them (GitHub holds the checks of one github-actions[bot] opens):
+[ ] Create the release app once. Release a version opens and merges release pull requests with
+    it, and their checks run without anyone approving them; GITHUB_TOKEN may not open them unless
+    you run this script with --allow-actions-pull-requests:
       node scripts/create-release-app.mjs
     You click "Create GitHub App", then install it on slotlock only; it checks the installation
     and stores the app in the release-app environment.
 
 [ ] Releases: run Actions > Release a version with the version. It prepares the release, opens
     its pull request, merges it once CI passes, and tag-release.yml tags it, which starts Release
-    (npm, then the GitHub release) and Image (GHCR, then the MCP Registry). Without the release
-    app, approve the pull request's checks on it ("Approve workflows to run"). Each staged npm
-    version waits for your two-factor approval (GOVERNANCE.md, Releases); the Release run's
-    summary gives the npm stage approve command.
+    (npm, then the GitHub release; GHCR, then the MCP Registry, once the suite passes). Approve
+    the npm, ghcr and mcp-registry jobs when the Release run waits for you; each staged npm
+    version also waits for your two-factor approval (GOVERNANCE.md, Releases), and the Release
+    run's summary gives the npm stage approve command.
     npm and GitHub keep three first-time steps for a person, and the run that needs one says so:
       scripts/bootstrap-release.sh <tag>
     - first release: puts the first version on npm from your npm session (npm accepts a trusted
@@ -702,6 +725,15 @@ print_checklist() {
     The deploy key tag-release.yml pushes v* tags with is created here. scripts/bootstrap-release.sh
     runs this script when it is missing, re-runs the failed job and finishes the release.
 EOF
+  if [ "${BRANCH_RULESET_SKIPPED:-0}" = 1 ]; then
+    cat <<EOF
+
+[ ] Apply the ruleset '$BRANCH_RULESET': it lets nobody merge past a failing "CI passed", so it waits
+    until that check has succeeded on main's latest commit (see the warning above). Get CI green
+    on main, the PostgreSQL 17 and 18 suites and the Compose quickstart included, then run this
+    script again: https://github.com/$OWNER/$REPO/actions/workflows/ci.yml?query=branch%3Amain
+EOF
+  fi
   if [ "${SITE_SECRETS_SKIPPED:-0}" = 1 ]; then
     cat <<EOF
 
@@ -724,12 +756,20 @@ EOF
   if [ "${CODEQL_SKIPPED:-0}" = 1 ]; then
     cat <<EOF
 
-[ ] CodeQL default setup did not start (see the warning above): main had no commits, or GitHub
-    refused a language main does not contain yet. Merge the initial import into main, then run
-    this script again.
+[ ] CodeQL default setup is still on (see the warning above), so codeql.yml's results cannot be
+    uploaded. Settings > Code security > Code scanning > CodeQL analysis > Disable, or run this
+    script again: https://github.com/$OWNER/$REPO/settings/security_analysis
 EOF
   fi
   cat <<EOF
+
+[ ] The language clients' registries, once each: a PyPI pending publisher, the first crates.io
+    version by hand and then its trusted publisher, a NuGet trusted publishing policy and the
+    NUGET_USER variable, and the Maven Central namespace, token and signing key in the
+    maven-central environment. docs/release/clients.md gives every step.
+
+[ ] When hosted Slotlock opens, turn on its public status probe (docs/hosted/status.md):
+      gh variable set SLOTLOCK_STATUS_PROBE --repo $OWNER/$REPO --body on
 
 [ ] Before the first site deploy (site/README.md): slotlock.pylota.io must have no CNAME record,
     and the pylota.io zone must have the route slotlock.pylota.io/* with no Worker. Without it
@@ -742,6 +782,7 @@ EOF
 }
 
 SITE_SECRETS_SKIPPED=0
+BRANCH_RULESET_SKIPPED=0
 CODEQL_SKIPPED=0
 ACTIONS_PULL_REQUESTS_SKIPPED=0
 # The temporary directory holding a new deploy key, removed however the script ends.

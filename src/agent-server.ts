@@ -35,6 +35,7 @@ import {
   isSlotlockApplicationOperation,
   slotlockApplicationOperation,
 } from './application-api.js';
+import { SLOTLOCK_EVENT_OUTPUT as EVENT } from './event-schema.js';
 import { ignoreRejection } from './hooks.js';
 import { slotlockPackageVersion } from './package-version.js';
 import {
@@ -122,14 +123,6 @@ const RESOURCE_ID = z.string().trim().min(1).max(200);
 const EVENT_ID = z.string().trim().min(1).max(500);
 const IDEMPOTENCY_KEY = z.string().trim().min(1).max(200);
 const REVISION = z.number().int().positive();
-// Output bounds mirror the trusted store's byte ceilings. A value admitted by a UTF-8 byte
-// ceiling can never exceed that many UTF-16 code units, so every valid stored/provider event is
-// serializable without truncating recurrence semantics or calendar identities.
-const TRUSTED_SUMMARY_OUTPUT_MAX = 4_096;
-const TRUSTED_TEXT_OUTPUT_MAX = 16_384;
-const TRUSTED_PERSON_NAME_OUTPUT_MAX = 1_024;
-const TRUSTED_RECURRENCE_EXCEPTION_OUTPUT_MAX = 1_000;
-const TRUSTED_REMINDER_MINUTES_OUTPUT_MAX = 366 * 24 * 60;
 const MAX_AGENT_WINDOW_MS = SLOTLOCK_CALENDAR_HORIZON_DAYS * 24 * 60 * 60 * 1_000;
 /** The longest slot `slotlock_find_next_available` can look for: the whole search window. */
 const MAX_SLOT_MINUTES = SLOTLOCK_CALENDAR_HORIZON_DAYS * 24 * 60;
@@ -154,41 +147,6 @@ const COVERAGE = z
     end: DATE_TIME,
     certainty: z.enum(['certain', 'uncertain']),
     reason: z.string().max(100).nullable(),
-  })
-  .strict();
-const ORGANIZER = z
-  .object({
-    address: z.string().email().max(320),
-    name: z.string().trim().max(TRUSTED_PERSON_NAME_OUTPUT_MAX).nullable(),
-  })
-  .strict();
-const ATTENDEE = z
-  .object({
-    address: z.string().email().max(320),
-    name: z.string().trim().max(TRUSTED_PERSON_NAME_OUTPUT_MAX).nullable(),
-    role: z.enum(['chair', 'required', 'optional', 'non_participant']),
-    participation_status: z.enum([
-      'needs_action',
-      'accepted',
-      'declined',
-      'tentative',
-      'delegated',
-    ]),
-    rsvp: z.boolean(),
-  })
-  .strict();
-const REMINDER = z
-  .object({
-    minutes_before: z.number().int().min(0).max(TRUSTED_REMINDER_MINUTES_OUTPUT_MAX),
-    channel: z.enum(['display', 'email']),
-  })
-  .strict();
-const RECURRENCE_EXCEPTION = z
-  .object({
-    recurrence_id: DATE_TIME,
-    cancelled: z.boolean(),
-    starts_at: DATE_TIME.nullable(),
-    ends_at: DATE_TIME.nullable(),
   })
   .strict();
 const ORGANIZER_INPUT = z
@@ -252,31 +210,6 @@ const MCP_INITIALIZE_PARAMS = z
     _meta: z.record(z.string(), z.unknown()).optional(),
   })
   .passthrough();
-const EVENT = z
-  .object({
-    id: EVENT_ID,
-    resource_id: RESOURCE_ID,
-    starts_at: DATE_TIME,
-    ends_at: DATE_TIME,
-    timezone: z.string().min(1).max(100),
-    title: z.string().max(TRUSTED_SUMMARY_OUTPUT_MAX).nullable(),
-    description: z.string().max(TRUSTED_TEXT_OUTPUT_MAX).nullable(),
-    location: z.string().max(TRUSTED_TEXT_OUTPUT_MAX).nullable(),
-    organizer: ORGANIZER.nullable(),
-    attendees: z.array(ATTENDEE).max(100),
-    reminders: z.array(REMINDER).max(20),
-    status: z.enum(['tentative', 'confirmed', 'cancelled']),
-    transparency: z.enum(['opaque', 'transparent']),
-    sequence: z.number().int().nonnegative(),
-    revision: REVISION,
-    recurrence_rule: z.string().max(TRUSTED_SUMMARY_OUTPUT_MAX).nullable(),
-    recurrence_exceptions: z
-      .array(RECURRENCE_EXCEPTION)
-      .max(TRUSTED_RECURRENCE_EXCEPTION_OUTPUT_MAX),
-    recurrence_id: DATE_TIME.nullable(),
-  })
-  .strict();
-
 type JsonSchema = Readonly<Record<string, unknown>>;
 type ObjectSchema = z.ZodType<Record<string, unknown>>;
 
@@ -465,7 +398,10 @@ export type SlotlockAgentWriteOperation = Extract<
  * A listed write first answers `input_required` with a yes/no form describing the change; it runs
  * only when the client retries with the person's explicit acceptance and the sealed state it was
  * given. Where no confirmation is possible — the 2025 MCP revisions and A2A — a listed write fails
- * with `confirmation_required`, never silently runs.
+ * with `confirmation_required`, never silently runs. The acceptance comes from the client, which a
+ * key holder controls: confirmation keeps an agent from writing unasked, and is not an
+ * authorization boundary (scopes and `authorize` are). Off unless set; `slotlock serve` sets it only
+ * when SLOTLOCK_CONFIRM_WRITES opts in.
  */
 export interface SlotlockAgentConfirmationOptions {
   operations: readonly SlotlockAgentWriteOperation[];
@@ -495,6 +431,12 @@ export interface SlotlockAgentSubscriptionOptions {
   keepAliveMs?: number;
   /** Open subscriptions one principal may hold: 1-64, default 4. */
   maxPerPrincipal?: number;
+  /**
+   * Open subscriptions one tenant may hold across all its principals: 1-10,000, default `maxTotal`.
+   * Set it below `maxTotal` on a multi-tenant server, so a tenant with many keys cannot hold every
+   * slot.
+   */
+  maxPerTenant?: number;
   /** Open subscriptions across the server: 1-10,000, default 256. */
   maxTotal?: number;
 }
@@ -545,7 +487,7 @@ export type SlotlockAgentServerEvent =
       type: 'subscription';
       outcome: 'opened' | 'closed';
       /** Why a subscription closed. */
-      reason?: 'client' | 'duration' | 'shutdown' | 'revoked' | 'failed' | 'empty';
+      reason?: 'client' | 'duration' | 'shutdown' | 'revoked' | 'failed' | 'empty' | 'preempted';
       /** How many calendar resources it watched. */
       resources: number;
     };
@@ -837,7 +779,8 @@ const OPERATION_DEFINITIONS = [
   {
     name: 'slotlock_update_event',
     title: 'Update resource event',
-    description: 'Apply an expected-revision event patch and rematerialize occupancy atomically.',
+    description:
+      'Apply an expected-revision event patch and rematerialize occupancy atomically. With expected_resource_id, the resource you read the event on, an event since moved elsewhere is not found.',
     input: z
       .object({
         event_id: EVENT_ID,
@@ -857,6 +800,8 @@ const OPERATION_DEFINITIONS = [
         recurrence_rule: RECURRENCE_RULE.nullable().optional(),
         recurrence_exceptions: z.array(RECURRENCE_EXCEPTION_INPUT).max(500).optional(),
         idempotency_key: IDEMPOTENCY_KEY,
+        // Last, so the generated clients that take optional arguments by position keep their order.
+        expected_resource_id: RESOURCE_ID.optional(),
       })
       .strict()
       .refine(
@@ -1689,11 +1634,20 @@ const MAX_RESOURCE_SUBSCRIPTIONS = 20;
 /** Consecutive failed re-reads after which a subscription is abandoned. */
 const MAX_POLL_FAILURES = 3;
 
+/** An open subscription, or a slot reserved by one still opening (not yet `streaming`). */
+interface SubscriptionSlot {
+  principalKey: string;
+  tenantRef: string;
+  streaming: boolean;
+  end(reason: 'shutdown' | 'preempted'): void;
+}
+
 interface SubscriptionPolicy {
   pollIntervalMs: number;
   maxDurationMs: number;
   keepAliveMs: number;
   maxPerPrincipal: number;
+  maxPerTenant: number;
   maxTotal: number;
 }
 
@@ -1713,12 +1667,14 @@ function validateSubscriptions(
     }
     return setting;
   };
+  const maxTotal = bounded('maxTotal', 1, 10_000, 256);
   return {
     pollIntervalMs: bounded('pollIntervalMs', 1_000, 300_000, 10_000),
     maxDurationMs: bounded('maxDurationMs', 60_000, 86_400_000, 900_000),
     keepAliveMs: bounded('keepAliveMs', 1_000, 60_000, 15_000),
     maxPerPrincipal: bounded('maxPerPrincipal', 1, 64, 4),
-    maxTotal: bounded('maxTotal', 1, 10_000, 256),
+    maxPerTenant: bounded('maxPerTenant', 1, 10_000, maxTotal),
+    maxTotal,
   };
 }
 
@@ -2062,12 +2018,20 @@ function promptSeries(
     const booked = expandCalendarEventOccurrences(content, horizon);
     beyond = promptSeriesEnd(series.rule, booked.length, horizon.end);
     const length = end.getTime() - start.getTime();
+    // Moved: by an exception, to another time or length. One the clocks change inside, or that
+    // the store ends where the next starts, is where its rule puts it.
+    const excepted = new Set(
+      exceptions.flatMap((exception) =>
+        exception.cancelled !== true && exception.start ? [exception.recurrenceId.getTime()] : [],
+      ),
+    );
     moved = promptMoved(
       booked.flatMap((occurrence) => {
         const from = new Date(occurrence.recurrenceId);
         const shifted =
-          occurrence.start.getTime() !== from.getTime() ||
-          occurrence.end.getTime() - occurrence.start.getTime() !== length;
+          excepted.has(from.getTime()) &&
+          (occurrence.start.getTime() !== from.getTime() ||
+            occurrence.end.getTime() - occurrence.start.getTime() !== length);
         return shifted && Number.isFinite(from.getTime())
           ? [{ from, start: occurrence.start, end: occurrence.end }]
           : [];
@@ -2337,10 +2301,19 @@ async function confirmationMessage(
   if (input.recurrence_rule === null) {
     changes.push('no longer repeats');
   } else if (typeof rule === 'string' && reshaped && seriesStart && seriesEnd) {
-    const seriesZone = input.timezone ?? event?.timezone ?? 'UTC';
-    changes.push(
-      `so it books ${promptSeries({ start: seriesStart, end: seriesEnd, timezone: seriesZone, rule, exceptions }, zone)}`,
-    );
+    const seriesZone = input.timezone ?? event?.timezone;
+    if (seriesZone === undefined) {
+      // An unread event and no new zone: the store expands in the event's own, which the question
+      // cannot know, so it states no dates.
+      changes.push(`repeats ${promptRule(rule)}, on dates that follow the event's existing time zone`);
+      if (input.recurrence_exceptions !== undefined) {
+        changes.push(`exceptions to ${promptRequestedExceptions(input.recurrence_exceptions, zone)}`);
+      }
+    } else {
+      changes.push(
+        `so it books ${promptSeries({ start: seriesStart, end: seriesEnd, timezone: seriesZone, rule, exceptions }, zone)}`,
+      );
+    }
   } else {
     if (typeof input.recurrence_rule === 'string') {
       changes.push(`repeats ${promptRule(input.recurrence_rule)}`);
@@ -2454,6 +2427,24 @@ function a2aError(
       data: [{ '@type': 'type.googleapis.com/google.rpc.ErrorInfo', ...info }],
     },
   });
+}
+
+/**
+ * The request's principal, or the error when `authenticate` throws a 503
+ * `SlotlockAgentOperationError`, as createSlotlockApiKeyAuthenticator does when its lookup queue is
+ * full: no answer about the credential, so the client is told to retry rather than that it is
+ * anonymous.
+ */
+async function principalOrBusy(
+  authenticate: SlotlockAgentServerOptions['authenticate'],
+  request: Request,
+): Promise<SlotlockAgentPrincipal | null | SlotlockAgentOperationError> {
+  try {
+    return await authenticate(request);
+  } catch (error) {
+    if (error instanceof SlotlockAgentOperationError && error.status === 503) return error;
+    throw error;
+  }
 }
 
 /** Map a request path onto the server's base path; `null` when it lies outside it. */
@@ -2642,10 +2633,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     );
   }
   /** Open subscriptions (and slots reserved by ones still opening), for the caps and shutdown. */
-  const openSubscriptions = new Set<{
-    principalKey: string;
-    end(reason: 'shutdown'): void;
-  }>();
+  const openSubscriptions = new Set<SubscriptionSlot>();
   let shuttingDown = false;
 
   const discoverResult = Object.freeze({
@@ -2966,15 +2954,44 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     if (shuttingDown) return modernError(503, id, -32603, 'Server is shutting down');
     const principalKey = `${principal.tenantRef}\0${principal.subject}`;
     let held = 0;
-    for (const open of openSubscriptions) if (open.principalKey === principalKey) held += 1;
+    let heldByTenant = 0;
+    for (const open of openSubscriptions) {
+      if (open.principalKey === principalKey) held += 1;
+      if (open.tenantRef === principal.tenantRef) heldByTenant += 1;
+    }
+    if (
+      openSubscriptions.size >= subscriptionPolicy.maxTotal &&
+      held < subscriptionPolicy.maxPerPrincipal &&
+      heldByTenant < subscriptionPolicy.maxPerTenant
+    ) {
+      // A full server is shared out: a tenant holding fewer than the one holding most, less one,
+      // ends that tenant's oldest stream, so many tenants within their share cannot keep another
+      // from holding any. A slot still opening has nothing to end yet.
+      const streamsOf = new Map<string, SubscriptionSlot[]>();
+      for (const open of openSubscriptions) {
+        if (!open.streaming) continue;
+        const streams = streamsOf.get(open.tenantRef);
+        if (streams) streams.push(open);
+        else streamsOf.set(open.tenantRef, [open]);
+      }
+      let most: SubscriptionSlot[] = [];
+      for (const streams of streamsOf.values()) if (streams.length > most.length) most = streams;
+      if (most.length > heldByTenant + 1) most[0]?.end('preempted');
+    }
     if (
       openSubscriptions.size >= subscriptionPolicy.maxTotal ||
-      held >= subscriptionPolicy.maxPerPrincipal
+      held >= subscriptionPolicy.maxPerPrincipal ||
+      heldByTenant >= subscriptionPolicy.maxPerTenant
     ) {
       return modernError(429, id, SLOTLOCK_MCP_RATE_LIMITED_ERROR_CODE, 'Too many subscriptions');
     }
     // The slot is held while access is checked, so concurrent opens cannot overshoot the caps.
-    const slot = { principalKey, end: (_reason: 'shutdown') => {} };
+    const slot: SubscriptionSlot = {
+      principalKey,
+      tenantRef: principal.tenantRef,
+      streaming: false,
+      end: () => {},
+    };
     openSubscriptions.add(slot);
     let streaming = false;
     try {
@@ -3001,7 +3018,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
   function streamSubscription(
     call: ModernCall,
     policy: SubscriptionPolicy,
-    slot: { principalKey: string; end(reason: 'shutdown'): void },
+    slot: SubscriptionSlot,
     window: { start: string; end: string },
     watched: { resourceIds: string[]; digests: Map<string, string> },
   ): Response {
@@ -3018,7 +3035,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     const onAbort = () => end('client');
 
     function end(
-      reason: 'client' | 'duration' | 'shutdown' | 'revoked' | 'failed' | 'empty',
+      reason: 'client' | 'duration' | 'shutdown' | 'revoked' | 'failed' | 'empty' | 'preempted',
     ): void {
       if (ended) return;
       ended = true;
@@ -3049,6 +3066,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       });
     }
     slot.end = end;
+    slot.streaming = true;
 
     stream.send({
       jsonrpc: '2.0',
@@ -3279,7 +3297,10 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
         return refuse(403, 'origin_not_allowed');
       }
     }
-    const principal = await options.authenticate(request);
+    const principal = await principalOrBusy(options.authenticate, request);
+    if (principal instanceof SlotlockAgentOperationError) {
+      return refuse(503, principal.code, { 'Retry-After': '1' });
+    }
     if (
       !principal ||
       !isCanonicalPrincipalIdentity(principal.subject) ||
@@ -3335,6 +3356,24 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     // The path names the event; the body or query may not name another.
     if (Object.keys(params).some((name) => Object.hasOwn(given, name))) {
       return refuseCall(400, 'invalid_arguments');
+    }
+    // An application write's retry identity may come as the Idempotency-Key header, where HTTP
+    // clients put it, as well as its `idempotency_key` argument. On an operation that keeps none it
+    // is refused rather than ignored: a key that was dropped would promise a replay it never gives.
+    // The agent tools take theirs as an argument alone, as they always have.
+    const idempotencyHeader = request.headers.get('idempotency-key');
+    if (idempotencyHeader !== null && isSlotlockApplicationOperation(route.operation)) {
+      const fields = (restInputSchemas.get(route.operation)?.properties ?? {}) as Record<
+        string,
+        unknown
+      >;
+      if (!Object.hasOwn(fields, 'idempotency_key')) {
+        return refuseCall(400, 'idempotency_key_not_supported');
+      }
+      if (Object.hasOwn(given, 'idempotency_key') && given.idempotency_key !== idempotencyHeader) {
+        return refuseCall(400, 'invalid_arguments');
+      }
+      given = { ...given, idempotency_key: idempotencyHeader };
     }
     const outcome = isSlotlockApplicationOperation(route.operation)
       ? await invokeApplicationOperation(
@@ -3430,7 +3469,21 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
           return json(403, rpcError(null, -32600, 'Origin not allowed'));
         }
       }
-      const principal = await options.authenticate(request);
+      const principal = await principalOrBusy(options.authenticate, request);
+      if (principal instanceof SlotlockAgentOperationError) {
+        // As `slotlock serve` answers it: A2A names the reason in an ErrorInfo, as for a rate limit.
+        const error = { code: -32603, message: 'Server is busy' };
+        const info = {
+          '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+          reason: 'SERVER_BUSY',
+          domain: 'slotlock',
+        };
+        return json(
+          503,
+          { jsonrpc: '2.0', id: null, error: path === '/a2a' ? { ...error, data: [info] } : error },
+          { 'Retry-After': '1' },
+        );
+      }
       if (
         !principal ||
         !isCanonicalPrincipalIdentity(principal.subject) ||

@@ -4,9 +4,9 @@
 # "## Unreleased" heading dated), opens its pull request (scripts/open-release-pr.sh), waits for CI
 # and DCO to pass on it (scripts/wait-for-pr-checks.sh) and squash-merges it, which leads to Tag
 # release. That tags the release commit, and the tag's push starts Release (npm, then the GitHub
-# release) and Image (GHCR, then the MCP Registry). npm then holds the staged version for a
-# maintainer's two-factor approval (GOVERNANCE.md, Releases): the Release run's summary gives the
-# command.
+# release, and GHCR, then the MCP Registry, once its suite passes). npm then holds the staged
+# version for a maintainer's two-factor approval (GOVERNANCE.md, Releases): the Release run's
+# summary gives the command.
 #
 # Who opens and merges the pull request:
 # - The release app, once scripts/create-release-app.mjs has stored it in the release-app
@@ -17,10 +17,14 @@
 #   2026-06-11), and only those runs count as its required checks. Its merge starts no push
 #   workflow, so this starts Tag release and Site with workflow_dispatch. It can open the pull
 #   request only once an admin allows Actions to (Settings > Actions > General > Workflow
-#   permissions; scripts/configure-github.sh sets it).
+#   permissions; scripts/configure-github.sh --allow-actions-pull-requests sets it).
 # Either way the merge is held to the "Protect main" ruleset like anyone's: the required checks must
 # pass on the branch, up to date with main. The release notes come from CHANGELOG.md's
 # "## Unreleased" section: add to it in the pull requests that make the changes.
+#
+# With dry_run it mints the app's token, prepares the release, and checks that token can read this
+# repository and push the release branch (scripts/release-dry-run.sh), then stops: nothing is pushed,
+# opened, merged or tagged. Run it so before the first release through the app.
 #
 # Run it again with the same version after a failure. It keeps the release branch the failed run left
 # when that already holds this release, so checks already run there still count, replaces it
@@ -34,6 +38,11 @@ on:
         description: Version to release, without the v (for example 0.1.1 or 0.2.0-rc.1)
         required: true
         type: string
+      dry_run:
+        description: Only check the release app's token can open the release; push, open and merge nothing
+        required: false
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -94,18 +103,27 @@ jobs:
           package-manager-cache: false
       - name: Prepare the release
         run: scripts/prepare-release.sh "$VERSION"
+      - name: Check the release token in a dry run, opening nothing
+        if: inputs.dry_run == true
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          IDENTITY: ${{ steps.app.outputs.token != '' && 'app' || 'github' }}
+        run: scripts/release-dry-run.sh "$VERSION" "$IDENTITY"
       - name: Push the release branch and open its pull request
+        if: inputs.dry_run != true
         # Sets SHA (the release commit) and PR.
         env:
           GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
         run: scripts/open-release-pr.sh "$VERSION" >> "$GITHUB_ENV"
       # The step's name is what shows while it waits.
       - name: Wait for CI and DCO on the pull request (approve its workflows to run if GitHub holds them)
+        if: inputs.dry_run != true
         env:
           # Reading workflow runs needs actions: read, which only GITHUB_TOKEN has here.
           GH_TOKEN: ${{ github.token }}
         run: scripts/wait-for-pr-checks.sh "$SHA" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/pull/$PR" ci.yml dco.yml
       - name: Merge it
+        if: inputs.dry_run != true
         env:
           GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
         # Only the commit whose checks were waited for: a head pushed since is not merged.
@@ -113,7 +131,7 @@ jobs:
       - name: Start Tag release and Site on main
         # The app's merge is a push to main, which starts both itself; a GITHUB_TOKEN merge starts
         # nothing.
-        if: steps.app.outputs.token == ''
+        if: steps.app.outputs.token == '' && inputs.dry_run != true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -123,15 +141,15 @@ jobs:
           {
             echo "### Releasing $VERSION"
             echo "Merged #$PR and started Tag release and Site on main. The tag starts Release (npm, then the GitHub"
-            echo "release) and Image (GHCR, then the MCP Registry). Approve the staged npm version with the command"
-            echo "in the Release run's summary."
+            echo "release; GHCR, then the MCP Registry, each once you approve its environment). Approve the staged"
+            echo "npm version with the command in the Release run's summary."
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Say what the merge starts
-        if: steps.app.outputs.token != ''
+        if: steps.app.outputs.token != '' && inputs.dry_run != true
         run: |
           {
             echo "### Releasing $VERSION"
             echo "Merged #$PR as the release app: its push to main starts Tag release and Site. The tag starts"
-            echo "Release (npm, then the GitHub release) and Image (GHCR, then the MCP Registry). Approve the staged"
-            echo "npm version with the command in the Release run's summary."
+            echo "Release (npm, then the GitHub release; GHCR, then the MCP Registry, each once you approve its"
+            echo "environment). Approve the staged npm version with the command in the Release run's summary."
           } >> "$GITHUB_STEP_SUMMARY"

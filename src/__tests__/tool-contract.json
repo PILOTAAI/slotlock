@@ -635,8 +635,8 @@
                   "properties": {
                     "address": {
                       "type": "string",
-                      "maxLength": 320,
-                      "format": "email"
+                      "minLength": 3,
+                      "maxLength": 320
                     },
                     "name": {
                       "anyOf": [
@@ -669,8 +669,8 @@
                 "properties": {
                   "address": {
                     "type": "string",
-                    "maxLength": 320,
-                    "format": "email"
+                    "minLength": 3,
+                    "maxLength": 320
                   },
                   "name": {
                     "anyOf": [
@@ -962,8 +962,8 @@
                   "properties": {
                     "address": {
                       "type": "string",
-                      "maxLength": 320,
-                      "format": "email"
+                      "minLength": 3,
+                      "maxLength": 320
                     },
                     "name": {
                       "anyOf": [
@@ -996,8 +996,8 @@
                 "properties": {
                   "address": {
                     "type": "string",
-                    "maxLength": 320,
-                    "format": "email"
+                    "minLength": 3,
+                    "maxLength": 320
                   },
                   "name": {
                     "anyOf": [
@@ -1322,8 +1322,8 @@
                     "properties": {
                       "address": {
                         "type": "string",
-                        "maxLength": 320,
-                        "format": "email"
+                        "minLength": 3,
+                        "maxLength": 320
                       },
                       "name": {
                         "anyOf": [
@@ -1356,8 +1356,8 @@
                   "properties": {
                     "address": {
                       "type": "string",
-                      "maxLength": 320,
-                      "format": "email"
+                      "minLength": 3,
+                      "maxLength": 320
                     },
                     "name": {
                       "anyOf": [
@@ -1583,7 +1583,7 @@
   {
     "name": "slotlock_update_event",
     "title": "Update resource event",
-    "description": "Apply an expected-revision event patch and rematerialize occupancy atomically.",
+    "description": "Apply an expected-revision event patch and rematerialize occupancy atomically. With expected_resource_id, the resource you read the event on, an event since moved elsewhere is not found.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1806,6 +1806,11 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 200
+        },
+        "expected_resource_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
         }
       },
       "required": [
@@ -1884,8 +1889,8 @@
                   "properties": {
                     "address": {
                       "type": "string",
-                      "maxLength": 320,
-                      "format": "email"
+                      "minLength": 3,
+                      "maxLength": 320
                     },
                     "name": {
                       "anyOf": [
@@ -1918,8 +1923,8 @@
                 "properties": {
                   "address": {
                     "type": "string",
-                    "maxLength": 320,
-                    "format": "email"
+                    "minLength": 3,
+                    "maxLength": 320
                   },
                   "name": {
                     "anyOf": [

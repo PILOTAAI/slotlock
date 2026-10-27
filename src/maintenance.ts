@@ -14,18 +14,28 @@ export interface SlotlockMaintenanceResult {
   extended: number;
   /** Series that could not extend because an occurrence would overlap a booking. */
   conflicts: number;
-  /** Series over the expansion budget; they keep their old coverage. */
+  /** Series over the expansion budget, or whose roll failed otherwise; they keep their old coverage. */
   refused: number;
-  /** Idempotency commands and tombstones deleted. */
+  /**
+   * Expired holds and the answers kept for keyed ones, and past the retention window event
+   * idempotency answers, agents' event cancellations and booking references retired with no
+   * booking, deleted. A cancelled booking's tombstone stays.
+   */
   pruned: number;
   /** More was left than one pass does: run another. */
   capped: boolean;
+  /**
+   * The roll stopped before the series it had put back: series it has not tried since may still
+   * extend, so another pass should follow at once.
+   */
+  rollPending: boolean;
 }
 
 /**
- * One maintenance pass for a tenant: roll its recurring events to the rolling horizon, then prune
- * past the retention window, each in at most `batches` batches (1-100, default 10), every batch its
- * own transaction. Aborting `signal` stops it between batches with the signal's reason.
+ * One maintenance pass for a tenant: roll its recurring events to the rolling horizon, then purge
+ * its expired holds with their answers and prune its events' and bookings' bookkeeping past the
+ * retention window, each in at most `batches` batches (1-100, default 10), every batch its own
+ * transaction. Aborting `signal` stops it between batches with the signal's reason.
  */
 export async function maintainSlotlockTenant(
   store: SlotlockStore,
@@ -42,35 +52,58 @@ export async function maintainSlotlockTenant(
   let refused = 0;
   let rollCapped = true;
   let after: CalendarHorizonRollCursor | null = null;
-  for (let batch = 0; batch < batches; batch++) {
-    options.signal?.throwIfAborted();
-    const from: CalendarHorizonRollCursor | null = after;
-    const roll: CalendarHorizonRollResult = await store.withTenant(tenantRef, (tenant) =>
-      tenant.rollCalendarEventHorizon({ tenantRef, window, ...(from ? { after: from } : {}) }),
-    );
-    extended += roll.extended;
-    conflicts += roll.conflicts;
-    refused += roll.refused;
-    after = roll.next;
-    if (!after) {
-      rollCapped = false;
-      break;
+  // A roll that fails does not stop the pruning: expired holds are purged all the same, and the
+  // roll's error is thrown after.
+  let rollFailure: { error: unknown } | null = null;
+  try {
+    for (let batch = 0; batch < batches; batch++) {
+      options.signal?.throwIfAborted();
+      const from: CalendarHorizonRollCursor | null = after;
+      const roll: CalendarHorizonRollResult = await store.withTenant(tenantRef, (tenant) =>
+        tenant.rollCalendarEventHorizon({ tenantRef, window, ...(from ? { after: from } : {}) }),
+      );
+      extended += roll.extended;
+      conflicts += roll.conflicts;
+      refused += roll.refused;
+      after = roll.next;
+      if (!after) {
+        rollCapped = false;
+        break;
+      }
     }
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+    rollFailure = { error };
   }
   let pruned = 0;
-  let pruneCapped = true;
-  for (let batch = 0; batch < batches; batch++) {
+  let eventsLeft = true;
+  let bookingsLeft = true;
+  for (let batch = 0; batch < batches && (eventsLeft || bookingsLeft); batch++) {
     options.signal?.throwIfAborted();
-    const prune = await store.withTenant(tenantRef, (tenant) =>
-      tenant.pruneCalendarEventRetention({ tenantRef }),
-    );
-    pruned += prune.commandsDeleted + prune.tombstonesDeleted;
-    if (!prune.hasMore) {
-      pruneCapped = false;
-      break;
+    if (eventsLeft) {
+      const prune = await store.withTenant(tenantRef, (tenant) =>
+        tenant.pruneCalendarEventRetention({ tenantRef }),
+      );
+      pruned += prune.commandsDeleted + prune.tombstonesDeleted;
+      eventsLeft = prune.hasMore;
+    }
+    if (bookingsLeft) {
+      const prune = await store.withTenant(tenantRef, (tenant) =>
+        tenant.pruneBookingRetention({ tenantRef }),
+      );
+      pruned += prune.expiredHoldsDeleted + prune.holdCommandsDeleted + prune.tombstonesDeleted;
+      bookingsLeft = prune.hasMore;
     }
   }
-  return { extended, conflicts, refused, pruned, capped: rollCapped || pruneCapped };
+  if (rollFailure) throw rollFailure.error;
+  return {
+    extended,
+    conflicts,
+    refused,
+    pruned,
+    capped: rollCapped || eventsLeft || bookingsLeft,
+    rollPending: rollCapped && after !== null && (after.rollRetryAt ?? null) === null,
+  };
 }
 
 /** The advisory lock key for one tenant's maintenance (64-bit, from the tenant reference). */
@@ -183,9 +216,14 @@ export function startSlotlockMaintenance(
             } catch {
               // Reporting must never stop maintenance, or make a pass that ran look failed.
             }
-            // A capped pass that got somewhere goes round again at once; one that only met series it
-            // cannot extend waits for the next interval rather than examine them again and again.
-            again = result.capped && result.extended + result.pruned > 0;
+            // A capped pass that got somewhere goes round again at once, as does one whose roll
+            // stopped before the series it had put back: each series it could not extend is now
+            // behind every one it has not tried (the store puts it there), so the next pass meets
+            // new ones, and however many are stuck, each is met once before a healthy one is
+            // reached. A pass that reached the series put back waits for the next interval: they
+            // take turns there, and the next pass reaches anything new before them.
+            const progressed = result.extended + result.pruned > 0;
+            again = result.capped && (progressed || result.rollPending);
           }
         } catch (error) {
           if (controller.signal.aborted) return;
@@ -223,7 +261,10 @@ export function startSlotlockMaintenance(
       const previous = served.get(tenantRef);
       served.delete(tenantRef);
       served.set(tenantRef, previous ?? 0);
-      while (served.size > maxTenants) served.delete(served.keys().next().value as string);
+      while (served.size > maxTenants) {
+        const forgotten = served.keys().next().value as string;
+        served.delete(forgotten);
+      }
       if (due(tenantRef)) enqueue(tenantRef);
     },
     async close() {

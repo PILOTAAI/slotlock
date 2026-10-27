@@ -22,9 +22,18 @@ const HANDLER_TIMEOUT = Symbol('handler_timeout');
 
 export type SlotlockNodeServerErrorPhase = 'client' | 'listen' | 'request' | 'server' | 'shutdown';
 
+/** What the listener knows about a request's connection, beside the Request itself. */
+export interface SlotlockNodeServerConnection {
+  /**
+   * The peer's address as the socket reports it (an IPv4 client of a dual-stack listener reads
+   * `::ffff:a.b.c.d`). Behind a proxy it is the proxy's; never taken from a request field.
+   */
+  remoteAddress?: string;
+}
+
 /** The narrow Fetch-compatible boundary returned by `createSlotlockAgentServer`. */
 export interface SlotlockNodeServerFetchTarget {
-  fetch(request: Request): Promise<Response>;
+  fetch(request: Request, connection?: SlotlockNodeServerConnection): Promise<Response>;
   /**
    * Called once when `close()` begins, after the listener stops accepting connections, to end
    * long-lived responses (MCP subscription streams) so they drain within the grace period.
@@ -219,8 +228,9 @@ function toWebRequest(
   }
   // URL parsing resolves dot segments, `%2E` spellings included: `/v1/resources/%2E%2E/availability`
   // would reach the target as `/v1/availability`, a path parameter of `..` naming another route.
+  // It also takes a backslash for a slash, so a segment ends at either.
   const path = target.split(/[?#]/, 1)[0] ?? '';
-  if (path.split('/').some((segment) => /^(?:\.|%2e){1,2}$/i.test(segment))) {
+  if (path.split(/[\\/]/).some((segment) => /^(?:\.|%2e){1,2}$/i.test(segment))) {
     throw new Error('invalid_request_target');
   }
   const url = new URL(target, requestOrigin);
@@ -413,7 +423,11 @@ export function createSlotlockNodeServer(
         timeout.unref();
       });
       try {
-        const outcome = await Promise.race([target.fetch(webRequest), handlerTimeout]);
+        const connection: SlotlockNodeServerConnection = {};
+        if (request.socket.remoteAddress !== undefined) {
+          connection.remoteAddress = request.socket.remoteAddress;
+        }
+        const outcome = await Promise.race([target.fetch(webRequest, connection), handlerTimeout]);
         if (outcome === HANDLER_TIMEOUT) {
           controller.abort(abortReason('handler_timeout'));
           safeReport(config.onError, new Error('handler_timeout'), 'request');

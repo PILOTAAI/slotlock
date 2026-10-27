@@ -79,6 +79,34 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
+        name: "slotlock_delete_resource",
+        method: "DELETE",
+        path: "/v1/resources/{resource_id}",
+        path_params: &["resource_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_archive_resource",
+        method: "POST",
+        path: "/v1/resources/{resource_id}/archive",
+        path_params: &["resource_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_restore_resource",
+        method: "POST",
+        path: "/v1/resources/{resource_id}/restore",
+        path_params: &["resource_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_list_busy",
+        method: "GET",
+        path: "/v1/resources/{resource_id}/busy",
+        path_params: &["resource_id"],
+        query: &["start", "end"],
+    },
+    Operation {
         name: "slotlock_set_resource_availability",
         method: "PUT",
         path: "/v1/resources/{resource_id}/availability",
@@ -100,9 +128,9 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
-        name: "slotlock_confirm_hold",
-        method: "POST",
-        path: "/v1/holds/{hold_id}/confirm",
+        name: "slotlock_get_hold",
+        method: "GET",
+        path: "/v1/holds/{hold_id}",
         path_params: &["hold_id"],
         query: &[],
     },
@@ -111,6 +139,27 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/holds/{hold_id}",
         path_params: &["hold_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_list_holds",
+        method: "GET",
+        path: "/v1/resources/{resource_id}/holds",
+        path_params: &["resource_id"],
+        query: &["limit", "cursor"],
+    },
+    Operation {
+        name: "slotlock_confirm_hold",
+        method: "POST",
+        path: "/v1/holds/{hold_id}/confirm",
+        path_params: &["hold_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_get_reservation",
+        method: "GET",
+        path: "/v1/reservations/{reservation_ref}",
+        path_params: &["reservation_ref"],
         query: &[],
     },
     Operation {
@@ -128,10 +177,52 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &["revision"],
     },
     Operation {
+        name: "slotlock_list_reservations",
+        method: "GET",
+        path: "/v1/resources/{resource_id}/reservations",
+        path_params: &["resource_id"],
+        query: &["start", "end", "limit", "cursor"],
+    },
+    Operation {
         name: "slotlock_record_coverage",
         method: "PUT",
         path: "/v1/resources/{resource_id}/coverage/{source}",
         path_params: &["resource_id", "source"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_list_tenant_events",
+        method: "GET",
+        path: "/v1/tenant/events",
+        path_params: &[],
+        query: &["resource_id", "start", "end", "limit", "cursor"],
+    },
+    Operation {
+        name: "slotlock_get_tenant_event",
+        method: "GET",
+        path: "/v1/tenant/events/{event_id}",
+        path_params: &["event_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_cancel_tenant_event",
+        method: "DELETE",
+        path: "/v1/tenant/events/{event_id}",
+        path_params: &["event_id"],
+        query: &["expected_revision", "expected_resource_id", "idempotency_key"],
+    },
+    Operation {
+        name: "slotlock_get_tenant",
+        method: "GET",
+        path: "/v1/tenant",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_erase_tenant",
+        method: "POST",
+        path: "/v1/tenant/erase",
+        path_params: &[],
         query: &[],
     },
     Operation {
@@ -158,6 +249,8 @@ pub struct CreateResourceInput {
     pub external_ref: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<String>,
 }
 
 /// The arguments of [`Client::get_free_busy`].
@@ -264,6 +357,8 @@ pub struct UpdateEventInput {
     pub recurrence_rule: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recurrence_exceptions: Option<Vec<Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_resource_id: Option<String>,
 }
 
 /// The arguments of [`Client::delete_event`].
@@ -278,6 +373,32 @@ pub struct DeleteEventInput {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct GetResourceInput {
     pub resource_id: String,
+}
+
+/// The arguments of [`Client::delete_resource`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DeleteResourceInput {
+    pub resource_id: String,
+}
+
+/// The arguments of [`Client::archive_resource`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ArchiveResourceInput {
+    pub resource_id: String,
+}
+
+/// The arguments of [`Client::restore_resource`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RestoreResourceInput {
+    pub resource_id: String,
+}
+
+/// The arguments of [`Client::list_busy`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ListBusyInput {
+    pub resource_id: String,
+    pub start: String,
+    pub end: String,
 }
 
 /// The arguments of [`Client::set_resource_availability`].
@@ -302,6 +423,34 @@ pub struct AcquireHoldInput {
     pub ttl_seconds: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
+    /// request answers what the first did; with another request, 409 idempotency_conflict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub buffer_after_minutes: Option<i64>,
+}
+
+/// The arguments of [`Client::get_hold`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GetHoldInput {
+    pub hold_id: String,
+}
+
+/// The arguments of [`Client::release_hold`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ReleaseHoldInput {
+    pub hold_id: String,
+}
+
+/// The arguments of [`Client::list_holds`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ListHoldsInput {
+    pub resource_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
 /// The arguments of [`Client::confirm_hold`].
@@ -310,10 +459,10 @@ pub struct ConfirmHoldInput {
     pub hold_id: String,
 }
 
-/// The arguments of [`Client::release_hold`].
+/// The arguments of [`Client::get_reservation`].
 #[derive(Debug, Clone, Default, Serialize)]
-pub struct ReleaseHoldInput {
-    pub hold_id: String,
+pub struct GetReservationInput {
+    pub reservation_ref: String,
 }
 
 /// The arguments of [`Client::put_reservation`].
@@ -337,6 +486,18 @@ pub struct CancelReservationInput {
     pub revision: i64,
 }
 
+/// The arguments of [`Client::list_reservations`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ListReservationsInput {
+    pub resource_id: String,
+    pub start: String,
+    pub end: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
 /// The arguments of [`Client::record_coverage`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct RecordCoverageInput {
@@ -345,6 +506,47 @@ pub struct RecordCoverageInput {
     pub start: String,
     pub end: String,
     pub revision: i64,
+}
+
+/// The arguments of [`Client::list_tenant_events`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ListTenantEventsInput {
+    pub resource_id: String,
+    pub start: String,
+    pub end: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+/// The arguments of [`Client::get_tenant_event`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GetTenantEventInput {
+    pub event_id: String,
+}
+
+/// The arguments of [`Client::cancel_tenant_event`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CancelTenantEventInput {
+    pub event_id: String,
+    pub expected_revision: i64,
+    /// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
+    /// request answers what the first did; with another request, 409 idempotency_conflict.
+    pub idempotency_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_resource_id: Option<String>,
+}
+
+/// The arguments of [`Client::get_tenant`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GetTenantInput {
+}
+
+/// The arguments of [`Client::erase_tenant`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct EraseTenantInput {
+    pub confirm_tenant_ref: String,
 }
 
 /// The arguments of [`Client::run_maintenance`].
@@ -363,7 +565,9 @@ impl Client {
     /// Create or update a resource.
     ///
     /// Create the resource with this external reference, or update its time zone if the tenant
-    /// already has it. Repeating the call changes nothing more.
+    /// already has it. Repeating the call changes nothing more. visibility is shared (the
+    /// default: agents list and book it) or private (agents never see it), fixed at creation:
+    /// naming another for an existing resource answers 409 resource_visibility_conflict.
     pub fn create_resource(&self, input: &CreateResourceInput) -> Result<Value, Error> {
         self.call("slotlock_create_resource", serde_json::to_value(input)?)
     }
@@ -407,7 +611,9 @@ impl Client {
 
     /// Update resource event.
     ///
-    /// Apply an expected-revision event patch and rematerialize occupancy atomically.
+    /// Apply an expected-revision event patch and rematerialize occupancy atomically. With
+    /// expected_resource_id, the resource you read the event on, an event since moved elsewhere
+    /// is not found.
     pub fn update_event(&self, input: &UpdateEventInput) -> Result<Value, Error> {
         self.call("slotlock_update_event", serde_json::to_value(input)?)
     }
@@ -421,9 +627,48 @@ impl Client {
 
     /// Get a resource.
     ///
-    /// One resource of the tenant, with its own weekly bookable hours.
+    /// One resource of the tenant, archived or not, with its own weekly bookable hours and its
+    /// visibility.
     pub fn get_resource(&self, input: &GetResourceInput) -> Result<Value, Error> {
         self.call("slotlock_get_resource", serde_json::to_value(input)?)
+    }
+
+    /// Delete a resource.
+    ///
+    /// Delete a resource with its history (past bookings, coverage, cancelled events), freeing
+    /// its place under the tenant's resource limit. Refused with 409 resource_in_use while a
+    /// booking on it has not ended, a hold on it is live, or a calendar event is on it: cancel or
+    /// move those first. deleted is false when the tenant has no such resource, deleted already,
+    /// say.
+    pub fn delete_resource(&self, input: &DeleteResourceInput) -> Result<Value, Error> {
+        self.call("slotlock_delete_resource", serde_json::to_value(input)?)
+    }
+
+    /// Archive a resource.
+    ///
+    /// Take a resource out of use: no list shows it and it takes no new booking, hold or event
+    /// (409 resource_archived), while what is on it stays and can still be cancelled or released.
+    /// Archiving it again keeps the first time.
+    pub fn archive_resource(&self, input: &ArchiveResourceInput) -> Result<Value, Error> {
+        self.call("slotlock_archive_resource", serde_json::to_value(input)?)
+    }
+
+    /// Restore a resource.
+    ///
+    /// Put an archived resource back in use. Restoring one in use changes nothing.
+    pub fn restore_resource(&self, input: &RestoreResourceInput) -> Result<Value, Error> {
+        self.call("slotlock_restore_resource", serde_json::to_value(input)?)
+    }
+
+    /// List a resource's busy time.
+    ///
+    /// The time a resource of the tenant, private ones included, is occupied in a window of at
+    /// most 367 days, by start: bookings with their turnaround, live holds, and calendar events.
+    /// Adjacent intervals are not merged. More than 10,000 answers 400 calendar_work_limit:
+    /// narrow the window. Free/busy with coverage, for the resources agents see, is
+    /// slotlock_get_free_busy.
+    pub fn list_busy(&self, input: &ListBusyInput) -> Result<Value, Error> {
+        self.call("slotlock_list_busy", serde_json::to_value(input)?)
     }
 
     /// Set a resource's bookable hours.
@@ -448,18 +693,21 @@ impl Client {
     ///
     /// Occupy a window without booking it, for example while a customer pays. The hold blocks
     /// every other booking until it expires (the database clock, ttl_seconds from now), is
-    /// confirmed, or is released. A taken window answers 409 overlap.
+    /// confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and
+    /// a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key
+    /// (the Idempotency-Key header or idempotency_key), a retry answers the hold the first
+    /// request made, until that hold would have expired, is released or is confirmed; the same
+    /// key with another request is 409 idempotency_conflict.
     pub fn acquire_hold(&self, input: &AcquireHoldInput) -> Result<Value, Error> {
         self.call("slotlock_acquire_hold", serde_json::to_value(input)?)
     }
 
-    /// Confirm a hold.
+    /// Get a hold.
     ///
-    /// Turn an unexpired hold into a confirmed reservation. Confirming it again answers the same
-    /// reservation, so a retry is safe. An expired hold answers 409 hold_expired; a released or
-    /// unknown one, 404 hold_not_found.
-    pub fn confirm_hold(&self, input: &ConfirmHoldInput) -> Result<Value, Error> {
-        self.call("slotlock_confirm_hold", serde_json::to_value(input)?)
+    /// One of the tenant's live holds. An expired, confirmed, released or unknown one answers 404
+    /// hold_not_found; a confirmed one is a reservation whose reference is the hold's id.
+    pub fn get_hold(&self, input: &GetHoldInput) -> Result<Value, Error> {
+        self.call("slotlock_get_hold", serde_json::to_value(input)?)
     }
 
     /// Release a hold.
@@ -468,6 +716,34 @@ impl Client {
     /// or released.
     pub fn release_hold(&self, input: &ReleaseHoldInput) -> Result<Value, Error> {
         self.call("slotlock_release_hold", serde_json::to_value(input)?)
+    }
+
+    /// List a resource's holds.
+    ///
+    /// The live holds on one of the tenant's resources, by start then id, a page at a time: pass
+    /// next_cursor as cursor for the next page, until it is null.
+    pub fn list_holds(&self, input: &ListHoldsInput) -> Result<Value, Error> {
+        self.call("slotlock_list_holds", serde_json::to_value(input)?)
+    }
+
+    /// Confirm a hold.
+    ///
+    /// Turn an unexpired hold into a confirmed reservation, whose reference is the hold's id at
+    /// revision 1: move or cancel it with the reservation routes by that reference (DELETE
+    /// /v1/reservations/{hold_id}?revision=2 cancels it). Confirming it again answers the same
+    /// reservation, so a retry is safe. An expired hold answers 409 hold_expired; a released or
+    /// unknown one, 404 hold_not_found.
+    pub fn confirm_hold(&self, input: &ConfirmHoldInput) -> Result<Value, Error> {
+        self.call("slotlock_confirm_hold", serde_json::to_value(input)?)
+    }
+
+    /// Get a reservation.
+    ///
+    /// The tenant's booking with this reference as it now is, at its current revision: move it at
+    /// that revision plus 1. A cancelled or unknown reference, or a calendar event's time,
+    /// answers 404 reservation_not_found.
+    pub fn get_reservation(&self, input: &GetReservationInput) -> Result<Value, Error> {
+        self.call("slotlock_get_reservation", serde_json::to_value(input)?)
     }
 
     /// Book or move a reservation.
@@ -489,6 +765,16 @@ impl Client {
         self.call("slotlock_cancel_reservation", serde_json::to_value(input)?)
     }
 
+    /// List a resource's reservations.
+    ///
+    /// The tenant's bookings on one resource whose time, turnaround included, meets a window of
+    /// at most 367 days, by start then id, a page at a time: pass next_cursor as cursor for the
+    /// next page, until it is null. Calendar events are not bookings; slotlock_list_tenant_events
+    /// lists them.
+    pub fn list_reservations(&self, input: &ListReservationsInput) -> Result<Value, Error> {
+        self.call("slotlock_list_reservations", serde_json::to_value(input)?)
+    }
+
     /// Record calendar coverage.
     ///
     /// Record that the events of an external calendar (source) are complete for a window of a
@@ -497,6 +783,56 @@ impl Client {
     /// nothing.
     pub fn record_coverage(&self, input: &RecordCoverageInput) -> Result<Value, Error> {
         self.call("slotlock_record_coverage", serde_json::to_value(input)?)
+    }
+
+    /// List a resource's events, every key's.
+    ///
+    /// The calendar events on one of the tenant's resources with an occurrence in a window of at
+    /// most 367 days, whichever key wrote them (a revoked one's included), by start then id, a
+    /// page at a time: pass next_cursor as cursor for the next page, until it is null.
+    pub fn list_tenant_events(&self, input: &ListTenantEventsInput) -> Result<Value, Error> {
+        self.call("slotlock_list_tenant_events", serde_json::to_value(input)?)
+    }
+
+    /// Get any event of the tenant.
+    ///
+    /// One of the tenant's events by its id (the id slotlock_list_tenant_events gives), whichever
+    /// key wrote it. A cancelled or unknown one answers 404 event_not_found.
+    pub fn get_tenant_event(&self, input: &GetTenantEventInput) -> Result<Value, Error> {
+        self.call("slotlock_get_tenant_event", serde_json::to_value(input)?)
+    }
+
+    /// Cancel any event of the tenant.
+    ///
+    /// Cancel one of the tenant's events by its id, whichever key wrote it (a revoked key's
+    /// included, without charging its quota), at the revision you last read (expected_revision).
+    /// Its owner cannot create it again. With expected_resource_id, an event since moved to
+    /// another resource answers 404 event_not_found. Needs an idempotency key (the
+    /// Idempotency-Key header or idempotency_key): a retry with it answers the first cancellation
+    /// (replayed: true).
+    pub fn cancel_tenant_event(&self, input: &CancelTenantEventInput) -> Result<Value, Error> {
+        self.call("slotlock_cancel_tenant_event", serde_json::to_value(input)?)
+    }
+
+    /// Get the tenant.
+    ///
+    /// The key's tenant: its reference, and whether it is suspended. A suspended tenant may read
+    /// and writes nothing (403 tenant_suspended); only the server's operator suspends a tenant or
+    /// lifts a suspension (slotlock tenant suspend).
+    pub fn get_tenant(&self, input: &GetTenantInput) -> Result<Value, Error> {
+        self.call("slotlock_get_tenant", serde_json::to_value(input)?)
+    }
+
+    /// Erase the tenant.
+    ///
+    /// Delete everything the key's tenant has, at once and for good: resources, holds, bookings,
+    /// events, coverage and every API key, this one included. confirm_tenant_ref must be the
+    /// tenant's reference (slotlock_get_tenant), or it answers 400 invalid_confirmation. Off
+    /// unless the server allows it (403 tenant_erasure_disabled; slotlock serve does not: its
+    /// operator runs slotlock tenant erase). A suspended tenant cannot erase itself (403
+    /// tenant_suspended). Erasing again deletes nothing.
+    pub fn erase_tenant(&self, input: &EraseTenantInput) -> Result<Value, Error> {
+        self.call("slotlock_erase_tenant", serde_json::to_value(input)?)
     }
 
     /// Run maintenance.

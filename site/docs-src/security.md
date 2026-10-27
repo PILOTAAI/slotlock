@@ -1,6 +1,6 @@
 ---
 title: Security model
-description: How Slotlock keeps agent writes safe. A person can confirm each one, PostgreSQL decides every overlap, and forced row-level security keeps tenants apart.
+description: How Slotlock keeps agent writes safe. An MCP client can ask its person to confirm each one, PostgreSQL decides every overlap, and forced row-level security keeps tenants apart.
 ---
 
 Three rules hold everywhere: the database decides overlaps, the tenant comes from the authenticated
@@ -35,7 +35,7 @@ Each re-read checks the caller's credentials again, so a revoked token ends its 
 
 Each agent may keep 1,000 events and 10,000 idempotency records, so one agent cannot fill the
 database. Pruning frees quota; it is not erasure. See
-[Operations](https://github.com/PILOTAAI/slotlock#operations).
+[Operations](/docs/operations/).
 
 ## Report a vulnerability
 

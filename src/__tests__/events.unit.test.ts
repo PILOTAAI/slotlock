@@ -1,9 +1,12 @@
+import fc from 'fast-check';
 import ICAL from 'ical.js';
 import { describe, expect, it } from 'vitest';
+import { SLOTLOCK_EVENT_OUTPUT } from '../event-schema.js';
 import {
   CalendarContractError,
   emitITipCalendar,
   expandCalendarEventOccurrences,
+  normalizeCalendarEventContent,
   parseICalendarChanges,
   parseTrustedICalendarEvents,
 } from '../sync.js';
@@ -99,6 +102,26 @@ END:VCALENDAR\r
     ]);
   });
 
+  it('expands an instant a spring-forward names twice once, however far apart the two are', () => {
+    // 02:00 and 02:30 do not exist on 2028-03-12 in New York: ical.js moves them to 03:00 and
+    // 03:30, which the rule names again two steps later.
+    const occurrences = expandCalendarEventOccurrences(
+      {
+        start: d('2028-03-10T07:00:00Z'),
+        end: d('2028-03-10T07:15:00Z'),
+        timezone: 'America/New_York',
+        summary: 'Night check',
+        transparency: 'transparent',
+        recurrence: { rrule: 'FREQ=DAILY;BYHOUR=2,3;BYMINUTE=0,30' },
+      },
+      { start: d('2028-03-12T00:00:00Z'), end: d('2028-03-13T00:00:00Z') },
+    );
+    expect(occurrences.map((occurrence) => occurrence.recurrenceId)).toEqual([
+      '2028-03-12T07:00:00.000Z',
+      '2028-03-12T07:30:00.000Z',
+    ]);
+  });
+
   it('maps EXDATE to a cancellation exception and rejects recurrence constructs it cannot preserve', () => {
     const payload = `BEGIN:VCALENDAR\r
 VERSION:2.0\r
@@ -173,6 +196,94 @@ END:VCALENDAR\r
     expect(emailAlarm?.getFirstPropertyValue('attendee')).toBe('mailto:agent@example.com');
     expect(events[1]?.getFirstPropertyValue('status')).toBe('CANCELLED');
     expect(events[1]?.getFirstProperty('recurrence-id')).toBeDefined();
+  });
+
+  it('refuses control characters in event text, so no output line ends at a bare CR', () => {
+    const event = {
+      uid: 'handover-43@slotlock.example',
+      start: d('2027-06-12T09:15:00Z'),
+      end: d('2027-06-12T10:15:00Z'),
+      timezone: 'UTC',
+      summary: 'Vehicle handover',
+      organizer: { email: 'fleet@example.com', name: 'Fleet Desk' },
+      attendees: [{ email: 'agent@example.com', name: 'Booking Agent' }],
+    };
+    // The audit's probe: a reader that ends lines at CR saw METHOD:CANCEL and X-CN-INJ:1.
+    for (const hostile of [
+      { ...event, summary: 'Handover\rMETHOD:CANCEL' },
+      { ...event, description: 'Keys\rMETHOD:CANCEL' },
+      { ...event, location: 'Depot\u0000 7' },
+      { ...event, uid: 'handover\r@slotlock.example' },
+      { ...event, uid: 'handover\n@slotlock.example' },
+      { ...event, organizer: { email: 'fleet@example.com', name: 'Desk\rX-CN-INJ:1' } },
+      { ...event, attendees: [{ email: 'agent@example.com', name: 'Agent\u001b' }] },
+    ]) {
+      expect(() => emitITipCalendar(hostile, 'REQUEST')).toThrowError(CalendarContractError);
+    }
+    // A description may run over several lines, written with LF or CRLF.
+    const payload = emitITipCalendar(
+      { ...event, description: 'Keys at the desk.\r\nFuel full.\nTab\there.' },
+      'REQUEST',
+    );
+    expect(payload.replace(/\r\n/g, '')).not.toMatch(/\r/);
+    const master = new ICAL.Component(ICAL.parse(payload)).getFirstSubcomponent('vevent');
+    expect(master?.getFirstPropertyValue('description')).toBe('Keys at the desk.\nFuel full.\nTab\there.');
+  });
+
+  it('returns every participant address the store keeps', () => {
+    // The store keeps any address with one @ and no space; the output once wanted a stricter one,
+    // so one imported event made every listing of its window answer 500.
+    const organizer = SLOTLOCK_EVENT_OUTPUT.shape.organizer.unwrap();
+    const attendee = SLOTLOCK_EVENT_OUTPUT.shape.attendees.element;
+    const kept = (email: string) =>
+      normalizeCalendarEventContent({
+        start: d('2027-01-01T09:00:00Z'),
+        end: d('2027-01-01T10:00:00Z'),
+        timezone: 'UTC',
+        summary: 'Imported',
+        organizer: { email },
+        attendees: [{ email }],
+      });
+    const part = fc.string({ unit: 'grapheme', minLength: 1, maxLength: 20 });
+    fc.assert(
+      fc.property(part, part, (local, domain) => {
+        let content: ReturnType<typeof kept>;
+        try {
+          content = kept(`${local}@${domain}`);
+        } catch {
+          return;
+        }
+        const address = content.organizer?.email as string;
+        expect(organizer.safeParse({ address, name: null }).success, address).toBe(true);
+        expect(
+          attendee.safeParse({
+            address,
+            name: null,
+            role: 'required',
+            participation_status: 'needs_action',
+            rsvp: false,
+          }).success,
+          address,
+        ).toBe(true);
+      }),
+      { numRuns: 500 },
+    );
+    for (const address of ['ops@localhost', 'grüße@bücher.example']) {
+      expect(organizer.safeParse({ address: kept(address).organizer?.email, name: null }).success).toBe(true);
+    }
+  });
+
+  it('keeps instants in years 1-9999, which the events are returned in', () => {
+    const at = (start: Date) => () =>
+      normalizeCalendarEventContent({
+        start,
+        end: new Date(start.getTime() + 3_600_000),
+        timezone: 'UTC',
+        summary: 'Far',
+      });
+    expect(at(new Date(Date.UTC(10_000, 0, 1)))).toThrowError(CalendarContractError);
+    expect(at(new Date('0000-06-01T00:00:00Z'))).toThrowError(CalendarContractError);
+    expect(at(new Date('9999-12-31T22:00:00Z'))).not.toThrow();
   });
 
   it('fails closed before unbounded trusted-event work or cardinality can reach the store', () => {
@@ -408,7 +519,7 @@ describe('Slotlock long one-off events', () => {
       ),
     ).toEqual([['2027-01-01T00:00:00.000Z', '2028-06-01T00:00:00.000Z']]);
 
-    // Recurrence expansion keeps its bound: a 368-day window is still refused for a series.
+    // Recurrence expansion keeps its bound: a 370-day window is still refused for a series.
     expect(() =>
       expandCalendarEventOccurrences(
         {
@@ -418,7 +529,7 @@ describe('Slotlock long one-off events', () => {
           summary: 'Series',
           recurrence: { rrule: 'FREQ=WEEKLY;COUNT=3' },
         },
-        { start: d('2027-01-01T00:00:00Z'), end: d('2028-01-04T00:00:00Z') },
+        { start: d('2027-01-01T00:00:00Z'), end: d('2028-01-06T00:00:00Z') },
       ),
     ).toThrowError(expect.objectContaining({ code: 'invalid_icalendar' }));
   });

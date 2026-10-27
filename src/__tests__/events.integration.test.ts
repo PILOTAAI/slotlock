@@ -390,16 +390,12 @@ describe.skipIf(!url)('Slotlock calendar events (real Postgres)', () => {
       materializationWindow: initialWindow,
     });
     if (!created.ok) throw new Error('rolling conflict fixture failed');
-    const blocker = await store.createExternalReservation({
-      tenantRef: rollingTenant,
-      externalRef: `rolling-blocker-${crypto.randomUUID()}`,
-      resourceId: rollingResource.id,
-      start: d('2027-09-03T09:30:00Z'),
-      end: d('2027-09-03T10:30:00Z'),
-      bufferAfterMs: 0,
-      revision: 1,
-    });
-    if (!blocker.ok) throw new Error('rolling blocker fixture failed');
+    // A booking where the series is not stored, as releases before 0.3 accepted one: a write there
+    // now extends the series first (and here would be refused as an overlap).
+    await sql`
+      INSERT INTO slotlock.reservations (resource_id, tenant_ref, external_ref, starts_at, ends_at)
+      VALUES (${rollingResource.id}, ${rollingTenant}, ${`rolling-blocker-${crypto.randomUUID()}`},
+              '2027-09-03T09:30:00Z', '2027-09-03T10:30:00Z')`;
 
     await expect(
       store.rollCalendarEventHorizon({
@@ -520,6 +516,22 @@ describe.skipIf(!url)('Slotlock calendar events (real Postgres)', () => {
     ).resolves.toEqual({ ok: false, code: 'invalid_event' });
   });
 
+  it('refuses an event whose text holds a bare CR as invalid_event', async () => {
+    await expect(
+      store.putCalendarEvent({
+        tenantRef,
+        externalRef: `bare-cr-${crypto.randomUUID()}`,
+        idempotencyKey: `command-${crypto.randomUUID()}`,
+        expectedRevision: 0,
+        resourceId,
+        start: d('2027-03-20T09:00:00Z'),
+        end: d('2027-03-20T10:00:00Z'),
+        timezone: 'UTC',
+        summary: 'Handover\rMETHOD:CANCEL',
+      }),
+    ).resolves.toEqual({ ok: false, code: 'invalid_event' });
+  });
+
   it('stores a one-off event longer than the recurrence window, up to the 3,660-day ceiling', async () => {
     const DAY = 24 * 60 * 60 * 1000;
     const leaseResource = (
@@ -594,7 +606,7 @@ describe.skipIf(!url)('Slotlock calendar events (real Postgres)', () => {
       store.listBusy(leaseResource, { start: lease.start, end: d('2029-01-01T00:00:00Z') }),
     ).resolves.toEqual([]);
 
-    // Recurrence keeps its 367-day materialization bound.
+    // Recurrence keeps its 369-day materialization bound (2028 is a leap year: this is 370 days).
     await expect(
       store.putCalendarEvent({
         ...lease,
@@ -606,31 +618,39 @@ describe.skipIf(!url)('Slotlock calendar events (real Postgres)', () => {
         recurrence: { rrule: 'FREQ=WEEKLY;COUNT=2' },
         materializationWindow: {
           start: d('2028-01-01T00:00:00Z'),
-          end: d('2029-01-04T00:00:00Z'),
+          end: d('2029-01-05T00:00:00Z'),
         },
       }),
     ).resolves.toEqual({ ok: false, code: 'invalid_event' });
   });
 
-  it('upgrades an installed 367-day window CHECK to the bounded one', async () => {
+  it.each([
+    ['0.1', 'slotlock_calendar_events_materialization_window_valid', "interval '367 days'"],
+    [
+      '0.2',
+      'slotlock_calendar_events_materialization_window_bounded',
+      `interval '367 days' OR (recurrence_rule IS NULL AND materialized_starts_at = starts_at
+         AND materialized_ends_at = ends_at AND ends_at - starts_at <= interval '3660 days')`,
+    ],
+  ])('upgrades the window CHECK %s installed to the 369-day one', async (_release, name, bound) => {
     await sql
       .begin(async (tx) => {
         await tx.unsafe(`
           ALTER TABLE slotlock.calendar_events
-            DROP CONSTRAINT slotlock_calendar_events_materialization_window_bounded;
+            DROP CONSTRAINT slotlock_calendar_events_materialization_window_limit;
           ALTER TABLE slotlock.calendar_events
-            ADD CONSTRAINT slotlock_calendar_events_materialization_window_valid CHECK (
+            ADD CONSTRAINT ${name} CHECK (
               materialized_ends_at > materialized_starts_at
-              AND materialized_ends_at - materialized_starts_at <= interval '367 days'
-            );`);
+              AND (materialized_ends_at - materialized_starts_at <= ${bound})
+            ) NOT VALID;`);
         await createSlotlockStore(tx).applySchema();
-        const constraints = await tx<{ conname: string }[]>`
-          SELECT conname FROM pg_constraint
+        const constraints = await tx<{ conname: string; validated: boolean }[]>`
+          SELECT conname, convalidated AS validated FROM pg_constraint
            WHERE conrelid = 'slotlock.calendar_events'::regclass
              AND conname LIKE 'slotlock_calendar_events_materialization_window%'
            ORDER BY conname`;
-        expect(constraints.map((row) => row.conname)).toEqual([
-          'slotlock_calendar_events_materialization_window_bounded',
+        expect(constraints).toEqual([
+          { conname: 'slotlock_calendar_events_materialization_window_limit', validated: true },
         ]);
         throw new Error('rollback');
       })
@@ -942,7 +962,7 @@ describe.skipIf(!url)('Slotlock calendar events (real Postgres)', () => {
   });
 
   it('forces, fingerprints and enforces tenant RLS on every new event table', async () => {
-    const role = 'slotlock_events_rls_probe';
+    const role = `slotlock_events_rls_probe_${crypto.randomUUID().replaceAll('-', '').slice(0, 16)}`;
     const tables = [
       'calendar_events',
       'calendar_event_attendees',

@@ -71,13 +71,41 @@ describe('pinned dependencies', () => {
       .filter((line) => line.startsWith('FROM '));
     expect(fromLines).toHaveLength(3);
     for (const line of fromLines) expect(line).toMatch(/^FROM \S+:\S+@sha256:[0-9a-f]{64} AS \w+$/);
+    // A service whose image is a matrix value names it in the matrix, as postgres-image.
     const images = [
       ...read('docker-compose.yml').matchAll(/^[ \t]+image:[ \t]*(\S+)/gm),
-      ...workflows.flatMap(({ text }) => [...text.matchAll(/^[ \t]+image:[ \t]*(\S+)/gm)]),
+      ...workflows.flatMap(({ text }) => [
+        ...text.matchAll(/^[ \t]+(?:image|postgres-image):[ \t]*(\S+)/gm),
+      ]),
     ].map(([, image]) => image as string);
     expect(images.length).toBeGreaterThanOrEqual(4);
-    for (const image of images.filter((name) => name !== 'slotlock:local')) {
+    const local = new Set(['slotlock:local', '${{']);
+    for (const workflow of workflows) {
+      for (const [line] of workflow.text.matchAll(/^[ \t]+image:[ \t]*\$\{\{.*$/gm)) {
+        expect(line.trim(), workflow.file).toBe('image: ${{ matrix.postgres-image }}');
+      }
+    }
+    for (const image of images.filter((name) => !local.has(name))) {
       expect(image).toMatch(/^[\w./-]+:[\w.-]+@sha256:[0-9a-f]{64}$/);
+    }
+  });
+});
+
+describe('token permissions', () => {
+  // OpenSSF Scorecard's Token-Permissions check: a workflow's default token reads at most, and each
+  // job asks for the writes it needs.
+  it('gives every workflow a top-level permissions block that grants no write', () => {
+    expect(workflows.length).toBeGreaterThanOrEqual(12);
+    for (const { file, text } of workflows) {
+      const block = /^permissions:(.*)\n((?:[ \t]+.*\n)*)/m.exec(text);
+      expect(block, `${file} has no top-level permissions`).not.toBeNull();
+      const [, inline = '', nested = ''] = block ?? [];
+      if (inline.trim()) {
+        expect(['{}', 'read-all'], file).toContain(inline.trim());
+      } else {
+        const entries = nested.split('\n').filter((line) => line.trim() && !/^\s*#/.test(line));
+        for (const line of entries) expect(line.trim(), file).toMatch(/^[\w-]+: read$/);
+      }
     }
   });
 });
@@ -98,24 +126,32 @@ describe('MCP Registry entry', () => {
     expect(/^\s*service="([^"]+)"/m.exec(read('Dockerfile'))?.[1]).toBe('slotlock');
   });
 
-  it('declares only variables the command reads, with the secrets required and secret', () => {
+  it('declares only variables the command reads, required only when serve needs them', () => {
     const declared = serverPackage?.environmentVariables ?? [];
     const known: readonly string[] = SLOTLOCK_ENVIRONMENT_VARIABLES;
     for (const { name } of declared) expect(known).toContain(name);
-    for (const name of ['DATABASE_URL', 'SLOTLOCK_AUTH_TOKEN', 'SLOTLOCK_CONFIRMATION_SECRET']) {
-      expect(declared.find((variable) => variable.name === name)).toMatchObject({
-        isRequired: true,
-        isSecret: true,
-      });
+    const variable = (name: string) => declared.find((entry) => entry.name === name);
+    expect(variable('DATABASE_URL')).toMatchObject({ isRequired: true, isSecret: true });
+    // serve runs with API keys alone (CI's client suites serve without a token), and without a
+    // confirmation secret when SLOTLOCK_CONFIRM_WRITES is none.
+    for (const name of ['SLOTLOCK_AUTH_TOKEN', 'SLOTLOCK_CONFIRMATION_SECRET']) {
+      expect(variable(name)?.isSecret, name).toBe(true);
+      expect(variable(name)?.isRequired ?? false, name).toBe(false);
     }
+    expect(
+      (variable('SLOTLOCK_TENANT') as { description?: string } | undefined)?.description,
+    ).toContain('API keys act in their own tenant');
+    // Writes take effect at once unless SLOTLOCK_CONFIRM_WRITES opts in.
+    expect(variable('SLOTLOCK_CONFIRM_WRITES')).toMatchObject({ default: 'none' });
     // The URL's {PORT} is the PORT variable, which is also the published container port.
     expect(serverPackage?.transport.url).toBe('http://localhost:{PORT}/mcp');
     expect(declared.map(({ name }) => name)).toContain('PORT');
     expect(serverPackage?.runtimeArguments).toContainEqual(
       expect.objectContaining({ name: '-p', value: '127.0.0.1:{PORT}:{PORT}' }),
     );
+    // The bearer is SLOTLOCK_AUTH_TOKEN or an API key, whichever the client was given.
     expect(serverPackage?.transport.headers).toContainEqual(
-      expect.objectContaining({ name: 'Authorization', value: 'Bearer {SLOTLOCK_AUTH_TOKEN}' }),
+      expect.objectContaining({ name: 'Authorization', value: 'Bearer {token}', isRequired: true }),
     );
   });
 });
@@ -518,12 +554,45 @@ describe('release automation', () => {
   });
 
   it('starts the release workflows only from a pushed v* tag', () => {
-    for (const file of ['release.yml', 'image.yml']) {
+    const release = workflow('release.yml');
+    expect(release).toMatch(/^on:\n {2}push:\n {4}tags: \['v\*'\]\n\n/m);
+    // The image and the MCP Registry are jobs of that run, never a run of their own.
+    for (const file of ['image.yml', 'mcp-registry.yml']) {
+      expect(workflow(file), file).toMatch(/^on:\n {2}workflow_call:\n\n/m);
+    }
+    for (const file of ['release.yml', 'image.yml', 'mcp-registry.yml']) {
       const text = workflow(file);
-      expect(text, file).toMatch(/^on:\n {2}push:\n {4}tags: \['v\*'\]\n\n/m);
       expect(text, file).not.toContain('workflow_dispatch');
+      expect(text, file).not.toContain('pull_request');
       expect(text, file).toContain('run: scripts/check-release-tag.sh "$GITHUB_REF_NAME"');
     }
+  });
+
+  it('publishes the image and the MCP Registry entry only after the release tests pass, behind a reviewer', () => {
+    const release = workflow('release.yml');
+    const job = (text: string, name: string) => {
+      const start = text.indexOf(`\n  ${name}:\n`);
+      expect(start, name).toBeGreaterThan(0);
+      const next = text.slice(start + 1).search(/\n {2}[\w-]+:\n/);
+      return text.slice(start, next === -1 ? undefined : start + 1 + next);
+    };
+    const image = job(release, 'image');
+    expect(image).toContain('needs: build');
+    expect(image).toContain('uses: ./.github/workflows/image.yml');
+    // A called workflow can only keep or narrow what its caller grants.
+    for (const permission of ['packages: write', 'attestations: write', 'id-token: write']) {
+      expect(image).toContain(permission);
+    }
+    // The build job is the one that runs npm test against PostgreSQL.
+    expect(job(release, 'build')).toContain('run: npm test');
+    const called = workflow('image.yml');
+    expect(job(called, 'image')).toContain('environment: ghcr');
+    expect(job(called, 'registry')).toContain('needs: image');
+    expect(job(workflow('mcp-registry.yml'), 'publish')).toContain('environment: mcp-registry');
+    // Pylota's deploy verifies the image with --signer-workflow image.yml: an attestation made in a
+    // reusable workflow is signed by that workflow (gh attestation verify), so it stays image.yml.
+    expect(called).toContain('uses: actions/attest@');
+    expect(release).not.toContain('uses: actions/attest@');
   });
 
   it('only stages on npm, and asks for the bootstrap when npm refuses the credential', () => {
@@ -593,19 +662,30 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
     )?.body;
 
   it('lets only admins and deploy keys create release tags, and only admins move or delete them', () => {
-    const tags = dryRun().find(
+    const tags = dryRun().filter(
       (request) => request.path.endsWith('/rulesets') && request.body.target === 'tag',
-    )?.body;
-    expect(tags?.conditions?.ref_name.include).toEqual(['refs/tags/v*']);
-    expect(tags?.rules?.map((rule) => rule.type).sort()).toEqual([
-      'creation',
-      'deletion',
-      'update',
-    ]);
-    expect(tags?.bypass_actors).toEqual([
+    );
+    expect(tags, 'two tag rulesets').toHaveLength(2);
+    for (const { body } of tags) expect(body.conditions?.ref_name.include).toContain('refs/tags/v*');
+    const byRules = (types: string) =>
+      tags.find(({ body }) => body.rules?.map((rule) => rule.type).sort().join() === types)?.body;
+    // A DeployKey bypass names no key (the REST docs: its actor_id "should be null"), so it covers
+    // every write deploy key; it is kept to creation, where tag-release.yml needs it.
+    expect(byRules('creation')?.bypass_actors).toEqual([
       { actor_id: 5, actor_type: 'RepositoryRole', bypass_mode: 'always' },
       { actor_id: null, actor_type: 'DeployKey', bypass_mode: 'always' },
     ]);
+    expect(byRules('deletion,update')?.bypass_actors).toEqual([
+      { actor_id: 5, actor_type: 'RepositoryRole', bypass_mode: 'always' },
+    ]);
+  });
+
+  it("lets nobody bypass main's pull request and required checks, the admin included", () => {
+    const main = dryRun().find(
+      (request) => request.path.endsWith('/rulesets') && request.body.target === 'branch',
+    )?.body;
+    expect(main?.rules?.map((rule) => rule.type)).toContain('required_status_checks');
+    expect(main?.bypass_actors).toEqual([]);
   });
 
   it('keeps the tag deploy key in an environment only main can use', () => {
@@ -634,19 +714,21 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
     expect(policy).toEqual({ name: 'main', type: 'branch' });
   });
 
-  it('makes a release wait for no reviewer unless asked to', () => {
-    const plain = dryRun();
-    expect(environment(plain, 'npm')?.reviewers).toEqual([]);
-    expect(environment(plain, 'mcp-registry')?.reviewers).toEqual([]);
-    const approved = dryRun('--require-approval');
-    expect(environment(approved, 'npm')?.reviewers).toEqual([{ type: 'User', id: 0 }]);
-    expect(environment(approved, 'mcp-registry')?.reviewers).toEqual([{ type: 'User', id: 0 }]);
+  it('makes every publishing job wait for a reviewer, and nothing else', () => {
+    const requests = dryRun();
+    for (const name of ['npm', 'ghcr', 'mcp-registry']) {
+      expect(environment(requests, name)?.reviewers, name).toEqual([{ type: 'User', id: 0 }]);
+    }
+    for (const name of ['release-tag', 'release-app', 'site']) {
+      expect(environment(requests, name)?.reviewers, name).toEqual([]);
+    }
   });
 
   // A stand-in for gh that answers every request configure-github.sh sends, logs each one, and
-  // keeps the deploy key it is sent and the secret value it receives on stdin. With
-  // STUB_WORKFLOW_PERMISSIONS set, it refuses the Actions workflow permissions with that message,
-  // as GitHub does (409) when the organization holds the setting.
+  // keeps the deploy key it is sent, each ruleset it writes and the secret value it receives on
+  // stdin. With STUB_WORKFLOW_PERMISSIONS set, it refuses the Actions workflow permissions with that
+  // message, as GitHub does (409) when the organization holds the setting. STUB_CHECK_RUNS is what
+  // GitHub lists for main's "CI passed".
   const gh = `#!/bin/sh
 printf '%s\\n' "$*" >> "$STUB_LOG/gh.log"
 case "$1 $2" in
@@ -670,11 +752,13 @@ if [ "$method" != GET ]; then
     exit 1
   fi
   [ "$method $path" = 'POST repos/PILOTAAI/slotlock/keys' ] && printf '%s' "$body" > "$STUB_LOG/key.json"
+  case "$path" in */rulesets | */rulesets/*) printf '%s' "$body" | jq -c . >> "$STUB_LOG/rulesets.jsonl" ;; esac
   echo '{"id":1}'
   exit 0
 fi
 case "$path" in
   repos/PILOTAAI/slotlock) echo '{"permissions":{"admin":true},"visibility":"public","default_branch":"main"}' ;;
+  */commits/main/check-runs\\?*) echo "$STUB_CHECK_RUNS" ;;
   */code-scanning/default-setup) echo '{"state":"configured","languages":["actions","javascript-typescript"],"query_suite":"extended"}' ;;
   */deployment-branch-policies*) echo '{"branch_policies":[]}' ;;
   */environments/release-tag/secrets*) echo "$STUB_SECRETS" ;;
@@ -684,8 +768,18 @@ case "$path" in
 esac
 `;
 
+  const ciPassed = (...conclusions: string[]) =>
+    JSON.stringify({
+      total_count: conclusions.length,
+      check_runs: conclusions.map((conclusion) => ({
+        name: 'CI passed',
+        status: 'completed',
+        conclusion,
+      })),
+    });
+
   function configure(
-    scenario: { keys: string; secrets: string; workflowPermissions?: string },
+    scenario: { keys: string; secrets: string; workflowPermissions?: string; checkRuns?: string },
     ...args: string[]
   ) {
     const dir = mkdtempSync(join(tmpdir(), 'slotlock-configure-'));
@@ -705,10 +799,17 @@ esac
         STUB_KEYS: scenario.keys,
         STUB_SECRETS: scenario.secrets,
         STUB_WORKFLOW_PERMISSIONS: scenario.workflowPermissions ?? '',
+        STUB_CHECK_RUNS: scenario.checkRuns ?? ciPassed('success'),
       },
     });
     const calls = readFileSync(join(log, 'gh.log'), 'utf8').trim().split('\n');
-    return { ...result, dir, log, temp, calls };
+    const rulesets = existsSync(join(log, 'rulesets.jsonl'))
+      ? readFileSync(join(log, 'rulesets.jsonl'), 'utf8')
+          .trim()
+          .split('\n')
+          .map((line) => (JSON.parse(line) as { name: string }).name)
+      : [];
+    return { ...result, dir, log, temp, calls, rulesets };
   }
   const none = { keys: '[]', secrets: '{"secrets":[]}' };
   const present = {
@@ -716,13 +817,44 @@ esac
     secrets: '{"secrets":[{"name":"TAG_RELEASE_DEPLOY_KEY"}]}',
   };
 
-  it('lets GitHub Actions open pull requests, with GITHUB_TOKEN read-only by default', () => {
-    const permissions = dryRun().find(
-      (request) =>
-        request.method === 'PUT' &&
-        request.path === 'repos/PILOTAAI/slotlock/actions/permissions/workflow',
-    )?.body;
-    expect(permissions).toEqual({
+  // With no bypass, a required check that cannot pass blocks every pull request, its own fix
+  // included, so the ruleset waits for a green run of every CI job (PostgreSQL 17 and 18 and the
+  // Compose quickstart among them) on main.
+  it.each([
+    ['failed', ciPassed('failure')],
+    ['not run', ciPassed()],
+    ['failed in one of its runs', ciPassed('success', 'failure')],
+  ])('leaves main\'s ruleset as it is while "CI passed" has %s there', (_, checkRuns) => {
+    const waiting = configure({ ...present, checkRuns });
+    expect(waiting.status, waiting.stderr).toBe(0);
+    const checks = 'commits/main/check-runs?check_name=CI%20passed&app_id=15368';
+    expect(waiting.calls.some((call) => call.endsWith(`repos/PILOTAAI/slotlock/${checks}`))).toBe(true);
+    expect(waiting.rulesets).not.toContain('Protect main');
+    expect(waiting.rulesets, 'the tag rulesets still apply').toHaveLength(2);
+    expect(waiting.stderr).toContain(`"CI passed" has not succeeded on main`);
+    expect(waiting.stdout).toContain("[ ] Apply the ruleset 'Protect main'");
+  });
+
+  it('locks main behind "CI passed" once that check has succeeded on main', () => {
+    const green = configure(present);
+    expect(green.status, green.stderr).toBe(0);
+    expect(green.rulesets).toContain('Protect main');
+    expect(green.stdout).not.toContain("[ ] Apply the ruleset 'Protect main'");
+  });
+
+  it('keeps GITHUB_TOKEN read-only, and Actions from opening or approving pull requests unless asked', () => {
+    const permissions = (...args: string[]) =>
+      dryRun(...args).find(
+        (request) =>
+          request.method === 'PUT' &&
+          request.path === 'repos/PILOTAAI/slotlock/actions/permissions/workflow',
+      )?.body;
+    // The release app opens and merges release pull requests; GITHUB_TOKEN needs neither.
+    expect(permissions()).toEqual({
+      default_workflow_permissions: 'read',
+      can_approve_pull_request_reviews: false,
+    });
+    expect(permissions('--allow-actions-pull-requests')).toEqual({
       default_workflow_permissions: 'read',
       can_approve_pull_request_reviews: true,
     });
@@ -732,11 +864,14 @@ esac
     'carries on when the organization holds that setting, and says where to change it',
     () => {
       const page = 'https://github.com/organizations/PILOTAAI/settings/actions';
-      const allowed = configure(present);
+      const allowed = configure(present, '--allow-actions-pull-requests');
       expect(allowed.status, allowed.stderr).toBe(0);
       expect(allowed.stdout).toContain('may open pull requests');
       expect(allowed.stdout).not.toContain(page);
-      const held = configure({ ...present, workflowPermissions: 'gh: Conflict (HTTP 409)' });
+      const held = configure(
+        { ...present, workflowPermissions: 'gh: Conflict (HTTP 409)' },
+        '--allow-actions-pull-requests',
+      );
       expect(held.status, held.stderr).toBe(0);
       expect(held.stderr).toContain('refused to let Actions open pull requests: gh: Conflict');
       expect(held.stdout).toContain(page);
@@ -817,6 +952,9 @@ describe.skipIf(!hasJq)('release bootstrap', () => {
   --version) echo "$STUB_NPM_VERSION" ;;
   'view slotlock@1.2.3 version') [ "$STUB_VERSION_ON_NPM" = 1 ] && echo 1.2.3 || exit 1 ;;
   'view slotlock version') [ "$STUB_PACKAGE_ON_NPM" = 1 ] && echo 1.2.2 || exit 1 ;;
+  'view slotlock dist-tags.latest')
+    [ "$STUB_REGISTRY_DOWN" = 1 ] && { echo 'npm error code ECONNRESET' >&2; exit 1; }
+    [ "$STUB_PACKAGE_ON_NPM" = 1 ] && echo 1.2.2 || { echo 'npm error code E404' >&2; exit 1; } ;;
   whoami) echo ada ;;
   'stage list slotlock') printf '%s' "$STUB_STAGED" ;;
   'stage publish '*) echo '+ slotlock@1.2.3 (staged with id stage-1)' ;;
@@ -839,11 +977,10 @@ esac`,
   'api repos/PILOTAAI/slotlock/git/tags/7a6 '*) echo "commit $STUB_TAG_COMMIT" ;;
   'run list '*'--workflow tag-release.yml '*) echo "$STUB_TAG_RUNS" ;;
   'run list '*'--workflow release.yml '*) [ "$STUB_GH_FAILS" = 1 ] && exit 1; echo "$STUB_RELEASE_RUNS" ;;
-  'run list '*'--workflow image.yml '*) echo "$STUB_IMAGE_RUNS" ;;
   'run download '*) for last; do :; done; cp "$STUB_ARTIFACT"/* "$last" ;;
   'run view '*'--json attempt'*)
     if [ -f "$STUB_LOG/rerun-$3" ] && [ "$STUB_NO_NEW_ATTEMPT" != 1 ]; then echo 2; else echo 1; fi ;;
-  'run view 22 '*) echo "$STUB_IMAGE_JOB" ;;
+  'run view 11 '*'--json jobs'*) echo "$STUB_IMAGE_JOB" ;;
   'run rerun '*)
     touch "$STUB_LOG/rerun-$3"
     if [ "$3" = 5 ] && [ "$STUB_RERUN_TAGS" = 1 ]; then touch "$STUB_LOG/tagged"; fi ;;
@@ -907,7 +1044,6 @@ esac`,
         STUB_NPM_VERSION: '11.19.0',
         STUB_TAG_COMMIT: tagCommit,
         STUB_RELEASE_RUNS: JSON.stringify([run(11)]),
-        STUB_IMAGE_RUNS: JSON.stringify([run(22)]),
         STUB_IMAGE_PUBLIC: '1',
         STUB_IMAGE_JOB: 'success',
         STUB_STAGED: '',
@@ -996,6 +1132,14 @@ esac`,
     expect(result.stderr).toContain('no Tag release run started for main');
   });
 
+  it('stages nothing when npm cannot say which version is latest', () => {
+    const result = bootstrap({ STUB_REGISTRY_DOWN: '1' });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('ECONNRESET');
+    expect(result.stderr).toContain('could not choose the dist-tag');
+    expect(result.npm.filter((call) => /^(?:stage|trust) /.test(call))).toEqual([]);
+  });
+
   it('stops when Tag release passed without pushing the tag', () => {
     const result = bootstrap({ STUB_TAG_PUSHED: '0', STUB_TAG_RUNS: tagRun('success') });
     expect(result.status).toBe(1);
@@ -1031,7 +1175,6 @@ esac`,
     // npm expires a trusted publisher that has not published within 2 days.
     expect(result.npm.filter((call) => call.startsWith('trust '))).toEqual([]);
     expect(result.gh).toContain(rerun(11));
-    expect(result.gh).toContain(rerun(22));
   });
 
   it("uses only the run the tag's push started on the tag's commit", () => {
@@ -1131,10 +1274,11 @@ esac`,
       'https://github.com/orgs/PILOTAAI/packages/container/package/slotlock',
     );
     expect(result.stderr).toContain('stopped before the image was public');
-    expect(result.gh).not.toContain(rerun(22));
+    // Only the npm step's re-run: the registry entry is not retried until the image is public.
+    expect(result.gh.filter((call) => call === rerun(11))).toHaveLength(1);
   });
 
-  it('re-runs an Image run whose image job failed, without asking about visibility', () => {
+  it('names a Release run whose image job failed once re-run, without asking about visibility', () => {
     const result = bootstrap({
       STUB_PACKAGE_ON_NPM: '1',
       STUB_VERSION_ON_NPM: '1',
@@ -1142,8 +1286,12 @@ esac`,
       STUB_IMAGE_JOB: 'failure',
     });
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toContain('did not push the image');
-    expect(result.gh).toContain(rerun(22));
+    expect(result.stdout).toContain('Release run 11 did not push the image');
+    expect(result.stdout).not.toContain('Make it public');
+    expect(result.gh.filter((call) => call === rerun(11))).toHaveLength(1);
+    expect(result.gh).toContainEqual(
+      expect.stringMatching(/^run view 11 --repo PILOTAAI\/slotlock --json jobs --jq /),
+    );
   });
 
   it('refuses an npm older than the one it was run with', () => {
@@ -1382,12 +1530,14 @@ describe('release button', () => {
 describe('release pull request', () => {
   const bot = 'github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>';
   const branch = 'release/v1.2.4';
+  // One client file stands for the eight scripts/client-versions.sh lists.
   const files = [
     'package.json',
     'package-lock.json',
     'server.json',
     'slotlock.manifest.json',
     'CHANGELOG.md',
+    'clients/go/client.go',
   ];
   // A stand-in for gh: pr list answers with the open pull request's number, or nothing; pr create
   // opens #52, or fails with STUB_CREATE_ERROR.
@@ -1434,7 +1584,10 @@ esac
     git('init', '--quiet', '--bare', '--initial-branch=main', origin);
     git('init', '--quiet', '--initial-branch=main');
     const write = (version: string) => {
-      for (const file of files) writeFileSync(join(cwd, file), `${file} ${version}\n`);
+      for (const file of files) {
+        mkdirSync(dirname(join(cwd, file)), { recursive: true });
+        writeFileSync(join(cwd, file), `${file} ${version}\n`);
+      }
     };
     write('1.2.3');
     git('add', '.');
@@ -1769,5 +1922,396 @@ describe('release version and merge', () => {
     expect(merges).toEqual([
       '        run: gh pr merge "$PR" --squash --delete-branch --match-head-commit "$SHA"',
     ]);
+  });
+});
+
+describe('release channel', () => {
+  // npm installs the `latest` dist-tag, and an explicit --tag latest skips npm's own refusal to move
+  // it to a lower version (npm 11 lib/commands/publish.js), so the tag is chosen from the registry.
+  const channel = (...args: string[]) => repository().script('dist-tag.sh', ...args);
+
+  it.each([
+    ['0.3.0', '0.2.0', 'latest'],
+    ['0.3.0', '', 'latest'],
+    ['0.10.0', '0.9.3', 'latest'],
+    ['1.0.0', '0.10.0', 'latest'],
+    ['0.2.1', '0.3.0', 'latest-0.2'],
+    ['0.2.1', '0.2.1', 'latest-0.2'],
+    ['1.4.7', '2.0.0', 'latest-1.4'],
+    ['0.3.0-rc.1', '0.2.0', 'next'],
+    ['0.3.0-rc.1', '', 'next'],
+  ])('tags %s, with latest at "%s", as %s', (version, latest, tag) => {
+    const result = channel(version, latest);
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe(`${tag}\n`);
+  });
+
+  it('never names a tag npm would read as a version range', () => {
+    // npm dist-tag: "Tags that can be interpreted as valid semver ranges will be rejected."
+    const result = channel('0.2.1', '0.3.0');
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe('latest-0.2\n');
+    expect(result.stdout.trim()).not.toMatch(/^v?\d+(?:\.\d+)?$/);
+  });
+
+  /** dist-tag.sh <version> --npm, with a stand-in npm that answers `npm view` as given. */
+  function fromRegistry(version: string, npm: string) {
+    const dir = mkdtempSync(join(tmpdir(), 'slotlock-dist-tag-'));
+    scratch.push(dir);
+    writeFileSync(
+      join(dir, 'npm'),
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "${dir}/npm.log"\n${npm}\n`,
+      { mode: 0o755 },
+    );
+    const result = spawnSync('sh', [join(root, 'scripts', 'dist-tag.sh'), version, '--npm'], {
+      encoding: 'utf8',
+      env: { PATH: `${dir}:${process.env.PATH ?? ''}`, TMPDIR: dir },
+    });
+    const log = existsSync(join(dir, 'npm.log')) ? readFileSync(join(dir, 'npm.log'), 'utf8') : '';
+    return { ...result, log, dir };
+  }
+  // What npm 11.17 prints for a package the registry does not have (lib/utils/error-message.js).
+  const notFound = "echo 'npm error code E404' >&2; echo 'npm error 404 Not Found' >&2; exit 1";
+
+  it('asks the registry for the current latest when given --npm', () => {
+    const result = fromRegistry('0.2.1', 'echo 0.3.0');
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe('latest-0.2\n');
+    expect(result.log).toBe('view slotlock dist-tags.latest\n');
+  });
+
+  it('takes a package the registry does not have (E404) as having no latest yet', () => {
+    const result = fromRegistry('0.1.0', notFound);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe('latest\n');
+  });
+
+  it('stops when the registry does not answer, rather than read it as no release yet', () => {
+    // A transient error must not stage a patch to an older line as an immutable `latest`.
+    const result = fromRegistry(
+      '0.2.1',
+      "echo 'npm error code ECONNRESET' >&2; echo 'npm error network aborted' >&2; exit 1",
+    );
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain('ECONNRESET');
+    expect(result.stderr).toContain('::error::');
+    expect(readdirSync(result.dir).sort()).toEqual(['npm', 'npm.log']);
+  });
+
+  it('stops when the registry has the package but names no latest', () => {
+    const result = fromRegistry('0.2.1', 'exit 0');
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain('::error::');
+  });
+
+  it('compares with the highest release tag in git when asked to, for the image', () => {
+    const repo = repository();
+    for (const tag of ['v0.1.1', 'v0.2.0', 'v0.3.0', 'v0.4.0-rc.1']) {
+      repo.commit(tag);
+      repo.git('tag', tag);
+    }
+    const tagFor = (version: string) => repo.script('dist-tag.sh', version, '--git-tags');
+    expect(tagFor('0.2.1').stdout).toBe('latest-0.2\n');
+    expect(tagFor('0.3.1').stdout).toBe('latest\n');
+    // Its own tag is not a rival, and a prerelease tag never holds latest.
+    expect(tagFor('0.3.0').stdout).toBe('latest\n');
+    expect(tagFor('0.4.0').stdout).toBe('latest\n');
+  });
+
+  it('refuses a version that is not semver', () => {
+    for (const version of ['v1.2.3', '1.2', 'latest']) {
+      const result = channel(version, '0.2.0');
+      expect(result.status, version).toBe(2);
+      expect(result.stdout, version).toBe('');
+    }
+  });
+
+  it('stages on npm with the tag the registry calls for, and the image tags latest the same way', () => {
+    const release = read('.github/workflows/release.yml');
+    const stage = release.slice(release.indexOf('\n  stage:\n'), release.indexOf('\n  github-release:\n'));
+    // The registry lookup is dist-tag.sh's own, which fails closed (the tests above).
+    expect(stage).toContain('dist_tag=$(../scripts/dist-tag.sh "$version" --npm)');
+    expect(stage).not.toContain('dist-tags.latest');
+    expect(stage).not.toMatch(/dist_tag=latest\b/);
+    const bootstrap = read('scripts/bootstrap-release.sh');
+    expect(bootstrap).toContain('dist_tag=$(sh "$DIST_TAG" "$VERSION" --npm)');
+    expect(bootstrap).not.toContain('dist-tags.latest');
+    expect(bootstrap).not.toMatch(/dist_tag=latest\b/);
+    const image = read('.github/workflows/image.yml');
+    expect(image).toContain('scripts/dist-tag.sh "${GITHUB_REF_NAME#v}" --git-tags');
+    expect(image).toMatch(/flavor: \|\n\s+latest=false\n/);
+    expect(image).toContain(
+      "type=raw,value=latest,enable=${{ steps.channel.outputs.tag == 'latest' }}",
+    );
+  });
+});
+
+describe('the Node.js the image ships', () => {
+  const dockerfile = read('Dockerfile');
+  const froms = [...dockerfile.matchAll(/^FROM node:(\d+)\.(\d+)\.(\d+)-[\w-]+@sha256:/gm)].map(
+    ([, major, minor, patch]) => `${major}.${minor}.${patch}`,
+  );
+  const image = froms[0] as string;
+  const major = image.split('.')[0];
+
+  it('is one Node.js release in every stage, named in the header', () => {
+    expect(froms, 'canary: the three node stages were found').toHaveLength(3);
+    expect(new Set(froms)).toEqual(new Set([image]));
+    expect(dockerfile.split('\n')[0]).toContain(`on Node.js ${major} LTS`);
+  });
+
+  it('is the Node.js the release suite runs on, and one CI tests on every pull request', () => {
+    // release.yml: "The suite runs on the Node.js the image ships."
+    expect(read('.github/workflows/release.yml')).toContain(`NODE_VERSION: '${image}'`);
+    const matrix = /node: \[([^\]]+)\]/.exec(read('.github/workflows/ci.yml'))?.[1] ?? '';
+    const versions = [...matrix.matchAll(/'(\d+)'/g)].map(([, version]) => version);
+    expect(versions, 'canary: the CI matrix was found').not.toHaveLength(0);
+    expect(versions).toContain(major);
+    // The engines floor is a major CI runs too.
+    const floor = /^>=(\d+)\./.exec(JSON.parse(read('package.json')).engines.node)?.[1];
+    expect(versions).toContain(floor);
+  });
+});
+
+describe('PostgreSQL versions', () => {
+  const ci = read('.github/workflows/ci.yml');
+  const compose = read('docker-compose.yml');
+  const composeImage = /^ {4}image: (postgres:\S+)$/m.exec(compose)?.[1] ?? '';
+  const major = (image: string) => /^postgres:(\d+)\./.exec(image)?.[1];
+  const ciImages = [...ci.matchAll(/^\s+(?:image|postgres-image): (postgres:\S+)$/gm)].map(
+    ([, image]) => image as string,
+  );
+
+  it('runs the database suites on 16, 17 and the Compose image itself', () => {
+    expect(major(composeImage), 'canary: the compose postgres image was found').toBe('18');
+    expect(new Set(ciImages.map(major))).toEqual(new Set(['16', '17', '18']));
+    // The 18 that CI runs is the very image the quickstart pulls.
+    expect(ciImages).toContain(composeImage);
+    const suites = ci.slice(ci.indexOf('\n  postgres:\n'), ci.indexOf('\n  image:\n'));
+    expect(suites).toContain('name: Database suites (PostgreSQL ${{ matrix.postgres }})');
+    expect(suites).toContain('image: ${{ matrix.postgres-image }}');
+    expect(suites).toContain('npx vitest run .integration.test.ts');
+  });
+
+  it('runs the Compose quickstart in CI, from .env.example, and across a restart', () => {
+    const job = ci.slice(ci.indexOf('\n  compose:\n'));
+    expect(job, 'canary: the compose job').toContain('name: Compose quickstart');
+    expect(job).toContain('run: scripts/quickstart-env.sh > .env');
+    expect(job).toContain('run: scripts/compose-smoke.sh');
+    const smoke = read('scripts/compose-smoke.sh');
+    expect(smoke).toContain('compose() { docker compose --env-file "$ENV_FILE" "$@"; }');
+    for (const step of [
+      'compose up --build --detach',
+      'node scripts/smoke-deployment.mjs',
+      'compose down\n',
+      'compose down --volumes',
+    ]) {
+      expect(smoke).toContain(step);
+    }
+  });
+
+  it('names only the PostgreSQL versions CI runs', () => {
+    expect(compose.split('\n')[0]).toContain('PostgreSQL 18');
+    const claims = [
+      ['README.md', read('README.md')],
+      ['server.json', read('server.json')],
+      ['CONTRIBUTING.md', read('CONTRIBUTING.md')],
+      ['site/src/data/landing.ts', read('site/src/data/landing.ts')],
+      ['site/docs-src/quickstart.md', read('site/docs-src/quickstart.md')],
+      ['site/docs-src/index.md', read('site/docs-src/index.md')],
+      ['site/astro.config.mjs (llms.txt)', read('site/astro.config.mjs')],
+    ] as const;
+    expect(read('README.md')).toMatch(/^\| PostgreSQL \| 16, 17 and 18 /m);
+    for (const [file, text] of claims) {
+      // "PostgreSQL 16" alone reads as the only version; the supported range is 16 to 18.
+      expect(text, file).not.toMatch(/PostgreSQL 16(?! or newer|, 17 and 18|, 17 or 18| to 18)/);
+    }
+  });
+});
+
+describe.skipIf(!hasJq)('quickstart .env', () => {
+  it('fills every secret .env.example leaves empty, keeps every other line, and leaves the dashboard off', () => {
+    const result = spawnSync('sh', [join(root, 'scripts', 'quickstart-env.sh')], {
+      cwd: root,
+      encoding: 'utf8',
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const example = read('.env.example').split('\n');
+    const written = result.stdout.split('\n');
+    expect(written).toHaveLength(example.length);
+    const secrets = [
+      'POSTGRES_PASSWORD',
+      'SLOTLOCK_APP_DB_PASSWORD',
+      'SLOTLOCK_AUTH_TOKEN',
+      'SLOTLOCK_CONFIRMATION_SECRET',
+    ];
+    const values = new Set<string>();
+    written.forEach((line, index) => {
+      const key = /^([A-Z_]+)=/.exec(line)?.[1];
+      if (key && secrets.includes(key)) {
+        const value = line.slice(key.length + 1);
+        expect(value, key).toMatch(/^[0-9a-f]{64}$/);
+        values.add(value);
+      } else {
+        expect(line).toBe(example[index]);
+      }
+    });
+    expect(values.size, 'each secret is its own').toBe(secrets.length);
+    expect(written).toContain('SLOTLOCK_GITHUB_CLIENT_SECRET=');
+    expect(written).toContain('SLOTLOCK_REST_API=on');
+  });
+});
+
+describe('required checks', () => {
+  const ci = read('.github/workflows/ci.yml');
+  const jobIds = [...ci.matchAll(/^ {2}([\w-]+):\n {4}name: /gm)].map(([, id]) => id as string);
+
+  it('gathers every CI job, the client suites included, into one check', () => {
+    expect(jobIds, 'canary: the CI jobs were found').toEqual(
+      expect.arrayContaining(['test', 'postgres', 'image', 'clients', 'compose', 'passed']),
+    );
+    const passed = ci.slice(ci.indexOf('\n  passed:\n'));
+    expect(passed).toContain('name: CI passed');
+    // Without always() a failed job would skip this one, and a skipped required check passes.
+    expect(passed).toContain('if: always()');
+    const needs = /needs: \[([^\]]+)\]/.exec(passed)?.[1]?.split(',').map((id) => id.trim());
+    expect(needs?.sort()).toEqual(jobIds.filter((id) => id !== 'passed').sort());
+    expect(passed).toContain("jq -e 'all(. == \"success\")'");
+  });
+
+  it.skipIf(!hasJq)('is what the main ruleset requires, with DCO', () => {
+    const result = spawnSync('bash', [join(root, 'scripts', 'configure-github.sh'), '--dry-run'], {
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH ?? '', SKIP_SITE_SECRETS: '1' },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const body = [...result.stdout.matchAll(/^> (?:PUT|POST) \/\S+\n(\{[\s\S]*?\n\})$/gm)]
+      .map(([, json]) => JSON.parse(json as string))
+      .find((request) => request.target === 'branch');
+    const checks = body.rules.find((rule: { type: string }) => rule.type === 'required_status_checks')
+      .parameters.required_status_checks.map((check: { context: string }) => check.context);
+    expect(checks).toEqual(['CI passed', 'Signed-off-by']);
+    expect(result.stderr).not.toContain('no longer names its jobs');
+  });
+});
+
+describe('dependency updates', () => {
+  const config = read('.github/dependabot.yml');
+  const watched = new Set<string>();
+  for (const block of config.split(/\n(?= {2}- package-ecosystem: )/).slice(1)) {
+    const ecosystem = /package-ecosystem: (\S+)/.exec(block)?.[1];
+    const single = /\n {4}directory: (\S+)/.exec(block)?.[1];
+    const many = /\n {4}directories: \[([^\]]+)\]/.exec(block)?.[1];
+    for (const directory of single ? [single] : (many?.split(',').map((d) => d.trim()) ?? [])) {
+      watched.add(`${ecosystem} ${directory.replace(/^'|'$/g, '')}`);
+    }
+  }
+  /** Every directory below the root, outside dependencies and build output, holding FILE. */
+  function holding(test: (file: string) => boolean, dir = root, out: string[] = []): string[] {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (['node_modules', '.git', 'dist', 'target', 'bin', 'obj', 'build'].includes(entry.name)) {
+        continue;
+      }
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) holding(test, path, out);
+      else if (test(entry.name)) out.push(`/${dirname(path).slice(root.length + 1)}`.replace(/\/$/, ''));
+    }
+    return out;
+  }
+
+  it('watches every lockfile and manifest in the repository', () => {
+    const expected = [
+      ...holding((file) => file === 'package-lock.json').map((dir) => `npm ${dir || '/'}`),
+      ...holding((file) => file === 'Cargo.toml').map((dir) => `cargo ${dir}`),
+      ...holding((file) => file === 'go.mod').map((dir) => `gomod ${dir}`),
+      ...holding((file) => file === 'pyproject.toml').map((dir) => `pip ${dir}`),
+      ...holding((file) => file === 'build.gradle.kts').map((dir) => `gradle ${dir}`),
+      ...holding((file) => file.endsWith('.csproj')).map((dir) => `nuget ${dir}`),
+    ];
+    expect(expected, 'canary: the manifests were found').toEqual(
+      expect.arrayContaining(['npm /', 'npm /site', 'npm /workers/dashboard', 'cargo /clients/rust']),
+    );
+    for (const entry of expected) expect([...watched], entry).toContain(entry);
+    for (const entry of ['github-actions /', 'docker /', 'docker-compose /']) {
+      expect([...watched]).toContain(entry);
+    }
+  });
+
+  it('installs no version Scorecard reported vulnerable on 2026-10-24, in any lockfile', () => {
+    // Scorecard's Vulnerabilities check named these advisories; their vulnerable ranges are from
+    // gh api /advisories/<id> (2026-10-24), as [from, to) pairs of major.minor.patch.
+    const advisories: Record<string, [string, string, string][]> = {
+      undici: [
+        ['GHSA-xjj6-f33q-929c', '6.23.0', '6.29.1'],
+        ['GHSA-xjj6-f33q-929c', '7.18.0', '7.30.1'],
+        ['GHSA-xjj6-f33q-929c', '8.0.0', '8.12.2'],
+        ['GHSA-4qv8-2p9j-2685', '6.5.0', '6.29.1'],
+        ['GHSA-4qv8-2p9j-2685', '7.0.0', '7.30.1'],
+        ['GHSA-4qv8-2p9j-2685', '8.0.0', '8.12.2'],
+        ['GHSA-f72v-6w45-q472', '7.15.0', '7.30.1'],
+        ['GHSA-f72v-6w45-q472', '8.0.0', '8.12.2'],
+      ],
+      'body-parser': [
+        ['GHSA-27r3-jxmh-p828', '0.0.0', '1.20.9'],
+        ['GHSA-27r3-jxmh-p828', '2.0.0', '2.4.0'],
+      ],
+    };
+    const at = (version: string) => {
+      const [major = 0, minor = 0, patch = 0] = version.split('-')[0]?.split('.').map(Number) ?? [];
+      return major * 1e6 + minor * 1e3 + patch;
+    };
+    const found = new Set<string>();
+    for (const dir of holding((file) => file === 'package-lock.json')) {
+      const lock = JSON.parse(read(join(dir.slice(1), 'package-lock.json'))) as {
+        packages: Record<string, { version?: string }>;
+      };
+      for (const [path, entry] of Object.entries(lock.packages)) {
+        const name = /(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)$/.exec(path)?.[1] ?? '';
+        for (const [id, from, to] of advisories[name] ?? []) {
+          found.add(name);
+          const version = at(entry.version ?? '');
+          expect(
+            version >= at(from) && version < at(to),
+            `${dir} ${path} ${entry.version} is in ${id}`,
+          ).toBe(false);
+        }
+      }
+    }
+    expect([...found].sort(), 'canary: both packages are in the lockfiles').toEqual([
+      'body-parser',
+      'undici',
+    ]);
+  });
+});
+
+describe('code scanning', () => {
+  it('runs CodeQL from a configuration that records why it drops a false positive', () => {
+    const workflow = read('.github/workflows/codeql.yml');
+    expect(workflow).toContain('config-file: ./.github/codeql/codeql-config.yml');
+    expect(workflow).toMatch(/language: \[actions, javascript-typescript\]/);
+    expect(workflow).toContain('security-events: write');
+    const config = read('.github/codeql/codeql-config.yml');
+    // The extended suite, as default setup ran it.
+    expect(config).toMatch(/queries:\n {2}- uses: security-extended\n/);
+    // Exactly one query is dropped, with its reason beside it.
+    const excluded = [...config.matchAll(/^\s+id: (\S+)$/gm)].map(([, id]) => id);
+    expect(excluded).toEqual(['js/insufficient-password-hash']);
+    expect(config).toContain('SECURITY.md');
+    expect(read('SECURITY.md')).toContain('`js/insufficient-password-hash`');
+  });
+
+  it.skipIf(!hasJq)('turns default setup off, which an advanced configuration cannot run beside', () => {
+    const result = spawnSync('bash', [join(root, 'scripts', 'configure-github.sh'), '--dry-run'], {
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH ?? '', SKIP_SITE_SECRETS: '1' },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const setup = /^> PATCH \/repos\/PILOTAAI\/slotlock\/code-scanning\/default-setup\n(\{[\s\S]*?\n\})$/m.exec(
+      result.stdout,
+    )?.[1];
+    expect(JSON.parse(setup ?? '{}')).toEqual({ state: 'not-configured' });
   });
 });

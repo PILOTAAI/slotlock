@@ -5,6 +5,42 @@ reservable, answers "when is this free?" from weekly availability rules, and let
 double bookings, however many writers race. Agents call it over MCP or A2A; your code calls it as a
 TypeScript library.
 
+## Known issues in 0.2.0
+
+Slotlock 0.2.0 can occupy less time than an event was written with, so another booking can take the
+rest: around daylight-saving changes, in any time zone that has them, and at the end of some series.
+The library and `slotlock serve` are both affected (the last case below is in the library's
+iCalendar readers only); the 0.1 releases are older still and unsupported. 0.3.0 fixes all six
+cases; while you run 0.2.0, do not rely on it alone to refuse bookings in them.
+
+- A recurring event whose first occurrence spans a daylight-saving change gets that occurrence an
+  hour short: in spring, an hour of the written time is free to book.
+- Recurring events written through the store (the agent tools and the application API) lose the
+  repeated hour of an autumn change: times in it move an hour early, and a series whose first
+  occurrence spans it can store no occurrences, so all of its time is free.
+- A stored recurring series cannot cancel or move an occurrence that falls in the skipped hour of a
+  spring change; the time it was moved to stays free.
+- An occurrence that starts in the skipped hour and lasts longer than the skipped hour is cut short:
+  a 75-minute occurrence occupies 15 minutes.
+- A timed recurring series with a date-only `UNTIL` ends at midnight UTC, so it can lose its last
+  day.
+- An event read from iCalendar (`parseICalendarChanges`, `parseTrustedICalendarEvents` or the
+  worker pool) whose `DURATION` counts hours loses an hour across a spring change, whether it is a
+  single event, a series, an `RDATE` period or a moved occurrence: `DURATION:PT48H` occupies 47
+  hours.
+
+0.1.0, 0.1.1 and 0.2.0 also pin zod 4.6.5 exactly, which has a high advisory
+([GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5): validating an oversized
+array can exhaust memory), which `npm audit` reports. While you run one of them, add this to your
+application's `package.json` and run `npm install`:
+
+```json
+"overrides": {"zod": "4.6.7"}
+```
+
+The full notice, with the versions affected, is in
+[docs/release/0.2.0-known-issues.md](https://github.com/PILOTAAI/slotlock/blob/main/docs/release/0.2.0-known-issues.md).
+
 ## Why it is built for agents
 
 - Resources own calendars, not users, and the tenant comes only from the authenticated caller.
@@ -20,15 +56,15 @@ TypeScript library.
 npm install slotlock postgres
 ```
 
-Node.js 22.12+, PostgreSQL 16 with `btree_gist` (created for you if missing), and `postgres` ^3.4.5
-as a peer dependency. TypeScript declarations are included.
+Node.js 22.12+, PostgreSQL 16 or newer with `btree_gist` (created for you if missing; CI runs 16,
+17 and 18), and `postgres` ^3.4.5 as a peer dependency. TypeScript declarations are included.
 
 ## Self-host with Docker
 
 From a clone of this repository:
 
 ```sh
-cp .env.example .env    # set the four empty secrets: openssl rand -hex 32
+scripts/quickstart-env.sh > .env    # .env.example, its four secrets set to openssl rand -hex 32
 docker compose up --build --detach
 docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/London
 ```
@@ -44,19 +80,60 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
   `migrate` service applies the schema as the owner.
 - `SLOTLOCK_AVAILABILITY` sets the default bookable hours. A resource can have its own
   (`slotlock hours set`, or the dashboard); with neither, no slot is offered.
-  `SLOTLOCK_CONFIRM_WRITES=all` (the default) makes every write wait for a person.
+  `SLOTLOCK_CONFIRM_WRITES=all` (as `.env.example` sets it; the server's default is `none`) makes
+  every write wait for a person.
 - To serve beyond this machine, put a TLS proxy in front and set `SLOTLOCK_PUBLIC_URL`.
+- The server limits requests per client address (before any key is looked up), per key, per
+  tenant and for the whole server, and answers `429 rate_limited` with `Retry-After` and the
+  `RateLimit` fields. The application API counts an admin key's calls in its tenant's own
+  `app_read` and `app_write` budgets, apart from the agents'; another key's are its own. A recurring create and every event update (a new title
+  re-expands a recurring event's series too) takes its write token, then waits for a slot: one at
+  a time per tenant (`tenant_series_writes`) and per server (`series_writes`); each server process
+  counts its own. A freed slot rests for as long as the server was busy while the write before
+  held it (at most a second), so with one slot, writes that each hold it under a second keep the
+  server busy at most about half the time. It then goes to the waiting tenant with the fewest
+  writes in flight and, among those, the one whose writes have kept the server busy least lately
+  (halving every ten seconds), then to the first to ask. So a tenant sending one write at a time
+  waits for the write running, its rest, and the other tenants with one write in flight whose
+  writes kept the server less busy: many such tenants, new ones included, can each go ahead of it
+  once. Tenants keeping more writes waiting never go ahead of it. Four more of a tenant's writes
+  may wait and the rest get 429. When the server's 64 places are all taken, a write from a tenant
+  with fewer writes in flight than the tenant with the most takes the place of that tenant's last
+  write, which gets 503 `server_busy`; otherwise it gets 503 at once. An expansion runs on the
+  server's main thread, so any request may also wait for the one running. A write that has waited
+  two seconds gets 429 while its tenant's own write is still running, otherwise 503
+  `server_busy`. An application API maintenance run waits the same way for slots of its own: one
+  per tenant, `maintenance_runs` per server. The health check is not counted. One tenant's
+  requests hold at most `tenant_transactions` (2) of the server's 10 database connections at once
+  and the rest wait their turn, so a tenant's writes waiting on its own locks leave the others to
+  other tenants and key lookups; a server with one tenant can set `tenant_transactions=10`. A
+  request whose transaction waits more than 5 seconds for a lock gets 503 `server_busy`.
+  `SLOTLOCK_LIMITS` changes the limits; behind a proxy, set `SLOTLOCK_TRUSTED_PROXY_HEADER` to the field it puts the
+  client's address in (`CF-Connecting-IP` behind Cloudflare) before the server takes traffic, or
+  every client shares the proxy's budget: the server logs a `client_address_field_ignored` warning
+  when such a field arrives without the setting. Behind two proxies, such as Cloudflare and then
+  kamal-proxy, name the first one's field: the server reads the last address of a list field such
+  as `X-Forwarded-For`, which the second proxy writes as Cloudflare's. A client can send that field
+  itself, so let nothing reach the server except through the proxy.
+- The server also bounds what one tenant may store, whichever key, agent or application writes
+  it: 10,000 holds, and 100,000 each of bookings, calendar events and coverage rows, counted as
+  the store's `tenantLimits` count them, besides 10,000 resources. A write past one answers 409
+  `hold_limit_reached`, `reservation_limit_reached`, `event_limit_reached` or
+  `coverage_limit_reached`; `SLOTLOCK_LIMITS` changes them (`tenant_holds`,
+  `tenant_reservations`, `tenant_events`, `tenant_coverage`).
 
 ```sh
 slotlock hours set '[{"rrule":"FREQ=WEEKLY;BYDAY=SA","startMinutes":600,"durationMinutes":240}]' --resource vehicle-42
 slotlock hours clear --all    # back to SLOTLOCK_AVAILABILITY
 ```
 
-`slotlock --help` lists every setting.
+A rule is `rrule`, `startMinutes` and `durationMinutes` here and in `SLOTLOCK_AVAILABILITY`. The
+REST application API spells every field in snake_case, so there it is `rrule`, `start_minutes` and
+`duration_minutes`. `slotlock --help` lists every setting.
 
 ### Without Docker
 
-With Node.js 22.12+ and PostgreSQL 16, run each command as `npx slotlock` after
+With Node.js 22.12+ and PostgreSQL 16 or newer, run each command as `npx slotlock` after
 `npm install slotlock postgres`, or from a clone, built once, as `node dist/cli.js` (a clone does not
 put `slotlock` on your `PATH`). Use two roles, as Compose does:
 the server connects as a role that owns nothing and cannot bypass row-level security, and `migrate`
@@ -99,6 +176,25 @@ slotlock key revoke <id>
 - `rotate` keeps the key's id, scopes and bookings; `revoke` stops it on its next request.
 - A tenant may hold 100 active keys. The last six characters are a checksum secret scanners can
   verify offline.
+
+### Retiring resources and tenants
+
+```sh
+slotlock resource archive vehicle-42   # no new bookings, holds or events; history kept
+slotlock resource restore vehicle-42
+slotlock resource delete vehicle-42    # with its history; refused while anything on it is live
+slotlock tenant status
+slotlock tenant suspend --reason "chargeback review"
+slotlock tenant unsuspend
+slotlock tenant erase --confirm "$SLOTLOCK_TENANT"
+```
+
+- The resource commands take a reference or an id, and act in `SLOTLOCK_TENANT`.
+- A suspended tenant may read and writes nothing; its keys still authenticate, but it gets no new
+  key or secret. Only the schema owner suspends or lifts a suspension, so `suspend` and `unsuspend`
+  connect as `SLOTLOCK_MIGRATE_DATABASE_URL`'s role when it is set.
+- `erase` deletes everything the tenant has, its API keys included, at once and for good;
+  `--confirm` must repeat the tenant. A suspension outlives it.
 
 ### Dashboard
 
@@ -173,7 +269,7 @@ this one and read its session secret, which signs in as any tenant.
    - the configuration's id;
    - your hostname (`routes`);
    - `SLOTLOCK_PUBLIC_URL`, `SLOTLOCK_SERVICE_URL` and `SLOTLOCK_DASHBOARD_USERS` (`vars`);
-   - the two rate limiting bindings, each with a `namespace_id` unique in your account.
+   - the three rate limiting bindings, each with a `namespace_id` unique in your account.
 3. Create the GitHub OAuth app as above, with the callback URL
    `<SLOTLOCK_PUBLIC_URL>/dashboard/callback` on the Worker's origin.
 4. Store the secrets on the Worker: `npx wrangler secret put` for `SLOTLOCK_GITHUB_CLIENT_ID`,
@@ -185,11 +281,20 @@ this one and read its session secret, which signs in as any tenant.
   response is sent; Hyperdrive keeps the pool.
 - Anyone may start a sign-in, and each callback costs a database write and a request to GitHub
   with the app's client secret. An isolate runs at most eight at once, but Workers run many
-  isolates, so two rate limiting bindings bound them all:
-  - `SLOTLOCK_CLIENT_RATE_LIMIT` counts every dashboard request per client address;
-  - `SLOTLOCK_SIGN_IN_RATE_LIMIT` counts sign-ins and callbacks from every client together.
+  isolates, so three rate limiting bindings bound them all:
+  - `SLOTLOCK_CLIENT_RATE_LIMIT` counts every dashboard request per client address (an IPv6
+    client's /64, as `slotlock serve` counts it);
+  - `SLOTLOCK_SIGN_IN_RATE_LIMIT` counts sign-ins and callbacks per client network (an IPv6
+    client's /48, a site's allocation, as `slotlock serve` counts its sign-ins), so a site rotating
+    through its /64s cannot use up the ceiling;
+  - `SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT` counts them from every client together, set far above one
+    client's limit so a few clients cannot use it up for everyone.
 
-  Their counts are per Cloudflare location. Without either binding the Worker answers 503.
+  Their counts are per Cloudflare location. Without either of the first two the Worker answers 503.
+  Without the ceiling, as in a configuration from before it, `SLOTLOCK_SIGN_IN_RATE_LIMIT` counts
+  every client together, and the Worker logs a warning: add the ceiling before lowering that
+  binding's limit to one client's. The example configuration also removes query strings (a
+  callback's OAuth code) from the URLs Workers Logs keep.
 - The server checks a dashboard tenant against `SLOTLOCK_DASHBOARD_USERS` only when it serves the
   dashboard itself. With the dashboard on Workers, removing a person from the Worker's list signs
   them out of the dashboard; to stop their keys, revoke them or erase the tenant.
@@ -359,7 +464,11 @@ callback call uses, supports nested savepoints, and restores the previous contex
 standalone `set_config(..., true)` through a pool: its transaction ends before the next call.
 `withTenant(tenantRef, callback, { isolation: 'read committed' })` runs the callback in a READ
 COMMITTED transaction whatever the role's default, and refuses inside a caller's transaction of
-another level.
+another level. A store sharing one pool among tenants can bound each tenant's share:
+`createSlotlockStore(sql, { maxTenantTransactions, tenantLockTimeoutMs })` runs at most that many
+of a tenant's `withTenant` transactions at once (the rest wait in the process, and leave the line
+when `withTenant`'s `signal` aborts), and refuses one that waits longer than that for a lock with
+`lock_timeout`, safe to retry. `slotlock serve` sets `tenant_transactions` (2) and 5,000.
 
 `createResource({ ..., maxTenantResources })` refuses a new resource (`resource_limit_reached`) once
 the tenant has that many (1-100,000); an existing `externalRef` is still updated. Capped creates for
@@ -417,26 +526,67 @@ Occurrences are stored for a window of at most 367 days and 2,000 occurrences; m
 the window forward, never moving its end back. Outside it, before or after, free/busy reports the
 time as unproven.
 
-A rule is expanded within a budget: 50,000 steps and a second for a feed (the whole read, from its
-text), or for a stored series as maintenance rolls it; half of that for one event as it is written.
-A feed's own time zones (VTIMEZONE) count against the same budget. A feed may carry 100 time zones
-and name 100 it does not define, 1,000 observances and 2,000 RDATE values in the zones it carries,
-and 20,000 RDATE and EXDATE values in its events; a property's name and parameters may take 8 KB
-and list 100. A SECONDLY to WEEKLY step, a `DURATION`, or an event's length may be a century at
+A rule is expanded within a budget of steps, a count of work that reads no clock, so the same input
+is accepted or refused however loaded the machine: 500,000 for a feed (the whole read, from its
+text) or for a stored series as maintenance rolls it, about half a second, and 50,000 for one event
+as it is written, refused within a tenth of a second whatever its rule or time zone (on a laptop; a
+4-vCPU Linux server takes up to twice as long). A step is about a microsecond: a step of ical.js's
+search costs three, a weekday compared one, five days walked one, a year scanned three (and one for
+each eight days it lists), and two weekdays of a year listed one. Each occurrence passed costs one
+more, each conversion of a time in an IANA zone half (one and a half in a zone only the feed
+defines), and each instant Intl is asked for to read a zone's offsets five, the first time an
+expansion reads that day of the zone, whatever the process has read before. A feed's own time zones
+(VTIMEZONE) count against the same budget, each change listed when one is expanded costing four
+tenths: one written the way Outlook writes them, from 1601, costs about 6,000. A feed may carry 100
+time zones and name 100 it does not define, 1,000 observances and 2,000 RDATE values in the zones it
+carries, and 20,000 RDATE and EXDATE values in its events, and an event 8 RRULEs, each further one
+costing a step at every occurrence its expansion passes; a property's name and parameters may take
+8 KB and list 100. A MINUTELY to WEEKLY step, a `DURATION`, or an event's length may be a century at
 most. A calendar that needs more, such as a rule that never occurs
 (`FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30`), is refused: `invalid_event` on a write, `invalid_icalendar`
 from a feed.
 
 A feed's rules are expanded from their start, and each series may pass 4,000 occurrences on the way
-(a daily one, about 11 years) whatever the feed's other series take. A stored series keeps where
-its last expansion stopped, and the next one resumes there, so a daily series keeps rolling for as
-long as it runs: its budget goes on the window, not on the years before it. A write that changes a
-series searches from its start, and resumes from where it stopped only if that search is over the
-budget. A place serves only the rule, start and time zone it was kept for, read by the same version
-of ical.js, and never lies past an occurrence that could still reach the window (one within the
-event's length and a day of it, or one an exception moves into it). Otherwise the series is searched
-from its start, within the same budget. During maintenance, a stored series that outgrows the budget
-is counted as `refused` (its ids in `refusedEventIds`) and keeps its old coverage.
+(a daily one, about 11 years) whatever the feed's other series take. A feed series with one DAILY or
+WEEKLY rule and no COUNT, RDATE or `RANGE=THISANDFUTURE` override is searched from just before the
+window instead, so a daily standup since 2014 reads like one that began this year. A stored series
+keeps where its last expansion stopped, and the next one resumes there, so a daily series keeps
+rolling for as long as it runs: its budget goes on the window, not on the years before it. A write
+that changes a series searches from its start, and resumes from where it stopped only if that search
+is over the budget. A place serves only the rule, start and time zone it was kept for, read by the
+same version of ical.js, and never lies past an occurrence that could still reach the window (one
+within the event's length and a day of it, or one an exception moves into it). Otherwise the series
+is searched from its start, within the same budget. During maintenance, a stored series that
+outgrows the budget, that an earlier release stored and this one refuses, or whose roll fails for
+any other reason (a row no release could have written, such as a rule ical.js cannot read), is
+counted as `refused` (its ids in `refusedEventIds`), keeps its old coverage and waits an hour behind
+the others. A pass whose roll fails still prunes, then reports the failure.
+`storedCalendarEventProblem(event)` says why this
+release would refuse a stored event (a rule shape it no longer expands, `COUNT` with a yearly day
+some years lack, or an exception that names no occurrence), or `null`; run it over your stored
+events before upgrading.
+
+A stored rule is daily or less frequent and follows RFC 5545's grammar: `COUNT=0`, an unknown or
+repeated part, or `COUNT` with `UNTIL` is refused. Shapes ical.js 2.2.1 expands differently from
+RFC 5545 are refused everywhere, a feed included, and `recurrenceRuleProblem(rule)` says why:
+`BYWEEKNO`; a two-digit `BYDAY` ordinal; `BYSETPOS` other than with `FREQ=MONTHLY` and `BYDAY`
+alone; `BYMONTH` with `FREQ=MONTHLY`; a negative `BYMONTHDAY` other than with `FREQ=MONTHLY` and
+no `BYDAY`; `FREQ=YEARLY` with `BYMONTHDAY` but no `BYMONTH`, with a day none of its months has,
+with `COUNT` or `BYDAY` and a day one of its months can lack, with `BYYEARDAY` and `BYMONTH` or
+`BYMONTHDAY`, or with a numbered `BYDAY` and `BYMONTHDAY`; `BYHOUR` with `FREQ=HOURLY`,
+`BYMINUTE` or `BYSECOND` with `FREQ=MINUTELY`, and any of them with `FREQ=MONTHLY` or `YEARLY`;
+and `FREQ=SECONDLY`. A yearly day some years lack (29 February, or a 31st with April) occurs only
+in the years that have it, as RFC 5545 says, so its series may not add an RDATE or a second RRULE.
+A DATE `UNTIL` on a timed series includes its whole day on the series' clock. An event's time zone
+is an IANA name, stored in its canonical spelling (`europe/london` becomes `Europe/London`); a UTC
+offset such as `+05:00` is refused.
+
+A recurrence exception names the occurrence it cancels or moves by that occurrence's instant, as
+`expandCalendarEventOccurrences` reports it, and is exported as a UTC `RECURRENCE-ID`; one that
+names no occurrence is refused, so a mistyped instant is an error rather than a cancellation that
+frees nothing. A series' occurrences never overlap each other: one that reaches past the next one's
+start (a day-long occurrence the night the clocks go forward) ends there, and the next ends at the
+later of the two ends, so the series holds the same time as separate reservations.
 
 ### External calendars
 
@@ -445,6 +595,11 @@ Slotlock gives them neutral boundaries:
 
 - `normalizeExternalCalendarChange` for webhook changes; `parseICalendarChanges` and `emitICalendar`
   for bounded iCalendar in and out; `emitITipCalendar` for invitations.
+- `parseICalendarFeed` reads a feed series by series: a series it cannot read (a refused rule
+  shape, an end the clocks move onto its start, DTEND with DURATION, more than 4,000 occurrences
+  from its start, or more work than the feed's budget has left) is named in `refused` by UID, with
+  `limit: true` for the last two, and the rest is read. Treat a refused series' time as busy, or the
+  feed's coverage as incomplete. `parseICalendarChanges` refuses the whole feed instead.
 - All-day events become whole local days in the calendar's time zone; a feed without one is refused.
 - A TZID Intl knows is read as that IANA zone, whether or not the feed defines it (a VTIMEZONE's
   own rules for such a name are not used); one only the feed defines, such as a Windows name, is
@@ -459,21 +614,40 @@ Slotlock gives them neutral boundaries:
   instant two of them, or an RRULE and an RDATE, name is one occurrence; every EXDATE excludes the
   occurrence it names (RFC 5545 §3.8.5). A DATE EXDATE of a timed series names the occurrence at the
   series' start time that day.
-- An occurrence ends on the wall clock, as calendars show it (00:30-02:30 lasts three hours the
-  night the clocks go back). One that starts in an hour the clocks skip lasts its series' exact
-  length instead, from the offset before the gap (RFC 5545 §3.3.5).
+- An occurrence of a series occupies both readings of it when the clocks change inside it: its
+  exact length from its start (RFC 5545 §3.8.5.3) and its written end on the wall clock (the later
+  instant of a repeated hour). 00:00-06:00 holds six hours the night the clocks go forward and
+  seven the night they go back. A start in a skipped hour moves forward by the gap; one in a
+  repeated hour is its first instant. One-off events, overrides and PERIOD RDATEs occupy exactly
+  the times they give. A series' occurrences never overlap each other, as for stored series. SPEC.md,
+  "Daylight-saving time", lists the cases.
+- An override without DTEND or DURATION lasts its series' length. One whose RECURRENCE-ID names no
+  occurrence, or whose occurrence the series also EXDATEs, occupies its own time, as the provider
+  shows it. The instances of a CalDAV-expanded series are each read, the first with or without a
+  RECURRENCE-ID. An event with both DTEND and DURATION is refused.
 - `parseTrustedICalendarEvents` reads times as `parseICalendarChanges` does, so a series stored from
-  it occupies what the feed reports.
+  it occupies what the feed reports; an all-day series, stored from local midnight to local
+  midnight, may also hold the hour after a midnight the clocks go forward on, never less. It drops
+  an EXDATE that names no occurrence, and refuses what a stored series cannot hold: a zone only the
+  feed defines (a Windows name such as `GMT Standard Time`; map it to an IANA zone first), a DTSTART
+  or DTEND the clocks skip (an all-day series' first midnight included), a `DURATION` that counts
+  days or weeks outside UTC, an instance whose transparency differs from its series', or a moved
+  instance that names no occurrence.
+- `emitICalendar` and `emitITipCalendar` write a VTIMEZONE for the zone their times name (RFC 5545
+  §3.6.5), from the IANA rules: every change over the years the event covers, and, where a zone
+  changes on the same numbered or last weekday of a month every year, yearly rules that carry a
+  series on past them. A zone that does not, such as Casablanca, Gaza, Jerusalem or Santiago, is
+  exact over those years only.
 - `recordCalendarCoverage` marks how much of a feed is read. Pass the sources a resource depends on as
   `requiredSources`, and any coverage short of `complete` means the time is not proven free.
 
 Read a feed someone else controls with `createICalendarWorkerPool`, which runs the same parsers on
 worker threads. However costly the feed, the thread that serves requests never runs ical.js on it: a
 worker past its deadline (3 seconds by default) or its heap (128 MB) is stopped, and the feed is
-refused with `CalendarExpansionLimitError`. When every worker is busy and the queue is full, the
-pool answers `ICalendarWorkerBusyError` at once. A worker starts in about 40 ms and is reused; idle
-workers do not keep the process alive. The pool runs from the built package (the worker is
-`ical-worker-thread.js`), not from Slotlock's TypeScript sources.
+refused with `CalendarExpansionLimitError`. The pool offers `parseICalendarFeed` too. When every
+worker is busy and the queue is full, the pool answers `ICalendarWorkerBusyError` at once. A worker
+starts in about 40 ms and is reused; idle workers do not keep the process alive. The pool runs from
+the built package (the worker is `ical-worker-thread.js`), not from Slotlock's TypeScript sources.
 
 <!-- example: examples/feeds.ts#feeds -->
 ```ts
@@ -609,7 +783,7 @@ export async function startCalendarServer(config: CalendarServerConfig) {
 | `slotlock_list_events` | Events the caller created in a window | read-only |
 | `slotlock_get_event` | One event the caller created | read-only |
 | `slotlock_create_event` | Create an event of up to 3,660 days (idempotent) | write |
-| `slotlock_update_event` | Patch at an expected revision | write |
+| `slotlock_update_event` | Patch at an expected revision, optionally fenced to `expected_resource_id` | write |
 | `slotlock_delete_event` | Tombstone at an expected revision | write, destructive |
 
 A query window is at most 367 days. Each caller sees only the events it created, but everyone's
@@ -635,7 +809,7 @@ A refusal is a result the model can act on:
 | `confirmation_required` | The write needs a person, and this client cannot ask one |
 | `confirmation_declined`, `confirmation_cancelled` | The person said no, or dismissed the question |
 | `invalid_cursor`, `invalid_event`, `invalid_window`, … | The store rejected a bounded input |
-| `request_aborted`, `store_inconsistent` | Transient; retry |
+| `request_aborted`, `server_busy`, `store_inconsistent` | Transient; retry |
 
 #### Errors from your own backend
 
@@ -691,6 +865,9 @@ handover".` Only an explicit yes runs the write.
 - The pending question is sealed (HMAC-SHA256) to the caller, the tool and the exact arguments, and
   expires after `ttlSeconds` (600).
 - Clients that cannot ask (MCP 2025 revisions, A2A) get `confirmation_required`; nothing is written.
+- The yes comes from the client: Slotlock relies on the MCP client to ask its person, and a key
+  holder's own client can answer for itself. Confirmation keeps an agent from writing unasked; it is
+  not an authorization boundary. Scopes and `authorize` decide who may write.
 - `secrets` holds 1 to 8 keys of 32+ bytes: list the new one first to rotate. `onEvent` reports each
   outcome for audit.
 
@@ -703,7 +880,13 @@ returns busy time and coverage for the next `resourceWindowDays` (30). `subscrip
 - Changes are found by re-reading through your backend every `subscriptions.pollIntervalMs` (10 s),
   re-checking the caller each time.
 - A subscription ends after `maxDurationMs` (15 minutes), on `shutdown()`, or when access is lost.
-- At most 4 open per caller and 256 per server (`maxPerPrincipal`, `maxTotal`).
+- At most 4 open per caller and 256 per server (`maxPerPrincipal`, `maxTotal`). `maxPerTenant`
+  caps one tenant's across all its callers (default `maxTotal`; `slotlock serve` sets 16), so a
+  tenant with many keys cannot hold every slot. When the server is full, a tenant holding fewer
+  than the tenant holding most, less one, ends that tenant's oldest stream instead of being
+  refused, so many tenants cannot hold every slot either. `slotlock serve` sets `maxTotal` to
+  `subscriptions` (256) and lets one key hold `key_subscriptions` (4), and always fewer than its
+  tenant may unless that is one, so one key cannot lock its tenant's other keys out.
   `subscriptions: false` turns them off.
 
 ### Caching and tracing
@@ -756,11 +939,15 @@ curl "http://localhost:8080/v1/resources" -H "Authorization: Bearer $SLOTLOCK_AP
 - Keys, scopes, `authorize` and the rate limit apply as over MCP. The body is the tool's output, or
   `{"error":{"code":…}}` with the matching HTTP status.
 - REST cannot ask a person, so a write listed in `confirmation` answers `428 confirmation_required`.
+- Free/busy and the next-available search read each resource they name once, however often it is
+  named, and 10,000 busy intervals in all; the next-available search also expands 100,000 bookable
+  windows from its resources' hours in all. Past either they answer `400 calendar_work_limit`: ask
+  for fewer resources or a shorter window.
 - There are no CORS headers: call it from a server, not a browser.
 - From Python, Go, Rust, Java or .NET, use the [clients](clients/README.md): one method per
   operation, the application API included, each tested against the server in CI. For another
-  language, generate one from [`openapi.json`](openapi.json) (or a server's `/openapi.json`) with any
-  OpenAPI 3.1 generator.
+  language, generate one from [`openapi.json`](openapi.json) (or a server's `/openapi.json`, or
+  `slotlock/openapi.json` in the npm package) with any OpenAPI 3.1 generator.
 
 ### Application API
 
@@ -772,16 +959,27 @@ waits for a confirmation.
 
 | Request | Does |
 | --- | --- |
-| `POST /v1/resources` | Create the resource with this `external_ref`, or update its `timezone` |
-| `GET /v1/resources/{resource_id}` | One resource, with its own weekly hours |
+| `POST /v1/resources` | Create the resource with this `external_ref`, or update its `timezone`; `visibility: "private"` hides it from agents |
+| `GET /v1/resources/{resource_id}` | One resource, with its own weekly hours, visibility and `archived_at` |
+| `POST /v1/resources/{resource_id}/archive` | Take it out of use; `…/restore` puts it back |
+| `DELETE /v1/resources/{resource_id}` | Delete it with its history (`409 resource_in_use` while anything on it is live) |
+| `GET /v1/resources/{resource_id}/busy?start=…&end=…` | Its occupied time, private resources included |
 | `PUT /v1/resources/{resource_id}/availability` | Its own weekly hours; `[]` never bookable, `null` the server's |
 | `PUT /v1/availability` | Every resource's weekly hours at once |
 | `POST /v1/holds` | Hold a window for `ttl_seconds` (up to 7 days) |
+| `GET /v1/holds/{hold_id}` | One live hold; `GET /v1/resources/{resource_id}/holds` lists them |
 | `POST /v1/holds/{hold_id}/confirm` | Turn the hold into a reservation |
 | `DELETE /v1/holds/{hold_id}` | Release the hold |
+| `GET /v1/reservations/{reservation_ref}` | The booking at its current revision |
+| `GET /v1/resources/{resource_id}/reservations?start=…&end=…` | Its bookings in a window |
 | `PUT /v1/reservations/{reservation_ref}` | Book (`revision: 1`) or move (the current revision plus 1) |
 | `DELETE /v1/reservations/{reservation_ref}?revision=…` | Cancel, at the current revision plus 1 |
 | `PUT /v1/resources/{resource_id}/coverage/{source}` | Record that `source`'s events are complete for a window |
+| `GET /v1/tenant/events?resource_id=…&start=…&end=…` | Every key's events on a resource, with the `id` the next two take |
+| `GET /v1/tenant/events/{event_id}` | One of them |
+| `DELETE /v1/tenant/events/{event_id}?expected_revision=…` | Cancel it, whichever key wrote it |
+| `GET /v1/tenant` | The key's tenant, and whether it is suspended |
+| `POST /v1/tenant/erase` | Erase the tenant, when the server allows it |
 | `POST /v1/maintenance` | Run [maintenance](#operations) for the key's tenant |
 
 ```sh
@@ -797,8 +995,23 @@ curl -X PUT "http://localhost:8080/v1/reservations/BK-42" \
   `replayed: true`, a confirmed hold confirms again, and a cancelled reference stays cancelled (a
   late booking for it answers `409`). A late copy of a booking or a move that has since been
   superseded answers `409 stale_revision`.
+- A confirmed hold is the booking whose reference is the hold's id, at revision 1: cancel it with
+  `DELETE /v1/reservations/{hold_id}?revision=2`.
+- `POST /v1/holds` and `DELETE /v1/tenant/events/…` take a retry identity as the `Idempotency-Key`
+  header or as `idempotency_key`. A retried hold answers the hold the first request made; the same
+  key with another request is `409 idempotency_conflict`. Other routes are safe to retry as they
+  are, and refuse the header (`400 idempotency_key_not_supported`).
+- Lists page by `limit` (up to 100) and `cursor`, the `next_cursor` of the page before, and read a
+  window of at most 367 days.
 - The time a calendar event occupies is the event's: reservation calls never find, move or cancel
-  it, whatever reference they name. Change the event instead.
+  it, whatever reference they name. Change the event instead, or cancel it as the tenant with
+  `DELETE /v1/tenant/events/{event_id}`, which needs its revision and an idempotency key, and
+  takes `expected_resource_id` to fence it to the resource you read it on.
+- Erasing a tenant over the API is off unless the backend is created with `tenantErasure: true`
+  (`slotlock serve` leaves it off: its operator runs `slotlock tenant erase`). It needs
+  `confirm_tenant_ref` to be the tenant's reference (`GET /v1/tenant`), deletes every key the tenant
+  has, the caller's included, and is refused while the tenant is suspended. Suspending a tenant is
+  never an API call: only the schema owner may, and a tenant could not lift its own.
 - The tenant is the key's. Another tenant's resource or hold is `404`, whatever the database role.
 - With the library, pass `application` beside `rest: true`:
   `{ backend: createSlotlockStoreApplicationBackend(store, { maxTenantResources }), authorize }`.
@@ -1002,10 +1215,13 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
   tenant list. `startSlotlockMaintenance({ store, sql, tenants, intervalMs })` is the scheduler
   `serve` uses, lock included; `withSlotlockMaintenanceLock` is the lock alone.
 - **Capped passes.** A capped pass that extended and pruned nothing met only series it cannot extend
-  (counted in `conflicts` and `refused`): another pass would too, so wait for the next interval.
+  (counted in `conflicts` and `refused`). The roll puts each behind every series it has not put
+  back, for an hour, so with `rollPending: true` (it stopped before those) run another pass at once:
+  it meets new ones, and a healthy series is reached however many are stuck. Otherwise another pass
+  would meet the same ones, so wait for the next interval.
 - **Paging the roll yourself.** `rollCalendarEventHorizon` returns `next`; pass it as `after` to the
-  next batch of the same pass. A series left in conflict or refused keeps its place at the front of
-  the order, so without `after` every later batch would examine it again.
+  next batch of the same pass, so later batches go on from the last series examined. Series the
+  roll has never put back come first, then those it has, longest waiting first.
 - **Quotas.** Each agent principal may retain 1,000 event identities (active plus cancelled) and
   10,000 idempotency commands, of which 9,000 can be creates or updates, so a cancel always has
   room. Adjust with `agentOwnerEventQuota` and `agentOwnerCommandQuota` on `createSlotlockStore`.
@@ -1033,13 +1249,18 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
 5. Bound retries on serialization failures; never blindly retry an unknown write.
 6. Reconcile external calendars with durable cursors and coverage windows.
 7. Monitor conflicts, refused rules, sync lag, capped maintenance runs, quota errors and confirmation outcomes.
-8. Keep writes confirmation-gated wherever your policy needs a person.
+8. Keep writes confirmation-gated wherever your policy needs a person (`slotlock serve`:
+   `SLOTLOCK_CONFIRM_WRITES`, `none` by default).
 9. Size live updates: at most `maxTotal` backend reads per `pollIntervalMs`.
 10. Give each agent its own API key with the narrowest scope and an expiry.
 11. After each deployment, check it end to end with a short-lived admin key, then revoke the key:
     `SLOTLOCK_URL=https://… SLOTLOCK_ADMIN_KEY=… node scripts/smoke-deployment.mjs` checks health,
     discovery, MCP, A2A, holds and reservations (in a resource named `slotlock-smoke`, 400 days
     ahead, cancelled after) and the 401, 409, 413 and 415 refusals.
+12. Rate-limit every public server. `slotlock serve` does it per client address, key, tenant and
+    server (`SLOTLOCK_LIMITS`); behind a proxy, set `SLOTLOCK_TRUSTED_PROXY_HEADER` and firewall
+    the server so nothing reaches it except through that proxy. Embedding the
+    agent server, give it a `consumeRateLimit`. Watch serve's `refusals` log line for floods.
 
 ## Supported versions
 
@@ -1048,16 +1269,19 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
 | MCP | 2026-07-28 (stateless), 2025-11-25, 2025-06-18 |
 | A2A | 1.0, JSON-RPC binding |
 | MCP Apps | `io.modelcontextprotocol/ui` 2026-01-26 |
-| Node.js | ≥ 22.12 (CI: 22 and 24) |
-| PostgreSQL | 16 |
+| Node.js | ≥ 22.12 (CI: 22 and 24; the image runs 24) |
+| PostgreSQL | 16, 17 and 18 (CI runs the database suites on each; Compose ships 18) |
 | postgres (peer) | ^3.4.5 |
 
 ## Project status and boundaries
 
-0.1 is the core: availability maths, holds and reservations, events with recurrence, coverage-aware
+Slotlock is availability maths, holds and reservations, events with recurrence, coverage-aware
 free/busy, tenant isolation, iCalendar interchange, MCP and A2A with human confirmation and live
-updates, and an MCP Apps view. Provider sync (Google, Microsoft, CalDAV), notifications to people,
-and a human calendar app are yours to build around it.
+updates, an MCP Apps view, REST with the application API, scoped API keys, a GitHub sign-in
+dashboard, maintenance, and clients for five languages. [Hosted Slotlock](docs/hosted/README.md)
+runs it for you. Provider sync (Google, Microsoft, CalDAV), notifications to people, and a human
+calendar app are yours to build around it. What each version promises is in
+[VERSIONING.md](VERSIONING.md).
 
 Events need a finite duration (all-day events are whole local days; one event may last 3,660 days).
 Open-ended entries are refused rather than guessed.

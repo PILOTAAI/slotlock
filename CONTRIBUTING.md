@@ -6,8 +6,8 @@ listed in [MAINTAINERS.md](./MAINTAINERS.md).
 
 ## Development
 
-You need Node.js 22.12 or newer and, for the database suites, PostgreSQL 16. From the repository
-root:
+You need Node.js 22.12 or newer and, for the database suites, PostgreSQL 16 or newer (CI runs them
+on 16, 17 and 18). From the repository root:
 
 ```sh
 npm ci
@@ -15,7 +15,7 @@ npm run typecheck   # the package, then examples/ as a consumer compiles them
 npm test            # tests, build, then the packed-artifact verification
 ```
 
-Database suites (`*.integration.test.ts`) run when `DATABASE_URL` points at a PostgreSQL 16
+Database suites (`*.integration.test.ts`) run when `DATABASE_URL` points at a PostgreSQL 16 or newer
 database whose connecting role can create roles, databases and extensions, and are skipped
 otherwise (the upgrade suite builds a database of its own and drops it):
 
@@ -65,6 +65,11 @@ Edit the example, not the README copy: `readme-examples.test.ts` fails when they
 - Run typecheck, tests, build, and package verification.
 - Call out database, tenancy, privacy, sync, or supply-chain risk explicitly.
 - Do not add provider credentials, product-specific authorization, or network calls to the core.
+- `NOTICE` is written by `node scripts/notice.mjs --write`. A dependency bump needs no edit to it,
+  unless it adds or removes a runtime dependency in `package.json` or a dependency changes its
+  licence: then CI fails with "NOTICE is not what scripts/notice.mjs writes". Read the new
+  licence, then run that command. A licence `scripts/notice.mjs` has not reviewed stops the build
+  until it is added to `LICENSE_NAMES` there.
 
 Changes to exclusion constraints, RLS, identity/idempotency, retention, iCalendar trust boundaries,
 protocol error contracts, or release automation require a security review; while the project has
@@ -78,10 +83,11 @@ that section becomes the release notes.
 To release, run **Actions > Release a version** with the version (for example `0.1.1`). It sets the
 version in `package.json`, `package-lock.json`, `server.json` and `slotlock.manifest.json` and dates
 the `## Unreleased` heading (`scripts/prepare-release.sh`), opens the pull request, merges it once CI
-and DCO pass on it, and `tag-release.yml` tags the release commit. The tag starts `release.yml` (the
-suite, then npm and the GitHub release) and `image.yml` (the image, then the MCP Registry). npm holds
-each staged version until a maintainer approves it with two-factor authentication (GOVERNANCE.md);
-the Release run's summary gives the command. A version merged to `main` by hand, with its heading
+and DCO pass on it, and `tag-release.yml` tags the release commit. The tag starts `release.yml`: the
+suite, then npm and the GitHub release, and, only once the suite has passed, `image.yml` (the image,
+then the MCP Registry). The image and the registry entry each wait for a maintainer to approve their
+environment (`ghcr`, `mcp-registry`), and npm holds each staged version until a maintainer approves
+it with two-factor authentication (GOVERNANCE.md); the Release run's summary gives the command. A version merged to `main` by hand, with its heading
 dated, is released the same way. After a failed run, run it again with the same version: it keeps
 the release branch the failed run left when that already holds this release, so checks already run
 there still count, replaces it otherwise, and reuses its pull request (`scripts/open-release-pr.sh`).
@@ -94,7 +100,28 @@ which only `main` can use. Without the app, the workflow opens the pull request 
 github-actions[bot], whose checks GitHub holds until someone with write access approves them on the
 pull request (**Approve workflows to run**). GitHub lets a workflow open pull requests at all only
 once an admin allows it (Settings > Actions > General > Workflow permissions);
-`scripts/configure-github.sh` sets it, and the run says so when it is off.
+`scripts/configure-github.sh --allow-actions-pull-requests` sets it, and the run says so when it is
+off. By default the script leaves it off, since the same switch lets GITHUB_TOKEN approve pull
+requests.
+
+Before the first release through the app, or after replacing it, run **Release a version** with
+**dry_run**: it mints the app's token and prepares the release as a real run would, checks the token
+can read the repository and push the release branch (`scripts/release-dry-run.sh`), and stops
+without pushing, opening, merging or tagging anything. Its summary says which identity a real run
+would use.
+
+Nobody, the admin included, can merge into `main` past a failing or missing required check ("CI
+passed" and "Signed-off-by"): a change whose checks cannot pass is fixed in another pull request
+first. The npm, `ghcr` and `mcp-registry` environments wait for a maintainer's approval in every
+Release run.
+
+Approving a stage publishes the tarball the tag's run built, however long ago that was. Before
+`npm stage approve`, run `scripts/check-stage.sh <stage-id>` from a checkout, logged in to npm and
+gh. It refuses a stage whose tarball is not the one the release tested (the GitHub release's
+`SHA256SUMS`), whose dist-tag would move `latest` backwards, or whose runtime dependencies, as a
+consumer installs them that day, have a high or critical advisory (`npm audit --omit=dev`). Reject
+such a stage and release a version that fixes it; accept a named advisory with
+`--allow <GHSA id>` only when the release notes say why. It approves nothing itself.
 
 When a run needs a step npm or GitHub keeps for a person (the first npm version, the npm trusted
 publisher, the image's visibility, and the deploy key `tag-release.yml` pushes tags with), the

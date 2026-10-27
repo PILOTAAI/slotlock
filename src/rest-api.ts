@@ -203,6 +203,17 @@ function openApiOperation(
       parameters.push({ name, in: 'query', required: required.has(name), schema });
     }
   }
+  // An application write that keeps a retry identity also takes it as the Idempotency-Key header.
+  if (extra.tag === 'Application' && fields.idempotency_key !== undefined) {
+    parameters.push({
+      name: 'Idempotency-Key',
+      in: 'header',
+      required: false,
+      description:
+        'Stands in for idempotency_key, where HTTP clients put a retry identity; when both are sent they must be equal.',
+      schema: { type: 'string', minLength: 1, maxLength: 500 },
+    });
+  }
   if (parameters.length > 0) result.parameters = parameters;
   result.responses = {
     '200': {

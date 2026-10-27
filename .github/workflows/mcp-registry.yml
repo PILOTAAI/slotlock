@@ -1,6 +1,7 @@
 # MCP Registry: publish server.json to registry.modelcontextprotocol.io as
 # io.github.PILOTAAI/slotlock. image.yml calls this workflow once its image job has pushed and
-# attested the release image, so it runs for the same v* tag. mcp-publisher authenticates with
+# attested the release image, so it runs for the same v* tag, after the release tests passed, and
+# waits in the `mcp-registry` environment for a required reviewer. mcp-publisher authenticates with
 # this job's GitHub OIDC token; no secret is stored.
 #
 # The registry pulls the image anonymously and compares its io.modelcontextprotocol.server.name
@@ -10,7 +11,8 @@
 # page that makes it public, waits for it, and re-runs this job.
 #
 # One-time setup by the repository owner:
-#   - A GitHub environment named `mcp-registry`, with deployment tags limited to v*.
+#   - A GitHub environment named `mcp-registry`, with deployment tags limited to v* and a required
+#     reviewer (scripts/configure-github.sh).
 #   - The ghcr.io/pilotaai/slotlock package made public (see image.yml).
 name: MCP Registry
 

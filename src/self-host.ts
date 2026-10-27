@@ -36,12 +36,17 @@ import {
   SECRET_HINT,
   SlotlockConfigError,
   type SlotlockEnv,
+  type SlotlockLimits,
   type SlotlockServeDashboardConfig,
+  formatSlotlockRate,
   optional,
   readAvailability,
   readDashboardConfig,
+  readLimits,
   readSecret,
   readServerUrl,
+  readTrustedProxyHeader,
+  slotlockKeySubscriptions,
 } from './config.js';
 import { SLOTLOCK_APPLICATION_SCOPE } from './application-api.js';
 import { SLOTLOCK_DASHBOARD_FUNCTIONS, SLOTLOCK_TENANT_TABLES } from './ddl.js';
@@ -58,7 +63,14 @@ import {
   createSlotlockNodeServer,
 } from './node-server.js';
 import { slotlockPackageVersion } from './package-version.js';
-import { type SlotlockSql, createSlotlockStore } from './store.js';
+import { createSlotlockRequestLimits } from './rate-limit.js';
+import {
+  type SlotlockSql,
+  type SlotlockStore,
+  type SlotlockTenantLimits,
+  assertSlotlockSchemaCurrent,
+  createSlotlockStore,
+} from './store.js';
 import type { SlotlockResource, WeeklyAvailabilityRule } from './types.js';
 import { parseAvailabilityRules } from './weekly-hours.js';
 
@@ -75,6 +87,8 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_TENANT',
   'SLOTLOCK_AVAILABILITY',
   'SLOTLOCK_REST_API',
+  'SLOTLOCK_LIMITS',
+  'SLOTLOCK_TRUSTED_PROXY_HEADER',
   'SLOTLOCK_GITHUB_CLIENT_ID',
   'SLOTLOCK_GITHUB_CLIENT_SECRET',
   'SLOTLOCK_SESSION_SECRET',
@@ -86,7 +100,7 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8080;
 const DEFAULT_TENANT = 'default';
-/** The principal the server token resolves to: it acts in SLOTLOCK_TENANT with every scope. */
+/** The principal the server token resolves to: it acts in SLOTLOCK_TENANT with read and write. */
 const SELF_HOST_SUBJECT = 'self-host';
 /** Who `key create` records as a key's creator. */
 const CLI_KEY_CREATOR = 'cli';
@@ -120,8 +134,13 @@ const SERVED_OPERATIONS: ReadonlySet<SlotlockAgentOperation> = new Set([
   'slotlock_delete_event',
 ]);
 const HEALTH_QUERY_TIMEOUT_MS = 2_000;
+/** How long one database check answers /healthz, so a flood of health checks is not one of queries. */
+const HEALTH_RESULT_MS = 1_000;
 const HEALTHCHECK_TIMEOUT_MS = 5_000;
+/** One pool for every tenant; SLOTLOCK_LIMITS `tenant_transactions` (config.ts) goes up to it. */
 const POOL_SIZE = 10;
+/** How long a request's transaction waits for any one lock before it answers 503 `server_busy`. */
+const SERVE_LOCK_TIMEOUT_MS = 5_000;
 const RESOURCE_PAGE_SIZE = 1_000;
 
 export interface SlotlockDatabaseConfig {
@@ -141,11 +160,14 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
   /** Where clients reach the server; Slotlock publishes its endpoints under this URL. */
   publicUrl: string;
   /**
-   * A bearer token for SLOTLOCK_TENANT with every scope. Optional: API keys (`slotlock key create`)
-   * authenticate whether or not it is set, each as its own tenant and scopes.
+   * A bearer token for SLOTLOCK_TENANT with read and write, never admin. Optional: API keys
+   * (`slotlock key create`) authenticate whether or not it is set, each as its own tenant and scopes.
    */
   authToken?: string;
-  /** Writes that wait for a person's confirmation (MCP 2026-07-28) and are refused elsewhere. */
+  /**
+   * Writes that wait for a person's confirmation (MCP 2026-07-28) and are refused elsewhere. None
+   * unless SLOTLOCK_CONFIRM_WRITES opts in: every authenticated write takes effect at once.
+   */
   confirmWrites: readonly SlotlockAgentWriteOperation[];
   /** Set exactly when `confirmWrites` is not empty. */
   confirmationSecret?: string;
@@ -158,6 +180,10 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
    * (SLOTLOCK_REST_API: on unless off).
    */
   restApi: boolean;
+  /** Request limits (SLOTLOCK_LIMITS over SLOTLOCK_DEFAULT_LIMITS): the server's only rate limit. */
+  limits: SlotlockLimits;
+  /** The lower-case request field a trusted proxy sets to the client address; else the socket's. */
+  trustedProxyHeader?: string;
 }
 
 function readDatabaseUrl(env: SlotlockEnv, name: string): string | undefined {
@@ -207,7 +233,7 @@ function readTenant(env: SlotlockEnv): string {
 }
 
 function readConfirmWrites(env: SlotlockEnv): SlotlockAgentWriteOperation[] {
-  const value = optional(env, 'SLOTLOCK_CONFIRM_WRITES') ?? 'all';
+  const value = optional(env, 'SLOTLOCK_CONFIRM_WRITES') ?? 'none';
   if (value === 'all') return [...WRITE_OPERATIONS];
   if (value === 'none') return [];
   const operations: SlotlockAgentWriteOperation[] = [];
@@ -251,7 +277,7 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
   const confirmationSecret = readSecret(env, 'SLOTLOCK_CONFIRMATION_SECRET');
   if (confirmWrites.length > 0 && confirmationSecret === undefined) {
     throw new SlotlockConfigError(
-      `SLOTLOCK_CONFIRMATION_SECRET is required while SLOTLOCK_CONFIRM_WRITES guards writes (the default): it signs each pending confirmation; ${SECRET_HINT}, or set SLOTLOCK_CONFIRM_WRITES=none to let agents write without asking a person`,
+      `SLOTLOCK_CONFIRMATION_SECRET is required while SLOTLOCK_CONFIRM_WRITES guards writes: it signs each pending confirmation; ${SECRET_HINT}, or set SLOTLOCK_CONFIRM_WRITES=none (the default) to let agents write without asking a person`,
     );
   }
   if (
@@ -272,7 +298,10 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
     confirmWrites,
     availability: readAvailability(env),
     restApi: readRestApi(env),
+    limits: readLimits(env),
   };
+  const trustedProxyHeader = readTrustedProxyHeader(env);
+  if (trustedProxyHeader !== undefined) config.trustedProxyHeader = trustedProxyHeader;
   if (authToken !== undefined) config.authToken = authToken;
   const dashboard = readDashboardConfig(env);
   if (dashboard !== undefined) config.dashboard = dashboard;
@@ -318,8 +347,8 @@ export function createSlotlockTokenAuthenticator(
 
 /**
  * What `serve` lets a principal call: a served operation its scopes cover. The server token's
- * principal carries every scope; a principal without scopes is refused everything here, though the
- * agent server alone would leave it to this function.
+ * principal carries read and write, never admin; a principal without scopes is refused everything
+ * here, though the agent server alone would leave it to this function.
  */
 export function authorizeSlotlockServeOperation(args: {
   principal: SlotlockAgentPrincipal;
@@ -345,6 +374,7 @@ export interface SlotlockCliIo {
 
 export interface SlotlockLogger {
   info(event: string, fields?: Record<string, unknown>): void;
+  warn(event: string, fields?: Record<string, unknown>): void;
   error(event: string, fields?: Record<string, unknown>): void;
 }
 
@@ -375,7 +405,10 @@ function secretsIn(env: SlotlockEnv): string[] {
   return [...new Set(secrets)].sort((a, b) => b.length - a.length);
 }
 
-/** One JSON object per line: info on stdout, errors on stderr, secrets replaced by `[redacted]`. */
+/**
+ * One JSON object per line: info on stdout, warnings and errors on stderr, secrets replaced by
+ * `[redacted]`.
+ */
 function createLogger(io: SlotlockCliIo): SlotlockLogger {
   const secrets = secretsIn(io.env);
   const write = (stream: OutputStream, level: string, event: string, fields = {}) => {
@@ -385,6 +418,7 @@ function createLogger(io: SlotlockCliIo): SlotlockLogger {
   };
   return {
     info: (event, fields) => write(io.stdout, 'info', event, fields),
+    warn: (event, fields) => write(io.stderr, 'warn', event, fields),
     error: (event, fields) => write(io.stderr, 'error', event, fields),
   };
 }
@@ -485,6 +519,31 @@ function dashboardAllows(config: SlotlockServeConfig, tenantRef: string): boolea
   return githubId === undefined || users.includes(githubId);
 }
 
+function serveTenantLimits(caps: SlotlockLimits['caps']): SlotlockTenantLimits {
+  return {
+    resources: SERVE_MAX_TENANT_RESOURCES,
+    holds: caps.tenant_holds,
+    reservations: caps.tenant_reservations,
+    events: caps.tenant_events,
+    coverage: caps.tenant_coverage,
+  };
+}
+
+/**
+ * The store `serve` answers requests from. Every surface writes through it, so its tenant limits
+ * bound what any key can add, and its transaction limits what one tenant holds of the shared pool.
+ */
+export function createSlotlockServeStore(
+  sql: SlotlockSql,
+  caps: SlotlockLimits['caps'],
+): SlotlockStore {
+  return createSlotlockStore(sql, {
+    tenantLimits: serveTenantLimits(caps),
+    maxTenantTransactions: caps.tenant_transactions,
+    tenantLockTimeoutMs: SERVE_LOCK_TIMEOUT_MS,
+  });
+}
+
 /** Serve MCP and A2A over HTTP from the Postgres store, as one token-authenticated tenant. */
 export async function startSlotlockServer(
   config: SlotlockServeConfig,
@@ -516,6 +575,9 @@ export async function startSlotlockServer(
         { code: 'schema_missing' },
       );
     }
+    // Migrated by another release: an older schema needs this release's migrate first, and a newer
+    // one has tables and rules this release's code does not know.
+    await assertSlotlockSchemaCurrent(sql);
     // A deployment run statement by statement lifts forced row-level security for its data steps
     // and, stopped part way, leaves it lifted until the next one puts it back. The owning role then
     // reads every tenant's rows: refuse to serve until then.
@@ -550,9 +612,13 @@ export async function startSlotlockServer(
         }
       }
     }
-    const store = createSlotlockStore(sql);
+    const { caps } = config.limits;
+    const store = createSlotlockServeStore(sql, caps);
     const publicUrl = new URL(config.publicUrl);
-    const authenticateKey = createSlotlockApiKeyAuthenticator(createSlotlockApiKeyStore(sql));
+    const authenticateKey = createSlotlockApiKeyAuthenticator(createSlotlockApiKeyStore(sql), {
+      maxConcurrentLookups: caps.key_lookups,
+      maxWaitingLookups: caps.key_lookup_queue,
+    });
     const authenticateToken =
       config.authToken === undefined
         ? undefined
@@ -565,13 +631,14 @@ export async function startSlotlockServer(
           });
     // Set once the listener is up; the authenticator tells it which tenants this server serves.
     let maintenance: SlotlockMaintenanceScheduler | undefined;
-    const agentServer = createSlotlockAgentServer({
-      publicBaseUrl: config.publicUrl,
-      // readPublicUrl admits plain HTTP only on a loopback host, which is all this permits anyway.
-      allowInsecureLocalhost: publicUrl.protocol === 'http:',
-      backend: createSlotlockStoreAgentBackend(store, {
-        availabilityRules: async () => config.availability.map((rule) => ({ ...rule })),
-      }),
+    const basePath = publicUrl.pathname.replace(/\/$/, '');
+    const limits = createSlotlockRequestLimits({
+      limits: config.limits,
+      ...(config.trustedProxyHeader !== undefined
+        ? { trustedProxyHeader: config.trustedProxyHeader }
+        : {}),
+      basePath,
+      signInPaths: config.dashboard ? ['/dashboard/sign-in', '/dashboard/callback'] : [],
       // The token is compared in constant time first; only then is a key looked up. A person the
       // dashboard no longer allows loses their keys with their session.
       authenticate: async (request) => {
@@ -580,12 +647,42 @@ export async function startSlotlockServer(
         maintenance?.touch(principal.tenantRef);
         return principal;
       },
-      authorize: async ({ principal, operation }) =>
-        authorizeSlotlockServeOperation({ principal, operation }),
-      health: async () =>
-        (await databaseReachable(sql))
+      // Counts and pseudonyms only: never an address, a credential or a tenant.
+      onRefusals: (counts) => log.info('refusals', { ...counts }),
+      // Behind a proxy without the setting, every client shares the proxy's address budget.
+      onIgnoredClientField: (field) =>
+        log.warn('client_address_field_ignored', { field, setting: 'SLOTLOCK_TRUSTED_PROXY_HEADER' }),
+    });
+    let health: { at: number; ready: Promise<boolean> } | undefined;
+    const agentServer = createSlotlockAgentServer({
+      publicBaseUrl: config.publicUrl,
+      // readPublicUrl admits plain HTTP only on a loopback host, which is all this permits anyway.
+      allowInsecureLocalhost: publicUrl.protocol === 'http:',
+      backend: createSlotlockStoreAgentBackend(store, {
+        availabilityRules: async () => config.availability.map((rule) => ({ ...rule })),
+      }),
+      authenticate: limits.authenticate,
+      consumeRateLimit: limits.consumeRateLimit,
+      // A write that may expand a recurring series also waits for one of a few slots, so one
+      // tenant's expansions cannot hold the event loop from every other tenant's requests.
+      authorize: async ({ principal, operation, input }) => {
+        if (!authorizeSlotlockServeOperation({ principal, operation })) return false;
+        await limits.admit({ principal, operation, input });
+        return true;
+      },
+      subscriptions: {
+        maxTotal: caps.subscriptions,
+        maxPerTenant: caps.tenant_subscriptions,
+        maxPerPrincipal: slotlockKeySubscriptions(caps),
+      },
+      health: async () => {
+        if (!health || performance.now() - health.at > HEALTH_RESULT_MS) {
+          health = { at: performance.now(), ready: databaseReachable(sql) };
+        }
+        return (await health.ready)
           ? { ready: true, checks: ['database'] }
-          : { ready: false, checks: ['database_unreachable'] },
+          : { ready: false, checks: ['database_unreachable'] };
+      },
       // Outcomes and counts only: the server never reports arguments or identities.
       onEvent: ({ type, ...fields }) => log.info(type, snakeCaseKeys(fields)),
       // What an agent sees only as internal_error: the operation and the error's message and code,
@@ -600,8 +697,11 @@ export async function startSlotlockServer(
               backend: createSlotlockStoreApplicationBackend(store, {
                 maxTenantResources: SERVE_MAX_TENANT_RESOURCES,
               }),
-              authorize: async ({ principal }) =>
-                principal.scopes?.includes(SLOTLOCK_APPLICATION_SCOPE) === true,
+              authorize: async ({ principal, operation, input }) => {
+                if (principal.scopes?.includes(SLOTLOCK_APPLICATION_SCOPE) !== true) return false;
+                await limits.admit({ principal, operation, input });
+                return true;
+              },
             },
           }
         : {}),
@@ -629,22 +729,26 @@ export async function startSlotlockServer(
             resources: createSlotlockDashboardResources(store),
             state: createSlotlockDashboardState(sql),
             availability: config.availability,
+            clientAddress: (request) => limits.clientAddress(request),
             onError: (error) => log.error('dashboard_error', describeError(error)),
           });
-    const target = dashboard
-      ? {
-          fetch: (request: Request) =>
-            dashboard.handles(request) ? dashboard.fetch(request) : agentServer.fetch(request),
-          shutdown: () => agentServer.shutdown(),
-        }
-      : agentServer;
+    const target = limits.serve(
+      dashboard
+        ? {
+            fetch: (request: Request) =>
+              dashboard.handles(request) ? dashboard.fetch(request) : agentServer.fetch(request),
+            shutdown: () => agentServer.shutdown(),
+          }
+        : agentServer,
+    );
     const listener = createSlotlockNodeServer(target, {
       requestOrigin: publicUrl.origin,
       onError: (error, phase) => log.error('http_error', { phase, ...describeError(error) }),
     });
     const address = await listener.listen({ host: config.host, port: config.port });
     maintenance = startSlotlockMaintenance({
-      store,
+      // One tenant at a time, and its long passes may wait on a request's locks for longer.
+      store: createSlotlockStore(sql, { tenantLimits: serveTenantLimits(caps) }),
       sql,
       tenants: [config.tenantRef],
       intervalMs: SERVE_MAINTENANCE_INTERVAL_MS,
@@ -663,11 +767,21 @@ export async function startSlotlockServer(
       availability_rules: config.availability.length,
       rest: config.restApi ? `${config.publicUrl}/openapi.json` : null,
       maintenance_interval_minutes: SERVE_MAINTENANCE_INTERVAL_MS / 60_000,
+      limits: {
+        ...Object.fromEntries(
+          Object.entries(config.limits.rates).map(([name, rate]) => [name, formatSlotlockRate(rate)]),
+        ),
+        ...caps,
+        // What a key may hold, which is below key_subscriptions when the tenant's cap is lower.
+        key_subscriptions: slotlockKeySubscriptions(caps),
+      },
+      client_address: config.trustedProxyHeader ?? 'socket',
     });
     return {
       address,
       async close() {
         const result = await listener.close();
+        limits.close();
         await maintenance?.close();
         await sql.end({ timeout: 5 });
         return result;
@@ -735,10 +849,11 @@ function hoursLine(resource: SlotlockResource): string {
   })}\n`;
 }
 
-/** Every resource of the tenant, a page at a time. */
+/** Every resource of the tenant in use (with `includeArchived`, every one), a page at a time. */
 async function tenantResources(
   store: ReturnType<typeof createSlotlockStore>,
   tenantRef: string,
+  includeArchived = false,
 ): Promise<SlotlockResource[]> {
   const all: SlotlockResource[] = [];
   let after: string | undefined;
@@ -748,6 +863,7 @@ async function tenantResources(
         tenantRef,
         limit: RESOURCE_PAGE_SIZE,
         ...(after !== undefined ? { after } : {}),
+        ...(includeArchived ? { includeArchived } : {}),
       }),
     );
     all.push(...page);
@@ -802,6 +918,97 @@ async function runHours(
   }
 }
 
+/** A resource as `resource archive` and `resource restore` print it. */
+function resourceStateLine(resource: SlotlockResource): string {
+  return `${JSON.stringify({
+    id: resource.id,
+    external_ref: resource.externalRef,
+    timezone: resource.timezone,
+    visibility: resource.visibility ?? 'shared',
+    archived_at: resource.archivedAt?.toISOString() ?? null,
+  })}\n`;
+}
+
+/**
+ * `resource archive|restore|delete`: the tenant's resource named by id, else by reference, archived
+ * ones included. Returns false when no resource has that name, and `in_use` when a delete is
+ * refused because something on the resource has not ended.
+ */
+async function changeResource(
+  config: SlotlockDatabaseConfig,
+  out: OutputStream,
+  name: string,
+  action: 'archive' | 'restore' | 'delete',
+): Promise<boolean | 'in_use'> {
+  const sql = connect(config.databaseUrl, 1);
+  try {
+    const store = createSlotlockStore(sql);
+    const tenantRef = config.tenantRef;
+    const resources = await tenantResources(store, tenantRef, true);
+    // An id first: another resource's reference may spell it.
+    const named =
+      resources.find((resource) => resource.id === name) ??
+      resources.find((resource) => resource.externalRef === name);
+    if (!named) return false;
+    const id = named.id;
+    if (action === 'delete') {
+      const result = await store.withTenant(tenantRef, (tenant) => tenant.deleteResource({ tenantRef, id }));
+      if (!result.ok) return 'in_use';
+      if (!result.deleted) return false;
+      out.write(`${JSON.stringify({ id, external_ref: named.externalRef, deleted: true })}\n`);
+      return true;
+    }
+    const changed = await store.withTenant(tenantRef, (tenant) =>
+      action === 'archive'
+        ? tenant.archiveResource({ tenantRef, id })
+        : tenant.restoreResource({ tenantRef, id }),
+    );
+    if (!changed) return false;
+    out.write(resourceStateLine(changed));
+    return true;
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
+/**
+ * `tenant status|suspend|unsuspend|erase` for SLOTLOCK_TENANT. Suspending and lifting a suspension
+ * are the deployment role's alone, so they connect as SLOTLOCK_MIGRATE_DATABASE_URL when it is set;
+ * the serving role reads a suspension and may erase.
+ */
+async function runTenantCommand(
+  config: SlotlockDatabaseConfig,
+  out: OutputStream,
+  action: 'status' | 'suspend' | 'unsuspend' | 'erase',
+  reason?: string,
+): Promise<void> {
+  const owner = action === 'suspend' || action === 'unsuspend';
+  const sql = connect(owner ? (config.migrateDatabaseUrl ?? config.databaseUrl) : config.databaseUrl, 1);
+  try {
+    const store = createSlotlockStore(sql);
+    const tenantRef = config.tenantRef;
+    let line: Record<string, unknown>;
+    if (action === 'status') {
+      line = { tenant: tenantRef, suspended: await store.isTenantSuspended({ tenantRef }) };
+    } else if (action === 'suspend') {
+      const { suspended } = await store.suspendTenant({
+        tenantRef,
+        ...(reason !== undefined ? { reason } : {}),
+      });
+      line = { tenant: tenantRef, suspended: true, changed: suspended };
+    } else if (action === 'unsuspend') {
+      const { unsuspended } = await store.unsuspendTenant({ tenantRef });
+      line = { tenant: tenantRef, suspended: false, changed: unsuspended };
+    } else {
+      const erased = await store.eraseTenant({ tenantRef });
+      line = { tenant: tenantRef, total: erased.total, rows: erased.rows };
+    }
+    out.write(`${JSON.stringify(line)}\n`);
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
 /** One key as `key create`, `key list` and `key revoke` print it: never the digest. */
 function apiKeyLine(apiKey: SlotlockApiKey, key?: string): string {
   return `${JSON.stringify({
@@ -835,7 +1042,7 @@ function parseKeyScopes(value: string | undefined): SlotlockApiKeyScope[] {
  */
 async function maintainTenant(
   config: SlotlockDatabaseConfig,
-): Promise<(SlotlockMaintenanceResult & { passes: number }) | null> {
+): Promise<(Omit<SlotlockMaintenanceResult, 'rollPending'> & { passes: number }) | null> {
   const sql = connect(config.databaseUrl, 2);
   try {
     const store = createSlotlockStore(sql);
@@ -848,9 +1055,11 @@ async function maintainTenant(
         sum.conflicts += pass.conflicts;
         sum.refused += pass.refused;
         sum.pruned += pass.pruned;
-        // A capped pass that got nowhere met only series it cannot extend: another would too.
+        // A capped pass that got nowhere met only series it cannot extend. While its roll stopped
+        // before the series it had put back, the next pass meets new ones (and perhaps a healthy
+        // one); once it reached them, another pass would meet them again.
         sum.capped = pass.capped;
-        if (pass.capped && pass.extended + pass.pruned === 0) break;
+        if (pass.capped && pass.extended + pass.pruned === 0 && !pass.rollPending) break;
       }
       return sum;
     });
@@ -915,6 +1124,11 @@ Commands:
   resource add <ref> [--timezone <IANA zone>]
                            Create a calendar resource (a car, room, person or machine)
   resource list            Print the tenant's resources, one JSON object per line
+  resource archive <ref>   Take a resource out of use: no new bookings, holds or events, and
+                           no longer listed; what is on it stays
+  resource restore <ref>   Put an archived resource back in use
+  resource delete <ref>    Delete a resource and its history; refused while a booking, hold
+                           or event on it has not ended
   hours show [--resource <ref>]
                            Print each resource's bookable hours (null: the server's)
   hours set <json> (--resource <ref> | --all)
@@ -929,6 +1143,15 @@ Commands:
   key rotate <id>          Give an active key a new secret and print it once; the old one stops
                            working at once, and the key keeps its id and what it booked
   key revoke <id>          Revoke one of the tenant's API keys at once
+  tenant status            Print whether the tenant is suspended
+  tenant suspend [--reason <text>]
+                           Suspend the tenant: it may read, and writes nothing; its keys get
+                           no new secret (as SLOTLOCK_MIGRATE_DATABASE_URL's role when set:
+                           only the schema owner suspends)
+  tenant unsuspend         Lift the tenant's suspension (as the schema owner, likewise)
+  tenant erase --confirm <tenant>
+                           Delete everything the tenant has, its API keys included, for good;
+                           --confirm repeats SLOTLOCK_TENANT
   healthcheck              Exit 0 when the local server reports ready
 
 Options:
@@ -939,16 +1162,40 @@ Environment:
   DATABASE_URL                   postgres:// URL of the role Slotlock serves as (required); serve
                                  refuses a superuser or a role with BYPASSRLS
   SLOTLOCK_MIGRATE_DATABASE_URL  postgres:// URL of the schema owner, for migrate (optional)
-  SLOTLOCK_AUTH_TOKEN            Optional bearer token for SLOTLOCK_TENANT with every scope,
-                                 32+ random characters (serve); API keys work with or without it
-  SLOTLOCK_CONFIRMATION_SECRET   Signs pending write confirmations, 32+ random characters (serve)
-  SLOTLOCK_CONFIRM_WRITES        all (default), none, or a comma-separated list of write tools
+  SLOTLOCK_AUTH_TOKEN            Optional bearer token for SLOTLOCK_TENANT with read and write
+                                 access (never admin), 32+ random characters (serve); API keys
+                                 work with or without it
+  SLOTLOCK_CONFIRMATION_SECRET   Signs pending write confirmations, 32+ random characters (serve;
+                                 required when SLOTLOCK_CONFIRM_WRITES is not none)
+  SLOTLOCK_CONFIRM_WRITES        none (default), all, or a comma-separated list of write tools
+                                 that wait for a person (MCP 2026-07-28 form elicitation; refused
+                                 with confirmation_required on REST, A2A and older MCP)
   SLOTLOCK_PUBLIC_URL            URL clients use (default http://localhost:$PORT)
   SLOTLOCK_TENANT                Tenant of the token, resource and key commands (default "default")
   SLOTLOCK_AVAILABILITY          JSON array of weekly bookable-hours rules (default: none)
   SLOTLOCK_REST_API              on (default): also serve the tools as a REST API under /v1, and
                                  the application API for admin keys, described at /openapi.json;
                                  off: MCP and A2A only
+  SLOTLOCK_LIMITS                Request limits, comma-separated name=value over the defaults:
+                                 rates as <count>/<s|m|h>[:<burst>] or off for address (50/s:100,
+                                 every request per client, before any key lookup), key_read,
+                                 tenant_read (20/s:40), key_write, tenant_write (5/s:20),
+                                 global_read (500/s:1000), global_write (50/s:100), app_read
+                                 (20/s:40) and app_write (5/s:20) per tenant for the
+                                 application API, sign_in (20/m:20); counts for
+                                 tenant_series_writes and series_writes
+                                 (1: writes that may expand a recurring series at once),
+                                 maintenance_runs (1: application API maintenance runs at once),
+                                 subscriptions (256), tenant_subscriptions (16),
+                                 key_subscriptions (4, and fewer than tenant_subscriptions),
+                                 key_lookups (2), key_lookup_queue (256),
+                                 tenant_transactions (2: one tenant's database transactions at
+                                 once, of the pool's 10); what one tenant may store:
+                                 tenant_holds (10000), tenant_reservations, tenant_events and
+                                 tenant_coverage (100000)
+  SLOTLOCK_TRUSTED_PROXY_HEADER  The request field a proxy in front sets to the client address,
+                                 such as CF-Connecting-IP (default: the connection's address);
+                                 set it only when every request comes through that proxy
   SLOTLOCK_GITHUB_CLIENT_ID      Serve the dashboard at $SLOTLOCK_PUBLIC_URL/dashboard: the Client ID
                                  of a GitHub OAuth app with callback .../dashboard/callback
   SLOTLOCK_GITHUB_CLIENT_SECRET  That app's client secret (dashboard)
@@ -991,7 +1238,7 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     return 2;
   }
   const subcommand =
-    command === 'resource' || command === 'key' || command === 'hours'
+    command === 'resource' || command === 'key' || command === 'hours' || command === 'tenant'
       ? `${command} ${operands[0] ?? ''}`.trim()
       : command;
   const expectedOperands: Record<string, number> = {
@@ -1001,6 +1248,13 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     healthcheck: 0,
     'resource add': 2,
     'resource list': 1,
+    'resource archive': 2,
+    'resource restore': 2,
+    'resource delete': 2,
+    'tenant status': 1,
+    'tenant suspend': 1,
+    'tenant unsuspend': 1,
+    'tenant erase': 1,
     'key create': 2,
     'key list': 1,
     'key rotate': 2,
@@ -1020,6 +1274,15 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     if (values[option] !== undefined && subcommand !== 'key create') {
       return usage(`--${option} applies only to key create`);
     }
+  }
+  if (values.reason !== undefined && subcommand !== 'tenant suspend') {
+    return usage('--reason applies only to tenant suspend');
+  }
+  if (values.confirm !== undefined && subcommand !== 'tenant erase') {
+    return usage('--confirm applies only to tenant erase');
+  }
+  if (subcommand === 'tenant erase' && values.confirm === undefined) {
+    return usage('tenant erase needs --confirm <tenant>, the tenant it erases (SLOTLOCK_TENANT)');
   }
   if (values.all && subcommand !== 'hours set' && subcommand !== 'hours clear') {
     return usage('--all applies only to hours set and hours clear');
@@ -1095,6 +1358,58 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
       case 'resource list':
         await listResources(readSlotlockDatabaseConfig(io.env), io.stdout);
         return 0;
+      case 'resource archive':
+      case 'resource restore':
+      case 'resource delete': {
+        const changed = await changeResource(
+          readSlotlockDatabaseConfig(io.env),
+          io.stdout,
+          operands[1] as string,
+          subcommand.slice('resource '.length) as 'archive' | 'restore' | 'delete',
+        );
+        if (changed === 'in_use') {
+          io.stderr.write(
+            'slotlock: a booking, hold or calendar event on that resource has not ended; cancel or move it first, or archive the resource\n',
+          );
+          return 1;
+        }
+        if (!changed) {
+          io.stderr.write('slotlock: no resource with that reference or id in this tenant\n');
+          return 1;
+        }
+        return 0;
+      }
+      case 'tenant status':
+      case 'tenant suspend':
+      case 'tenant unsuspend':
+      case 'tenant erase': {
+        const config = readSlotlockDatabaseConfig(io.env);
+        // The tenant named twice, so erasing the one SLOTLOCK_TENANT happens to name is deliberate.
+        if (subcommand === 'tenant erase' && values.confirm !== config.tenantRef) {
+          return usage('--confirm must repeat SLOTLOCK_TENANT, the tenant tenant erase deletes');
+        }
+        try {
+          await runTenantCommand(
+            config,
+            io.stdout,
+            subcommand.slice('tenant '.length) as 'status' | 'suspend' | 'unsuspend' | 'erase',
+            values.reason,
+          );
+        } catch (error) {
+          const code = (error as { code?: unknown } | null)?.code;
+          if (code === 'tenant_suspension_not_permitted') {
+            io.stderr.write(
+              'slotlock: only the schema owner suspends a tenant or lifts a suspension; set SLOTLOCK_MIGRATE_DATABASE_URL to its URL\n',
+            );
+            return 1;
+          }
+          if (code === 'invalid_suspension_reason') {
+            return usage('--reason must be 1-500 characters without control characters');
+          }
+          throw error;
+        }
+        return 0;
+      }
       case 'hours show':
       case 'hours set':
       case 'hours clear': {
@@ -1195,6 +1510,8 @@ function parseCliArguments(argv: readonly string[]) {
       'expires-in-days': { type: 'string' },
       resource: { type: 'string' },
       all: { type: 'boolean' },
+      reason: { type: 'string' },
+      confirm: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
     },

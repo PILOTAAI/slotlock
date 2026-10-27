@@ -3,6 +3,336 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+0.3.0 fixes the double bookings 0.2.0 could accept around daylight-saving changes and makes
+`slotlock serve` safe to share between tenants. Its themes: a recurrence engine that keeps every
+occurrence's whole time across clock changes; per-tenant limits, suspension and erasure in the
+store; request limits and fair shares of the server in `slotlock serve`; the application API's
+reads, resource lifecycle and tenant calls; a release path that checks what it publishes and
+publishes the five language clients; and fixes for the findings of a security audit. Read the
+upgrade notes first.
+
+### Upgrade notes
+
+- Run `slotlock migrate` with 0.3.0 before serving it. The schema now records its version, and
+  `slotlock serve` refuses a database an older release migrated (`schema_outdated`) or a newer one
+  did (`schema_newer`). A migration refuses a schema a newer release migrated, and PostgreSQL older
+  than 16. It also grants the serving role what this release needs: a role without that grant is
+  refused `application_role_not_granted`, so a library user runs `grantApplicationRole` again.
+  Each migration step waits at most a second for a lock and tries again, so serving queries queue
+  behind it for at most that long, and an unchanged schema takes no table lock.
+- Before upgrading, run `storedCalendarEventProblem(event)` over your stored events. A series an
+  earlier release stored and this one refuses (a rule shape it no longer expands, `COUNT` with a
+  yearly day some years lack, or an exception that names no occurrence) keeps its old coverage and
+  is counted as refused at every roll.
+- Breaking: `slotlock serve` defaults `SLOTLOCK_CONFIRM_WRITES` to `none`, so an authenticated
+  write takes effect at once. Set `all`, or a list of write tools, to keep confirmation;
+  `SLOTLOCK_CONFIRMATION_SECRET` is required only then.
+- Breaking behind a proxy: `slotlock serve` now limits requests per client address, so set
+  `SLOTLOCK_TRUSTED_PROXY_HEADER` (`CF-Connecting-IP` behind Cloudflare, also when kamal-proxy or
+  another proxy sits between) before upgrading a server behind one. Without it every client counts
+  as the proxy's one address and shares one `address` budget, 50 requests a second by default.
+- `slotlock serve` applies new limits by default, each set with `SLOTLOCK_LIMITS`: per tenant,
+  10,000 holds (`tenant_holds`) and 100,000 each of bookings, events and coverage rows
+  (`tenant_reservations`, `tenant_events`, `tenant_coverage`); 256 live-update streams on the
+  server (`subscriptions`), 16 a tenant (`tenant_subscriptions`) and 4 a key
+  (`key_subscriptions`); 2 of the pool's 10 connections a tenant (`tenant_transactions`; a server
+  with one tenant can set 10); one recurring write at a time per tenant and per server
+  (`tenant_series_writes`, `series_writes`) and one application maintenance run
+  (`maintenance_runs`); and request rates (Added). Check them against your largest tenant.
+- Clients should handle the new answers: 429 `rate_limited` with `Retry-After`; 503
+  `server_busy` (a full key-lookup or series-write queue, or a transaction that waited more than 5
+  seconds for a lock) and 503 `request_aborted` (the request ended before its call did); 400
+  `calendar_work_limit` from free/busy, next-available and busy reads; 409
+  `hold_limit_reached`, `reservation_limit_reached`, `event_limit_reached`,
+  `coverage_limit_reached` and `resource_limit_reached`; and 403 `tenant_suspended`.
+- Writes 0.2.0 accepted that are now refused: a control character other than tab or line break in
+  an event's title, description, location or participant names, or any in its UID
+  (`invalid_event`); event times outside years 1 to 9999; rule shapes ical.js expands differently
+  from RFC 5545 (`recurrenceRuleProblem(rule)` says why), and in a stored rule `COUNT=0`, an
+  unknown or repeated part or a sub-daily frequency; DTEND with DURATION; an exception that names
+  no occurrence; more than 8 RRULEs on a feed event; in the trusted importer, a DTEND the clocks
+  skip, a DURATION in days or weeks outside UTC and an all-day series whose first midnight is
+  skipped; and a booking, hold or event past the rolling horizon on a resource whose series goes on
+  past it (`recurrence_not_materialized`).
+- Breaking for library callers: `findNextAvailableFor` requires `tenantRef` (`null` for a resource
+  with no tenant). `withTenant` opens its own transactions READ COMMITTED, and inside a caller's
+  REPEATABLE READ or SERIALIZABLE transaction refuses writes with `invalid_transaction_isolation`.
+  `createSlotlockApiKeyAuthenticator` throws `SlotlockAgentOperationError` `server_busy` (503) when
+  its lookup queue is full, instead of answering anonymous; `createSlotlockAgentServer` answers it
+  503 with `Retry-After` on REST, MCP and A2A. During maintenance a series whose roll fails is
+  reported in `refusedEventIds` and put back for an hour instead of failing the pass.
+- Clients and OpenAPI: new optional arguments come after the old ones in every client, and the
+  .NET client keeps 0.2.0's parameter lists as overloads, so a call passing the cancellation token
+  by position still compiles. A Rust input struct written out field by field needs
+  `..Default::default()` for the fields it gained (`CreateResourceInput`, `AcquireHoldInput`,
+  `UpdateEventInput`), and a Go one written without field names needs them. Event participant
+  addresses in responses are no longer `format: email` in openapi.json; they follow the store's
+  own grammar (one `@`, no spaces), so a client that checked them as email addresses should stop.
+- The dashboard Worker takes a new binding, `SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT`, for every
+  client together. Until it is bound, `SLOTLOCK_SIGN_IN_RATE_LIMIT` counts every client together,
+  as before, and the Worker logs a warning: add the ceiling before lowering that binding's limit
+  to one client's.
+- The server image runs Node.js 24 LTS (24.22.1). 0.2.0's image ran Node.js 26.11.1.
+
+### Security
+
+- zod moves from 4.6.5 to 4.6.7 (#59), past GHSA-mrhx-c7xc-m3w5 (high): when validating an
+  oversized array, zod 4.6.5 collects an issue for every failing element with no cap, so one
+  authenticated tool or REST call could hold far more memory than its body. 0.1.0, 0.1.1 and 0.2.0
+  pin zod 4.6.5 exactly; their users can add `"overrides": {"zod": "4.6.7"}` to their own
+  `package.json` (README, Known issues in 0.2.0).
+- `slotlock serve` had no request limits. It now limits requests per client address, key, tenant
+  and server (Added), and caps the work one tenant can start, store or hold open (Upgrade notes).
+- A flood of made-up API keys no longer makes real keys answer 401 as if revoked. A full lookup
+  queue answers 503 `server_busy`, and keys that authenticated in the last 15 minutes wait in a
+  queue of their own, served first.
+- The store's next-available search took no tenant and read no coverage: it offered slots on
+  another tenant's resource, on unknown ids and in a series' unstored time. It now answers
+  `resource_not_found` for those and offers a slot only where free/busy proves the time complete.
+  `acquireHold`, `createReservation` and `listBusy` take `tenantRef` and enforce it whatever the
+  connection's row-level security. An id the store never issues answers not found, not a raw error.
+- One tenant can no longer hold every database connection of `slotlock serve`. 12 one-off creates
+  waiting on their tenant's lock held the shared pool of 10, and another tenant waited about a
+  second. A tenant's transactions now run at most 2 at once (`tenant_transactions`), and one that
+  waits more than 5 seconds for a lock answers 503 `server_busy`. `createSlotlockStore` takes
+  `maxTenantTransactions` and `tenantLockTimeoutMs` to do the same.
+- `slotlock serve` bounds what one tenant may store. It gave its store no tenant limits, so an admin
+  key could add holds, bookings and coverage rows (and an agent events) without end. Every surface
+  now shares the store's tenant limits (Upgrade notes); a write past one answers 409 with its
+  `*_limit_reached` code.
+- Expired holds now count against the hold limit until deleted, and keyed holds until they would
+  have expired, so one-millisecond holds cannot store rows without end between maintenance passes.
+- Many tenants can no longer hold every live-update stream between them: 16 tenants within their
+  share could take all 256. When the server is full, a tenant holding fewer than the tenant holding
+  most, less one, ends that tenant's oldest stream gracefully (reported as `preempted`).
+- One API key can no longer hold every live-update stream of its tenant: a key's cap
+  (`key_subscriptions`) is kept below its tenant's unless the tenant may hold only one.
+- A key without the admin scope no longer spends its tenant's application API budget. Its refused
+  calls to application routes took tokens from `app_read` and `app_write`, so a read-only key could
+  keep the tenant's admin application answered 429.
+- A burst of one tenant's recurring writes no longer holds the server from other tenants: such
+  writes wait for slots shared between tenants (Added). In the audit's test another tenant's
+  worst read went from 12.4 s to about 0.3 s.
+- `slotlock_get_free_busy` and `slotlock_find_next_available` read a resource named more than once
+  once, and read 10,000 busy intervals in all across a request, answering `400
+  calendar_work_limit` past that. A request naming 100 resources, or one resource 100 times, did
+  100 times the work of one.
+- `slotlock_find_next_available` expands 100,000 bookable windows in all, answering `400
+  calendar_work_limit` past that, and walks a resource's busy time once rather than once per
+  window. 100 resources with 50 daily rules each, searched over a year, held the process for about
+  seven seconds.
+- `slotlock_list_events` reads a resource named more than once once. One id named 100 times read
+  its events 100 times and returned the first event 100 times.
+- The application API's busy read (`GET /v1/resources/{id}/busy`) stops at the first interval past
+  the 10,000 it may return, instead of reading the whole window first. `store.listBusy` takes a
+  `limit`.
+- The recurrence budget counts work, not time, and now charges what each step costs, time zone
+  reads included. Fifty writes of `FREQ=DAILY;INTERVAL=9999;BYMONTH=2;BYMONTHDAY=29` held the
+  server for 23 seconds, and forty daily London series held a feed for 35 seconds; a refused write
+  now ends within about a tenth of a second, and a feed within about half a second.
+- A feed event may list 8 RRULEs, and each one past the first costs a step at every occurrence it
+  passes. One event with 110,000 RRULEs (2 MB) held `parseICalendarFeed` for about 9 seconds.
+- One recurring series can no longer stop its tenant's maintenance. A rule naming two wall times in
+  a spring-forward gap (`FREQ=DAILY;BYHOUR=2,3;BYMINUTE=0,30` in New York) gave one instant twice,
+  its roll failed every pass, and no other series of the tenant extended or had its expired holds
+  purged. An instant is now one occurrence wherever the rule names it again, and a series whose
+  roll fails for any other reason is refused and put back (Upgrade notes).
+- An event's title, description, location and participant names may hold a tab or a line break,
+  and no other control character; its UID none. ical.js left a bare CR in what `emitICalendar` and
+  `emitITipCalendar` wrote, so a reader that ends lines at one read the rest as properties of its
+  own (`METHOD:CANCEL`). A CRLF line break is kept as LF.
+- The Node listener refuses a request target with a dot segment between backslashes
+  (`/v1/resources\..\availability`), as it refuses one between slashes: URL parsing reads a
+  backslash as a slash. An encoded backslash (`%5C`) is still an ordinary character.
+- A write confirmation no longer states a series' dates in UTC when it could not read the event (a
+  write-only key, a refused or slow read) and the update names no time zone. The store books the
+  series in the event's own zone, so the dates approved could differ from those booked. The
+  question now shows the rule and says its dates follow the event's existing zone.
+- An event whose organizer or attendee address the store keeps but `z.email()` refuses, such as
+  `ops@localhost` from an imported feed, no longer makes every listing of its window answer 500 and
+  stop paginating (Upgrade notes).
+- Dashboard sign-ins are counted per client network, in the Worker and in `slotlock serve`: an
+  IPv4 address, or an IPv6 client's /48, so a site rotating through its addresses cannot use up the
+  ceiling every other client shares. Every other request counts an IPv6 client as its /64. The
+  dashboard runs at most two sign-ins from one client at once.
+- The example dashboard Worker configuration removes query strings, which hold OAuth codes, from
+  the URLs Workers Logs keep.
+- SECURITY.md and the README say write confirmation is attested by the client: it keeps an agent
+  from writing unasked and is not an authorization boundary. SECURITY.md also says how hosted
+  Slotlock may be tested: your own account only, no other account's data, no load or denial of
+  service, reports through private vulnerability reporting.
+- Development lockfiles only (nothing reaches the package or the image): the site's and the
+  dashboard Worker's Wrangler move undici from 7.29.1 to 7.30.1 (GHSA-xjj6-f33q-929c, high), and
+  the development lockfile moves body-parser from 2.3.0 to 2.4.0 (GHSA-27r3-jxmh-p828).
+
+### Added
+
+- The application API serves the store calls it lacked, each in `openapi.json` and the five
+  clients: a resource's `visibility` (`private` ones are never shown to agents) and `archived_at`;
+  `POST /v1/resources/{id}/archive` and `…/restore`, and `DELETE /v1/resources/{id}` (`409
+  resource_in_use` while anything on it is live); `GET /v1/holds/{id}`,
+  `GET /v1/resources/{id}/holds`, `GET /v1/reservations/{ref}`,
+  `GET /v1/resources/{id}/reservations` and `GET /v1/resources/{id}/busy`, paged and bounded to
+  367 days; `GET /v1/tenant/events` and `GET`/`DELETE /v1/tenant/events/{id}`, which reach and
+  cancel any key's event, a revoked one's included; and `GET /v1/tenant`, the key's tenant and
+  whether it is suspended.
+- `POST /v1/tenant/erase` erases the key's tenant, with its reference as `confirm_tenant_ref`. It is
+  off unless the application backend is created with `tenantErasure: true` (`slotlock serve` leaves
+  it off) and refused while the tenant is suspended.
+- `POST /v1/holds` and `DELETE /v1/tenant/events/{id}` take a retry identity as the
+  `Idempotency-Key` header as well as `idempotency_key`; a hold retried with it answers the first
+  hold, and the key reused with another request is `409 idempotency_conflict`. Another application
+  route refuses the header (`400 idempotency_key_not_supported`) rather than ignore it.
+- `POST /v1/holds` takes `buffer_after_minutes` (0 to 30 days), as a booking does: the time after
+  the hold stays busy, and the booking it is confirmed as keeps it.
+- In the store: private resources, which agents neither list, describe nor book; `archiveResource`,
+  `restoreResource` and `deleteResource`; holds with a turnaround buffer the booking keeps and a
+  retry identity; `getHold`, `listHolds`, `getReservation` and `listReservations`; and reading,
+  listing and cancelling any key's event as the tenant.
+- Tenant limits in the store (`tenantLimits`: resources, holds, reservations, events, coverage),
+  refused with `*_limit_reached`. They count what is live or still to come plus what the tenant
+  added in the last 30 days, so ended history leaves them. Maintenance now deletes expired holds.
+- Tenant suspension and erasure: the deployment role may `suspendTenant` (with a reason) and
+  `unsuspendTenant`; a suspended tenant may read, its writes are refused `tenant_suspended`, and it
+  gets no new API key. `eraseTenant` deletes every row a tenant owns in one call and says how many
+  from each table. No serving role may suspend.
+- `slotlock resource archive|restore|delete <ref>` and `slotlock tenant status|suspend|unsuspend|erase`.
+  `suspend` and `unsuspend` connect as `SLOTLOCK_MIGRATE_DATABASE_URL`'s role, the only one that
+  may; `erase` needs `--confirm` repeating `SLOTLOCK_TENANT`.
+- `slotlock_update_event` takes `expected_resource_id`: an event since moved to another resource is
+  not found, checked under the event's lock.
+- `slotlock serve` limits requests: per client address before any key is looked up, then per API
+  key, per tenant and for the whole server, with reads and writes counted apart (by default 20
+  reads and 5 writes a second per key and per tenant). The application API counts in its tenant's
+  own budget (`app_read`, `app_write`). A refusal answers 429 `rate_limited` with `Retry-After` and
+  the `RateLimit` and `RateLimit-Policy` fields. `SLOTLOCK_LIMITS` changes the limits. Behind a
+  proxy without `SLOTLOCK_TRUSTED_PROXY_HEADER`, the first request carrying a client-address field
+  logs a `client_address_field_ignored` warning. The health check is not counted, and reuses one
+  database check a second.
+- `slotlock serve` runs a recurring create and every event update one at a time per tenant and per
+  server (`tenant_series_writes`, `series_writes`), taking the write's token before it waits; each
+  server process counts its own slots. A freed slot rests for as long as the server was busy while
+  the write before held it, up to a second, so writes that each hold it under a second keep the
+  server busy at most about half the time. It then goes to the waiting tenant with the fewest
+  writes in flight and, among those, the one whose writes have kept the server busy least lately.
+  Tenants with more writes waiting never go ahead of one sending a write at a time, but many
+  tenants with one write each and less use, new ones included, can each go ahead of it once. Four
+  more of a tenant's writes may wait and the rest get 429. When the server's 64 places are taken,
+  a write from a tenant with fewer writes in flight than the one with the most takes the place of
+  that tenant's last write, which gets 503 `server_busy`. One that has waited two seconds gets 429
+  while its tenant's own write is still running, otherwise 503 `server_busy`. An application API
+  maintenance run waits the same way for slots of its own: one per tenant, `maintenance_runs` (1)
+  per server.
+- `createSlotlockAgentServer` takes `subscriptions.maxPerTenant`, which `slotlock serve` sets from
+  `tenant_subscriptions`.
+- `slotlock serve` logs a `refusals` line each minute there are any, and at shutdown: auth
+  refusals, rate limits, lookup overflows, busy series writes, busy maintenance runs and bodies too
+  large, with clients named only by per-process pseudonyms.
+- `createSlotlockNodeServer` hands the fetch target the connection's remote address as a second
+  argument.
+- `parseICalendarFeed` reads a feed series by series and names the series it refuses, with why,
+  instead of refusing the whole calendar; the worker pool offers it too.
+  `recurrenceRuleProblem(rule)` says why a rule shape is refused, and
+  `storedCalendarEventProblem(event)` why a stored event would be.
+- An exported calendar carries a VTIMEZONE for each IANA zone it names, so a reader that does not
+  know the name reads the times as Slotlock does.
+- The npm package ships `openapi.json`, the REST API's OpenAPI 3.1 document, exported as
+  `slotlock/openapi.json`. The capability manifest names the 0.2 surfaces: `rest-api`,
+  `application-api`, `api-keys`, `dashboard` and `maintenance`.
+- The five language clients are published with each release: `slotlock` on PyPI and crates.io,
+  `Slotlock.Client` on NuGet, `io.pylota:slotlock` on Maven Central and the Go module's
+  `clients/go/v<version>` tag, each after the release suite passes and a maintainer approves. They
+  now carry the package's version (they said 0.1.0 beside a 0.2.0 server).
+  `docs/release/clients.md` has each registry's one-time setup.
+- `scripts/check-stage.sh <stage-id>`, which a maintainer runs before `npm stage approve`. It
+  refuses a stage whose tarball is not the one the release tested, whose dist-tag would move
+  `latest` backwards, or whose runtime dependencies, installed as a consumer would that day, have a
+  high or critical advisory. 0.2.0 went public with zod 4.6.5 after `main` had moved past it.
+- A known-issues notice for 0.2.0: in the README, on the site (`/docs/known-issues/`) and as text
+  for the v0.2.0 release notes, a pinned issue and two security advisories
+  (`docs/release/0.2.0-known-issues.md`). It names the six ways 0.2.0 can accept a double booking
+  around daylight-saving changes and series ends, and the zod pin with its workaround.
+  `docs/release/deprecations.md` gives the `npm deprecate` and `mcp-publisher status` commands for
+  0.0.0-stage, 0.1.0, 0.1.1 and 0.2.0.
+- For hosted Slotlock: drafts of a privacy notice (`PRIVACY.md`), Terms of Service (`TERMS.md`,
+  with data processing terms) and an Acceptable Use Policy (`ACCEPTABLE-USE.md`), each marked for
+  owner and legal review; a service page (`docs/hosted/README.md`) with addresses, price, limits
+  and contacts; `VERSIONING.md`, what `/v1`, the tools and the version numbers promise; a public
+  status from an off-server probe (`docs/hosted/status.md`, off until the owner sets
+  `SLOTLOCK_STATUS_PROBE`); and `.github/SUPPORT.md`, the route for each kind of request.
+
+### Changed
+
+- A recurring event occupies both readings of each occurrence across a clock change: RFC 5545's
+  exact duration from its start, and its written end on the wall clock. A start in a skipped hour
+  moves forward by the gap, and one in a repeated hour takes the first instant. One-off events,
+  overrides and PERIOD RDATEs keep their exact times. Feeds, the trusted importer and the store all
+  read events this way.
+- A stored series is expanded from the instants it holds, and its exceptions name occurrences by
+  UTC instant (exported as UTC `RECURRENCE-ID`s).
+- A series' occurrences never overlap each other: one that reaches past the next one's start ends
+  there, and the next ends at the later of the two ends.
+- Recurring series are stored for up to 369 days (`SLOTLOCK_MATERIALIZATION_WINDOW_DAYS`), so a
+  full 367-day search can be complete; search, free/busy and coverage windows keep their 367-day
+  cap.
+- A booking, hold or event first extends each series on its resource that is not stored as far as
+  it reaches, so it meets their occurrences. A write past the rolling horizon on a resource whose
+  series goes on past it is refused with `recurrence_not_materialized`; a series known to have
+  ended does not count.
+- A confirmed hold becomes a booking of its tenant whose reference is the hold's id, at revision 1,
+  so it can be read, moved and cancelled like any booking (`slotlock_confirm_hold` says so).
+  `createReservation` on a tenant's resource does the same. The migration, and maintenance for
+  rows a 0.2 server writes during a rolling deploy, give older such bookings their tenant.
+- `server.json` (the MCP Registry entry) no longer marks `SLOTLOCK_AUTH_TOKEN` and
+  `SLOTLOCK_CONFIRMATION_SECRET` as required, and its Authorization header takes the token or an
+  API key.
+- `slotlock --help` describes the server token as read and write, never admin.
+- Releases: npm's `latest` dist-tag, and the image's `latest` tag, never move backwards. A release
+  on an older line takes `latest-<major>.<minor>` and a prerelease `next`, and a release stops when
+  the registry cannot say which version is `latest`. The image and the MCP Registry entry are
+  published only after the release's own suite passes, each behind an approval; the image's
+  attestation is still signed by `image.yml`. The packed NOTICE is written at build time from the
+  lockfile, so a dependency bump no longer breaks the release checks. **Release a version** takes
+  `dry_run`.
+- Repository: CI runs the database suites on PostgreSQL 16, 17 and 18 and the Compose quickstart
+  end to end, and one check, "CI passed", gathers every job, the language clients included.
+  `scripts/configure-github.sh` requires it and DCO's "Signed-off-by" on `main` with no admin
+  bypass, puts the person who runs it as reviewer on the publishing environments, and sets up
+  CodeQL and Dependabot for every manifest.
+
+### Fixed
+
+- 0.2.0's six double-booking cases (Known issues in the README): a first occurrence spanning a
+  clock change, the repeated hour of an autumn change in stored series, exceptions in a skipped
+  hour, occurrences starting in a skipped hour, a timed series with a date-only `UNTIL` (now its
+  whole day on the series' clock), and an iCalendar `DURATION` counting hours across a spring
+  change.
+- A weekly-hours window whose edge falls in a skipped hour stands where the gap ends, so it holds
+  only the wall times it names that exist. It used to move, or give nothing.
+- A yearly rule on a day some years lack (29 February) occurs in the years that have it instead of
+  being refused.
+- A feed's daily or weekly series from years ago is searched from near the window, so a daily
+  standup since 2014 no longer refuses its feed. A CalDAV server's expanded series whose first
+  instance has no `RECURRENCE-ID` keeps its later instances busy.
+- A series whose DTEND falls in a skipped hour no longer holds an extra hour every later day.
+- Series the roll cannot extend (in conflict or over the budget) no longer keep a healthy series
+  from rolling, however many there are. The roll puts each behind for an hour and takes those it
+  has never put back first; its cursor carries that place (`rollRetryAt`), and a pass says when it
+  stopped before them (`rollPending`), so `slotlock serve` and `slotlock maintain` go round again
+  at once. The roll names the series it could not extend because of a collision
+  (`conflictEventIds`).
+- A refused update of a recurring event names the booking in its way, not its own first
+  occurrence.
+- The quickstart: `.env.example` turns the REST API on, as `slotlock serve` and Compose do, and
+  the docs say PostgreSQL 16 or newer (Compose ships 18).
+- Documentation: SPEC.md and the README describe 0.2 and later, and SPEC.md gains a daylight-saving
+  section; the README says which spelling of an availability rule each surface takes
+  (`startMinutes` for `slotlock hours set` and `SLOTLOCK_AVAILABILITY`, `start_minutes` over
+  REST); the site names the version to install and has pages for the clients, operations and the
+  hosted service.
+
 ## 0.2.0 - 2026-10-23
 
 ### Added

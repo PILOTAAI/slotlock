@@ -1,0 +1,22 @@
+# CodeQL configuration for .github/workflows/codeql.yml. It runs the same extended security suite
+# that default setup ran (scripts/configure-github.sh turned default setup off: GitHub runs one or
+# the other), and drops one query, for the reason given beside it. Every other query reports as
+# before; a query is dropped here only with its reason, never by dismissing alerts one by one.
+name: Slotlock CodeQL
+
+queries:
+  - uses: security-extended
+
+query-filters:
+  # js/insufficient-password-hash reports the SHA-256 of an API key (src/api-keys.ts,
+  # slotlockApiKeyDigest, and the tests that build keys) as a weak password hash. An API key is not a
+  # password: it is 40 base62 characters from the operating system's random source (about 238 bits,
+  # with rejection sampling so no character is likelier than another), which no offline guessing can
+  # search, so a slow password hash (bcrypt, scrypt, Argon2) would add nothing and would cost every
+  # request a deliberately slow lookup. SECURITY.md, "API keys and the application API", gives the
+  # design. The query has no way to tell a high-entropy token from a password a person chose, so it
+  # is dropped for the whole repository.
+  # If Slotlock ever stores a secret a person chooses, it gets a slow hash, and this exclusion is
+  # revisited in that change.
+  - exclude:
+      id: js/insufficient-password-hash

@@ -251,6 +251,51 @@ func TestWritesEventsAndClearsAFieldWithNull(t *testing.T) {
 	s.refused(428, "confirmation_required", err)
 }
 
+func TestRetriesAKeyedHoldAndRetiresAResource(t *testing.T) {
+	s := newServer(t)
+	c := s.client
+	resource := s.must(c.CreateResource(s.ctx, CreateResourceInput{ExternalRef: "go-retire-" + s.suffix, Visibility: Ptr("private")}))["resource"].(map[string]any)
+	id := resource["id"].(string)
+	if resource["visibility"] != "private" {
+		t.Fatalf("create_resource: %v", resource)
+	}
+	s.must(c.SetResourceAvailability(s.ctx, SetResourceAvailabilityInput{ResourceID: id, Rules: Value(allWeek)}))
+	// A keyed hold retried answers the hold the first request made.
+	window := AcquireHoldInput{ResourceID: id, Start: s.at(9), End: s.at(10), TTLSeconds: 600, IdempotencyKey: Ptr("go-hold-" + s.suffix)}
+	hold := s.must(c.AcquireHold(s.ctx, window))["hold"].(map[string]any)
+	if again := s.must(c.AcquireHold(s.ctx, window))["hold"]; !reflect.DeepEqual(again, hold) {
+		t.Fatalf("acquire_hold again: %v", again)
+	}
+	window.TTLSeconds = 60
+	_, err := c.AcquireHold(s.ctx, window)
+	s.refused(409, "idempotency_conflict", err)
+	holdID := hold["id"].(string)
+	if got := s.must(c.GetHold(s.ctx, GetHoldInput{HoldID: holdID}))["hold"]; !reflect.DeepEqual(got, hold) {
+		t.Fatalf("get_hold: %v", got)
+	}
+	// Confirmed, it is the reservation its id names, cancelled by that reference.
+	confirmed := s.must(c.ConfirmHold(s.ctx, ConfirmHoldInput{HoldID: holdID}))["reservation"]
+	if got := s.must(c.GetReservation(s.ctx, GetReservationInput{ReservationRef: holdID}))["reservation"]; !reflect.DeepEqual(got, confirmed) {
+		t.Fatalf("get_reservation: %v", got)
+	}
+	s.must(c.CancelReservation(s.ctx, CancelReservationInput{ReservationRef: holdID, Revision: 2}))
+	_, err = c.GetReservation(s.ctx, GetReservationInput{ReservationRef: holdID})
+	s.refused(404, "reservation_not_found", err)
+
+	archived := s.must(c.ArchiveResource(s.ctx, ArchiveResourceInput{ResourceID: id}))["resource"].(map[string]any)
+	if archived["archived_at"] == nil {
+		t.Fatalf("archive_resource: %v", archived)
+	}
+	if restored := s.must(c.RestoreResource(s.ctx, RestoreResourceInput{ResourceID: id}))["resource"].(map[string]any); restored["archived_at"] != nil {
+		t.Fatalf("restore_resource: %v", restored)
+	}
+	if deleted := s.must(c.DeleteResource(s.ctx, DeleteResourceInput{ResourceID: id})); deleted["deleted"] != true {
+		t.Fatalf("delete_resource: %v", deleted)
+	}
+	_, err = c.GetResource(s.ctx, GetResourceInput{ResourceID: id})
+	s.refused(404, "resource_not_found", err)
+}
+
 func TestSaysWhyACallWasRefused(t *testing.T) {
 	s := newServer(t)
 	_, err := s.client.GetResource(s.ctx, GetResourceInput{ResourceID: "00000000-0000-4000-8000-000000000000"})

@@ -67,8 +67,9 @@ if (held.ok) await tenant.confirmHold(held.hold.id);
   wants its time removes it. No cron job.
 - `confirmHold` turns it into a reservation and is safe to retry; `releaseHold` frees it at once.
 
-Holds are in the TypeScript store. Over MCP and A2A, agents create events, and you can make each
-write [wait for a person](/docs/security/#confirmation-before-writes).
+Holds are in the TypeScript store and in the REST application API, for keys with the `admin`
+scope. Over MCP and A2A, agents create events, and you can make each write
+[wait for a person](/docs/security/#confirmation-before-writes).
 
 ## Events
 

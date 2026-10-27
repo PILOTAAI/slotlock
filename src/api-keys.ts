@@ -9,7 +9,11 @@
 // key.
 import { createHash, randomBytes } from 'node:crypto';
 import type { Sql } from 'postgres';
-import { type SlotlockAgentPrincipal, slotlockAgentOperationScope } from './agent-server.js';
+import {
+  SlotlockAgentOperationError,
+  type SlotlockAgentPrincipal,
+  slotlockAgentOperationScope,
+} from './agent-server.js';
 import { SLOTLOCK_API_KEY_ACTIVE_LIMIT, SLOTLOCK_API_KEY_RETAINED_LIMIT } from './ddl.js';
 import type { SlotlockSql } from './store.js';
 
@@ -49,6 +53,10 @@ const DAY_MS = 86_400_000;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_MAX_CONCURRENT_LOOKUPS = 2;
 const DEFAULT_MAX_WAITING_LOOKUPS = 256;
+/** How long a key that authenticated keeps its place ahead of unknown keys in the lookup queue. */
+const RECENTLY_VALID_MS = 15 * 60_000;
+/** Keys the authenticator remembers as recently valid, by digest; past this the oldest go first. */
+const MAX_RECENTLY_VALID = 10_000;
 
 /** A key as lists show it. The key itself is never stored and so never listed. */
 export interface SlotlockApiKey {
@@ -368,9 +376,15 @@ export function createSlotlockApiKeyStore(sql: SlotlockSql): SlotlockApiKeyStore
 export interface SlotlockApiKeyAuthenticatorOptions {
   /** Key lookups that may run at once, default 2: at most this many connections serve them. */
   maxConcurrentLookups?: number;
-  /** Lookups that may wait for one, default 256. A request beyond that is anonymous at once. */
+  /**
+   * Lookups that may wait for one, default 256, and as many again for keys that recently
+   * authenticated. A request beyond that is refused as busy at once.
+   */
   maxWaitingLookups?: number;
 }
+
+/** What the authenticator throws when its lookup queue is full: retry later, the key may be fine. */
+const LOOKUP_BUSY = 'server_busy';
 
 /**
  * Bearer authentication by API key: a request carrying an active key is that key's principal,
@@ -378,8 +392,13 @@ export interface SlotlockApiKeyAuthenticatorOptions {
  * `authorize`. A value that is not a well-formed key is anonymous without a lookup.
  *
  * Anyone can make well-formed keys, so lookups are bounded: a flood of made-up keys waits for at
- * most `maxConcurrentLookups` connections and is refused past `maxWaitingLookups`, and the rest of
- * the pool stays free for authenticated work. Rate-limit a public server in front of it as well.
+ * most `maxConcurrentLookups` connections, and past `maxWaitingLookups` a request is refused with a
+ * `SlotlockAgentOperationError` (`server_busy`, 503) rather than answered anonymous, which would
+ * tell a client holding a valid key that its key is bad. A key that authenticated in the last 15
+ * minutes waits in a queue of its own that is served first, so made-up keys, which never
+ * authenticate, cannot keep it waiting. Every request is still looked up, so a revoked key stops
+ * at once. Rate-limit a public server in front of it as well (`slotlock serve` does, per client
+ * address, before any lookup).
  */
 export function createSlotlockApiKeyAuthenticator(
   keys: Pick<SlotlockApiKeyStore, 'authenticate'>,
@@ -395,28 +414,39 @@ export function createSlotlockApiKeyAuthenticator(
   }
   let active = 0;
   const waiting: Array<() => void> = [];
+  const waitingKnown: Array<() => void> = [];
+  /** Digests of keys that recently authenticated, oldest first, with when they stop counting. */
+  const recentlyValid = new Map<string, number>();
   return async (request) => {
     const presented = slotlockBearerCredential(request);
     if (presented === undefined || !isSlotlockApiKey(presented)) return null;
+    const digest = slotlockApiKeyDigest(presented).toString('hex');
+    const known = (recentlyValid.get(digest) ?? 0) > Date.now();
+    const queue = known ? waitingKnown : waiting;
     if (active < maxActive) {
       active += 1;
-    } else if (waiting.length < maxWaiting) {
+    } else if (queue.length < maxWaiting) {
       // A finishing lookup hands its slot straight to the next waiter, so `active` is unchanged.
-      await new Promise<void>((resolve) => waiting.push(resolve));
+      await new Promise<void>((resolve) => queue.push(resolve));
     } else {
-      return null;
+      throw new SlotlockAgentOperationError(LOOKUP_BUSY, 503);
     }
     try {
       if (request.signal.aborted) return null;
       const identity = await keys.authenticate(presented);
+      recentlyValid.delete(digest);
       if (!identity) return null;
+      recentlyValid.set(digest, Date.now() + RECENTLY_VALID_MS);
+      if (recentlyValid.size > MAX_RECENTLY_VALID) {
+        recentlyValid.delete(recentlyValid.keys().next().value as string);
+      }
       return {
         subject: `api_key:${identity.id}`,
         tenantRef: identity.tenantRef,
         scopes: identity.scopes,
       };
     } finally {
-      const next = waiting.shift();
+      const next = waitingKnown.shift() ?? waiting.shift();
       if (next) next();
       else active -= 1;
     }

@@ -1,10 +1,14 @@
-# Slotlock server image: `slotlock serve` (MCP and A2A over HTTP) on Node.js 22 LTS.
+# Slotlock server image: `slotlock serve` (MCP, A2A and REST over HTTP) on Node.js 24 LTS.
 #   docker build -t slotlock .
 #   docker compose up            (PostgreSQL included; see docker-compose.yml and the README)
 # Every base image is pinned by digest; Dependabot proposes updates. The server listens on
 # 0.0.0.0:8080 inside the container: publish it on 127.0.0.1, or behind a TLS reverse proxy.
+# The Node.js here is the one release.yml runs the suite on (NODE_VERSION) and a major the CI matrix
+# tests; src/__tests__/release-infrastructure.test.ts keeps the three in step. Node.js 24 is an LTS
+# line until 2028-04-30 (nodejs/Release schedule.json, read 2026-10-24); 26 becomes LTS on
+# 2026-10-28.
 
-FROM node:26.11.1-bookworm-slim@sha256:86f07bc9c5dce4578cf37e5a418b7bfc7f817cda25cde66e2b66e95ed86c4567 AS build
+FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS build
 WORKDIR /src
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund
@@ -12,13 +16,13 @@ RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY . .
 RUN npm run build && chmod 0755 dist/cli.js
 
-FROM node:26.11.1-bookworm-slim@sha256:86f07bc9c5dce4578cf37e5a418b7bfc7f817cda25cde66e2b66e95ed86c4567 AS deps
+FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 # Runtime dependencies exactly as locked: the libraries plus postgres, the peer dependency.
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 
-FROM node:26.11.1-bookworm-slim@sha256:86f07bc9c5dce4578cf37e5a418b7bfc7f817cda25cde66e2b66e95ed86c4567 AS runtime
+FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS runtime
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /src/dist ./dist

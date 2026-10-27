@@ -13,3 +13,4 @@ src/__tests__/
 !NOTICE
 !slotlock.manifest.json
 !slotlock-manifest.schema.json
+!openapi.json

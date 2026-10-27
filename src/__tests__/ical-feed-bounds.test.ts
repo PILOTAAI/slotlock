@@ -267,6 +267,29 @@ describe('a feed that would hold the process outside the recurrence budget', () 
     },
   );
 
+  it.each(parsers)('refuses %s thousands of RRULEs on one event at once', (_name, parse) => {
+    // Every step of the expansion compared each rule's next time, uncharged: 16,000 rules took
+    // 64 million comparisons and a second and a half to refuse.
+    const rules = Array.from({ length: 16_000 }, () => 'RRULE:FREQ=DAILY');
+    const text = calendar(
+      ...event('UID:fan-out', 'DTSTART:20261101T090000Z', 'DTEND:20261101T100000Z', ...rules),
+    );
+    const compare = ICAL.Time.prototype.compare;
+    let compared = 0;
+    ICAL.Time.prototype.compare = function (this: ICAL.Time, other: ICAL.Time) {
+      compared += 1;
+      return compare.call(this, other);
+    };
+    try {
+      const { ms, error } = timed(() => parse(text));
+      expect(error).toBeInstanceOf(CalendarExpansionLimitError);
+      expect(compared).toBeLessThan(10_000);
+      expect(ms).toBeLessThan(500);
+    } finally {
+      ICAL.Time.prototype.compare = compare;
+    }
+  });
+
   it.each(parsers)(
     'bounds %s a zone no VTIMEZONE defines, looked up among them for every date value',
     (_name, parse) => {

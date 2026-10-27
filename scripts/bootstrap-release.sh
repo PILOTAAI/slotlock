@@ -12,7 +12,9 @@
 #           create. If the release-tag environment has no TAG_RELEASE_DEPLOY_KEY, or the Release tags
 #           ruleset no deploy-key bypass, this runs scripts/configure-github.sh (you must be an admin).
 #   Tag     If the tag is not on GitHub yet, it re-runs tag-release.yml's failed run for main's head
-#           (or starts one) and waits for the tag. The tag's push starts Release and Image.
+#           (or starts one) and waits for the tag. The tag's push starts Release, whose image job
+#           (image.yml) pushes the image and then publishes the MCP Registry entry once the suite
+#           has passed and a reviewer has approved the ghcr and mcp-registry environments.
 #   npm     It waits for the tag's Release run, then:
 #           - slotlock is not on npm yet: npm accepts a trusted publisher only for a package that
 #             exists, so the first version comes from your own npm session. This downloads the
@@ -26,12 +28,12 @@
 #             (GOVERNANCE.md, Releases). The re-run then stages the version within minutes, which
 #             validates the publisher. This happens once, at the release after the first.
 #           Then it re-runs the Release run's failed jobs and waits for them.
-#   GHCR    It waits for the tag's Image run. A new GHCR package is private, GitHub has no API that
-#           changes that, and the MCP Registry pulls the image anonymously: if the image was pushed
-#           but cannot be pulled anonymously, this names the settings page, waits while you make it
-#           public, re-runs the Image run's failed jobs and waits for them.
+#   GHCR    A new GHCR package is private, GitHub has no API that changes that, and the MCP Registry
+#           pulls the image anonymously: if the Release run pushed the image but it cannot be pulled
+#           anonymously, this names the settings page, waits while you make it public, re-runs the
+#           Release run's failed jobs (the registry entry) and waits for them.
 #
-# It only uses the Release and Image runs that a push of the tag started on the commit the tag names.
+# It only uses the Release run that a push of the tag started on the commit the tag names.
 # It never asks for, reads or stores an npm token: npm uses the session `npm login` gave you.
 # Needs bash 3.2 or newer, gh logged in with write access to PILOTAAI/slotlock (admin when GitHub
 # still needs setting up), npm 11.15.0 or newer (npm stage, npm trust) logged in to an account with
@@ -44,11 +46,14 @@ IMAGE_PATH=pilotaai/slotlock
 # npm stage and npm trust arrived in 11.15.0; 11.17.0 is the version this script was run with,
 # whose publish lets a command-line flag override package.json's publishConfig (below).
 NPM_MINIMUM=11.17.0
-# image.yml's job that pushes the image.
+# image.yml's job that pushes the image. In the Release run that calls image.yml, GitHub names it
+# after the calling job too ("Image / Build, push and attest"), so it is matched by its end.
 IMAGE_JOB='Build, push and attest'
 TAG_KEY_SECRET=TAG_RELEASE_DEPLOY_KEY
 # The script that sets GitHub up; a test points this at a stand-in.
 CONFIGURE_GITHUB=${SLOTLOCK_CONFIGURE_GITHUB:-"$(cd "$(dirname "$0")" && pwd)/configure-github.sh"}
+# Chooses the dist-tag from the registry's current latest, as release.yml does.
+DIST_TAG="$(cd "$(dirname "$0")" && pwd)/dist-tag.sh"
 # Seconds between checks while waiting for a run to appear.
 POLL_SECONDS=${SLOTLOCK_POLL_SECONDS:-5}
 
@@ -165,7 +170,8 @@ tag_commit() {
 # watch_run RUN_ID NAME: waits for the run to finish (gh run watch returns when it does).
 watch_run() {
   [ "$DRY_RUN" -eq 0 ] || return 0
-  say "  waiting for $2 run $1 (https://github.com/$REPO/actions/runs/$1)"
+  say "  waiting for $2 run $1 (https://github.com/$REPO/actions/runs/$1); when a job waits for a"
+  say "  reviewer (npm, ghcr, mcp-registry), approve it there"
   gh run watch "$1" --repo "$REPO" --interval 15 >/dev/null 2>&1 || true
 }
 
@@ -326,8 +332,9 @@ first_publish() {
   [ "$spec" = "$PACKAGE@$VERSION" ] || die "$tarball holds $spec, not $PACKAGE@$VERSION"
   say "  $tarball: Release run $id's tested artifact, checksum verified"
 
-  dist_tag=latest
-  case "$VERSION" in *-*) dist_tag=next ;; esac
+  # It asks the registry, and stops rather than take an error for "nothing published yet".
+  dist_tag=$(sh "$DIST_TAG" "$VERSION" --npm) ||
+    die "could not choose the dist-tag for $VERSION"
   npm_login
   # A version already staged cannot be staged again; approve that one instead. 1.2.3 is not
   # 1.2.3-rc.1: the version must not run on into more version characters.
@@ -396,23 +403,23 @@ image_public() {
 
 image() {
   local id='' status='' conclusion='' run pushed attempt
-  run=$(latest_run image.yml) || exit 1
+  run=$(latest_run release.yml) || exit 1
   read -r id status conclusion <<<"$run" || true
   if image_public; then
     say "  ghcr.io/$IMAGE_PATH:$VERSION pulls anonymously"
   elif [ -z "$id" ]; then
-    say "  no Image run for $TAG yet: run this again when it has finished"
+    say "  no Release run for $TAG yet: run this again when it has finished"
     return 0
   elif [ "$status" != completed ]; then
-    say "  Image run $id is $status: run this again when it has finished"
+    say "  Release run $id is $status: run this again when it has finished"
     return 0
   else
     pushed=$(gh run view "$id" --repo "$REPO" --json jobs \
-      --jq ".jobs[] | select(.name == \"$IMAGE_JOB\") | .conclusion") ||
-      die "gh could not read Image run $id"
+      --jq "[.jobs[] | select(.name | endswith(\"$IMAGE_JOB\")) | .conclusion][0] // empty") ||
+      die "gh could not read Release run $id"
     if [ "$pushed" != success ]; then
-      say "  Image run $id did not push the image ($IMAGE_JOB: ${pushed:-not run})"
-      rerun_failed image.yml Image
+      # Its failed jobs were re-run above, after npm: what failed again needs a look, not a loop.
+      say "  Release run $id did not push the image ($IMAGE_JOB: ${pushed:-not run}): see https://github.com/$REPO/actions/runs/$id"
       return 0
     fi
     say "  ghcr.io/$IMAGE_PATH is private. Make it public (GitHub has no API for this; it cannot be undone):"
@@ -427,8 +434,9 @@ image() {
     done
     image_public || die "ghcr.io/$IMAGE_PATH:$VERSION still cannot be pulled anonymously"
     say "  ghcr.io/$IMAGE_PATH:$VERSION pulls anonymously"
+    # The registry entry failed while the image was private: publish it now.
+    rerun_failed release.yml Release
   fi
-  rerun_failed image.yml Image
 }
 
 command -v gh >/dev/null 2>&1 || die 'gh is required (https://cli.github.com)'
@@ -473,9 +481,7 @@ fi
 rerun_failed release.yml Release
 
 step "GHCR: ghcr.io/$IMAGE_PATH:$VERSION"
-wait_run image.yml Image
 image
 
 step "Where $TAG stands"
 result release.yml Release
-result image.yml Image

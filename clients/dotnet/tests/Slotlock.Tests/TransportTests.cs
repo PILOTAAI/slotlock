@@ -155,6 +155,24 @@ public sealed class TransportTests : IDisposable
     }
 
     [Fact]
+    public async Task Compiles0_2_0CallsThatPassTheTokenByPosition()
+    {
+        var (port, seen) = Stub();
+        using var client = Client(port);
+        await client.CreateResourceAsync("room", "UTC", Ct);
+        await client.AcquireHoldAsync("r1", "2027-03-29T09:00:00Z", "2027-03-29T10:00:00Z", 60, "checkout", Ct);
+        await client.UpdateEventAsync("e1", 3, "k", default, default, default, default, default, default, "Dock 4", default, default, default, default, default, default, default, Ct);
+        Assert.Equal(
+            new[]
+            {
+                "{\"external_ref\":\"room\",\"timezone\":\"UTC\"}",
+                "{\"resource_id\":\"r1\",\"start\":\"2027-03-29T09:00:00Z\",\"end\":\"2027-03-29T10:00:00Z\",\"ttl_seconds\":60,\"source\":\"checkout\"}",
+                "{\"expected_revision\":3,\"idempotency_key\":\"k\",\"location\":\"Dock 4\"}",
+            },
+            seen.Select(request => JsonNode.Parse(request.Body)!.ToJsonString()).ToArray());
+    }
+
+    [Fact]
     public async Task LeavesOutDefaultSendsNullAsNull()
     {
         var (port, seen) = Stub();

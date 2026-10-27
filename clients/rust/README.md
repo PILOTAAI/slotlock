@@ -15,6 +15,7 @@ let client = Client::new("https://calendar.example.com", &api_key)?; // a key wi
 let van = client.create_resource(&CreateResourceInput {
     external_ref: "vehicle-42".into(),
     timezone: Some("Europe/London".into()),
+    ..Default::default()
 })?;
 let id = van["resource"]["id"].as_str().unwrap().to_string();
 

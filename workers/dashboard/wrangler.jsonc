@@ -32,10 +32,12 @@
       "id": "set-this-to-the-hyperdrive-configuration-id"
     }
   ],
-  // Required: the Worker answers 503 without them. A sign-in writes to the database and asks GitHub
-  // with the app's client secret, and the limit on sign-ins in flight is per isolate, so these bound
-  // the requests of every isolate. Counts are per Cloudflare location. namespace_id must be unique in
-  // the account (two bindings with the same one share their counts).
+  // The Worker answers 503 without the first two, and without the ceiling counts sign-ins from every
+  // client in SLOTLOCK_SIGN_IN_RATE_LIMIT, as before the ceiling existed. A sign-in writes to the
+  // database and asks GitHub with the app's client secret, and the limit on sign-ins in flight is per
+  // isolate, so these bound the requests of every isolate. Counts are per Cloudflare location.
+  // namespace_id must be unique in the account (two bindings with the same one share their counts);
+  // period is 10 or 60 seconds.
   "ratelimits": [
     {
       // Every dashboard request, per client address.
@@ -44,10 +46,18 @@
       "simple": { "limit": 60, "period": 60 }
     },
     {
-      // GitHub sign-ins and their callbacks, from every client together.
+      // GitHub sign-ins and their callbacks, per client network (an IPv6 client's /48): five
+      // sign-ins a minute.
       "name": "SLOTLOCK_SIGN_IN_RATE_LIMIT",
       "namespace_id": "41002",
-      "simple": { "limit": 120, "period": 60 }
+      "simple": { "limit": 10, "period": 60 }
+    },
+    {
+      // GitHub sign-ins and their callbacks, from every client together: a ceiling far above one
+      // client's limit, so a few clients cannot use it up for everyone.
+      "name": "SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT",
+      "namespace_id": "41003",
+      "simple": { "limit": 600, "period": 60 }
     }
   ],
   // A page takes several queries; run the Worker near the database rather than near each visitor.
@@ -60,5 +70,9 @@
     // Who may sign in: "*" for every GitHub account (each gets its own tenant), or GitHub ids.
     "SLOTLOCK_DASHBOARD_USERS": "*"
   },
-  "observability": { "enabled": true }
+  // Workers Logs keep each request's URL for up to 7 days; a sign-in callback's query holds its
+  // OAuth code and state, so query strings are removed from logged URLs. redact_query_string is the
+  // field's name in wrangler 4.149.0's config-schema.json (Observability, read 2026-10-24), the
+  // version package.json pins.
+  "observability": { "enabled": true, "redact_query_string": true }
 }

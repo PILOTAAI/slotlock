@@ -10,7 +10,11 @@ import {
   withSlotlockMaintenanceLock,
 } from '../maintenance.js';
 import type { SlotlockStore } from '../store.js';
-import type { CalendarEventRetentionResult, CalendarHorizonRollResult } from '../types.js';
+import type {
+  BookingRetentionResult,
+  CalendarEventRetentionResult,
+  CalendarHorizonRollResult,
+} from '../types.js';
 
 // The timers a test runs on, before startSlotlockMaintenance's tests fake them.
 const realSetTimeout = globalThis.setTimeout;
@@ -19,19 +23,37 @@ const DONE_ROLL: CalendarHorizonRollResult = {
   examined: 0,
   extended: 0,
   conflicts: 0,
+  conflictEventIds: [],
   refused: 0,
   refusedEventIds: [],
   hasMore: false,
   next: null,
 };
 const DONE_PRUNE: CalendarEventRetentionResult = { commandsDeleted: 0, tombstonesDeleted: 0, hasMore: false };
-const cursor = (n: number) => ({ materializedEndsAt: new Date(Date.UTC(2027, 0, n)), eventId: `event-${n}` });
+const DONE_PURGE: BookingRetentionResult = {
+  expiredHoldsDeleted: 0,
+  holdCommandsDeleted: 0,
+  tombstonesDeleted: 0,
+  hasMore: false,
+};
+const cursor = (n: number) => ({
+  rollRetryAt: null,
+  materializedEndsAt: new Date(Date.UTC(2027, 0, n)),
+  eventId: `event-${n}`,
+});
+/** A place among the series the roll has put back, which it reaches after every other. */
+const retryCursor = (n: number) => ({ ...cursor(n), rollRetryAt: new Date(Date.UTC(2026, 11, 31)) });
 
 /** A store whose tenants answer from queues of results, then with nothing left to do. */
 function fakeStore() {
   const rolls = new Map<string, CalendarHorizonRollResult[]>();
   const prunes = new Map<string, CalendarEventRetentionResult[]>();
-  const calls: { tenantRef: string; task: 'roll' | 'prune'; params: Record<string, unknown> }[] = [];
+  const purges = new Map<string, BookingRetentionResult[]>();
+  const calls: {
+    tenantRef: string;
+    task: 'roll' | 'prune' | 'purge';
+    params: Record<string, unknown>;
+  }[] = [];
   let gate: Promise<void> | null = null;
   const store = {
     async withTenant(tenantRef: string, callback: (tenant: unknown) => Promise<unknown>) {
@@ -47,6 +69,10 @@ function fakeStore() {
           calls.push({ tenantRef, task: 'prune', params });
           return prunes.get(tenantRef)?.shift() ?? DONE_PRUNE;
         },
+        async pruneBookingRetention(params: Record<string, unknown>) {
+          calls.push({ tenantRef, task: 'purge', params });
+          return purges.get(tenantRef)?.shift() ?? DONE_PURGE;
+        },
       });
     },
   } as unknown as SlotlockStore;
@@ -55,6 +81,7 @@ function fakeStore() {
     calls,
     roll: (tenantRef: string, ...results: CalendarHorizonRollResult[]) => rolls.set(tenantRef, results),
     prune: (tenantRef: string, ...results: CalendarEventRetentionResult[]) => prunes.set(tenantRef, results),
+    purge: (tenantRef: string, ...results: BookingRetentionResult[]) => purges.set(tenantRef, results),
     fail: (tenantRef: string, error: Error) =>
       rolls.set(tenantRef, [{ fail: error } as unknown as CalendarHorizonRollResult]),
     /** Hold every pass until the returned function is called. */
@@ -111,6 +138,7 @@ const result = (overrides: Partial<SlotlockMaintenanceResult> = {}): SlotlockMai
   refused: 0,
   pruned: 0,
   capped: false,
+  rollPending: false,
   ...overrides,
 });
 
@@ -130,6 +158,7 @@ describe('maintainSlotlockTenant', () => {
       ['roll', null],
       ['roll', cursor(1)],
       ['prune', null],
+      ['purge', null],
       ['prune', null],
     ]);
     // One rolling window for the whole pass, and always the tenant it was given.
@@ -140,11 +169,47 @@ describe('maintainSlotlockTenant', () => {
     );
   });
 
+  it('purges expired holds and prunes booking bookkeeping alongside, counting them as pruned', async () => {
+    const fake = fakeStore();
+    fake.purge(
+      'fleet',
+      { expiredHoldsDeleted: 100, holdCommandsDeleted: 2, tombstonesDeleted: 1, hasMore: true },
+      { expiredHoldsDeleted: 20, holdCommandsDeleted: 0, tombstonesDeleted: 0, hasMore: false },
+    );
+    expect(await maintainSlotlockTenant(fake.store, 'fleet')).toEqual(result({ pruned: 123 }));
+    expect(fake.calls.map(({ task, params }) => [task, params.tenantRef])).toEqual([
+      ['roll', 'fleet'],
+      ['prune', 'fleet'],
+      ['purge', 'fleet'],
+      ['purge', 'fleet'],
+    ]);
+    const capped = fakeStore();
+    capped.purge('fleet', { ...DONE_PURGE, expiredHoldsDeleted: 100, hasMore: true });
+    expect(await maintainSlotlockTenant(capped.store, 'fleet', { batches: 1 })).toEqual(
+      result({ pruned: 100, capped: true }),
+    );
+  });
+
+  it('still prunes when the roll fails, then throws the roll\'s error', async () => {
+    const fake = fakeStore();
+    const failure = new Error('connection reset');
+    fake.fail('fleet', failure);
+    fake.purge('fleet', { ...DONE_PURGE, expiredHoldsDeleted: 3 });
+    await expect(maintainSlotlockTenant(fake.store, 'fleet')).rejects.toBe(failure);
+    expect(fake.calls.map(({ task }) => task)).toEqual(['roll', 'prune', 'purge']);
+  });
+
   it('stops each task after `batches` and says there is more', async () => {
     const fake = fakeStore();
     fake.roll('fleet', ...[1, 2, 3].map((n) => ({ ...DONE_ROLL, extended: 1, hasMore: true, next: cursor(n) })));
     expect(await maintainSlotlockTenant(fake.store, 'fleet', { batches: 2 })).toEqual(
-      result({ extended: 2, capped: true }),
+      result({ extended: 2, capped: true, rollPending: true }),
+    );
+    // A roll that stopped among the series it put back has nothing new left behind.
+    const retries = fakeStore();
+    retries.roll('fleet', ...[1, 2].map((n) => ({ ...DONE_ROLL, refused: 1, hasMore: true, next: retryCursor(n) })));
+    expect(await maintainSlotlockTenant(retries.store, 'fleet', { batches: 1 })).toEqual(
+      result({ refused: 1, capped: true }),
     );
     const prunes = fakeStore();
     prunes.prune('fleet', ...[1, 2].map(() => ({ commandsDeleted: 5, tombstonesDeleted: 0, hasMore: true })));
@@ -284,8 +349,10 @@ describe('startSlotlockMaintenance', () => {
     const fake = fakeStore();
     // Ten batches of one extended series, then the rest: two passes back to back.
     fake.roll('fleet', ...Array.from({ length: 12 }, (_, n) => ({ ...DONE_ROLL, extended: 1, hasMore: true, next: cursor(n + 1) })));
-    // Another tenant whose only due series are ones it cannot extend: capped, but no progress.
-    fake.roll('stuck', ...Array.from({ length: 30 }, (_, n) => ({ ...DONE_ROLL, refused: 1, hasMore: true, next: cursor(n + 1) })));
+    // Another tenant whose pass meets only series the roll has put back before, and cannot extend
+    // again: capped, but nothing behind them is new, since the roll reaches them after every other
+    // series. It waits for the next interval: a store that kept answering them never loops.
+    fake.roll('stuck', ...Array.from({ length: 30 }, (_, n) => ({ ...DONE_ROLL, refused: 1, hasMore: true, next: retryCursor(n + 1) })));
     const onPass = vi.fn();
     const scheduler = startSlotlockMaintenance({
       store: fake.store,
@@ -297,9 +364,40 @@ describe('startSlotlockMaintenance', () => {
     await settle();
     await settle();
     expect(onPass.mock.calls.map(([pass]) => pass)).toEqual([
-      result({ extended: 10, capped: true }),
+      result({ extended: 10, capped: true, rollPending: true }),
       result({ refused: 10, capped: true }),
       result({ extended: 2 }),
+    ]);
+    await settle();
+    expect(onPass).toHaveBeenCalledTimes(3);
+    await scheduler.close();
+  });
+
+  it('goes round again while a capped pass stops among series not yet put back, however many are stuck', async () => {
+    const fake = fakeStore();
+    // 30 batches of series the roll meets for the first time and cannot extend, then a healthy one:
+    // each pass puts its ten behind every other series, so the next one meets new ones.
+    fake.roll(
+      'stuck',
+      ...Array.from({ length: 30 }, (_, n) => ({ ...DONE_ROLL, conflicts: 1, hasMore: true, next: cursor(n + 1) })),
+      { ...DONE_ROLL, extended: 1 },
+    );
+    const onPass = vi.fn();
+    const scheduler = startSlotlockMaintenance({
+      store: fake.store,
+      sql: fakeSql().sql,
+      tenants: ['stuck'],
+      intervalMs: HOUR,
+      onPass,
+    });
+    for (let i = 0; i < 4; i++) await settle();
+    // Before, it went round once more after a blocked pass and then waited an interval, by which
+    // time the first ones were due again: more than two passes' worth starved the healthy one.
+    expect(onPass.mock.calls.map(([pass]) => pass)).toEqual([
+      result({ conflicts: 10, capped: true, rollPending: true }),
+      result({ conflicts: 10, capped: true, rollPending: true }),
+      result({ conflicts: 10, capped: true, rollPending: true }),
+      result({ extended: 1 }),
     ]);
     await scheduler.close();
   });
@@ -323,7 +421,8 @@ describe('startSlotlockMaintenance', () => {
     await settle();
     expect(onError).toHaveBeenCalledWith(failure);
     expect(onPass).toHaveBeenCalledTimes(1);
-    expect(tenantsMaintained(fake)).toEqual(['fine']);
+    // The failed roll's tenant is still pruned before its pass is reported failed.
+    expect(tenantsMaintained(fake)).toEqual(['broken', 'fine']);
     // The failed tenant waits for the next interval rather than failing in a loop.
     await vi.advanceTimersByTimeAsync(30 * 60_000);
     expect(onError).toHaveBeenCalledTimes(1);
@@ -365,7 +464,7 @@ describe('startSlotlockMaintenance', () => {
         failures: onError.mock.calls.length,
         maintained: tenantsMaintained(fake),
         unhandled,
-      }).toEqual({ passes: 2, failures: 1, maintained: ['fine', 'also-fine'], unhandled: [] });
+      }).toEqual({ passes: 2, failures: 1, maintained: ['fine', 'broken', 'also-fine'], unhandled: [] });
       await scheduler.close();
     } finally {
       process.off('unhandledRejection', record);

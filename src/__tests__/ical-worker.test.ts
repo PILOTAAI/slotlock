@@ -59,7 +59,8 @@ describe('reading iCalendar on worker threads', () => {
   });
 
   it('where a parse on this thread holds every timer until it ends', async () => {
-    // What the pool avoids: one of the slow feeds the parser stops at its one-second limit.
+    // What the pool avoids: one of the slow feeds the parser refuses at the end of its budget, about
+    // a third of a second of work here.
     const slowZone = [
       'BEGIN:VCALENDAR',
       'VERSION:2.0',
@@ -83,7 +84,8 @@ describe('reading iCalendar on worker threads', () => {
     ].join('\r\n');
     const { ticks, ms, outcome } = await ticking(() => parseICalendarChanges(slowZone, 'UTC'));
     expect(outcome).toBeInstanceOf(CalendarExpansionLimitError);
-    expect(ms).toBeGreaterThanOrEqual(900);
+    // Long enough for five ticks, had the thread been free.
+    expect(ms).toBeGreaterThanOrEqual(50);
     expect(ticks).toBe(0);
   });
 
@@ -131,6 +133,25 @@ describe('reading iCalendar on worker threads', () => {
     });
     expect(reply.echo.window.start).toEqual(window.start);
     expect(reply.echo.window.end).toEqual(window.end);
+  });
+
+  it('reads a feed series by series, passing the feed, its zone and its window as given', async () => {
+    const window = {
+      start: new Date('2026-10-01T00:00:00Z'),
+      end: new Date('2027-10-01T00:00:00Z'),
+    };
+    const reply = (await pool().parseICalendarFeed('feed', 'Europe/London', window)) as unknown as {
+      echo: { op: string; input: string; calendarTimezone: string; window: { start: Date } };
+    };
+    expect(reply.echo).toMatchObject({
+      op: 'feed',
+      input: 'feed',
+      calendarTimezone: 'Europe/London',
+    });
+    expect(reply.echo.window.start).toEqual(window.start);
+    await expect(
+      pool().parseICalendarFeed('feed', undefined, { start: 'today' } as never),
+    ).rejects.toMatchObject({ code: 'invalid_icalendar' });
   });
 
   it("gives the parsers' own refusals back as the same errors", async () => {

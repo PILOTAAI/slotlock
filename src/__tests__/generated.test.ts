@@ -47,4 +47,29 @@ describe('generated files', () => {
     expect([...files.keys()]).toHaveLength(5);
     for (const [path, content] of files) expectFile(path, content);
   });
+
+  it("the .NET client still has every method 0.2.0's callers compile against", () => {
+    const compat = JSON.parse(
+      readFileSync(new URL('clients/dotnet/compat-0.2.0.json', ROOT), 'utf8'),
+    ) as { methods: Record<string, string[]> };
+    const source = generateClients(repositoryOpenApi()).get(
+      'clients/dotnet/src/Slotlock/SlotlockClient.Operations.g.cs',
+    ) as string;
+    // Every public method's parameter list, defaults left out, by name.
+    const methods = new Map<string, string[][]>();
+    for (const match of source.matchAll(/public Task<JsonObject> (\w+)\(([^)]*)\)/g)) {
+      const params = (match[2] as string).split(',').map((p) => p.trim().replace(/ = default$/, ''));
+      methods.set(match[1] as string, [...(methods.get(match[1] as string) ?? []), params]);
+    }
+    const name = (id: string) =>
+      `${id.replace(/^slotlock_/, '').replace(/(^|_)([a-z])/g, (_m, _s, letter: string) => letter.toUpperCase())}Async`;
+    expect(Object.keys(compat.methods)).toHaveLength(19);
+    for (const [id, params] of Object.entries(compat.methods)) {
+      expect(methods.get(name(id)), id).toContainEqual(params);
+    }
+    // Where a parameter came in before the token, the 0.2.0 list is an overload of its own.
+    for (const method of ['CreateResourceAsync', 'AcquireHoldAsync', 'UpdateEventAsync']) {
+      expect(methods.get(method), method).toHaveLength(2);
+    }
+  });
 });

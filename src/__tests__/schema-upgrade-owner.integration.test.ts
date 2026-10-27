@@ -195,7 +195,9 @@ describe.skipIf(!url)('upgrading as the owning role under forced RLS', () => {
         return { resourceId: resource.id, eventId: put.eventId };
       }),
     );
-    // As a release before the normalized children, and before archives carried their tenant, left them.
+    // As a release before the normalized children, and before archives carried their tenant, left them
+    // (and before schemas recorded their version).
+    await superuser`DROP TABLE slotlock.schema_version`;
     await superuser`DELETE FROM slotlock.calendar_event_attendees WHERE event_id = ${eventId}`;
     await superuser`DELETE FROM slotlock.calendar_event_reminders WHERE event_id = ${eventId}`;
     const [archive] = await superuser<{ archive_id: string }[]>`

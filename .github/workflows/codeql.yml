@@ -1,0 +1,51 @@
+# CodeQL: the extended security queries over the TypeScript and JavaScript (src/, scripts/, site/,
+# the clients' generator) and over the workflows themselves, on every pull request, every push to
+# main and weekly. It replaces GitHub's default setup (scripts/configure-github.sh turns that off;
+# the two cannot run together) so that the one false positive it drops is dropped by a reviewed
+# configuration with its reason (.github/codeql/codeql-config.yml), not by dismissing alerts.
+#
+# Both actions are pinned to the commit scorecard.yml's upload-sarif uses: github/codeql-action's
+# annotated tag v4.39.0 peels to 6f2ac81f (gh api .../git/matching-refs/tags/v4.39.0, then
+# .../git/tags/<sha>, on 2026-10-24), and init at that commit takes languages, build-mode and
+# config-file.
+name: CodeQL
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions: {}
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      # Upload the results to code scanning.
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, javascript-typescript]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          languages: ${{ matrix.language }}
+          # Neither needs a build: CodeQL reads TypeScript, JavaScript and workflow files as they are.
+          build-mode: none
+          config-file: ./.github/codeql/codeql-config.yml
+      - uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          category: /language:${{ matrix.language }}

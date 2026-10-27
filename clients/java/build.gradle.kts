@@ -3,10 +3,12 @@
 // the suite against a server).
 plugins {
     `java-library`
+    `maven-publish`
+    signing
 }
 
 group = "io.pylota"
-version = "0.1.0"
+version = "0.2.0"
 description = "A client for Slotlock's REST API: calendars AI agents cannot double-book."
 
 repositories {
@@ -42,5 +44,61 @@ tasks.test {
     testLogging {
         events("passed", "skipped", "failed")
         exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
+}
+
+// Maven Central: release.yml's maven-central job runs `gradle publishMavenPublicationToBundleRepository`
+// with the signing key in its environment, then scripts/central-bundle.sh uploads build/central-bundle
+// as a deployment a maintainer publishes. Central requires the name, description, URL, licence,
+// developers and SCM below, and a signature on every file (central.sonatype.org/publish/requirements).
+publishing {
+    publications {
+        create<MavenPublication>("maven") {
+            artifactId = "slotlock"
+            from(components["java"])
+            pom {
+                name = "Slotlock"
+                description = project.description
+                url = "https://slotlock.pylota.io"
+                licenses {
+                    license {
+                        name = "Apache-2.0"
+                        url = "https://www.apache.org/licenses/LICENSE-2.0"
+                    }
+                }
+                developers {
+                    developer {
+                        id = "cleverom"
+                        name = "TREFT LTD"
+                        url = "https://github.com/PILOTAAI/slotlock/blob/main/MAINTAINERS.md"
+                    }
+                }
+                scm {
+                    url = "https://github.com/PILOTAAI/slotlock"
+                    connection = "scm:git:https://github.com/PILOTAAI/slotlock.git"
+                    developerConnection = "scm:git:ssh://git@github.com/PILOTAAI/slotlock.git"
+                }
+            }
+        }
+    }
+    repositories {
+        maven {
+            name = "bundle"
+            url = uri(layout.buildDirectory.dir("central-bundle"))
+        }
+    }
+}
+
+// Signs only where the release job provides the key (ASCII-armoured, from the maven-central
+// environment); a local or CI build signs nothing and needs no key. A key without a passphrase takes
+// an empty one: with none at all, Gradle configures no signatory.
+val signingKey = providers.environmentVariable("MAVEN_SIGNING_KEY")
+if (signingKey.isPresent) {
+    signing {
+        useInMemoryPgpKeys(
+            signingKey.get(),
+            providers.environmentVariable("MAVEN_SIGNING_PASSWORD").getOrElse(""),
+        )
+        sign(publishing.publications["maven"])
     }
 }
