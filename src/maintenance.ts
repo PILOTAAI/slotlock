@@ -29,6 +29,10 @@ export interface SlotlockMaintenanceResult {
   zoneShifts: number;
   /** Coverage sources gone stale since the last pass, now reported on the feed (`coverage.stale`). */
   staleSources: number;
+  /** Bookings left unclaimed past their check-in window, released (`reservation.no_show`). */
+  noShows: number;
+  /** Waitlist entries whose window came free, each now holding it (`waitlist.offered`). */
+  waitlistOffers: number;
   /** More was left than one pass does: run another. */
   capped: boolean;
   /**
@@ -115,6 +119,9 @@ export async function maintainSlotlockTenant(
     tenant.followZoneRules({ tenantRef, move: options.followZoneRules === true }),
   );
   const staleSources = await store.withTenant(tenantRef, (tenant) => tenant.reportStaleCoverage({ tenantRef }));
+  // No-shows first: the time they free is offered to the waitlist in the same pass.
+  const noShows = await store.withTenant(tenantRef, (tenant) => tenant.releaseNoShows({ tenantRef }));
+  const offers = await store.withTenant(tenantRef, (tenant) => tenant.offerWaitlist({ tenantRef }));
   if (rollFailure) throw rollFailure.error;
   return {
     extended,
@@ -123,6 +130,8 @@ export async function maintainSlotlockTenant(
     pruned,
     zoneShifts: zones.shifted,
     staleSources,
+    noShows,
+    waitlistOffers: offers.offered,
     capped: rollCapped || eventsLeft || bookingsLeft || changesLeft,
     rollPending: rollCapped && after !== null && (after.rollRetryAt ?? null) === null,
   };

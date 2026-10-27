@@ -44,6 +44,10 @@ export type SlotlockApplicationOperation =
   | 'slotlock_list_reservations'
   | 'slotlock_put_reservation'
   | 'slotlock_cancel_reservation'
+  | 'slotlock_check_in_reservation'
+  | 'slotlock_join_waitlist'
+  | 'slotlock_list_waitlist'
+  | 'slotlock_leave_waitlist'
   | 'slotlock_record_coverage'
   | 'slotlock_list_tenant_events'
   | 'slotlock_get_tenant_event'
@@ -107,6 +111,10 @@ export interface SlotlockApplicationBackend {
   listReservations: Handler;
   putReservation: Handler;
   cancelReservation: Handler;
+  checkInReservation: Handler;
+  joinWaitlist: Handler;
+  listWaitlist: Handler;
+  leaveWaitlist: Handler;
   recordCoverage: Handler;
   listTenantEvents: Handler;
   getTenantEvent: Handler;
@@ -217,6 +225,7 @@ const BOOKING_RULES = z
     slot_step_minutes: z.number().int().min(1).max(1_440).optional(),
     turnaround_minutes: z.number().int().min(0).max(1_440).optional(),
     enforce_hours: z.boolean().optional(),
+    check_in_minutes: z.number().int().min(1).max(1_440).optional(),
   })
   .strict();
 
@@ -286,6 +295,25 @@ const WEBHOOK = z
     last_error: z.string().max(500).nullable(),
     disabled_at: DATE_TIME.nullable(),
     disabled_reason: z.enum(['gone', 'failing']).nullable(),
+  })
+  .strict();
+
+const WAITLIST_ENTRY = z
+  .object({
+    id: z.string().uuid(),
+    /** The resource it waits on; `null` when it waits on a pool. */
+    resource_id: RESOURCE_ID.nullable(),
+    pool: POOL.nullable(),
+    start: DATE_TIME,
+    end: DATE_TIME,
+    holder_ref: z.string().min(1).max(500),
+    offer_ttl_seconds: z.number().int().min(60).max(86_400),
+    /** waiting; offered (hold_id holds the window on offered_resource_id); expired (it started first). */
+    status: z.enum(['waiting', 'offered', 'expired']),
+    hold_id: z.string().uuid().nullable(),
+    offered_resource_id: RESOURCE_ID.nullable(),
+    offered_at: DATE_TIME.nullable(),
+    created_at: DATE_TIME,
   })
   .strict();
 
@@ -747,6 +775,82 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       example: { reservation_ref: 'booking-BK-42', revision: 2 },
     },
     {
+      name: 'slotlock_check_in_reservation',
+      title: 'Check in a booking',
+      description:
+        "Claim a booking by its reference: the customer has arrived or picked up. On a resource whose booking rules set check_in_minutes, a booking not checked in that long after its start is released by maintenance (reservation.no_show on the feed) and offered to the waitlist. Checking in again keeps the first time; a booking that has ended answers 409 reservation_ended.",
+      method: 'POST',
+      path: '/v1/reservations/{reservation_ref}/check-in',
+      input: z.object({ reservation_ref: IDENTITY }).strict(),
+      output: z.object({ reference: IDENTITY, checked_in_at: DATE_TIME }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'checkInReservation',
+      example: { reservation_ref: 'booking-BK-42' },
+    },
+    {
+      name: 'slotlock_join_waitlist',
+      title: 'Join the waitlist',
+      description:
+        "Wait for a window on one resource (resource_id) or on any member of a pool (pool) that is taken now. When it comes free (a booking cancelled, a hold released or expired, a no-show), the entries waiting for it are offered in the order they joined: the first gets a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409 waitlist_limit_reached); a window is at most 31 days.",
+      method: 'POST',
+      path: '/v1/waitlist',
+      input: z
+        .object({
+          resource_id: RESOURCE_ID.optional(),
+          pool: POOL.optional(),
+          start: DATE_TIME,
+          end: DATE_TIME,
+          holder_ref: z.string().trim().min(1).max(500),
+          offer_ttl_seconds: z.number().int().min(60).max(86_400).optional(),
+        })
+        .strict()
+        .refine((input) => (input.resource_id === undefined) !== (input.pool === undefined), {
+          message: 'Name resource_id or pool, not both',
+        }),
+      output: z.object({ entry: WAITLIST_ENTRY }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: false },
+      invoke: 'joinWaitlist',
+      example: {
+        pool: 'van',
+        start: '2027-03-29T09:00:00Z',
+        end: '2027-03-29T17:00:00Z',
+        holder_ref: 'customer-42',
+      },
+    },
+    {
+      name: 'slotlock_list_waitlist',
+      title: 'List the waitlist',
+      description:
+        "The tenant's waitlist entries in the order they are offered (oldest first), with what each was offered: optionally only those of one resource, pool or holder.",
+      method: 'GET',
+      path: '/v1/waitlist',
+      input: z
+        .object({
+          resource_id: RESOURCE_ID.optional(),
+          pool: POOL.optional(),
+          holder_ref: z.string().trim().min(1).max(500).optional(),
+          limit: z.number().int().min(1).max(1_000).default(100),
+        })
+        .strict(),
+      output: z.object({ entries: z.array(WAITLIST_ENTRY).max(1_000) }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'listWaitlist',
+      example: { pool: 'van' },
+    },
+    {
+      name: 'slotlock_leave_waitlist',
+      title: 'Leave the waitlist',
+      description:
+        'Stop waiting. A hold already offered stays until it is confirmed, released or expires. left is false when there was no such entry.',
+      method: 'DELETE',
+      path: '/v1/waitlist/{entry_id}',
+      input: z.object({ entry_id: z.string().uuid() }).strict(),
+      output: z.object({ left: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'leaveWaitlist',
+      example: { entry_id: '1b4e28ba-2fa1-41d2-883f-0016d3cca427' },
+    },
+    {
       name: 'slotlock_record_coverage',
       title: 'Record calendar coverage',
       description:
@@ -951,6 +1055,8 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           pruned: z.number().int().min(0),
           zone_shifts: z.number().int().min(0),
           stale_sources: z.number().int().min(0),
+          no_shows: z.number().int().min(0),
+          waitlist_offers: z.number().int().min(0),
           capped: z.boolean(),
         })
         .strict(),

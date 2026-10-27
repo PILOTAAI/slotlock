@@ -31,6 +31,7 @@ const READS = [
   'getFreeBusy',
   'findNextAvailableFor',
   'isTenantSuspended',
+  'listWaitlist',
 ];
 const UPKEEP = [
   'rollCalendarEventHorizon',
@@ -42,6 +43,8 @@ const UPKEEP = [
   'pruneChanges',
   'followZoneRules',
   'reportStaleCoverage',
+  'releaseNoShows',
+  'offerWaitlist',
 ];
 const ADMINISTRATION = [
   'applySchema',

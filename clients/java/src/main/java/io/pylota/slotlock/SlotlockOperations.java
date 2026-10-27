@@ -50,6 +50,10 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_put_reservation", new Operation("PUT", "/v1/reservations/{reservation_ref}", List.of("reservation_ref"), List.of())),
           Map.entry("slotlock_cancel_reservation", new Operation("DELETE", "/v1/reservations/{reservation_ref}", List.of("reservation_ref"), List.of("revision"))),
           Map.entry("slotlock_list_reservations", new Operation("GET", "/v1/resources/{resource_id}/reservations", List.of("resource_id"), List.of("start", "end", "limit", "cursor"))),
+          Map.entry("slotlock_check_in_reservation", new Operation("POST", "/v1/reservations/{reservation_ref}/check-in", List.of("reservation_ref"), List.of())),
+          Map.entry("slotlock_list_waitlist", new Operation("GET", "/v1/waitlist", List.of(), List.of("resource_id", "pool", "holder_ref", "limit"))),
+          Map.entry("slotlock_join_waitlist", new Operation("POST", "/v1/waitlist", List.of(), List.of())),
+          Map.entry("slotlock_leave_waitlist", new Operation("DELETE", "/v1/waitlist/{entry_id}", List.of("entry_id"), List.of())),
           Map.entry("slotlock_record_coverage", new Operation("PUT", "/v1/resources/{resource_id}/coverage/{source}", List.of("resource_id", "source"), List.of())),
           Map.entry("slotlock_get_coverage", new Operation("GET", "/v1/resources/{resource_id}/coverage", List.of("resource_id"), List.of())),
           Map.entry("slotlock_record_coverage_failure", new Operation("POST", "/v1/resources/{resource_id}/coverage/{source}/failure", List.of("resource_id", "source"), List.of())),
@@ -1054,6 +1058,108 @@ public abstract class SlotlockOperations {
    */
   public Map<String, Object> listReservations(String resourceId, String start, String end) {
     return listReservations(resourceId, start, end, null);
+  }
+
+  /**
+   * Check in a booking. Claim a booking by its reference: the customer has arrived or picked up.
+   * On a resource whose booking rules set check_in_minutes, a booking not checked in that long
+   * after its start is released by maintenance (reservation.no_show on the feed) and offered to
+   * the waitlist. Checking in again keeps the first time; a booking that has ended answers 409
+   * reservation_ended.
+   *
+   * @param reservationRef {@code reservation_ref}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> checkInReservation(String reservationRef) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("reservation_ref", reservationRef);
+    return call("slotlock_check_in_reservation", values);
+  }
+
+  /**
+   * List the waitlist. The tenant's waitlist entries in the order they are offered (oldest
+   * first), with what each was offered: optionally only those of one resource, pool or holder.
+   *
+   * @param optional the optional arguments, or null: {@code resource_id} (string), {@code pool}
+   * (string), {@code holder_ref} (string), {@code limit} (integer)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> listWaitlist(Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    putOptional(values, optional, Set.of("resource_id", "pool", "holder_ref", "limit"), "slotlock_list_waitlist");
+    return call("slotlock_list_waitlist", values);
+  }
+
+  /**
+   * List the waitlist. The tenant's waitlist entries in the order they are offered (oldest
+   * first), with what each was offered: optionally only those of one resource, pool or holder.
+   *
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> listWaitlist() {
+    return listWaitlist(null);
+  }
+
+  /**
+   * Join the waitlist. Wait for a window on one resource (resource_id) or on any member of a pool
+   * (pool) that is taken now. When it comes free (a booking cancelled, a hold released or
+   * expired, a no-show), the entries waiting for it are offered in the order they joined: the
+   * first gets a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed
+   * says so (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window
+   * starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409
+   * waitlist_limit_reached); a window is at most 31 days.
+   *
+   * @param start {@code start}, string
+   * @param end {@code end}, string
+   * @param holderRef {@code holder_ref}, string
+   * @param optional the optional arguments, or null: {@code resource_id} (string), {@code pool}
+   * (string), {@code offer_ttl_seconds} (integer)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> joinWaitlist(String start, String end, String holderRef, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("start", start);
+    values.put("end", end);
+    values.put("holder_ref", holderRef);
+    putOptional(values, optional, Set.of("resource_id", "pool", "offer_ttl_seconds"), "slotlock_join_waitlist");
+    return call("slotlock_join_waitlist", values);
+  }
+
+  /**
+   * Join the waitlist. Wait for a window on one resource (resource_id) or on any member of a pool
+   * (pool) that is taken now. When it comes free (a booking cancelled, a hold released or
+   * expired, a no-show), the entries waiting for it are offered in the order they joined: the
+   * first gets a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed
+   * says so (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window
+   * starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409
+   * waitlist_limit_reached); a window is at most 31 days.
+   *
+   * @param start {@code start}, string
+   * @param end {@code end}, string
+   * @param holderRef {@code holder_ref}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> joinWaitlist(String start, String end, String holderRef) {
+    return joinWaitlist(start, end, holderRef, null);
+  }
+
+  /**
+   * Leave the waitlist. Stop waiting. A hold already offered stays until it is confirmed,
+   * released or expires. left is false when there was no such entry.
+   *
+   * @param entryId {@code entry_id}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> leaveWaitlist(String entryId) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("entry_id", entryId);
+    return call("slotlock_leave_waitlist", values);
   }
 
   /**

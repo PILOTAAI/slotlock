@@ -1179,6 +1179,8 @@ async function maintainTenant(
         pruned: 0,
         zoneShifts: 0,
         staleSources: 0,
+        noShows: 0,
+        waitlistOffers: 0,
         capped: true,
         passes: 0,
       };
@@ -1191,6 +1193,8 @@ async function maintainTenant(
         sum.pruned += pass.pruned;
         sum.zoneShifts += pass.zoneShifts;
         sum.staleSources += pass.staleSources;
+        sum.noShows += pass.noShows;
+        sum.waitlistOffers += pass.waitlistOffers;
         // A capped pass that got nowhere met only series it cannot extend. While its roll stopped
         // before the series it had put back, the next pass meets new ones (and perhaps a healthy
         // one); once it reached them, another pass would meet them again.
