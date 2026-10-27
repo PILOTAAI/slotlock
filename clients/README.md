@@ -63,9 +63,11 @@ Each suite checks what it can without a server, and runs the full scenario when 
 export DATABASE_URL=postgresql://slotlock_app:…@localhost:5432/slotlock
 export SLOTLOCK_MIGRATE_DATABASE_URL=postgresql://<owner>:…@localhost:5432/slotlock
 export SLOTLOCK_CONFIRMATION_SECRET="$(openssl rand -hex 32)"
-SLOTLOCK_CONFIRM_WRITES=slotlock_delete_event npx slotlock serve --migrate &
-export SLOTLOCK_URL=http://localhost:8080
+npx slotlock migrate      # first, so the key below has a schema to go in
 export SLOTLOCK_ADMIN_KEY="$(npx slotlock key create "Client suites" --scope read,write,admin | jq -r .key)"
+SLOTLOCK_CONFIRM_WRITES=slotlock_delete_event npx slotlock serve &
+export SLOTLOCK_URL=http://localhost:8080
+until curl -fs "$SLOTLOCK_URL/healthz" > /dev/null; do sleep 1; done
 ```
 
 | Language | Command, in its directory |
