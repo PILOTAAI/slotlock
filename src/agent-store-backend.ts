@@ -320,15 +320,21 @@ export function projectSlotlockCalendarEvent(event: SlotlockCalendarEvent): Reco
   };
 }
 
+/**
+ * The HTTP status a store refusal answers with on every agent surface: a missing or foreign
+ * record 404, a malformed request 400, a full agent quota 429, and any other conflict with what is
+ * stored 409. rest-api.ts declares the 404 and 409 each route can answer from this.
+ */
+export function slotlockAgentErrorStatus(code: string): 400 | 404 | 409 | 429 {
+  if (code === 'resource_tenant_mismatch' || code.endsWith('_not_found')) return 404;
+  if (code.startsWith('invalid_')) return 400;
+  if (code === 'owner_event_quota_exceeded' || code === 'owner_command_quota_exceeded') return 429;
+  return 409;
+}
+
 function operationError(code: string): SlotlockAgentOperationError {
-  if (code === 'resource_tenant_mismatch' || code.endsWith('_not_found')) {
-    return new SlotlockAgentOperationError('not_found', 404);
-  }
-  if (code.startsWith('invalid_')) return new SlotlockAgentOperationError(code, 400);
-  if (code === 'owner_event_quota_exceeded' || code === 'owner_command_quota_exceeded') {
-    return new SlotlockAgentOperationError(code, 429);
-  }
-  return new SlotlockAgentOperationError(code, 409);
+  const status = slotlockAgentErrorStatus(code);
+  return new SlotlockAgentOperationError(status === 404 ? 'not_found' : code, status);
 }
 
 /** Resource and event ids: the UUIDs the store issues and validates. */

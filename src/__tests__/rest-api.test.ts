@@ -472,3 +472,26 @@ describe('a REST call', () => {
     }
   });
 });
+
+describe('the refusals each agent route declares', () => {
+  it('are exactly the 404 and 409 its tool can answer, by the store backend status rule', async () => {
+    // The tools reference lists each tool's own error codes, and the site build fails when one is
+    // not a code in the source; mapped through the backend's rule, they name the statuses to declare.
+    const { TOOL_ERRORS } = (await import(
+      new URL('../../site/scripts/tool-notes.mjs', import.meta.url).href
+    )) as { TOOL_ERRORS: Record<string, string[]> };
+    const { slotlockAgentErrorStatus } = await import('../agent-store-backend.js');
+    for (const route of SLOTLOCK_REST_ROUTES) {
+      const codes = TOOL_ERRORS[route.operation];
+      expect(codes, route.operation).toBeDefined();
+      const expected = [
+        ...new Set(
+          (codes ?? [])
+            .map((code) => slotlockAgentErrorStatus(code))
+            .filter((status) => status === 404 || status === 409),
+        ),
+      ].sort();
+      expect([...(route.refusals ?? [])].sort(), route.operation).toEqual(expected);
+    }
+  });
+});
