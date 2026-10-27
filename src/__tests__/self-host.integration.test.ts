@@ -192,6 +192,30 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     }
   });
 
+  it("sets and clears a resource's booking rules from the command line", async () => {
+    const added = await run(['resource', 'add', 'rules-van']);
+    expect(added.code).toBe(0);
+    try {
+      const rules = { minNoticeMinutes: 120, slotStepMinutes: 30, turnaroundMinutes: 15, enforceHours: true };
+      const set = await run(['rules', 'set', JSON.stringify(rules), '--resource', 'rules-van']);
+      expect(set.code).toBe(0);
+      expect(JSON.parse(set.stdout.text())).toMatchObject({ external_ref: 'rules-van', booking_rules: rules });
+      const cleared = await run(['rules', 'clear', '--resource', 'rules-van']);
+      expect(JSON.parse(cleared.stdout.text())).toMatchObject({ booking_rules: null });
+      // Outside their bounds, unknown, or without a resource: refused before anything is written.
+      for (const args of [
+        ['rules', 'set', '{"slotStepMinutes":0}', '--resource', 'rules-van'],
+        ['rules', 'set', '{"bufferBeforeMinutes":5}', '--resource', 'rules-van'],
+        ['rules', 'set', '{}'],
+      ]) {
+        expect((await run(args)).code, args.join(' ')).toBe(2);
+      }
+      expect((await run(['rules', 'clear', '--resource', 'no-such-van'])).code).toBe(1);
+    } finally {
+      expect((await run(['resource', 'delete', 'rules-van'])).code).toBe(0);
+    }
+  });
+
   it('archives, restores and deletes resources, and suspends and erases a tenant, from the command line', async () => {
     const lifecycle = `cli-lifecycle-${randomUUID()}`;
     const runIn = async (argv: string[], overrides: SlotlockEnv = {}) => {

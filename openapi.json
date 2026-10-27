@@ -256,6 +256,42 @@
                             }
                           ]
                         },
+                        "booking_rules": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "min_notice_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "max_advance_days": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 3660
+                                },
+                                "slot_step_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
+                                },
+                                "turnaround_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1440
+                                },
+                                "enforce_hours": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
                         "visibility": {
                           "type": "string",
                           "enum": [
@@ -280,6 +316,7 @@
                         "external_ref",
                         "timezone",
                         "availability",
+                        "booking_rules",
                         "visibility",
                         "archived_at"
                       ],
@@ -2725,6 +2762,42 @@
                             }
                           ]
                         },
+                        "booking_rules": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "min_notice_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "max_advance_days": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 3660
+                                },
+                                "slot_step_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
+                                },
+                                "turnaround_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1440
+                                },
+                                "enforce_hours": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
                         "visibility": {
                           "type": "string",
                           "enum": [
@@ -2749,6 +2822,7 @@
                         "external_ref",
                         "timezone",
                         "availability",
+                        "booking_rules",
                         "visibility",
                         "archived_at"
                       ],
@@ -2950,6 +3024,42 @@
                             }
                           ]
                         },
+                        "booking_rules": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "min_notice_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "max_advance_days": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 3660
+                                },
+                                "slot_step_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
+                                },
+                                "turnaround_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1440
+                                },
+                                "enforce_hours": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
                         "visibility": {
                           "type": "string",
                           "enum": [
@@ -2974,6 +3084,7 @@
                         "external_ref",
                         "timezone",
                         "availability",
+                        "booking_rules",
                         "visibility",
                         "archived_at"
                       ],
@@ -3115,6 +3226,42 @@
                             }
                           ]
                         },
+                        "booking_rules": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "min_notice_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "max_advance_days": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 3660
+                                },
+                                "slot_step_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
+                                },
+                                "turnaround_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1440
+                                },
+                                "enforce_hours": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
                         "visibility": {
                           "type": "string",
                           "enum": [
@@ -3139,6 +3286,7 @@
                         "external_ref",
                         "timezone",
                         "availability",
+                        "booking_rules",
                         "visibility",
                         "archived_at"
                       ],
@@ -3419,6 +3567,42 @@
                             }
                           ]
                         },
+                        "booking_rules": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "min_notice_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "max_advance_days": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 3660
+                                },
+                                "slot_step_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
+                                },
+                                "turnaround_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1440
+                                },
+                                "enforce_hours": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
                         "visibility": {
                           "type": "string",
                           "enum": [
@@ -3443,6 +3627,248 @@
                         "external_ref",
                         "timezone",
                         "availability",
+                        "booking_rules",
+                        "visibility",
+                        "archived_at"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "resource"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/resources/{resource_id}/booking-rules": {
+      "put": {
+        "operationId": "slotlock_set_resource_booking_rules",
+        "summary": "Set a resource's booking rules",
+        "description": "Set what a booking on one resource must satisfy from now on: minimum notice, how far ahead, the step starts fall on (from local midnight in the resource's time zone), the turnaround kept free after each booking, and whether bookings must lie inside its hours. `null` clears them. Holds, reservations, moves and agents' events are refused with the rule they break; searches offer only what they allow.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "rules": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "min_notice_minutes": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 525600
+                          },
+                          "max_advance_days": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 3660
+                          },
+                          "slot_step_minutes": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 1440
+                          },
+                          "turnaround_minutes": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 1440
+                          },
+                          "enforce_hours": {
+                            "type": "boolean"
+                          }
+                        },
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "rules"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "resource_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "resource": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "external_ref": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 500
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "timezone": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 100
+                        },
+                        "availability": {
+                          "anyOf": [
+                            {
+                              "maxItems": 50,
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "rrule": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 500
+                                  },
+                                  "start_minutes": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 1439
+                                  },
+                                  "duration_minutes": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 10080
+                                  }
+                                },
+                                "required": [
+                                  "rrule",
+                                  "start_minutes",
+                                  "duration_minutes"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "booking_rules": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "min_notice_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "max_advance_days": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 3660
+                                },
+                                "slot_step_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
+                                },
+                                "turnaround_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1440
+                                },
+                                "enforce_hours": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "visibility": {
+                          "type": "string",
+                          "enum": [
+                            "shared",
+                            "private"
+                          ]
+                        },
+                        "archived_at": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "external_ref",
+                        "timezone",
+                        "availability",
+                        "booking_rules",
                         "visibility",
                         "archived_at"
                       ],

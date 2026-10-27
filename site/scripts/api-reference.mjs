@@ -17,6 +17,7 @@ export const GROUPS = [
       'slotlock_archive_resource',
       'slotlock_restore_resource',
       'slotlock_delete_resource',
+      'slotlock_set_resource_booking_rules',
     ],
   },
   {

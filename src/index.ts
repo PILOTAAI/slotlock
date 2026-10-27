@@ -4,6 +4,14 @@
 // TypeScript 6 default) still loads @types/node.
 /// <reference types="node" preserve="true" />
 export { findNextAvailable, mergeIntervals, subtractBusy } from './engine.js';
+export {
+  type SlotlockBookingRule,
+  type SlotlockBookingRules,
+  bookingRuleBroken,
+  bookingSearch,
+  nextStepStart,
+  parseBookingRules,
+} from './booking-rules.js';
 export { expandRules } from './rules.js';
 export {
   availabilityRuleProblem,

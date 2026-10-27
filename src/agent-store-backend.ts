@@ -8,6 +8,7 @@ import type {
   SlotlockApplicationBackend,
   SlotlockApplicationInvocationContext,
 } from './application-api.js';
+import { type SlotlockBookingRule, type SlotlockBookingRules, bookingSearch } from './booking-rules.js';
 import { findNextAvailable } from './engine.js';
 import { expandRules } from './rules.js';
 import { type SlotlockStore, type SlotlockTenantStore, calendarEventRollingHorizon } from './store.js';
@@ -332,7 +333,24 @@ export function slotlockAgentErrorStatus(code: string): 400 | 404 | 409 | 429 {
   return 409;
 }
 
-function operationError(code: string): SlotlockAgentOperationError {
+/** The code an agent's error carries for each booking rule a write breaks. */
+const BOOKING_RULE_CODES: Readonly<Record<SlotlockBookingRule, string>> = Object.freeze({
+  min_notice: 'booking_rule_min_notice',
+  max_advance: 'booking_rule_max_advance',
+  slot_step: 'booking_rule_slot_step',
+  outside_hours: 'booking_rule_outside_hours',
+});
+
+function operationError(
+  refusal: string | { code: string; rule?: string },
+): SlotlockAgentOperationError {
+  // A broken booking rule is named in the code, which is all an agent's error carries.
+  const code =
+    typeof refusal === 'string'
+      ? refusal
+      : refusal.code === 'booking_rule_violated' && refusal.rule
+        ? (BOOKING_RULE_CODES[refusal.rule as SlotlockBookingRule] ?? refusal.code)
+        : refusal.code;
   const status = slotlockAgentErrorStatus(code);
   return new SlotlockAgentOperationError(status === 404 ? 'not_found' : code, status);
 }
@@ -516,11 +534,23 @@ export function createSlotlockStoreAgentBackend(
             context.principal.tenantRef,
             resourceId,
           );
+          // Only what a booking made now may take: the resource's booking rules bound the search,
+          // as they bound the write that follows it.
+          const search = bookingSearch({
+            rules: resource.bookingRules,
+            timezone: resource.timezone,
+            window,
+            now: new Date(),
+          });
           const sources = await requiredSources(options, context, resource);
           const freeBusy = await readFreeBusy(tenantStore, {
             tenantRef: context.principal.tenantRef,
             resourceId,
-            window,
+            // A slot's turnaround may run past the window: what it reaches must be free too.
+            window: {
+              start: window.start,
+              end: new Date(window.end.getTime() + (search?.bufferAfterMs ?? 0)),
+            },
             requiredSources: [...sources],
             ...(options.coverageMaxAgeMs !== undefined
               ? { coverageMaxAgeMs: options.coverageMaxAgeMs }
@@ -531,12 +561,22 @@ export function createSlotlockStoreAgentBackend(
             incomplete = true;
             continue;
           }
+          if (!search) continue;
           const rules =
             resource.availabilityRules ?? (await options.availabilityRules(context, resource));
-          const windows = expandRules(rules, window, resource.timezone);
+          const windows = expandRules(rules, search.window, resource.timezone);
           windowsLeft -= windows.length;
           if (windowsLeft < 0) throw new SlotlockAgentOperationError('calendar_work_limit', 400);
-          const candidate = findNextAvailable({ busy: freeBusy.busy, windows, durationMs });
+          // A slot [s, s + d) with its turnaround meets busy [b, e) when [s, s + d) meets [b - t, e).
+          const candidate = findNextAvailable({
+            busy: freeBusy.busy.map((busy) => ({
+              start: new Date(busy.start.getTime() - search.bufferAfterMs),
+              end: busy.end,
+            })),
+            windows,
+            durationMs,
+            ...(search.align ? { align: search.align } : {}),
+          });
           if (
             candidate &&
             (!best ||
@@ -596,8 +636,10 @@ export function createSlotlockStoreAgentBackend(
           source: 'agent-server',
           ...content,
           materializationWindow: materializationWindow(content),
+          // An agent's event is a booking made now: the resource's booking rules apply.
+          enforceBookingRules: true,
         });
-        if (!result.ok) throw operationError(result.code);
+        if (!result.ok) throw operationError(result);
         const created = await tenantStore.getCalendarEvent({
           tenantRef: context.principal.tenantRef,
           ownerRef: agentOwnerRef(context),
@@ -746,8 +788,10 @@ export function createSlotlockStoreAgentBackend(
           source: current.source ?? 'agent-server',
           ...content,
           materializationWindow: materializationWindow(content),
+          // An agent's event is a booking made now: the resource's booking rules apply.
+          enforceBookingRules: true,
         });
-        if (!result.ok) throw operationError(result.code);
+        if (!result.ok) throw operationError(result);
         const updated = await tenantStore.getCalendarEvent({
           tenantRef: context.principal.tenantRef,
           ownerRef: agentOwnerRef(context),
@@ -775,7 +819,7 @@ export function createSlotlockStoreAgentBackend(
           idempotencyKey: agentCommandIdempotencyKey(context, input.idempotency_key as string),
           expectedRevision: input.expected_revision as number,
         });
-        if (!result.ok) throw operationError(result.code);
+        if (!result.ok) throw operationError(result);
         return {
           event_id: externalRef,
           revision: result.revision,
@@ -851,12 +895,37 @@ function rulesInput(value: unknown): WeeklyAvailabilityRule[] | null {
   }
 }
 
+/** Booking rules as the application API writes them, snake_case; `null` for none. */
+function bookingRulesOutput(rules: SlotlockBookingRules | undefined) {
+  if (!rules) return null;
+  return {
+    ...(rules.minNoticeMinutes !== undefined ? { min_notice_minutes: rules.minNoticeMinutes } : {}),
+    ...(rules.maxAdvanceDays !== undefined ? { max_advance_days: rules.maxAdvanceDays } : {}),
+    ...(rules.slotStepMinutes !== undefined ? { slot_step_minutes: rules.slotStepMinutes } : {}),
+    ...(rules.turnaroundMinutes !== undefined ? { turnaround_minutes: rules.turnaroundMinutes } : {}),
+    ...(rules.enforceHours !== undefined ? { enforce_hours: rules.enforceHours } : {}),
+  };
+}
+
+function bookingRulesInput(value: unknown): SlotlockBookingRules | null {
+  if (value === null || value === undefined) return null;
+  const input = value as Record<string, unknown>;
+  const rules: SlotlockBookingRules = {};
+  if (input.min_notice_minutes !== undefined) rules.minNoticeMinutes = input.min_notice_minutes as number;
+  if (input.max_advance_days !== undefined) rules.maxAdvanceDays = input.max_advance_days as number;
+  if (input.slot_step_minutes !== undefined) rules.slotStepMinutes = input.slot_step_minutes as number;
+  if (input.turnaround_minutes !== undefined) rules.turnaroundMinutes = input.turnaround_minutes as number;
+  if (input.enforce_hours !== undefined) rules.enforceHours = input.enforce_hours as boolean;
+  return rules;
+}
+
 function resourceOutput(resource: SlotlockResource) {
   return {
     id: resource.id,
     external_ref: resource.externalRef,
     timezone: resource.timezone,
     availability: rulesOutput(resource.availabilityRules),
+    booking_rules: bookingRulesOutput(resource.bookingRules),
     visibility: resource.visibility ?? 'shared',
     archived_at: resource.archivedAt?.toISOString() ?? null,
   };
@@ -1036,6 +1105,22 @@ export function createSlotlockStoreApplicationBackend(
         let resource: SlotlockResource | null;
         try {
           resource = await tenant.setResourceAvailability({ tenantRef: tenantOf(context), id, rules });
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+        if (!resource) throw new SlotlockAgentOperationError('resource_not_found', 404);
+        return { resource: resourceOutput(resource) };
+      });
+    },
+
+    async setResourceBookingRules(context, input) {
+      const rules = bookingRulesInput(input.rules);
+      const id = input.resource_id as string;
+      if (!STORE_ID_PATTERN.test(id)) throw new SlotlockAgentOperationError('resource_not_found', 404);
+      return withTenant(store, context, async (tenant) => {
+        let resource: SlotlockResource | null;
+        try {
+          resource = await tenant.setResourceBookingRules({ tenantRef: tenantOf(context), id, rules });
         } catch (error) {
           throw storeRefusal(error);
         }

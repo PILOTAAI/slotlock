@@ -32,6 +32,7 @@ const RESOURCE = {
   external_ref: 'vehicle-42',
   timezone: 'Europe/London',
   availability: null,
+  booking_rules: null,
   visibility: 'shared',
   archived_at: null,
 };
@@ -112,6 +113,7 @@ const backend = {
   getTenant: vi.fn(),
   eraseTenant: vi.fn(),
   runMaintenance: vi.fn(),
+  setResourceBookingRules: vi.fn(),
 } satisfies Record<keyof SlotlockApplicationBackend, ReturnType<typeof vi.fn>>;
 const authorizeApplication = vi.fn();
 const consumeRateLimit = vi.fn();
@@ -206,6 +208,7 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   listBusy: { busy: [{ start: '2027-03-29T09:00:00.000Z', end: '2027-03-29T10:00:00.000Z' }] },
   setResourceAvailability: { resource: RESOURCE },
   setTenantAvailability: { resources_updated: 3 },
+  setResourceBookingRules: { resource: { ...RESOURCE, booking_rules: { min_notice_minutes: 120 } } },
   acquireHold: { hold: HOLD },
   getHold: { hold: HOLD },
   listHolds: { holds: [HOLD], next_cursor: null },

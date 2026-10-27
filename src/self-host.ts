@@ -48,6 +48,7 @@ import {
   readTrustedProxyHeader,
   slotlockKeySubscriptions,
 } from './config.js';
+import { type SlotlockBookingRules, parseBookingRules } from './booking-rules.js';
 import { SLOTLOCK_APPLICATION_SCOPE } from './application-api.js';
 import { SLOTLOCK_DASHBOARD_FUNCTIONS, SLOTLOCK_TENANT_TABLES } from './ddl.js';
 import {
@@ -536,8 +537,10 @@ function serveTenantLimits(caps: SlotlockLimits['caps']): SlotlockTenantLimits {
 export function createSlotlockServeStore(
   sql: SlotlockSql,
   caps: SlotlockLimits['caps'],
+  availability: readonly WeeklyAvailabilityRule[] = [],
 ): SlotlockStore {
   return createSlotlockStore(sql, {
+    defaultAvailabilityRules: availability,
     tenantLimits: serveTenantLimits(caps),
     maxTenantTransactions: caps.tenant_transactions,
     tenantLockTimeoutMs: SERVE_LOCK_TIMEOUT_MS,
@@ -613,7 +616,7 @@ export async function startSlotlockServer(
       }
     }
     const { caps } = config.limits;
-    const store = createSlotlockServeStore(sql, caps);
+    const store = createSlotlockServeStore(sql, caps, config.availability);
     const publicUrl = new URL(config.publicUrl);
     const authenticateKey = createSlotlockApiKeyAuthenticator(createSlotlockApiKeyStore(sql), {
       maxConcurrentLookups: caps.key_lookups,
@@ -918,6 +921,42 @@ async function runHours(
   }
 }
 
+/**
+ * `rules set|clear`: set or clear (`null`) the booking rules of the tenant's resource named by id,
+ * else by reference, and print it. Returns false when no resource has that name.
+ */
+async function runRules(
+  config: SlotlockDatabaseConfig,
+  out: OutputStream,
+  name: string,
+  rules: SlotlockBookingRules | null,
+): Promise<boolean> {
+  const sql = connect(config.databaseUrl, 1);
+  try {
+    const store = createSlotlockStore(sql);
+    const tenantRef = config.tenantRef;
+    const resources = await tenantResources(store, tenantRef);
+    const named =
+      resources.find((resource) => resource.id === name) ??
+      resources.find((resource) => resource.externalRef === name);
+    if (!named) return false;
+    const updated = await store.withTenant(tenantRef, (tenant) =>
+      tenant.setResourceBookingRules({ tenantRef, id: named.id, rules }),
+    );
+    if (!updated) return false;
+    out.write(
+      `${JSON.stringify({
+        id: updated.id,
+        external_ref: updated.externalRef,
+        booking_rules: updated.bookingRules ?? null,
+      })}\n`,
+    );
+    return true;
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
 /** A resource as `resource archive` and `resource restore` print it. */
 function resourceStateLine(resource: SlotlockResource): string {
   return `${JSON.stringify({
@@ -1135,6 +1174,11 @@ Commands:
                            Give one resource, or every one, weekly hours of its own; [] closes
   hours clear (--resource <ref> | --all)
                            Hand one resource, or every one, back to the server's hours
+  rules set <json> --resource <ref>
+                           Set what a booking on the resource must satisfy, like
+                           {"minNoticeMinutes":120,"slotStepMinutes":30,"turnaroundMinutes":30,"enforceHours":true}
+  rules clear --resource <ref>
+                           Remove the resource's booking rules
   key create <name> [--scope read,write,admin] [--expires-in-days <n>]
                            Create an API key for the tenant (default scope read,write, no
                            expiry; admin adds the application API) and print it once; only its
@@ -1238,7 +1282,11 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     return 2;
   }
   const subcommand =
-    command === 'resource' || command === 'key' || command === 'hours' || command === 'tenant'
+    command === 'resource' ||
+    command === 'key' ||
+    command === 'hours' ||
+    command === 'rules' ||
+    command === 'tenant'
       ? `${command} ${operands[0] ?? ''}`.trim()
       : command;
   const expectedOperands: Record<string, number> = {
@@ -1262,6 +1310,8 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     'hours show': 1,
     'hours set': 2,
     'hours clear': 1,
+    'rules set': 2,
+    'rules clear': 1,
   };
   const expected = expectedOperands[subcommand];
   if (expected === undefined) return usage(`unknown command "${subcommand}"`);
@@ -1287,8 +1337,27 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
   if (values.all && subcommand !== 'hours set' && subcommand !== 'hours clear') {
     return usage('--all applies only to hours set and hours clear');
   }
-  if (values.resource !== undefined && !subcommand.startsWith('hours ')) {
-    return usage('--resource applies only to hours commands');
+  if (
+    values.resource !== undefined &&
+    !subcommand.startsWith('hours ') &&
+    !subcommand.startsWith('rules ')
+  ) {
+    return usage('--resource applies only to hours and rules commands');
+  }
+  if (subcommand.startsWith('rules ') && values.resource === undefined) {
+    return usage(`${subcommand} needs --resource <ref>`);
+  }
+  let bookingRules: SlotlockBookingRules | null = null;
+  if (subcommand === 'rules set') {
+    try {
+      bookingRules = parseBookingRules(JSON.parse(operands[1] as string));
+    } catch (error) {
+      return usage(
+        error instanceof SyntaxError
+          ? 'rules must be a JSON object like {"minNoticeMinutes":120,"slotStepMinutes":30}'
+          : (error as Error).message,
+      );
+    }
   }
   if (
     (subcommand === 'hours set' || subcommand === 'hours clear') &&
@@ -1424,6 +1493,20 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
           io.stdout,
           target,
           subcommand === 'hours show' ? undefined : hours,
+        );
+        if (!found) {
+          io.stderr.write('slotlock: no resource with that reference or id in this tenant\n');
+          return 1;
+        }
+        return 0;
+      }
+      case 'rules set':
+      case 'rules clear': {
+        const found = await runRules(
+          readSlotlockDatabaseConfig(io.env),
+          io.stdout,
+          values.resource as string,
+          bookingRules,
         );
         if (!found) {
           io.stderr.write('slotlock: no resource with that reference or id in this tenant\n');

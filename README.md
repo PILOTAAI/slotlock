@@ -133,6 +133,33 @@ A rule is `rrule`, `startMinutes` and `durationMinutes` here and in `SLOTLOCK_AV
 REST application API spells every field in snake_case, so there it is `rrule`, `start_minutes` and
 `duration_minutes`. `slotlock --help` lists every setting.
 
+#### Booking rules
+
+A resource can also say what a booking on it must satisfy:
+
+```sh
+slotlock rules set '{"minNoticeMinutes":120,"slotStepMinutes":30,"turnaroundMinutes":30,"enforceHours":true}' --resource vehicle-42
+slotlock rules clear --resource vehicle-42
+```
+
+| Rule | A booking made now |
+| --- | --- |
+| `minNoticeMinutes` | starts at least this far ahead |
+| `maxAdvanceDays` | starts at most this far ahead |
+| `slotStepMinutes` | starts on a step from local midnight in the resource's time zone |
+| `turnaroundMinutes` | keeps this long free after it: its trailing buffer, which the database enforces |
+| `enforceHours` | lies inside the resource's bookable hours |
+
+- Holds, reservations, moves and agents' events are checked when they are made, by the database's
+  clock; a refusal names the rule (`booking_rule_violated` with `rule` in the store,
+  `booking_rule_min_notice`, `_max_advance`, `_slot_step` or `_outside_hours` to an agent).
+- A series is judged on its first occurrence for notice and advance, and on every occurrence for
+  step and hours. Imported calendar events are not checked: they happened elsewhere.
+- Searches (`slotlock_find_next_available`, `slotlock_find_available_slots`, `findNextAvailableFor`)
+  offer only slots the rules allow, so an offered slot is one the write accepts.
+- The REST application API sets them with `PUT /v1/resources/{resource_id}/booking-rules`, in
+  snake_case; the store with `setResourceBookingRules`.
+
 ### Without Docker
 
 With Node.js 22.12+ and PostgreSQL 16 or newer, run each command as `npx slotlock` after

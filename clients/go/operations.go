@@ -25,6 +25,7 @@ var operations = func() map[string]operation {
 		{name: "slotlock_restore_resource", method: "POST", path: "/v1/resources/{resource_id}/restore", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_list_busy", method: "GET", path: "/v1/resources/{resource_id}/busy", pathParams: []string{"resource_id"}, query: []string{"start", "end"}},
 		{name: "slotlock_set_resource_availability", method: "PUT", path: "/v1/resources/{resource_id}/availability", pathParams: []string{"resource_id"}, query: nil},
+		{name: "slotlock_set_resource_booking_rules", method: "PUT", path: "/v1/resources/{resource_id}/booking-rules", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_set_tenant_availability", method: "PUT", path: "/v1/availability", pathParams: nil, query: nil},
 		{name: "slotlock_acquire_hold", method: "POST", path: "/v1/holds", pathParams: nil, query: nil},
 		{name: "slotlock_get_hold", method: "GET", path: "/v1/holds/{hold_id}", pathParams: []string{"hold_id"}, query: nil},
@@ -523,6 +524,31 @@ func (in SetResourceAvailabilityInput) values() map[string]any {
 // duration_minutes.
 func (c *Client) SetResourceAvailability(ctx context.Context, in SetResourceAvailabilityInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_set_resource_availability", in.values())
+}
+
+// SetResourceBookingRulesInput holds the arguments of [Client.SetResourceBookingRules].
+type SetResourceBookingRulesInput struct {
+	ResourceID string
+
+	Rules Nullable[map[string]any]
+}
+
+func (in SetResourceBookingRulesInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_id"] = in.ResourceID
+	if value, ok := in.Rules.get(); ok {
+		values["rules"] = value
+	}
+	return values
+}
+
+// SetResourceBookingRules: Set a resource's booking rules. Set what a booking on one resource
+// must satisfy from now on: minimum notice, how far ahead, the step starts fall on (from local
+// midnight in the resource's time zone), the turnaround kept free after each booking, and whether
+// bookings must lie inside its hours. `null` clears them. Holds, reservations, moves and agents'
+// events are refused with the rule they break; searches offer only what they allow.
+func (c *Client) SetResourceBookingRules(ctx context.Context, in SetResourceBookingRulesInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_set_resource_booking_rules", in.values())
 }
 
 // SetTenantAvailabilityInput holds the arguments of [Client.SetTenantAvailability].
