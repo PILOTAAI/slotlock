@@ -14,7 +14,7 @@ Worker's Hyperdrive binding and checks what the API relies on, as listed in
 | Control | A session advisory lock that is never released, as `maintenance.ts` takes today. The run reports whether it outlives its request; the RFC's maintenance lease exists because a pooler keeps it |
 
 `worker.ts` only reports what happened. `run.mjs` judges each result, prints a Markdown table, and
-writes the raw answers to `results.json`.
+prints the raw answers as JSON instead when `SPIKE_RAW=1`.
 
 ## On your Cloudflare account
 

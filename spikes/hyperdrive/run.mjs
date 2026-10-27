@@ -1,6 +1,6 @@
 // RFC 0001's spike driver: deploys Slotlock's schema as the owner, then asks the spike Worker
 // (worker.ts) checks 1-5 and judges each answer. Prints a Markdown table to paste into the RFC and
-// writes every raw answer to results.json. README.md says how to run it.
+// prints every raw answer as JSON with SPIKE_RAW=1. README.md says how to run it.
 //
 //   SPIKE_URL            the Worker, e.g. https://slotlock-hyperdrive-spike.<you>.workers.dev
 //   SPIKE_TOKEN          the Worker's SPIKE_TOKEN secret
@@ -8,8 +8,8 @@
 //   SPIKE_APP_URL        a direct connection as slotlock_app, the role Hyperdrive connects as
 //   SPIKE_STREAM_SECONDS how long check 4 keeps its stream open (default 600)
 //   SPIKE_DEPLOY=0       skip deploying the schema (to run against a database left as it is)
+//   SPIKE_RAW=1          print every raw answer as JSON instead of the table
 import { randomUUID } from 'node:crypto';
-import { writeFile } from 'node:fs/promises';
 import postgres from 'postgres';
 import { createSlotlockStore } from '../../dist/store.js';
 
@@ -31,7 +31,8 @@ const observations = [];
 
 function record(check, pass, evidence) {
   rows.push({ check, pass, evidence });
-  console.log(`${pass ? 'PASS' : 'FAIL'}  ${check}: ${evidence}`);
+  // Progress goes to stderr, so stdout holds only the table, or the raw JSON with SPIKE_RAW=1.
+  console.error(`${pass ? 'PASS' : 'FAIL'}  ${check}: ${evidence}`);
 }
 
 async function call(path, params = {}) {
@@ -294,7 +295,12 @@ await check3(scope);
 await check5();
 await check4(scope);
 
-await writeFile(new URL('./results.json', import.meta.url), `${JSON.stringify({ run, workerUrl, rows, observations, raw }, null, 2)}\n`);
+// The raw answers go to stdout, for the run's record (SPIKE_RAW=1 node run.mjs > raw.json); the driver
+// writes no file of what the Worker sent.
+if (process.env.SPIKE_RAW === '1') {
+  console.log(JSON.stringify({ run, workerUrl, rows, observations, raw }, null, 2));
+  process.exit(rows.every((row) => row.pass) ? 0 : 1);
+}
 console.log('\n| Check | Result | Evidence |\n| --- | --- | --- |');
 for (const row of rows) console.log(`| ${row.check} | ${row.pass ? 'pass' : '**fail**'} | ${row.evidence} |`);
 for (const line of observations) console.log(`\n${line}`);
