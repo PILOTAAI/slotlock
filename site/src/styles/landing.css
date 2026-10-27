@@ -369,38 +369,53 @@ svg {
 .hero__actions {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: flex-start;
   gap: 12px;
   margin-top: 30px;
 }
 
-/* Install pill: target picker built from radio buttons, so it works without JavaScript. */
+/* Install card: target picker built from radio buttons, so it works without JavaScript. */
 .install {
-  position: relative;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  min-height: 44px;
-  max-width: 100%;
-  border-radius: 999px;
+  width: min(100%, 560px);
+  border-radius: var(--radius-md);
   border: 1px solid var(--line-strong);
   background: var(--paper);
   font-size: 13px;
+  overflow: hidden;
 }
 
 .install__targets {
   display: flex;
   gap: 2px;
   padding: 4px;
-  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.install__targets::-webkit-scrollbar {
+  display: none;
 }
 
 .install__targets label {
-  padding: 6px 10px;
+  padding: 5px 10px;
   border-radius: 999px;
   color: var(--ink-3);
   cursor: pointer;
   white-space: nowrap;
+}
+
+.install__targets label:hover {
+  color: var(--ink);
+}
+
+.install__line {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 44px;
+  padding-right: 4px;
 }
 
 .install__cmd {
@@ -413,28 +428,40 @@ svg {
   color: var(--ink);
 }
 
-.install__cmd::before {
+.install__cmd--shell::before {
   content: '$ ';
   color: var(--ink-3);
 }
 
-#install-source:checked ~ .install .install__targets label[for='install-source'],
+#install-docker:checked ~ .install .install__targets label[for='install-docker'],
 #install-npm:checked ~ .install .install__targets label[for='install-npm'],
-#install-docker:checked ~ .install .install__targets label[for='install-docker'] {
+#install-python:checked ~ .install .install__targets label[for='install-python'],
+#install-go:checked ~ .install .install__targets label[for='install-go'],
+#install-rust:checked ~ .install .install__targets label[for='install-rust'],
+#install-java:checked ~ .install .install__targets label[for='install-java'],
+#install-dotnet:checked ~ .install .install__targets label[for='install-dotnet'] {
   background: var(--ink);
   color: var(--paper);
 }
 
-#install-source:focus-visible ~ .install .install__targets label[for='install-source'],
+#install-docker:focus-visible ~ .install .install__targets label[for='install-docker'],
 #install-npm:focus-visible ~ .install .install__targets label[for='install-npm'],
-#install-docker:focus-visible ~ .install .install__targets label[for='install-docker'] {
+#install-python:focus-visible ~ .install .install__targets label[for='install-python'],
+#install-go:focus-visible ~ .install .install__targets label[for='install-go'],
+#install-rust:focus-visible ~ .install .install__targets label[for='install-rust'],
+#install-java:focus-visible ~ .install .install__targets label[for='install-java'],
+#install-dotnet:focus-visible ~ .install .install__targets label[for='install-dotnet'] {
   outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  outline-offset: -2px;
 }
 
-#install-source:checked ~ .install [data-install='source'],
+#install-docker:checked ~ .install [data-install='docker'],
 #install-npm:checked ~ .install [data-install='npm'],
-#install-docker:checked ~ .install [data-install='docker'] {
+#install-python:checked ~ .install [data-install='python'],
+#install-go:checked ~ .install [data-install='go'],
+#install-rust:checked ~ .install [data-install='rust'],
+#install-java:checked ~ .install [data-install='java'],
+#install-dotnet:checked ~ .install [data-install='dotnet'] {
   display: block;
 }
 
@@ -442,6 +469,7 @@ svg {
   display: none;
   margin: 8px 0 0;
   width: 100%;
+  max-width: 560px;
   font-size: 13px;
   color: var(--ink-3);
 }
@@ -453,9 +481,13 @@ svg {
   max-width: 100%;
 }
 
-#install-source:checked ~ .install__notes [data-note='source'],
+#install-docker:checked ~ .install__notes [data-note='docker'],
 #install-npm:checked ~ .install__notes [data-note='npm'],
-#install-docker:checked ~ .install__notes [data-note='docker'] {
+#install-python:checked ~ .install__notes [data-note='python'],
+#install-go:checked ~ .install__notes [data-note='go'],
+#install-rust:checked ~ .install__notes [data-note='rust'],
+#install-java:checked ~ .install__notes [data-note='java'],
+#install-dotnet:checked ~ .install__notes [data-note='dotnet'] {
   display: block;
 }
 
@@ -2135,21 +2167,14 @@ figure {
 }
 
 @media (max-width: 639px) {
-  .install {
-    grid-template-columns: minmax(0, 1fr) auto;
-    border-radius: var(--radius-md);
-  }
   .install__targets {
-    border-right: 0;
+    justify-content: space-between;
   }
-  .install .copy {
-    grid-row: 1;
-    grid-column: 2;
+  .install__targets label {
+    padding: 5px 7px;
   }
   .install__cmd {
-    grid-column: 1 / -1;
-    padding: 10px 14px 12px;
-    border-top: 1px solid var(--line);
+    padding: 10px 14px;
     white-space: normal;
     overflow-wrap: anywhere;
   }

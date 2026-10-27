@@ -150,17 +150,23 @@ const canonical = new URL('/', Astro.site).toString();
                 <div class="install__targets" role="presentation">
                   {hero.install.map((target) => <label for={`install-${target.id}`}>{target.label}</label>)}
                 </div>
-                {
-                  hero.install.map((target) => (
-                    <code class="install__cmd" data-install={target.id} id={`cmd-${target.id}`}>
-                      {target.command}
-                    </code>
-                  ))
-                }
-                <button class="copy" type="button" data-copy-install hidden>
-                  <Icon name="copy" />
-                  <span>Copy</span>
-                </button>
+                <div class="install__line">
+                  {
+                    hero.install.map((target) => (
+                      <code
+                        class:list={['install__cmd', { 'install__cmd--shell': target.shell !== false }]}
+                        data-install={target.id}
+                        id={`cmd-${target.id}`}
+                      >
+                        {target.command}
+                      </code>
+                    ))
+                  }
+                  <button class="copy" type="button" data-copy-install hidden>
+                    <Icon name="copy" />
+                    <span>Copy</span>
+                  </button>
+                </div>
               </div>
               <div class="install__notes">
                 {
