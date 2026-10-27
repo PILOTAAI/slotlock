@@ -15,13 +15,14 @@ public sealed partial class SlotlockClient
     /// <summary>Every operation, by name: its method, path, path parameters and query parameters.</summary>
     internal static readonly IReadOnlyDictionary<string, Operation> Operations = new Dictionary<string, Operation>
     {
-        ["slotlock_list_resources"] = new("GET", "/v1/resources", [], ["cursor", "limit"]),
+        ["slotlock_list_resources"] = new("GET", "/v1/resources", [], ["cursor", "limit", "pool"]),
         ["slotlock_create_resource"] = new("POST", "/v1/resources", [], []),
         ["slotlock_get_free_busy"] = new("GET", "/v1/free-busy", [], ["resource_ids", "start", "end"]),
         ["slotlock_find_next_available"] = new("GET", "/v1/next-available", [], ["resource_ids", "start", "end", "duration_minutes"]),
         ["slotlock_find_available_slots"] = new("GET", "/v1/available-slots", [], ["resource_ids", "start", "end", "duration_minutes", "limit", "require_free"]),
         ["slotlock_hold_slots"] = new("POST", "/v1/slot-holds", [], []),
         ["slotlock_book_together"] = new("POST", "/v1/bundles", [], []),
+        ["slotlock_book_pool"] = new("POST", "/v1/pool-bookings", [], []),
         ["slotlock_release_slots"] = new("DELETE", "/v1/slot-holds/{hold_id}", ["hold_id"], []),
         ["slotlock_list_events"] = new("GET", "/v1/events", [], ["resource_ids", "start", "end", "cursor", "limit"]),
         ["slotlock_create_event"] = new("POST", "/v1/events", [], []),
@@ -35,6 +36,8 @@ public sealed partial class SlotlockClient
         ["slotlock_list_busy"] = new("GET", "/v1/resources/{resource_id}/busy", ["resource_id"], ["start", "end"]),
         ["slotlock_set_resource_availability"] = new("PUT", "/v1/resources/{resource_id}/availability", ["resource_id"], []),
         ["slotlock_set_resource_booking_rules"] = new("PUT", "/v1/resources/{resource_id}/booking-rules", ["resource_id"], []),
+        ["slotlock_set_resource_pool"] = new("PUT", "/v1/resources/{resource_id}/pool", ["resource_id"], []),
+        ["slotlock_list_pools"] = new("GET", "/v1/pools", [], []),
         ["slotlock_set_tenant_availability"] = new("PUT", "/v1/availability", [], []),
         ["slotlock_acquire_hold"] = new("POST", "/v1/holds", [], []),
         ["slotlock_get_hold"] = new("GET", "/v1/holds/{hold_id}", ["hold_id"], []),
@@ -61,23 +64,41 @@ public sealed partial class SlotlockClient
 
     /// <summary>List calendar resources.</summary>
     /// <remarks>
-    /// List resources visible to the authenticated tenant principal.
+    /// List resources visible to the authenticated tenant principal, with the pool each belongs
+    /// to (a vehicle class, a room type). With pool, only that pool's members, in the order
+    /// slotlock_book_pool tries them.
     /// </remarks>
     /// <param name="cursor">cursor</param>
     /// <param name="limit">limit</param>
+    /// <param name="pool">pool</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> ListResourcesAsync(
         Optional<string> cursor = default,
         Optional<long> limit = default,
+        Optional<string> pool = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         if (cursor.HasValue) values["cursor"] = Json.ToNode(cursor.Value);
         if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
+        if (pool.HasValue) values["pool"] = Json.ToNode(pool.Value);
         return CallAsync("slotlock_list_resources", values, cancellationToken);
     }
+
+    /// <summary>Slotlock.Client 0.2.0's parameters for <c>ListResourcesAsync</c>, kept so code
+    /// written against them compiles.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public Task<JsonObject> ListResourcesAsync(
+        Optional<string> cursor,
+        Optional<long> limit,
+        CancellationToken cancellationToken) =>
+        ListResourcesAsync(
+            cursor: cursor,
+            limit: limit,
+            cancellationToken: cancellationToken,
+            pool: default);
 
     /// <summary>Create or update a resource.</summary>
     /// <remarks>
@@ -265,6 +286,42 @@ public sealed partial class SlotlockClient
         values["idempotency_key"] = Json.ToNode(idempotencyKey);
         if (title.HasValue) values["title"] = Json.ToNode(title.Value);
         return CallAsync("slotlock_book_together", values, cancellationToken);
+    }
+
+    /// <summary>Book from a pool.</summary>
+    /// <remarks>
+    /// Book any one member of a pool (a vehicle class, a room type) for a time: members are tried
+    /// in a fixed order and the first that is free and allows the booking is booked, in one
+    /// transaction, so a class sells out exactly at its number of members. The event names the
+    /// member booked. 409 pool_full when none is free; 404 pool_not_found when the pool has no
+    /// member you may book. A retry with the same idempotency_key answers the same event.
+    /// </remarks>
+    /// <param name="pool">pool</param>
+    /// <param name="startsAt">starts_at</param>
+    /// <param name="endsAt">ends_at</param>
+    /// <param name="timezone">timezone</param>
+    /// <param name="idempotencyKey">idempotency_key</param>
+    /// <param name="title">title</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> BookPoolAsync(
+        string pool,
+        string startsAt,
+        string endsAt,
+        string timezone,
+        string idempotencyKey,
+        Optional<string> title = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["pool"] = Json.ToNode(pool);
+        values["starts_at"] = Json.ToNode(startsAt);
+        values["ends_at"] = Json.ToNode(endsAt);
+        values["timezone"] = Json.ToNode(timezone);
+        values["idempotency_key"] = Json.ToNode(idempotencyKey);
+        if (title.HasValue) values["title"] = Json.ToNode(title.Value);
+        return CallAsync("slotlock_book_pool", values, cancellationToken);
     }
 
     /// <summary>Release held slots.</summary>
@@ -716,6 +773,45 @@ public sealed partial class SlotlockClient
         values["resource_id"] = Json.ToNode(resourceId);
         values["rules"] = Json.ToNode(rules);
         return CallAsync("slotlock_set_resource_booking_rules", values, cancellationToken);
+    }
+
+    /// <summary>Set a resource's pool.</summary>
+    /// <remarks>
+    /// Make a resource a member of a pool, a class of interchangeable resources such as a vehicle
+    /// class or a room type, or take it out (`null`). Agents book the class with
+    /// slotlock_book_pool, which takes the first member free; the class's capacity is its number
+    /// of members. A resource is in one pool at most; pool names are 1-100 of a-z, 0-9, '.', '_'
+    /// and '-'.
+    /// </remarks>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="pool">pool</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> SetResourcePoolAsync(
+        string resourceId,
+        string? pool,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_id"] = Json.ToNode(resourceId);
+        values["pool"] = Json.ToNode(pool);
+        return CallAsync("slotlock_set_resource_pool", values, cancellationToken);
+    }
+
+    /// <summary>List pools.</summary>
+    /// <remarks>
+    /// The tenant's pools by name, each with its capacity: how many members it has that are not
+    /// archived.
+    /// </remarks>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ListPoolsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        return CallAsync("slotlock_list_pools", values, cancellationToken);
     }
 
     /// <summary>Set every resource's bookable hours.</summary>

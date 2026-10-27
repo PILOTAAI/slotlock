@@ -13,7 +13,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "GET",
         path: "/v1/resources",
         path_params: &[],
-        query: &["cursor", "limit"],
+        query: &["cursor", "limit", "pool"],
     },
     Operation {
         name: "slotlock_create_resource",
@@ -54,6 +54,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         name: "slotlock_book_together",
         method: "POST",
         path: "/v1/bundles",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_book_pool",
+        method: "POST",
+        path: "/v1/pool-bookings",
         path_params: &[],
         query: &[],
     },
@@ -146,6 +153,20 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "PUT",
         path: "/v1/resources/{resource_id}/booking-rules",
         path_params: &["resource_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_set_resource_pool",
+        method: "PUT",
+        path: "/v1/resources/{resource_id}/pool",
+        path_params: &["resource_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_list_pools",
+        method: "GET",
+        path: "/v1/pools",
+        path_params: &[],
         query: &[],
     },
     Operation {
@@ -311,6 +332,8 @@ pub struct ListResourcesInput {
     pub cursor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
 }
 
 /// The arguments of [`Client::create_resource`].
@@ -366,6 +389,18 @@ pub struct HoldSlotsInput {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct BookTogetherInput {
     pub resource_ids: Vec<String>,
+    pub starts_at: String,
+    pub ends_at: String,
+    pub timezone: String,
+    pub idempotency_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+/// The arguments of [`Client::book_pool`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BookPoolInput {
+    pub pool: String,
     pub starts_at: String,
     pub ends_at: String,
     pub timezone: String,
@@ -525,6 +560,18 @@ pub struct SetResourceAvailabilityInput {
 pub struct SetResourceBookingRulesInput {
     pub resource_id: String,
     pub rules: Option<Value>,
+}
+
+/// The arguments of [`Client::set_resource_pool`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SetResourcePoolInput {
+    pub resource_id: String,
+    pub pool: Option<String>,
+}
+
+/// The arguments of [`Client::list_pools`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ListPoolsInput {
 }
 
 /// The arguments of [`Client::set_tenant_availability`].
@@ -710,7 +757,9 @@ pub struct EnableWebhookInput {
 impl Client {
     /// List calendar resources.
     ///
-    /// List resources visible to the authenticated tenant principal.
+    /// List resources visible to the authenticated tenant principal, with the pool each belongs
+    /// to (a vehicle class, a room type). With pool, only that pool's members, in the order
+    /// slotlock_book_pool tries them.
     pub fn list_resources(&self, input: &ListResourcesInput) -> Result<Value, Error> {
         self.call("slotlock_list_resources", serde_json::to_value(input)?)
     }
@@ -771,6 +820,17 @@ impl Client {
     /// with the same idempotency_key answers the same events.
     pub fn book_together(&self, input: &BookTogetherInput) -> Result<Value, Error> {
         self.call("slotlock_book_together", serde_json::to_value(input)?)
+    }
+
+    /// Book from a pool.
+    ///
+    /// Book any one member of a pool (a vehicle class, a room type) for a time: members are tried
+    /// in a fixed order and the first that is free and allows the booking is booked, in one
+    /// transaction, so a class sells out exactly at its number of members. The event names the
+    /// member booked. 409 pool_full when none is free; 404 pool_not_found when the pool has no
+    /// member you may book. A retry with the same idempotency_key answers the same event.
+    pub fn book_pool(&self, input: &BookPoolInput) -> Result<Value, Error> {
+        self.call("slotlock_book_pool", serde_json::to_value(input)?)
     }
 
     /// Release held slots.
@@ -883,6 +943,25 @@ impl Client {
     /// rule they break; searches offer only what they allow.
     pub fn set_resource_booking_rules(&self, input: &SetResourceBookingRulesInput) -> Result<Value, Error> {
         self.call("slotlock_set_resource_booking_rules", serde_json::to_value(input)?)
+    }
+
+    /// Set a resource's pool.
+    ///
+    /// Make a resource a member of a pool, a class of interchangeable resources such as a vehicle
+    /// class or a room type, or take it out (`null`). Agents book the class with
+    /// slotlock_book_pool, which takes the first member free; the class's capacity is its number
+    /// of members. A resource is in one pool at most; pool names are 1-100 of a-z, 0-9, '.', '_'
+    /// and '-'.
+    pub fn set_resource_pool(&self, input: &SetResourcePoolInput) -> Result<Value, Error> {
+        self.call("slotlock_set_resource_pool", serde_json::to_value(input)?)
+    }
+
+    /// List pools.
+    ///
+    /// The tenant's pools by name, each with its capacity: how many members it has that are not
+    /// archived.
+    pub fn list_pools(&self, input: &ListPoolsInput) -> Result<Value, Error> {
+        self.call("slotlock_list_pools", serde_json::to_value(input)?)
     }
 
     /// Set every resource's bookable hours.

@@ -26,6 +26,8 @@ export type SlotlockApplicationOperation =
   | 'slotlock_set_resource_availability'
   | 'slotlock_set_tenant_availability'
   | 'slotlock_set_resource_booking_rules'
+  | 'slotlock_set_resource_pool'
+  | 'slotlock_list_pools'
   | 'slotlock_acquire_hold'
   | 'slotlock_get_hold'
   | 'slotlock_list_holds'
@@ -79,6 +81,8 @@ export interface SlotlockApplicationBackend {
   setResourceAvailability: Handler;
   setTenantAvailability: Handler;
   setResourceBookingRules: Handler;
+  setResourcePool: Handler;
+  listPools: Handler;
   acquireHold: Handler;
   getHold: Handler;
   listHolds: Handler;
@@ -200,6 +204,8 @@ const BOOKING_RULES = z
   })
   .strict();
 
+const POOL = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,99}$/);
+
 const RESOURCE = z
   .object({
     id: RESOURCE_ID,
@@ -213,6 +219,8 @@ const RESOURCE = z
     visibility: VISIBILITY,
     /** When it was archived; `null` while it is in use. */
     archived_at: DATE_TIME.nullable(),
+    /** The pool it is a member of (a vehicle class, a room type); `null` when none. */
+    pool: POOL.nullable(),
   })
   .strict();
 
@@ -403,6 +411,33 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
         resource_id: EXAMPLE_RESOURCE_ID,
         rules: { min_notice_minutes: 120, slot_step_minutes: 30, turnaround_minutes: 30, enforce_hours: true },
       },
+    },
+    {
+      name: 'slotlock_set_resource_pool',
+      title: "Set a resource's pool",
+      description:
+        "Make a resource a member of a pool, a class of interchangeable resources such as a vehicle class or a room type, or take it out (`null`). Agents book the class with slotlock_book_pool, which takes the first member free; the class's capacity is its number of members. A resource is in one pool at most; pool names are 1-100 of a-z, 0-9, '.', '_' and '-'.",
+      method: 'PUT',
+      path: '/v1/resources/{resource_id}/pool',
+      input: z.object({ resource_id: RESOURCE_ID, pool: POOL.nullable() }).strict(),
+      output: z.object({ resource: RESOURCE }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'setResourcePool',
+      example: { resource_id: EXAMPLE_RESOURCE_ID, pool: 'van' },
+    },
+    {
+      name: 'slotlock_list_pools',
+      title: 'List pools',
+      description: "The tenant's pools by name, each with its capacity: how many members it has that are not archived.",
+      method: 'GET',
+      path: '/v1/pools',
+      input: z.object({}).strict(),
+      output: z
+        .object({ pools: z.array(z.object({ pool: POOL, capacity: z.number().int().min(1) }).strict()).max(1000) })
+        .strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'listPools',
+      example: {},
     },
     {
       name: 'slotlock_set_tenant_availability',

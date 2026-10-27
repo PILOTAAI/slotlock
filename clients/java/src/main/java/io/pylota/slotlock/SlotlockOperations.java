@@ -12,13 +12,14 @@ public abstract class SlotlockOperations {
   /** Every operation, by name: its method, path, path parameters and query parameters. */
   static final Map<String, Operation> OPERATIONS =
       Map.ofEntries(
-          Map.entry("slotlock_list_resources", new Operation("GET", "/v1/resources", List.of(), List.of("cursor", "limit"))),
+          Map.entry("slotlock_list_resources", new Operation("GET", "/v1/resources", List.of(), List.of("cursor", "limit", "pool"))),
           Map.entry("slotlock_create_resource", new Operation("POST", "/v1/resources", List.of(), List.of())),
           Map.entry("slotlock_get_free_busy", new Operation("GET", "/v1/free-busy", List.of(), List.of("resource_ids", "start", "end"))),
           Map.entry("slotlock_find_next_available", new Operation("GET", "/v1/next-available", List.of(), List.of("resource_ids", "start", "end", "duration_minutes"))),
           Map.entry("slotlock_find_available_slots", new Operation("GET", "/v1/available-slots", List.of(), List.of("resource_ids", "start", "end", "duration_minutes", "limit", "require_free"))),
           Map.entry("slotlock_hold_slots", new Operation("POST", "/v1/slot-holds", List.of(), List.of())),
           Map.entry("slotlock_book_together", new Operation("POST", "/v1/bundles", List.of(), List.of())),
+          Map.entry("slotlock_book_pool", new Operation("POST", "/v1/pool-bookings", List.of(), List.of())),
           Map.entry("slotlock_release_slots", new Operation("DELETE", "/v1/slot-holds/{hold_id}", List.of("hold_id"), List.of())),
           Map.entry("slotlock_list_events", new Operation("GET", "/v1/events", List.of(), List.of("resource_ids", "start", "end", "cursor", "limit"))),
           Map.entry("slotlock_create_event", new Operation("POST", "/v1/events", List.of(), List.of())),
@@ -32,6 +33,8 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_list_busy", new Operation("GET", "/v1/resources/{resource_id}/busy", List.of("resource_id"), List.of("start", "end"))),
           Map.entry("slotlock_set_resource_availability", new Operation("PUT", "/v1/resources/{resource_id}/availability", List.of("resource_id"), List.of())),
           Map.entry("slotlock_set_resource_booking_rules", new Operation("PUT", "/v1/resources/{resource_id}/booking-rules", List.of("resource_id"), List.of())),
+          Map.entry("slotlock_set_resource_pool", new Operation("PUT", "/v1/resources/{resource_id}/pool", List.of("resource_id"), List.of())),
+          Map.entry("slotlock_list_pools", new Operation("GET", "/v1/pools", List.of(), List.of())),
           Map.entry("slotlock_set_tenant_availability", new Operation("PUT", "/v1/availability", List.of(), List.of())),
           Map.entry("slotlock_acquire_hold", new Operation("POST", "/v1/holds", List.of(), List.of())),
           Map.entry("slotlock_get_hold", new Operation("GET", "/v1/holds/{hold_id}", List.of("hold_id"), List.of())),
@@ -80,21 +83,25 @@ public abstract class SlotlockOperations {
   }
 
   /**
-   * List calendar resources. List resources visible to the authenticated tenant principal.
+   * List calendar resources. List resources visible to the authenticated tenant principal, with
+   * the pool each belongs to (a vehicle class, a room type). With pool, only that pool's members,
+   * in the order slotlock_book_pool tries them.
    *
    * @param optional the optional arguments, or null: {@code cursor} (string), {@code limit}
-   * (integer)
+   * (integer), {@code pool} (string)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> listResources(Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
-    putOptional(values, optional, Set.of("cursor", "limit"), "slotlock_list_resources");
+    putOptional(values, optional, Set.of("cursor", "limit", "pool"), "slotlock_list_resources");
     return call("slotlock_list_resources", values);
   }
 
   /**
-   * List calendar resources. List resources visible to the authenticated tenant principal.
+   * List calendar resources. List resources visible to the authenticated tenant principal, with
+   * the pool each belongs to (a vehicle class, a room type). With pool, only that pool's members,
+   * in the order slotlock_book_pool tries them.
    *
    * @return the response body
    * @throws SlotlockException when the server refuses the call
@@ -298,6 +305,52 @@ public abstract class SlotlockOperations {
    */
   public Map<String, Object> bookTogether(List<?> resourceIds, String startsAt, String endsAt, String timezone, String idempotencyKey) {
     return bookTogether(resourceIds, startsAt, endsAt, timezone, idempotencyKey, null);
+  }
+
+  /**
+   * Book from a pool. Book any one member of a pool (a vehicle class, a room type) for a time:
+   * members are tried in a fixed order and the first that is free and allows the booking is
+   * booked, in one transaction, so a class sells out exactly at its number of members. The event
+   * names the member booked. 409 pool_full when none is free; 404 pool_not_found when the pool
+   * has no member you may book. A retry with the same idempotency_key answers the same event.
+   *
+   * @param pool {@code pool}, string
+   * @param startsAt {@code starts_at}, string
+   * @param endsAt {@code ends_at}, string
+   * @param timezone {@code timezone}, string
+   * @param idempotencyKey {@code idempotency_key}, string
+   * @param optional the optional arguments, or null: {@code title} (string)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> bookPool(String pool, String startsAt, String endsAt, String timezone, String idempotencyKey, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("pool", pool);
+    values.put("starts_at", startsAt);
+    values.put("ends_at", endsAt);
+    values.put("timezone", timezone);
+    values.put("idempotency_key", idempotencyKey);
+    putOptional(values, optional, Set.of("title"), "slotlock_book_pool");
+    return call("slotlock_book_pool", values);
+  }
+
+  /**
+   * Book from a pool. Book any one member of a pool (a vehicle class, a room type) for a time:
+   * members are tried in a fixed order and the first that is free and allows the booking is
+   * booked, in one transaction, so a class sells out exactly at its number of members. The event
+   * names the member booked. 409 pool_full when none is free; 404 pool_not_found when the pool
+   * has no member you may book. A retry with the same idempotency_key answers the same event.
+   *
+   * @param pool {@code pool}, string
+   * @param startsAt {@code starts_at}, string
+   * @param endsAt {@code ends_at}, string
+   * @param timezone {@code timezone}, string
+   * @param idempotencyKey {@code idempotency_key}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> bookPool(String pool, String startsAt, String endsAt, String timezone, String idempotencyKey) {
+    return bookPool(pool, startsAt, endsAt, timezone, idempotencyKey, null);
   }
 
   /**
@@ -579,6 +632,36 @@ public abstract class SlotlockOperations {
     values.put("resource_id", resourceId);
     values.put("rules", rules);
     return call("slotlock_set_resource_booking_rules", values);
+  }
+
+  /**
+   * Set a resource's pool. Make a resource a member of a pool, a class of interchangeable
+   * resources such as a vehicle class or a room type, or take it out (`null`). Agents book the
+   * class with slotlock_book_pool, which takes the first member free; the class's capacity is its
+   * number of members. A resource is in one pool at most; pool names are 1-100 of a-z, 0-9, '.',
+   * '_' and '-'.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param pool {@code pool}, string (may be null)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> setResourcePool(String resourceId, String pool) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("resource_id", resourceId);
+    values.put("pool", pool);
+    return call("slotlock_set_resource_pool", values);
+  }
+
+  /**
+   * List pools. The tenant's pools by name, each with its capacity: how many members it has that
+   * are not archived.
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> listPools() {
+    Map<String, Object> values = new LinkedHashMap<>();
+    return call("slotlock_list_pools", values);
   }
 
   /**

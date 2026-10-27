@@ -213,6 +213,7 @@ describe('slotlock serve configuration', () => {
     expect(optedIn.confirmWrites).toEqual([
       'slotlock_create_event',
       'slotlock_book_together',
+      'slotlock_book_pool',
       'slotlock_update_event',
       'slotlock_delete_event',
     ]);

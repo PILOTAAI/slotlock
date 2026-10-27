@@ -36,6 +36,11 @@ export interface SlotlockResource {
   archivedAt?: Date;
   /** What a booking on it must satisfy (`SlotlockBookingRules`). Absent when it has none. */
   bookingRules?: SlotlockBookingRules;
+  /**
+   * The pool it belongs to: interchangeable resources sharing a name, such as a vehicle class or a
+   * room type, booked by the class (`slotlock_book_pool`). Absent when it is in none.
+   */
+  pool?: string;
 }
 
 /** A confirmed occupation of a resource. The DB EXCLUDE constraint is the overlap arbiter. */

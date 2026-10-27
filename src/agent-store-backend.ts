@@ -506,6 +506,69 @@ export function createSlotlockStoreAgentBackend(
       });
     },
 
+    async bookPool(context, rawInput) {
+      const input = rawInput as {
+        pool: string;
+        starts_at: string;
+        ends_at: string;
+        timezone: string;
+        title?: string;
+        idempotency_key: string;
+      };
+      const content: CalendarEventContent = {
+        start: new Date(input.starts_at),
+        end: new Date(input.ends_at),
+        timezone: input.timezone,
+        summary: eventSummary(input.title),
+        status: 'confirmed',
+        transparency: 'opaque',
+        attendees: [],
+        reminders: [],
+      };
+      const tenantRef = context.principal.tenantRef;
+      const ownerRef = agentOwnerRef(context);
+      const externalRef = agentExternalRef(context, input.idempotency_key);
+      return withTenant(store, context, async (tenantStore) => {
+        const put = (resourceId: string) =>
+          tenantStore.putCalendarEvent({
+            tenantRef,
+            ownerRef,
+            externalRef,
+            resourceId,
+            expectedRevision: 0,
+            idempotencyKey: agentCommandIdempotencyKey(context, input.idempotency_key),
+            source: 'agent-server',
+            ...content,
+            materializationWindow: materializationWindow(content),
+            enforceBookingRules: true,
+          });
+        const answer = async (result: { externalRef: string; idempotent: boolean }) => {
+          const created = await tenantStore.getCalendarEvent({ tenantRef, ownerRef, externalRef: result.externalRef });
+          if (!created) throw new SlotlockAgentOperationError('store_inconsistent', 503);
+          return { event: projectSlotlockCalendarEvent(created), replayed: result.idempotent };
+        };
+        // A retry answers the member the first call booked, whichever it was.
+        const earlier = await tenantStore.getCalendarEvent({ tenantRef, ownerRef, externalRef });
+        if (earlier) {
+          const replay = await put(earlier.resourceId);
+          if (!replay.ok) throw operationError(replay);
+          return answer(replay);
+        }
+        const members = await tenantStore.listPoolMembers({ tenantRef, pool: input.pool, visibility: 'shared' });
+        if (members.length === 0) throw new SlotlockAgentOperationError('pool_not_found', 404);
+        // Each member in turn, each try its own savepoint: a member that is taken or that the
+        // booking's rules refuse is passed over; the exclusion constraint still decides each one.
+        for (const member of members) {
+          const result = await put(member.id);
+          if (result.ok) return answer(result);
+          if (result.code !== 'overlap' && result.code !== 'booking_rule_violated') {
+            throw operationError(result);
+          }
+        }
+        throw new SlotlockAgentOperationError('pool_full', 409);
+      }, WRITE);
+    },
+
     async bookTogether(context, rawInput) {
       const input = rawInput as {
         resource_ids: string[];
@@ -599,6 +662,25 @@ export function createSlotlockStoreAgentBackend(
 
     async listResources(context, input) {
       const cursor = parseResourceCursor(input.cursor);
+      const output = (resource: SlotlockResource) => ({
+        id: resource.id,
+        external_ref: resource.externalRef,
+        timezone: resource.timezone,
+        ...(resource.pool !== undefined ? { pool: resource.pool } : {}),
+      });
+      if (typeof input.pool === 'string') {
+        // A pool's members, in the order a pool booking tries them; at most 100, one page.
+        return withTenant(store, context, async (tenantStore) => ({
+          resources: (
+            await tenantStore.listPoolMembers({
+              tenantRef: context.principal.tenantRef,
+              pool: input.pool as string,
+              visibility: 'shared',
+            })
+          ).map(output),
+          next_cursor: null,
+        }));
+      }
       return withTenant(store, context, async (tenantStore) => {
         const limit = input.limit as number;
         const resources = await tenantStore.listResources({
@@ -609,11 +691,7 @@ export function createSlotlockStoreAgentBackend(
         });
         const page = resources.slice(0, limit);
         return {
-          resources: page.map((resource) => ({
-            id: resource.id,
-            external_ref: resource.externalRef,
-            timezone: resource.timezone,
-          })),
+          resources: page.map(output),
           next_cursor: resources.length > limit ? (page.at(-1)?.id ?? null) : null,
         };
       });
@@ -1083,6 +1161,7 @@ function resourceOutput(resource: SlotlockResource) {
     booking_rules: bookingRulesOutput(resource.bookingRules),
     visibility: resource.visibility ?? 'shared',
     archived_at: resource.archivedAt?.toISOString() ?? null,
+    pool: resource.pool ?? null,
   };
 }
 
@@ -1282,6 +1361,27 @@ export function createSlotlockStoreApplicationBackend(
         if (!resource) throw new SlotlockAgentOperationError('resource_not_found', 404);
         return { resource: resourceOutput(resource) };
       });
+    },
+
+    async setResourcePool(context, input) {
+      const id = input.resource_id as string;
+      if (!STORE_ID_PATTERN.test(id)) throw new SlotlockAgentOperationError('resource_not_found', 404);
+      return withTenant(store, context, async (tenant) => {
+        let resource: SlotlockResource | null;
+        try {
+          resource = await tenant.setResourcePool({ tenantRef: tenantOf(context), id, pool: input.pool as string | null });
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+        if (!resource) throw new SlotlockAgentOperationError('resource_not_found', 404);
+        return { resource: resourceOutput(resource) };
+      }, WRITE);
+    },
+
+    async listPools(context) {
+      return withTenant(store, context, async (tenant) => ({
+        pools: await tenant.listPools({ tenantRef: tenantOf(context) }),
+      }));
     },
 
     async setTenantAvailability(context, input) {

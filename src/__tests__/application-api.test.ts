@@ -35,6 +35,7 @@ const RESOURCE = {
   booking_rules: null,
   visibility: 'shared',
   archived_at: null,
+  pool: null,
 };
 const HOLD = {
   id: HOLD_ID,
@@ -115,6 +116,8 @@ const backend = {
   runMaintenance: vi.fn(),
   setResourceBookingRules: vi.fn(),
   listChanges: vi.fn(),
+  setResourcePool: vi.fn(),
+  listPools: vi.fn(),
   createWebhook: vi.fn(),
   listWebhooks: vi.fn(),
   deleteWebhook: vi.fn(),
@@ -260,6 +263,8 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   },
   createWebhook: { webhook: WEBHOOK, secret: `whsec_${'A'.repeat(43)}=` },
   listWebhooks: { webhooks: [WEBHOOK] },
+  setResourcePool: { resource: { ...RESOURCE, pool: 'van' } },
+  listPools: { pools: [{ pool: 'van', capacity: 5 }] },
   deleteWebhook: { deleted: true },
   enableWebhook: { webhook: WEBHOOK },
 };
@@ -520,6 +525,7 @@ describe('the application API over REST', () => {
       .sort();
     expect(headed).toEqual([
       'slotlock_acquire_hold',
+      'slotlock_book_pool',
       'slotlock_book_together',
       'slotlock_cancel_tenant_event',
       'slotlock_create_event',

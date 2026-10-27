@@ -813,6 +813,7 @@ export async function startCalendarServer(config: CalendarServerConfig) {
 | `slotlock_hold_slots` | Hold up to 5 candidates for 30-900 seconds while a person chooses | write |
 | `slotlock_release_slots` | Release a hold and the rest of its group | write |
 | `slotlock_book_together` | Book the same time on 2-20 resources, all or none | write |
+| `slotlock_book_pool` | Book any one free member of a pool (a vehicle class, a room type) | write |
 | `slotlock_list_events` | Events the caller created in a window | read-only |
 | `slotlock_get_event` | One event the caller created | read-only |
 | `slotlock_create_event` | Create an event of up to 3,660 days (idempotent) | write |
@@ -834,7 +835,15 @@ uses `slotlock_find_available_slots` with `require_free` (every resource, or any
 together, each judged by its own hours and rules) and books with `slotlock_book_together`: one event
 per resource in one transaction, all or none. A refusal names the `resource_id` that refused, on
 MCP and A2A in the error beside its `code`, on REST in the problem. Bundles take their resources
-in one order, so two racing over the same ones end with one booked, never a deadlock. The older names `calendar.<verb>` and `calendar_<verb>` still work and
+in one order, so two racing over the same ones end with one booked, never a deadlock.
+
+Rentals sell a class, not a plate. Put interchangeable resources in a pool
+(`PUT /v1/resources/{id}/pool`, `setResourcePool`); agents see each resource's `pool`, list a pool's
+members with `slotlock_list_resources` and `pool`, and book the class with `slotlock_book_pool`,
+which takes the first member that is free and allows the booking, in one transaction: a class of
+five sells exactly five for a time, however many race (`pool_full` after that). To see how many are
+free, search the members with `slotlock_find_available_slots` and `require_free: 1`: each slot names
+the members free in `resource_ids`. `GET /v1/pools` lists the pools with their capacity. The older names `calendar.<verb>` and `calendar_<verb>` still work and
 are no longer advertised.
 
 ### Errors
@@ -974,6 +983,7 @@ never cached. W3C `traceparent`, `tracestate` and `baggage` reach your backend a
 | `POST /v1/slot-holds` | `slotlock_hold_slots` |
 | `DELETE /v1/slot-holds/{hold_id}` | `slotlock_release_slots` |
 | `POST /v1/bundles` | `slotlock_book_together` |
+| `POST /v1/pool-bookings` | `slotlock_book_pool` |
 | `GET /v1/events` | `slotlock_list_events` |
 | `POST /v1/events` | `slotlock_create_event` |
 | `GET /v1/events/{event_id}` | `slotlock_get_event` |
