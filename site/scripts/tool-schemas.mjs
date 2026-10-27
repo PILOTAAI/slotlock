@@ -22,6 +22,7 @@ class Lexer {
   next() {
     const token = this.peek();
     this.buffer = null;
+    this.last = token;
     return token;
   }
 
@@ -59,6 +60,13 @@ class Lexer {
       }
       this.position = i + 1;
       return { t: 'str', v: value, start };
+    }
+    // A regular expression literal, which the registry passes only as a call's first argument.
+    if (c === '/' && this.last?.v === '(') {
+      const literal = /^\/((?:[^/\\\n]|\\.)+)\/([a-z]*)/.exec(src.slice(start, start + 500));
+      if (!literal) throw new Error(`unterminated regular expression at ${start}`);
+      this.position += literal[0].length;
+      return (this.last = { t: 'regex', v: literal[1], flags: literal[2], start });
     }
     const number = /^[0-9][0-9_]*(?:\.[0-9_]+)?/.exec(src.slice(start, start + 40));
     if (number) {
@@ -103,6 +111,7 @@ function parsePrimary(lexer) {
   const token = lexer.next();
   if (token.t === 'num') return { type: 'value', value: token.v };
   if (token.t === 'str') return { type: 'value', value: token.v };
+  if (token.t === 'regex') return { type: 'value', value: token.v };
   if (token.t === 'id') {
     if (token.v === 'true' || token.v === 'false')
       return { type: 'value', value: token.v === 'true' };
@@ -287,6 +296,10 @@ export function createSourceReader(source, external = {}) {
         return { ...inner, format: 'email' };
       case 'datetime':
         return { ...inner, format: 'date-time' };
+      case 'uuid':
+        return { ...inner, format: 'uuid' };
+      case 'regex':
+        return { ...inner, pattern: value(node.args[0]) };
       case 'refine':
         return { ...inner, refinements: [...(inner.refinements ?? []), node.text] };
       case 'trim':

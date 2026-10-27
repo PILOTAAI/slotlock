@@ -94,8 +94,12 @@ const expectedFiles = new Set([
   'api-keys.d.ts',
   'application-api.js',
   'application-api.d.ts',
+  'booking-rules.js',
+  'booking-rules.d.ts',
   'cli.js',
   'cli.d.ts',
+  'event-feed.js',
+  'event-feed.d.ts',
   'config.js',
   'config.d.ts',
   'dashboard.js',
@@ -140,6 +144,10 @@ const expectedFiles = new Set([
   'timezone.d.ts',
   'types.js',
   'types.d.ts',
+  'webhooks.js',
+  'webhooks.d.ts',
+  'interop.js',
+  'interop.d.ts',
   'weekly-hours.js',
   'weekly-hours.d.ts',
 ]);
@@ -355,6 +363,7 @@ try {
   assert.deepEqual(await health.json(), {
     status: 'ready',
     version: ${JSON.stringify(manifest.version)},
+    tzdata: process.versions.tz,
     checks: ['backend'],
   });
 
@@ -753,7 +762,7 @@ if (databaseUrl) {
         { jsonrpc: '2.0', id: 2, method: 'tools/list' },
         { 'MCP-Protocol-Version': '2025-11-25' },
       );
-      assert.equal((await tools.json()).result.tools.length, 8);
+      assert.equal((await tools.json()).result.tools.length, 13);
       // The REST API: its document is public, its routes take the same token, and a write that
       // waits for a person (SLOTLOCK_CONFIRM_WRITES=all, set above; the default is none) answers 428.
       const openApi = await fetch(`${listening.address}/openapi.json`);
@@ -779,7 +788,10 @@ if (databaseUrl) {
         idempotency_key: 'package-verification',
       });
       assert.equal(guarded.status, 428);
-      assert.deepEqual(await guarded.json(), { error: { code: 'confirmation_required' } });
+      assert.equal(guarded.headers.get('content-type'), 'application/problem+json');
+      const problem = await guarded.json();
+      assert.equal(problem.code, 'confirmation_required');
+      assert.deepEqual(problem.error, { code: 'confirmation_required' });
     } finally {
       child.kill('SIGTERM');
     }

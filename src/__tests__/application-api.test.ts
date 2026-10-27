@@ -32,8 +32,10 @@ const RESOURCE = {
   external_ref: 'vehicle-42',
   timezone: 'Europe/London',
   availability: null,
+  booking_rules: null,
   visibility: 'shared',
   archived_at: null,
+  pool: null,
 };
 const HOLD = {
   id: HOLD_ID,
@@ -112,6 +114,26 @@ const backend = {
   getTenant: vi.fn(),
   eraseTenant: vi.fn(),
   runMaintenance: vi.fn(),
+  setResourceBookingRules: vi.fn(),
+  listChanges: vi.fn(),
+  setResourcePool: vi.fn(),
+  listPools: vi.fn(),
+  getResourceHistory: vi.fn(),
+  getCoverage: vi.fn(),
+  recordCoverageFailure: vi.fn(),
+  getReservationHistory: vi.fn(),
+  getTenantEventHistory: vi.fn(),
+  createWebhook: vi.fn(),
+  listWebhooks: vi.fn(),
+  deleteWebhook: vi.fn(),
+  enableWebhook: vi.fn(),
+  exportResourceAvailability: vi.fn(),
+  importResourceAvailability: vi.fn(),
+  exportTenantEvent: vi.fn(),
+  checkInReservation: vi.fn(),
+  joinWaitlist: vi.fn(),
+  listWaitlist: vi.fn(),
+  leaveWaitlist: vi.fn(),
 } satisfies Record<keyof SlotlockApplicationBackend, ReturnType<typeof vi.fn>>;
 const authorizeApplication = vi.fn();
 const consumeRateLimit = vi.fn();
@@ -197,6 +219,47 @@ function exampleRequest(name: string, token = 'admin'): Request {
   return call(definition.method, path, { body: rest, token });
 }
 
+const HISTORY = {
+    history: [
+      {
+        id: 'msg_2',
+        type: 'reservation.updated',
+        time: '2027-03-01T09:00:00.000Z',
+        actor: 'api_key:1',
+        data: { reference: 'BK-42', before: { revision: 1 } },
+      },
+    ],
+    next_before: null,
+  };
+
+const WEBHOOK = {
+  id: '9b2f4c1e-6d3a-4e8b-a1c7-5f0e2d4b6a8c',
+  url: 'https://example.com/slotlock-webhook',
+  event_types: null,
+  created_at: '2027-03-01T00:00:00.000Z',
+  attempts: 0,
+  failing_since: null,
+  last_status: null,
+  last_error: null,
+  disabled_at: null,
+  disabled_reason: null,
+};
+
+const WAITLIST_ENTRY = {
+    id: '1b4e28ba-2fa1-41d2-883f-0016d3cca427',
+    resource_id: null,
+    pool: 'van',
+    start: '2027-03-29T09:00:00.000Z',
+    end: '2027-03-29T17:00:00.000Z',
+    holder_ref: 'customer-42',
+    offer_ttl_seconds: 900,
+    status: 'waiting',
+    hold_id: null,
+    offered_resource_id: null,
+    offered_at: null,
+    created_at: '2027-03-01T09:00:00.000Z',
+  };
+
 const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>> = {
   createResource: { resource: RESOURCE },
   getResource: { resource: RESOURCE },
@@ -206,6 +269,27 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   listBusy: { busy: [{ start: '2027-03-29T09:00:00.000Z', end: '2027-03-29T10:00:00.000Z' }] },
   setResourceAvailability: { resource: RESOURCE },
   setTenantAvailability: { resources_updated: 3 },
+  exportResourceAvailability: { icalendar: 'BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n' },
+  importResourceAvailability: { resource: RESOURCE },
+  checkInReservation: { reference: 'BK-42', checked_in_at: '2027-03-29T09:05:00.000Z' },
+  joinWaitlist: { entry: WAITLIST_ENTRY },
+  listWaitlist: { entries: [WAITLIST_ENTRY] },
+  leaveWaitlist: { left: true },
+  exportTenantEvent: {
+    event: {
+      '@type': 'Event',
+      uid: EVENT_ID,
+      updated: '2027-03-01T09:00:00.000Z',
+      sequence: 2,
+      title: 'Van handover',
+      start: '2027-03-29T10:00:00',
+      timeZone: 'Europe/London',
+      duration: 'PT1H',
+      status: 'confirmed',
+      freeBusyStatus: 'busy',
+    },
+  },
+  setResourceBookingRules: { resource: { ...RESOURCE, booking_rules: { min_notice_minutes: 120 } } },
   acquireHold: { hold: HOLD },
   getHold: { hold: HOLD },
   listHolds: { holds: [HOLD], next_cursor: null },
@@ -221,7 +305,46 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   cancelTenantEvent: { event_id: EVENT_ID, revision: 3, cancelled: true, replayed: false },
   getTenant: { tenant: { ref: 'tenant-a', suspended: false } },
   eraseTenant: { total: 12, rows: { resources: 2, reservations: 10 } },
-  runMaintenance: { extended: 0, conflicts: 0, refused: 0, pruned: 0, capped: false },
+  runMaintenance: { extended: 0, conflicts: 0, refused: 0, pruned: 0, zone_shifts: 0, stale_sources: 0, no_shows: 0, waitlist_offers: 0, capped: false },
+  listChanges: {
+    changes: [
+      {
+        specversion: '1.0',
+        id: 'msg_1',
+        source: '/slotlock/resources/0f8b6c1e-2d4a-4c7e-9b1a-3e5f7a9c2d4b',
+        type: 'io.pylota.slotlock.reservation.created',
+        subject: 'BK-42',
+        time: '2027-03-01T09:00:00.000Z',
+        datacontenttype: 'application/json',
+        data: { reference: 'BK-42' },
+      },
+    ],
+    next_cursor: 'MToxOjE6MA',
+  },
+  createWebhook: { webhook: WEBHOOK, secret: `whsec_${'A'.repeat(43)}=` },
+  listWebhooks: { webhooks: [WEBHOOK] },
+  setResourcePool: { resource: { ...RESOURCE, pool: 'van' } },
+  listPools: { pools: [{ pool: 'van', capacity: 5 }] },
+  getResourceHistory: HISTORY,
+  getCoverage: {
+    sources: [
+      {
+        source: 'google:fleet@example.com',
+        start: '2027-03-01T00:00:00.000Z',
+        end: '2027-06-01T00:00:00.000Z',
+        revision: 7,
+        observed_at: '2027-02-28T09:00:00.000Z',
+        last_error: null,
+        last_error_at: null,
+        stale: false,
+      },
+    ],
+  },
+  recordCoverageFailure: { recorded: true },
+  getReservationHistory: HISTORY,
+  getTenantEventHistory: HISTORY,
+  deleteWebhook: { deleted: true },
+  enableWebhook: { webhook: WEBHOOK },
 };
 
 beforeEach(() => {
@@ -455,7 +578,7 @@ describe('the application API over REST', () => {
     // Cancelling any event of the tenant needs a key, from the query or the header.
     const unkeyed = await server.fetch(call('DELETE', `/v1/tenant/events/${EVENT_ID}?expected_revision=2`));
     expect(unkeyed.status).toBe(400);
-    expect(await errorCode(unkeyed)).toBe('invalid_arguments');
+    expect(await errorCode(unkeyed)).toBe('idempotency_key_required');
     const headed = await server.fetch(
       call('DELETE', `/v1/tenant/events/${EVENT_ID}?expected_revision=2`, {
         headers: { 'Idempotency-Key': 'cancel-1' },
@@ -478,7 +601,16 @@ describe('the application API over REST', () => {
       .filter((operation) => operation.parameters?.some((parameter) => parameter.in === 'header'))
       .map((operation) => operation.operationId)
       .sort();
-    expect(headed).toEqual(['slotlock_acquire_hold', 'slotlock_cancel_tenant_event']);
+    expect(headed).toEqual([
+      'slotlock_acquire_hold',
+      'slotlock_book_pool',
+      'slotlock_book_together',
+      'slotlock_cancel_tenant_event',
+      'slotlock_create_event',
+      'slotlock_delete_event',
+      'slotlock_hold_slots',
+      'slotlock_update_event',
+    ]);
   });
 
   it('takes a visibility only at creation, and erases a tenant only with its reference', () => {
@@ -537,7 +669,7 @@ describe('the application API over REST', () => {
     backend.confirmHold.mockRejectedValueOnce(failure);
     const broken = await server.fetch(exampleRequest('slotlock_confirm_hold'));
     expect(broken.status).toBe(500);
-    expect(await broken.json()).toEqual({ error: { code: 'internal_error' } });
+    expect(await broken.json()).toEqual(expect.objectContaining({ status: 500, code: 'internal_error', error: { code: 'internal_error' } }));
     expect(onError).toHaveBeenCalledWith(failure, expect.objectContaining({ operation: 'slotlock_confirm_hold' }));
   });
 
@@ -547,7 +679,7 @@ describe('the application API over REST', () => {
     expect(response.status).toBe(500);
     const body = await response.text();
     expect(body).not.toContain('tenant-b');
-    expect(JSON.parse(body)).toEqual({ error: { code: 'internal_error' } });
+    expect(JSON.parse(body)).toEqual(expect.objectContaining({ status: 500, code: 'internal_error', error: { code: 'internal_error' } }));
     expect(onError).toHaveBeenCalledWith(
       expect.objectContaining({ code: 'invalid_backend_result' }),
       expect.objectContaining({ operation: 'slotlock_get_resource' }),

@@ -32,6 +32,21 @@ export const SLOTLOCK_REST_ROUTES: readonly SlotlockRestRoute[] = Object.freeze(
     operation: 'slotlock_find_next_available',
     refusals: [404],
   },
+  {
+    method: 'GET',
+    path: '/v1/available-slots',
+    operation: 'slotlock_find_available_slots',
+    refusals: [404],
+  },
+  { method: 'POST', path: '/v1/slot-holds', operation: 'slotlock_hold_slots', refusals: [409] },
+  { method: 'POST', path: '/v1/bundles', operation: 'slotlock_book_together', refusals: [404, 409] },
+  { method: 'POST', path: '/v1/pool-bookings', operation: 'slotlock_book_pool', refusals: [404, 409] },
+  {
+    method: 'DELETE',
+    path: '/v1/slot-holds/{hold_id}',
+    operation: 'slotlock_release_slots',
+    refusals: [409],
+  },
   { method: 'GET', path: '/v1/events', operation: 'slotlock_list_events', refusals: [404] },
   { method: 'POST', path: '/v1/events', operation: 'slotlock_create_event', refusals: [404, 409] },
   { method: 'GET', path: '/v1/events/{event_id}', operation: 'slotlock_get_event', refusals: [404] },
@@ -58,6 +73,91 @@ export const SLOTLOCK_APPLICATION_REST_ROUTES: readonly SlotlockRestRoute<Slotlo
       operation: name,
     })),
   );
+
+/** Where every REST refusal's documentation is: the Link header's `describedby` target. */
+export const SLOTLOCK_PROBLEM_DOCS = 'https://slotlock.pylota.io/docs/api/#errors';
+
+/** A problem type's identifier: a tag URI (RFC 4151), stable, one per code, not a locator. */
+export function slotlockProblemType(code: string): string {
+  return `tag:slotlock.pylota.io,2026:problem:${code}`;
+}
+
+const PROBLEM_TITLES: Readonly<Record<string, string>> = Object.freeze({
+  overlap: 'The time is taken',
+  idempotency_conflict: 'Idempotency-Key is already used',
+  idempotency_key_required: 'Idempotency-Key is missing',
+  idempotency_key_not_supported: 'Idempotency-Key is not taken here',
+  revision_conflict: 'The revision is stale',
+  confirmation_required: 'A person must confirm this write',
+  rate_limited: 'Too many requests',
+  authentication_required: 'Authentication required',
+  forbidden: 'Not allowed',
+  invalid_arguments: 'The arguments are not valid',
+});
+
+const STATUS_TITLES: Readonly<Record<number, string>> = Object.freeze({
+  400: 'Bad Request',
+  401: 'Unauthorized',
+  403: 'Forbidden',
+  404: 'Not Found',
+  405: 'Method Not Allowed',
+  409: 'Conflict',
+  410: 'Gone',
+  413: 'Content Too Large',
+  415: 'Unsupported Media Type',
+  422: 'Unprocessable Content',
+  428: 'Precondition Required',
+  429: 'Too Many Requests',
+  500: 'Internal Server Error',
+  503: 'Service Unavailable',
+});
+
+/**
+ * A REST refusal as RFC 9457 problem details (`application/problem+json`): `type` and `title` name
+ * the problem, `code` is Slotlock's code, and `error.code` repeats it, the body every earlier
+ * client reads. `extensions` add what the refusal is about, such as the interval an overlap refused.
+ */
+export function slotlockProblem(
+  status: number,
+  code: string,
+  extensions: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    type: slotlockProblemType(code),
+    title: PROBLEM_TITLES[code] ?? STATUS_TITLES[status] ?? 'Error',
+    status,
+    code,
+    ...extensions,
+    error: { code },
+  };
+}
+
+/**
+ * The Idempotency-Key header's value: a Structured Field String (RFC 9651, as
+ * draft-ietf-httpapi-idempotency-key-header-08 defines it), or the bare token clients sent before.
+ * `null` when it is a quoted string that does not parse.
+ */
+export function parseIdempotencyKeyHeader(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('"')) return trimmed;
+  let key = '';
+  for (let index = 1; index < trimmed.length; index++) {
+    const char = trimmed[index] as string;
+    if (char === '\\') {
+      const next = trimmed[index + 1];
+      if (next !== '"' && next !== '\\') return null;
+      key += next;
+      index++;
+    } else if (char === '"') {
+      return index === trimmed.length - 1 ? key : null;
+    } else if (char < ' ' || char > '~') {
+      return null;
+    } else {
+      key += char;
+    }
+  }
+  return null;
+}
 
 /** Where an operation's arguments come from. */
 export function restInputFromBody(route: { method: string }): boolean {
@@ -168,6 +268,14 @@ export function restQueryInput(
 
 const ERROR_RESPONSE = { $ref: '#/components/responses/Error' };
 
+const IDEMPOTENCY_KEY_HEADER =
+  'Stands in for idempotency_key: a Structured Field String (`"8e03978e-40d5-43e8-bc93-6894a57f9324"`, ' +
+  'draft-ietf-httpapi-idempotency-key-header-08) or the bare key; when both are sent they must be equal. ' +
+  'A retry with the same key and request answers what the first did; the same key with another request is ' +
+  '422 idempotency_conflict. An event write keeps its key for 30 days (maintenance removes it after that), ' +
+  'a hold until the hold would have expired, is released or is confirmed. Where the key is required and ' +
+  'neither is sent: 400 idempotency_key_required.';
+
 /** One operation, as the OpenAPI document needs it. */
 export interface SlotlockOpenApiOperation {
   name: string;
@@ -224,15 +332,15 @@ function openApiOperation(
       parameters.push({ name, in: 'query', required: required.has(name), schema });
     }
   }
-  // An application write that keeps a retry identity also takes it as the Idempotency-Key header.
-  if (extra.tag === 'Application' && fields.idempotency_key !== undefined) {
+  // A write that keeps a retry identity also takes it as the Idempotency-Key header.
+  const keyed = fields.idempotency_key !== undefined;
+  if (keyed) {
     parameters.push({
       name: 'Idempotency-Key',
       in: 'header',
       required: false,
-      description:
-        'Stands in for idempotency_key, where HTTP clients put a retry identity; when both are sent they must be equal.',
-      schema: { type: 'string', minLength: 1, maxLength: 500 },
+      description: IDEMPOTENCY_KEY_HEADER,
+      schema: { type: 'string', minLength: 1, maxLength: 502 },
     });
   }
   if (parameters.length > 0) result.parameters = parameters;
@@ -242,6 +350,7 @@ function openApiOperation(
       content: { 'application/json': { schema: operation.outputSchema } },
     },
     ...extra.responses,
+    ...(keyed ? { '422': ERROR_RESPONSE } : {}),
   };
   return result;
 }
@@ -293,6 +402,8 @@ export function slotlockOpenApiDocument(args: {
           '403': ERROR_RESPONSE,
           '404': ERROR_RESPONSE,
           ...(route.method === 'GET' ? {} : { '409': ERROR_RESPONSE }),
+          // A change cursor past the feed's retention.
+          ...(route.operation === 'slotlock_list_changes' ? { '410': ERROR_RESPONSE } : {}),
           '429': ERROR_RESPONSE,
           default: ERROR_RESPONSE,
         },
@@ -307,8 +418,10 @@ export function slotlockOpenApiDocument(args: {
       description:
         'Calendars agents cannot double-book. The "Agent tools" operations are the Slotlock MCP tools; ' +
         'the "Application" operations (resources, bookable hours, holds, reservations, coverage and ' +
-        'maintenance) need an API key with the admin scope. An error is `{"error":{"code":…}}`, and ' +
-        'a write that waits for a person answers 428 `confirmation_required`.',
+        'maintenance) need an API key with the admin scope. An error is RFC 9457 problem details ' +
+        '(`application/problem+json`) whose `code` names it, also as `{"error":{"code":…}}`; an overlap ' +
+        'names the `resource_id`, `start` and `end` it refused. A write that waits for a person answers 428 ' +
+        '`confirmation_required`.',
     },
     servers: [
       args.publicBaseUrl !== undefined
@@ -349,8 +462,16 @@ export function slotlockOpenApiDocument(args: {
       schemas: {
         Error: {
           type: 'object',
-          required: ['error'],
+          description: 'RFC 9457 problem details.',
+          required: ['type', 'title', 'status', 'code', 'error'],
           properties: {
+            type: { type: 'string', description: 'The problem type: a tag URI, one per code.' },
+            title: { type: 'string' },
+            status: { type: 'integer' },
+            code: { type: 'string', description: 'Why the operation did not run.' },
+            resource_id: { type: 'string', description: 'An overlap: the resource it refused.' },
+            start: { type: 'string', description: 'An overlap: the start it refused.' },
+            end: { type: 'string', description: 'An overlap: the end it refused.' },
             error: {
               type: 'object',
               required: ['code'],
@@ -362,7 +483,15 @@ export function slotlockOpenApiDocument(args: {
       responses: {
         Error: {
           description: 'The operation did not run; `code` says why.',
-          content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
+          headers: {
+            Link: {
+              description: 'Where the error codes are documented (`rel="describedby"`).',
+              schema: { type: 'string' },
+            },
+          },
+          content: {
+            'application/problem+json': { schema: { $ref: '#/components/schemas/Error' } },
+          },
         },
       },
     },

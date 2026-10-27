@@ -110,6 +110,9 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
   and the rest wait their turn, so a tenant's writes waiting on its own locks leave the others to
   other tenants and key lookups; a server with one tenant can set `tenant_transactions=10`. A
   request whose transaction waits more than 5 seconds for a lock gets 503 `server_busy`.
+  With more than one server, `SLOTLOCK_SHARED_LIMITS=on` shares the tenant budgets (`tenant_*`,
+  `app_*`) through the database, so N servers allow a tenant its rate once, not N times; each server
+  checks its own buckets first, and goes on with them alone if the database cannot be reached.
   `SLOTLOCK_LIMITS` changes the limits; behind a proxy, set `SLOTLOCK_TRUSTED_PROXY_HEADER` to the field it puts the
   client's address in (`CF-Connecting-IP` behind Cloudflare) before the server takes traffic, or
   every client shares the proxy's budget: the server logs a `client_address_field_ignored` warning
@@ -132,6 +135,34 @@ slotlock hours clear --all    # back to SLOTLOCK_AVAILABILITY
 A rule is `rrule`, `startMinutes` and `durationMinutes` here and in `SLOTLOCK_AVAILABILITY`. The
 REST application API spells every field in snake_case, so there it is `rrule`, `start_minutes` and
 `duration_minutes`. `slotlock --help` lists every setting.
+
+#### Booking rules
+
+A resource can also say what a booking on it must satisfy:
+
+```sh
+slotlock rules set '{"minNoticeMinutes":120,"slotStepMinutes":30,"turnaroundMinutes":30,"enforceHours":true}' --resource vehicle-42
+slotlock rules clear --resource vehicle-42
+```
+
+| Rule | A booking made now |
+| --- | --- |
+| `minNoticeMinutes` | starts at least this far ahead |
+| `maxAdvanceDays` | starts at most this far ahead |
+| `slotStepMinutes` | starts on a step from local midnight in the resource's time zone |
+| `turnaroundMinutes` | keeps this long free after it: its trailing buffer, which the database enforces |
+| `enforceHours` | lies inside the resource's bookable hours |
+| `checkInMinutes` | is claimed (`checkInReservation`) this long after its start, or maintenance releases it |
+
+- Holds, reservations, moves and agents' events are checked when they are made, by the database's
+  clock; a refusal names the rule (`booking_rule_violated` with `rule` in the store,
+  `booking_rule_min_notice`, `_max_advance`, `_slot_step` or `_outside_hours` to an agent).
+- A series is judged on its first occurrence for notice and advance, and on every occurrence for
+  step and hours. Imported calendar events are not checked: they happened elsewhere.
+- Searches (`slotlock_find_next_available`, `slotlock_find_available_slots`, `findNextAvailableFor`)
+  offer only slots the rules allow, so an offered slot is one the write accepts.
+- The REST application API sets them with `PUT /v1/resources/{resource_id}/booking-rules`, in
+  snake_case; the store with `setResourceBookingRules`.
 
 ### Without Docker
 
@@ -483,6 +514,24 @@ uses the default, `[]` closes it); `setTenantAvailability({ tenantRef, rules })`
 of a tenant. `createSlotlockStoreAgentBackend` answers from a resource's own hours and calls
 `availabilityRules` only for resources without them.
 
+Waitlists: `joinWaitlist({ tenantRef, resourceId | pool, start, end, holderRef, offerTtlMs })`
+waits for a window that is taken now. When it comes free (a cancel, a released or expired hold, a
+no-show), `offerWaitlist` gives it to the entries in the order they joined: the first whose window
+is free, on its resource or the first free member of its pool, gets a hold for its holder, and the
+feed says so (`waitlist.offered`, with `hold_id`). Confirm the hold to book it; let it go and the next
+is offered. Cancels and releases through the API offer at once; maintenance offers the rest and
+expires entries whose window has started (`waitlist.expired`). With `checkInMinutes` in a
+resource's booking rules, maintenance releases a booking made since the rule was set that nobody
+checked in that long after its start, or after it was made for a walk-in (`reservation.no_show`),
+and the waitlist is offered its time. Check-in opens an hour before the start; moving a booking to
+another start clears it. Leaving the waitlist lets an offer not yet confirmed go with it.
+
+Calendar tools speak the standards: `emitVAvailability({ rules, timezone, uid })` writes rules as an
+iCalendar VAVAILABILITY (RFC 7953) and `parseVAvailability(text)` reads one back as
+`{ timezone, rules }`; `toJSCalendarEvent(event)` answers a calendar event as a JSCalendar Event
+(RFC 8984). The API serves them at `/v1/resources/{resource_id}/availability/ical` and
+`/v1/tenant/events/{event_id}/jscalendar`.
+
 Writing rules:
 
 - Create with `expectedRevision: 0`; update with the revision you last read and a new idempotency
@@ -782,6 +831,11 @@ export async function startCalendarServer(config: CalendarServerConfig) {
 | `slotlock_list_resources` | Resources visible to the tenant | read-only |
 | `slotlock_get_free_busy` | Busy intervals plus coverage certainty | read-only |
 | `slotlock_find_next_available` | Earliest *certain* slot across resources | read-only |
+| `slotlock_find_available_slots` | Up to 50 *certain* slots, earliest first, to offer a choice | read-only |
+| `slotlock_hold_slots` | Hold up to 5 candidates for 30-900 seconds while a person chooses | write |
+| `slotlock_release_slots` | Release a hold and the rest of its group | write |
+| `slotlock_book_together` | Book the same time on 2-20 resources, all or none | write |
+| `slotlock_book_pool` | Book any one free member of a pool (a vehicle class, a room type) | write |
 | `slotlock_list_events` | Events the caller created in a window | read-only |
 | `slotlock_get_event` | One event the caller created | read-only |
 | `slotlock_create_event` | Create an event of up to 3,660 days (idempotent) | write |
@@ -789,7 +843,29 @@ export async function startCalendarServer(config: CalendarServerConfig) {
 | `slotlock_delete_event` | Tombstone at an expected revision | write, destructive |
 
 A query window is at most 367 days. Each caller sees only the events it created, but everyone's
-events count as busy time. The older names `calendar.<verb>` and `calendar_<verb>` still work and
+events count as busy time.
+
+An agent offering a person several times holds them first, so none is taken while the person
+decides: `slotlock_hold_slots` holds each free candidate in one group (and lists the taken ones in
+`refused`), and `slotlock_create_event` with one `hold_id` books that time and releases the rest in
+the same transaction. A hold belongs to the agent that took it: another agent can neither book nor
+release it. One agent may have 20 live holds at once; unbooked ones expire by the database clock.
+Notice was judged when the time was held, so booking the hold does not judge it again.
+
+A booking that needs several resources at once (a van and its driver, a room and its projector)
+uses `slotlock_find_available_slots` with `require_free` (every resource, or any n of them, free
+together, each judged by its own hours and rules) and books with `slotlock_book_together`: one event
+per resource in one transaction, all or none. A refusal names the `resource_id` that refused, on
+MCP and A2A in the error beside its `code`, on REST in the problem. Bundles take their resources
+in one order, so two racing over the same ones end with one booked, never a deadlock.
+
+Rentals sell a class, not a plate. Put interchangeable resources in a pool
+(`PUT /v1/resources/{id}/pool`, `setResourcePool`); agents see each resource's `pool`, list a pool's
+members with `slotlock_list_resources` and `pool`, and book the class with `slotlock_book_pool`,
+which takes the first member that is free and allows the booking, in one transaction: a class of
+five sells exactly five for a time, however many race (`pool_full` after that). To see how many are
+free, search the members with `slotlock_find_available_slots` and `require_free: 1`: each slot names
+the members free in `resource_ids`. `GET /v1/pools` lists the pools with their capacity. The older names `calendar.<verb>` and `calendar_<verb>` still work and
 are no longer advertised.
 
 ### Errors
@@ -925,6 +1001,11 @@ never cached. W3C `traceparent`, `tracestate` and `baggage` reach your backend a
 | `GET /v1/resources` | `slotlock_list_resources` |
 | `GET /v1/free-busy` | `slotlock_get_free_busy` |
 | `GET /v1/next-available` | `slotlock_find_next_available` |
+| `GET /v1/available-slots` | `slotlock_find_available_slots` |
+| `POST /v1/slot-holds` | `slotlock_hold_slots` |
+| `DELETE /v1/slot-holds/{hold_id}` | `slotlock_release_slots` |
+| `POST /v1/bundles` | `slotlock_book_together` |
+| `POST /v1/pool-bookings` | `slotlock_book_pool` |
 | `GET /v1/events` | `slotlock_list_events` |
 | `POST /v1/events` | `slotlock_create_event` |
 | `GET /v1/events/{event_id}` | `slotlock_get_event` |
@@ -939,7 +1020,17 @@ curl "http://localhost:8080/v1/resources" -H "Authorization: Bearer $SLOTLOCK_AP
   `resource_ids=a&resource_ids=b`); `POST`, `PUT` and `PATCH` take a JSON body. Ids are in the path;
   percent-encode one that holds `/`.
 - Keys, scopes, `authorize` and the rate limit apply as over MCP. The body is the tool's output, or
-  `{"error":{"code":…}}` with the matching HTTP status.
+  an [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem (`application/problem+json`) with
+  the matching HTTP status: `type` (a tag URI, one per code), `title`, `status`, `code`, and
+  `error.code` as well, the body earlier clients read. An `overlap` names the `resource_id`, `start`
+  and `end` it refused. A `Link: <…>; rel="describedby"` header points at these docs.
+- A write's `idempotency_key` may come as the `Idempotency-Key` header instead
+  ([draft 08](https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/)): a
+  quoted Structured Field String (`Idempotency-Key: "booking-BK-42"`) or the bare key, equal to the
+  argument when both are sent. A write that needs one and gets neither answers
+  `400 idempotency_key_required`; the same key with another request, `422 idempotency_conflict`.
+  An event write's key is kept 30 days, then removed by maintenance, after which the key is new; a
+  hold's until the hold would have expired, is released or is confirmed.
 - REST cannot ask a person, so a write listed in `confirmation` answers `428 confirmation_required`.
 - Free/busy and the next-available search read each resource they name once, however often it is
   named, and 10,000 busy intervals in all; the next-available search also expands 100,000 bookable
@@ -1001,7 +1092,7 @@ curl -X PUT "http://localhost:8080/v1/reservations/BK-42" \
   `DELETE /v1/reservations/{hold_id}?revision=2`.
 - `POST /v1/holds` and `DELETE /v1/tenant/events/…` take a retry identity as the `Idempotency-Key`
   header or as `idempotency_key`. A retried hold answers the hold the first request made; the same
-  key with another request is `409 idempotency_conflict`. Other routes are safe to retry as they
+  key with another request is `422 idempotency_conflict`. Other routes are safe to retry as they
   are, and refuse the header (`400 idempotency_key_not_supported`).
 - Lists page by `limit` (up to 100) and `cursor`, the `next_cursor` of the page before, and read a
   window of at most 367 days.
@@ -1018,6 +1109,52 @@ curl -X PUT "http://localhost:8080/v1/reservations/BK-42" \
 - With the library, pass `application` beside `rest: true`:
   `{ backend: createSlotlockStoreApplicationBackend(store, { maxTenantResources }), authorize }`.
   A principal with `scopes` needs `admin`; then `authorize` decides.
+
+### Changes and webhooks
+
+Every committed change to a tenant's holds, bookings and calendar events is recorded in the same
+transaction (by a database trigger, so no write path skips it), and nothing is recorded that did
+not commit. A change carries ids, times and states, never titles, descriptions or attendees.
+
+- `GET /v1/changes?cursor=…` lists them oldest first as [CloudEvents 1.0](https://cloudevents.io)
+  (`io.pylota.slotlock.hold.created`, `.reservation.cancelled`, `.event.updated`, …). Follow
+  `next_cursor`, which comes back even when nothing is new: it never skips a change, even one whose
+  transaction commits after a later one's. Changes are kept 30 days; an older cursor answers
+  `410 cursor_expired`.
+- `POST /v1/webhooks` with an https `url` (and `event_types`, optionally) sends each change from
+  then on as a [Standard Webhooks](https://www.standardwebhooks.com) request: `webhook-id` (the
+  change's id, the same on every retry), `webhook-timestamp` and `webhook-signature`, keyed by the
+  `whsec_` secret the call returns once. Verify it with any Standard Webhooks library, and use
+  `webhook-id` to drop a repeat: delivery is at least once.
+- Changes go to each webhook in order, one at a time, until one fails; that one is retried after
+  5 seconds, 5 minutes, 30 minutes, 2, 5, then every 10 hours. After a day of failures, or a `410`,
+  the webhook is disabled and the feed records `webhook.disabled`; `POST /v1/webhooks/{id}/enable`
+  resumes it where it stopped, or answers `409 changes_pruned` when what it missed is older than the
+  feed keeps (add it again and read what it missed from `/v1/changes`). The feed keeps every change
+  an enabled webhook has still to receive, however old. At most 10 webhooks per tenant.
+- Each request has 15 seconds in all, and a tenant's pass 30 seconds; tenants are delivered 8 at
+  a time, so a slow endpoint holds up only its own tenant.
+- History reads the same record backwards, with who made each change (the API key or agent) and,
+  for a change of an existing booking or event, what it was before:
+  `GET /v1/resources/{id}/history`, `GET /v1/reservations/{reference}/history`,
+  `GET /v1/tenant/events/{id}/history`, newest first, paged by `before`. In the library, pass
+  `actor` to `withTenant` and read `listHistory`. It is kept as long as the feed and erased with
+  the tenant.
+- When time zone rules change (a new tzdata), a booking's instant and the wall time it was made for
+  part: Winnipeg's 09:00 is no longer the instant stored. Slotlock keeps both, and maintenance finds
+  future one-off events whose wall time moved: it reports each once (`event.timezone_shifted`, with
+  the instant it has and the one its wall time now means). The library's `followZoneRules` option
+  to `maintainSlotlockTenant` moves them instead, as a new revision, unless that overlaps another
+  booking (`event.timezone_conflict`; it stays, for a person or an agent to decide). `/healthz`
+  reports the `tzdata` the server runs.
+- Feed health: `GET /v1/resources/{id}/coverage` shows each source's window, when it was last read,
+  its last error (`POST /v1/resources/{id}/coverage/{source}/failure` records one) and whether it is
+  stale (not read for a day, so the time it covers is unproven, never free). A source that goes stale
+  is put on the feed once, as `coverage.stale`, until it is read again.
+- `slotlock serve` delivers (`SLOTLOCK_WEBHOOKS`): never to an address on a private network, which
+  it checks when it connects, and following no redirect. `private` allows those, for testing.
+- In the library: `listChanges`, `createWebhookEndpoint` and the rest are store methods, and
+  `startSlotlockWebhookDelivery` with `deliverSlotlockWebhooks` runs delivery in your own process.
 
 ## Connect an agent
 
@@ -1187,6 +1324,18 @@ Send one `application/json` data part, `{"skill": "<id>", "arguments": {…}}`, 
 Read-only tools link to `ui://slotlock/calendar`, a self-contained calendar view that hosts
 supporting MCP Apps (`io.modelcontextprotocol/ui`) render in a sandbox. It makes no network requests
 and never writes.
+
+A person can pick a slot in it. After `slotlock_find_available_slots` or a certain
+`slotlock_find_next_available`, the view shows a strip of days and each day's times by morning,
+afternoon and evening, or the one next available time. Picking a time and pressing *Book this time*
+sends one chat message naming the resource id and the slot's start and end. The agent books it with
+`slotlock_create_event`, through confirmation if `SLOTLOCK_CONFIRM_WRITES` asks for it. The message
+carries nothing else from the result. If the host refuses the message, the view shows the text to
+send instead. Write tools are marked `visibility: ["model"]`, so a host never lets a view call them.
+
+The view takes its look from the host: its light or dark theme and its standard MCP Apps style
+variables (colours, fonts, sizes). It shows times in the person's locale, clock and time zone, with
+a 12h/24h switch.
 
 ## Operations
 
