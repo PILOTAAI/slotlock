@@ -5,31 +5,48 @@ import { readdirSync, readFileSync } from 'node:fs';
 import starlight from '@astrojs/starlight';
 import { defineConfig } from 'astro/config';
 import starlightLlmsTxt from 'starlight-llms-txt';
+import { GROUPS, pageSlug } from './scripts/api-reference.mjs';
 import { llmsDetails } from './src/data/llms.mjs';
 
 const REPO = 'https://github.com/PILOTAAI/slotlock';
 const SIDEBAR_ORDER = [
   'index',
   'quickstart',
+  'agent-setup',
   'connect',
+  'hosted',
+  'self-host',
   'keys',
+  'dashboard',
   'library',
   'clients',
-  'hosted',
-  'status',
-  'privacy',
-  'terms',
-  'acceptable-use',
-  'concepts',
-  'security',
   'operations',
   'tools',
   'reference',
+  'concepts',
+  'security',
   'specification',
   'versioning',
   'known-issues',
   'changelog',
+  'status',
+  'privacy',
+  'terms',
+  'acceptable-use',
 ];
+
+/** The REST reference's sidebar: the overview, then one collapsed group per resource. */
+const API_SIDEBAR = {
+  label: 'REST API',
+  items: [
+    { label: 'Overview', link: '/docs/api/' },
+    ...GROUPS.map((group) => ({
+      label: group.name,
+      collapsed: true,
+      items: group.operations.map((id) => `docs/api/${pageSlug(id)}`),
+    })),
+  ],
+};
 
 /** The docs pages as Markdown links, read from docs-src so llms.txt lists exactly what is built. */
 function markdownPageList() {
@@ -46,11 +63,12 @@ function markdownPageList() {
       };
     })
     .sort((a, b) => SIDEBAR_ORDER.indexOf(a.slug) - SIDEBAR_ORDER.indexOf(b.slug));
-  return pages
-    .map(
+  return [
+    ...pages.map(
       (page) => `- [${page.title}](https://slotlock.pylota.io/docs/${page.slug}.md): ${page.description}`,
-    )
-    .join('\n');
+    ),
+    '- [REST API](https://slotlock.pylota.io/docs/api.md): every route, with a page per route at /docs/api/<route>.md, and the OpenAPI document at https://slotlock.pylota.io/openapi.json',
+  ].join('\n');
 }
 
 export default defineConfig({
@@ -126,36 +144,30 @@ export default defineConfig({
       sidebar: [
         {
           label: 'Get started',
+          items: ['docs', 'docs/quickstart', 'docs/agent-setup', 'docs/connect', 'docs/hosted'],
+        },
+        {
+          label: 'Guides',
           items: [
-            'docs',
-            'docs/quickstart',
-            'docs/connect',
+            'docs/self-host',
             'docs/keys',
+            'docs/dashboard',
             'docs/library',
             'docs/clients',
+            'docs/operations',
           ],
         },
+        API_SIDEBAR,
+        { label: 'MCP and A2A', items: ['docs/tools', 'docs/reference'] },
+        { label: 'Learn', items: ['docs/concepts', 'docs/security'] },
         {
-          label: 'Hosted',
-          items: [
-            'docs/hosted',
-            'docs/status',
-            'docs/privacy',
-            'docs/terms',
-            'docs/acceptable-use',
-          ],
+          label: 'Project',
+          items: ['docs/specification', 'docs/versioning', 'docs/known-issues', 'docs/changelog'],
         },
-        { label: 'Learn', items: ['docs/concepts', 'docs/security', 'docs/operations'] },
         {
-          label: 'Reference',
-          items: [
-            'docs/tools',
-            'docs/reference',
-            'docs/specification',
-            'docs/versioning',
-            'docs/known-issues',
-            'docs/changelog',
-          ],
+          label: 'Hosted service',
+          collapsed: true,
+          items: ['docs/status', 'docs/privacy', 'docs/terms', 'docs/acceptable-use'],
         },
       ],
       routeMiddleware: './src/routeData.ts',

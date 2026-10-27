@@ -9,7 +9,7 @@ server's own, or an [API key](/docs/keys/) per agent. The examples use the
 
 Both are wire protocols, so an agent in any language connects with its own MCP or A2A client. Code
 that calls Slotlock directly, without an agent, can use the
-[REST clients](https://github.com/PILOTAAI/slotlock/blob/main/clients/README.md) for Python, Go,
+[REST clients](/docs/clients/) for Python, Go,
 Rust, Java and .NET.
 
 ## Editors and coding agents

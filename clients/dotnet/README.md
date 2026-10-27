@@ -1,8 +1,11 @@
 # Slotlock for .NET
 
 A client for [Slotlock](https://slotlock.pylota.io)'s REST API: the agent tools and the application
-API, one method per operation. .NET 8 or 10, no dependencies, trimmable and AOT-compatible. Build the
-package with `dotnet pack src/Slotlock`.
+API, one method per operation. .NET 8 or 10, no dependencies, trimmable and AOT-compatible.
+
+```sh
+dotnet add package Slotlock.Client
+```
 
 ```csharp
 using var slotlock = new SlotlockClient("https://calendar.example.com", apiKey);

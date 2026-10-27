@@ -31,7 +31,7 @@ length, evaluated in the resource's time zone (09:00 stays 09:00 across daylight
   `DTSTART` or 31 February).
 
 `expandRules` turns rules into windows and `findNextAvailable` finds the first slot that fits. Both
-are pure functions ([example](/docs/library/#quick-start-the-next-free-slot)).
+are pure functions ([example](/docs/library/#find-a-free-slot-with-no-database)).
 
 ## Half-open intervals
 

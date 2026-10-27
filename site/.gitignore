@@ -7,3 +7,5 @@ src/content/docs/
 src/generated/
 public/schema/
 public/openapi.json
+public/slotlock.postman_collection.json
+public/slotlock-setup-prompt.md

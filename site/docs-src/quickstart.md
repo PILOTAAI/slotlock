@@ -4,18 +4,18 @@ description: Run Slotlock and PostgreSQL 18 with Docker, connect Claude Code, an
 ---
 
 You need Docker with Compose v2, `git`, `openssl` and Claude Code ([other clients](/docs/connect/)).
-The quickstart builds and runs the Slotlock in a clone of the repository (`main`, which is
+The quickstart builds and runs Slotlock in a clone of the repository (`main`, which is
 {{version}} or later) with Docker Compose. Without Docker, install it from npm
 (`npm install slotlock@{{version}}`) and run `npx slotlock` with two database roles, as the
-[README shows](https://github.com/PILOTAAI/slotlock#without-docker). Hosted Slotlock needs neither:
-see [Hosted Slotlock](/docs/hosted/).
+[Self-hosting](/docs/self-host/#without-docker) shows.
 
 Step 6 asks you before the agent books, which needs an MCP client that supports protocol version
 {{mcpModern}} with form elicitation. Claude Code uses that revision on its v2 MCP runtime, the
 default from v2.1.274 (from v2.1.232 in sessions that fetch feature flags; `MCP_SDK_GENERATION=v2`
 selects it): see
 [MCP client runtimes](https://code.claude.com/docs/en/mcp#mcp-client-runtimes). An older client
-gets `confirmation_required` for every booking while `SLOTLOCK_CONFIRM_WRITES=all`, the default;
+gets `confirmation_required` for every booking while `SLOTLOCK_CONFIRM_WRITES=all`, which
+`.env.example` sets (the server's own default is `none`);
 the note at the end of [step 6](#6-find-a-slot-and-book-it) turns confirmation off instead.
 
 ## 1. Get the code
@@ -23,6 +23,7 @@ the note at the end of [step 6](#6-find-a-slot-and-book-it) turns confirmation o
 ```sh
 git clone https://github.com/PILOTAAI/slotlock.git
 cd slotlock
+git checkout v{{version}}
 ```
 
 ## 2. Configure it
@@ -106,6 +107,6 @@ book without asking. Keep confirmation on for anything real.
 
 - [Tools reference](/docs/tools/): every tool's input, output and errors.
 - [Connect an agent](/docs/connect/): Cursor, VS Code, the Claude API, A2A.
-- [TypeScript library](/docs/library/): the same engine in your code, with holds.
+- [TypeScript library](/docs/library/): the same engine in your code.
 - For a server beyond this machine, put a TLS proxy in front, set `SLOTLOCK_PUBLIC_URL`, and work
   through the [production checklist](https://github.com/PILOTAAI/slotlock#production-checklist).

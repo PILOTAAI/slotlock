@@ -4,7 +4,7 @@ A client for [Slotlock](https://slotlock.pylota.io)'s REST API: the agent tools 
 API, one method per operation. Go 1.22+, standard library only.
 
 ```sh
-go get github.com/PILOTAAI/slotlock/clients/go@main
+go get github.com/PILOTAAI/slotlock/clients/go
 ```
 
 ```go

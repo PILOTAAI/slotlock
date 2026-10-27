@@ -3,9 +3,8 @@
 A client for [Slotlock](https://slotlock.pylota.io)'s REST API: the agent tools and the application
 API, one method per operation. Blocking, on `ureq`; Rust 1.85+.
 
-```toml
-[dependencies]
-slotlock = { git = "https://github.com/PILOTAAI/slotlock" }
+```sh
+cargo add slotlock
 ```
 
 ```rust
