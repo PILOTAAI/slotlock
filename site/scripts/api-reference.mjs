@@ -33,6 +33,8 @@ export const GROUPS = [
       'slotlock_set_resource_availability',
       'slotlock_set_tenant_availability',
       'slotlock_record_coverage',
+      'slotlock_get_coverage',
+      'slotlock_record_coverage_failure',
     ],
   },
   {

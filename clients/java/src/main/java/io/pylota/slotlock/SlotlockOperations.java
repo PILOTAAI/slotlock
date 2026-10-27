@@ -49,6 +49,8 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_cancel_reservation", new Operation("DELETE", "/v1/reservations/{reservation_ref}", List.of("reservation_ref"), List.of("revision"))),
           Map.entry("slotlock_list_reservations", new Operation("GET", "/v1/resources/{resource_id}/reservations", List.of("resource_id"), List.of("start", "end", "limit", "cursor"))),
           Map.entry("slotlock_record_coverage", new Operation("PUT", "/v1/resources/{resource_id}/coverage/{source}", List.of("resource_id", "source"), List.of())),
+          Map.entry("slotlock_get_coverage", new Operation("GET", "/v1/resources/{resource_id}/coverage", List.of("resource_id"), List.of())),
+          Map.entry("slotlock_record_coverage_failure", new Operation("POST", "/v1/resources/{resource_id}/coverage/{source}/failure", List.of("resource_id", "source"), List.of())),
           Map.entry("slotlock_list_tenant_events", new Operation("GET", "/v1/tenant/events", List.of(), List.of("resource_id", "start", "end", "limit", "cursor"))),
           Map.entry("slotlock_get_tenant_event", new Operation("GET", "/v1/tenant/events/{event_id}", List.of("event_id"), List.of())),
           Map.entry("slotlock_cancel_tenant_event", new Operation("DELETE", "/v1/tenant/events/{event_id}", List.of("event_id"), List.of("expected_revision", "expected_resource_id", "idempotency_key"))),
@@ -1037,6 +1039,42 @@ public abstract class SlotlockOperations {
     values.put("end", end);
     values.put("revision", revision);
     return call("slotlock_record_coverage", values);
+  }
+
+  /**
+   * A resource's coverage and its health. Each external calendar (source) that records coverage
+   * of a resource: the window it covers, when it was last read, its last error, and whether it is
+   * stale (not read for a day, so the time it covers is unproven, not free). A source that goes
+   * stale is also put on the change feed once, as coverage.stale, until it is read again.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> getCoverage(String resourceId) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("resource_id", resourceId);
+    return call("slotlock_get_coverage", values);
+  }
+
+  /**
+   * Record a failed read of a source. Record that reading an external calendar failed (it
+   * answered 500, a token expired): kept as the source's last error, shown by
+   * slotlock_get_coverage, while its coverage stays as it was. 404 coverage_not_found for a
+   * source that has never recorded coverage of the resource.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param source {@code source}, string
+   * @param error {@code error}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> recordCoverageFailure(String resourceId, String source, String error) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("resource_id", resourceId);
+    values.put("source", source);
+    values.put("error", error);
+    return call("slotlock_record_coverage_failure", values);
   }
 
   /**

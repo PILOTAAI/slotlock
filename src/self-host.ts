@@ -1145,7 +1145,16 @@ async function maintainTenant(
   try {
     const store = createSlotlockStore(sql);
     const total = await withSlotlockMaintenanceLock(sql, config.tenantRef, async () => {
-      const sum = { extended: 0, conflicts: 0, refused: 0, pruned: 0, zoneShifts: 0, capped: true, passes: 0 };
+      const sum = {
+        extended: 0,
+        conflicts: 0,
+        refused: 0,
+        pruned: 0,
+        zoneShifts: 0,
+        staleSources: 0,
+        capped: true,
+        passes: 0,
+      };
       while (sum.capped && sum.passes < MAINTAIN_MAX_PASSES) {
         const pass = await maintainSlotlockTenant(store, config.tenantRef);
         sum.passes += 1;
@@ -1154,6 +1163,7 @@ async function maintainTenant(
         sum.refused += pass.refused;
         sum.pruned += pass.pruned;
         sum.zoneShifts += pass.zoneShifts;
+        sum.staleSources += pass.staleSources;
         // A capped pass that got nowhere met only series it cannot extend. While its roll stopped
         // before the series it had put back, the next pass meets new ones (and perhaps a healthy
         // one); once it reached them, another pass would meet them again.

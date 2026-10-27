@@ -12,6 +12,7 @@ import {
 } from '../store.js';
 
 const READS = [
+  'listCoverage',
   'listHistory',
   'listPoolMembers',
   'listPools',
@@ -40,6 +41,7 @@ const UPKEEP = [
   'settleWebhookDelivery',
   'pruneChanges',
   'followZoneRules',
+  'reportStaleCoverage',
 ];
 const ADMINISTRATION = [
   'applySchema',

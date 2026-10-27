@@ -1256,6 +1256,11 @@ UPDATE slotlock.calendar_events
        wall_ends_at = slotlock.zoned_wall(ends_at, timezone)
  WHERE wall_starts_at IS NULL AND ends_at > now();
 
+-- Feed health: a source's last failure, and when its staleness was last reported on the feed.
+ALTER TABLE slotlock.calendar_coverage ADD COLUMN IF NOT EXISTS last_error text;
+ALTER TABLE slotlock.calendar_coverage ADD COLUMN IF NOT EXISTS last_error_at timestamptz;
+ALTER TABLE slotlock.calendar_coverage ADD COLUMN IF NOT EXISTS stale_reported_at timestamptz;
+
 DROP TRIGGER IF EXISTS slotlock_outbox_reservation_change ON slotlock.reservations;
 CREATE TRIGGER slotlock_outbox_reservation_change
   AFTER INSERT OR UPDATE OR DELETE ON slotlock.reservations

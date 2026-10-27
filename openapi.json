@@ -7419,6 +7419,229 @@
         }
       }
     },
+    "/v1/resources/{resource_id}/coverage": {
+      "get": {
+        "operationId": "slotlock_get_coverage",
+        "summary": "A resource's coverage and its health",
+        "description": "Each external calendar (source) that records coverage of a resource: the window it covers, when it was last read, its last error, and whether it is stale (not read for a day, so the time it covers is unproven, not free). A source that goes stale is also put on the change feed once, as coverage.stale, until it is read again.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "parameters": [
+          {
+            "name": "resource_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "sources": {
+                      "maxItems": 100,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "source": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "start": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "end": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "revision": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "observed_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "last_error": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 500
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "last_error_at": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "stale": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "source",
+                          "start",
+                          "end",
+                          "revision",
+                          "observed_at",
+                          "last_error",
+                          "last_error_at",
+                          "stale"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "sources"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/resources/{resource_id}/coverage/{source}/failure": {
+      "post": {
+        "operationId": "slotlock_record_coverage_failure",
+        "summary": "Record a failed read of a source",
+        "description": "Record that reading an external calendar failed (it answered 500, a token expired): kept as the source's last error, shown by slotlock_get_coverage, while its coverage stays as it was. 404 coverage_not_found for a source that has never recorded coverage of the resource.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "error": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "error"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "resource_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          {
+            "name": "source",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "recorded": {
+                      "type": "boolean",
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "recorded"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/v1/tenant/events": {
       "get": {
         "operationId": "slotlock_list_tenant_events",
@@ -8520,6 +8743,11 @@
                       "minimum": 0,
                       "maximum": 9007199254740991
                     },
+                    "stale_sources": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
                     "capped": {
                       "type": "boolean"
                     }
@@ -8530,6 +8758,7 @@
                     "refused",
                     "pruned",
                     "zone_shifts",
+                    "stale_sources",
                     "capped"
                   ],
                   "additionalProperties": false
@@ -8735,6 +8964,7 @@
                         "event.cancelled",
                         "event.timezone_shifted",
                         "event.timezone_conflict",
+                        "coverage.stale",
                         "webhook.disabled"
                       ]
                     }
@@ -8787,6 +9017,7 @@
                                   "event.cancelled",
                                   "event.timezone_shifted",
                                   "event.timezone_conflict",
+                                  "coverage.stale",
                                   "webhook.disabled"
                                 ]
                               }
@@ -8966,6 +9197,7 @@
                                     "event.cancelled",
                                     "event.timezone_shifted",
                                     "event.timezone_conflict",
+                                    "coverage.stale",
                                     "webhook.disabled"
                                   ]
                                 }
@@ -9225,6 +9457,7 @@
                                   "event.cancelled",
                                   "event.timezone_shifted",
                                   "event.timezone_conflict",
+                                  "coverage.stale",
                                   "webhook.disabled"
                                 ]
                               }

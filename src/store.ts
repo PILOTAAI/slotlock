@@ -2291,6 +2291,31 @@ export interface SlotlockStore extends SlotlockEventFeed {
     move?: boolean;
     limit?: number;
   }): Promise<{ shifted: number; moved: number; conflicts: number }>;
+  /**
+   * A source failed to read (a feed answered 500, a token expired): kept as its last error, at most
+   * 500 characters, beside its coverage, which stays as it was. `coverage_not_found` for a source
+   * that has never recorded coverage on the resource.
+   */
+  recordCoverageFailure(params: {
+    tenantRef: string;
+    resourceId: string;
+    source: string;
+    error: string;
+  }): Promise<{ ok: true } | { ok: false; code: 'coverage_not_found' | 'invalid_identity' }>;
+  /**
+   * Each source's coverage of one resource and how healthy it is: when it was last read, its last
+   * error, and whether it is `stale` (not read for `maxAgeMs`, default a day, as free/busy judges).
+   */
+  listCoverage(params: {
+    tenantRef: string;
+    resourceId: string;
+    maxAgeMs?: number;
+  }): Promise<SlotlockCoverageHealth[]>;
+  /**
+   * Put each source that has gone stale (not read for `maxAgeMs`, default a day) on the feed once
+   * (`coverage.stale`), until it is read again. Up to `limit` (default 100); how many.
+   */
+  reportStaleCoverage(params: { tenantRef: string; maxAgeMs?: number; limit?: number }): Promise<number>;
   pruneBookingRetention(params: {
     tenantRef: string;
     /** Rows per class per call, 1-1000. Defaults to 100. */
@@ -2357,6 +2382,20 @@ export interface SlotlockStore extends SlotlockEventFeed {
     requiredSources?: string[];
     coverageMaxAgeMs?: number;
   }): Promise<Interval | null>;
+}
+
+/** One source's coverage of a resource, with its health (listCoverage). */
+export interface SlotlockCoverageHealth {
+  source: string;
+  start: Date;
+  end: Date;
+  revision: number;
+  /** When it was last read. */
+  observedAt: Date;
+  lastError: string | null;
+  lastErrorAt: Date | null;
+  /** Not read for longer than free/busy trusts: time it covers is unproven, not free. */
+  stale: boolean;
 }
 
 export type SlotlockTenantStore = Omit<
@@ -2810,6 +2849,7 @@ export const SLOTLOCK_TENANT_WRITE_METHODS = Object.freeze([
   'createWebhookEndpoint',
   'deleteWebhookEndpoint',
   'enableWebhookEndpoint',
+  'recordCoverageFailure',
 ] as const satisfies readonly (keyof SlotlockStore)[]);
 
 function tenantSuspendedError(): Error & { code: 'tenant_suspended' } {
@@ -5290,10 +5330,11 @@ function buildSlotlockStore(
           if (params.revision !== currentRevision + 1) {
             return { ok: false, code: 'revision_conflict' };
           }
+          // A fresh read ends a staleness: the next one is reported again.
           await tx`
             UPDATE slotlock.calendar_coverage
                SET starts_at = ${window.start}, ends_at = ${window.end},
-                   revision = ${params.revision}, observed_at = now()
+                   revision = ${params.revision}, observed_at = now(), stale_reported_at = NULL
              WHERE tenant_ref = ${params.tenantRef}
                AND resource_id = ${params.resourceId}
                AND source = ${params.source}`;
@@ -5311,6 +5352,81 @@ function buildSlotlockStore(
         }
         return { ok: true, revision: params.revision, idempotent: false };
       });
+    },
+
+    async recordCoverageFailure(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidIdentity(params.source) || !isValidResourceId(params.resourceId)) {
+        return { ok: false, code: 'invalid_identity' };
+      }
+      const rows = await sql`
+        UPDATE slotlock.calendar_coverage
+           SET last_error = left(${String(params.error).replace(/[\u0000-\u001f\u007f]/g, ' ')}, 500),
+               last_error_at = now()
+         WHERE tenant_ref = ${params.tenantRef} AND resource_id = ${params.resourceId}
+           AND source = ${params.source}
+         RETURNING source`;
+      return rows.length > 0 ? { ok: true } : { ok: false, code: 'coverage_not_found' };
+    },
+
+    async listCoverage(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidResourceId(params.resourceId)) {
+        throw invalidIdentityError('Slotlock coverage identity is invalid');
+      }
+      const maxAgeMs = params.maxAgeMs ?? 24 * 60 * 60 * 1000;
+      const rows = await sql<{
+        source: string;
+        starts_at: Date;
+        ends_at: Date;
+        revision: string | number;
+        observed_at: Date;
+        last_error: string | null;
+        last_error_at: Date | null;
+        stale: boolean;
+      }[]>`
+        SELECT source, starts_at, ends_at, revision, observed_at, last_error, last_error_at,
+               observed_at < now() - make_interval(secs => ${maxAgeMs / 1_000}) AS stale
+          FROM slotlock.calendar_coverage
+         WHERE tenant_ref = ${params.tenantRef} AND resource_id = ${params.resourceId}
+         ORDER BY source`;
+      return rows.map((row) => ({
+        source: row.source,
+        start: row.starts_at,
+        end: row.ends_at,
+        revision: Number(row.revision),
+        observedAt: row.observed_at,
+        lastError: row.last_error,
+        lastErrorAt: row.last_error_at,
+        stale: row.stale,
+      }));
+    },
+
+    async reportStaleCoverage(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const maxAgeMs = params.maxAgeMs ?? 24 * 60 * 60 * 1000;
+      const rows = await sql<{ count: number }[]>`
+        WITH stale AS (
+          UPDATE slotlock.calendar_coverage coverage SET stale_reported_at = now()
+           WHERE (coverage.tenant_ref, coverage.resource_id, coverage.source) IN (
+             SELECT tenant_ref, resource_id, source FROM slotlock.calendar_coverage
+              WHERE tenant_ref = ${params.tenantRef} AND stale_reported_at IS NULL
+                AND observed_at < now() - make_interval(secs => ${maxAgeMs / 1_000})
+              ORDER BY observed_at LIMIT ${params.limit ?? 100}
+              FOR UPDATE SKIP LOCKED)
+          RETURNING coverage.resource_id, coverage.source, coverage.observed_at, coverage.last_error
+        ), reported AS (
+          INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+          SELECT ${params.tenantRef}, stale.resource_id, 'coverage.stale', stale.source,
+                 jsonb_strip_nulls(jsonb_build_object(
+                   'resource_id', stale.resource_id, 'source', stale.source,
+                   'observed_at', stale.observed_at, 'last_error', stale.last_error)),
+                 'slotlock:maintenance'
+            FROM stale
+          RETURNING 1
+        )
+        SELECT count(*)::int AS count FROM reported`;
+      return rows[0]?.count ?? 0;
     },
 
     async getFreeBusy(params) {

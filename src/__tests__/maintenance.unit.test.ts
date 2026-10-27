@@ -73,6 +73,9 @@ function fakeStore() {
         async pruneChanges() {
           return 0;
         },
+        async reportStaleCoverage() {
+          return 0;
+        },
         async followZoneRules() {
           return { shifted: 0, moved: 0, conflicts: 0 };
         },
@@ -141,6 +144,7 @@ function fakeSql(held = new Set<string>()) {
 
 const result = (overrides: Partial<SlotlockMaintenanceResult> = {}): SlotlockMaintenanceResult => ({
   zoneShifts: 0,
+  staleSources: 0,
   extended: 0,
   conflicts: 0,
   refused: 0,

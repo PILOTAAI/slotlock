@@ -52,6 +52,8 @@ public sealed partial class SlotlockClient
         ["slotlock_cancel_reservation"] = new("DELETE", "/v1/reservations/{reservation_ref}", ["reservation_ref"], ["revision"]),
         ["slotlock_list_reservations"] = new("GET", "/v1/resources/{resource_id}/reservations", ["resource_id"], ["start", "end", "limit", "cursor"]),
         ["slotlock_record_coverage"] = new("PUT", "/v1/resources/{resource_id}/coverage/{source}", ["resource_id", "source"], []),
+        ["slotlock_get_coverage"] = new("GET", "/v1/resources/{resource_id}/coverage", ["resource_id"], []),
+        ["slotlock_record_coverage_failure"] = new("POST", "/v1/resources/{resource_id}/coverage/{source}/failure", ["resource_id", "source"], []),
         ["slotlock_list_tenant_events"] = new("GET", "/v1/tenant/events", [], ["resource_id", "start", "end", "limit", "cursor"]),
         ["slotlock_get_tenant_event"] = new("GET", "/v1/tenant/events/{event_id}", ["event_id"], []),
         ["slotlock_cancel_tenant_event"] = new("DELETE", "/v1/tenant/events/{event_id}", ["event_id"], ["expected_revision", "expected_resource_id", "idempotency_key"]),
@@ -1195,6 +1197,51 @@ public sealed partial class SlotlockClient
         values["end"] = Json.ToNode(end);
         values["revision"] = Json.ToNode(revision);
         return CallAsync("slotlock_record_coverage", values, cancellationToken);
+    }
+
+    /// <summary>A resource's coverage and its health.</summary>
+    /// <remarks>
+    /// Each external calendar (source) that records coverage of a resource: the window it covers,
+    /// when it was last read, its last error, and whether it is stale (not read for a day, so the
+    /// time it covers is unproven, not free). A source that goes stale is also put on the change
+    /// feed once, as coverage.stale, until it is read again.
+    /// </remarks>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> GetCoverageAsync(
+        string resourceId,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_id"] = Json.ToNode(resourceId);
+        return CallAsync("slotlock_get_coverage", values, cancellationToken);
+    }
+
+    /// <summary>Record a failed read of a source.</summary>
+    /// <remarks>
+    /// Record that reading an external calendar failed (it answered 500, a token expired): kept
+    /// as the source's last error, shown by slotlock_get_coverage, while its coverage stays as it
+    /// was. 404 coverage_not_found for a source that has never recorded coverage of the resource.
+    /// </remarks>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="source">source</param>
+    /// <param name="error">error</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> RecordCoverageFailureAsync(
+        string resourceId,
+        string source,
+        string error,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_id"] = Json.ToNode(resourceId);
+        values["source"] = Json.ToNode(source);
+        values["error"] = Json.ToNode(error);
+        return CallAsync("slotlock_record_coverage_failure", values, cancellationToken);
     }
 
     /// <summary>List a resource's events, every key's.</summary>

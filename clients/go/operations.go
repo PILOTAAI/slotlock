@@ -47,6 +47,8 @@ var operations = func() map[string]operation {
 		{name: "slotlock_cancel_reservation", method: "DELETE", path: "/v1/reservations/{reservation_ref}", pathParams: []string{"reservation_ref"}, query: []string{"revision"}},
 		{name: "slotlock_list_reservations", method: "GET", path: "/v1/resources/{resource_id}/reservations", pathParams: []string{"resource_id"}, query: []string{"start", "end", "limit", "cursor"}},
 		{name: "slotlock_record_coverage", method: "PUT", path: "/v1/resources/{resource_id}/coverage/{source}", pathParams: []string{"resource_id", "source"}, query: nil},
+		{name: "slotlock_get_coverage", method: "GET", path: "/v1/resources/{resource_id}/coverage", pathParams: []string{"resource_id"}, query: nil},
+		{name: "slotlock_record_coverage_failure", method: "POST", path: "/v1/resources/{resource_id}/coverage/{source}/failure", pathParams: []string{"resource_id", "source"}, query: nil},
 		{name: "slotlock_list_tenant_events", method: "GET", path: "/v1/tenant/events", pathParams: nil, query: []string{"resource_id", "start", "end", "limit", "cursor"}},
 		{name: "slotlock_get_tenant_event", method: "GET", path: "/v1/tenant/events/{event_id}", pathParams: []string{"event_id"}, query: nil},
 		{name: "slotlock_cancel_tenant_event", method: "DELETE", path: "/v1/tenant/events/{event_id}", pathParams: []string{"event_id"}, query: []string{"expected_revision", "expected_resource_id", "idempotency_key"}},
@@ -1156,6 +1158,50 @@ func (in RecordCoverageInput) values() map[string]any {
 // forward; repeating one changes nothing.
 func (c *Client) RecordCoverage(ctx context.Context, in RecordCoverageInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_record_coverage", in.values())
+}
+
+// GetCoverageInput holds the arguments of [Client.GetCoverage].
+type GetCoverageInput struct {
+	ResourceID string
+}
+
+func (in GetCoverageInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_id"] = in.ResourceID
+	return values
+}
+
+// GetCoverage: A resource's coverage and its health. Each external calendar (source) that records
+// coverage of a resource: the window it covers, when it was last read, its last error, and
+// whether it is stale (not read for a day, so the time it covers is unproven, not free). A source
+// that goes stale is also put on the change feed once, as coverage.stale, until it is read again.
+func (c *Client) GetCoverage(ctx context.Context, in GetCoverageInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_get_coverage", in.values())
+}
+
+// RecordCoverageFailureInput holds the arguments of [Client.RecordCoverageFailure].
+type RecordCoverageFailureInput struct {
+	ResourceID string
+
+	Source string
+
+	Error string
+}
+
+func (in RecordCoverageFailureInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_id"] = in.ResourceID
+	values["source"] = in.Source
+	values["error"] = in.Error
+	return values
+}
+
+// RecordCoverageFailure: Record a failed read of a source. Record that reading an external
+// calendar failed (it answered 500, a token expired): kept as the source's last error, shown by
+// slotlock_get_coverage, while its coverage stays as it was. 404 coverage_not_found for a source
+// that has never recorded coverage of the resource.
+func (c *Client) RecordCoverageFailure(ctx context.Context, in RecordCoverageFailureInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_record_coverage_failure", in.values())
 }
 
 // ListTenantEventsInput holds the arguments of [Client.ListTenantEvents].

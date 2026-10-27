@@ -29,6 +29,8 @@ export type SlotlockApplicationOperation =
   | 'slotlock_set_resource_pool'
   | 'slotlock_list_pools'
   | 'slotlock_get_resource_history'
+  | 'slotlock_get_coverage'
+  | 'slotlock_record_coverage_failure'
   | 'slotlock_get_reservation_history'
   | 'slotlock_get_tenant_event_history'
   | 'slotlock_acquire_hold'
@@ -87,6 +89,8 @@ export interface SlotlockApplicationBackend {
   setResourcePool: Handler;
   listPools: Handler;
   getResourceHistory: Handler;
+  getCoverage: Handler;
+  recordCoverageFailure: Handler;
   getReservationHistory: Handler;
   getTenantEventHistory: Handler;
   acquireHold: Handler;
@@ -717,6 +721,51 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       },
     },
     {
+      name: 'slotlock_get_coverage',
+      title: "A resource's coverage and its health",
+      description:
+        "Each external calendar (source) that records coverage of a resource: the window it covers, when it was last read, its last error, and whether it is stale (not read for a day, so the time it covers is unproven, not free). A source that goes stale is also put on the change feed once, as coverage.stale, until it is read again.",
+      method: 'GET',
+      path: '/v1/resources/{resource_id}/coverage',
+      input: z.object({ resource_id: RESOURCE_ID }).strict(),
+      output: z
+        .object({
+          sources: z
+            .array(
+              z
+                .object({
+                  source: SOURCE,
+                  start: DATE_TIME,
+                  end: DATE_TIME,
+                  revision: REVISION,
+                  observed_at: DATE_TIME,
+                  last_error: z.string().max(500).nullable(),
+                  last_error_at: DATE_TIME.nullable(),
+                  stale: z.boolean(),
+                })
+                .strict(),
+            )
+            .max(100),
+        })
+        .strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'getCoverage',
+      example: { resource_id: EXAMPLE_RESOURCE_ID },
+    },
+    {
+      name: 'slotlock_record_coverage_failure',
+      title: 'Record a failed read of a source',
+      description:
+        "Record that reading an external calendar failed (it answered 500, a token expired): kept as the source's last error, shown by slotlock_get_coverage, while its coverage stays as it was. 404 coverage_not_found for a source that has never recorded coverage of the resource.",
+      method: 'POST',
+      path: '/v1/resources/{resource_id}/coverage/{source}/failure',
+      input: z.object({ resource_id: RESOURCE_ID, source: SOURCE, error: z.string().min(1).max(500) }).strict(),
+      output: z.object({ recorded: z.literal(true) }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'recordCoverageFailure',
+      example: { resource_id: EXAMPLE_RESOURCE_ID, source: 'google:fleet@example.com', error: 'HTTP 401 from the calendar API' },
+    },
+    {
       name: 'slotlock_list_tenant_events',
       title: "List a resource's events, every key's",
       description: `The calendar events on one of the tenant's resources with an occurrence in a window of at most ${SLOTLOCK_CALENDAR_HORIZON_DAYS} days, whichever key wrote them (a revoked one's included), by start then id, a page at a time: pass next_cursor as cursor for the next page, until it is null.`,
@@ -834,6 +883,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           refused: z.number().int().min(0),
           pruned: z.number().int().min(0),
           zone_shifts: z.number().int().min(0),
+          stale_sources: z.number().int().min(0),
           capped: z.boolean(),
         })
         .strict(),
