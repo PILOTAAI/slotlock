@@ -675,7 +675,7 @@ describe('resources in the dashboard', () => {
       session,
     );
     expect(added.status).toBe(303);
-    expect(resources.store.add).toHaveBeenCalledWith('github:4242', 'vehicle-42', 'Europe/London');
+    expect(resources.store.add).toHaveBeenCalledWith('github:4242', 'vehicle-42', 'Europe/London', 'github:4242');
     expect(await (await get(target, '/base/dashboard/resources', session)).text()).toContain('vehicle-42');
 
     const zone = await post(
@@ -835,7 +835,7 @@ describe('bookable hours in the dashboard', () => {
       { rrule: 'FREQ=WEEKLY;BYDAY=MO', startMinutes: 480, durationMinutes: 240 },
       { rrule: 'FREQ=WEEKLY;BYDAY=MO', startMinutes: 780, durationMinutes: 270 },
       { rrule: 'FREQ=WEEKLY;BYDAY=FR', startMinutes: 1_320, durationMinutes: 480 },
-    ]);
+    ], 'github:4242');
   });
 
   it("hands a resource back to the server's hours, or closes it", async () => {
@@ -863,6 +863,7 @@ describe('bookable hours in the dashboard', () => {
         'github:4242',
         { id: car.id },
         rules,
+        'github:4242',
       );
     }
     const html = await (
@@ -894,7 +895,7 @@ describe('bookable hours in the dashboard', () => {
     expect(saved.status).toBe(303);
     expect(resources.store.setHours).toHaveBeenCalledWith('github:4242', 'all', [
       { rrule: 'FREQ=WEEKLY;BYDAY=SA', startMinutes: 600, durationMinutes: 240 },
-    ]);
+    ], 'github:4242');
   });
 
   it.each([
@@ -1602,6 +1603,24 @@ describe('the overview', () => {
     expect(html).not.toContain(created.apiKey.id);
   });
 
+  it('names the people who changed things from the dashboard', async () => {
+    const change = (actor: string, id: string) => ({
+      id,
+      type: 'hold.released' as const,
+      resourceId: null,
+      subject: 'h',
+      data: {},
+      occurredAt: new Date(now - 60_000),
+      actor,
+      position: id,
+    });
+    const { target } = withFeed([], [change('github:4242', 'msg_2'), change('github:777', 'msg_1')]);
+    const { session } = await signIn(target);
+    const html = await (await get(target, '/base/dashboard', session)).text();
+    expect(html).toMatch(/Hold released<\/span><span class="meta">You · /);
+    expect(html).toMatch(/Hold released<\/span><span class="meta">GitHub user 777 · /);
+  });
+
   it('walks a new tenant through its first steps, and hides them once done', async () => {
     const empty = withFeed([], []);
     const { session } = await signIn(empty.target);
@@ -1684,8 +1703,11 @@ describe('resource detail, webhooks and the waitlist', () => {
     const store = {
       ...resources.store,
       setRules: vi.fn(async (tenantRef: string, id: string, rules: unknown) => {
-        if ((rules as { slotStepMinutes?: number } | null)?.slotStepMinutes === 0) {
-          throw Object.assign(new Error('slotStepMinutes must be 1-1440'), { code: 'invalid_booking_rules' });
+        if ((rules as { minNoticeMinutes?: number } | null)?.minNoticeMinutes === 7) {
+          throw Object.assign(new Error('Slotlock booking rule minNoticeMinutes is odd'), { code: 'invalid_booking_rules' });
+        }
+        if ((rules as { minNoticeMinutes?: number } | null)?.minNoticeMinutes === 8) {
+          throw Object.assign(new Error('suspended'), { code: 'tenant_suspended' });
         }
         const row = resources.rows.find((r) => r.id === id && r.tenantRef === tenantRef);
         if (!row) return null;
@@ -1764,22 +1786,32 @@ describe('resource detail, webhooks and the waitlist', () => {
     );
     expect(saved.status).toBe(303);
     expect(saved.headers.get('location')).toBe(`/base/dashboard/resources/${OWN}`);
-    expect(store.setRules).toHaveBeenLastCalledWith('github:4242', OWN, {
-      minNoticeMinutes: 60,
-      slotStepMinutes: 15,
-      checkInMinutes: 20,
-      enforceHours: true,
-    });
+    expect(store.setRules).toHaveBeenLastCalledWith(
+      'github:4242',
+      OWN,
+      { minNoticeMinutes: 60, slotStepMinutes: 15, checkInMinutes: 20, enforceHours: true },
+      'github:4242',
+    );
     const shown = await (await get(target, `/base/dashboard/resources/${OWN}`, session)).text();
     expect(shown).toContain('name="min_notice_minutes" value="60"');
     expect(shown).toMatch(/name="enforce_hours" value="1" checked/);
 
     // Empty fields clear every rule; a value the store refuses says why.
     await post(target, '/base/dashboard/resources/rules', { csrf: token, id: OWN }, session);
-    expect(store.setRules).toHaveBeenLastCalledWith('github:4242', OWN, null);
+    expect(store.setRules).toHaveBeenLastCalledWith('github:4242', OWN, null, 'github:4242');
+    // Out of a rule's bounds: said in the form's words, before the store is asked.
+    const calls = store.setRules.mock.calls.length;
     const refused = await post(target, '/base/dashboard/resources/rules', { csrf: token, id: OWN, slot_step_minutes: '0' }, session);
     expect(refused.status).toBe(400);
-    expect(await refused.text()).toContain('slotStepMinutes must be 1-1440');
+    expect(await refused.text()).toContain('Start step is a whole number from 1 to 1,440');
+    expect(store.setRules.mock.calls.length).toBe(calls);
+    expect(await (await get(target, `/base/dashboard/resources/${OWN}`, session)).text()).toContain('min="1" max="1440" name="slot_step_minutes"');
+    const kept = await post(target, '/base/dashboard/resources/rules', { csrf: token, id: OWN, min_notice_minutes: '7' }, session);
+    expect(kept.status).toBe(400);
+    expect(await kept.text()).toContain('not ones Slotlock can keep');
+    const suspended = await post(target, '/base/dashboard/resources/rules', { csrf: token, id: OWN, min_notice_minutes: '8' }, session);
+    expect(suspended.status).toBe(403);
+    expect(await suspended.text()).toContain('suspended');
     const notNumber = await post(target, '/base/dashboard/resources/rules', { csrf: token, id: OWN, slot_step_minutes: '1.5' }, session);
     expect(notNumber.status).toBe(400);
     const foreign = await post(target, '/base/dashboard/resources/rules', { csrf: token, id: THEIRS, min_notice_minutes: '5' }, session);
@@ -1787,11 +1819,11 @@ describe('resource detail, webhooks and the waitlist', () => {
     expect(store.setRules).not.toHaveBeenCalledWith(expect.anything(), THEIRS, expect.anything());
 
     expect((await post(target, '/base/dashboard/resources/pool', { csrf: token, id: OWN, pool: 'vans' }, session)).status).toBe(303);
-    expect(store.setPool).toHaveBeenLastCalledWith('github:4242', OWN, 'vans');
+    expect(store.setPool).toHaveBeenLastCalledWith('github:4242', OWN, 'vans', 'github:4242');
     expect(await (await get(target, '/base/dashboard/resources', session)).text()).toContain('Pool vans');
     expect((await post(target, '/base/dashboard/resources/pool', { csrf: token, id: OWN, pool: 'bad pool!' }, session)).status).toBe(400);
     await post(target, '/base/dashboard/resources/pool', { csrf: token, id: OWN, pool: '' }, session);
-    expect(store.setPool).toHaveBeenLastCalledWith('github:4242', OWN, null);
+    expect(store.setPool).toHaveBeenLastCalledWith('github:4242', OWN, null, 'github:4242');
   });
 
   it('adds a webhook showing its secret once, lists its health, and deletes or enables it', async () => {
@@ -1806,7 +1838,7 @@ describe('resource detail, webhooks and the waitlist', () => {
     );
     expect(added.status).toBe(200);
     expect(await added.text()).toContain('value="whsec_c2VjcmV0LXZhbHVl"');
-    expect(store.webhooks.create).toHaveBeenCalledWith('github:4242', 'https://hooks.example.com/in', ['reservation.created']);
+    expect(store.webhooks.create).toHaveBeenCalledWith('github:4242', 'https://hooks.example.com/in', ['reservation.created'], 'github:4242');
     const listed = await (await get(target, '/base/dashboard/webhooks', session)).text();
     expect(listed).not.toContain('whsec_');
     expect(listed).toContain('Delivering');
@@ -1837,7 +1869,7 @@ describe('resource detail, webhooks and the waitlist', () => {
     const id = entries[0]?.id as string;
     const removed = await post(target, '/base/dashboard/waitlist/leave', { csrf: await csrf(target, session), id }, session);
     expect(removed.status).toBe(303);
-    expect(store.waitlist.leave).toHaveBeenCalledWith('github:4242', id);
+    expect(store.waitlist.leave).toHaveBeenCalledWith('github:4242', id, 'github:4242');
     expect(entries).toHaveLength(0);
     expect((await post(target, '/base/dashboard/waitlist/leave', { csrf: await csrf(target, session), id }, session)).status).toBe(404);
   });

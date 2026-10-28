@@ -39,13 +39,15 @@ export type SlotlockBookingRule = 'min_notice' | 'max_advance' | 'slot_step' | '
 const MINUTE_MS = 60_000;
 const DAY_MINUTES = 24 * 60;
 
-const LIMITS = {
+/** Each numeric rule's least and greatest value. */
+export const SLOTLOCK_BOOKING_RULE_LIMITS = Object.freeze({
   minNoticeMinutes: [0, 525_600],
   maxAdvanceDays: [1, 3_660],
   slotStepMinutes: [1, DAY_MINUTES],
   turnaroundMinutes: [0, DAY_MINUTES],
   checkInMinutes: [1, DAY_MINUTES],
-} as const;
+} as const);
+const LIMITS = SLOTLOCK_BOOKING_RULE_LIMITS;
 
 /** Booking rules from untrusted input, or a TypeError naming the field that is wrong. */
 export function parseBookingRules(value: unknown): SlotlockBookingRules {

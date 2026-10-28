@@ -1,13 +1,13 @@
-node_modules/
+node_modules
 dist/
 *.tgz
 .DS_Store
-site/node_modules/
+site/node_modules
 site/dist/
 site/.astro/
 .wrangler/
 .env
-workers/dashboard/node_modules/
+workers/dashboard/node_modules
 workers/dashboard/.dev.vars
 workers/dashboard/dist/
 # Language clients' build output

@@ -19,7 +19,7 @@ import type { SlotlockApiKey, SlotlockApiKeyScope, SlotlockApiKeyStore } from '.
 import { SLOTLOCK_DASHBOARD_NAME_PATTERN } from './config.js';
 import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from './ddl.js';
 import { ignoreRejection } from './hooks.js';
-import type { SlotlockBookingRules } from './booking-rules.js';
+import { SLOTLOCK_BOOKING_RULE_LIMITS, type SlotlockBookingRules } from './booking-rules.js';
 import {
   type CreateWebhookEndpointResult,
   SLOTLOCK_CHANGE_TYPES,
@@ -107,7 +107,10 @@ const REFERRER_POLICY = 'same-origin';
 const CONTENT_SECURITY_POLICY =
   "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
-/** A tenant's calendar resources, as the dashboard lists and adds them. */
+/**
+ * A tenant's calendar resources, as the dashboard lists and adds them. Each write takes, last, the
+ * person who made it (`github:<user id>`) as `actor`, to record on the event feed.
+ */
 export interface SlotlockDashboardResources {
   list(tenantRef: string): Promise<SlotlockResource[]>;
   /**
@@ -115,7 +118,12 @@ export interface SlotlockDashboardResources {
    * (an error with `code: 'resource_limit_reached'`) once the tenant has
    * SLOTLOCK_DASHBOARD_MAX_RESOURCES, however many adds race, on however many servers.
    */
-  add(tenantRef: string, externalRef: string, timezone: string): Promise<SlotlockResource>;
+  add(
+    tenantRef: string,
+    externalRef: string,
+    timezone: string,
+    actor?: string,
+  ): Promise<SlotlockResource>;
   /**
    * Set the bookable hours of one of the tenant's resources (`{ id }`) or of all of them; `null`
    * hands them back to the server's and `[]` closes. Returns how many resources changed: 0 for an
@@ -125,6 +133,7 @@ export interface SlotlockDashboardResources {
     tenantRef: string,
     target: { id: string } | 'all',
     rules: WeeklyAvailabilityRule[] | null,
+    actor?: string,
   ): Promise<number>;
   /** What occupies the tenant's resources in `window`, by start: the overview's agenda. */
   agenda?(tenantRef: string, window: Interval, limit: number): Promise<SlotlockAgendaEntry[]>;
@@ -138,13 +147,19 @@ export interface SlotlockDashboardResources {
     tenantRef: string,
     id: string,
     rules: SlotlockBookingRules | null,
+    actor?: string,
   ): Promise<SlotlockResource | null>;
   /** Put one of the tenant's resources in a pool, or none: as setRules; `code: 'invalid_pool'`. */
-  setPool?(tenantRef: string, id: string, pool: string | null): Promise<SlotlockResource | null>;
+  setPool?(
+    tenantRef: string,
+    id: string,
+    pool: string | null,
+    actor?: string,
+  ): Promise<SlotlockResource | null>;
   /** The tenant's waitlist, oldest first, and leaving it (false when the entry is not the tenant's). */
   waitlist?: {
     list(tenantRef: string, limit: number): Promise<SlotlockWaitlistEntry[]>;
-    leave(tenantRef: string, id: string): Promise<boolean>;
+    leave(tenantRef: string, id: string, actor?: string): Promise<boolean>;
   };
   /** The tenant's webhook endpoints, as the event feed keeps them. */
   webhooks?: {
@@ -153,11 +168,13 @@ export interface SlotlockDashboardResources {
       tenantRef: string,
       url: string,
       eventTypes: readonly string[] | undefined,
+      actor?: string,
     ): Promise<CreateWebhookEndpointResult>;
-    remove(tenantRef: string, id: string): Promise<boolean>;
+    remove(tenantRef: string, id: string, actor?: string): Promise<boolean>;
     enable(
       tenantRef: string,
       id: string,
+      actor?: string,
     ): Promise<SlotlockWebhookEndpoint | null | { code: 'changes_pruned' }>;
   };
 }
@@ -256,12 +273,13 @@ export interface SlotlockDashboard {
  * in the database (a READ COMMITTED transaction, under a per-tenant lock).
  */
 export function createSlotlockDashboardResources(store: SlotlockStore): SlotlockDashboardResources {
+  const by = (actor: string | undefined) => (actor === undefined ? {} : { actor });
   return {
     list: (tenantRef) =>
       store.withTenant(tenantRef, (tenant) =>
         tenant.listResources({ tenantRef, limit: SLOTLOCK_DASHBOARD_MAX_RESOURCES + 1 }),
       ),
-    add: (tenantRef, externalRef, timezone) =>
+    add: (tenantRef, externalRef, timezone, actor) =>
       store.withTenant(
         tenantRef,
         (tenant) =>
@@ -271,28 +289,38 @@ export function createSlotlockDashboardResources(store: SlotlockStore): Slotlock
             timezone,
             maxTenantResources: SLOTLOCK_DASHBOARD_MAX_RESOURCES,
           }),
-        { isolation: 'read committed' },
+        { isolation: 'read committed', ...by(actor) },
       ),
-    setHours: (tenantRef, target, rules) =>
-      store.withTenant(tenantRef, async (tenant) => {
-        if (target === 'all') return tenant.setTenantAvailability({ tenantRef, rules });
-        const updated = await tenant.setResourceAvailability({ tenantRef, id: target.id, rules });
-        return updated ? 1 : 0;
-      }),
+    setHours: (tenantRef, target, rules, actor) =>
+      store.withTenant(
+        tenantRef,
+        async (tenant) => {
+          if (target === 'all') return tenant.setTenantAvailability({ tenantRef, rules });
+          const updated = await tenant.setResourceAvailability({ tenantRef, id: target.id, rules });
+          return updated ? 1 : 0;
+        },
+        by(actor),
+      ),
     agenda: (tenantRef, window, limit) =>
       store.withTenant(tenantRef, (tenant) => tenant.listAgenda({ tenantRef, window, limit })),
     recentChanges: (tenantRef, limit) =>
       store.withTenant(tenantRef, (tenant) => tenant.listRecentChanges({ tenantRef, limit })),
-    setRules: (tenantRef, id, rules) =>
-      store.withTenant(tenantRef, (tenant) => tenant.setResourceBookingRules({ tenantRef, id, rules })),
-    setPool: (tenantRef, id, pool) =>
-      store.withTenant(tenantRef, (tenant) => tenant.setResourcePool({ tenantRef, id, pool })),
+    setRules: (tenantRef, id, rules, actor) =>
+      store.withTenant(
+        tenantRef,
+        (tenant) => tenant.setResourceBookingRules({ tenantRef, id, rules }),
+        by(actor),
+      ),
+    setPool: (tenantRef, id, pool, actor) =>
+      store.withTenant(tenantRef, (tenant) => tenant.setResourcePool({ tenantRef, id, pool }), by(actor)),
     waitlist: {
       list: (tenantRef, limit) =>
         store.withTenant(tenantRef, (tenant) => tenant.listWaitlist({ tenantRef, limit })),
-      async leave(tenantRef, id) {
-        const left = await store.withTenant(tenantRef, (tenant) =>
-          tenant.leaveWaitlist({ tenantRef, id }),
+      async leave(tenantRef, id, actor) {
+        const left = await store.withTenant(
+          tenantRef,
+          (tenant) => tenant.leaveWaitlist({ tenantRef, id }),
+          by(actor),
         );
         // An offered entry's hold went with it: offer that time to the next, as the API does.
         if (left) {
@@ -306,22 +334,31 @@ export function createSlotlockDashboardResources(store: SlotlockStore): Slotlock
     webhooks: {
       list: (tenantRef) =>
         store.withTenant(tenantRef, (tenant) => tenant.listWebhookEndpoints({ tenantRef })),
-      create: (tenantRef, url, eventTypes) =>
-        store.withTenant(tenantRef, (tenant) =>
-          tenant.createWebhookEndpoint({
-            tenantRef,
-            url,
-            ...(eventTypes !== undefined ? { eventTypes } : {}),
-          }),
+      create: (tenantRef, url, eventTypes, actor) =>
+        store.withTenant(
+          tenantRef,
+          (tenant) =>
+            tenant.createWebhookEndpoint({
+              tenantRef,
+              url,
+              ...(eventTypes !== undefined ? { eventTypes } : {}),
+            }),
+          by(actor),
         ),
-      remove: async (tenantRef, id) =>
+      remove: async (tenantRef, id, actor) =>
         (
-          await store.withTenant(tenantRef, (tenant) =>
-            tenant.deleteWebhookEndpoint({ tenantRef, id }),
+          await store.withTenant(
+            tenantRef,
+            (tenant) => tenant.deleteWebhookEndpoint({ tenantRef, id }),
+            by(actor),
           )
         ).deleted,
-      enable: (tenantRef, id) =>
-        store.withTenant(tenantRef, (tenant) => tenant.enableWebhookEndpoint({ tenantRef, id })),
+      enable: (tenantRef, id, actor) =>
+        store.withTenant(
+          tenantRef,
+          (tenant) => tenant.enableWebhookEndpoint({ tenantRef, id }),
+          by(actor),
+        ),
     },
   };
 }
@@ -523,6 +560,15 @@ const AGENDA_SHOWN = 30;
 const ACTIVITY_LIMIT = 20;
 const WAITLIST_SHOWN = 200;
 const RESOURCE_PAGE = /^\/resources\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+/** How the booking rules form names each rule. */
+const RULE_LIMITS = SLOTLOCK_BOOKING_RULE_LIMITS;
+const RULE_NAMES = Object.freeze({
+  minNoticeMinutes: 'Minimum notice',
+  maxAdvanceDays: 'Book up to',
+  slotStepMinutes: 'Start step',
+  turnaroundMinutes: 'Turnaround',
+  checkInMinutes: 'Check-in release',
+} as const);
 /** The booking rules form's fields, by rule. */
 const RULE_FIELDS = Object.freeze({
   minNoticeMinutes: 'min_notice_minutes',
@@ -1134,6 +1180,7 @@ ${served ? html`<td data-label="Created by">${key.createdBy === personOf(session
     changes: readonly SlotlockChange[],
     byId: ReadonlyMap<string, SlotlockResource>,
     keys: readonly SlotlockApiKey[],
+    session: Session,
   ): Html {
     if (changes.length === 0) {
       return html`<p class="empty">No activity yet. What agents book, move and cancel shows here.</p>`;
@@ -1144,8 +1191,14 @@ ${served ? html`<td data-label="Created by">${key.createdBy === personOf(session
       const who =
         change.actor === null
           ? brandName
-          : (keyNames.get(change.actor) ??
-            (change.actor.startsWith('api_key:') ? 'A deleted key' : change.actor.slice(0, 60)));
+          : change.actor === personOf(session)
+            ? 'You'
+            : (keyNames.get(change.actor) ??
+              (change.actor.startsWith('api_key:')
+                ? 'A deleted key'
+                : /^github:\d+$/.test(change.actor)
+                  ? `GitHub user ${change.actor.slice(7)}`
+                  : change.actor.slice(0, 60)));
       const where = change.resourceId
         ? resourceName(byId.get(change.resourceId), change.resourceId)
         : null;
@@ -1196,7 +1249,7 @@ ${stat('Active keys', String(active.length), `${root}/keys`)}
 </div>
 <div class="split">
 ${agenda ? html`<section class="panel" id="upcoming"><h2>Upcoming</h2>${agendaPanel(agenda, byId, agenda.length > AGENDA_SHOWN)}</section>` : html``}
-${changes ? html`<section class="panel"><h2>Agent activity</h2>${activityPanel(changes, byId, keys)}</section>` : html``}
+${changes ? html`<section class="panel"><h2>Agent activity</h2>${activityPanel(changes, byId, keys, session)}</section>` : html``}
 </div>`;
     return respond(status, layout('Overview', content, session, 'overview'));
   }
@@ -1319,8 +1372,8 @@ ${current ? html`<p class="fine">Membership is read from GitHub when you sign in
     const activity = changes?.filter((change) => change.resourceId === resource.id).slice(0, 10);
     const token = csrfToken(session);
     const rules = resource.bookingRules ?? {};
-    const field = (name: keyof typeof RULE_FIELDS, label: string, unit: string, max: number) =>
-      html`<label>${label}<span class="unit-input"><input type="number" inputmode="numeric" min="0" max="${String(max)}" name="${RULE_FIELDS[name]}" value="${rules[name] === undefined ? '' : String(rules[name])}"><span>${unit}</span></span></label>`;
+    const field = (name: keyof typeof RULE_FIELDS, label: string, unit: string) =>
+      html`<label>${label}<span class="unit-input"><input type="number" inputmode="numeric" min="${String(RULE_LIMITS[name][0])}" max="${String(RULE_LIMITS[name][1])}" name="${RULE_FIELDS[name]}" value="${rules[name] === undefined ? '' : String(rules[name])}"><span>${unit}</span></span></label>`;
     const content = html`${noticeOf(notice)}
 <p><a class="back" href="${root}/resources">Resources</a></p>
 ${pageHead(resourceName(resource, resource.id))}
@@ -1336,11 +1389,11 @@ ${
 <input type="hidden" name="once" value="${formNonce(session)}">
 <input type="hidden" name="id" value="${resource.id}">
 <div class="grid-form">
-${field('minNoticeMinutes', 'Minimum notice', 'min', 525_600)}
-${field('maxAdvanceDays', 'Book up to', 'days ahead', 3_660)}
-${field('slotStepMinutes', 'Start on a step of', 'min', 1_440)}
-${field('turnaroundMinutes', 'Turnaround after each booking', 'min', 1_440)}
-${field('checkInMinutes', 'Release if not checked in after', 'min', 1_440)}
+${field('minNoticeMinutes', 'Minimum notice', 'min')}
+${field('maxAdvanceDays', 'Book up to', 'days ahead')}
+${field('slotStepMinutes', 'Start on a step of', 'min')}
+${field('turnaroundMinutes', 'Turnaround after each booking', 'min')}
+${field('checkInMinutes', 'Release if not checked in after', 'min')}
 </div>
 <label class="choice"><input type="checkbox" name="enforce_hours" value="1"${rules.enforceHours ? html` checked` : html``}> Only inside bookable hours</label>
 <p class="fine">Leave a field empty for no rule.</p>
@@ -1367,7 +1420,7 @@ ${
 </div>
 <div class="stack">
 ${mine ? html`<section class="panel"><h2>Upcoming</h2>${agendaPanel(mine, byId, mine.length > AGENDA_SHOWN)}</section>` : html``}
-${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activity, byId, keys)}</section>` : html``}
+${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activity, byId, keys, session)}</section>` : html``}
 </div>
 </div>`;
     return respond(status, layout(resourceName(resource, resource.id), content, session, 'resources'));
@@ -1381,8 +1434,14 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
     for (const [name, key] of Object.entries(RULE_FIELDS) as [keyof typeof RULE_FIELDS, string][]) {
       const value = (form.get(key) ?? '').trim();
       if (value === '') continue;
-      if (!/^\d{1,7}$/.test(value)) {
-        return resourceDetailPage(session, id, 400, 'Rules are whole numbers. Leave a field empty for none.');
+      const [min, max] = RULE_LIMITS[name];
+      if (!/^\d{1,7}$/.test(value) || Number(value) < min || Number(value) > max) {
+        return resourceDetailPage(
+          session,
+          id,
+          400,
+          `${RULE_NAMES[name]} is a whole number from ${min.toLocaleString('en')} to ${max.toLocaleString('en')}. Leave it empty for none.`,
+        );
       }
       rules[name] = Number(value);
     }
@@ -1392,10 +1451,11 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
         tenantOf(session),
         id,
         Object.keys(rules).length === 0 ? null : rules,
+        personOf(session),
       );
     } catch (error) {
       if ((error as { code?: unknown }).code !== 'invalid_booking_rules') throw error;
-      return resourceDetailPage(session, id, 400, (error as Error).message);
+      return resourceDetailPage(session, id, 400, 'Those rules are not ones Slotlock can keep.');
     }
     return redirect(303, `${root}/resources/${id}`);
   }
@@ -1406,7 +1466,12 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
     if (!resource || !options.resources.setPool) return notFound(session);
     const pool = (form.get('pool') ?? '').trim();
     try {
-      await options.resources.setPool(tenantOf(session), id, pool === '' ? null : pool);
+      await options.resources.setPool(
+        tenantOf(session),
+        id,
+        pool === '' ? null : pool,
+        personOf(session),
+      );
     } catch (error) {
       if ((error as { code?: unknown }).code !== 'invalid_pool') throw error;
       return resourceDetailPage(
@@ -1489,6 +1554,7 @@ ${
       tenantOf(session),
       (form.get('url') ?? '').trim(),
       types.length === 0 ? undefined : types,
+      personOf(session),
     );
     if (!created.ok) {
       const message =
@@ -1519,12 +1585,12 @@ ${
     if (!hooks) return notFound(session);
     const id = form.get('id') ?? '';
     if (change === 'remove') {
-      if (!(await hooks.remove(tenantOf(session), id))) {
+      if (!(await hooks.remove(tenantOf(session), id, personOf(session)))) {
         return webhooksPage(session, 404, 'That webhook is not one of yours.');
       }
       return redirect(303, `${root}/webhooks`);
     }
-    const enabled = await hooks.enable(tenantOf(session), id);
+    const enabled = await hooks.enable(tenantOf(session), id, personOf(session));
     if (enabled === null) return webhooksPage(session, 404, 'That webhook is not one of yours.');
     if ('code' in enabled) {
       return webhooksPage(
@@ -1586,7 +1652,7 @@ ${
   async function leaveWaitlist(session: Session, form: URLSearchParams): Promise<Response> {
     const waitlist = options.resources.waitlist;
     if (!waitlist) return notFound(session);
-    if (!(await waitlist.leave(tenantOf(session), form.get('id') ?? ''))) {
+    if (!(await waitlist.leave(tenantOf(session), form.get('id') ?? '', personOf(session)))) {
       return waitlistPage(session, 404, 'That entry is not on your waitlist.');
     }
     return redirect(303, `${root}/waitlist`);
@@ -1741,6 +1807,7 @@ ${
       tenantOf(session),
       target === 'all' ? 'all' : { id: target.id },
       rules,
+      personOf(session),
     );
     if (changed === 0) {
       return target === 'all'
@@ -2094,7 +2161,7 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       return resourcesPage(session, 400, 'Give the resource a reference of 1 to 200 characters.');
     }
     try {
-      await options.resources.add(tenantOf(session), reference, timezone);
+      await options.resources.add(tenantOf(session), reference, timezone, personOf(session));
     } catch (error) {
       const code = (error as { code?: unknown }).code;
       if (code === 'resource_limit_reached') {
@@ -2308,6 +2375,17 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
           },
         );
       } catch (error) {
+        // A suspended tenant may look, not change: the store refuses its writes.
+        if ((error as { code?: unknown } | null)?.code === 'tenant_suspended') {
+          return respond(
+            403,
+            layout(
+              'Suspended',
+              html`<p class="notice">This account is suspended: its data can be seen, not changed.</p>`,
+              null,
+            ),
+          );
+        }
         try {
           ignoreRejection(options.onError?.(error));
         } catch {

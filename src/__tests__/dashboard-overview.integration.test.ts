@@ -113,7 +113,10 @@ describe.skipIf(!url)('the dashboard overview (real Postgres)', () => {
     const offered = (await adapter.waitlist?.list(tenant, 10)) ?? [];
     expect(offered.map(({ status }) => status)).toEqual(['offered', 'waiting']);
     expect(await adapter.waitlist?.leave(other, first.ok ? first.entry.id : '')).toBe(false);
-    expect(await adapter.waitlist?.leave(tenant, first.ok ? first.entry.id : '')).toBe(true);
+    expect(await adapter.waitlist?.leave(tenant, first.ok ? first.entry.id : '', 'github:42')).toBe(true);
+    // The person who removed it is on the feed: its offered hold, released by them.
+    const released = (await adapter.recentChanges?.(tenant, 20))?.find(({ type }) => type === 'hold.released');
+    expect(released?.actor).toBe('github:42');
     expect((await adapter.waitlist?.list(tenant, 10))?.map(({ holderRef, status }) => [holderRef, status])).toEqual([
       ['second', 'offered'],
     ]);
