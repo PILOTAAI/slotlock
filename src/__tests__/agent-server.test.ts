@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   SLOTLOCK_A2A_PROTOCOL_VERSION,
+  SLOTLOCK_A2A_WATCH_SKILL,
   SLOTLOCK_AGENT_OPERATION_LEGACY_NAMES,
   SLOTLOCK_AGENT_SERVER_VERSION,
   SLOTLOCK_MCP_APPS_EXTENSION,
@@ -377,7 +378,7 @@ describe('consumer-neutral Slotlock agent server', () => {
     });
   });
 
-  it('exposes bounded health and discovery without claiming unsupported streaming', async () => {
+  it('exposes bounded health and discovery, claiming streaming but not push', async () => {
     const server = buildServer();
     const health = await server.fetch(new Request('http://localhost/slotlock/healthz'));
     expect(health.status).toBe(200);
@@ -391,7 +392,7 @@ describe('consumer-neutral Slotlock agent server', () => {
       new Request('http://localhost/slotlock/.well-known/agent-card.json'),
     );
     expect(await card.json()).toMatchObject({
-      capabilities: { streaming: false, pushNotifications: false },
+      capabilities: { streaming: true, pushNotifications: false },
       securitySchemes: {
         bearer: {
           httpAuthSecurityScheme: {
@@ -1556,7 +1557,7 @@ describe('consumer-neutral Slotlock agent server', () => {
           },
         });
       }
-      for (const method of ['SendStreamingMessage', 'SubscribeToTask', 'GetExtendedAgentCard']) {
+      for (const method of ['SubscribeToTask', 'GetExtendedAgentCard']) {
         const response = await call(method);
         expect(response.status).toBe(200);
         expect(await response.json()).toMatchObject({
@@ -1798,14 +1799,21 @@ describe('consumer-neutral Slotlock agent server', () => {
         },
       ]);
       expect(card.capabilities).toEqual({
-        streaming: false,
+        streaming: true,
         pushNotifications: false,
         extendedAgentCard: false,
       });
-      expect(card.skills.map((skill) => skill.id)).toEqual(
-        slotlockAgentTools().map((tool) => tool.name),
-      );
-      for (const skill of card.skills) {
+      // Every tool, then the watch skill, which only a stream can serve.
+      expect(card.skills.map((skill) => skill.id)).toEqual([
+        ...slotlockAgentTools().map((tool) => tool.name),
+        SLOTLOCK_A2A_WATCH_SKILL,
+      ]);
+      const watch = card.skills.at(-1) as { examples: string[] };
+      expect(JSON.parse(watch.examples[0] ?? 'null')).toEqual({
+        skill: SLOTLOCK_A2A_WATCH_SKILL,
+        arguments: { resource_ids: [expect.any(String)] },
+      });
+      for (const skill of card.skills.slice(0, -1)) {
         // a2a.proto's AgentSkill has no `metadata` field.
         expect(skill).not.toHaveProperty('metadata');
         const examples = skill.examples as string[];

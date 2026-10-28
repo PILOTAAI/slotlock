@@ -834,8 +834,10 @@ import {
   type SlotlockStore,
   createSlotlockAgentServer,
   createSlotlockStoreAgentBackend,
+  createSlotlockStoreChangeSource,
 } from 'slotlock';
 import { createSlotlockNodeServer } from 'slotlock/node-server';
+import type { Sql } from 'postgres';
 
 const ALLOWED_OPERATIONS: ReadonlySet<SlotlockAgentOperation> = new Set([
   'slotlock_list_resources',
@@ -849,6 +851,8 @@ const ALLOWED_OPERATIONS: ReadonlySet<SlotlockAgentOperation> = new Set([
 
 export interface CalendarServerConfig {
   store: SlotlockStore;
+  /** The store's client: live updates LISTEN on it for the database's wake-ups. */
+  sql: Sql;
   publicBaseUrl: string;
   port: number;
   verifyToken(token: string): Promise<SlotlockAgentPrincipal | null>;
@@ -869,7 +873,8 @@ export async function startCalendarServer(config: CalendarServerConfig) {
         }
       : {}),
     resourceWindowDays: 90,
-    subscriptions: { pollIntervalMs: 5_000 },
+    // Live updates follow each tenant's change feed: a booking is announced as it commits.
+    subscriptions: { changes: createSlotlockStoreChangeSource(config.store, config.sql) },
     backend: createSlotlockStoreAgentBackend(config.store, {
       availabilityRules: async () => [
         { rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR', startMinutes: 9 * 60, durationMinutes: 480 },
@@ -998,7 +1003,7 @@ on stderr.
 | HTTP | `401` with `WWW-Authenticate`, `403` disallowed origin, `413`/`415` bad body, `429` rate limit (MCP, REST) |
 | MCP | `-32602` unknown tool, `arguments` that are not an object, or altered confirmation; `-32603` server fault; `-32601` unknown method |
 | MCP 2026-07-28 | `-32020` header disagrees with body, `-32021` form elicitation not declared, `-32022` unsupported revision, `-31029` rate limit |
-| A2A | `-32602` malformed message or parameters, `-32029` rate limit (`RATE_LIMITED`, in the 200 envelope like every A2A error), `-32009` unsupported `A2A-Version`, `-32003` push notifications, `-32004` streaming, `-32001` task not found (the server keeps no tasks) |
+| A2A | `-32602` malformed message or parameters, `-32029` rate limit (`RATE_LIMITED`, in the 200 envelope like every A2A error), `-32009` unsupported `A2A-Version`, `-32003` push notifications, `-32004` task subscription or extended card, `-32001` task not found (the server keeps no tasks) |
 
 ### Authentication and OAuth discovery
 
@@ -1049,8 +1054,18 @@ On MCP 2026-07-28 each resource is also an MCP resource, `slotlock://resources/{
 returns busy time and coverage for the next `resourceWindowDays` (30). `subscriptions/listen` streams
 `notifications/resources/updated` when a resource's free/busy changes.
 
-- Changes are found by re-reading through your backend every `subscriptions.pollIntervalMs` (10 s),
-  re-checking the caller each time.
+- With `subscriptions.changes` (`createSlotlockStoreChangeSource(store, sql)`; `slotlock serve`
+  sets it), changes come from the tenant's change feed: one reader per tenant per process, shared by
+  all its subscriptions, follows the feed by cursor and is woken by PostgreSQL `LISTEN/NOTIFY` at
+  each commit. The notification names a digest of the tenant and carries nothing else; the reader
+  reads only its own tenant's feed, under row-level security. A change re-reads the subscriptions
+  watching its resource, and each announces only what actually changed in its window. Without a
+  wake-up (a pooler in transaction mode drops `LISTEN`) the feed is read every 2 s when quiet, one
+  indexed query per tenant. A cursor the feed has pruned past announces every watched resource
+  once, then follows from now.
+- Each subscription is also re-read every `pollIntervalMs` (60 s with a feed, 10 s without one,
+  which is then the only way changes are found), re-checking the caller each time, so a revoked key
+  or what the feed does not carry (bookable hours) is caught.
 - A subscription ends after `maxDurationMs` (15 minutes), on `shutdown()`, or when access is lost.
 - At most 4 open per caller and 256 per server (`maxPerPrincipal`, `maxTotal`). `maxPerTenant`
   caps one tenant's across all its callers (default `maxTotal`; `slotlock serve` sets 16), so a
@@ -1421,6 +1436,15 @@ export async function listResourcesOverA2a(baseUrl: string, token: string) {
 Send one `application/json` data part, `{"skill": "<id>", "arguments": {…}}`, with header
 `A2A-Version: 1.0`. Each skill in the agent card has an example; replies are synchronous.
 
+The card declares `streaming`. `SendStreamingMessage` with any skill streams its reply as one
+message. With `slotlock_watch_resources` (`{"resource_ids": [...]}`, up to 20) it streams a watch:
+a task in `TASK_STATE_WORKING` naming the resources it can see, then a status update
+`{"resource_id", "uri"}` each time one's free/busy changes, from the same feed and under the same
+caps as MCP subscriptions, until `TASK_STATE_COMPLETED` (its duration, shutdown) or
+`TASK_STATE_FAILED` (access withdrawn). Closing the stream ends it; the task is not kept, so
+`SubscribeToTask` and `GetTask` do not find it. Push notifications are not offered: a tenant's
+changes reach a URL as signed webhooks.
+
 ### MCP Apps
 
 Read-only tools link to `ui://slotlock/calendar`, a self-contained calendar view that hosts
@@ -1506,7 +1530,9 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
 7. Monitor conflicts, refused rules, sync lag, capped maintenance runs, quota errors and confirmation outcomes.
 8. Keep writes confirmation-gated wherever your policy needs a person (`slotlock serve`:
    `SLOTLOCK_CONFIRM_WRITES`, `none` by default).
-9. Size live updates: at most `maxTotal` backend reads per `pollIntervalMs`.
+9. Size live updates: one feed query per tenant with an open subscription per wake-up (or per 2 s
+   without `LISTEN`), a backend read per subscription a change touches, and at most `maxTotal`
+   backend reads per `pollIntervalMs`.
 10. Give each agent its own API key with the narrowest scope and an expiry.
 11. After each deployment, check it end to end with a short-lived admin key, then revoke the key:
     `SLOTLOCK_URL=https://… SLOTLOCK_ADMIN_KEY=… node scripts/smoke-deployment.mjs`, from a clone

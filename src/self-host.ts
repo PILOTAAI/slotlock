@@ -22,6 +22,7 @@ import {
 import {
   createSlotlockStoreAgentBackend,
   createSlotlockStoreApplicationBackend,
+  createSlotlockStoreChangeSource,
 } from './agent-store-backend.js';
 import {
   SLOTLOCK_API_KEY_DEFAULT_SCOPES,
@@ -876,6 +877,8 @@ export async function startSlotlockServer(
         return true;
       },
       subscriptions: {
+        // Live updates follow each tenant's change feed, woken by LISTEN/NOTIFY.
+        changes: createSlotlockStoreChangeSource(store, sql),
         maxTotal: caps.subscriptions,
         maxPerTenant: caps.tenant_subscriptions,
         maxPerPrincipal: slotlockKeySubscriptions(caps),

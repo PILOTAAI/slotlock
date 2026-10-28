@@ -1282,6 +1282,27 @@ $slotlock_outbox_mark_pruned$;
 CREATE OR REPLACE TRIGGER slotlock_outbox_mark_pruned
   AFTER DELETE ON slotlock.outbox REFERENCING OLD TABLE AS pruned
   FOR EACH STATEMENT EXECUTE FUNCTION slotlock.outbox_mark_pruned();
+-- A wake-up for live updates (agent-store-backend.ts, createSlotlockStoreChangeSource): each tenant
+-- with new changes is notified once at commit (NOTIFY folds repeats in a transaction), on a channel
+-- named by a digest of the tenant, with no payload. A listener reads the tenant's feed to learn what
+-- changed, under that tenant's row-level security.
+CREATE OR REPLACE FUNCTION slotlock.outbox_notify()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_outbox_notify$
+BEGIN
+  PERFORM pg_catalog.pg_notify(
+    'slotlock_feed_' || pg_catalog.left(pg_catalog.encode(
+      pg_catalog.sha256(pg_catalog.convert_to(added.tenant_ref, 'UTF8')), 'hex'), 40),
+    '')
+    FROM (SELECT DISTINCT tenant_ref FROM added) added;
+  RETURN NULL;
+END
+$slotlock_outbox_notify$;
+CREATE OR REPLACE TRIGGER slotlock_outbox_notify
+  AFTER INSERT ON slotlock.outbox REFERENCING NEW TABLE AS added
+  FOR EACH STATEMENT EXECUTE FUNCTION slotlock.outbox_notify();
 
 CREATE TABLE IF NOT EXISTS slotlock.webhook_endpoints (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

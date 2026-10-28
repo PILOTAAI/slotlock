@@ -6,8 +6,10 @@ import {
   type SlotlockStore,
   createSlotlockAgentServer,
   createSlotlockStoreAgentBackend,
+  createSlotlockStoreChangeSource,
 } from 'slotlock';
 import { createSlotlockNodeServer } from 'slotlock/node-server';
+import type { Sql } from 'postgres';
 
 const ALLOWED_OPERATIONS: ReadonlySet<SlotlockAgentOperation> = new Set([
   'slotlock_list_resources',
@@ -21,6 +23,8 @@ const ALLOWED_OPERATIONS: ReadonlySet<SlotlockAgentOperation> = new Set([
 
 export interface CalendarServerConfig {
   store: SlotlockStore;
+  /** The store's client: live updates LISTEN on it for the database's wake-ups. */
+  sql: Sql;
   publicBaseUrl: string;
   port: number;
   verifyToken(token: string): Promise<SlotlockAgentPrincipal | null>;
@@ -41,7 +45,8 @@ export async function startCalendarServer(config: CalendarServerConfig) {
         }
       : {}),
     resourceWindowDays: 90,
-    subscriptions: { pollIntervalMs: 5_000 },
+    // Live updates follow each tenant's change feed: a booking is announced as it commits.
+    subscriptions: { changes: createSlotlockStoreChangeSource(config.store, config.sql) },
     backend: createSlotlockStoreAgentBackend(config.store, {
       availabilityRules: async () => [
         { rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR', startMinutes: 9 * 60, durationMinutes: 480 },

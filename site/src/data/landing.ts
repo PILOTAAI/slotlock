@@ -746,7 +746,7 @@ export const developers = {
     },
     {
       label: 'Live updates',
-      body: `On MCP ${facts.mcpModern} each resource is an MCP resource, and a subscription hears when its free/busy changes.`,
+      body: `On MCP ${facts.mcpModern} each resource is an MCP resource, and a subscription hears when its free/busy changes, as the booking commits. On A2A the same feed streams to a watch task.`,
       href: '/docs/reference/#calendar-resources-and-live-updates',
     },
   ],

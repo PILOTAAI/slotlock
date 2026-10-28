@@ -98,6 +98,8 @@ const expectedFiles = new Set([
   'assistant.d.ts',
   'booking-rules.js',
   'booking-rules.d.ts',
+  'change-watch.js',
+  'change-watch.d.ts',
   'cli.js',
   'cli.d.ts',
   'event-feed.js',

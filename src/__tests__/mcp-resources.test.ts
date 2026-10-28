@@ -24,6 +24,7 @@ import {
   modernRequest,
   rpc,
 } from './helpers/modern-mcp.js';
+import { createFakeChangeFeed } from './helpers/change-feed.js';
 
 type BackendMethod = (
   context: SlotlockAgentInvocationContext,
@@ -850,5 +851,207 @@ describe('live calendar updates (MCP 2026-07-28 subscriptions/listen)', () => {
     ]) {
       expect(() => buildServer({ subscriptions })).toThrow(/subscriptions\.\w+ is invalid/);
     }
+  });
+});
+
+describe('live calendar updates from the change feed (RFC 0002 P1-5)', () => {
+  // A re-read every minute is only the fallback: a change must arrive long before it.
+  const feedServer = (feed: ReturnType<typeof createFakeChangeFeed>, extra: object = {}) =>
+    buildServer({
+      subscriptions: {
+        pollIntervalMs: 60_000,
+        keepAliveMs: 5_000,
+        maxDurationMs: 600_000,
+        changes: feed.source,
+        ...extra,
+      },
+    });
+
+  /** Every message the stream carries from now on, as it arrives. */
+  function collect(stream: SseReader): Record<string, unknown>[] {
+    const messages: Record<string, unknown>[] = [];
+    void (async () => {
+      for (;;) {
+        const message = await stream.message();
+        if (message === null) return;
+        messages.push(message);
+      }
+    })();
+    return messages;
+  }
+  const updated = (messages: Record<string, unknown>[]) =>
+    messages
+      .filter((message) => message.method === 'notifications/resources/updated')
+      .map((message) => (message.params as { uri: string }).uri);
+
+  async function open(server: ReturnType<typeof buildServer>, uris: string[], token = 'Bearer valid') {
+    const stream = new SseReader(await server.fetch(listen({ resourceSubscriptions: uris }, token)));
+    expect(await stream.message()).toMatchObject({
+      method: 'notifications/subscriptions/acknowledged',
+    });
+    const messages = collect(stream);
+    // The reader's first read, and the one re-read that covers whatever came in between.
+    await vi.advanceTimersByTimeAsync(0);
+    return { stream, messages };
+  }
+
+  it('announces a booking change within a quarter second, without waiting for the re-read', async () => {
+    const feed = createFakeChangeFeed();
+    const { stream, messages } = await open(feedServer(feed), [URI_A, URI_B]);
+    expect(updated(messages)).toEqual([]);
+
+    calendars.set('vehicle-b', [HANDOVER]);
+    feed.publish('tenant-a', 'vehicle-b');
+    await vi.advanceTimersByTimeAsync(250);
+    expect(updated(messages)).toEqual([URI_B]);
+    // A change to a resource it does not watch is read from the feed and announces nothing.
+    feed.publish('tenant-a', 'vehicle-z');
+    await vi.advanceTimersByTimeAsync(250);
+    expect(updated(messages)).toEqual([URI_B]);
+    for (const [params] of feed.source.listChanges.mock.calls) {
+      expect(params.tenantRef).toBe('tenant-a');
+    }
+    await stream.cancel();
+  });
+
+  it("never tells one tenant's subscriber of another tenant's change", async () => {
+    const feed = createFakeChangeFeed();
+    const server = feedServer(feed);
+    const tenantA = await open(server, [URI_A]);
+    const tenantB = await open(server, [URI_A], 'Bearer third');
+    expect(feed.listening().sort()).toEqual(['tenant-a', 'tenant-b']);
+
+    calendars.set('vehicle-a', [HANDOVER]);
+    feed.publish('tenant-a', 'vehicle-a');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(updated(tenantA.messages)).toEqual([URI_A]);
+    // Tenant b's reader was not woken and read nothing new, so its subscriber re-read nothing.
+    expect(updated(tenantB.messages)).toEqual([]);
+    const readsOf = (tenantRef: string) =>
+      getFreeBusy.mock.calls.filter(([context]) => context.principal.tenantRef === tenantRef).length;
+    const tenantBReads = readsOf('tenant-b');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(readsOf('tenant-b')).toBe(tenantBReads);
+    await tenantA.stream.cancel();
+    await tenantB.stream.cancel();
+  });
+
+  it("shares one reader among a tenant's subscriptions", async () => {
+    const feed = createFakeChangeFeed();
+    const server = feedServer(feed);
+    const first = await open(server, [URI_A]);
+    const second = await open(server, [URI_A, URI_B], 'Bearer other');
+    expect(feed.source.watch?.mock.calls.map(([tenantRef]) => tenantRef)).toEqual(['tenant-a']);
+    expect(feed.source.head).toHaveBeenCalledTimes(1);
+
+    calendars.set('vehicle-a', [HANDOVER]);
+    feed.publish('tenant-a', 'vehicle-a');
+    await vi.advanceTimersByTimeAsync(250);
+    expect(updated(first.messages)).toEqual([URI_A]);
+    expect(updated(second.messages)).toEqual([URI_A]);
+    await first.stream.cancel();
+    await second.stream.cancel();
+  });
+
+  it('re-syncs an expired cursor by announcing every watched resource once, then reads on from now', async () => {
+    const feed = createFakeChangeFeed();
+    const { stream, messages } = await open(feedServer(feed), [URI_A, URI_B]);
+    feed.expire('tenant-a');
+    await vi.advanceTimersByTimeAsync(250);
+    expect(updated(messages)).toEqual([URI_A, URI_B]);
+    expect(feed.source.head).toHaveBeenCalledTimes(2);
+
+    // From the new position on, only what changes.
+    calendars.set('vehicle-a', [HANDOVER]);
+    feed.publish('tenant-a', 'vehicle-a');
+    await vi.advanceTimersByTimeAsync(250);
+    expect(updated(messages)).toEqual([URI_A, URI_B, URI_A]);
+    await stream.cancel();
+  });
+
+  it('stops the reader and its wake-up when the last subscription closes or its request aborts', async () => {
+    const feed = createFakeChangeFeed();
+    const server = feedServer(feed);
+    const first = await open(server, [URI_A]);
+    await first.stream.cancel();
+    expect(feed.stopped).toEqual(['tenant-a']);
+    expect(feed.listening()).toEqual([]);
+
+    const abort = new AbortController();
+    const aborted = new SseReader(
+      await server.fetch(
+        new Request(listen({ resourceSubscriptions: [URI_B] }), { signal: abort.signal }),
+      ),
+    );
+    await aborted.message();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(feed.listening()).toEqual(['tenant-a']);
+    abort.abort();
+    expect(feed.stopped).toEqual(['tenant-a', 'tenant-a']);
+    expect(closedEvents()).toEqual([
+      { type: 'subscription', outcome: 'closed', reason: 'client', resources: 1 },
+      { type: 'subscription', outcome: 'closed', reason: 'client', resources: 1 },
+    ]);
+    feed.source.listChanges.mockClear();
+    getFreeBusy.mockClear();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(feed.source.listChanges).not.toHaveBeenCalled();
+    expect(getFreeBusy).not.toHaveBeenCalled();
+  });
+
+  it('reads a feed with no wake-up on a short interval that backs off to two seconds', async () => {
+    const feed = createFakeChangeFeed({ wakes: false });
+    const { stream, messages } = await open(feedServer(feed), [URI_A]);
+    await vi.advanceTimersByTimeAsync(30_000);
+    feed.source.listChanges.mockClear();
+    await vi.advanceTimersByTimeAsync(10_000);
+    // Quiet: once every two seconds, one indexed query for the tenant.
+    expect(feed.source.listChanges).toHaveBeenCalledTimes(5);
+
+    calendars.set('vehicle-a', [HANDOVER]);
+    feed.publish('tenant-a', 'vehicle-a');
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(updated(messages)).toEqual([URI_A]);
+    await stream.cancel();
+  });
+
+  it('still re-reads at the fallback interval when the feed fails, and reports why', async () => {
+    const onError = vi.fn();
+    const feed = createFakeChangeFeed();
+    feed.source.listChanges.mockRejectedValue(new Error('feed down'));
+    const { stream, messages } = await open(
+      buildServer({
+        onError,
+        subscriptions: { pollIntervalMs: 60_000, maxDurationMs: 600_000, changes: feed.source },
+      }),
+      [URI_A],
+    );
+    expect(onError).toHaveBeenCalledWith(new Error('feed down'), { operation: null });
+    calendars.set('vehicle-a', [HANDOVER]);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(updated(messages)).toEqual([URI_A]);
+    await stream.cancel();
+  });
+
+  it('keeps the subscription caps', async () => {
+    const feed = createFakeChangeFeed();
+    const server = feedServer(feed, { maxPerPrincipal: 1, maxPerTenant: 1, maxTotal: 2 });
+    const first = await open(server, [URI_A]);
+    // Per principal, then per tenant.
+    expect((await server.fetch(listen({ resourceSubscriptions: [URI_B] }))).status).toBe(429);
+    expect(
+      (await server.fetch(listen({ resourceSubscriptions: [URI_B] }, 'Bearer other'))).status,
+    ).toBe(429);
+    const second = await open(server, [URI_B], 'Bearer third');
+    expect(feed.listening().sort()).toEqual(['tenant-a', 'tenant-b']);
+    await first.stream.cancel();
+    await second.stream.cancel();
+    expect(feed.listening()).toEqual([]);
+  });
+
+  it('rejects a change source without head and listChanges', () => {
+    expect(() =>
+      buildServer({ subscriptions: { changes: { head: async () => '0' } as never } }),
+    ).toThrow(/subscriptions\.changes is invalid/);
   });
 });

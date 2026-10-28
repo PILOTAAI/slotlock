@@ -3,6 +3,26 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Added
+
+- Live updates from the change feed (RFC 0002 P1-5). With `subscriptions.changes`
+  (`createSlotlockStoreChangeSource(store, sql)`, which `slotlock serve` sets), MCP resource
+  subscriptions follow each tenant's change feed instead of re-reading every 10 seconds: one reader
+  per tenant per process, shared by its subscriptions, reads the feed by cursor and re-reads only
+  the subscriptions a change touches, so a booking is announced as it commits. The outbox wakes it
+  with `LISTEN/NOTIFY` (`slotlock.outbox_notify`): one notification per tenant per commit, on a
+  channel named by a digest of the tenant (`slotlockChangeChannel`), with no payload. Without a
+  wake-up the feed is read every 2 s when quiet. A cursor pruned past announces every watched
+  resource once. The re-read every `pollIntervalMs` stays as the fallback (60 s with a feed), and
+  the subscription caps are unchanged. `slotlockChangeFeedHead` is where a reader starts.
+- A2A streaming: the card declares `streaming`. `SendStreamingMessage` streams any skill's reply as
+  one message, and the `slotlock_watch_resources` skill streams a watch task with a status update
+  for each change to a watched resource's free/busy, from the same feed and caps as MCP
+  subscriptions, ending `TASK_STATE_COMPLETED` or, when access is withdrawn, `TASK_STATE_FAILED`.
+  Push notifications stay unsupported: webhooks deliver a tenant's changes to a URL.
+
 ## 0.5.2 - 2026-10-28
 
 ### Added

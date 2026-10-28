@@ -1,4 +1,6 @@
-import type { SlotlockWebhookEndpoint } from './event-feed.js';
+import type { Sql } from 'postgres';
+import type { SlotlockAgentChangeSource } from './change-watch.js';
+import { type SlotlockWebhookEndpoint, slotlockChangeFeedHead } from './event-feed.js';
 import { slotlockCloudEvent } from './webhooks.js';
 import { createHash } from 'node:crypto';
 import {
@@ -470,6 +472,39 @@ function requireAgentResource(
   resourceId: string,
 ): Promise<SlotlockResource> {
   return requireResource(tenantStore, tenantRef, resourceId, 'shared');
+}
+
+/**
+ * The LISTEN channel the database wakes on when a tenant's feed grows (ddl.ts,
+ * slotlock.outbox_notify): a digest of the tenant, so the name says nothing of it, and the wake-up
+ * carries no payload. What changed is read from the tenant's own feed, under its row-level security.
+ */
+export function slotlockChangeChannel(tenantRef: string): string {
+  return `slotlock_feed_${createHash('sha256').update(tenantRef).digest('hex').slice(0, 40)}`;
+}
+
+/**
+ * The store's change feed for live updates (`subscriptions.changes`): each tenant's changes read
+ * under its row-level security, woken by PostgreSQL LISTEN/NOTIFY on `sql` (its own connection, one
+ * per process). `sql` must reach the database directly: LISTEN does not pass a pooler in
+ * transaction mode, and then the feed is read every couple of seconds instead.
+ */
+export function createSlotlockStoreChangeSource(
+  store: SlotlockStore,
+  sql: Sql,
+): SlotlockAgentChangeSource {
+  return {
+    head: () => slotlockChangeFeedHead(sql),
+    async listChanges(params) {
+      const page = await store.withTenant(params.tenantRef, (tenant) => tenant.listChanges(params));
+      return page.ok ? { ok: true, changes: page.changes, next: page.next } : page;
+    },
+    async watch(tenantRef, wake) {
+      // A reconnected listener may have missed a wake-up while it was down: it wakes once.
+      const listening = await sql.listen(slotlockChangeChannel(tenantRef), () => wake(), wake);
+      return () => listening.unlisten();
+    },
+  };
 }
 
 /** Bind the protocol server to the production store without giving a request control of tenancy. */
