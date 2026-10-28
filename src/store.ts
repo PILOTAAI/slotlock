@@ -1706,12 +1706,15 @@ const EFFECTIVE_BOOKING_RULES = `NULLIF(
   || COALESCE(resources.booking_rules, '{}'::jsonb),
   '{}'::jsonb) AS effective_booking_rules`;
 
+/** What rules Slotlock did not write read as: no booking passes them. */
+const REFUSE_EVERY_BOOKING: SlotlockBookingRules = Object.freeze({ maxAdvanceDays: 1, minNoticeMinutes: 525_600 });
+
 /** Rules read back from storage: written validated, so anything else refuses every booking. */
 function storedBookingRules(value: unknown): SlotlockBookingRules {
   try {
     return parseBookingRules(value);
   } catch {
-    return { maxAdvanceDays: 1, minNoticeMinutes: 525_600 };
+    return { ...REFUSE_EVERY_BOOKING };
   }
 }
 
@@ -1739,14 +1742,18 @@ function toResource(row: ResourceRow): SlotlockResource {
     resource.bookingRules = storedBookingRules(row.booking_rules);
   }
   if (row.effective_booking_rules !== null && row.effective_booking_rules !== undefined) {
-    // Merged from levels each validated alone: read leniently, never as refusing everything.
+    // Merged from levels each validated alone, so only their combination can disagree (an offset
+    // from one level over a shorter step from another): that one is read modulo the step. A field
+    // invalid in itself was not written by Slotlock, and refuses every booking, as stored rules do.
     const { rules, dropped } = parseEffectiveBookingRules(row.effective_booking_rules);
     if (dropped.length > 0) {
       console.warn(
-        JSON.stringify({ message: 'slotlock ignored invalid booking rules', resource: row.id, dropped }),
+        JSON.stringify({ message: 'slotlock refused invalid booking rules', resource: row.id, dropped }),
       );
+      resource.effectiveBookingRules = { ...REFUSE_EVERY_BOOKING };
+    } else if (Object.keys(rules).length > 0) {
+      resource.effectiveBookingRules = rules;
     }
-    if (Object.keys(rules).length > 0) resource.effectiveBookingRules = rules;
   }
   return resource;
 }
@@ -3861,6 +3868,8 @@ function buildSlotlockStore(
       return inTransaction(sql, async (tx) => {
         if (pool !== '') {
           // Counted under the tenant's lock, so racing writes stop at the cap.
+          // The count after the lock sees every committed row only under READ COMMITTED.
+          await assertReadCommitted(tx);
           await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`slotlock:rule-defaults:${tenantRef}`}, 0))`;
           const [counted] = await tx<{ pools: number; exists: boolean }[]>`
             SELECT count(*)::int AS pools, bool_or(pool_ref = ${pool}) IS TRUE AS exists

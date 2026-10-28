@@ -205,6 +205,37 @@ describe.skipIf(!url)('default booking rules (real Postgres, application role)',
     expect(slot).toEqual({ start: at(35, 5), end: at(36, 5) });
   });
 
+  it('refuses every booking on a resource whose merged rules hold a field Slotlock never wrote', async () => {
+    // A tenant default under a resource's own value no write path accepts (over the notice limit):
+    // the merge keeps the bad value, which then refuses rather than leaving no notice at all.
+    const corrupt = await resource(tenant, null);
+    await as(tenant, (scoped) =>
+      scoped.setBookingRuleDefaults({ tenantRef: tenant, pool: null, rules: { minNoticeMinutes: 120 } }),
+    );
+    await admin`
+      UPDATE slotlock.resources SET booking_rules = '{"minNoticeMinutes": 600000}'::jsonb
+       WHERE id = ${corrupt}`;
+    expect(
+      await as(tenant, async (scoped) => (await scoped.getResource({ tenantRef: tenant, id: corrupt }))?.effectiveBookingRules),
+    ).toEqual({ maxAdvanceDays: 1, minNoticeMinutes: 525_600 });
+    expect(await book(corrupt, at(30), at(31))).toMatchObject({ ok: false });
+    await as(tenant, (scoped) => scoped.setBookingRuleDefaults({ tenantRef: tenant, pool: null, rules: null }));
+  });
+
+  it('caps pool defaults only under read committed, where its count sees every committed row', async () => {
+    // A tenant's own writes already refuse anything else (their suspension check); the root store
+    // in a caller's REPEATABLE READ transaction, whose snapshot predates the lock, is refused too.
+    await expect(
+      admin.begin('isolation level repeatable read', (tx) =>
+        createSlotlockStore(tx).setBookingRuleDefaults({
+          tenantRef: many,
+          pool: 'repeatable',
+          rules: { minNoticeMinutes: 5 },
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'invalid_transaction_isolation' });
+  });
+
   it('keeps default rules for at most 1,000 pools a tenant, and reads them all back', async () => {
     await admin`
       INSERT INTO slotlock.booking_rule_defaults (tenant_ref, pool_ref, rules)
