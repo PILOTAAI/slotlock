@@ -34,6 +34,8 @@ const READS = [
   'findNextAvailableFor',
   'isTenantSuspended',
   'listWaitlist',
+  'getAssistantSettings',
+  'getAssistantConversation',
 ];
 const UPKEEP = [
   'rollCalendarEventHorizon',

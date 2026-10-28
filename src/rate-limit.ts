@@ -338,6 +338,29 @@ function bucketsFor(rate: SlotlockRate, now: () => number) {
 }
 
 /**
+ * One token bucket per key at `rate`, kept in this process like serve's own: `take` spends a token
+ * of the key's bucket and is false, spending nothing, when it has less than one. The dashboard
+ * assistant limits each member's messages with it.
+ */
+export function createSlotlockRateLimiter(
+  rate: SlotlockRate,
+  now: () => number = () => performance.now(),
+): { take(key: string): boolean } {
+  if (!(rate.perSecond > 0) || !(rate.burst >= 1)) {
+    throw new Error('Slotlock rate limiter needs a positive rate and a burst of at least 1');
+  }
+  const buckets = bucketsFor(rate, now);
+  return {
+    take(key) {
+      const bucket = buckets.get(key, now());
+      if (bucket.tokens < 1) return false;
+      bucket.tokens -= 1;
+      return true;
+    },
+  };
+}
+
+/**
  * Slots, at most `perKey` running for a key and `total` in all, shared between keys by how much
  * each asks for. A key's use is how long the event loop was busy while its writes held a slot,
  * halving every SLOT_USE_HALF_LIFE_MS. A freed slot goes to the waiter whose key has the fewest

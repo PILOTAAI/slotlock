@@ -10,6 +10,8 @@
 //       SLOTLOCK_GITHUB_CLIENT_ID      the GitHub OAuth app's Client ID
 //       SLOTLOCK_GITHUB_CLIENT_SECRET  a client secret of that app
 //       SLOTLOCK_SESSION_SECRET        32+ random characters (openssl rand -hex 32)
+//     and, to turn on the chat assistant (optional):
+//       SLOTLOCK_ASSISTANT_SECRET      32+ random characters; seals each organization's model key
 //
 // Local development: CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE=postgres://… and a
 // .dev.vars file with the three secrets and SLOTLOCK_PUBLIC_URL=http://localhost:8788.

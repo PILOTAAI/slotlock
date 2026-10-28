@@ -132,6 +132,11 @@ export interface SlotlockServeDashboardConfig {
   organizations?: string[];
   /** What the deployment is called in the dashboard (SLOTLOCK_DASHBOARD_NAME). */
   name?: string;
+  /**
+   * Seals each tenant's model API key for the dashboard assistant (SLOTLOCK_ASSISTANT_SECRET).
+   * Without it the assistant is off.
+   */
+  assistantSecret?: string;
 }
 
 const DASHBOARD_VARIABLES = [
@@ -179,6 +184,13 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
       'SLOTLOCK_DASHBOARD_USERS is required to serve the dashboard: * for every GitHub account, or a comma-separated list of GitHub user ids (gh api users/<login> --jq .id)',
     );
   }
+  const assistantSecret = readSecret(env, 'SLOTLOCK_ASSISTANT_SECRET');
+  if (
+    assistantSecret !== undefined &&
+    [sessionSecret, ...others].includes(assistantSecret)
+  ) {
+    throw new SlotlockConfigError('SLOTLOCK_ASSISTANT_SECRET must differ from every other secret');
+  }
   const orgs = readDashboardOrganizations(env);
   const name = optional(env, 'SLOTLOCK_DASHBOARD_NAME')?.trim();
   if (name !== undefined && name !== '' && !SLOTLOCK_DASHBOARD_NAME_PATTERN.test(name)) {
@@ -193,6 +205,7 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
     allowedUsers: users === '*' ? '*' : [...new Set(users.split(','))],
     ...(orgs !== undefined ? { organizations: orgs } : {}),
     ...(name !== undefined && name !== '' ? { name } : {}),
+    ...(assistantSecret !== undefined ? { assistantSecret } : {}),
   };
 }
 

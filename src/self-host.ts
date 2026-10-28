@@ -107,6 +107,7 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_GITHUB_CLIENT_ID',
   'SLOTLOCK_GITHUB_CLIENT_SECRET',
   'SLOTLOCK_SESSION_SECRET',
+  'SLOTLOCK_ASSISTANT_SECRET',
   'SLOTLOCK_DASHBOARD_USERS',
   'SLOTLOCK_DASHBOARD_ORGS',
   'SLOTLOCK_DASHBOARD_NAME',
@@ -364,6 +365,7 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
       confirmationSecret,
       env.SLOTLOCK_SESSION_SECRET?.trim(),
       env.SLOTLOCK_GITHUB_CLIENT_SECRET?.trim(),
+      env.SLOTLOCK_ASSISTANT_SECRET?.trim(),
     ];
     if (others.includes(metricsToken)) {
       throw new SlotlockConfigError('SLOTLOCK_METRICS_TOKEN must differ from every other secret');
@@ -455,6 +457,7 @@ function secretsIn(env: SlotlockEnv): string[] {
     'SLOTLOCK_CONFIRMATION_SECRET',
     'SLOTLOCK_GITHUB_CLIENT_SECRET',
     'SLOTLOCK_SESSION_SECRET',
+    'SLOTLOCK_ASSISTANT_SECRET',
     'SLOTLOCK_METRICS_TOKEN',
   ]) {
     const value = env[name]?.trim();
@@ -831,13 +834,14 @@ export async function startSlotlockServer(
         log.warn('client_address_field_ignored', { field, setting: 'SLOTLOCK_TRUSTED_PROXY_HEADER' }),
     });
     let health: { at: number; ready: Promise<boolean> } | undefined;
+    const agentBackend = createSlotlockStoreAgentBackend(store, {
+      availabilityRules: async () => config.availability.map((rule) => ({ ...rule })),
+    });
     const agentServer = createSlotlockAgentServer({
       publicBaseUrl: config.publicUrl,
       // readPublicUrl admits plain HTTP only on a loopback host, which is all this permits anyway.
       allowInsecureLocalhost: publicUrl.protocol === 'http:',
-      backend: createSlotlockStoreAgentBackend(store, {
-        availabilityRules: async () => config.availability.map((rule) => ({ ...rule })),
-      }),
+      backend: agentBackend,
       authenticate: limits.authenticate,
       consumeRateLimit: limits.consumeRateLimit,
       // A write that may expand a recurring series also waits for one of a few slots, so one
@@ -915,6 +919,22 @@ export async function startSlotlockServer(
             resources: createSlotlockDashboardResources(store),
             state: createSlotlockDashboardState(sql),
             availability: config.availability,
+            ...(config.dashboard.assistantSecret !== undefined
+              ? {
+                  // The assistant's reads and approved writes are agent calls: the same backend,
+                  // operations, rate limits and series-write slots as an API key's.
+                  assistant: {
+                    secret: config.dashboard.assistantSecret,
+                    backend: agentBackend,
+                    consumeRateLimit: limits.consumeRateLimit,
+                    authorize: async ({ principal, operation, input }) => {
+                      if (!authorizeSlotlockServeOperation({ principal, operation })) return false;
+                      await limits.admit({ principal, operation, input });
+                      return true;
+                    },
+                  },
+                }
+              : {}),
             clientAddress: (request) => limits.clientAddress(request),
             onError: (error) => log.error('dashboard_error', describeError(error)),
           });
@@ -1496,6 +1516,9 @@ Environment:
                                  of a GitHub OAuth app with callback .../dashboard/callback
   SLOTLOCK_GITHUB_CLIENT_SECRET  That app's client secret (dashboard)
   SLOTLOCK_SESSION_SECRET        Signs dashboard sessions, 32+ random characters (dashboard)
+  SLOTLOCK_ASSISTANT_SECRET      Turns on the dashboard assistant and seals each organization's
+                                 model API key with it, 32+ random characters (dashboard; off
+                                 without it)
   SLOTLOCK_DASHBOARD_USERS       * or comma-separated GitHub user ids that may sign in (dashboard)
   SLOTLOCK_DASHBOARD_ORGS        comma-separated GitHub organization ids: each is one shared tenant
   SLOTLOCK_DASHBOARD_NAME        What the dashboard calls this deployment (default Slotlock)

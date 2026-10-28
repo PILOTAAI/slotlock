@@ -16,7 +16,37 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Sql } from 'postgres';
 import type { SlotlockApiKey, SlotlockApiKeyScope, SlotlockApiKeyStore } from './api-keys.js';
-import { SLOTLOCK_DASHBOARD_NAME_PATTERN } from './config.js';
+import {
+  type SlotlockAgentCalendarBackend,
+  type SlotlockAgentOperation,
+  type SlotlockAgentOperationDispatchOptions,
+  type SlotlockAgentOperationDispatchResult,
+  type SlotlockAgentPrincipal,
+  invokeSlotlockAgentOperation,
+  slotlockAgentTools,
+} from './agent-server.js';
+import {
+  SLOTLOCK_ASSISTANT_API_KEY,
+  SLOTLOCK_ASSISTANT_MAX_MESSAGE,
+  SLOTLOCK_ASSISTANT_MODEL_NAME,
+  SLOTLOCK_ASSISTANT_TOOL_USE,
+  type SlotlockAssistantAction,
+  type SlotlockAssistantEntry,
+  type SlotlockAssistantModel,
+  type SlotlockAssistantStore,
+  boundSlotlockAssistantEntries,
+  createSlotlockAssistantStore,
+  openSlotlockAssistantKey,
+  readSlotlockAssistantBaseUrl,
+  readSlotlockAssistantEntries,
+  runSlotlockAssistantTurn,
+  sealSlotlockAssistantKey,
+  slotlockAssistantProviderMessage,
+  slotlockAssistantSystemPrompt,
+  testSlotlockAssistantModel,
+} from './assistant.js';
+import { SLOTLOCK_DASHBOARD_NAME_PATTERN, type SlotlockRate } from './config.js';
+import { createSlotlockRateLimiter } from './rate-limit.js';
 import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from './ddl.js';
 import { ignoreRejection } from './hooks.js';
 import { SLOTLOCK_BOOKING_RULE_LIMITS, type SlotlockBookingRules } from './booking-rules.js';
@@ -72,6 +102,13 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/waitlist/leave',
   '/hours',
   '/organization',
+  '/assistant',
+  '/assistant/approve',
+  '/assistant/dismiss',
+  '/assistant/reset',
+  '/settings/assistant',
+  '/settings/assistant/test',
+  '/settings/assistant/remove',
 ]);
 const SIGN_IN_AGAIN = 'That sign-in did not finish here, or took too long. Sign in again.';
 const GITHUB_ERROR_CODE = /^[a-z0-9_]{1,64}$/;
@@ -161,6 +198,8 @@ export interface SlotlockDashboardResources {
     list(tenantRef: string, limit: number): Promise<SlotlockWaitlistEntry[]>;
     leave(tenantRef: string, id: string, actor?: string): Promise<boolean>;
   };
+  /** The tenant's assistant settings and its members' conversations (assistant.ts). */
+  assistant?: SlotlockAssistantStore;
   /** The tenant's webhook endpoints, as the event feed keeps them. */
   webhooks?: {
     list(tenantRef: string): Promise<SlotlockWebhookEndpoint[]>;
@@ -201,6 +240,33 @@ export interface SlotlockDashboardState {
    * state's clock (past its expiry, or claiming to outlive a day).
    */
   sessionEnded(sid: string, expiresAt: number): Promise<boolean>;
+}
+
+/**
+ * The chat assistant (assistant.ts): each tenant's admins connect a model of their own in Settings,
+ * and every member may chat with it. Its reads and approved writes run through the agent operation
+ * boundary with `backend`, as the principal `dashboard-assistant:<GitHub login>` of the member's
+ * tenant, with `authorize` and `consumeRateLimit` as an agent's are. Needs the resources adapter's
+ * `assistant` too.
+ */
+export interface SlotlockDashboardAssistantOptions {
+  /** Seals each tenant's API key (SLOTLOCK_ASSISTANT_SECRET): 32+ random characters. */
+  secret: string;
+  backend: SlotlockAgentCalendarBackend;
+  /** As the agent server's: false refuses an operation. Every offered operation by default. */
+  authorize?: SlotlockAgentOperationDispatchOptions['authorize'];
+  consumeRateLimit?: SlotlockAgentOperationDispatchOptions['consumeRateLimit'];
+  /** Reaches the model providers; the global fetch by default. */
+  fetch?: typeof fetch;
+  /** Messages and connection tests one member may send: 10 a minute, 10 at once, by default. */
+  rate?: SlotlockRate;
+  /** One model call's limit (30 s by default) and one message's (90 s). */
+  timeoutMs?: number;
+  turnTimeoutMs?: number;
+  /** Model calls one message may make (8 by default, at most 20). */
+  maxSteps?: number;
+  /** How long a conversation is kept after its last message: 2 hours by default. */
+  conversationTtlMs?: number;
 }
 
 export interface SlotlockDashboardOptions {
@@ -247,6 +313,8 @@ export interface SlotlockDashboardOptions {
   state: SlotlockDashboardState;
   /** The server's bookable hours: shown, not edited, and used by resources without their own. */
   availability?: readonly WeeklyAvailabilityRule[];
+  /** The chat assistant; off unless set. */
+  assistant?: SlotlockDashboardAssistantOptions;
   fetch?: typeof fetch;
   now?: () => number;
   /**
@@ -360,6 +428,7 @@ export function createSlotlockDashboardResources(store: SlotlockStore): Slotlock
           by(actor),
         ),
     },
+    assistant: createSlotlockAssistantStore(store),
   };
 }
 
@@ -516,6 +585,8 @@ interface Session {
 interface Organization {
   id: string;
   login: string;
+  /** The person's role in it, read at sign-in: owners are `admin`. Older sessions have none: members. */
+  role?: 'admin' | 'member';
 }
 
 /** Served organizations one session lists at most: the session is a cookie of at most 4 KB. */
@@ -591,6 +662,7 @@ const ICONS = Object.freeze({
   keys: icon('<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/>'),
   waitlist: icon('<path d="M4 6h16M4 12h10M4 18h6"/><circle cx="18" cy="16" r="3"/>'),
   webhooks: icon('<path d="M9 7a3 3 0 1 1 4 2.8L16 15M6.5 13.5A3 3 0 1 0 9 18h6M15 18a3 3 0 1 0 1.5-5.6"/>'),
+  assistant: icon('<path d="M4 5h16v11H9l-5 4z"/><path d="M8 9h8M8 12h5"/>'),
   settings: icon(
     '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
   ),
@@ -1023,7 +1095,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const redirect = (status: number, location: string, cookies: string[] = []) =>
     respond(status, '', { Location: location }, cookies);
 
-  type Section = 'overview' | 'resources' | 'waitlist' | 'keys' | 'webhooks' | 'settings';
+  type Section = 'overview' | 'resources' | 'waitlist' | 'keys' | 'webhooks' | 'assistant' | 'settings';
   // Pages for what the adapter offers, so a custom one without a waitlist shows none. Read per
   // request: on Workers the adapter exists only inside one.
   const nav = (): ReadonlyArray<{ section: Section; label: string; path: string; icon: Html }> => [
@@ -1035,6 +1107,9 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     { section: 'keys', label: 'API keys', path: '/keys', icon: ICONS.keys },
     ...(options.resources.webhooks
       ? [{ section: 'webhooks' as const, label: 'Webhooks', path: '/webhooks', icon: ICONS.webhooks }]
+      : []),
+    ...(assistantStore()
+      ? [{ section: 'assistant' as const, label: 'Assistant', path: '/assistant', icon: ICONS.assistant }]
       : []),
     { section: 'settings', label: 'Settings', path: '/settings', icon: ICONS.settings },
   ];
@@ -1198,7 +1273,9 @@ ${served ? html`<td data-label="Created by">${key.createdBy === personOf(session
                 ? 'A deleted key'
                 : /^github:\d+$/.test(change.actor)
                   ? `GitHub user ${change.actor.slice(7)}`
-                  : change.actor.slice(0, 60)));
+                  : change.actor.startsWith('dashboard-assistant:')
+                    ? `Assistant for @${change.actor.slice(20, 80)}`
+                    : change.actor.slice(0, 60)));
       const where = change.resourceId
         ? resourceName(byId.get(change.resourceId), change.resourceId)
         : null;
@@ -1318,10 +1395,12 @@ ${
     return respond(status, layout('Resources', content, session, 'resources'));
   }
 
-  function settingsPage(session: Session): Response {
+  async function settingsPage(session: Session, status = 200, notice?: string): Promise<Response> {
     const rules = options.availability ?? [];
     const current = session.orgs?.find((org) => org.id === session.org);
-    const content = html`${pageHead('Settings')}
+    const content = html`${noticeOf(notice)}
+${pageHead('Settings')}
+${await assistantSettingsPanel(session)}
 <section class="panel">
 <h2>Endpoints</h2>
 ${endpoints()}
@@ -1347,7 +1426,7 @@ ${
     }<dt>Session ends</dt><dd>${formatDate(new Date(session.exp))}</dd></dl>
 ${current ? html`<p class="fine">Membership is read from GitHub when you sign in.</p>` : html``}
 </section>`;
-    return respond(200, layout('Settings', content, session, 'settings'));
+    return respond(status, layout('Settings', content, session, 'settings'));
   }
 
   /** The tenant's resource with that id and every resource (for names), or null for anything else. */
@@ -1660,12 +1739,466 @@ ${
     return redirect(303, `${root}/waitlist`);
   }
 
+
+  // ---- The assistant ----
+
+  const assistantOptions = options.assistant;
+  /** The assistant's records, when the assistant is on and the adapter keeps them. Per request (Workers). */
+  const assistantStore = (): SlotlockAssistantStore | undefined =>
+    assistantOptions ? options.resources.assistant : undefined;
+  const assistantFetch = assistantOptions?.fetch ?? ((input, init) => fetch(input, init));
+  const assistantTimeout = assistantOptions?.timeoutMs ?? 30_000;
+  const assistantTurnTimeout = assistantOptions?.turnTimeoutMs ?? 90_000;
+  const conversationTtl = assistantOptions?.conversationTtlMs ?? 2 * 3_600_000;
+  if (assistantOptions && Buffer.byteLength(assistantOptions.secret, 'utf8') < 32) {
+    throw new Error('Slotlock dashboard assistant secret must be at least 32 bytes');
+  }
+  if (assistantOptions && assistantOptions.secret === options.sessionSecret) {
+    throw new Error('Slotlock dashboard assistant secret must differ from the session secret');
+  }
+  const memberMessages = createSlotlockRateLimiter(
+    assistantOptions?.rate ?? { perSecond: 10 / 60, burst: 10 },
+    now,
+  );
+  const toolTitles = new Map(slotlockAgentTools().map((tool) => [tool.name as string, tool.title]));
+  /** The writes that take an idempotency key: the dashboard sets it, from the action's id. */
+  const keyed = new Set(
+    slotlockAgentTools()
+      .filter((tool) => 'idempotency_key' in ((tool.inputSchema as { properties?: object }).properties ?? {}))
+      .map((tool) => tool.name as string),
+  );
+  const ACTION_ID = /^[A-Za-z0-9_-]{16}$/;
+
+  /** Owners of the organization in use may change its assistant; a person always may their own. */
+  const isAdmin = (session: Session) =>
+    !served || session.orgs?.find((org) => org.id === session.org)?.role === 'admin';
+  /** Who the assistant acts as for the record: the member, by GitHub login. */
+  const assistantActor = (session: Session) => `dashboard-assistant:${session.login}`;
+
+  function dispatch(
+    session: Session,
+    operation: SlotlockAgentOperation,
+    input: unknown,
+    confirm?: SlotlockAgentOperationDispatchOptions['confirm'],
+  ): Promise<SlotlockAgentOperationDispatchResult> {
+    const assistant = assistantOptions as SlotlockDashboardAssistantOptions;
+    const principal: SlotlockAgentPrincipal = {
+      subject: assistantActor(session),
+      tenantRef: tenantOf(session),
+      scopes: ['read', 'write'],
+    };
+    return invokeSlotlockAgentOperation({
+      operation,
+      input,
+      request: new Request(`${origin}${root}/assistant`, {
+        signal: AbortSignal.timeout(assistantTimeout),
+      }),
+      options: {
+        backend: assistant.backend,
+        authenticate: async () => principal,
+        // The fixed list decides first; nothing the model sends adds to it.
+        authorize: async (args) =>
+          SLOTLOCK_ASSISTANT_TOOL_USE[args.operation] !== 'excluded' &&
+          (assistant.authorize ? await assistant.authorize(args) : true),
+        ...(assistant.consumeRateLimit ? { consumeRateLimit: assistant.consumeRateLimit } : {}),
+        ...(confirm ? { confirm } : {}),
+        onError: (error) => {
+          try {
+            ignoreRejection(options.onError?.(error));
+          } catch {
+            // A failing reporter must not change the answer.
+          }
+        },
+      },
+    });
+  }
+
+  async function assistantModel(
+    session: Session,
+  ): Promise<{ model: SlotlockAssistantModel } | { problem: string } | null> {
+    const store = assistantStore();
+    const settings = store ? await store.getSettings(tenantOf(session)) : null;
+    if (!settings || !assistantOptions) return null;
+    let apiKey: string | null = null;
+    if (settings.sealedKey !== null) {
+      apiKey = await openSlotlockAssistantKey(assistantOptions.secret, tenantOf(session), settings.sealedKey);
+      if (apiKey === null) {
+        return {
+          problem:
+            'The stored API key cannot be opened: the server’s assistant secret changed. An admin can enter the key again in Settings.',
+        };
+      }
+    }
+    return {
+      model: { provider: settings.provider, baseUrl: settings.baseUrl, model: settings.model, apiKey },
+    };
+  }
+
+  /** A field of a proposed change, as the card shows it. */
+  function fieldValue(name: string, value: unknown, names: ReadonlyMap<string, string>): string {
+    if (typeof value === 'string') {
+      if ((name === 'resource_id' || name === 'hold_id') && names.has(value)) return names.get(value) as string;
+      return value.length > 200 ? `${value.slice(0, 200)}…` : value;
+    }
+    if (Array.isArray(value) && value.every((item) => typeof item === 'string')) {
+      return value.map((item) => names.get(item) ?? item).join(', ');
+    }
+    const text = JSON.stringify(value);
+    return text.length > 300 ? `${text.slice(0, 300)}…` : text;
+  }
+
+  function actionCard(
+    session: Session,
+    action: SlotlockAssistantAction,
+    names: ReadonlyMap<string, string>,
+  ): Html {
+    const token = csrfToken(session);
+    const fields = Object.entries(action.input).filter(([name]) => name !== 'idempotency_key');
+    const state = {
+      pending: { text: 'Waiting for you', tone: 'held' },
+      approved: { text: 'Running', tone: 'held' },
+      dismissed: { text: 'Dismissed', tone: 'revoked' },
+      done: { text: 'Done', tone: 'active' },
+      failed: { text: 'Failed', tone: 'revoked' },
+    }[action.status] ?? { text: action.status, tone: 'revoked' };
+    const buttons =
+      action.status === 'pending'
+        ? html`<div class="action-buttons"><form class="inline" method="post" action="${root}/assistant/approve"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="action" value="${action.id}"><button class="primary" type="submit">Approve</button></form><form class="inline" method="post" action="${root}/assistant/dismiss"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="action" value="${action.id}"><button type="submit">Dismiss</button></form></div>`
+        : html``;
+    return html`<li class="action-card" id="action-${action.id}"><div class="action-head"><span class="title">${toolTitles.get(action.operation) ?? action.operation}</span><span class="pill ${state.tone}">${state.text}</span></div><dl class="facts">${fields.map(
+      ([name, value]) => html`<dt>${name.replaceAll('_', ' ')}</dt><dd>${fieldValue(name, value, names)}</dd>`,
+    )}</dl>${action.status === 'failed' && action.outcome ? html`<p class="fine">Refused: <code>${action.outcome}</code></p>` : html``}${buttons}</li>`;
+  }
+
+  function readAction(id: string, value: unknown): SlotlockAssistantAction | null {
+    if (!isRecord(value) || typeof value.operation !== 'string' || !isRecord(value.input)) return null;
+    return {
+      id,
+      operation: value.operation as SlotlockAgentOperation,
+      input: value.input,
+      status: (typeof value.status === 'string' ? value.status : 'failed') as SlotlockAssistantAction['status'],
+      ...(typeof value.outcome === 'string' ? { outcome: value.outcome } : {}),
+    };
+  }
+
+  async function assistantPage(session: Session, status = 200, notice?: string): Promise<Response> {
+    const store = assistantStore();
+    if (!store) return notFound(session);
+    const tenantRef = tenantOf(session);
+    const [settings, conversation] = await Promise.all([
+      store.getSettings(tenantRef),
+      store.getConversation(tenantRef, personOf(session)),
+    ]);
+    const entries = readSlotlockAssistantEntries(conversation?.messages);
+    const actions = conversation?.actions ?? {};
+    const names = new Map<string, string>();
+    if (Object.keys(actions).length > 0) {
+      for (const resource of await options.resources.list(tenantRef)) {
+        names.set(resource.id, resourceName(resource, resource.id));
+      }
+    }
+    const token = csrfToken(session);
+    const items: Html[] = [];
+    for (const entry of entries) {
+      if (entry.role === 'user') items.push(html`<li class="msg mine"><p>${entry.text}</p></li>`);
+      else if (entry.role === 'assistant' && entry.text.trim() !== '') {
+        items.push(html`<li class="msg bot"><p>${entry.text}</p></li>`);
+      } else if (entry.role === 'note') items.push(html`<li class="notice">${entry.text}</li>`);
+      else if (entry.role === 'tool') {
+        for (const result of entry.results) {
+          const action = result.action ? readAction(result.action, actions[result.action]) : null;
+          if (action) items.push(actionCard(session, action, names));
+          else {
+            items.push(
+              html`<li class="tool-line">${result.error ? 'Could not run' : 'Read'}: ${toolTitles.get(result.name) ?? result.name}</li>`,
+            );
+          }
+        }
+      }
+    }
+    const composer = html`<form class="composer" method="post" action="${root}/assistant"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="message">Message</label><textarea id="message" name="message" rows="3" maxlength="${String(SLOTLOCK_ASSISTANT_MAX_MESSAGE)}" required placeholder="Find a free van tomorrow morning and book it for Ana"></textarea><button class="primary" type="submit">Send</button></form>`;
+    const reset =
+      entries.length > 0
+        ? html`<form class="inline" method="post" action="${root}/assistant/reset"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><button type="submit">New conversation</button></form>`
+        : undefined;
+    const content = html`${noticeOf(notice)}
+${pageHead('Assistant', reset)}
+${
+  settings
+    ? html`<section class="panel chat">${
+        items.length === 0
+          ? html`<p class="empty">Ask about bookings and free time. Changes wait for your approval.</p>`
+          : html`<ol class="thread">${items}</ol>`
+      }<span id="latest"></span>${composer}</section>`
+    : html`<p class="empty">${
+        isAdmin(session)
+          ? html`No model is connected. <a href="${root}/settings#assistant">Connect one in Settings</a>.`
+          : 'No model is connected. An admin of this organization can connect one in Settings.'
+      }</p>`
+}`;
+    return respond(status, layout('Assistant', content, session, 'assistant'));
+  }
+
+  async function assistantSettingsPanel(session: Session): Promise<Html> {
+    const store = assistantStore();
+    if (!store) return html``;
+    const settings = await store.getSettings(tenantOf(session));
+    const sentTo = html`<p class="fine">Members' messages, and the bookings and resources the assistant reads for them, are sent to this provider.</p>`;
+    if (!isAdmin(session)) {
+      return html`<section class="panel" id="assistant"><h2>Assistant</h2>${
+        settings
+          ? html`<dl class="facts"><dt>Provider</dt><dd>${settings.provider === 'anthropic' ? 'Anthropic' : 'OpenAI-compatible'}</dd><dt>Model</dt><dd>${settings.model}</dd></dl>${sentTo}`
+          : html`<p class="empty">No model is connected. An admin can connect one.</p>`
+      }</section>`;
+    }
+    const token = csrfToken(session);
+    const selected = (provider: string) => (settings?.provider === provider ? html` selected` : html``);
+    return html`<section class="panel" id="assistant">
+<h2>Assistant</h2>
+<form method="post" action="${root}/settings/assistant">
+<input type="hidden" name="csrf" value="${token}">
+<input type="hidden" name="once" value="${formNonce(session)}">
+<div class="grid-form">
+<label>Provider<select name="provider"><option value="anthropic"${selected('anthropic')}>Anthropic Messages API</option><option value="openai"${selected('openai')}>OpenAI-compatible</option></select></label>
+<label>Base URL<input name="base_url" required maxlength="2048" value="${settings?.baseUrl ?? ''}" placeholder="https://api.anthropic.com"></label>
+<label>Model<input name="model" required maxlength="200" value="${settings?.model ?? ''}" placeholder="your-model"></label>
+<label>API key<input name="api_key" type="password" autocomplete="off" maxlength="4096" placeholder="${settings?.keyHint ? 'Leave empty to keep it' : 'Optional for a local model'}"></label>
+</div>
+<p class="fine">Key: ${settings?.keyHint ? html`set, ending in <code>${settings.keyHint}</code>` : 'none'}. OpenAI-compatible covers OpenAI, OpenRouter, vLLM, Ollama and LM Studio; give the URL that ends in <code>/v1</code>.</p>
+${settings?.keyHint ? html`<label class="choice"><input type="checkbox" name="clear_key" value="1"> Remove the key</label>` : html``}
+<button class="primary" type="submit">Save</button>
+</form>
+${sentTo}
+${
+  settings
+    ? html`<div class="row-actions"><form class="inline" method="post" action="${root}/settings/assistant/test"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><button type="submit">Test connection</button></form><details class="act danger"><summary>Disconnect</summary><div class="pop"><p>Members can no longer chat. The key is deleted.</p><form method="post" action="${root}/settings/assistant/remove"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><button class="danger" type="submit">Disconnect</button></form></div></details></div>`
+    : html``
+}
+</section>`;
+  }
+
+  const adminOnly = (session: Session) =>
+    settingsPage(session, 403, 'Only an owner of this organization can change the assistant.');
+
+  async function saveAssistantSettings(session: Session, form: URLSearchParams): Promise<Response> {
+    const store = assistantStore();
+    if (!store || !assistantOptions) return notFound(session);
+    if (!isAdmin(session)) return adminOnly(session);
+    const provider = form.get('provider');
+    const baseUrl = readSlotlockAssistantBaseUrl(form.get('base_url') ?? '');
+    const model = (form.get('model') ?? '').trim();
+    const apiKey = (form.get('api_key') ?? '').trim();
+    if (provider !== 'anthropic' && provider !== 'openai') {
+      return settingsPage(session, 400, 'Choose a provider from the list.');
+    }
+    if (baseUrl === null) {
+      return settingsPage(
+        session,
+        400,
+        'Give an https base URL (http only for localhost or 127.0.0.1), with no user name, query or #fragment.',
+      );
+    }
+    if (!SLOTLOCK_ASSISTANT_MODEL_NAME.test(model)) {
+      return settingsPage(session, 400, 'Give the model name, 1 to 200 characters without spaces.');
+    }
+    if (apiKey !== '' && !SLOTLOCK_ASSISTANT_API_KEY.test(apiKey)) {
+      return settingsPage(session, 400, 'An API key is up to 4,096 characters without spaces.');
+    }
+    const tenantRef = tenantOf(session);
+    const key =
+      apiKey !== ''
+        ? { sealed: await sealSlotlockAssistantKey(assistantOptions.secret, tenantRef, apiKey), hint: apiKey.slice(-4) }
+        : form.get('clear_key') === '1'
+          ? null
+          : ('keep' as const);
+    await store.putSettings(tenantRef, { provider, baseUrl, model, key }, personOf(session));
+    return redirect(303, `${root}/settings#assistant`);
+  }
+
+  async function removeAssistantSettings(session: Session): Promise<Response> {
+    const store = assistantStore();
+    if (!store) return notFound(session);
+    if (!isAdmin(session)) return adminOnly(session);
+    await store.deleteSettings(tenantOf(session), personOf(session));
+    return redirect(303, `${root}/settings#assistant`);
+  }
+
+  const tooManyMessages = (session: Session, page: typeof settingsPage) =>
+    page(session, 429, 'You have sent the assistant a lot in the last minute. Wait a moment and try again.');
+
+  async function testAssistant(session: Session): Promise<Response> {
+    if (!assistantStore()) return notFound(session);
+    if (!isAdmin(session)) return adminOnly(session);
+    if (!memberMessages.take(`${tenantOf(session)}\0${session.uid}`)) {
+      return tooManyMessages(session, settingsPage);
+    }
+    const found = await assistantModel(session);
+    if (found === null) return settingsPage(session, 409, 'Connect a model first.');
+    if ('problem' in found) return settingsPage(session, 409, found.problem);
+    try {
+      const ok = await testSlotlockAssistantModel({
+        model: found.model,
+        fetch: assistantFetch,
+        timeoutMs: assistantTimeout,
+      });
+      return settingsPage(
+        session,
+        ok ? 200 : 502,
+        ok
+          ? `Connected: ${found.model.model} answered and called a tool correctly.`
+          : `${found.model.model} answered, but did not call the tool it was given. Choose a model that supports tool calls.`,
+      );
+    } catch (error) {
+      report(error instanceof Error ? error.message : 'assistant connection test failed');
+      return settingsPage(session, 502, slotlockAssistantProviderMessage(error));
+    }
+  }
+
+  async function sendToAssistant(session: Session, form: URLSearchParams): Promise<Response> {
+    const store = assistantStore();
+    if (!store || !assistantOptions) return notFound(session);
+    const text = (form.get('message') ?? '').trim();
+    if (text === '' || text.length > SLOTLOCK_ASSISTANT_MAX_MESSAGE) {
+      return assistantPage(
+        session,
+        400,
+        `Write a message of 1 to ${SLOTLOCK_ASSISTANT_MAX_MESSAGE.toLocaleString('en')} characters.`,
+      );
+    }
+    if (!memberMessages.take(`${tenantOf(session)}\0${session.uid}`)) {
+      return tooManyMessages(session, assistantPage);
+    }
+    const found = await assistantModel(session);
+    if (found === null) return assistantPage(session, 409, 'No model is connected.');
+    if ('problem' in found) return assistantPage(session, 409, found.problem);
+    const tenantRef = tenantOf(session);
+    const member = personOf(session);
+    const stored = await store.getConversation(tenantRef, member);
+    const entries = boundSlotlockAssistantEntries([
+      ...readSlotlockAssistantEntries(stored?.messages),
+      { role: 'user', text },
+    ]);
+    const proposed: Record<string, Record<string, unknown>> = {};
+    const current = session.orgs?.find((org) => org.id === session.org);
+    const turn = await runSlotlockAssistantTurn({
+      model: found.model,
+      system: slotlockAssistantSystemPrompt({
+        brand: brandName,
+        workspace: current?.login ?? session.login,
+        login: session.login,
+        now: new Date(now()),
+      }),
+      entries,
+      fetch: assistantFetch,
+      timeoutMs: assistantTimeout,
+      turnTimeoutMs: assistantTurnTimeout,
+      ...(assistantOptions.maxSteps !== undefined ? { maxSteps: assistantOptions.maxSteps } : {}),
+      read: async (operation, input) => {
+        const outcome = await dispatch(session, operation, input);
+        return outcome.ok
+          ? outcome
+          : { ok: false, code: outcome.code, ...(outcome.details ? { details: outcome.details } : {}) };
+      },
+      propose: async (operation, input) => {
+        if (Object.keys(proposed).length >= 5) return { ok: false, code: 'too_many_proposals' };
+        const id = randomBytes(12).toString('base64url');
+        const prepared =
+          isRecord(input) && keyed.has(operation)
+            ? { ...input, idempotency_key: `dashboard-assistant.${id}` }
+            : input;
+        let checked: Record<string, unknown> | undefined;
+        // Every check an agent's call passes (arguments, scopes, authorize, rate limit), then halted
+        // here: it runs only when the member approves it.
+        const outcome = await dispatch(session, operation, prepared, async ({ input: parsed }) => {
+          checked = parsed;
+          return { status: 409, code: 'approval_required' };
+        });
+        if (checked === undefined || outcome.ok || outcome.code !== 'approval_required') {
+          return { ok: false, code: outcome.ok ? 'internal_error' : outcome.code };
+        }
+        proposed[id] = { operation, input: checked, status: 'pending' };
+        return { ok: true, actionId: id };
+      },
+    });
+    if (turn.failure !== undefined) {
+      report(turn.failure instanceof Error ? turn.failure.message : 'assistant provider failed');
+    }
+    await store.putConversation(
+      tenantRef,
+      member,
+      { messages: boundSlotlockAssistantEntries([...entries, ...turn.added]), actions: proposed },
+      conversationTtl,
+    );
+    return redirect(303, `${root}/assistant#latest`);
+  }
+
+  async function settleAction(
+    session: Session,
+    form: URLSearchParams,
+    decision: 'approve' | 'dismiss',
+  ): Promise<Response> {
+    const store = assistantStore();
+    if (!store || !assistantOptions) return notFound(session);
+    const id = form.get('action') ?? '';
+    const tenantRef = tenantOf(session);
+    const member = personOf(session);
+    const claimed = ACTION_ID.test(id)
+      ? await store.settleAction(tenantRef, member, id, 'pending', {
+          status: decision === 'approve' ? 'approved' : 'dismissed',
+        })
+      : null;
+    const action = claimed ? readAction(id, claimed) : null;
+    if (!action) return assistantPage(session, 409, 'That change was already approved or dismissed.');
+    const title = toolTitles.get(action.operation) ?? action.operation;
+    let event: string;
+    if (decision === 'dismiss') {
+      event = `The member dismissed the proposed change ${id} (${title}); it did not run.`;
+    } else if (SLOTLOCK_ASSISTANT_TOOL_USE[action.operation] !== 'propose') {
+      await store.settleAction(tenantRef, member, id, 'approved', { status: 'failed', outcome: 'tool_not_available' });
+      event = `The proposed change ${id} (${title}) could not run: tool_not_available.`;
+    } else {
+      const outcome = await dispatch(session, action.operation, action.input);
+      await store.settleAction(
+        tenantRef,
+        member,
+        id,
+        'approved',
+        outcome.ok ? { status: 'done' } : { status: 'failed', outcome: outcome.code },
+      );
+      const result = JSON.stringify(outcome.ok ? outcome.data : { error: { code: outcome.code } });
+      event = `The member approved the proposed change ${id} (${title}). ${outcome.ok ? 'It ran' : 'It was refused'}: ${result.length > 4_000 ? `${result.slice(0, 4_000)} …[truncated]` : result}`;
+    }
+    const stored = await store.getConversation(tenantRef, member);
+    if (stored) {
+      const entries: SlotlockAssistantEntry[] = [
+        ...readSlotlockAssistantEntries(stored.messages),
+        { role: 'event', text: event },
+      ];
+      await store.putConversation(
+        tenantRef,
+        member,
+        { messages: boundSlotlockAssistantEntries(entries), actions: {} },
+        conversationTtl,
+      );
+    }
+    return redirect(303, `${root}/assistant#action-${id}`);
+  }
+
+  async function resetAssistant(session: Session): Promise<Response> {
+    const store = assistantStore();
+    if (!store) return notFound(session);
+    await store.deleteConversation(tenantOf(session), personOf(session));
+    return redirect(303, `${root}/assistant`);
+  }
+
   /** The page a form was sent from, to show what went wrong with it. */
   function pageFor(route: string) {
     if (route.startsWith('/keys')) return keysPage;
     if (route.startsWith('/webhooks') && options.resources.webhooks) return webhooksPage;
     if (route.startsWith('/waitlist') && options.resources.waitlist) return waitlistPage;
     if (route.startsWith('/resources') || route === '/hours') return resourcesPage;
+    if (route.startsWith('/assistant') && assistantStore()) return assistantPage;
+    if (route.startsWith('/settings')) return settingsPage;
     return overviewPage;
   }
 
@@ -1984,7 +2517,9 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         continue;
       }
       const id = String(organization.id);
-      if (served?.has(id)) found.set(id, { id, login: organization.login });
+      if (served?.has(id)) {
+        found.set(id, { id, login: organization.login, role: membership.role === 'admin' ? 'admin' : 'member' });
+      }
     }
     return [...found.values()]
       .sort((a, b) => a.login.localeCompare(b.login))
@@ -2300,6 +2835,20 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         return changeWebhook(session, form, 'enable');
       case '/waitlist/leave':
         return leaveWaitlist(session, form);
+      case '/assistant':
+        return sendToAssistant(session, form);
+      case '/assistant/approve':
+        return settleAction(session, form, 'approve');
+      case '/assistant/dismiss':
+        return settleAction(session, form, 'dismiss');
+      case '/assistant/reset':
+        return resetAssistant(session);
+      case '/settings/assistant':
+        return saveAssistantSettings(session, form);
+      case '/settings/assistant/test':
+        return testAssistant(session);
+      case '/settings/assistant/remove':
+        return removeAssistantSettings(session);
       default:
         return respond(
           404,
@@ -2328,6 +2877,7 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
             case '/resources':
             case '/webhooks':
             case '/waitlist':
+            case '/assistant':
             case '/settings': {
               const session = await readSession(request);
               if (!session) return redirect(303, root);
@@ -2335,7 +2885,8 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
               if (route === '/resources') return await resourcesPage(session);
               if (route === '/webhooks') return await webhooksPage(session);
               if (route === '/waitlist') return await waitlistPage(session);
-              return settingsPage(session);
+              if (route === '/assistant') return await assistantPage(session);
+              return await settingsPage(session);
             }
             case '/style.css':
               return asset(DASHBOARD_CSS, 'text/css; charset=utf-8', url, ASSET_VERSIONS.css);
@@ -2579,6 +3130,21 @@ td[data-label] > .pill { justify-self: start; }
 td.wrap, .wrap { white-space: normal; overflow-wrap: anywhere; }
 form.inline { display: inline; margin: 0; }
 form > label { margin-bottom: 4px; }
+.chat { display: grid; gap: 16px; }
+.thread { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.msg { max-width: 78%; padding: 10px 14px; border-radius: 12px; background: var(--wash); border: 1px solid var(--line); }
+.msg p { margin: 0; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg.mine { justify-self: end; background: var(--accent-wash); border-color: transparent; }
+.msg.bot { justify-self: start; }
+.tool-line { font-size: 12.5px; color: var(--ink-3); padding-left: 4px; }
+.action-card { justify-self: start; width: min(100%, 520px); padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); box-shadow: var(--shadow); display: grid; gap: 10px; }
+.action-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.action-card .facts { font-size: 13px; }
+.action-card .facts dd { overflow-wrap: anywhere; }
+.action-buttons, .row-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: end; margin: 0; }
+textarea { font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--ink); resize: vertical; min-height: 64px; min-width: 0; }
+textarea:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--accent-wash); }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 @media (max-width: 1000px) {
   .split { grid-template-columns: minmax(0, 1fr); }
@@ -2606,6 +3172,8 @@ form > label { margin-bottom: 4px; }
   .actions { text-align: left; }
   .act { margin: 4px 12px 0 0; }
   .pop { left: 0; right: auto; }
+  .msg { max-width: 92%; }
+  .composer { grid-template-columns: minmax(0, 1fr); }
 }
 `;
 

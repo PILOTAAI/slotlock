@@ -902,6 +902,14 @@ BEGIN
   DELETE FROM slotlock.waitlist_entries WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  erased_table := 'assistant_conversations';
+  DELETE FROM slotlock.assistant_conversations WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'assistant_settings';
+  DELETE FROM slotlock.assistant_settings WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'resources';
   DELETE FROM slotlock.resources WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
@@ -1189,6 +1197,54 @@ CREATE INDEX IF NOT EXISTS slotlock_waitlist_entries_queue_idx
   ON slotlock.waitlist_entries (tenant_ref, created_at, id) WHERE status = 'waiting';
 CREATE INDEX IF NOT EXISTS slotlock_waitlist_entries_tenant_idx
   ON slotlock.waitlist_entries (tenant_ref, starts_at);
+
+-- The model a tenant's dashboard assistant uses (dashboard.ts, assistant.ts), one row a tenant.
+-- The API key is stored only sealed (AES-256-GCM under the deployment's SLOTLOCK_ASSISTANT_SECRET,
+-- bound to the tenant), with its last four characters to show.
+CREATE TABLE IF NOT EXISTS slotlock.assistant_settings (
+  tenant_ref text PRIMARY KEY,
+  provider text NOT NULL,
+  base_url text NOT NULL,
+  model text NOT NULL,
+  sealed_key text,
+  key_hint text,
+  updated_by text,
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_assistant_settings_tenant_ref_valid CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500),
+  CONSTRAINT slotlock_assistant_settings_provider_valid CHECK (provider IN ('anthropic', 'openai')),
+  CONSTRAINT slotlock_assistant_settings_base_url_valid CHECK (octet_length(base_url) BETWEEN 1 AND 2048),
+  CONSTRAINT slotlock_assistant_settings_model_valid CHECK (octet_length(model) BETWEEN 1 AND 200),
+  CONSTRAINT slotlock_assistant_settings_key_valid CHECK (
+    (sealed_key IS NULL) = (key_hint IS NULL)
+    AND (sealed_key IS NULL OR octet_length(sealed_key) BETWEEN 1 AND 8192)
+    AND (key_hint IS NULL OR char_length(key_hint) BETWEEN 1 AND 4)
+  ),
+  CONSTRAINT slotlock_assistant_settings_updated_by_valid
+    CHECK (updated_by IS NULL OR octet_length(updated_by) BETWEEN 1 AND 200)
+);
+
+-- One member's short-lived conversation with the dashboard assistant, and the writes it proposed
+-- (actions, by id, each pending until the member approves or dismisses it).
+CREATE TABLE IF NOT EXISTS slotlock.assistant_conversations (
+  tenant_ref text NOT NULL,
+  member_ref text NOT NULL,
+  messages jsonb NOT NULL DEFAULT '[]'::jsonb,
+  actions jsonb NOT NULL DEFAULT '{}'::jsonb,
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  expires_at timestamptz NOT NULL,
+  CONSTRAINT slotlock_assistant_conversations_pkey PRIMARY KEY (tenant_ref, member_ref),
+  CONSTRAINT slotlock_assistant_conversations_identity_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500 AND octet_length(member_ref) BETWEEN 1 AND 500
+  ),
+  CONSTRAINT slotlock_assistant_conversations_messages_valid CHECK (
+    jsonb_typeof(messages) = 'array' AND octet_length(messages::text) <= 262144
+  ),
+  CONSTRAINT slotlock_assistant_conversations_actions_valid CHECK (
+    jsonb_typeof(actions) = 'object' AND octet_length(actions::text) <= 131072
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_assistant_conversations_expiry_idx
+  ON slotlock.assistant_conversations (tenant_ref, expires_at);
 
 -- The tenant a reservation row belongs to: its own, or (a hold) its resource's.
 CREATE OR REPLACE FUNCTION slotlock.outbox_reservation_change()
@@ -2621,6 +2677,8 @@ export const SLOTLOCK_TENANT_TABLES = Object.freeze([
   'outbox',
   'webhook_endpoints',
   'waitlist_entries',
+  'assistant_settings',
+  'assistant_conversations',
 ] as const);
 
 const POSTGRES_SETTING_NAME = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/;
@@ -2703,6 +2761,10 @@ ALTER TABLE slotlock.webhook_endpoints ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.webhook_endpoints FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.waitlist_entries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.waitlist_entries FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.assistant_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.assistant_settings FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.assistant_conversations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.assistant_conversations FORCE ROW LEVEL SECURITY;
 
 -- One database must have one tenant-context contract. Re-applying with an adapter-specific
 -- setting deliberately rebinds the stable policies instead of silently keeping a prior setting.
@@ -2730,7 +2792,9 @@ BEGIN
          'hold_commands',
          'outbox',
          'webhook_endpoints',
-         'waitlist_entries'
+         'waitlist_entries',
+         'assistant_settings',
+         'assistant_conversations'
        )
   LOOP
     EXECUTE format(
@@ -2931,6 +2995,26 @@ BEGIN
       USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
       WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
   END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'assistant_settings'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.assistant_settings
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'assistant_conversations'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.assistant_conversations
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
 END
 $slotlock_rls$;
 
@@ -2965,6 +3049,10 @@ COMMENT ON POLICY tenant_isolation_v1 ON slotlock.outbox
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.webhook_endpoints
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.waitlist_entries
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.assistant_settings
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.assistant_conversations
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 
 INSERT INTO slotlock.rls_policy_contracts (
@@ -3004,7 +3092,9 @@ WHERE schemaname = 'slotlock'
     'hold_commands',
     'outbox',
     'webhook_endpoints',
-    'waitlist_entries'
+    'waitlist_entries',
+    'assistant_settings',
+    'assistant_conversations'
   )
   AND policyname = 'tenant_isolation_v1'
 ON CONFLICT (table_name) DO UPDATE

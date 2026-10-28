@@ -10,6 +10,8 @@
 // isolates, so three rate limiting bindings bound the requests of all of them together.
 import { AsyncLocalStorage } from 'node:async_hooks';
 import postgres from 'postgres';
+import type { SlotlockAgentCalendarBackend } from '../../src/agent-server.js';
+import { createSlotlockStoreAgentBackend } from '../../src/agent-store-backend.js';
 import { type SlotlockApiKeyStore, createSlotlockApiKeyStore } from '../../src/api-keys.js';
 import {
   SlotlockConfigError,
@@ -67,6 +69,8 @@ export interface SlotlockDashboardWorkerOptions {
 
 interface RequestScope {
   keys: SlotlockApiKeyStore;
+  /** The assistant's agent backend, on the request's own client. */
+  agent: SlotlockAgentCalendarBackend;
   resources: SlotlockDashboardResources;
   state: SlotlockDashboardState;
 }
@@ -123,6 +127,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
     | {
         dashboard: SlotlockDashboard;
         root: string;
+        availability: ReturnType<typeof readAvailability>;
         signInPaths: Set<string>;
         limits: {
           client: SlotlockRateLimit;
@@ -174,6 +179,11 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       ...(config.organizations ? { organizations: config.organizations } : {}),
       ...(config.name ? { name: config.name } : {}),
       availability: readAvailability(vars),
+      // With SLOTLOCK_ASSISTANT_SECRET, the chat assistant; its tool calls reach Postgres through
+      // the request's client like every other page, and are bounded by the client rate limit.
+      ...(config.assistantSecret !== undefined
+        ? { assistant: { secret: config.assistantSecret, backend: perRequest(() => current().agent) } }
+        : {}),
       // Cloudflare sets CF-Connecting-IP itself, so one client's sign-ins in flight are capped.
       clientAddress: clientOf,
       keys: perRequest(() => current().keys),
@@ -193,6 +203,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
     return {
       dashboard,
       root,
+      availability: readAvailability(vars),
       signInPaths: new Set([`${base}/sign-in`, `${base}/callback`]),
       limits: { client, signIn, signInCeiling },
     };
@@ -217,7 +228,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
           headers: { 'content-type': 'text/plain; charset=utf-8' },
         });
       }
-      const { dashboard, root, signInPaths, limits } = built;
+      const { dashboard, root, signInPaths, limits, availability } = built;
       const path = new URL(request.url).pathname;
       if (path === '/') return Response.redirect(root, 302);
       if (!dashboard.handles(request)) {
@@ -249,9 +260,13 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
         onnotice: () => {},
       });
       try {
+        const store = createSlotlockStore(sql);
         const requestScope: RequestScope = {
           keys: createSlotlockApiKeyStore(sql),
-          resources: createSlotlockDashboardResources(createSlotlockStore(sql)),
+          agent: createSlotlockStoreAgentBackend(store, {
+            availabilityRules: async () => availability.map((rule) => ({ ...rule })),
+          }),
+          resources: createSlotlockDashboardResources(store),
           state: createSlotlockDashboardState(sql),
         };
         return await scope.run(requestScope, () => dashboard.fetch(request));
