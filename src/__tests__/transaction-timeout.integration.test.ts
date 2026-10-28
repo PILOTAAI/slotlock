@@ -37,15 +37,13 @@ describe.skipIf(!url)('transaction_timeout (real Postgres)', () => {
     try {
       // In time: the transaction commits.
       await scoped.begin(async (tx) => tx`SELECT 1`);
-      // Past it: ended with an error, and nothing it did is kept.
-      await expect(
-        scoped.begin(async (tx) => {
-          await tx`CREATE TEMP TABLE slotlock_timeout_probe (n int)`;
-          await tx`SELECT pg_sleep(1)`;
-        }),
-      ).rejects.toThrow();
+      // Past it: PostgreSQL ends it, and the session with it (a pool opens another). One message,
+      // so nothing is sent on the connection after it is gone.
+      await expect(scoped.unsafe('BEGIN; SELECT pg_sleep(1); COMMIT')).rejects.toThrow(
+        /transaction timeout/i,
+      );
     } finally {
-      await scoped.end({ timeout: 1 }).catch(() => undefined);
+      await scoped.end({ timeout: 0 }).catch(() => undefined);
     }
   });
 });
