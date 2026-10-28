@@ -916,6 +916,34 @@ describe('live calendar updates from the change feed (RFC 0002 P1-5)', () => {
     await stream.cancel();
   });
 
+  it('announces a change on a page read before a later page failed, on the next read', async () => {
+    // As the store's own source: no wake-up, so the reader polls at most a second apart.
+    const feed = createFakeChangeFeed({ wakes: false });
+    const { stream, messages } = await open(feedServer(feed), [URI_B]);
+    // Pages of `limit`; the second page of the first read after the burst fails once.
+    const entries: { resourceId: string | null }[] = [];
+    let failSecondPage = true;
+    feed.source.listChanges.mockImplementation(async ({ after, limit = 100 }) => {
+      const from = Number(after);
+      if (failSecondPage && from === 500) {
+        failSecondPage = false;
+        throw new Error('pool timeout');
+      }
+      const page = entries.slice(from, from + limit);
+      return { ok: true, changes: page, next: String(from + page.length) };
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    calendars.set('vehicle-b', [HANDOVER]);
+    entries.push({ resourceId: 'vehicle-b' });
+    for (let index = 1; index < 600; index += 1) entries.push({ resourceId: 'vehicle-z' });
+    // Well inside the 15-second revalidation: only the feed can have announced it.
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(failSecondPage).toBe(false);
+    expect(updated(messages)).toEqual([URI_B]);
+    await stream.cancel();
+  });
+
   it("never tells one tenant's subscriber of another tenant's change", async () => {
     const feed = createFakeChangeFeed();
     const server = feedServer(feed);

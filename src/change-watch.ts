@@ -132,20 +132,23 @@ export function createSlotlockChangeReaders(
       let touched: Set<string> | 'all' = new Set();
       let expired = false;
       if (reader.cursor === undefined) reader.cursor = await source.head(tenantRef);
+      // The reader's cursor moves only once every page is read and its watchers are about to be
+      // told: a page that fails leaves it where it was, so the next read sees those changes again.
+      let cursor: string = reader.cursor;
       for (let page = 0; page < 20 && !reader.closed; page += 1) {
         const result = await source.listChanges({
           tenantRef,
-          after: reader.cursor,
+          after: cursor,
           limit: FEED_PAGE,
         });
         if (!result.ok) {
           // Too far behind (or a cursor no store knows): start again from now, and since changes
           // may have been missed, announce every watched resource once.
-          reader.cursor = await source.head(tenantRef);
+          cursor = await source.head(tenantRef);
           expired = true;
           break;
         }
-        reader.cursor = result.next;
+        cursor = result.next;
         for (const change of result.changes) {
           if (touched === 'all') break;
           if (change.resourceId === null) touched = 'all';
@@ -155,6 +158,7 @@ export function createSlotlockChangeReaders(
         if (result.changes.length < FEED_PAGE) break;
       }
       if (reader.closed) return;
+      reader.cursor = cursor;
       const told = new Set<SlotlockChangeWatcher>();
       for (const watcher of reader.watchers) {
         if (expired) {
