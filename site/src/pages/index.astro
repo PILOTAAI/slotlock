@@ -13,6 +13,7 @@ import {
   capabilities,
   closing,
   compare,
+  dashboard,
   DDL_URL,
   developers,
   facts,
@@ -70,6 +71,26 @@ const a2aBody = JSON.stringify(
   2,
 );
 const toolPad = Math.max(...facts.tools.map((tool) => tool.name.length)) + 2;
+const apiBase = facts.composeUp ? 'http://localhost:8080' : 'https://calendar.example.com/slotlock';
+const poolScene = capabilities.scenes.pool;
+const hh = (hour: number) => String(hour).padStart(2, '0');
+const poolAt = (hour: number) => `${poolScene.day}T${hh(hour)}:00:00Z`;
+const poolStart = poolAt(poolScene.intervals[0]?.from ?? 0);
+const poolEnd = poolAt(poolScene.intervals.at(-1)?.to ?? 0);
+const restResponse = JSON.stringify(
+  {
+    pool: developers.restPool,
+    members: poolScene.members,
+    intervals: poolScene.intervals.map((part) => ({
+      start: poolAt(part.from),
+      end: poolAt(part.to),
+      free: part.free,
+    })),
+    coverage: { start: poolStart, end: poolEnd, certainty: 'certain', reason: null },
+  },
+  null,
+  2,
+);
 const canonical = new URL('/', Astro.site).toString();
 ---
 
@@ -187,9 +208,16 @@ const canonical = new URL('/', Astro.site).toString();
 
       <section class="spec" aria-label="What is in the box">
         <div class="wrap">
-          <ul>
-            {specStrip.map((item) => <li>{item}</li>)}
-          </ul>
+          <dl>
+            {
+              specStrip.map((item) => (
+                <div>
+                  <dt>{item.label}</dt>
+                  <dd>{item.value}</dd>
+                </div>
+              ))
+            }
+          </dl>
         </div>
       </section>
 
@@ -339,7 +367,7 @@ const canonical = new URL('/', Astro.site).toString();
               <span class="soft">{model.heading.soft}</span>
               <span class="strong">{model.heading.strong}</span>
             </h2>
-            <p class="lede">{model.lede}</p>
+            <p class="lede"><Rich text={model.lede} /></p>
           </div>
           <div class="model-grid" role="img" aria-label={modelAria()}>
             <div class="panel week-panel" aria-hidden="true">
@@ -456,7 +484,92 @@ const canonical = new URL('/', Astro.site).toString();
         </div>
       </section>
 
-      <section class="band" id={capabilities.id} aria-labelledby="capabilities-title">
+      <section class="band" id={dashboard.id} aria-labelledby="dashboard-title">
+        <div class="wrap">
+          <div class="head head--split">
+            <p class="counter">{dashboard.counter} / Dashboard</p>
+            <h2 class="h2" id="dashboard-title">
+              <span class="soft">{dashboard.heading.soft}</span>
+              <span class="strong">{dashboard.heading.strong}</span>
+            </h2>
+            <p class="lede"><Rich text={dashboard.lede} /></p>
+          </div>
+          <figure class="window dash" role="img" aria-label={dashboard.aria}>
+            <div class="window__bar" aria-hidden="true">
+              <span class="window__dots"><i></i><i></i><i></i></span>
+              <span class="window__title">slotlock.example.com/dashboard</span>
+              <span class="mono">github-org</span>
+            </div>
+            <div class="dash__body" aria-hidden="true">
+              <div class="dash__side">
+                <p class="dash__brand">{dashboard.view.brand}</p>
+                <p class="dash__org"><span class="dash__avatar">{dashboard.view.org.slice(0, 1).toUpperCase()}</span>{dashboard.view.org}</p>
+                <ul class="dash__nav">
+                  {dashboard.view.nav.map((item, index) => <li class={index === 0 ? 'on' : undefined}>{item}</li>)}
+                </ul>
+              </div>
+              <div class="dash__main">
+                <p class="dash__title">{dashboard.view.title}</p>
+                <div class="dash__stats">
+                  {
+                    dashboard.view.stats.map((stat) => (
+                      <div class="dash__stat">
+                        <span>{stat.label}</span>
+                        <strong>{stat.value}</strong>
+                      </div>
+                    ))
+                  }
+                </div>
+                <div class="dash__split">
+                  <div class="dash__panel">
+                    <p class="dash__panel-title">Upcoming</p>
+                    <ul class="dash__list">
+                      {
+                        dashboard.view.upcoming.map((item) => (
+                          <li>
+                            <span class="mono dash__time">{item.day} · {item.time}</span>
+                            <span class="dash__what">{item.what}</span>
+                            <span class={`dash__kind dash__kind--${item.kind.toLowerCase()}`}>{item.kind}</span>
+                          </li>
+                        ))
+                      }
+                    </ul>
+                  </div>
+                  <div class="dash__panel">
+                    <p class="dash__panel-title">Agent activity</p>
+                    <ul class="dash__list dash__feed">
+                      {
+                        dashboard.view.activity.map((item) => (
+                          <li>
+                            <span class={`dash__dot dash__dot--${item.tone}`}></span>
+                            <span class="dash__what">
+                              {item.text} <span class="dash__muted">on</span> {item.on}
+                              <span class="dash__meta">{item.who} · {item.when}</span>
+                            </span>
+                          </li>
+                        ))
+                      }
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </figure>
+          <ul class="points">
+            {
+              dashboard.points.map((point) => (
+                <li>
+                  <h3>{point.title}</h3>
+                  <p><Rich text={point.body} /></p>
+                </li>
+              ))
+            }
+          </ul>
+          <p class="section-link"><a class="arrow-link" href={dashboard.link.href}>{dashboard.link.label} <Icon name="arrow" /></a></p>
+        </div>
+      </section>
+
+      <section class="band band--tint" id={capabilities.id} aria-labelledby="capabilities-title">
         <div class="wrap">
           <div class="head">
             <p class="counter">{capabilities.counter} / Capabilities</p>
@@ -465,9 +578,84 @@ const canonical = new URL('/', Astro.site).toString();
               <span class="strong">{capabilities.heading.strong}</span>
             </h2>
           </div>
-          <ul class="caps">
+          <ul class="bento">
             {
               capabilities.items.map((item) => (
+                <li class="bento__card">
+                  {item.visual === 'holds' && (
+                    <div class="bento__scene" role="img" aria-label={capabilities.scenes.holdsAria}>
+                      <ul class="scene-holds" aria-hidden="true">
+                        {capabilities.scenes.holds.map((slot) => (
+                          <li class={`scene-holds__slot scene-holds__slot--${slot.state}`}>
+                            <span class="mono">{slot.time}</span>
+                            <span>{slot.state}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {item.visual === 'pools' && (
+                    <div class="bento__scene" role="img" aria-label={capabilities.scenes.poolAria}>
+                      <div class="scene-pool" aria-hidden="true">
+                        <p class="mono scene-pool__head">{poolScene.name} · {poolScene.members} members</p>
+                        <div class="scene-pool__bars">
+                          {poolScene.intervals.map((part) => (
+                            <div class="scene-pool__col">
+                              <span class={`scene-pool__bar free-${part.free}`}></span>
+                              <span class="mono scene-pool__free">{part.free} free</span>
+                              <span class="mono scene-pool__when">{hh(part.from)}–{hh(part.to)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {item.visual === 'rules' && (
+                    <div class="bento__scene bento__scene--code" role="img" aria-label={capabilities.scenes.rulesAria}>
+                      <pre aria-hidden="true"><code>{'{\n'}{capabilities.scenes.rules.map(([key, value], index) => (
+<>  <span class="k">"{key}"</span>: <span class={value === 'true' ? 'g' : undefined}>{value}</span>{index < capabilities.scenes.rules.length - 1 ? ',' : ''}{'\n'}</>
+))}{'}'}</code></pre>
+                    </div>
+                  )}
+                  {item.visual === 'waitlist' && (
+                    <div class="bento__scene" role="img" aria-label={capabilities.scenes.waitlistAria}>
+                      <ol class="scene-queue" aria-hidden="true">
+                        {capabilities.scenes.waitlist.map((entry, index) => (
+                          <li class={index === 0 ? 'on' : undefined}>
+                            <span class="scene-queue__n mono">{entry.n}</span>
+                            <span>{entry.who}</span>
+                            <span class="scene-queue__state">{entry.state}</span>
+                          </li>
+                        ))}
+                      </ol>
+                    </div>
+                  )}
+                  {item.visual === 'feed' && (
+                    <div class="bento__scene bento__scene--code" role="img" aria-label={capabilities.scenes.feedAria}>
+                      <pre aria-hidden="true"><code><span class="c">GET /v1/changes?cursor=…</span>{'\n'}{capabilities.scenes.feed.map((type) => (
+<>{type.replace('io.pylota.slotlock.', '')}{'\n'}</>
+))}<span class="c">webhook-signature: v1,…</span></code></pre>
+                    </div>
+                  )}
+                  {item.visual === 'metrics' && (
+                    <div class="bento__scene bento__scene--code" role="img" aria-label={capabilities.scenes.metricsAria}>
+                      <pre aria-hidden="true"><code><span class="c">GET /metrics</span>{'\n'}{capabilities.scenes.metrics.map(([series, value]) => (
+<>{series} <span class="g">{value}</span>{'\n'}</>
+))}</code></pre>
+                    </div>
+                  )}
+                  <div class="bento__body">
+                    <h3>{item.title}</h3>
+                    <p><Rich text={item.body} /></p>
+                    <a class="arrow-link" href={item.href}>Reference <Icon name="arrow" /><span class="sr-only">: {item.title}</span></a>
+                  </div>
+                </li>
+              ))
+            }
+          </ul>
+          <ul class="caps">
+            {
+              capabilities.more.map((item) => (
                 <li>
                   <a href={item.href}>
                     <strong>{item.title}</strong>
@@ -480,7 +668,7 @@ const canonical = new URL('/', Astro.site).toString();
         </div>
       </section>
 
-      <section class="band band--tint" id={developers.id} aria-labelledby="dev-title">
+      <section class="band" id={developers.id} aria-labelledby="dev-title">
         <div class="wrap">
           <div class="head head--split">
             <p class="counter">{developers.counter} / Developers</p>
@@ -494,10 +682,12 @@ const canonical = new URL('/', Astro.site).toString();
             <div class="code tabs">
               <input type="radio" name="dev" id="dev-mcp" checked />
               <input type="radio" name="dev" id="dev-a2a" />
+              <input type="radio" name="dev" id="dev-rest" />
               <input type="radio" name="dev" id="dev-ts" />
               <div class="code__bar">
                 <label for="dev-mcp">MCP</label>
                 <label for="dev-a2a">A2A</label>
+                <label for="dev-rest">REST</label>
                 <label for="dev-ts">TypeScript</label>
                 <span class="grow"></span>
                 <button class="copy" type="button" data-copy-tab hidden>
@@ -516,15 +706,21 @@ const canonical = new URL('/', Astro.site).toString();
 <span class="c">Authorization: Bearer {facts.composeUp ? '$SLOTLOCK_AUTH_TOKEN' : '$SLOTLOCK_TOKEN'}</span>
 
 {a2aBody}</code></pre>
+              <pre data-panel="rest"><code><span class="c"># How many vans are free, and when</span>
+curl "{apiBase}/v1/pool-availability?pool={developers.restPool}&start={poolStart}&end={poolEnd}" \
+  -H "Authorization: Bearer $SLOTLOCK_API_KEY"
+
+{restResponse}</code></pre>
               <pre data-panel="ts"><code><span class="c">// No database needed for the availability maths.</span>
 {facts.readmeQuickStart}</code></pre>
             </div>
-            <ul class="chevrons">
+            <ul class="rows">
               {
-                developers.links.map((link) => (
+                developers.rows.map((row) => (
                   <li>
-                    <a href={link.href}>
-                      {link.label}
+                    <a href={row.href}>
+                      <strong>{row.label}</strong>
+                      <span><Rich text={row.body} /></span>
                       <Icon name="chevron" />
                     </a>
                   </li>
@@ -535,7 +731,7 @@ const canonical = new URL('/', Astro.site).toString();
         </div>
       </section>
 
-      <section class="band" id={security.id} aria-labelledby="security-title">
+      <section class="band band--tint" id={security.id} aria-labelledby="security-title">
         <div class="wrap">
           <div class="head">
             <p class="counter">{security.counter} / Security</p>
@@ -575,7 +771,7 @@ const canonical = new URL('/', Astro.site).toString();
         </div>
       </section>
 
-      <section class="band band--tint" id={compare.id} aria-labelledby="compare-title">
+      <section class="band" id={compare.id} aria-labelledby="compare-title">
         <div class="wrap">
           <div class="head">
             <p class="counter">{compare.counter} / Compare</p>
@@ -612,7 +808,7 @@ const canonical = new URL('/', Astro.site).toString();
         </div>
       </section>
 
-      <section class="band" id={openSource.id} aria-labelledby="oss-title">
+      <section class="band band--tint" id={openSource.id} aria-labelledby="oss-title">
         <div class="wrap">
           <div class="head">
             <p class="counter">{openSource.counter} / Open source</p>
@@ -621,6 +817,18 @@ const canonical = new URL('/', Astro.site).toString();
               <span class="strong">{openSource.heading.strong}</span>
             </h2>
           </div>
+          <ul class="deploy">
+            {
+              openSource.deploy.map((option) => (
+                <li>
+                  <h3>{option.title}</h3>
+                  <p><Rich text={option.body} /></p>
+                  {option.command && <code class="deploy__cmd">{option.command}</code>}
+                  <a class="arrow-link" href={option.link.href}>{option.link.label} <Icon name="arrow" /></a>
+                </li>
+              ))
+            }
+          </ul>
           <div class="security-grid">
             <div class="repo">
               <div class="repo__top">
@@ -648,7 +856,7 @@ const canonical = new URL('/', Astro.site).toString();
         </div>
       </section>
 
-      <section class="band band--tint" id={faq.id} aria-labelledby="faq-title">
+      <section class="band" id={faq.id} aria-labelledby="faq-title">
         <div class="wrap">
           <div class="head">
             <h2 class="h2" id="faq-title">
