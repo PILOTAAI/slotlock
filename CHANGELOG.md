@@ -7,6 +7,31 @@ versioning.
 
 ### Added
 
+- Configuration changes on the feed and in history (RFC 0002 P1-5, P1-6), each in the change's own
+  transaction, by trigger: `resource.created`, `resource.updated` (booking and check-in rules,
+  pool, bookable hours, time zone or reference, with `before` and `after` of the fields that
+  changed), `resource.archived`, `resource.restored`, `resource.deleted`, `coverage.recorded` (a
+  source's first read) and `coverage.deleted`, `webhook.created`, `webhook.enabled` and
+  `webhook.deleted`, and `key.created`, `key.rotated` and `key.revoked`. Writing a value that is
+  already there records nothing. Rows carry ids and states: never a webhook's URL or secret, nor an
+  API key, its digest, prefix or name, nor a coverage source, which `coverage.*` changes name by
+  `source_id` (`src_` and 24 hex digits, a digest of the tenant and the source; `subject` too).
+  `slotlock_get_coverage` and `listCoverage` give each source's `source_id`, and
+  `slotlockCoverageSourceId` works it out. A webhook's `event_types` takes any of them, up to every
+  type (it took at most 20).
+- Where a change came from: `withTenant` takes `origin` (`mcp`, `a2a`, `rest`, `application`,
+  `dashboard`, `dashboard-assistant`, `maintenance` or `library`, the default, also for a write
+  outside `withTenant`) and `keyId`, set by
+  each surface: the agent server per protocol, the application API, the dashboard and its
+  assistant, maintenance and webhook delivery. API key principals carry `keyId`, and the API key
+  store's `create`, `rotate` and `revoke` take `actor` and `origin`. The feed's new nullable
+  columns `origin` and `key_id` are in `listHistory` and `listChanges` (`origin`, `keyId`), the
+  history API (`origin`, `key_id`) and CloudEvents (extension attributes `slotlockorigin` and
+  `slotlockkeyid`). Rows written before keep null; an origin this release does not know reads as
+  null. `key_id` is pseudonymous and stays on a revoked key's changes for the retention. No address
+  or other personal data is recorded. The column's CHECK is added NOT VALID and validated after the
+  migration commits, so upgrading scans no rows under the table lock. An authenticator's key id
+  that is not a version 1-5 UUID is left out, as documented, rather than refusing the call.
 - Live updates from the change feed (RFC 0002 P1-5). With `subscriptions.changes`
   (`createSlotlockStoreChangeSource(store, sql)`, which `slotlock serve` sets), MCP resource
   subscriptions follow each tenant's change feed instead of re-reading every 10 seconds: one reader
@@ -65,6 +90,16 @@ versioning.
   A library user runs `applyTenantRls`, then `grantApplicationRole` right after `applySchema` and
   before serving traffic: until then every booking fails with a permission error on
   `booking_rule_defaults`, which every booking reads.
+
+### Changed
+
+- The feed now also records configuration changes, so a reader or webhook with no `event_types`
+  filter receives them too; filter by type to keep only bookings.
+- `coverage.stale` names its source by `source_id`, as `subject` and in `data`, in place of `source`,
+  and no longer carries `last_error`: a source can be an iCalendar URL with a token or an address,
+  and an error can quote it. `slotlock_get_coverage` still shows both to the tenant, with the
+  `source_id` to match a change to its source. Changes already on the feed keep the old payload
+  until they are pruned.
 
 ## 0.5.2 - 2026-10-28
 

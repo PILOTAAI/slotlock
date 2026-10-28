@@ -6,7 +6,12 @@
 // maintains the tenants it is configured with and the ones whose keys it has served.
 import type { Sql } from 'postgres';
 import { ignoreRejection } from './hooks.js';
-import { SLOTLOCK_MAX_WAITLIST_PER_TENANT, type SlotlockStore, calendarEventRollingHorizon } from './store.js';
+import {
+  SLOTLOCK_MAX_WAITLIST_PER_TENANT,
+  type SlotlockStore,
+  type SlotlockTenantStore,
+  calendarEventRollingHorizon,
+} from './store.js';
 import type { CalendarHorizonRollCursor, CalendarHorizonRollResult } from './types.js';
 
 export interface SlotlockMaintenanceResult {
@@ -58,6 +63,9 @@ export async function maintainSlotlockTenant(
   if (!(Number.isSafeInteger(batches) && batches >= 1 && batches <= 100)) {
     throw new RangeError('batches must be a whole number from 1 to 100');
   }
+  // What a pass changes (a no-show released, a waitlist offer) is recorded as maintenance's.
+  const withTenant = <T>(callback: (tenant: SlotlockTenantStore) => Promise<T>) =>
+    store.withTenant(tenantRef, callback, { origin: 'maintenance' });
   const window = calendarEventRollingHorizon();
   let extended = 0;
   let conflicts = 0;
@@ -71,7 +79,7 @@ export async function maintainSlotlockTenant(
     for (let batch = 0; batch < batches; batch++) {
       options.signal?.throwIfAborted();
       const from: CalendarHorizonRollCursor | null = after;
-      const roll: CalendarHorizonRollResult = await store.withTenant(tenantRef, (tenant) =>
+      const roll: CalendarHorizonRollResult = await withTenant((tenant) =>
         tenant.rollCalendarEventHorizon({ tenantRef, window, ...(from ? { after: from } : {}) }),
       );
       extended += roll.extended;
@@ -94,21 +102,21 @@ export async function maintainSlotlockTenant(
   for (let batch = 0; batch < batches && (eventsLeft || bookingsLeft || changesLeft); batch++) {
     options.signal?.throwIfAborted();
     if (eventsLeft) {
-      const prune = await store.withTenant(tenantRef, (tenant) =>
+      const prune = await withTenant((tenant) =>
         tenant.pruneCalendarEventRetention({ tenantRef }),
       );
       pruned += prune.commandsDeleted + prune.tombstonesDeleted;
       eventsLeft = prune.hasMore;
     }
     if (bookingsLeft) {
-      const prune = await store.withTenant(tenantRef, (tenant) =>
+      const prune = await withTenant((tenant) =>
         tenant.pruneBookingRetention({ tenantRef }),
       );
       pruned += prune.expiredHoldsDeleted + prune.holdCommandsDeleted + prune.tombstonesDeleted;
       bookingsLeft = prune.hasMore;
     }
     if (changesLeft) {
-      const deleted = await store.withTenant(tenantRef, (tenant) =>
+      const deleted = await withTenant((tenant) =>
         tenant.pruneChanges({ tenantRef, limit: CHANGE_PRUNE_BATCH }),
       );
       pruned += deleted;
@@ -118,15 +126,15 @@ export async function maintainSlotlockTenant(
   options.signal?.throwIfAborted();
   // Conversations last 2 hours after their last message (dashboard.ts): an expired one is
   // unreadable already, and deleted here.
-  pruned += await store.withTenant(tenantRef, (tenant) =>
+  pruned += await withTenant((tenant) =>
     tenant.pruneAssistantConversations({ tenantRef }),
   );
-  const zones = await store.withTenant(tenantRef, (tenant) =>
+  const zones = await withTenant((tenant) =>
     tenant.followZoneRules({ tenantRef, move: options.followZoneRules === true }),
   );
-  const staleSources = await store.withTenant(tenantRef, (tenant) => tenant.reportStaleCoverage({ tenantRef }));
+  const staleSources = await withTenant((tenant) => tenant.reportStaleCoverage({ tenantRef }));
   // No-shows first: the time they free is offered to the waitlist in the same pass.
-  const noShows = await store.withTenant(tenantRef, (tenant) => tenant.releaseNoShows({ tenantRef }));
+  const noShows = await withTenant((tenant) => tenant.releaseNoShows({ tenantRef }));
   // The whole waitlist, in join order, a page at a time and each page its own transaction, so a
   // later entry whose window is free is offered however many wait before it.
   let waitlistOffers = 0;
@@ -134,7 +142,7 @@ export async function maintainSlotlockTenant(
   for (let pages = 0; pages < WAITLIST_PAGES; pages++) {
     options.signal?.throwIfAborted();
     const from: WaitlistPage | null = page;
-    const offers: { offered: number; next: WaitlistPage | null } = await store.withTenant(tenantRef, (tenant) =>
+    const offers: { offered: number; next: WaitlistPage | null } = await withTenant((tenant) =>
       tenant.offerWaitlist({ tenantRef, ...(from ? { after: from } : {}) }),
     );
     waitlistOffers += offers.offered;

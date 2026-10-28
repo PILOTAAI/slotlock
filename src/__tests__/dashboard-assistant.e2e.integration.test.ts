@@ -277,9 +277,11 @@ describe.skipIf(!url || !playwright)('the dashboard assistant in a browser (real
       expect(overview).toContain('Ana pickup');
       expect(overview).toContain(`Assistant for @member-${format}`);
       await shot(member.page, '3-overview');
-      const history = await admin<{ actor: string }[]>`
-        SELECT actor FROM slotlock.outbox WHERE tenant_ref = ${fleetTenant} AND type = 'event.created'`;
-      expect(history.map(({ actor }) => actor)).toEqual([`dashboard-assistant:github:${people.member?.id}`]);
+      const history = await admin<{ actor: string; origin: string }[]>`
+        SELECT actor, origin FROM slotlock.outbox WHERE tenant_ref = ${fleetTenant} AND type = 'event.created'`;
+      expect(history.map(({ actor, origin }) => [actor, origin])).toEqual([
+        [`dashboard-assistant:github:${people.member?.id}`, 'dashboard-assistant'],
+      ]);
 
       // 4. A member of another organization sees nothing of the first one's.
       const outsider = await session('outsider');

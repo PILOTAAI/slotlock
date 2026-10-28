@@ -384,7 +384,9 @@ export interface SlotlockDashboard {
  * in the database (a READ COMMITTED transaction, under a per-tenant lock).
  */
 export function createSlotlockDashboardResources(store: SlotlockStore): SlotlockDashboardResources {
-  const by = (actor: string | undefined) => (actor === undefined ? {} : { actor });
+  // Every change here is the dashboard's, made by the person signed in (actor) when known.
+  const by = (actor: string | undefined) =>
+    actor === undefined ? { origin: 'dashboard' as const } : { origin: 'dashboard' as const, actor };
   return {
     list: (tenantRef) =>
       store.withTenant(tenantRef, (tenant) =>
@@ -438,7 +440,9 @@ export function createSlotlockDashboardResources(store: SlotlockStore): Slotlock
         // An offered entry's hold went with it: offer that time to the next, as the API does.
         if (left) {
           await store
-            .withTenant(tenantRef, (tenant) => tenant.offerWaitlist({ tenantRef, limit: 20 }))
+            .withTenant(tenantRef, (tenant) => tenant.offerWaitlist({ tenantRef, limit: 20 }), {
+              origin: 'maintenance',
+            })
             .catch(() => undefined);
         }
         return left;
@@ -1987,6 +1991,7 @@ ${
     const principal = assistantPrincipal(session);
     return invokeSlotlockAgentOperation({
       operation,
+      origin: 'dashboard-assistant',
       input,
       request: new Request(`${origin}${root}/assistant`, {
         signal: AbortSignal.timeout(assistantTimeout),
@@ -2926,6 +2931,7 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         name: form.get('name') ?? '',
         scopes,
         createdBy: personOf(session),
+        origin: 'dashboard',
         ...(typeof days === 'number' ? { expiresAt: new Date(now() + days * DAY_MS) } : {}),
       });
       return shownOncePage(session, created.key, created.apiKey, false);
@@ -2945,15 +2951,22 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
     }
   }
 
+  /** A key change in the session's tenant, recorded as the person's, from the dashboard. */
+  const asPerson = (session: Session) => ({
+    tenantRef: tenantOf(session),
+    actor: personOf(session),
+    origin: 'dashboard' as const,
+  });
+
   async function changeKey(session: Session, form: URLSearchParams, change: 'rotate' | 'revoke') {
     const id = form.get('id') ?? '';
     if (!UUID_PATTERN.test(id)) return keysPage(session, 404, 'That key is not one of yours.');
     if (change === 'rotate') {
-      const rotated = await options.keys.rotate({ tenantRef: tenantOf(session), id });
+      const rotated = await options.keys.rotate({ ...asPerson(session), id });
       if (!rotated) return keysPage(session, 404, 'That key is not an active key of yours.');
       return shownOncePage(session, rotated.key, rotated.apiKey, true);
     }
-    const revoked = await options.keys.revoke({ tenantRef: tenantOf(session), id });
+    const revoked = await options.keys.revoke({ ...asPerson(session), id });
     if (!revoked) return keysPage(session, 404, 'That key is not one of yours.');
     return redirect(303, `${root}/keys`);
   }

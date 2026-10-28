@@ -85,6 +85,7 @@ describe('API key authentication', () => {
       subject: 'api_key:6f1c2f9e-0a51-4f1c-9a43-2b8e1f0c7d11',
       tenantRef: 'fleet-7',
       scopes: ['read'],
+      keyId: '6f1c2f9e-0a51-4f1c-9a43-2b8e1f0c7d11',
     });
     expect(authenticateKey).toHaveBeenCalledWith(key);
   });

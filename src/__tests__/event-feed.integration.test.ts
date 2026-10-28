@@ -109,6 +109,7 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
 
     const page = await changes(start);
     expect(page.changes.map((change) => change.type)).toEqual([
+      'resource.created',
       'hold.created',
       'hold.confirmed',
       'hold.created',
@@ -121,8 +122,8 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
     const created = page.changes.find((change) => change.type === 'event.created');
     expect(created?.data).toMatchObject({ resource_id: id, revision: 1, transparency: 'opaque' });
     expect(JSON.stringify(page.changes)).not.toContain('Ms Example');
-    expect(page.changes[4]).toMatchObject({ subject: 'BK-1', resourceId: id });
-    expect(slotlockCloudEvent(page.changes[0] as never)).toMatchObject({
+    expect(page.changes[5]).toMatchObject({ subject: 'BK-1', resourceId: id });
+    expect(slotlockCloudEvent(page.changes[1] as never)).toMatchObject({
       specversion: '1.0',
       type: 'io.pylota.slotlock.hold.created',
       source: `/slotlock/resources/${id}`,
@@ -257,9 +258,10 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
 
   it('keeps what an enabled webhook has not received, and will not skip what one disabled missed', async () => {
     const other = `feed-keep-${randomUUID()}`;
-    const resource = await store.createResource({ tenantRef: other, externalRef: 'v', timezone: 'UTC' });
+    // The endpoint first, so it is to receive every change after it, the resource's creation too.
     const hook = await store.createWebhookEndpoint({ tenantRef: other, url: 'https://example.com/hook' });
     if (!hook.ok) throw new Error(hook.code);
+    const resource = await store.createResource({ tenantRef: other, externalRef: 'v', timezone: 'UTC' });
     await store.createExternalReservation({
       tenantRef: other, externalRef: 'K-1', resourceId: resource.id, start: at(60), end: at(61), bufferAfterMs: 0, revision: 1,
     });
@@ -332,10 +334,10 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
 
   it('never reads past a pruned change, however the transactions that made them interleave', async () => {
     const other = `feed-interleave-${randomUUID()}`;
-    const resource = await store.createResource({ tenantRef: other, externalRef: 'v', timezone: 'UTC' });
     // Read while the feed is empty: the cursor is before every change still to come.
     const empty = await store.listChanges({ tenantRef: other });
     if (!empty.ok) throw new Error(empty.code);
+    const resource = await store.createResource({ tenantRef: other, externalRef: 'v', timezone: 'UTC' });
     for (const [index, ref] of ['R-1', 'R-2'].entries()) {
       const made = await store.createExternalReservation({
         tenantRef: other, externalRef: ref, resourceId: resource.id, start: at(80 + index), end: at(81 + index), bufferAfterMs: 0, revision: 1,
@@ -344,7 +346,8 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
     }
     const page = await store.listChanges({ tenantRef: other });
     if (!page.ok) throw new Error(page.code);
-    const [first, second] = page.changes;
+    // After the resource's own creation.
+    const [first, second] = page.changes.filter((change) => change.type === 'reservation.created');
     if (!first || !second) throw new Error('two changes expected');
     // The later change is the older: a transaction that began first and wrote last. Only a prefix
     // in feed order is pruned, so it waits for the one before it, which is still kept.
@@ -354,11 +357,12 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
     // Nothing pruned: no reader is expired, the empty feed's either.
     expect(await store.listChanges({ tenantRef: other, after: first.position })).toMatchObject({ ok: true });
     const fromEmpty = await store.listChanges({ tenantRef: other, after: empty.next });
-    expect(fromEmpty.ok && fromEmpty.changes.map((change) => change.subject)).toEqual(['R-1', 'R-2']);
+    expect(fromEmpty.ok && fromEmpty.changes.map((change) => change.subject)).toEqual([resource.id, 'R-1', 'R-2']);
     // Both old: both pruned. A reader behind either is expired; one that had read both is up to
     // date, and stays so.
     await sql`UPDATE slotlock.outbox SET occurred_at = now() - interval '45 days' WHERE tenant_ref = ${other}`;
-    expect(await store.pruneChanges({ tenantRef: other, limit: 100 })).toBe(2);
+    // With the resource's creation before them.
+    expect(await store.pruneChanges({ tenantRef: other, limit: 100 })).toBe(3);
     expect(await store.listChanges({ tenantRef: other, after: first.position })).toEqual({ ok: false, code: 'cursor_expired' });
     expect(await store.listChanges({ tenantRef: other, after: empty.next })).toEqual({ ok: false, code: 'cursor_expired' });
     const current = await store.listChanges({ tenantRef: other, after: second.position });

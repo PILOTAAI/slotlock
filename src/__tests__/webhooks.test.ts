@@ -25,6 +25,8 @@ function change(n: number): SlotlockChange {
     data: { reference: `BK-${n}` },
     occurredAt: new Date('2027-03-01T09:00:00Z'),
     actor: null,
+    origin: null,
+    keyId: null,
     position: `p${n}`,
   };
 }

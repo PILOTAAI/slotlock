@@ -15,6 +15,7 @@ import {
   slotlockAgentOperationScope,
 } from './agent-server.js';
 import { SLOTLOCK_API_KEY_ACTIVE_LIMIT, SLOTLOCK_API_KEY_RETAINED_LIMIT } from './ddl.js';
+import { type SlotlockChangeOrigin, isSlotlockChangeOrigin } from './event-feed.js';
 import type { SlotlockSql } from './store.js';
 
 export { SLOTLOCK_API_KEY_ACTIVE_LIMIT, SLOTLOCK_API_KEY_RETAINED_LIMIT };
@@ -90,6 +91,16 @@ export interface CreateSlotlockApiKeyInput {
   /** Omit for a key that lives until it is revoked. At most ten years ahead. */
   expiresAt?: Date;
   createdBy?: string;
+  /** Who is creating it, for the feed's `key.created` (and withTenant's actor); else `createdBy`. */
+  actor?: string;
+  /** Where from, for the feed (`dashboard`, say); else the enclosing withTenant's, or `library`. */
+  origin?: SlotlockChangeOrigin;
+}
+
+/** Who rotates or revokes a key and from where, recorded on the feed as `create`'s are. */
+export interface SlotlockApiKeyChange {
+  actor?: string;
+  origin?: SlotlockChangeOrigin;
 }
 
 export interface SlotlockApiKeyStore {
@@ -108,7 +119,7 @@ export interface SlotlockApiKeyStore {
    * active key with that id. The key keeps its id, so whatever it booked stays its own; the old
    * secret stops working at once and can never be used again.
    */
-  rotate(input: { tenantRef: string; id: string }): Promise<{
+  rotate(input: { tenantRef: string; id: string } & SlotlockApiKeyChange): Promise<{
     key: string;
     apiKey: SlotlockApiKey;
   } | null>;
@@ -116,7 +127,7 @@ export interface SlotlockApiKeyStore {
    * Revoke one of the tenant's keys and return it; null when the tenant has no key with that id.
    * Revoking a revoked key returns it unchanged. Nothing un-revokes a key.
    */
-  revoke(input: { tenantRef: string; id: string }): Promise<SlotlockApiKey | null>;
+  revoke(input: { tenantRef: string; id: string } & SlotlockApiKeyChange): Promise<SlotlockApiKey | null>;
   /** Resolve a presented key to its tenant and scopes; null unless it is active. */
   authenticate(key: string): Promise<SlotlockApiKeyIdentity | null>;
   /**
@@ -260,6 +271,38 @@ async function readCommitted<T>(sql: SlotlockSql, query: (sql: SlotlockSql) => P
 }
 
 /**
+ * Run a key change with who made it and from where set for the row the database appends to the
+ * tenant's feed, in a READ COMMITTED transaction (or the caller's), and the caller's values put back.
+ */
+async function asChange<T>(
+  sql: SlotlockSql,
+  change: SlotlockApiKeyChange,
+  query: (sql: SlotlockSql) => Promise<T>,
+): Promise<T> {
+  if (change.actor !== undefined && !/^[^\u0000-\u001f\u007f]{1,200}$/u.test(change.actor)) {
+    throw invalid('invalid_identity', 'Slotlock actor must be 1-200 characters without control characters');
+  }
+  if (change.origin !== undefined && !isSlotlockChangeOrigin(change.origin)) {
+    throw invalid('invalid_identity', 'Slotlock origin is not one of SLOTLOCK_CHANGE_ORIGINS');
+  }
+  return readCommitted(sql, async (tx) => {
+    const [previous] = await tx<{ actor: string | null; origin: string | null }[]>`
+      SELECT current_setting('slotlock.actor', true) AS actor,
+             current_setting('slotlock.origin', true) AS origin`;
+    await tx`
+      SELECT set_config('slotlock.actor', COALESCE(${change.actor ?? null}::text, ${previous?.actor ?? ''}), true),
+             set_config('slotlock.origin', COALESCE(${change.origin ?? null}::text,
+               NULLIF(${previous?.origin ?? ''}, ''), 'library'), true)`;
+    const result = await query(tx);
+    // Only after success: a failed query has aborted the transaction, which takes the values with it.
+    await tx`
+      SELECT set_config('slotlock.actor', ${previous?.actor ?? ''}, true),
+             set_config('slotlock.origin', ${previous?.origin ?? ''}, true)`;
+    return result;
+  });
+}
+
+/**
  * API keys in the `slotlock` schema, through the connection's role. Every input is checked here
  * before a query runs; the functions and the table's constraints check the same rules again.
  */
@@ -308,8 +351,9 @@ export function createSlotlockApiKeyStore(sql: SlotlockSql): SlotlockApiKeyStore
       const { key, prefix, digest } = generateSlotlockApiKey();
       // Scopes travel as one string: postgres.js binds `sql.array` as text[] only once the pool
       // has fetched the server's array types, which the first query on a new pool precedes.
-      const [row] = await readCommitted(
+      const [row] = await asChange(
         sql,
+        { ...(input.actor !== undefined ? { actor: input.actor } : {}), ...(input.origin ? { origin: input.origin } : {}) },
         (tx) => tx<ApiKeyRow[]>`
           SELECT * FROM slotlock.create_api_key(
             ${input.tenantRef}::text,
@@ -337,22 +381,22 @@ export function createSlotlockApiKeyStore(sql: SlotlockSql): SlotlockApiKeyStore
       return rows.map(apiKeyFrom);
     },
 
-    async rotate({ tenantRef, id }) {
+    async rotate({ tenantRef, id, ...change }) {
       assertTenantRef(tenantRef);
       if (typeof id !== 'string' || !UUID_PATTERN.test(id)) return null;
       const { key, prefix, digest } = generateSlotlockApiKey();
-      const [row] = await sql<ApiKeyRow[]>`
+      const [row] = await asChange(sql, change, (tx) => tx<ApiKeyRow[]>`
         SELECT * FROM slotlock.rotate_api_key(
           ${tenantRef}::text, ${id}::uuid, ${prefix}::text, ${digest}::bytea
-        )`;
+        )`);
       return row ? { key, apiKey: apiKeyFrom(row) } : null;
     },
 
-    async revoke({ tenantRef, id }) {
+    async revoke({ tenantRef, id, ...change }) {
       assertTenantRef(tenantRef);
       if (typeof id !== 'string' || !UUID_PATTERN.test(id)) return null;
-      const [row] = await sql<ApiKeyRow[]>`
-        SELECT * FROM slotlock.revoke_api_key(${tenantRef}::text, ${id}::uuid)`;
+      const [row] = await asChange(sql, change, (tx) => tx<ApiKeyRow[]>`
+        SELECT * FROM slotlock.revoke_api_key(${tenantRef}::text, ${id}::uuid)`);
       return row ? apiKeyFrom(row) : null;
     },
 
@@ -444,6 +488,7 @@ export function createSlotlockApiKeyAuthenticator(
         subject: `api_key:${identity.id}`,
         tenantRef: identity.tenantRef,
         scopes: identity.scopes,
+        keyId: identity.id,
       };
     } finally {
       const next = waitingKnown.shift() ?? waiting.shift();

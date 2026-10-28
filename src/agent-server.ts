@@ -41,6 +41,7 @@ import {
   type SlotlockChangeWatcher,
   createSlotlockChangeReaders,
 } from './change-watch.js';
+import type { SlotlockChangeOrigin } from './event-feed.js';
 import { SLOTLOCK_EVENT_OUTPUT as EVENT } from './event-schema.js';
 import { ignoreRejection } from './hooks.js';
 import { slotlockPackageVersion } from './package-version.js';
@@ -490,6 +491,11 @@ export interface SlotlockAgentPrincipal {
    * Unset, `authorize` alone decides.
    */
   scopes?: readonly string[];
+  /**
+   * The API key the credential is, by its id (a UUID), when it is one: the history records it with
+   * each change the principal makes (`createSlotlockApiKeyAuthenticator` sets it).
+   */
+  keyId?: string;
 }
 
 /** Whether a principal's scopes, if it carries any, cover an operation. */
@@ -510,6 +516,11 @@ export interface SlotlockAgentInvocationContext {
    * backend's spans as its children to follow one agent action across services.
    */
   trace?: SlotlockTraceContext;
+  /**
+   * The surface the call came through (`mcp`, `a2a`, `rest`, `dashboard-assistant`), for a backend
+   * to record with its changes (withTenant's `origin`).
+   */
+  origin?: SlotlockChangeOrigin;
 }
 
 /** A bounded domain failure a backend may deliberately expose through a protocol tool result. */
@@ -1756,6 +1767,8 @@ export async function invokeSlotlockAgentOperation(args: {
   options: SlotlockAgentOperationDispatchOptions;
   /** Validated W3C trace context to hand the backend (see `SlotlockAgentInvocationContext.trace`). */
   trace?: SlotlockTraceContext;
+  /** The surface the call came through, handed to the backend (`SlotlockAgentInvocationContext.origin`). */
+  origin?: SlotlockChangeOrigin;
 }): Promise<SlotlockAgentOperationDispatchResult> {
   let resolvedOperation: SlotlockAgentOperation | null = null;
   try {
@@ -1821,6 +1834,7 @@ export async function invokeSlotlockAgentOperation(args: {
       signal: args.request.signal,
     };
     if (args.trace) context.trace = args.trace;
+    if (args.origin) context.origin = args.origin;
     const data = await method.call(backend, context, parsed.data);
     if (!operation.output.safeParse(data).success) {
       // Neither the result nor the schema's complaint about it: either may hold tenant data.
@@ -3183,7 +3197,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     },
   ): Promise<SlotlockAgentOperationDispatchResult> => {
     const started = performance.now();
-    const outcome = await invokeSlotlockAgentOperation(args);
+    const outcome = await invokeSlotlockAgentOperation({ ...args, origin: protocol });
     reportCall(protocol, args.operation, outcome.ok ? 'ok' : outcome.code, started, args.trace);
     return outcome;
   };
@@ -3431,6 +3445,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       input: { resource_ids: resourceIds, start: window.start, end: window.end },
       request: call.request,
       options: dispatch,
+      origin: 'mcp',
       ...(call.trace ? { trace: call.trace } : {}),
     });
 
@@ -3451,6 +3466,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       input: cursor === undefined ? {} : { cursor },
       request: call.request,
       options: dispatchOptions(call.principal),
+      origin: 'mcp',
       ...(call.trace ? { trace: call.trace } : {}),
     });
     if (!outcome.ok) {
@@ -4154,6 +4170,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
         principal,
         operation: definition.name,
         signal: request.signal,
+        origin: 'application',
       };
       if (trace) context.trace = trace;
       const data = await served.backend[definition.invoke].call(served.backend, context, parsed.data);
@@ -4317,6 +4334,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
           input: { ...given, ...params },
           request,
           options: withoutConfirmationRound(principal, route.operation),
+          origin: 'rest',
           ...(trace ? { trace } : {}),
         });
     const internal = !outcome.ok && INTERNAL_FAILURES.has(outcome.code);

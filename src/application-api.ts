@@ -9,7 +9,7 @@
 //
 // This module holds only the contract (names, schemas, routes); it imports nothing from the agent
 // server at runtime. The store-backed implementation is createSlotlockStoreApplicationBackend.
-import { SLOTLOCK_CHANGE_TYPES } from './event-feed.js';
+import { SLOTLOCK_CHANGE_ORIGINS, SLOTLOCK_CHANGE_TYPES, type SlotlockChangeOrigin } from './event-feed.js';
 import { z } from 'zod';
 import type { SlotlockAgentPrincipal } from './agent-server.js';
 import { SLOTLOCK_EVENT_OUTPUT } from './event-schema.js';
@@ -75,6 +75,8 @@ export interface SlotlockApplicationInvocationContext {
   signal: AbortSignal;
   /** W3C trace context the caller sent, already validated. */
   trace?: SlotlockTraceContext;
+  /** The surface the call came through: `application` when the agent server dispatches it. */
+  origin?: SlotlockChangeOrigin;
 }
 
 type Handler = (
@@ -275,6 +277,10 @@ const HISTORY_ENTRY = z
     time: DATE_TIME,
     /** Who made it: an API key, an agent's subject; `null` when not recorded. */
     actor: z.string().max(200).nullable(),
+    /** Where it came from (mcp, a2a, rest, application, dashboard, ...); `null` when not recorded. */
+    origin: z.enum(SLOTLOCK_CHANGE_ORIGINS).nullable(),
+    /** The API key that made it, by id; `null` when no key did. */
+    key_id: z.string().uuid().nullable(),
     /** The record as the change left it, with `before` for a change of an existing one. */
     data: z.record(z.string(), z.unknown()),
   })
@@ -298,6 +304,10 @@ const CHANGE = z
     subject: z.string().max(500),
     time: DATE_TIME,
     datacontenttype: z.literal('application/json'),
+    /** Extension attribute: where the change came from, when recorded (mcp, rest, dashboard, ...). */
+    slotlockorigin: z.enum(SLOTLOCK_CHANGE_ORIGINS).optional(),
+    /** Extension attribute: the id of the API key that made it, when one did. */
+    slotlockkeyid: z.string().uuid().optional(),
     data: z.record(z.string(), z.unknown()),
   })
   .strict();
@@ -619,7 +629,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_get_resource_history',
       title: "A resource's history",
       description:
-        "What happened on one of the tenant's resources, newest first: each hold, booking and event made, moved, confirmed, released or cancelled, when, by whom (the API key or agent), and for a change what it was before. Kept 30 days. Pass next_before as before for older entries.",
+        "What happened on one of the tenant's resources, newest first: each hold, booking and event made, moved, confirmed, released or cancelled, and each change to the resource itself (created, rules, pool or hours changed, archived, restored, coverage recorded or deleted), when, by whom (the actor and API key), from where (origin), and for a change what it was before. Kept 30 days. Pass next_before as before for older entries.",
       method: 'GET',
       path: '/v1/resources/{resource_id}/history',
       input: z.object({ resource_id: RESOURCE_ID, ...HISTORY_PAGE }).strict(),
@@ -945,7 +955,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_get_coverage',
       title: "A resource's coverage and its health",
       description:
-        "Each external calendar (source) that records coverage of a resource: the window it covers, when it was last read, its last error, and whether it is stale (not read for a day, so the time it covers is unproven, not free). A source that goes stale is also put on the change feed once, as coverage.stale, until it is read again.",
+        "Each external calendar (source) that records coverage of a resource: the window it covers, when it was last read, its last error, and whether it is stale (not read for a day, so the time it covers is unproven, not free). A source that goes stale is also put on the change feed once, as coverage.stale, until it is read again. The feed names a source by its source_id, never the source itself.",
       method: 'GET',
       path: '/v1/resources/{resource_id}/coverage',
       input: z.object({ resource_id: RESOURCE_ID }).strict(),
@@ -956,6 +966,8 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
               z
                 .object({
                   source: SOURCE,
+                  /** How the change feed names the source (coverage.recorded, .deleted, .stale). */
+                  source_id: z.string().regex(/^src_[0-9a-f]{24}$/),
                   start: DATE_TIME,
                   end: DATE_TIME,
                   revision: REVISION,
@@ -1144,7 +1156,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_list_changes',
       title: 'List changes',
       description:
-        "What changed in the tenant, oldest first, as CloudEvents: holds made, confirmed, released or expired; bookings made, moved or cancelled; calendar events created, changed or cancelled (ids, times and states, never titles or attendees). Pass next_cursor as cursor to read on; it is returned even when nothing is new, so poll with it. Only changes of transactions that have ended are listed, so following the cursor never skips one. Changes are kept 30 days: an older cursor answers 410 cursor_expired, so start again without one.",
+        "What changed in the tenant, oldest first, as CloudEvents: holds made, confirmed, released or expired; bookings made, moved or cancelled; calendar events created, changed or cancelled; resources created, changed (rules, pool, hours), archived, restored or deleted; coverage sources recorded or deleted; webhooks added, enabled or deleted; API keys created, rotated or revoked (ids, times and states, never titles, attendees, URLs or secrets). Each names where it came from (slotlockorigin) and the API key that made it (slotlockkeyid) when recorded. Pass next_cursor as cursor to read on; it is returned even when nothing is new, so poll with it. Only changes of transactions that have ended are listed, so following the cursor never skips one. Changes are kept 30 days: an older cursor answers 410 cursor_expired, so start again without one.",
       method: 'GET',
       path: '/v1/changes',
       input: z
@@ -1165,7 +1177,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       input: z
         .object({
           url: z.string().url().max(2048),
-          event_types: z.array(z.enum(SLOTLOCK_CHANGE_TYPES)).min(1).max(20).optional(),
+          event_types: z.array(z.enum(SLOTLOCK_CHANGE_TYPES)).min(1).max(SLOTLOCK_CHANGE_TYPES.length).optional(),
         })
         .strict(),
       output: z.object({ webhook: WEBHOOK, secret: z.string().regex(/^whsec_/) }).strict(),

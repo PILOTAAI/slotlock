@@ -1,7 +1,16 @@
 // DB mechanics for the Slotlock core — explicit `postgres` client in, structured results out.
 // Domain policy (who may reserve, pricing, holds) belongs to future callers; this layer owns the
 // reliable how: idempotent schema apply, EXCLUDE-arbitrated inserts with a structured conflict.
-import { SLOTLOCK_CHANGE_RETENTION_DAYS, type SlotlockEventFeed, slotlockEventFeedMethods } from './event-feed.js';
+import {
+  SLOTLOCK_CHANGE_ORIGINS,
+  SLOTLOCK_CHANGE_RETENTION_DAYS,
+  type SlotlockChangeOrigin,
+  type SlotlockEventFeed,
+  isSlotlockChangeOrigin,
+  slotlockCoverageSourceId,
+  slotlockCoverageSourceIdSql,
+  slotlockEventFeedMethods,
+} from './event-feed.js';
 import {
   type SlotlockBookingRule,
   type SlotlockBookingRules,
@@ -157,6 +166,9 @@ const MAX_CONFIGURED_AGENT_OWNER_EVENT_QUOTA = 100_000;
 const MAX_CONFIGURED_AGENT_OWNER_COMMAND_QUOTA = 1_000_000;
 const SCHEMA_APPLY_LOCK = 'slotlock:schema-apply:v1';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+// A coverage source as the feed names it (coverage.stale): its digest, never the source itself.
+const COVERAGE_SOURCE_ID = slotlockCoverageSourceIdSql('tenant_ref', 'source');
 const AGENT_EVENT_OWNER_PATTERN = /^agent:[0-9a-f]{64}$/;
 
 /** Store-owned coverage source for bounded, locally materialized recurring events. */
@@ -2115,6 +2127,13 @@ export interface SlotlockStore extends SlotlockEventFeed {
        * without control characters: the history (listHistory) records it with each change.
        */
       actor?: string;
+      /**
+       * Where the changes come from (SLOTLOCK_CHANGE_ORIGINS: `mcp`, `rest`, `dashboard`, ...),
+       * recorded with each beside the actor. Unset, the enclosing withTenant's, else `library`.
+       */
+      origin?: SlotlockChangeOrigin;
+      /** The id (a UUID) of the API key making these changes, recorded with each. */
+      keyId?: string;
     },
   ): Promise<T>;
   /**
@@ -2770,6 +2789,8 @@ export type CheckInReservationResult =
 /** One source's coverage of a resource, with its health (listCoverage). */
 export interface SlotlockCoverageHealth {
   source: string;
+  /** How the change feed names the source (slotlockCoverageSourceId), never the source itself. */
+  sourceId: string;
   start: Date;
   end: Date;
   revision: number;
@@ -3663,6 +3684,16 @@ function buildSlotlockStore(
           code: 'invalid_identity' as const,
         });
       }
+      const origin = options?.origin;
+      if (origin !== undefined && !isSlotlockChangeOrigin(origin)) {
+        throw Object.assign(new Error(`Slotlock origin must be one of ${SLOTLOCK_CHANGE_ORIGINS.join(', ')}`), {
+          code: 'invalid_identity' as const,
+        });
+      }
+      const keyId = options?.keyId;
+      if (keyId !== undefined && !isValidResourceId(keyId)) {
+        throw Object.assign(new Error('Slotlock key id must be a UUID'), { code: 'invalid_identity' as const });
+      }
       const release = await tenantSlots?.(tenantRef, options?.signal);
       // A lock wait that timed out leaves the transaction unusable, so the reset below fails with
       // another error in its place: noted here as it happens.
@@ -3677,9 +3708,13 @@ function buildSlotlockStore(
           // Held shared until the transaction ends: suspension and erasure, which take it
           // exclusively, wait for this transaction, and one that starts after them reads them below
           // (READ COMMITTED: a statement after the lock sees what committed before it was granted).
-          const previous = await tx<{ value: string | null; isolation: string; actor: string | null }[]>`
+          const previous = await tx<
+            { value: string | null; isolation: string; actor: string | null; origin: string | null; key: string | null }[]
+          >`
             SELECT current_setting(${configuredTenantSetting}, true) AS value,
                    current_setting('slotlock.actor', true) AS actor,
+                   current_setting('slotlock.origin', true) AS origin,
+                   current_setting('slotlock.key_id', true) AS key,
                    current_setting('transaction_isolation') AS isolation,
                    pg_advisory_xact_lock_shared(
                      hashtextextended(${slotlockTenantLockKey(tenantRef)}, 0)
@@ -3687,6 +3722,9 @@ function buildSlotlockStore(
           const [context] = await tx<{ suspended: boolean }[]>`
             SELECT set_config(${configuredTenantSetting}, ${tenantRef}, true) AS tenant,
                    set_config('slotlock.actor', ${actor ?? ''}, true) AS actor,
+                   set_config('slotlock.origin', COALESCE(${origin ?? null}::text,
+                     NULLIF(current_setting('slotlock.origin', true), ''), 'library'), true) AS origin,
+                   set_config('slotlock.key_id', ${keyId ?? ''}, true) AS key,
                    slotlock.tenant_suspended(${tenantRef}) AS suspended`.catch((error: unknown) => {
             throw suspensionCheckRefusal(error);
           });
@@ -3708,7 +3746,9 @@ function buildSlotlockStore(
             throw error;
           } finally {
             await tx`SELECT set_config(${configuredTenantSetting}, ${previous[0]?.value ?? ''}, true),
-                            set_config('slotlock.actor', ${previous[0]?.actor ?? ''}, true)`;
+                            set_config('slotlock.actor', ${previous[0]?.actor ?? ''}, true),
+                            set_config('slotlock.origin', ${previous[0]?.origin ?? ''}, true),
+                            set_config('slotlock.key_id', ${previous[0]?.key ?? ''}, true)`;
           }
         },
         'read committed',
@@ -6039,6 +6079,7 @@ function buildSlotlockStore(
          ORDER BY source`;
       return rows.map((row) => ({
         source: row.source,
+        sourceId: slotlockCoverageSourceId(params.tenantRef, row.source),
         start: row.starts_at,
         end: row.ends_at,
         revision: Number(row.revision),
@@ -6063,15 +6104,15 @@ function buildSlotlockStore(
                 AND observed_at < now() - make_interval(secs => ${maxAgeMs / 1_000})
               ORDER BY observed_at LIMIT ${params.limit ?? 100}
               FOR UPDATE SKIP LOCKED)
-          RETURNING coverage.resource_id, coverage.source, coverage.observed_at, coverage.last_error
+          RETURNING coverage.tenant_ref, coverage.resource_id, coverage.source, coverage.observed_at
         ), reported AS (
           INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
-          SELECT ${params.tenantRef}, stale.resource_id, 'coverage.stale', stale.source,
-                 jsonb_strip_nulls(jsonb_build_object(
-                   'resource_id', stale.resource_id, 'source', stale.source,
-                   'observed_at', stale.observed_at, 'last_error', stale.last_error)),
+          SELECT ${params.tenantRef}, named.resource_id, 'coverage.stale', named.source_id,
+                 jsonb_build_object(
+                   'resource_id', named.resource_id, 'source_id', named.source_id,
+                   'observed_at', named.observed_at),
                  'slotlock:maintenance'
-            FROM stale
+            FROM (SELECT resource_id, observed_at, ${sql.unsafe(COVERAGE_SOURCE_ID)} AS source_id FROM stale) named
           RETURNING 1
         )
         SELECT count(*)::int AS count FROM reported`;
