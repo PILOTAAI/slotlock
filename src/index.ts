@@ -23,6 +23,7 @@ export {
   SLOTLOCK_CHANGE_TYPES,
   SLOTLOCK_MAX_WEBHOOK_ENDPOINTS,
   SLOTLOCK_WEBHOOK_FAILING_LIMIT_MS,
+  slotlockChangeFeedHead,
   type SlotlockChange,
   type SlotlockChangeType,
   type SlotlockEventFeed,
@@ -96,6 +97,7 @@ export {
   slotlockAgentOperationScope,
   SLOTLOCK_A2A_PROTOCOL_VERSION,
   SLOTLOCK_A2A_TASK_PAGE_SIZE,
+  SLOTLOCK_A2A_WATCH_SKILL,
   SLOTLOCK_A2A_TASK_STATES,
   SLOTLOCK_AGENT_OPERATION_LEGACY_NAMES,
   SLOTLOCK_AGENT_SERVER_VERSION,
@@ -142,8 +144,15 @@ export type {
 export {
   createSlotlockStoreAgentBackend,
   createSlotlockStoreApplicationBackend,
+  createSlotlockStoreChangeSource,
   projectSlotlockCalendarEvent,
 } from './agent-store-backend.js';
+export {
+  SLOTLOCK_FEED_BUSY_MS,
+  SLOTLOCK_FEED_IDLE_MS,
+  type SlotlockAgentChange,
+  type SlotlockAgentChangeSource,
+} from './change-watch.js';
 export type {
   SlotlockStoreAgentBackendOptions,
   SlotlockStoreApplicationBackendOptions,

@@ -1,3 +1,4 @@
+import { AsyncResource } from 'node:async_hooks';
 import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import {
@@ -35,6 +36,11 @@ import {
   isSlotlockApplicationOperation,
   slotlockApplicationOperation,
 } from './application-api.js';
+import {
+  type SlotlockAgentChangeSource,
+  type SlotlockChangeWatcher,
+  createSlotlockChangeReaders,
+} from './change-watch.js';
 import { SLOTLOCK_EVENT_OUTPUT as EVENT } from './event-schema.js';
 import { ignoreRejection } from './hooks.js';
 import { slotlockPackageVersion } from './package-version.js';
@@ -677,13 +683,27 @@ export interface SlotlockAgentConfirmationOptions {
 /**
  * Live calendar updates over MCP 2026-07-28 `subscriptions/listen`. A client subscribes to calendar
  * resource URIs (`slotlockCalendarResourceUri`) and receives `notifications/resources/updated` on the
- * response stream when a resource's free/busy changes. The server finds changes by re-reading each
- * open subscription's resources through the backend every `pollIntervalMs`, re-running `authenticate`
- * and `authorize` each time, so a revoked credential or permission ends the stream.
+ * response stream when a resource's free/busy changes. With `changes`, the server follows each
+ * tenant's change feed (one reader per tenant, shared by all its subscriptions) and re-reads a
+ * subscription's resources when a change touches one of them; without it, it re-reads them every
+ * `pollIntervalMs`. Each re-read runs `authenticate` and `authorize` again, so a revoked credential
+ * or permission ends the stream, and announces only the resources whose free/busy changed.
  */
 export interface SlotlockAgentSubscriptionOptions {
-  /** How often an open subscription re-reads its resources, in ms: 1,000-300,000, default 10,000. */
+  /**
+   * How often an open subscription re-reads its resources regardless, in ms: 1,000-300,000. Default
+   * 10,000, or 15,000 with `changes`, where it is the fallback for what the feed does not carry
+   * (bookable hours, a revoked key or permission) and for a feed that stopped.
+   */
   pollIntervalMs?: number;
+  /**
+   * The change feed to follow (createSlotlockStoreChangeSource, or your own over
+   * SlotlockEventFeed.listChanges), polled by one reader per tenant every SLOTLOCK_FEED_BUSY_MS to
+   * SLOTLOCK_FEED_IDLE_MS: a change is announced within about a second instead of at the next
+   * re-read. A subscription re-reads its resources at most once a second, however many changes
+   * touch them.
+   */
+  changes?: SlotlockAgentChangeSource;
   /** When the server ends a subscription gracefully, in ms: 60,000-86,400,000, default 900,000. */
   maxDurationMs?: number;
   /** How often a quiet stream carries an SSE keep-alive comment, in ms: 1,000-60,000, default 15,000. */
@@ -1859,12 +1879,14 @@ function traceIdOf(trace: SlotlockTraceContext): string {
 const INTERNAL_FAILURES = new Set(['internal_error', 'invalid_backend_result']);
 
 /**
- * A2A 1.0 methods (a2a.proto `A2AService`) this synchronous, stateless binding does not implement.
- * A2A §3.3.4 fixes the error for the capability-gated ones: push-notification configuration answers
- * `PushNotificationNotSupportedError`; streaming, task subscription and the extended card answer
- * `UnsupportedOperationError`. GetTask, CancelTask and ListTasks are core operations every agent
- * answers; since every reply here is a message, no task id exists: `TaskNotFoundError` for the
- * first two (§3.1) and an empty page for the list.
+ * A2A 1.0 methods (a2a.proto `A2AService`) this binding does not implement. A2A §3.3.4 fixes the
+ * error for the capability-gated ones: push-notification configuration answers
+ * `PushNotificationNotSupportedError` (a tenant's changes reach a URL as signed webhooks instead);
+ * task subscription and the extended card answer `UnsupportedOperationError`. `SendStreamingMessage`
+ * is served: a skill's reply as a one-message stream, and the watch skill as a task whose stream is
+ * the only place it lives, so it cannot be subscribed to again. GetTask, CancelTask and ListTasks are
+ * core operations every agent answers; no task is kept to find: `TaskNotFoundError` for the first
+ * two (§3.1) and an empty page for the list.
  */
 const A2A_PUSH_NOTIFICATION_METHODS = new Set([
   'CreateTaskPushNotificationConfig',
@@ -1873,7 +1895,6 @@ const A2A_PUSH_NOTIFICATION_METHODS = new Set([
   'DeleteTaskPushNotificationConfig',
 ]);
 const A2A_UNSUPPORTED_METHODS = new Set([
-  'SendStreamingMessage',
   'SubscribeToTask',
   'GetExtendedAgentCard',
 ]);
@@ -2113,6 +2134,8 @@ const INVISIBLE_STATUSES: ReadonlySet<number> = new Set([400, 403, 404]);
 const MAX_RESOURCE_SUBSCRIPTIONS = 20;
 /** Consecutive failed re-reads after which a subscription is abandoned. */
 const MAX_POLL_FAILURES = 3;
+/** The least time between the starts of two re-reads of one subscription a change asked for, in ms. */
+const CHANGE_REREAD_MIN_MS = 1_000;
 
 /** An open subscription, or a slot reserved by one still opening (not yet `streaming`). */
 interface SubscriptionSlot {
@@ -2124,6 +2147,7 @@ interface SubscriptionSlot {
 
 interface SubscriptionPolicy {
   pollIntervalMs: number;
+  changes: SlotlockAgentChangeSource | null;
   maxDurationMs: number;
   keepAliveMs: number;
   maxPerPrincipal: number;
@@ -2135,8 +2159,18 @@ function validateSubscriptions(
   value: SlotlockAgentSubscriptionOptions | false | undefined,
 ): SubscriptionPolicy | null {
   if (value === false) return null;
+  const changes = value?.changes ?? null;
+  if (
+    changes !== null &&
+    (typeof changes !== 'object' ||
+      typeof changes.head !== 'function' ||
+      typeof changes.listChanges !== 'function' ||
+      (changes.watch !== undefined && typeof changes.watch !== 'function'))
+  ) {
+    throw new Error('Slotlock agent server subscriptions.changes is invalid');
+  }
   const bounded = (
-    name: keyof SlotlockAgentSubscriptionOptions,
+    name: Exclude<keyof SlotlockAgentSubscriptionOptions, 'changes'>,
     min: number,
     max: number,
     fallback: number,
@@ -2149,7 +2183,8 @@ function validateSubscriptions(
   };
   const maxTotal = bounded('maxTotal', 1, 10_000, 256);
   return {
-    pollIntervalMs: bounded('pollIntervalMs', 1_000, 300_000, 10_000),
+    pollIntervalMs: bounded('pollIntervalMs', 1_000, 300_000, changes ? 15_000 : 10_000),
+    changes,
     maxDurationMs: bounded('maxDurationMs', 60_000, 86_400_000, 900_000),
     keepAliveMs: bounded('keepAliveMs', 1_000, 60_000, 15_000),
     maxPerPrincipal: bounded('maxPerPrincipal', 1, 64, 4),
@@ -2989,8 +3024,16 @@ function routePath(pathname: string, basePath: string): string | null {
   return pathname.startsWith(`${basePath}/`) ? pathname.slice(basePath.length) : null;
 }
 
+/**
+ * The A2A skill that watches calendars: `SendStreamingMessage` only. Its stream opens with a task
+ * in TASK_STATE_WORKING and carries a status update for each change to a watched resource's
+ * free/busy, from the same feed as MCP resource subscriptions, until the watch's duration is up.
+ */
+export const SLOTLOCK_A2A_WATCH_SKILL = 'slotlock_watch_resources';
+const A2A_WATCH_EXAMPLE = { resource_ids: ['018f2f8e-7f8a-7c3e-9b1a-2a4c6e8f0a1b'] };
+
 /** The A2A 1.0 agent card, in the JSON form of a2a.proto's `AgentCard`. */
-function agentCard(publicBaseUrl: string): Readonly<Record<string, unknown>> {
+function agentCard(publicBaseUrl: string, watch: boolean): Readonly<Record<string, unknown>> {
   return Object.freeze({
     name: 'Slotlock Agent Calendar',
     description: `Tenant-isolated resource events, recurrence, free-busy, and scheduling. Invoke a skill with one application/json data part {"skill": "<skill id>", "arguments": {…}}; argument and result JSON Schemas are published at ${publicBaseUrl}/manifest.json.`,
@@ -3002,20 +3045,38 @@ function agentCard(publicBaseUrl: string): Readonly<Record<string, unknown>> {
       },
     ],
     version: SLOTLOCK_AGENT_SERVER_VERSION,
-    capabilities: { streaming: false, pushNotifications: false, extendedAgentCard: false },
+    capabilities: { streaming: true, pushNotifications: false, extendedAgentCard: false },
     securitySchemes: { bearer: { httpAuthSecurityScheme: { scheme: 'Bearer' } } },
     securityRequirements: [{ schemes: { bearer: { list: [] } } }],
     defaultInputModes: ['application/json'],
     defaultOutputModes: ['application/json'],
-    skills: OPERATION_DEFINITIONS.map((operation) => ({
-      id: operation.name,
-      name: operation.title,
-      description: operation.description,
-      tags: ['calendar', 'scheduling', 'resources'],
-      examples: [JSON.stringify({ skill: operation.name, arguments: operation.example })],
-      inputModes: ['application/json'],
-      outputModes: ['application/json'],
-    })),
+    skills: [
+      ...OPERATION_DEFINITIONS.map((operation) => ({
+        id: operation.name,
+        name: operation.title,
+        description: operation.description,
+        tags: ['calendar', 'scheduling', 'resources'],
+        examples: [JSON.stringify({ skill: operation.name, arguments: operation.example })],
+        inputModes: ['application/json'],
+        outputModes: ['application/json'],
+      })),
+      ...(watch
+        ? [
+            {
+              id: SLOTLOCK_A2A_WATCH_SKILL,
+              name: 'Watch calendar resources',
+              description:
+                'SendStreamingMessage only. Watch up to 20 resources (resource_ids) for changes to their free/busy: the stream opens with a task in TASK_STATE_WORKING and carries a status update {"resource_id", "uri"} for each change, until the watch ends (TASK_STATE_COMPLETED) or access is withdrawn (TASK_STATE_FAILED). Read the resource again on each update.',
+              tags: ['calendar', 'resources', 'watch'],
+              examples: [
+                JSON.stringify({ skill: SLOTLOCK_A2A_WATCH_SKILL, arguments: A2A_WATCH_EXAMPLE }),
+              ],
+              inputModes: ['application/json'],
+              outputModes: ['application/json'],
+            },
+          ]
+        : []),
+    ],
   });
 }
 
@@ -3085,7 +3146,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     },
     capabilities: slotlockAgentTools(),
   });
-  const card = agentCard(config.publicBaseUrl);
+  const card = agentCard(config.publicBaseUrl, options.subscriptions !== false);
   const confirmation = validateConfirmation(options.confirmation);
   const emit = (event: SlotlockAgentServerEvent): void => {
     try {
@@ -3170,6 +3231,12 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
   /** Open subscriptions (and slots reserved by ones still opening), for the caps and shutdown. */
   const openSubscriptions = new Set<SubscriptionSlot>();
   let shuttingDown = false;
+  /** One feed reader per tenant with an open subscription, when there is a feed to follow. */
+  const changeReaders = subscriptionPolicy?.changes
+    ? createSlotlockChangeReaders(subscriptionPolicy.changes, (error) =>
+        reportUnexpected(options.onError, error, null),
+      )
+    : null;
 
   const discoverResult = Object.freeze({
     supportedVersions: [...SLOTLOCK_MCP_SUPPORTED_PROTOCOL_VERSIONS],
@@ -3460,7 +3527,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
    * invisible resource does not hide the rest. Any other failure fails the whole check.
    */
   async function watchableCalendars(
-    call: ModernCall,
+    call: Pick<ModernCall, 'request' | 'principal' | 'trace'>,
     resourceIds: string[],
     window: { start: string; end: string },
   ): Promise<
@@ -3486,19 +3553,13 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
   }
 
   /**
-   * `subscriptions/listen` (2026-07-28 basic/patterns/subscriptions). The response is an SSE stream
-   * that opens with `notifications/subscriptions/acknowledged` naming the calendar resources this
-   * principal may watch, then carries `notifications/resources/updated` for each change until the
-   * client closes it or the server ends it gracefully (its duration, shutdown, lost access) with the
-   * request's result. Nothing is honored but resource subscriptions; a subscription honoring nothing
-   * ends right after its acknowledgment.
+   * A subscription slot for the principal, held while it opens so concurrent opens cannot
+   * overshoot the caps; null when a cap is reached. MCP subscriptions and A2A watches share them.
    */
-  async function modernListen(call: ModernCall): Promise<Response> {
-    const { id, principal } = call;
-    if (!subscriptionPolicy) return modernError(404, id, -32601, 'Method not found');
-    const filter = parseSubscriptionFilter(call.params.notifications);
-    if (!filter.ok) return modernError(200, id, -32602, filter.message, filter.data);
-    if (shuttingDown) return modernError(503, id, -32603, 'Server is shutting down');
+  function reserveSubscriptionSlot(
+    policy: SubscriptionPolicy,
+    principal: SlotlockAgentPrincipal,
+  ): SubscriptionSlot | null {
     const principalKey = `${principal.tenantRef}\0${principal.subject}`;
     let held = 0;
     let heldByTenant = 0;
@@ -3507,9 +3568,9 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       if (open.tenantRef === principal.tenantRef) heldByTenant += 1;
     }
     if (
-      openSubscriptions.size >= subscriptionPolicy.maxTotal &&
-      held < subscriptionPolicy.maxPerPrincipal &&
-      heldByTenant < subscriptionPolicy.maxPerTenant
+      openSubscriptions.size >= policy.maxTotal &&
+      held < policy.maxPerPrincipal &&
+      heldByTenant < policy.maxPerTenant
     ) {
       // A full server is shared out: a tenant holding fewer than the one holding most, less one,
       // ends that tenant's oldest stream, so many tenants within their share cannot keep another
@@ -3526,13 +3587,12 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       if (most.length > heldByTenant + 1) most[0]?.end('preempted');
     }
     if (
-      openSubscriptions.size >= subscriptionPolicy.maxTotal ||
-      held >= subscriptionPolicy.maxPerPrincipal ||
-      heldByTenant >= subscriptionPolicy.maxPerTenant
+      openSubscriptions.size >= policy.maxTotal ||
+      held >= policy.maxPerPrincipal ||
+      heldByTenant >= policy.maxPerTenant
     ) {
-      return modernError(429, id, SLOTLOCK_MCP_RATE_LIMITED_ERROR_CODE, 'Too many subscriptions');
+      return null;
     }
-    // The slot is held while access is checked, so concurrent opens cannot overshoot the caps.
     const slot: SubscriptionSlot = {
       principalKey,
       tenantRef: principal.tenantRef,
@@ -3540,15 +3600,42 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       end: () => {},
     };
     openSubscriptions.add(slot);
+    return slot;
+  }
+
+  /**
+   * The window a watch covers. A read's window rolls forward with the clock; a watch covers one
+   * fixed window that holds every window a read can return while it is open (from now to its last
+   * possible read's end), so a booking entering the rolling end is announced, and the clock alone
+   * changes nothing.
+   */
+  function watchWindow(policy: SubscriptionPolicy): { start: string; end: string } {
+    const window = calendarResourceWindow(Date.now(), resourceWindowDays);
+    window.end = new Date(Date.parse(window.end) + policy.maxDurationMs).toISOString();
+    return window;
+  }
+
+  /**
+   * `subscriptions/listen` (2026-07-28 basic/patterns/subscriptions). The response is an SSE stream
+   * that opens with `notifications/subscriptions/acknowledged` naming the calendar resources this
+   * principal may watch, then carries `notifications/resources/updated` for each change until the
+   * client closes it or the server ends it gracefully (its duration, shutdown, lost access) with the
+   * request's result. Nothing is honored but resource subscriptions; a subscription honoring nothing
+   * ends right after its acknowledgment.
+   */
+  async function modernListen(call: ModernCall): Promise<Response> {
+    const { id, principal } = call;
+    if (!subscriptionPolicy) return modernError(404, id, -32601, 'Method not found');
+    const filter = parseSubscriptionFilter(call.params.notifications);
+    if (!filter.ok) return modernError(200, id, -32602, filter.message, filter.data);
+    if (shuttingDown) return modernError(503, id, -32603, 'Server is shutting down');
+    const slot = reserveSubscriptionSlot(subscriptionPolicy, principal);
+    if (!slot) {
+      return modernError(429, id, SLOTLOCK_MCP_RATE_LIMITED_ERROR_CODE, 'Too many subscriptions');
+    }
     let streaming = false;
     try {
-      // A read's window rolls forward with the clock; a subscription watches one fixed window that
-      // holds every window a read can return while it is open (from now to its last possible read's
-      // end), so a booking entering the rolling end is announced, and the clock alone changes nothing.
-      const window = calendarResourceWindow(Date.now(), resourceWindowDays);
-      window.end = new Date(
-        Date.parse(window.end) + subscriptionPolicy.maxDurationMs,
-      ).toISOString();
+      const window = watchWindow(subscriptionPolicy);
       const watchable = await watchableCalendars(call, filter.resourceIds, window);
       if (!watchable.ok) return modernFailure(id, watchable);
       if (shuttingDown) return modernError(503, id, -32603, 'Server is shutting down');
@@ -3562,6 +3649,154 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     }
   }
 
+  /**
+   * Watch `watched.resourceIds` for the principal until the returned function is called: re-read
+   * their free/busy when the tenant's feed says a change touched one (and every `pollIntervalMs`
+   * regardless), and call `updated` for each whose free/busy changed. Every re-read authenticates
+   * the request's credentials again and must find the same principal, and is authorized like any
+   * read; neither the rate limiter nor a confirmation applies to reads the server makes on its own.
+   */
+  function watchResources(
+    call: Pick<ModernCall, 'request' | 'principal' | 'trace'>,
+    policy: SubscriptionPolicy,
+    window: { start: string; end: string },
+    watched: { resourceIds: string[]; digests: Map<string, string> },
+    sink: {
+      updated(resourceId: string): void;
+      /** False when the client is not reading what it is sent. */
+      healthy(): boolean;
+      end(reason: 'revoked' | 'failed'): void;
+    },
+  ): () => void {
+    const { principal, request } = call;
+    const stop = new AbortController();
+    let stopped = false;
+    let refreshing = false;
+    let again = false;
+    // The feed's cursor expired: the next read that succeeds announces every resource.
+    let owedAll = false;
+    let failures = 0;
+    let nextPoll: ReturnType<typeof setTimeout> | undefined;
+    // Changes coalesce: a re-read starts at most once every CHANGE_REREAD_MIN_MS.
+    let lastRefresh = 0;
+    let touchTimer: ReturnType<typeof setTimeout> | undefined;
+    const pollRequest = new Request(request.url, {
+      method: 'POST',
+      headers: request.headers,
+      signal: AbortSignal.any([request.signal, stop.signal]),
+    });
+    const pollDispatch: SlotlockAgentOperationDispatchOptions = {
+      backend: options.backend,
+      authenticate: async (current) => {
+        const again = await options.authenticate(current);
+        return again?.subject === principal.subject && again.tenantRef === principal.tenantRef
+          ? again
+          : null;
+      },
+      authorize: options.authorize,
+      ...(options.onError ? { onError: options.onError } : {}),
+    };
+    const schedule = () => {
+      clearTimeout(nextPoll);
+      nextPoll = unref(setTimeout(() => void refresh(false), policy.pollIntervalMs));
+    };
+    const refresh = async (all: boolean): Promise<void> => {
+      if (stopped) return;
+      if (all) owedAll = true;
+      if (refreshing) {
+        again = true;
+        return;
+      }
+      refreshing = true;
+      lastRefresh = Date.now();
+      clearTimeout(nextPoll);
+      clearTimeout(touchTimer);
+      touchTimer = undefined;
+      try {
+        const outcome = await readFreeBusy(
+          { request: pollRequest, trace: call.trace },
+          pollDispatch,
+          watched.resourceIds,
+          window,
+        );
+        if (stopped) return;
+        if (!outcome.ok) {
+          if (outcome.status === 401 || INVISIBLE_STATUSES.has(outcome.status)) {
+            sink.end('revoked');
+            return;
+          }
+          failures += 1;
+          if (failures >= MAX_POLL_FAILURES) {
+            sink.end('failed');
+            return;
+          }
+        } else {
+          failures = 0;
+          const announceAll = owedAll;
+          owedAll = false;
+          const digests = freeBusyDigests(outcome.data);
+          for (const resourceId of watched.resourceIds) {
+            const digest = digests.get(resourceId) ?? '';
+            if (!announceAll && digest === watched.digests.get(resourceId)) continue;
+            watched.digests.set(resourceId, digest);
+            sink.updated(resourceId);
+          }
+          if (!sink.healthy()) {
+            sink.end('failed');
+            return;
+          }
+        }
+      } catch {
+        sink.end('failed');
+        return;
+      } finally {
+        refreshing = false;
+      }
+      if (stopped) return;
+      schedule();
+      if (again) {
+        again = false;
+        touch(false);
+      }
+    };
+    const touch = (all: boolean): void => {
+      if (stopped) return;
+      if (all) owedAll = true;
+      if (refreshing) {
+        again = true;
+        return;
+      }
+      const wait = lastRefresh + CHANGE_REREAD_MIN_MS - Date.now();
+      if (wait <= 0) {
+        void refresh(false);
+      } else if (touchTimer === undefined) {
+        touchTimer = unref(
+          setTimeout(() => {
+            touchTimer = undefined;
+            void refresh(false);
+          }, wait),
+        );
+      }
+    };
+    // The tenant's reader is shared and runs outside any request; this subscription's re-reads run
+    // in its own request's async context.
+    const watcher: SlotlockChangeWatcher = {
+      resourceIds: new Set(watched.resourceIds),
+      touched: AsyncResource.bind(() => touch(false)),
+      resync: AsyncResource.bind(() => touch(true)),
+    };
+    const leave = changeReaders?.join(principal.tenantRef, watcher);
+    schedule();
+    return () => {
+      if (stopped) return;
+      stopped = true;
+      clearTimeout(nextPoll);
+      clearTimeout(touchTimer);
+      stop.abort();
+      leave?.();
+    };
+  }
+
   function streamSubscription(
     call: ModernCall,
     policy: SubscriptionPolicy,
@@ -3569,15 +3804,14 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     window: { start: string; end: string },
     watched: { resourceIds: string[]; digests: Map<string, string> },
   ): Response {
-    const { id, principal, request } = call;
+    const { id, request } = call;
     const subscriptionMeta = { [MCP_META_SUBSCRIPTION_ID]: id };
-    const stop = new AbortController();
     let ended = false;
     const timers: {
       keepAlive?: ReturnType<typeof setInterval>;
       lifetime?: ReturnType<typeof setTimeout>;
-      nextPoll?: ReturnType<typeof setTimeout>;
     } = {};
+    let unwatch: (() => void) | undefined;
     const stream = openMcpEventStream(() => end('client'));
     const onAbort = () => end('client');
 
@@ -3588,8 +3822,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       ended = true;
       clearInterval(timers.keepAlive);
       clearTimeout(timers.lifetime);
-      clearTimeout(timers.nextPoll);
-      stop.abort();
+      unwatch?.();
       request.signal.removeEventListener('abort', onAbort);
       openSubscriptions.delete(slot);
       // A server-side end the client should not retry is graceful: the listen request's result.
@@ -3637,75 +3870,203 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     }
     request.signal.addEventListener('abort', onAbort, { once: true });
 
-    // Every re-read authenticates the listen request's credentials again and must find the same
-    // principal, and is authorized like any read; neither the rate limiter nor a confirmation applies
-    // to reads the server makes on its own schedule.
-    const pollRequest = new Request(request.url, {
-      method: 'POST',
-      headers: request.headers,
-      signal: AbortSignal.any([request.signal, stop.signal]),
+    unwatch = watchResources(call, policy, window, watched, {
+      updated: (resourceId) =>
+        stream.send({
+          jsonrpc: '2.0',
+          method: 'notifications/resources/updated',
+          params: { _meta: subscriptionMeta, uri: slotlockCalendarResourceUri(resourceId) },
+        }),
+      healthy: () => !stream.lagging(),
+      end,
     });
-    const pollDispatch: SlotlockAgentOperationDispatchOptions = {
-      backend: options.backend,
-      authenticate: async (current) => {
-        const again = await options.authenticate(current);
-        return again?.subject === principal.subject && again.tenantRef === principal.tenantRef
-          ? again
-          : null;
-      },
-      authorize: options.authorize,
-      ...(options.onError ? { onError: options.onError } : {}),
-    };
-    let failures = 0;
-    const poll = async (): Promise<void> => {
-      try {
-        const outcome = await readFreeBusy(
-          { request: pollRequest, trace: call.trace },
-          pollDispatch,
-          watched.resourceIds,
-          window,
-        );
-        if (ended) return;
-        if (!outcome.ok) {
-          if (outcome.status === 401 || INVISIBLE_STATUSES.has(outcome.status)) {
-            end('revoked');
-            return;
-          }
-          failures += 1;
-          if (failures >= MAX_POLL_FAILURES) {
-            end('failed');
-            return;
-          }
-        } else {
-          failures = 0;
-          const digests = freeBusyDigests(outcome.data);
-          for (const resourceId of watched.resourceIds) {
-            const digest = digests.get(resourceId) ?? '';
-            if (digest === watched.digests.get(resourceId)) continue;
-            watched.digests.set(resourceId, digest);
-            stream.send({
-              jsonrpc: '2.0',
-              method: 'notifications/resources/updated',
-              params: { _meta: subscriptionMeta, uri: slotlockCalendarResourceUri(resourceId) },
-            });
-          }
-          if (stream.lagging()) {
-            end('failed');
-            return;
-          }
-        }
-        timers.nextPoll = unref(setTimeout(poll, policy.pollIntervalMs));
-      } catch {
-        end('failed');
-      }
-    };
     timers.keepAlive = unref(
       setInterval(() => {
         if (!stream.keepAlive() || stream.lagging()) end('failed');
       }, policy.keepAliveMs),
     );
     timers.lifetime = unref(setTimeout(() => end('duration'), policy.maxDurationMs));
-    timers.nextPoll = unref(setTimeout(poll, policy.pollIntervalMs));
+    return stream.response;
+  }
+
+  /**
+   * The A2A watch skill over `SendStreamingMessage`: the same caps, visibility check, feed and
+   * re-reads as an MCP subscription, framed as A2A 1.0 stream responses. The stream opens with the
+   * task (TASK_STATE_WORKING, naming the resources watched), carries a status update naming each
+   * resource whose free/busy changed, and ends with TASK_STATE_COMPLETED when its duration is up or
+   * the server shuts down, or TASK_STATE_FAILED when the credential or permission is withdrawn. A
+   * refusal before it opens is the skill's reply, as for any skill.
+   */
+  async function a2aWatch(args: {
+    id: string | number | null;
+    request: Request;
+    principal: SlotlockAgentPrincipal;
+    trace: SlotlockTraceContext | undefined;
+    input: unknown;
+    contextId: string;
+    reply: (data: unknown) => Response;
+  }): Promise<Response> {
+    const { id, request, principal, trace, contextId, reply } = args;
+    const policy = subscriptionPolicy;
+    if (!policy) return reply({ error: { code: 'not_supported' } });
+    const given = args.input;
+    const requested = isRecord(given) ? given.resource_ids : undefined;
+    if (
+      !isRecord(given) ||
+      Object.keys(given).some((key) => key !== 'resource_ids') ||
+      !Array.isArray(requested) ||
+      requested.length === 0 ||
+      requested.length > MAX_RESOURCE_SUBSCRIPTIONS ||
+      !requested.every((resourceId) => isCanonicalBoundedIdentifier(resourceId, 500))
+    ) {
+      return reply({ error: { code: 'invalid_arguments' } });
+    }
+    if (shuttingDown) return json(200, rpcError(id, -32603, 'Server is shutting down'));
+    const slot = reserveSubscriptionSlot(policy, principal);
+    if (!slot) {
+      return a2aError(id, -32029, 'Too many subscriptions', {
+        reason: 'RATE_LIMITED',
+        domain: 'slotlock',
+      });
+    }
+    let streaming = false;
+    try {
+      const resourceIds = [...new Set(requested as string[])];
+      const window = watchWindow(policy);
+      const call = { request, principal, trace };
+      const watchable = await watchableCalendars(call, resourceIds, window);
+      if (!watchable.ok) {
+        if (INTERNAL_FAILURES.has(watchable.code)) {
+          return json(200, rpcError(id, -32603, 'Internal error'));
+        }
+        return reply({ error: { code: watchable.code } });
+      }
+      const watched = {
+        resourceIds: resourceIds.filter((resourceId) => watchable.digests.has(resourceId)),
+        digests: watchable.digests,
+      };
+      if (watched.resourceIds.length === 0) return reply({ error: { code: 'not_found' } });
+      if (shuttingDown) return json(200, rpcError(id, -32603, 'Server is shutting down'));
+      streaming = true;
+      return streamA2AWatch({ id, request, principal, trace, contextId }, policy, slot, window, watched);
+    } finally {
+      if (!streaming) openSubscriptions.delete(slot);
+    }
+  }
+
+  function streamA2AWatch(
+    call: {
+      id: string | number | null;
+      request: Request;
+      principal: SlotlockAgentPrincipal;
+      trace: SlotlockTraceContext | undefined;
+      contextId: string;
+    },
+    policy: SubscriptionPolicy,
+    slot: SubscriptionSlot,
+    window: { start: string; end: string },
+    watched: { resourceIds: string[]; digests: Map<string, string> },
+  ): Response {
+    const { id, request, contextId } = call;
+    const taskId = `watch_${randomBytes(16).toString('base64url')}`;
+    let ended = false;
+    let unwatch: (() => void) | undefined;
+    const timers: {
+      keepAlive?: ReturnType<typeof setInterval>;
+      lifetime?: ReturnType<typeof setTimeout>;
+    } = {};
+    const stream = openMcpEventStream(() => end('client'));
+    const onAbort = () => end('client');
+    const status = (state: string, data?: unknown) => ({
+      state,
+      timestamp: new Date().toISOString(),
+      ...(data === undefined
+        ? {}
+        : {
+            message: {
+              messageId: `msg_${randomBytes(16).toString('base64url')}`,
+              contextId,
+              taskId,
+              role: 'ROLE_AGENT',
+              parts: [{ data, mediaType: 'application/json' }],
+            },
+          }),
+    });
+    const send = (result: Record<string, unknown>) => stream.send({ jsonrpc: '2.0', id, result });
+
+    function end(
+      reason: 'client' | 'duration' | 'shutdown' | 'revoked' | 'failed' | 'preempted',
+    ): void {
+      if (ended) return;
+      ended = true;
+      clearInterval(timers.keepAlive);
+      clearTimeout(timers.lifetime);
+      unwatch?.();
+      request.signal.removeEventListener('abort', onAbort);
+      openSubscriptions.delete(slot);
+      // A server-side end is the task's terminal state; a failure closes the stream without one,
+      // which a client may treat as a reason to watch again.
+      if (reason === 'revoked') {
+        send({
+          statusUpdate: {
+            taskId,
+            contextId,
+            status: status('TASK_STATE_FAILED', { error: { code: 'forbidden' } }),
+          },
+        });
+      } else if (reason !== 'client' && reason !== 'failed') {
+        send({ statusUpdate: { taskId, contextId, status: status('TASK_STATE_COMPLETED') } });
+      }
+      stream.close();
+      emit({
+        type: 'subscription',
+        outcome: 'closed',
+        reason,
+        resources: watched.resourceIds.length,
+      });
+    }
+    slot.end = end;
+    slot.streaming = true;
+
+    send({
+      task: {
+        id: taskId,
+        contextId,
+        status: status('TASK_STATE_WORKING', {
+          resources: watched.resourceIds.map((resourceId) => ({
+            resource_id: resourceId,
+            uri: slotlockCalendarResourceUri(resourceId),
+          })),
+        }),
+      },
+    });
+    emit({ type: 'subscription', outcome: 'opened', resources: watched.resourceIds.length });
+    if (request.signal.aborted) {
+      end('client');
+      return stream.response;
+    }
+    request.signal.addEventListener('abort', onAbort, { once: true });
+    unwatch = watchResources(call, policy, window, watched, {
+      updated: (resourceId) =>
+        send({
+          statusUpdate: {
+            taskId,
+            contextId,
+            status: status('TASK_STATE_WORKING', {
+              resource_id: resourceId,
+              uri: slotlockCalendarResourceUri(resourceId),
+            }),
+          },
+        }),
+      healthy: () => !stream.lagging(),
+      end,
+    });
+    timers.keepAlive = unref(
+      setInterval(() => {
+        if (!stream.keepAlive() || stream.lagging()) end('failed');
+      }, policy.keepAliveMs),
+    );
+    timers.lifetime = unref(setTimeout(() => end('duration'), policy.maxDurationMs));
     return stream.response;
   }
 
@@ -4270,7 +4631,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
         return a2aError(id, -32004, 'Unsupported operation', {
           reason: 'UNSUPPORTED_OPERATION',
           domain: 'a2a-protocol.org',
-          metadata: { supportedMethods: 'SendMessage' },
+          metadata: { supportedMethods: 'SendMessage, SendStreamingMessage' },
         });
       }
       if (A2A_TASK_METHOD_FIELDS.has(rpc.method)) {
@@ -4289,7 +4650,8 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
         const pageSize = rpc.params?.pageSize ?? SLOTLOCK_A2A_TASK_PAGE_SIZE.default;
         return json(200, rpcResult(id, { tasks: [], nextPageToken: '', pageSize, totalSize: 0 }));
       }
-      if (rpc.method !== 'SendMessage') {
+      const streamingRequest = rpc.method === 'SendStreamingMessage';
+      if (rpc.method !== 'SendMessage' && !streamingRequest) {
         return json(200, rpcError(id, -32601, 'Method not found'));
       }
       const started = performance.now();
@@ -4306,7 +4668,8 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       const parts = Array.isArray(message?.parts) ? message.parts : [];
       const part = parts.length === 1 ? (parts[0] as { data?: unknown }) : null;
       const data = part?.data as { skill?: unknown; arguments?: unknown } | undefined;
-      const operation = resolveSlotlockAgentOperation(data?.skill);
+      const watchSkill = data?.skill === SLOTLOCK_A2A_WATCH_SKILL;
+      const operation = watchSkill ? null : resolveSlotlockAgentOperation(data?.skill);
       // A refused message that names an operation is still a call, reported by the error's reason.
       const refuse = (outcome: string, response: Response): Response => {
         if (operation) reportCall('a2a', operation, outcome, started, trace);
@@ -4334,7 +4697,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       // `arguments` may be left out or null; anything else but an object is not arguments.
       const input = data?.arguments;
       if (
-        !operation ||
+        (!operation && !watchSkill) ||
         message?.role !== 'ROLE_USER' ||
         !isCanonicalBoundedIdentifier(message.messageId, 200) ||
         message.taskId !== undefined ||
@@ -4352,6 +4715,43 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
           }),
         );
       }
+      const requestedContextId = message.contextId;
+      const contextId =
+        typeof requestedContextId === 'string' &&
+        requestedContextId.length > 0 &&
+        requestedContextId.length <= 200
+          ? requestedContextId
+          : `ctx_${createHash('sha256')
+              .update(`${principal.tenantRef}\0${message.messageId}`)
+              .digest('base64url')
+              .slice(0, 32)}`;
+      const skillName = operation ?? SLOTLOCK_A2A_WATCH_SKILL;
+      // A skill's outcome is the agent's reply, success or not — the same contract as an MCP
+      // `isError` result, so the calling agent reads `{"error":{"code":…}}` and can act on it.
+      // Streamed, the reply is the stream's one event (A2A: a Message, then the stream closes).
+      const reply = (replyData: unknown): Response => {
+        const replyId = createHash('sha256')
+          .update(`${principal.subject}\0${message.messageId}\0${skillName}`)
+          .digest('base64url')
+          .slice(0, 32);
+        const result = {
+          message: {
+            messageId: `reply_${replyId}`,
+            contextId,
+            role: 'ROLE_AGENT',
+            parts: [{ data: replyData, mediaType: 'application/json' }],
+          },
+        };
+        if (!streamingRequest) return json(200, rpcResult(id, result));
+        const stream = openMcpEventStream(() => {});
+        stream.send({ jsonrpc: '2.0', id, result });
+        stream.close();
+        return stream.response;
+      };
+      if (!operation) {
+        if (!streamingRequest) return reply({ error: { code: 'streaming_required' } });
+        return a2aWatch({ id, request, principal, trace, input, contextId, reply });
+      }
       try {
         const outcome = await invokeReported('a2a', {
           operation,
@@ -4363,39 +4763,8 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
         if (!outcome.ok && INTERNAL_FAILURES.has(outcome.code)) {
           return json(200, rpcError(id, -32603, 'Internal error'));
         }
-        const replyId = createHash('sha256')
-          .update(`${principal.subject}\0${message.messageId}\0${operation}`)
-          .digest('base64url')
-          .slice(0, 32);
-        const requestedContextId = message.contextId;
-        const contextId =
-          typeof requestedContextId === 'string' &&
-          requestedContextId.length > 0 &&
-          requestedContextId.length <= 200
-            ? requestedContextId
-            : `ctx_${createHash('sha256')
-                .update(`${principal.tenantRef}\0${message.messageId}`)
-                .digest('base64url')
-                .slice(0, 32)}`;
-        // A skill's outcome is the agent's reply, success or not — the same contract as an MCP
-        // `isError` result, so the calling agent reads `{"error":{"code":…}}` and can act on it.
-        return json(
-          200,
-          rpcResult(id, {
-            message: {
-              messageId: `reply_${replyId}`,
-              contextId,
-              role: 'ROLE_AGENT',
-              parts: [
-                {
-                  data: outcome.ok
-                    ? outcome.data
-                    : { error: { ...outcome.details, code: outcome.code } },
-                  mediaType: 'application/json',
-                },
-              ],
-            },
-          }),
+        return reply(
+          outcome.ok ? outcome.data : { error: { ...outcome.details, code: outcome.code } },
         );
       } catch {
         return json(200, rpcError(id, -32603, 'Internal error'));

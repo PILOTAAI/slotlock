@@ -498,6 +498,7 @@ describe.skipIf(!url)('Slotlock README examples (real Postgres)', () => {
     const port = await freePort();
     const listener = await startCalendarServer({
       store: app.store,
+      sql: app.sql,
       publicBaseUrl: `http://localhost:${port}/slotlock`,
       port,
       allowInsecureLocalhost: true,
@@ -541,6 +542,7 @@ describe.skipIf(!url)('Slotlock README examples (real Postgres)', () => {
     const port = await freePort();
     const listener = await startCalendarServer({
       store: app.store,
+      sql: app.sql,
       publicBaseUrl: `http://localhost:${port}/slotlock`,
       port,
       allowInsecureLocalhost: true,
@@ -582,7 +584,8 @@ describe.skipIf(!url)('Slotlock README examples (real Postgres)', () => {
         /^Book vehicle-42 for \d{4}-\d{2}-\d{2} 1[34]:00–1[45]:00( UTC\+0[01]:00)? \(Europe\/London\): "Live handover"\.$/,
       );
 
-      await vi.waitFor(() => expect(changes).toEqual([uri]), { timeout: 15_000, interval: 100 });
+      // From the change feed as the booking commits, not the minute-long fallback re-read.
+      await vi.waitFor(() => expect(changes).toEqual([uri]), { timeout: 3_000, interval: 50 });
       expect((await live.read()).busy).toContainEqual({
         start: start.toISOString(),
         end: end.toISOString(),

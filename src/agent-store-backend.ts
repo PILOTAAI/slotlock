@@ -1,4 +1,6 @@
-import type { SlotlockWebhookEndpoint } from './event-feed.js';
+import type { Sql } from 'postgres';
+import type { SlotlockAgentChangeSource } from './change-watch.js';
+import { type SlotlockWebhookEndpoint, slotlockChangeFeedHead } from './event-feed.js';
 import { slotlockCloudEvent } from './webhooks.js';
 import { createHash } from 'node:crypto';
 import {
@@ -476,6 +478,25 @@ function requireAgentResource(
   resourceId: string,
 ): Promise<SlotlockResource> {
   return requireResource(tenantStore, tenantRef, resourceId, 'shared');
+}
+
+/**
+ * The store's change feed for live updates (`subscriptions.changes`): each tenant's changes read
+ * under its row-level security, one indexed query per read. Readers poll it (change-watch.ts:
+ * every `SLOTLOCK_FEED_BUSY_MS` after a read that found changes, backing off to
+ * `SLOTLOCK_FEED_IDLE_MS`); `sql` is the store's client, used for the feed's head.
+ */
+export function createSlotlockStoreChangeSource(
+  store: SlotlockStore,
+  sql: Sql,
+): SlotlockAgentChangeSource {
+  return {
+    head: () => slotlockChangeFeedHead(sql),
+    async listChanges(params) {
+      const page = await store.withTenant(params.tenantRef, (tenant) => tenant.listChanges(params));
+      return page.ok ? { ok: true, changes: page.changes, next: page.next } : page;
+    },
+  };
 }
 
 /** Bind the protocol server to the production store without giving a request control of tenancy. */

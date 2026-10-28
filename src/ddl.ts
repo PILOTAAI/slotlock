@@ -1286,6 +1286,10 @@ $slotlock_outbox_mark_pruned$;
 CREATE OR REPLACE TRIGGER slotlock_outbox_mark_pruned
   AFTER DELETE ON slotlock.outbox REFERENCING OLD TABLE AS pruned
   FOR EACH STATEMENT EXECUTE FUNCTION slotlock.outbox_mark_pruned();
+-- Live updates poll each tenant's feed (change-watch.ts). A pre-release build woke readers with a
+-- notification trigger here, which made every outbox commit take the cluster-wide notify lock: drop it.
+DROP TRIGGER IF EXISTS slotlock_outbox_notify ON slotlock.outbox;
+DROP FUNCTION IF EXISTS slotlock.outbox_notify();
 
 CREATE TABLE IF NOT EXISTS slotlock.webhook_endpoints (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -245,13 +245,16 @@ envelope (a body over the size limit is HTTP 413); A2A's own errors, below, carr
 `google.rpc.ErrorInfo` detail and JSON-RPC's (`-32700`, `-32600`, `-32601`, `-32603`) none. An
 `A2A-Version` other than `1.0`, including none (read as 0.3), is `VersionNotSupportedError`
 (`-32009`); push-notification methods are
-`PushNotificationNotSupportedError` (`-32003`); streaming, task subscription and the extended card
-are `UnsupportedOperationError` (`-32004`); a message that is not exactly one data part
+`PushNotificationNotSupportedError` (`-32003`); task subscription and the extended card are
+`UnsupportedOperationError` (`-32004`); a message that is not exactly one data part
 `{"skill": "<id>", "arguments": {…}}` (`arguments` left out or null is none; any other value that is
 not an object is not arguments) is `-32602`, as is a `configuration` or `metadata` that is set but
 is not an object; a rate-limited request is `-32029` with the reason `RATE_LIMITED` and a null id,
-answered before its body is read. The server replies with messages and keeps no
-tasks, so the core task operations answer as for an unknown task: `GetTask` and `CancelTask` are
+answered before its body is read. `SendStreamingMessage` streams a skill's reply as one message;
+with `slotlock_watch_resources` it streams a watch task (TASK_STATE_WORKING, a status update per
+changed resource, then TASK_STATE_COMPLETED or TASK_STATE_FAILED) that lives only in its stream,
+under the MCP subscription caps; refused before it opens, it is the skill's reply. The server keeps
+no tasks, so the core task operations answer as for an unknown task: `GetTask` and `CancelTask` are
 `TaskNotFoundError` (`-32001`), `ListTasks` returns an empty page (`pageSize` 1-100, default 50).
 Their params are checked first, as `SendMessage`'s are: a field the method does not define, a
 `tenant` other than the caller's, a value of the wrong type (a `status` outside `TaskState`, say), a
@@ -364,9 +367,9 @@ with no remaining command; `internal` tombstones remain authoritative until tena
 command evaluated after its evidence is gone is decided afresh by the expected-revision guard.
 
 The protocol backend remains injectable so a deployment owns credential verification, policy, rate
-limits, and networking. The A2A binding is intentionally synchronous and advertises neither
-streaming nor push notifications; an embedder must not claim task lifecycle support unless it
-persists that lifecycle itself.
+limits, and networking. The A2A binding advertises streaming (a reply as one message, a watch as
+a task that lives only in its stream) and not push notifications; an embedder must not claim
+persisted task lifecycle support unless it persists that lifecycle itself.
 
 The optional Node HTTP adapter preserves the Fetch boundary rather than defining another protocol
 implementation. It constructs callback-visible request URLs from an explicit canonical origin,
