@@ -2653,7 +2653,7 @@ export interface SlotlockStoreOptions {
    * How many days history is kept, 1-3,650 (default 30): the change feed (and how far back a cursor
    * reaches) and waitlist entries that ended; and, when longer than 30 days, retired idempotency
    * answers, booking references and past events' commands (never shorter, so a delayed retry is still
-   * answered as the first try was). Maintenance prunes what is older. A cursor whose change any
+   * answered as the first try was). Maintenance prunes what is older. A cursor before a change any
    * store has pruned answers `cursor_expired`, so stores set differently never skip a change.
    */
   retentionDays?: number;

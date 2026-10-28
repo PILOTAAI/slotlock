@@ -291,16 +291,20 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
     // Its position carries when it happened, 45 days ago.
     const old = first.changes[0]?.position as string;
     expect(await yearLong.listChanges({ tenantRef: other, after: old })).toMatchObject({ ok: true });
-    expect(await store.listChanges({ tenantRef: other, after: old })).toEqual({ ok: false, code: 'cursor_expired' });
+    // However long another store keeps changes: nothing has been pruned, so it reads on too.
+    expect(await store.listChanges({ tenantRef: other, after: old })).toMatchObject({ ok: true });
     // Kept a week, an 8-day-old cursor is expired, and the change is pruned.
     const week = Buffer.from(`1:1:1:${Date.now() - 8 * 86_400_000}`).toString('base64url');
     expect(await weekLong.listChanges({ tenantRef: other, after: week })).toEqual({ ok: false, code: 'cursor_expired' });
     expect(await weekLong.pruneChanges({ tenantRef: other, limit: 100 })).toBeGreaterThan(0);
-    // A cursor whose change another store pruned is expired, never read past unseen.
-    const fresh = await store.createExternalReservation({
-      tenantRef: other, externalRef: 'R-2', resourceId: resource.id, start: at(72), end: at(73), bufferAfterMs: 0, revision: 1,
-    });
-    expect(fresh.ok).toBe(true);
+    // A cursor whose change another store pruned is expired, never read past unseen; one at the
+    // last change pruned is not: nothing after it went.
+    for (const [index, ref] of ['R-2', 'R-3'].entries()) {
+      const made = await store.createExternalReservation({
+        tenantRef: other, externalRef: ref, resourceId: resource.id, start: at(72 + index), end: at(73 + index), bufferAfterMs: 0, revision: 1,
+      });
+      expect(made.ok).toBe(true);
+    }
     const page = await yearLong.listChanges({ tenantRef: other });
     if (!page.ok) throw new Error(page.code);
     const cursor = page.changes[0]?.position as string;
@@ -308,6 +312,7 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
     expect(await yearLong.listChanges({ tenantRef: other, after: cursor })).toMatchObject({ ok: true });
     expect(await weekLong.pruneChanges({ tenantRef: other, limit: 100 })).toBeGreaterThan(0);
     expect(await yearLong.listChanges({ tenantRef: other, after: cursor })).toEqual({ ok: false, code: 'cursor_expired' });
+    expect(await yearLong.listChanges({ tenantRef: other, after: page.next })).toEqual({ ok: true, changes: [], next: expect.any(String) });
     // An empty feed's cursor names no change, and stays readable.
     const empty = await yearLong.listChanges({ tenantRef: `${other}-empty` });
     if (!empty.ok) throw new Error(empty.code);
@@ -315,6 +320,47 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
     expect(() => createSlotlockStore(sql, { retentionDays: 0 })).toThrow(/retentionDays/);
     expect(() => createSlotlockStore(sql, { retentionDays: 3_651 })).toThrow(/retentionDays/);
     await store.eraseTenant({ tenantRef: other });
+  });
+
+  it('never reads past a pruned change, however the transactions that made them interleave', async () => {
+    const other = `feed-interleave-${randomUUID()}`;
+    const resource = await store.createResource({ tenantRef: other, externalRef: 'v', timezone: 'UTC' });
+    // Read while the feed is empty: the cursor is before every change still to come.
+    const empty = await store.listChanges({ tenantRef: other });
+    if (!empty.ok) throw new Error(empty.code);
+    for (const [index, ref] of ['R-1', 'R-2'].entries()) {
+      const made = await store.createExternalReservation({
+        tenantRef: other, externalRef: ref, resourceId: resource.id, start: at(80 + index), end: at(81 + index), bufferAfterMs: 0, revision: 1,
+      });
+      expect(made.ok).toBe(true);
+    }
+    const page = await store.listChanges({ tenantRef: other });
+    if (!page.ok) throw new Error(page.code);
+    const [first, second] = page.changes;
+    if (!first || !second) throw new Error('two changes expected');
+    // The later change is the older: a transaction that began first and wrote last. Pruning by
+    // age takes it and keeps the one before it, which a reader had read.
+    await sql`UPDATE slotlock.outbox SET occurred_at = now() - interval '45 days'
+               WHERE tenant_ref = ${other} AND id = ${second.id.slice(4)}::bigint`;
+    expect(await store.pruneChanges({ tenantRef: other, limit: 100 })).toBe(1);
+    expect(await store.listChanges({ tenantRef: other, after: first.position })).toEqual({ ok: false, code: 'cursor_expired' });
+    expect(await store.listChanges({ tenantRef: other, after: empty.next })).toEqual({ ok: false, code: 'cursor_expired' });
+    // A reader that had read both is up to date, whatever is pruned since.
+    await sql`UPDATE slotlock.outbox SET occurred_at = now() - interval '45 days' WHERE tenant_ref = ${other}`;
+    expect(await store.pruneChanges({ tenantRef: other, limit: 100 })).toBe(1);
+    const current = await store.listChanges({ tenantRef: other, after: second.position });
+    expect(current).toEqual({ ok: true, changes: [], next: expect.any(String) });
+    if (!current.ok) throw new Error(current.code);
+    // And it reads what comes next, as does a reader starting over.
+    await store.createExternalReservation({
+      tenantRef: other, externalRef: 'R-3', resourceId: resource.id, start: at(84), end: at(85), bufferAfterMs: 0, revision: 1,
+    });
+    const next = await store.listChanges({ tenantRef: other, after: current.next });
+    expect(next.ok && next.changes.map((change) => change.subject)).toEqual(['R-3']);
+    const restart = await store.listChanges({ tenantRef: other });
+    expect(restart.ok && restart.changes.map((change) => change.subject)).toEqual(['R-3']);
+    await store.eraseTenant({ tenantRef: other });
+    expect(await sql`SELECT 1 FROM slotlock.outbox_pruned WHERE tenant_ref = ${other}`).toHaveLength(0);
   });
 
   it('is erased with the tenant', async () => {

@@ -11,8 +11,11 @@ versioning.
   `createSlotlockStore`), 1 to 3,650 days, 30 by default. It sets how long the change feed is kept
   and how far back a cursor reaches, and ended waitlist entries; above 30 days, retired idempotency
   answers and booking references too (never under 30). `slotlock maintain` reads it as `serve` does.
-- A feed cursor whose change has been pruned answers `cursor_expired`, so a server keeping changes
-  longer than the one that pruned them never reads past a gap unseen.
+- A feed cursor answers `cursor_expired` exactly when a change after it has been pruned (a new
+  table, `slotlock.outbox_pruned`, keeps how far each tenant's feed was pruned): a server keeping
+  changes longer than the one that pruned them never reads past a gap unseen, a reader that is up to
+  date is never expired, and an old cursor with nothing pruned after it reads on. Until a tenant's
+  feed is first pruned by this version, a cursor older than 30 days is expired, as in 0.4.
 - `slotlock_get_pool_availability` (`GET /v1/pool-availability`): how many of a pool's members are
   free across a window, the window split where that number changes, with coverage certainty, so an
   agent can say "three vans free 9 to 11, one after" before booking with `slotlock_book_pool`.

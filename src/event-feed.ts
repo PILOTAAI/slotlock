@@ -97,8 +97,8 @@ export interface SlotlockEventFeed {
    * The tenant's changes after `after` (a `position`, or the oldest kept without it), oldest
    * first, up to `limit` (1-500, default 100). Only changes of transactions that have ended are
    * read, so a reader that follows `next` never skips one that commits late. `next` is the last
-   * change's position, or `after` when there is none yet: poll with it. A position older than
-   * SLOTLOCK_CHANGE_RETENTION_DAYS is `cursor_expired`: read from the start again.
+   * change's position, or `after` when there is none yet: poll with it. A position before a change
+   * any store has pruned is `cursor_expired`: read from the start again.
    */
   listChanges(params: {
     tenantRef: string;
@@ -288,33 +288,50 @@ export function slotlockEventFeedMethods(
       }
       const after = params.after === undefined ? null : decodePosition(params.after);
       if (params.after !== undefined && !after) return { ok: false, code: 'invalid_cursor' };
-      if (after && after.at < Date.now() - retentionDays * 86_400_000) {
-        return { ok: false, code: 'cursor_expired' };
+      // One statement, so the pruned position and the page are read from one snapshot: a prune
+      // that commits meanwhile is either wholly seen or not at all.
+      const rows = await sql<
+        (Omit<ChangeRow, 'id'> & {
+          id: string | null;
+          pruned_txid: string | null;
+          pruned_id: string | null;
+          horizon: string;
+        })[]
+      >`
+        SELECT mark.txid::text AS pruned_txid, mark.id::text AS pruned_id,
+               pg_snapshot_xmin(pg_current_snapshot())::text AS horizon,
+               page.id::text, page.txid::text, page.type, page.resource_id, page.subject,
+               page.data, page.occurred_at, page.actor
+          FROM (SELECT 1) here
+          LEFT JOIN slotlock.outbox_pruned mark ON mark.tenant_ref = ${params.tenantRef}
+          LEFT JOIN LATERAL (
+            SELECT * FROM slotlock.outbox
+             WHERE tenant_ref = ${params.tenantRef}
+               AND txid < pg_snapshot_xmin(pg_current_snapshot())
+               AND (${after?.txid ?? null}::xid8 IS NULL
+                    OR (txid, id) > (${after?.txid ?? null}::xid8, ${after?.id ?? null}::bigint))
+             ORDER BY txid, id
+             LIMIT ${limit}
+          ) page ON true
+         ORDER BY page.txid, page.id`;
+      const head = rows[0];
+      if (!head) throw new Error('slotlock: change page returned no row');
+      if (after) {
+        const pruned =
+          head.pruned_txid === null
+            ? // Pruned before the position was kept (0.4): by date, as 0.4 did.
+              after.at < Date.now() - SLOTLOCK_CHANGE_RETENTION_DAYS * 86_400_000
+            : BigInt(head.pruned_txid) > BigInt(after.txid) ||
+              (BigInt(head.pruned_txid) === BigInt(after.txid) &&
+                BigInt(head.pruned_id ?? 0) > BigInt(after.id));
+        // Whichever server pruned it, and however long it keeps changes: reading on could skip one.
+        if (pruned) return { ok: false, code: 'cursor_expired' };
       }
-      // A cursor names the last change it read (0 before the first). Changes are pruned oldest
-      // first, so when that one is gone those after it may be too: whichever server pruned it, and
-      // however long it keeps them, reading on could skip some unseen.
-      if (after && after.id !== '0') {
-        const [kept] = await sql<{ kept: boolean }[]>`
-          SELECT EXISTS (
-            SELECT 1 FROM slotlock.outbox
-             WHERE tenant_ref = ${params.tenantRef} AND id = ${after.id}::bigint
-          ) AS kept`;
-        if (kept?.kept !== true) return { ok: false, code: 'cursor_expired' };
-      }
-      const rows = await sql<ChangeRow[]>`
-        SELECT id::text, txid::text, type, resource_id, subject, data, occurred_at, actor
-          FROM slotlock.outbox
-         WHERE tenant_ref = ${params.tenantRef}
-           AND txid < pg_snapshot_xmin(pg_current_snapshot())
-           AND (${after?.txid ?? null}::xid8 IS NULL
-                OR (txid, id) > (${after?.txid ?? null}::xid8, ${after?.id ?? null}::bigint))
-         ORDER BY txid, id
-         LIMIT ${limit}`;
-      const changes = rows.map(toChange);
+      const changes = rows.flatMap((row) => (row.id === null ? [] : [toChange(row as ChangeRow)]));
       const last = changes.at(-1);
       // With nothing new the position stays, dated now: a reader that is up to date stays current.
-      const here = after ?? { txid: '0', id: '0', at: 0 };
+      // Before any change, every one still to come is after the oldest transaction still running.
+      const here = after ?? { txid: head.horizon, id: '0', at: 0 };
       return {
         ok: true,
         changes,
@@ -576,7 +593,25 @@ export function slotlockEventFeedMethods(
                SELECT 1 FROM doomed JOIN slotlock.outbox change ON change.id = doomed.id
                 WHERE (change.txid, change.id) > (endpoint.cursor_txid, endpoint.cursor_id))
         ), deleted AS (
-          DELETE FROM slotlock.outbox change USING doomed WHERE change.id = doomed.id RETURNING 1
+          DELETE FROM slotlock.outbox change USING doomed WHERE change.id = doomed.id
+          RETURNING change.txid, change.id
+        ), mark AS (
+          -- The furthest change pruned, never moved back. A tenant's first mark is at least its
+          -- oldest kept transaction, which every change an earlier version pruned is before.
+          INSERT INTO slotlock.outbox_pruned AS mark (tenant_ref, txid, id)
+          SELECT ${params.tenantRef}, furthest.txid, furthest.id FROM (
+            SELECT txid, id FROM deleted
+            UNION ALL
+            SELECT min(txid), 0 FROM slotlock.outbox
+             WHERE tenant_ref = ${params.tenantRef}
+               AND NOT EXISTS (
+                 SELECT 1 FROM slotlock.outbox_pruned WHERE tenant_ref = ${params.tenantRef})
+            HAVING min(txid) IS NOT NULL
+            ORDER BY txid DESC, id DESC
+            LIMIT 1
+          ) furthest
+          ON CONFLICT (tenant_ref) DO UPDATE SET txid = excluded.txid, id = excluded.id
+           WHERE (excluded.txid, excluded.id) > (mark.txid, mark.id)
         )
         SELECT count(*)::int AS deleted FROM deleted`;
       return rows[0]?.deleted ?? 0;

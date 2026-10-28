@@ -1159,8 +1159,8 @@ not commit. A change carries ids, times and states, never titles, descriptions o
   (`io.pylota.slotlock.hold.created`, `.reservation.cancelled`, `.event.updated`, …). Follow
   `next_cursor`, which comes back even when nothing is new: it never skips a change, even one whose
   transaction commits after a later one's. Changes are kept 30 days (`SLOTLOCK_RETENTION_DAYS`,
-  `retentionDays` in `createSlotlockStore`, 1-3,650, for `serve` and `maintain` alike); an older
-  cursor, or one whose change has been pruned, answers `410 cursor_expired`. A change keeps who made
+  `retentionDays` in `createSlotlockStore`, 1-3,650, for `serve` and `maintain` alike); a cursor
+  that a pruned change came after, whichever server pruned it, answers `410 cursor_expired`. A change keeps who made
   it (`actor`) and a booking's or waitlist entry's reference: keep references opaque, not emails,
   when the feed is kept long. A shorter retention never shortens how long a retried write is
   answered as the first was: that stays at least 30 days.

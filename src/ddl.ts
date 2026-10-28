@@ -911,6 +911,10 @@ BEGIN
   DELETE FROM slotlock.outbox WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  erased_table := 'outbox_pruned';
+  DELETE FROM slotlock.outbox_pruned WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'webhook_endpoints';
   DELETE FROM slotlock.webhook_endpoints WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
@@ -1117,6 +1121,14 @@ CREATE INDEX IF NOT EXISTS slotlock_outbox_tenant_position_idx
   ON slotlock.outbox (tenant_ref, txid, id);
 CREATE INDEX IF NOT EXISTS slotlock_outbox_tenant_time_idx
   ON slotlock.outbox (tenant_ref, occurred_at);
+-- How far a tenant's feed has been pruned: no change at or before (txid, id) may still be kept, and
+-- none after it was ever pruned. A cursor before it may have missed one, and is refused.
+CREATE TABLE IF NOT EXISTS slotlock.outbox_pruned (
+  tenant_ref text PRIMARY KEY,
+  txid xid8 NOT NULL,
+  id bigint NOT NULL,
+  CONSTRAINT slotlock_outbox_pruned_tenant_ref_valid CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500)
+);
 
 CREATE TABLE IF NOT EXISTS slotlock.webhook_endpoints (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -2619,6 +2631,7 @@ export const SLOTLOCK_TENANT_TABLES = Object.freeze([
   'calendar_coverage',
   'hold_commands',
   'outbox',
+  'outbox_pruned',
   'webhook_endpoints',
   'waitlist_entries',
 ] as const);
@@ -2699,6 +2712,8 @@ ALTER TABLE slotlock.hold_commands ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.hold_commands FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.outbox ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.outbox FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.outbox_pruned ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.outbox_pruned FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.webhook_endpoints ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.webhook_endpoints FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.waitlist_entries ENABLE ROW LEVEL SECURITY;
@@ -2729,6 +2744,7 @@ BEGIN
          'calendar_coverage',
          'hold_commands',
          'outbox',
+         'outbox_pruned',
          'webhook_endpoints',
          'waitlist_entries'
        )
@@ -2914,6 +2930,16 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'outbox_pruned'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.outbox_pruned
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
      WHERE schemaname = 'slotlock' AND tablename = 'webhook_endpoints'
        AND policyname = 'tenant_isolation_v1'
   ) THEN
@@ -2962,6 +2988,8 @@ COMMENT ON POLICY tenant_isolation_v1 ON slotlock.hold_commands
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.outbox
   IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.outbox_pruned
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.webhook_endpoints
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.waitlist_entries
@@ -3003,6 +3031,7 @@ WHERE schemaname = 'slotlock'
     'calendar_coverage',
     'hold_commands',
     'outbox',
+    'outbox_pruned',
     'webhook_endpoints',
     'waitlist_entries'
   )
