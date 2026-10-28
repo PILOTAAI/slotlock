@@ -440,6 +440,8 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
         if (!hook.ok) throw new Error(hook.code);
         const waiting = await tenant.joinWaitlist({ tenantRef, resourceId, ...slot(2), holderRef: 'waiting' });
         if (!waiting.ok) throw new Error(waiting.code);
+        // How far its feed was pruned: nothing is old enough yet, so only the mark is written.
+        expect(await tenant.pruneChanges({ tenantRef, limit: 100 })).toBe(0);
         expect(
           (
             await tenant.recordCalendarCoverage({
