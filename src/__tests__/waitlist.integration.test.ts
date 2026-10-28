@@ -262,8 +262,11 @@ describe.skipIf(!url)('waitlists and check-in (real Postgres)', () => {
     expect(hold.ok).toBe(true);
     expect((await join({ resourceId: van, start: at(60), end: at(61), holderRef: 'capped' })).ok).toBe(true);
     // Free, but the holder holds all it may: not offered, and still waiting.
-    expect(await maintenance.withTenant(tenantRef, (tenant) => tenant.offerWaitlist({ tenantRef }))).toMatchObject({ offered: 0 });
+    await maintenance.withTenant(tenantRef, (tenant) => tenant.offerWaitlist({ tenantRef }));
     expect(await entries({ resourceId: van })).toEqual([expect.objectContaining({ holderRef: 'capped', status: 'waiting' })]);
+    // Under the default limit it is.
+    await offer();
+    expect(await entries({ resourceId: van })).toEqual([expect.objectContaining({ holderRef: 'capped', status: 'offered' })]);
   });
 
   it("shows another tenant none of the waitlist, and lets only the tenant's own entry go", async () => {
