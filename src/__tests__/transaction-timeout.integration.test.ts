@@ -13,8 +13,10 @@ describe.skipIf(!url)('transaction_timeout (real Postgres)', () => {
 
   beforeAll(async () => {
     sql = postgres(url as string, { max: 2, onnotice: () => {} });
-    const [row] = await sql<{ version: string }[]>`SHOW server_version_num`;
-    version = Number(row?.version ?? 0);
+    const [row] = await sql<{ version: number }[]>`
+      SELECT current_setting('server_version_num')::int AS version`;
+    version = row?.version ?? 0;
+    expect(version).toBeGreaterThan(100_000);
   });
 
   afterAll(async () => {
