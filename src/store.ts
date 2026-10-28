@@ -4201,6 +4201,8 @@ function buildSlotlockStore(
             if (!resource) return { ok: false, code: 'resource_not_found' };
             if (resource.archived) return { ok: false, code: 'resource_archived' };
             if (holdLimit !== null) return { ok: false, code: 'hold_limit_reached', limit: holdLimit };
+            // Seconds the holder already holds, turnaround included, when its time is capped.
+            let heldSeconds: number | null = null;
             if (holderRef !== undefined) {
               // One holder's live holds, counted under a lock on the holder so racing holds stop
               // at the cap: an agent cannot hold a resource's whole week.
@@ -4211,7 +4213,9 @@ function buildSlotlockStore(
               ])}, 0))`;
               const [held] = await tx<{ count: number; seconds: number }[]>`
                 SELECT count(*)::int AS count,
-                       COALESCE(sum(extract(epoch FROM ends_at - starts_at)), 0)::float8 AS seconds
+                       COALESCE(sum(extract(epoch FROM
+                         ends_at + buffer_after_ms * interval '1 millisecond' - starts_at)), 0)::float8
+                         AS seconds
                   FROM slotlock.reservations
                  WHERE holder_ref = ${holderRef} AND tenant_ref IS NULL AND status = 'held'
                    AND expires_at > statement_timestamp()
@@ -4219,18 +4223,20 @@ function buildSlotlockStore(
               if ((held?.count ?? 0) >= maxHoldsPerHolder) {
                 return { ok: false, code: 'hold_limit_reached', limit: maxHoldsPerHolder };
               }
-              const asked = (params.end.getTime() - params.start.getTime()) / 1000;
-              if (
-                maxHeldHoursPerHolder !== undefined &&
-                (held?.seconds ?? 0) + asked > maxHeldHoursPerHolder * 3_600
-              ) {
-                return { ok: false, code: 'held_time_limit_reached', limit: maxHeldHoursPerHolder };
-              }
+              if (maxHeldHoursPerHolder !== undefined) heldSeconds = held?.seconds ?? 0;
             }
             const ruling = await bookingRuling(tx, params.resourceId, params, defaultHours);
             if (ruling.rule) return { ok: false, code: 'booking_rule_violated', rule: ruling.rule };
             written = Math.max(bufferAfterMs, ruling.turnaroundMs);
             const reach = occupiedEnd({ end: params.end, bufferAfterMs: written });
+            if (
+              heldSeconds !== null &&
+              maxHeldHoursPerHolder !== undefined &&
+              heldSeconds + (reach.getTime() - params.start.getTime()) / 1000 >
+                maxHeldHoursPerHolder * 3_600
+            ) {
+              return { ok: false, code: 'held_time_limit_reached', limit: maxHeldHoursPerHolder };
+            }
             if (
               resource.tenant_ref !== null &&
               !(await recurrenceCoversWrite(tx, {

@@ -233,6 +233,15 @@ describe.skipIf(!url)('agent holds (real Postgres)', () => {
     // The count: three short holds, then a fourth refused by number.
     for (const hour of [1, 3, 5]) expect((await holdFor(at(43, hour), at(43, hour + 1), 'counted')).ok).toBe(true);
     expect(await holdFor(at(43, 8), at(43, 9), 'counted')).toEqual({ ok: false, code: 'hold_limit_reached', limit: 3 });
+    // Turnaround is held too: nine hours and one after it are the ten.
+    const buffered = await tight.withTenant(tenantRef, (tenant) =>
+      tenant.acquireHold({
+        tenantRef, principalRef: 'buffered', holderRef: 'buffered', idempotencyKey: `t-${randomUUID()}`,
+        resourceId: id, start: new Date(at(44, 0)), end: new Date(at(44, 9)), bufferAfterMs: 3_600_000, ttlMs: 60_000,
+      }),
+    );
+    expect(buffered.ok).toBe(true);
+    expect(await holdFor(at(45, 0), at(45, 1), 'buffered')).toEqual({ ok: false, code: 'held_time_limit_reached', limit: 10 });
     expect(() => createSlotlockStore(sql, { maxHeldHoursPerHolder: 0 })).toThrow(/maxHeldHoursPerHolder/);
     expect(() => createSlotlockStore(sql, { maxHoldsPerHolder: 10_001 })).toThrow(/maxHoldsPerHolder/);
   });
