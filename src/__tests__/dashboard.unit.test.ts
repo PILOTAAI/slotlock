@@ -17,7 +17,8 @@ import {
   createSlotlockMemoryDashboardState,
 } from '../dashboard.js';
 import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from '../ddl.js';
-import type { SlotlockChange } from '../event-feed.js';
+import type { SlotlockChange, SlotlockWebhookEndpoint } from '../event-feed.js';
+import type { SlotlockWaitlistEntry } from '../store.js';
 import type { SlotlockAgendaEntry, SlotlockResource, WeeklyAvailabilityRule } from '../types.js';
 
 const PUBLIC_URL = 'https://slotlock.example.com/base';
@@ -674,7 +675,7 @@ describe('resources in the dashboard', () => {
       session,
     );
     expect(added.status).toBe(303);
-    expect(resources.store.add).toHaveBeenCalledWith('github:4242', 'vehicle-42', 'Europe/London');
+    expect(resources.store.add).toHaveBeenCalledWith('github:4242', 'vehicle-42', 'Europe/London', 'github:4242');
     expect(await (await get(target, '/base/dashboard/resources', session)).text()).toContain('vehicle-42');
 
     const zone = await post(
@@ -834,7 +835,7 @@ describe('bookable hours in the dashboard', () => {
       { rrule: 'FREQ=WEEKLY;BYDAY=MO', startMinutes: 480, durationMinutes: 240 },
       { rrule: 'FREQ=WEEKLY;BYDAY=MO', startMinutes: 780, durationMinutes: 270 },
       { rrule: 'FREQ=WEEKLY;BYDAY=FR', startMinutes: 1_320, durationMinutes: 480 },
-    ]);
+    ], 'github:4242');
   });
 
   it("hands a resource back to the server's hours, or closes it", async () => {
@@ -862,6 +863,7 @@ describe('bookable hours in the dashboard', () => {
         'github:4242',
         { id: car.id },
         rules,
+        'github:4242',
       );
     }
     const html = await (
@@ -893,7 +895,7 @@ describe('bookable hours in the dashboard', () => {
     expect(saved.status).toBe(303);
     expect(resources.store.setHours).toHaveBeenCalledWith('github:4242', 'all', [
       { rrule: 'FREQ=WEEKLY;BYDAY=SA', startMinutes: 600, durationMinutes: 240 },
-    ]);
+    ], 'github:4242');
   });
 
   it.each([
@@ -1601,6 +1603,24 @@ describe('the overview', () => {
     expect(html).not.toContain(created.apiKey.id);
   });
 
+  it('names the people who changed things from the dashboard', async () => {
+    const change = (actor: string, id: string) => ({
+      id,
+      type: 'hold.released' as const,
+      resourceId: null,
+      subject: 'h',
+      data: {},
+      occurredAt: new Date(now - 60_000),
+      actor,
+      position: id,
+    });
+    const { target } = withFeed([], [change('github:4242', 'msg_2'), change('github:777', 'msg_1')]);
+    const { session } = await signIn(target);
+    const html = await (await get(target, '/base/dashboard', session)).text();
+    expect(html).toMatch(/Hold released<\/span><span class="meta">You · /);
+    expect(html).toMatch(/Hold released<\/span><span class="meta">GitHub user 777 · /);
+  });
+
   it('walks a new tenant through its first steps, and hides them once done', async () => {
     const empty = withFeed([], []);
     const { session } = await signIn(empty.target);
@@ -1651,5 +1671,219 @@ describe('the overview', () => {
     for (const name of ['', ' padded', '<b>x</b>', 'x'.repeat(61), 'line\nbreak', 'Acme\u202eteeLF', 'zero\u200bwidth', 'c1\u0085']) {
       expect(() => dashboard({ name })).toThrow(/dashboard name/);
     }
+  });
+});
+
+describe('resource detail, webhooks and the waitlist', () => {
+  const OWN = '22222222-2222-4222-8222-222222222222';
+  const THEIRS = '33333333-3333-4333-8333-333333333333';
+
+  function full() {
+    resources.rows.push(
+      { id: OWN, externalRef: 'van-1', tenantRef: 'github:4242', timezone: 'UTC' },
+      { id: THEIRS, externalRef: 'van-x', tenantRef: 'github:1', timezone: 'UTC' },
+    );
+    const endpoints: SlotlockWebhookEndpoint[] = [];
+    const entries: SlotlockWaitlistEntry[] = [
+      {
+        id: '44444444-4444-4444-8444-444444444444',
+        resourceId: OWN,
+        pool: null,
+        start: new Date(now + 3_600_000),
+        end: new Date(now + 7_200_000),
+        holderRef: 'customer-<9>',
+        offerTtlMs: 600_000,
+        status: 'waiting',
+        holdId: null,
+        offeredResourceId: null,
+        offeredAt: null,
+        createdAt: new Date(now - 600_000),
+      },
+    ];
+    const store = {
+      ...resources.store,
+      setRules: vi.fn(async (tenantRef: string, id: string, rules: unknown) => {
+        if ((rules as { minNoticeMinutes?: number } | null)?.minNoticeMinutes === 7) {
+          throw Object.assign(new Error('Slotlock booking rule minNoticeMinutes is odd'), { code: 'invalid_booking_rules' });
+        }
+        if ((rules as { minNoticeMinutes?: number } | null)?.minNoticeMinutes === 8) {
+          throw Object.assign(new Error('suspended'), { code: 'tenant_suspended' });
+        }
+        const row = resources.rows.find((r) => r.id === id && r.tenantRef === tenantRef);
+        if (!row) return null;
+        if (rules === null) delete (row as SlotlockResource).bookingRules;
+        else (row as SlotlockResource).bookingRules = rules as never;
+        return row;
+      }),
+      setPool: vi.fn(async (tenantRef: string, id: string, pool: string | null) => {
+        if (pool === 'bad pool!') throw Object.assign(new Error('bad'), { code: 'invalid_pool' });
+        const row = resources.rows.find((r) => r.id === id && r.tenantRef === tenantRef);
+        if (!row) return null;
+        if (pool === null) delete (row as SlotlockResource).pool;
+        else (row as SlotlockResource).pool = pool;
+        return row;
+      }),
+      waitlist: {
+        list: vi.fn(async (tenantRef: string) => (tenantRef === 'github:4242' ? entries : [])),
+        leave: vi.fn(async (tenantRef: string, id: string) => {
+          const index = entries.findIndex((entry) => entry.id === id);
+          if (tenantRef !== 'github:4242' || index < 0) return false;
+          entries.splice(index, 1);
+          return true;
+        }),
+      },
+      webhooks: {
+        list: vi.fn(async () => endpoints),
+        create: vi.fn(async (_tenantRef: string, url: string, eventTypes: readonly string[] | undefined) => {
+          if (!url.startsWith('https://')) return { ok: false as const, code: 'invalid_webhook_url' as const };
+          const endpoint: SlotlockWebhookEndpoint = {
+            id: randomUUID(),
+            url,
+            eventTypes: eventTypes ? ([...eventTypes] as never) : null,
+            createdAt: new Date(now),
+            attempts: 0,
+            failingSince: null,
+            lastStatus: null,
+            lastError: null,
+            disabledAt: null,
+            disabledReason: null,
+          };
+          endpoints.push(endpoint);
+          return { ok: true as const, endpoint, secret: 'whsec_c2VjcmV0LXZhbHVl' };
+        }),
+        remove: vi.fn(async (_tenantRef: string, id: string) => {
+          const index = endpoints.findIndex((endpoint) => endpoint.id === id);
+          if (index < 0) return false;
+          endpoints.splice(index, 1);
+          return true;
+        }),
+        enable: vi.fn(async (_tenantRef: string, id: string) => {
+          const endpoint = endpoints.find((candidate) => candidate.id === id);
+          if (!endpoint) return null;
+          endpoint.disabledAt = null;
+          return endpoint;
+        }),
+      },
+    };
+    return { target: dashboard({ resources: store }), store, endpoints, entries };
+  }
+
+  it("shows a resource's rules and pool, saves them, and refuses another tenant's", async () => {
+    const { target, store } = full();
+    const { session } = await signIn(target);
+    const page = await get(target, `/base/dashboard/resources/${OWN}`, session);
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain('<h1>van-1</h1>');
+    expect((await get(target, `/base/dashboard/resources/${THEIRS}`, session)).status).toBe(404);
+    expect((await get(target, `/base/dashboard/resources/${OWN}`)).status).toBe(303);
+
+    const token = await csrf(target, session);
+    const saved = await post(
+      target,
+      '/base/dashboard/resources/rules',
+      { csrf: token, id: OWN, min_notice_minutes: '60', slot_step_minutes: '15', max_advance_days: '', turnaround_minutes: '', check_in_minutes: '20', enforce_hours: '1' },
+      session,
+    );
+    expect(saved.status).toBe(303);
+    expect(saved.headers.get('location')).toBe(`/base/dashboard/resources/${OWN}`);
+    expect(store.setRules).toHaveBeenLastCalledWith(
+      'github:4242',
+      OWN,
+      { minNoticeMinutes: 60, slotStepMinutes: 15, checkInMinutes: 20, enforceHours: true },
+      'github:4242',
+    );
+    const shown = await (await get(target, `/base/dashboard/resources/${OWN}`, session)).text();
+    expect(shown).toContain('name="min_notice_minutes" value="60"');
+    expect(shown).toMatch(/name="enforce_hours" value="1" checked/);
+
+    // Empty fields clear every rule; a value the store refuses says why.
+    await post(target, '/base/dashboard/resources/rules', { csrf: token, id: OWN }, session);
+    expect(store.setRules).toHaveBeenLastCalledWith('github:4242', OWN, null, 'github:4242');
+    // Out of a rule's bounds: said in the form's words, before the store is asked.
+    const calls = store.setRules.mock.calls.length;
+    const refused = await post(target, '/base/dashboard/resources/rules', { csrf: token, id: OWN, slot_step_minutes: '0' }, session);
+    expect(refused.status).toBe(400);
+    expect(await refused.text()).toContain('Start step is a whole number from 1 to 1,440');
+    expect(store.setRules.mock.calls.length).toBe(calls);
+    expect(await (await get(target, `/base/dashboard/resources/${OWN}`, session)).text()).toContain('min="1" max="1440" name="slot_step_minutes"');
+    const kept = await post(target, '/base/dashboard/resources/rules', { csrf: token, id: OWN, min_notice_minutes: '7' }, session);
+    expect(kept.status).toBe(400);
+    expect(await kept.text()).toContain('not ones Slotlock can keep');
+    const suspended = await post(target, '/base/dashboard/resources/rules', { csrf: token, id: OWN, min_notice_minutes: '8' }, session);
+    expect(suspended.status).toBe(403);
+    expect(await suspended.text()).toContain('suspended');
+    const notNumber = await post(target, '/base/dashboard/resources/rules', { csrf: token, id: OWN, slot_step_minutes: '1.5' }, session);
+    expect(notNumber.status).toBe(400);
+    const foreign = await post(target, '/base/dashboard/resources/rules', { csrf: token, id: THEIRS, min_notice_minutes: '5' }, session);
+    expect(foreign.status).toBe(404);
+    expect(store.setRules).not.toHaveBeenCalledWith(expect.anything(), THEIRS, expect.anything());
+
+    expect((await post(target, '/base/dashboard/resources/pool', { csrf: token, id: OWN, pool: 'vans' }, session)).status).toBe(303);
+    expect(store.setPool).toHaveBeenLastCalledWith('github:4242', OWN, 'vans', 'github:4242');
+    expect(await (await get(target, '/base/dashboard/resources', session)).text()).toContain('Pool vans');
+    expect((await post(target, '/base/dashboard/resources/pool', { csrf: token, id: OWN, pool: 'bad pool!' }, session)).status).toBe(400);
+    await post(target, '/base/dashboard/resources/pool', { csrf: token, id: OWN, pool: '' }, session);
+    expect(store.setPool).toHaveBeenLastCalledWith('github:4242', OWN, null, 'github:4242');
+  });
+
+  it('adds a webhook showing its secret once, lists its health, and deletes or enables it', async () => {
+    const { target, store, endpoints } = full();
+    const { session } = await signIn(target);
+    const token = await csrf(target, session);
+    const added = await post(
+      target,
+      '/base/dashboard/webhooks',
+      { csrf: token, url: 'https://hooks.example.com/in', event_type: 'reservation.created' },
+      session,
+    );
+    expect(added.status).toBe(200);
+    expect(await added.text()).toContain('value="whsec_c2VjcmV0LXZhbHVl"');
+    expect(store.webhooks.create).toHaveBeenCalledWith('github:4242', 'https://hooks.example.com/in', ['reservation.created'], 'github:4242');
+    const listed = await (await get(target, '/base/dashboard/webhooks', session)).text();
+    expect(listed).not.toContain('whsec_');
+    expect(listed).toContain('Delivering');
+
+    const endpoint = endpoints[0] as SlotlockWebhookEndpoint;
+    Object.assign(endpoint, { failingSince: new Date(now - 3_600_000), attempts: 4, lastStatus: 503 });
+    expect(await (await get(target, '/base/dashboard/webhooks', session)).text()).toMatch(/Failing[\s\S]*4 attempts, last HTTP 503/);
+    Object.assign(endpoint, { disabledAt: new Date(now), disabledReason: 'Failing for a day' });
+    const disabled = await (await get(target, '/base/dashboard/webhooks', session)).text();
+    expect(disabled).toContain('action="/base/dashboard/webhooks/enable"');
+    expect((await post(target, '/base/dashboard/webhooks/enable', { csrf: token, id: endpoint.id }, session)).status).toBe(303);
+    expect(endpoint.disabledAt).toBeNull();
+
+    const bad = await post(target, '/base/dashboard/webhooks', { csrf: token, url: 'http://x.example.com' }, session);
+    expect(bad.status).toBe(400);
+    expect(await bad.text()).toContain('Give an https URL');
+    expect((await post(target, '/base/dashboard/webhooks/delete', { csrf: token, id: endpoint.id }, session)).status).toBe(303);
+    expect(endpoints).toHaveLength(0);
+    expect((await post(target, '/base/dashboard/webhooks/delete', { csrf: token, id: endpoint.id }, session)).status).toBe(404);
+  });
+
+  it('lists the waitlist and removes an entry', async () => {
+    const { target, store, entries } = full();
+    const { session } = await signIn(target);
+    const page = await (await get(target, '/base/dashboard/waitlist', session)).text();
+    expect(page).toContain('customer-&lt;9&gt;');
+    expect(page).toMatch(/Today 13:00–14:00<\/td>\s*<td data-label="For">van-1/);
+    const id = entries[0]?.id as string;
+    const removed = await post(target, '/base/dashboard/waitlist/leave', { csrf: await csrf(target, session), id }, session);
+    expect(removed.status).toBe(303);
+    expect(store.waitlist.leave).toHaveBeenCalledWith('github:4242', id, 'github:4242');
+    expect(entries).toHaveLength(0);
+    expect((await post(target, '/base/dashboard/waitlist/leave', { csrf: await csrf(target, session), id }, session)).status).toBe(404);
+  });
+
+  it('shows Waitlist and Webhooks only for an adapter that has them', async () => {
+    const plain = dashboard();
+    const first = await signIn(plain);
+    const html = await (await get(plain, '/base/dashboard', first.session)).text();
+    expect(html).not.toContain('/base/dashboard/webhooks');
+    expect((await get(plain, '/base/dashboard/webhooks', first.session)).status).toBe(404);
+    const { target } = full();
+    const second = await signIn(target);
+    const nav = await (await get(target, '/base/dashboard', second.session)).text();
+    expect(nav).toContain('<span>Webhooks</span>');
+    expect(nav).toContain('<span>Waitlist</span>');
   });
 });

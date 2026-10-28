@@ -11,6 +11,12 @@ versioning.
   live holds across every resource and the agents' latest changes, named by key; Resources; API
   keys, with the endpoints; and Settings. `SLOTLOCK_DASHBOARD_NAME` (`name` in
   `createSlotlockDashboard`) names the deployment. Works without JavaScript, light and dark.
+- Dashboard pages for 0.4's features: a page per resource (bookable hours, booking rules, pool, its
+  coming bookings and activity), Waitlist (entries and their offers; removing one offers its time
+  on) and Webhooks (add with the secret shown once, delete, re-enable, and each endpoint's health:
+  delivering, failing since when and why, or disabled). `SlotlockDashboardResources` takes them as
+  optional `setRules`, `setPool`, `waitlist` and `webhooks`; a page shows only when its adapter
+  offers it.
 - `listAgenda` reads what occupies a tenant's resources in a window, every resource at once:
   bookings, calendar events' occurrences and live holds. `listRecentChanges` reads a tenant's
   latest changes, newest first. `SlotlockDashboardResources` takes both as optional `agenda` and
