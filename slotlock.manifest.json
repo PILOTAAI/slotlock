@@ -3,7 +3,7 @@
   "schemaVersion": "1.0",
   "name": "Slotlock",
   "package": "slotlock",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Resource-first, deterministic calendar and availability engine for AI agents.",
   "intervalSemantics": {
     "boundary": "[)",
