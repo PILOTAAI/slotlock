@@ -48,6 +48,49 @@ describe.skipIf(!url)('holds and the bookings they become (real Postgres)', () =
     return hold.hold;
   }
 
+  describe("a hold's expiry inside a caller's transaction", () => {
+    // A store made from the caller's transaction runs in savepoints of it, where now() is the
+    // transaction's start: a hold that expired while the transaction ran still looked live, and
+    // was confirmed after its expiry.
+    it('is judged at the statement, not at the start of the transaction', async () => {
+      const { tenantRef, resourceId } = await freshTenant();
+      const hold = await store.acquireHold({
+        resourceId,
+        start: d('2027-06-20T09:00:00Z'),
+        end: d('2027-06-20T10:00:00Z'),
+        ttlMs: 1_000,
+      });
+      if (!hold.ok) throw new Error(hold.code);
+      const confirmed = await sql.begin(async (tx) => {
+        // The transaction starts while the hold is live, then runs past its expiry.
+        await tx`SELECT now()`;
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
+        return createSlotlockStore(tx).confirmHold(hold.hold.id, { tenantRef });
+      });
+      expect(confirmed).toEqual({ ok: false, code: 'hold_expired' });
+    });
+
+    it('starts its time to live at the statement too', async () => {
+      const { resourceId } = await freshTenant();
+      const acquired = await sql.begin(async (tx) => {
+        await tx`SELECT now()`;
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        const [row] = await tx<{ at: Date }[]>`SELECT clock_timestamp() AS at`;
+        const at = row?.at as Date;
+        const result = await createSlotlockStore(tx).acquireHold({
+          resourceId,
+          start: d('2027-06-21T09:00:00Z'),
+          end: d('2027-06-21T10:00:00Z'),
+          ttlMs: 60_000,
+        });
+        return { at, result };
+      });
+      if (!acquired.result.ok) throw new Error(acquired.result.code);
+      // A full 60 s from when it was asked for, not from the transaction's start a second earlier.
+      expect(acquired.result.hold.expiresAt.getTime() - acquired.at.getTime()).toBeGreaterThanOrEqual(59_900);
+    });
+  });
+
   describe('a confirmed hold is a booking', () => {
     it('carries its tenant and its own id as reference, at revision 1', async () => {
       const { tenantRef, resourceId } = await freshTenant();
