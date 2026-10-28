@@ -55,6 +55,7 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_join_waitlist", new Operation("POST", "/v1/waitlist", List.of(), List.of())),
           Map.entry("slotlock_leave_waitlist", new Operation("DELETE", "/v1/waitlist/{entry_id}", List.of("entry_id"), List.of())),
           Map.entry("slotlock_record_coverage", new Operation("PUT", "/v1/resources/{resource_id}/coverage/{source}", List.of("resource_id", "source"), List.of())),
+          Map.entry("slotlock_delete_coverage", new Operation("DELETE", "/v1/resources/{resource_id}/coverage/{source}", List.of("resource_id", "source"), List.of())),
           Map.entry("slotlock_get_coverage", new Operation("GET", "/v1/resources/{resource_id}/coverage", List.of("resource_id"), List.of())),
           Map.entry("slotlock_record_coverage_failure", new Operation("POST", "/v1/resources/{resource_id}/coverage/{source}/failure", List.of("resource_id", "source"), List.of())),
           Map.entry("slotlock_list_tenant_events", new Operation("GET", "/v1/tenant/events", List.of(), List.of("resource_id", "start", "end", "limit", "cursor"))),
@@ -1186,6 +1187,23 @@ public abstract class SlotlockOperations {
     values.put("end", end);
     values.put("revision", revision);
     return call("slotlock_record_coverage", values);
+  }
+
+  /**
+   * Retire a source. Forget a source's coverage of the resource, for a calendar sync that is
+   * disconnected or replaced: free/busy and a resource whose booking rules require certainty stop
+   * waiting on it. 404 coverage_not_found for a source with no coverage of the resource.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param source {@code source}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> deleteCoverage(String resourceId, String source) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("resource_id", resourceId);
+    values.put("source", source);
+    return call("slotlock_delete_coverage", values);
   }
 
   /**

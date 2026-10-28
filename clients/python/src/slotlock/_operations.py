@@ -309,6 +309,13 @@ OPERATIONS: dict[str, Operation] = {
         ("resource_id", "source"),
         (),
     ),
+    "slotlock_delete_coverage": Operation(
+        "slotlock_delete_coverage",
+        "DELETE",
+        "/v1/resources/{resource_id}/coverage/{source}",
+        ("resource_id", "source"),
+        (),
+    ),
     "slotlock_get_coverage": Operation(
         "slotlock_get_coverage",
         "GET",
@@ -1227,6 +1234,16 @@ class Operations(Transport):
             "revision": revision,
         }
         return self.call("slotlock_record_coverage", values)
+
+    def delete_coverage(self, resource_id: str, source: str) -> dict[str, Any]:
+        """Retire a source.
+
+        Forget a source's coverage of the resource, for a calendar sync that is disconnected or
+        replaced: free/busy and a resource whose booking rules require certainty stop waiting on
+        it. 404 coverage_not_found for a source with no coverage of the resource.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id, "source": source}
+        return self.call("slotlock_delete_coverage", values)
 
     def get_coverage(self, resource_id: str) -> dict[str, Any]:
         """A resource's coverage and its health.

@@ -31,10 +31,21 @@ export interface SlotlockBookingRules {
    * rule is set are released.
    */
   checkInMinutes?: number;
+  /**
+   * A booking lies in time every calendar sync recording coverage for the resource has read within
+   * the last day (`recordCalendarCoverage`): time a stale or failing sync leaves unproven is
+   * refused (`uncertain`), not booked over what it may hide. A resource no sync covers is certain.
+   */
+  requireCertain?: boolean;
 }
 
 /** Which rule a write broke, as its refusal names it. */
-export type SlotlockBookingRule = 'min_notice' | 'max_advance' | 'slot_step' | 'outside_hours';
+export type SlotlockBookingRule =
+  | 'min_notice'
+  | 'max_advance'
+  | 'slot_step'
+  | 'outside_hours'
+  | 'uncertain';
 
 const MINUTE_MS = 60_000;
 const DAY_MINUTES = 24 * 60;
@@ -57,7 +68,7 @@ export function parseBookingRules(value: unknown): SlotlockBookingRules {
   const input = value as Record<string, unknown>;
   const rules: SlotlockBookingRules = {};
   for (const key of Object.keys(input)) {
-    if (!(key in LIMITS) && key !== 'enforceHours') {
+    if (!(key in LIMITS) && key !== 'enforceHours' && key !== 'requireCertain') {
       throw new TypeError(`Slotlock booking rules have no ${key}`);
     }
   }
@@ -74,6 +85,12 @@ export function parseBookingRules(value: unknown): SlotlockBookingRules {
       throw new TypeError('Slotlock booking rule enforceHours must be true or false');
     }
     rules.enforceHours = input.enforceHours;
+  }
+  if (input.requireCertain !== undefined) {
+    if (typeof input.requireCertain !== 'boolean') {
+      throw new TypeError('Slotlock booking rule requireCertain must be true or false');
+    }
+    rules.requireCertain = input.requireCertain;
   }
   return rules;
 }
