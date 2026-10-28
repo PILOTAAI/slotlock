@@ -3,6 +3,24 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Added
+
+- Organizations in the dashboard: with `SLOTLOCK_DASHBOARD_ORGS` (GitHub organization ids), a
+  tenant is an organization, `github-org:<id>`, that its members share. Sign-in asks for `read:org`
+  and reads the person's active memberships as an owner or member (not a billing manager); a member
+  of several served organizations switches between them, and someone in none is refused. A form
+  works only for the organization it was opened in, and the key list says who made each key.
+  Removing an organization from the list signs its sessions out and stops its keys in `slotlock
+  serve`, which reads the list whether or not it serves the dashboard itself. `createSlotlockDashboard` takes
+  `organizations`.
+
+### Changed
+
+- A key created in the dashboard records the person who created it (`github:<user id>`) as
+  `createdBy`, not the tenant; for a personal tenant the two are the same.
+
 ## 0.4.1 - 2026-10-28
 
 ### Fixed

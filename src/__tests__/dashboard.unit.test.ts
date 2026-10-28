@@ -1331,3 +1331,179 @@ describe('limits found in review', () => {
     expect(callback.status).toBe(303);
   });
 });
+
+describe('organizations', () => {
+  const ACME = { id: 91, login: 'acme-fleet' };
+  const GLOBEX = { id: 92, login: 'globex' };
+  const ELSEWHERE = { id: 93, login: 'elsewhere' };
+  const MEMBERSHIPS = 'https://api.github.com/user/memberships/orgs?state=active&per_page=100';
+
+  /** GitHub with the user's active org memberships, as GET /user/memberships/orgs lists them. */
+  function githubWithOrgs(
+    orgs: { id: number; login: string; role?: string }[],
+    membershipsStatus = 200,
+  ) {
+    const base = fakeGitHub();
+    const fetch = vi.fn(async (input: string | URL | Request, init: RequestInit = {}) => {
+      const url = String(input);
+      if (url === MEMBERSHIPS) {
+        base.calls.push({ url, init });
+        if (membershipsStatus !== 200) return new Response('nope', { status: membershipsStatus });
+        return Response.json([
+          ...orgs.map(({ role = 'member', ...organization }) => ({
+            state: 'active',
+            role,
+            organization,
+          })),
+          // GitHub lists only what state=active asks for; a pending one must still never count.
+          { state: 'pending', role: 'member', organization: ELSEWHERE },
+        ]);
+      }
+      return base.fetch(input, init);
+    });
+    return { fetch, calls: base.calls };
+  }
+
+  const orgDashboard = (
+    orgs: { id: number; login: string; role?: string }[],
+    overrides: Partial<Parameters<typeof createSlotlockDashboard>[0]> = {},
+  ) => {
+    github = githubWithOrgs(orgs);
+    return dashboard({
+      fetch: github.fetch,
+      organizations: [String(ACME.id), String(GLOBEX.id), String(ELSEWHERE.id)],
+      ...overrides,
+    });
+  };
+
+  it('asks GitHub for read:org only when the server serves organizations', async () => {
+    expect((await signIn(dashboard())).location.searchParams.has('scope')).toBe(false);
+    expect((await signIn(orgDashboard([ACME]))).location.searchParams.get('scope')).toBe('read:org');
+  });
+
+  it("puts a member's keys in the organization's tenant, recording who made each", async () => {
+    const target = orgDashboard([ACME]);
+    const { session } = await signIn(target);
+    const page = await (await get(target, '/base/dashboard', session)).text();
+    expect(page).toContain('acme-fleet');
+    await post(
+      target,
+      '/base/dashboard/keys',
+      { csrf: await csrf(target, session), name: 'Fleet agent', access: 'read', expires: '30' },
+      session,
+    );
+    expect(keys.store.create).toHaveBeenCalledWith(
+      expect.objectContaining({ tenantRef: 'github-org:91', createdBy: 'github:4242' }),
+    );
+    // The membership was read with the person's own token.
+    const asked = github.calls.find(({ url }) => url === MEMBERSHIPS);
+    expect(new Headers(asked?.init.headers).get('authorization')).toBe('Bearer gho_fake');
+  });
+
+  it('refuses someone in none of the served organizations, or whose memberships cannot be read', async () => {
+    const outsider = await signIn(orgDashboard([{ id: 77, login: 'unrelated' }]));
+    expect(outsider.callback.status).toBe(403);
+    expect(outsider.session).toBeUndefined();
+    expect(await outsider.callback.text()).toContain('not a member of an organization');
+
+    github = githubWithOrgs([ACME], 500);
+    const failed = await signIn(
+      dashboard({ fetch: github.fetch, organizations: [String(ACME.id)] }),
+    );
+    expect(failed.callback.status).toBe(502);
+    expect(failed.session).toBeUndefined();
+  });
+
+  it('lets a member of two served organizations switch, and only between them', async () => {
+    const target = orgDashboard([ACME, GLOBEX]);
+    const { session } = await signIn(target);
+    const page = await (await get(target, '/base/dashboard', session)).text();
+    expect(page).toContain('globex');
+    const token = await csrf(target, session);
+
+    const switched = await post(target, '/base/dashboard/organization', { csrf: token, organization: String(GLOBEX.id) }, session);
+    expect(switched.status).toBe(303);
+    const moved = cookie(switched, '__Host-slotlock-session')?.pair as string;
+    await post(
+      target,
+      '/base/dashboard/keys',
+      { csrf: await csrf(target, moved), name: 'Globex agent', access: 'read', expires: '30' },
+      moved,
+    );
+    expect(keys.store.create).toHaveBeenLastCalledWith(expect.objectContaining({ tenantRef: 'github-org:92' }));
+
+    // An organization the server serves but the person is not in, or one it does not serve.
+    for (const organization of [String(ELSEWHERE.id), '55', 'x']) {
+      const refused = await post(target, '/base/dashboard/organization', { csrf: await csrf(target, moved), organization }, moved);
+      expect(refused.status).toBe(400);
+      expect(cookie(refused, '__Host-slotlock-session')).toBeUndefined();
+    }
+  });
+
+  it('counts owners and members, never billing managers', async () => {
+    const billing = await signIn(orgDashboard([{ ...ACME, role: 'billing_manager' }]));
+    expect(billing.callback.status).toBe(403);
+    expect(billing.session).toBeUndefined();
+    const owner = await signIn(orgDashboard([{ ...ACME, role: 'admin' }]));
+    expect(owner.callback.status).toBe(303);
+  });
+
+  it('refuses a form from a page of the organization the person switched away from', async () => {
+    const target = orgDashboard([ACME, GLOBEX]);
+    const { session } = await signIn(target);
+    // Opened while acting for acme-fleet: the create-key form's single-use value.
+    const acmePage = await (await get(target, '/base/dashboard', session)).text();
+    const stale = /action="\/base\/dashboard\/keys">\s*<input type="hidden" name="csrf" value="[^"]+">\s*<input type="hidden" name="once" value="([^"]+)"/.exec(acmePage)?.[1] as string;
+    expect(stale).toBeDefined();
+    const token = await csrf(target, session);
+    const switched = await post(target, '/base/dashboard/organization', { csrf: token, organization: String(GLOBEX.id) }, session);
+    const moved = cookie(switched, '__Host-slotlock-session')?.pair as string;
+    const refused = await post(
+      target,
+      '/base/dashboard/keys',
+      { csrf: token, once: stale, name: 'Acme agent', access: 'full', expires: 'never' },
+      moved,
+    );
+    expect(refused.status).toBe(409);
+    expect(await refused.text()).toContain('another organization');
+    expect(keys.store.create).not.toHaveBeenCalled();
+  });
+
+  it('names who made each key, and the organization a new key is for', async () => {
+    const target = orgDashboard([ACME]);
+    const { session } = await signIn(target);
+    const created = await post(
+      target,
+      '/base/dashboard/keys',
+      { csrf: await csrf(target, session), name: 'Fleet agent', access: 'read', expires: '30' },
+      session,
+    );
+    expect(await created.text()).toContain('For the organization <strong>acme-fleet</strong>');
+    const [row] = [...keys.rows.values()];
+    keys.rows.set('other', { ...(row as NonNullable<typeof row>), id: randomUUID(), createdBy: 'github:777' });
+    const page = await (await get(target, '/base/dashboard', session)).text();
+    expect(page).toContain('<td data-label="Created by">You</td>');
+    expect(page).toContain('<td data-label="Created by">GitHub user 777</td>');
+  });
+
+  it('offers only organizations the server still serves', async () => {
+    const { session } = await signIn(orgDashboard([ACME, GLOBEX]));
+    const narrowed = dashboard({ fetch: github.fetch, organizations: [String(ACME.id)] });
+    const page = await (await get(narrowed, '/base/dashboard', session)).text();
+    expect(page).not.toContain('globex');
+    const refused = await post(
+      narrowed,
+      '/base/dashboard/organization',
+      { csrf: await csrf(narrowed, session), organization: String(GLOBEX.id) },
+      session,
+    );
+    expect(refused.status).toBe(400);
+  });
+
+  it("signs out a session whose organization the server no longer serves", async () => {
+    const { session } = await signIn(orgDashboard([ACME, GLOBEX]));
+    const narrowed = dashboard({ fetch: github.fetch, organizations: [String(GLOBEX.id)] });
+    const page = await get(narrowed, '/base/dashboard', session);
+    expect(await page.text()).toContain('Sign in with GitHub');
+  });
+});
