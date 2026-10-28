@@ -17,7 +17,8 @@ import {
   createSlotlockMemoryDashboardState,
 } from '../dashboard.js';
 import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from '../ddl.js';
-import type { SlotlockResource, WeeklyAvailabilityRule } from '../types.js';
+import type { SlotlockChange } from '../event-feed.js';
+import type { SlotlockAgendaEntry, SlotlockResource, WeeklyAvailabilityRule } from '../types.js';
 
 const PUBLIC_URL = 'https://slotlock.example.com/base';
 const ORIGIN = 'https://slotlock.example.com';
@@ -182,7 +183,7 @@ async function post(
 ) {
   const sent = { ...fields };
   if (once === 'fresh' && !('once' in sent) && !path.endsWith('/sign-out') && cookie) {
-    const page = await (await get(target, '/base/dashboard', cookie)).text();
+    const page = await (await get(target, '/base/dashboard/keys', cookie)).text();
     const value = /name="once" value="([^"]+)"/.exec(page)?.[1];
     if (value !== undefined) sent.once = value;
   }
@@ -341,7 +342,7 @@ describe('GitHub sign-in', () => {
       'user-agent': 'slotlock-dashboard',
     });
 
-    const page = await (await get(dashboard(), '/base/dashboard', session)).text();
+    const page = await (await get(dashboard(), '/base/dashboard/settings', session)).text();
     expect(page).toContain('@octocat');
     expect(page).toContain('Mon–Fri: 09:00–17:00');
     expect(page).toContain('https://slotlock.example.com/base/mcp');
@@ -486,7 +487,7 @@ describe('API keys in the dashboard', () => {
     expect(html.split(row?.key as string)).toHaveLength(3); // the field and the client command
     expect(html).toContain('will not be shown again');
 
-    const listed = await (await get(target, '/base/dashboard', session)).text();
+    const listed = await (await get(target, '/base/dashboard/keys', session)).text();
     expect(listed).toContain(row?.prefix as string);
     expect(listed).not.toContain(row?.key as string);
   });
@@ -509,7 +510,7 @@ describe('API keys in the dashboard', () => {
   it('creates a full key, which the application API takes, and lists it as Full', async () => {
     const target = dashboard();
     const { session } = await signIn(target);
-    const form = await (await get(target, '/base/dashboard', session)).text();
+    const form = await (await get(target, '/base/dashboard/keys', session)).text();
     expect(form).toContain('<option value="full">Full, with the application API</option>');
     await post(
       target,
@@ -520,7 +521,7 @@ describe('API keys in the dashboard', () => {
     expect(keys.store.create).toHaveBeenCalledWith(
       expect.objectContaining({ scopes: ['read', 'write', 'admin'] }),
     );
-    const listed = await (await get(target, '/base/dashboard', session)).text();
+    const listed = await (await get(target, '/base/dashboard/keys', session)).text();
     expect(listed).toContain('<td data-label="Access">Full</td>');
   });
 
@@ -608,7 +609,7 @@ describe('API keys in the dashboard', () => {
       { csrf: token, name: '<img src=x onerror=alert(1)>', access: 'read', expires: 'never' },
       session,
     );
-    const html = await (await get(target, '/base/dashboard', session)).text();
+    const html = await (await get(target, '/base/dashboard/keys', session)).text();
     expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
     expect(html).not.toContain('<img src=x');
   });
@@ -674,7 +675,7 @@ describe('resources in the dashboard', () => {
     );
     expect(added.status).toBe(303);
     expect(resources.store.add).toHaveBeenCalledWith('github:4242', 'vehicle-42', 'Europe/London');
-    expect(await (await get(target, '/base/dashboard', session)).text()).toContain('vehicle-42');
+    expect(await (await get(target, '/base/dashboard/resources', session)).text()).toContain('vehicle-42');
 
     const zone = await post(
       target,
@@ -757,7 +758,7 @@ describe('bookable hours in the dashboard', () => {
     const custom = own('car-custom', [weekdays]);
     const target = dashboard();
     const { session } = await signIn(target);
-    const html = await (await get(target, '/base/dashboard', session)).text();
+    const html = await (await get(target, '/base/dashboard/resources', session)).text();
     expect(html).toContain('Server&#39;s hours');
     expect(html).toContain('Closed');
     expect(html).toContain('Mon–Fri 09:00–17:00');
@@ -781,12 +782,13 @@ describe('bookable hours in the dashboard', () => {
     ]);
     const target = dashboard();
     const { session } = await signIn(target);
-    const html = await (await get(target, '/base/dashboard', session)).text();
+    const html = await (await get(target, '/base/dashboard/resources', session)).text();
     expect(html).toContain(
       'Mon–Fri 08:00–12:00, 13:00–18:00; Sat 22:00–08:00 next day; Sun all day',
     );
     expect(html).toContain('Mon, Wed 23:00–00:20 next day; Fri from 09:00 for 2 d 2 h 30 min');
-    expect(html).toContain('Mon–Fri: 09:00–17:00');
+    const settings = await (await get(target, '/base/dashboard/settings', session)).text();
+    expect(settings).toContain('Mon–Fri: 09:00–17:00');
     expect(html).not.toMatch(/\d\.\d+ h/);
   });
 
@@ -1286,7 +1288,7 @@ describe('limits found in review', () => {
   it('does not run a form twice when the browser sends it again', async () => {
     const target = dashboard();
     const { session } = await signIn(target);
-    const html = await (await get(target, '/base/dashboard', session)).text();
+    const html = await (await get(target, '/base/dashboard/keys', session)).text();
     const token = /name="csrf" value="([^"]+)"/.exec(html)?.[1] as string;
     const once =
       /action="\/base\/dashboard\/keys">\s*<input type="hidden" name="csrf" value="[^"]+">\s*<input type="hidden" name="once" value="([^"]+)">/.exec(
@@ -1384,7 +1386,7 @@ describe('organizations', () => {
   it("puts a member's keys in the organization's tenant, recording who made each", async () => {
     const target = orgDashboard([ACME]);
     const { session } = await signIn(target);
-    const page = await (await get(target, '/base/dashboard', session)).text();
+    const page = await (await get(target, '/base/dashboard/keys', session)).text();
     expect(page).toContain('acme-fleet');
     await post(
       target,
@@ -1452,7 +1454,7 @@ describe('organizations', () => {
     const target = orgDashboard([ACME, GLOBEX]);
     const { session } = await signIn(target);
     // Opened while acting for acme-fleet: the create-key form's single-use value.
-    const acmePage = await (await get(target, '/base/dashboard', session)).text();
+    const acmePage = await (await get(target, '/base/dashboard/keys', session)).text();
     const stale = /action="\/base\/dashboard\/keys">\s*<input type="hidden" name="csrf" value="[^"]+">\s*<input type="hidden" name="once" value="([^"]+)"/.exec(acmePage)?.[1] as string;
     expect(stale).toBeDefined();
     const token = await csrf(target, session);
@@ -1481,7 +1483,7 @@ describe('organizations', () => {
     expect(await created.text()).toContain('For the organization <strong>acme-fleet</strong>');
     const [row] = [...keys.rows.values()];
     keys.rows.set('other', { ...(row as NonNullable<typeof row>), id: randomUUID(), createdBy: 'github:777' });
-    const page = await (await get(target, '/base/dashboard', session)).text();
+    const page = await (await get(target, '/base/dashboard/keys', session)).text();
     expect(page).toContain('<td data-label="Created by">You</td>');
     expect(page).toContain('<td data-label="Created by">GitHub user 777</td>');
   });
@@ -1504,6 +1506,150 @@ describe('organizations', () => {
     const { session } = await signIn(orgDashboard([ACME, GLOBEX]));
     const narrowed = dashboard({ fetch: github.fetch, organizations: [String(GLOBEX.id)] });
     const page = await get(narrowed, '/base/dashboard', session);
-    expect(await page.text()).toContain('Sign in with GitHub');
+    expect(await page.text()).toContain('Continue with GitHub');
+  });
+});
+
+describe('the overview', () => {
+  const at = (iso: string) => new Date(iso);
+
+  function withFeed(agenda: SlotlockAgendaEntry[], changes: SlotlockChange[]) {
+    const store = {
+      ...resources.store,
+      agenda: vi.fn(async () => agenda),
+      recentChanges: vi.fn(async () => changes),
+    };
+    return { target: dashboard({ resources: store }), store };
+  }
+
+  it("shows the tenant's coming week by day and what its agents did, from the store alone", async () => {
+    resources.rows.push({
+      id: '11111111-1111-4111-8111-111111111111',
+      externalRef: 'vehicle-42',
+      tenantRef: 'github:4242',
+      timezone: 'Europe/London',
+    });
+    const created = await keys.store.create({
+      tenantRef: 'github:4242',
+      name: 'Booking agent',
+      scopes: ['read', 'write'],
+    });
+    const resourceId = '11111111-1111-4111-8111-111111111111';
+    const { target, store } = withFeed(
+      [
+        {
+          id: randomUUID(),
+          resourceId,
+          start: at('2026-10-10T14:00:00Z'),
+          end: at('2026-10-10T16:00:00Z'),
+          kind: 'booking',
+          reference: 'rental-<7>',
+          summary: null,
+          expiresAt: null,
+          source: 'agent',
+        },
+        {
+          id: randomUUID(),
+          resourceId,
+          start: at('2026-10-11T09:00:00Z'),
+          end: at('2026-10-11T10:00:00Z'),
+          kind: 'hold',
+          reference: null,
+          summary: null,
+          expiresAt: at('2026-10-10T12:15:00Z'),
+          source: null,
+        },
+      ],
+      [
+        {
+          id: 'msg_2',
+          type: 'reservation.cancelled',
+          resourceId,
+          subject: 'rental-6',
+          data: {},
+          occurredAt: at('2026-10-10T11:55:00Z'),
+          actor: `api_key:${created.apiKey.id}`,
+          position: 'p2',
+        },
+        {
+          id: 'msg_1',
+          type: 'hold.expired',
+          resourceId: null,
+          subject: 'h',
+          data: {},
+          occurredAt: at('2026-10-08T12:00:00Z'),
+          actor: null,
+          position: 'p1',
+        },
+      ],
+    );
+    const { session } = await signIn(target);
+    const html = await (await get(target, '/base/dashboard', session)).text();
+    expect(store.agenda).toHaveBeenCalledWith(
+      'github:4242',
+      { start: new Date(now), end: new Date(now + 7 * 86_400_000) },
+      expect.any(Number),
+    );
+    expect(store.recentChanges).toHaveBeenCalledWith('github:4242', expect.any(Number));
+    // Times in the resource's own zone (BST, UTC+1), grouped under Today and Tomorrow.
+    expect(html).toMatch(/<h3 class="day">Today<\/h3>[\s\S]*15:00[\s\S]*vehicle-42<\/span><span class="meta">rental-&lt;7&gt; · agent/);
+    expect(html).toMatch(/<h3 class="day">Tomorrow<\/h3>[\s\S]*10:00[\s\S]*Held until 13:15/);
+    expect(html).toContain('<span class="stat-value">1</span>');
+    // The activity names the key, not its id, and says when.
+    expect(html).toMatch(/Booking cancelled <span class="on">on<\/span> vehicle-42[\s\S]*Booking agent · <time[^>]*>5 min ago/);
+    expect(html).toMatch(/Hold expired<\/span><span class="meta">Slotlock · <time[^>]*>2 d ago/);
+    expect(html).not.toContain(created.apiKey.id);
+  });
+
+  it('walks a new tenant through its first steps, and hides them once done', async () => {
+    const empty = withFeed([], []);
+    const { session } = await signIn(empty.target);
+    const first = await (await get(empty.target, '/base/dashboard', session)).text();
+    expect(first).toContain('Get started');
+    expect(first).toContain('Nothing booked in the next 7 days.');
+    expect(first).toContain('No activity yet.');
+    expect(first).toContain('href="/base/dashboard/resources">Add what your agents book</a>');
+  });
+
+  it('leaves out the agenda and activity for resources without them', async () => {
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const html = await (await get(target, '/base/dashboard', session)).text();
+    expect(html).not.toContain('Upcoming');
+    expect(html).not.toContain('Agent activity');
+    expect(html).toContain('Active keys');
+  });
+
+  it('marks the current page in the navigation, and sends a visitor to sign in', async () => {
+    const target = dashboard();
+    const { session } = await signIn(target);
+    for (const [path, label] of [
+      ['', 'Overview'],
+      ['/resources', 'Resources'],
+      ['/keys', 'API keys'],
+      ['/settings', 'Settings'],
+    ] as const) {
+      const html = await (await get(target, `/base/dashboard${path}`, session)).text();
+      expect(html).toContain(`<a href="/base/dashboard${path}" aria-current="page">`);
+      expect(html).toContain(`<span>${label}</span>`);
+      if (path !== '') {
+        const visitor = await get(target, `/base/dashboard${path}`);
+        expect(visitor.status).toBe(303);
+        expect(visitor.headers.get('location')).toBe('/base/dashboard');
+      }
+    }
+  });
+
+  it('takes the deployment its name, and refuses one that is not a name', async () => {
+    const target = dashboard({ name: 'Acme Fleet Calendar' });
+    expect(await (await get(target, '/base/dashboard')).text()).toContain(
+      '<title>Sign in · Acme Fleet Calendar</title>',
+    );
+    const { session } = await signIn(target);
+    const html = await (await get(target, '/base/dashboard', session)).text();
+    expect(html).toContain('<span class="name">Acme Fleet Calendar</span>');
+    for (const name of ['', ' padded', '<b>x</b>', 'x'.repeat(61), 'line\nbreak']) {
+      expect(() => dashboard({ name })).toThrow(/dashboard name/);
+    }
   });
 });

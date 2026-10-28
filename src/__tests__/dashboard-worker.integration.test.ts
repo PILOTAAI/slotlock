@@ -110,9 +110,9 @@ describe.skipIf(!url)('the dashboard Worker (real Postgres)', () => {
       ?.split('; ')[0] as string;
     expect(session).toBeDefined();
 
-    const page = await (await get('/dashboard', session)).text();
-    expect(page).toContain(`<code>${SERVICE}/mcp</code>`);
-    expect(page).toContain(`<code>${SERVICE}/a2a</code>`);
+    const page = await (await get('/dashboard/keys', session)).text();
+    expect(page).toContain(`<code id="mcp-url">${SERVICE}/mcp</code>`);
+    expect(page).toContain(`<code id="a2a-url">${SERVICE}/a2a</code>`);
     expect(page).not.toContain(`${APP}/mcp`);
     const csrf = /name="csrf" value="([^"]+)"/.exec(page)?.[1] as string;
     const once = /name="once" value="([^"]+)"/.exec(page)?.[1] as string;

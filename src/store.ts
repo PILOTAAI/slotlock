@@ -67,6 +67,7 @@ import type {
   ExternalReservationResult,
   Interval,
   SlotlockCalendarEvent,
+  SlotlockAgendaEntry,
   SlotlockHold,
   SlotlockReservation,
   SlotlockResource,
@@ -869,6 +870,19 @@ function toReservation(row: ReservationRow): SlotlockReservation {
     revision: Number(row.revision),
     source: row.source,
   };
+}
+
+interface AgendaRow {
+  id: string;
+  resource_id: string;
+  starts_at: Date;
+  ends_at: Date;
+  status: 'held' | 'confirmed';
+  external_ref: string | null;
+  expires_at: Date | null;
+  source: string | null;
+  calendar_event_id: string | null;
+  summary: string | null;
 }
 
 interface HoldRow {
@@ -2198,6 +2212,13 @@ export interface SlotlockStore extends SlotlockEventFeed {
     limit?: number;
     after?: { start: Date; id: string };
   }): Promise<SlotlockHold[]>;
+  /**
+   * What occupies the tenant's resources in `window` (at most 367 days), every resource at once, by
+   * start then id: bookings, calendar events' occurrences and live holds, up to `limit` (1-1000,
+   * default 100). An agenda for people to read; listReservations, listCalendarEvents and listHolds
+   * page through each.
+   */
+  listAgenda(params: { tenantRef: string; window: Interval; limit?: number }): Promise<SlotlockAgendaEntry[]>;
   /**
    * The tenant's booking with this reference as it now is (its current revision), or null: none,
    * cancelled, or a calendar event's occupation, which is not a booking.
@@ -4244,6 +4265,39 @@ function buildSlotlockStore(
          ORDER BY hold.starts_at, hold.id
          LIMIT ${limit}`;
       return rows.map(toHold);
+    },
+
+    async listAgenda(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const window = calendarWindow(params.window);
+      const limit = pageLimit(params.limit);
+      // A confirmed row without a tenant is a parity shadow, not a booking.
+      const rows = await sql<AgendaRow[]>`
+        SELECT entry.id, entry.resource_id, entry.starts_at, entry.ends_at, entry.status,
+               entry.external_ref, entry.expires_at, entry.source, entry.calendar_event_id,
+               event.summary
+          FROM slotlock.reservations entry
+          JOIN slotlock.resources resource ON resource.id = entry.resource_id
+          LEFT JOIN slotlock.calendar_events event ON event.id = entry.calendar_event_id
+         WHERE resource.tenant_ref = ${params.tenantRef}
+           AND entry.starts_at < ${window.end} AND entry.ends_at > ${window.start}
+           AND ((entry.status = 'held' AND entry.expires_at > statement_timestamp())
+                OR (entry.status = 'confirmed' AND entry.tenant_ref = ${params.tenantRef}))
+         ORDER BY entry.starts_at, entry.id
+         LIMIT ${limit}`;
+      return rows.map((row) => ({
+        id: row.id,
+        resourceId: row.resource_id,
+        start: row.starts_at,
+        end: row.ends_at,
+        kind: row.status === 'held' ? 'hold' : row.calendar_event_id ? 'event' : 'booking',
+        reference: row.status === 'held' || row.calendar_event_id ? null : row.external_ref,
+        summary: row.summary,
+        expiresAt: row.status === 'held' ? row.expires_at : null,
+        source: row.source,
+      }));
     },
 
     async getReservation(params) {

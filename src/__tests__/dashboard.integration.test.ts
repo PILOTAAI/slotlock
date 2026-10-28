@@ -70,7 +70,7 @@ describe.skipIf(!url)('dashboard (real Postgres)', () => {
     const post = async (path: string, fields: Record<string, string>, cookie: string) => {
       const sent = { ...fields };
       if (!('once' in sent) && !path.endsWith('/sign-out')) {
-        const page = await (await get('/dashboard', cookie)).text();
+        const page = await (await get('/dashboard/keys', cookie)).text();
         const once = /name="once" value="([^"]+)"/.exec(page)?.[1];
         if (once !== undefined) sent.once = once;
       }
@@ -96,7 +96,7 @@ describe.skipIf(!url)('dashboard (real Postgres)', () => {
       .find((value) => value.startsWith('__Host-slotlock-session='))
       ?.split('; ')[0] as string;
     expect(session).toBeDefined();
-    const csrf = /name="csrf" value="([^"]+)"/.exec(await (await get('/dashboard', session)).text())?.[1] as string;
+    const csrf = /name="csrf" value="([^"]+)"/.exec(await (await get('/dashboard/keys', session)).text())?.[1] as string;
 
     const created = await post(
       '/dashboard/keys',
@@ -152,7 +152,7 @@ describe.skipIf(!url)('dashboard (real Postgres)', () => {
       (await post('/dashboard/hours', { csrf, resource: 'all', mode: 'closed' }, session)).status,
     ).toBe(303);
     expect((await read())?.availabilityRules).toEqual([]);
-    expect(await (await get('/dashboard', session)).text()).toContain('Closed <a href');
+    expect(await (await get('/dashboard/resources', session)).text()).toContain('Closed <a href');
     expect(
       (await post('/dashboard/hours', { csrf, resource: van, mode: 'server' }, session)).status,
     ).toBe(303);

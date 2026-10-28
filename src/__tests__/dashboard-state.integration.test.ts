@@ -69,7 +69,7 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
   ) => {
     const sent = { ...fields };
     if (!('once' in sent) && !path.endsWith('/sign-out')) {
-      const page = await (await get(target, '/dashboard', cookie)).text();
+      const page = await (await get(target, '/dashboard/keys', cookie)).text();
       const once = /name="once" value="([^"]+)"/.exec(page)?.[1];
       if (once !== undefined) sent.once = once;
     }
@@ -279,8 +279,8 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
     const session = await signIn(ahead);
     expect(session).toMatch(/^__Host-slotlock-session=/);
     // Its 12 hours end 25 hours from now by the database's clock: no server takes it.
-    expect(await (await get(ahead, '/dashboard', session)).text()).not.toContain('@two-servers');
-    expect(await (await get(server(), '/dashboard', session)).text()).not.toContain('@two-servers');
+    expect(await (await get(ahead, '/dashboard/keys', session)).text()).not.toContain('@two-servers');
+    expect(await (await get(server(), '/dashboard/keys', session)).text()).not.toContain('@two-servers');
   });
 
   it("writes nothing for a made-up form value, another session's, or a route that does not exist", async () => {
@@ -288,7 +288,7 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
     const session = await signIn(target);
     const other = await signIn(target);
     const page = async (cookie: string) => {
-      const html = await (await get(target, '/dashboard', cookie)).text();
+      const html = await (await get(target, '/dashboard/keys', cookie)).text();
       return {
         csrf: /name="csrf" value="([^"]+)"/.exec(html)?.[1] as string,
         once: /name="once" value="([^"]+)"/.exec(html)?.[1] as string,
@@ -316,7 +316,7 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
     const [first, second] = [server(), server()];
     const session = await signIn(first);
     const pages = await Promise.all(
-      Array.from({ length: 10 }, async () => (await get(first, '/dashboard', session)).text()),
+      Array.from({ length: 10 }, async () => (await get(first, '/dashboard/keys', session)).text()),
     );
     const csrf = /name="csrf" value="([^"]+)"/.exec(pages[0] as string)?.[1] as string;
     const onces = pages.flatMap((html) => [...html.matchAll(/name="once" value="([^"]+)"/g)].map((m) => m[1] as string));
@@ -351,7 +351,7 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
       SELECT 'form', sha256(convert_to(${randomUUID()} || n::text, 'UTF8')), ${ownerHash}, now() + interval '1 hour'
         FROM generate_series(1, ${SLOTLOCK_DASHBOARD_FORM_LIMIT}) AS n`;
     try {
-      const html = await (await get(second, '/dashboard', session)).text();
+      const html = await (await get(second, '/dashboard/keys', session)).text();
       const csrf = /name="csrf" value="([^"]+)"/.exec(html)?.[1] as string;
       const once = /name="once" value="([^"]+)"/.exec(html)?.[1] as string;
       const refused = await post(second, '/dashboard/keys', { csrf, once, name: 'Over', access: 'read', expires: 'never' }, session);
@@ -360,7 +360,7 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
       // Signing out is never refused.
       const out = await post(first, '/dashboard/sign-out', { csrf }, session);
       expect(out.status).toBe(303);
-      expect(await (await get(second, '/dashboard', session)).text()).not.toContain('@two-servers');
+      expect(await (await get(second, '/dashboard/keys', session)).text()).not.toContain('@two-servers');
     } finally {
       await admin`DELETE FROM slotlock.dashboard_tokens WHERE owner_hash = ${ownerHash}`;
     }
@@ -381,11 +381,11 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
   it('keeps a signed-out session out on every server', async () => {
     const [first, second] = [server(), server()];
     const session = await signIn(first);
-    expect(await (await get(second, '/dashboard', session)).text()).toContain('@two-servers');
-    const csrf = /name="csrf" value="([^"]+)"/.exec(await (await get(first, '/dashboard', session)).text())?.[1] as string;
+    expect(await (await get(second, '/dashboard/keys', session)).text()).toContain('@two-servers');
+    const csrf = /name="csrf" value="([^"]+)"/.exec(await (await get(first, '/dashboard/keys', session)).text())?.[1] as string;
     await post(first, '/dashboard/sign-out', { csrf }, session);
-    expect(await (await get(second, '/dashboard', session)).text()).not.toContain('@two-servers');
-    expect(await (await get(first, '/dashboard', session)).text()).not.toContain('@two-servers');
+    expect(await (await get(second, '/dashboard/keys', session)).text()).not.toContain('@two-servers');
+    expect(await (await get(first, '/dashboard/keys', session)).text()).not.toContain('@two-servers');
   });
 
   it('refuses a transaction in place of a client, where a rollback would undo a record', async () => {
@@ -398,7 +398,7 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
   it('runs a form once, whichever server it is sent to again', async () => {
     const [first, second] = [server(), server()];
     const session = await signIn(first);
-    const html = await (await get(first, '/dashboard', session)).text();
+    const html = await (await get(first, '/dashboard/keys', session)).text();
     const csrf = /name="csrf" value="([^"]+)"/.exec(html)?.[1] as string;
     const once = /action="\/dashboard\/keys">\s*<input type="hidden" name="csrf" value="[^"]+">\s*<input type="hidden" name="once" value="([^"]+)">/.exec(html)?.[1] as string;
     const fields = { csrf, once, name: 'Shared', access: 'read', expires: 'never' };
@@ -411,7 +411,7 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
   it('holds the resource cap when adds race on two servers', async () => {
     const [first, second] = [server(), server()];
     const session = await signIn(first);
-    const csrf = /name="csrf" value="([^"]+)"/.exec(await (await get(first, '/dashboard', session)).text())?.[1] as string;
+    const csrf = /name="csrf" value="([^"]+)"/.exec(await (await get(first, '/dashboard/keys', session)).text())?.[1] as string;
     const store = createSlotlockStore(connectAsServer());
     for (let index = 0; index < SLOTLOCK_DASHBOARD_MAX_RESOURCES - 5; index += 1) {
       await store.withTenant(tenantRef, (tenant) =>

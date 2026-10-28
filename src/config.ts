@@ -124,6 +124,8 @@ export interface SlotlockServeDashboardConfig {
   allowedUsers: '*' | string[];
   /** GitHub organization ids whose members share a tenant each (SLOTLOCK_DASHBOARD_ORGS). */
   organizations?: string[];
+  /** What the deployment is called in the dashboard (SLOTLOCK_DASHBOARD_NAME). */
+  name?: string;
 }
 
 const DASHBOARD_VARIABLES = [
@@ -172,12 +174,19 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
     );
   }
   const orgs = readDashboardOrganizations(env);
+  const name = optional(env, 'SLOTLOCK_DASHBOARD_NAME')?.trim();
+  if (name !== undefined && !/^[^\u0000-\u001f\u007f<>]{1,60}$/u.test(name)) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_DASHBOARD_NAME must be 1-60 characters, without <, > or control characters',
+    );
+  }
   return {
     githubClientId,
     githubClientSecret,
     sessionSecret,
     allowedUsers: users === '*' ? '*' : [...new Set(users.split(','))],
     ...(orgs !== undefined ? { organizations: orgs } : {}),
+    ...(name !== undefined && name !== '' ? { name } : {}),
   };
 }
 

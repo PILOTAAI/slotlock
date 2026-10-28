@@ -22,6 +22,8 @@ const READS = [
   'listResources',
   'getHold',
   'listHolds',
+  'listAgenda',
+  'listRecentChanges',
   'getReservation',
   'listReservations',
   'listBusy',

@@ -106,6 +106,7 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_SESSION_SECRET',
   'SLOTLOCK_DASHBOARD_USERS',
   'SLOTLOCK_DASHBOARD_ORGS',
+  'SLOTLOCK_DASHBOARD_NAME',
   'HOST',
   'PORT',
 ] as const);
@@ -559,8 +560,9 @@ export interface SlotlockRunningServer {
 
 /**
  * Whether the dashboard's allowlists let a tenant act: a `github-org:<id>` tenant only while
- * SLOTLOCK_DASHBOARD_ORGS lists that organization, wherever the dashboard runs; otherwise every tenant when there is no dashboard or it allows
- * everyone, and a `github:<id>` tenant only while that id is listed.
+ * SLOTLOCK_DASHBOARD_ORGS lists that organization, wherever the dashboard runs; otherwise every
+ * tenant when there is no dashboard or it allows everyone, and a `github:<id>` tenant only while
+ * that id is listed.
  */
 function dashboardAllows(config: SlotlockServeConfig, tenantRef: string): boolean {
   const orgId = /^github-org:(\d+)$/.exec(tenantRef)?.[1];
@@ -812,6 +814,7 @@ export async function startSlotlockServer(
             },
             sessionSecret: config.dashboard.sessionSecret,
             allowedUsers: config.dashboard.allowedUsers,
+            ...(config.dashboard.name ? { name: config.dashboard.name } : {}),
             ...(config.dashboard.organizations
               ? { organizations: config.dashboard.organizations }
               : {}),
@@ -1388,6 +1391,7 @@ Environment:
   SLOTLOCK_SESSION_SECRET        Signs dashboard sessions, 32+ random characters (dashboard)
   SLOTLOCK_DASHBOARD_USERS       * or comma-separated GitHub user ids that may sign in (dashboard)
   SLOTLOCK_DASHBOARD_ORGS        comma-separated GitHub organization ids: each is one shared tenant
+  SLOTLOCK_DASHBOARD_NAME        What the dashboard calls this deployment (default Slotlock)
   HOST                           Listen address (default 127.0.0.1)
   PORT                           Listen port (default 8080)
 

@@ -106,6 +106,11 @@ export interface SlotlockEventFeed {
     limit?: number;
   }): Promise<ListChangesResult>;
   /**
+   * The tenant's latest changes, newest first, up to `limit` (1-100, default 20): what happened
+   * lately, for people to read. To follow the feed, read listChanges.
+   */
+  listRecentChanges(params: { tenantRef: string; limit?: number }): Promise<SlotlockChange[]>;
+  /**
    * Add a webhook endpoint for the tenant's changes from now on. `url` is https (http only for
    * `localhost`), with no credentials or fragment, at most 2,048 bytes. The secret (`whsec_…`,
    * 32 random bytes) is returned here only. At most SLOTLOCK_MAX_WEBHOOK_ENDPOINTS per tenant.
@@ -298,6 +303,23 @@ export function slotlockEventFeedMethods(sql: SlotlockSql): SlotlockEventFeed {
         changes,
         next: last?.position ?? encodePosition({ ...here, at: Date.now() }),
       };
+    },
+
+    async listRecentChanges(params) {
+      if (!isIdentity(params.tenantRef)) throw identityError();
+      const limit = params.limit ?? 20;
+      if (!(Number.isSafeInteger(limit) && limit >= 1 && limit <= 100)) {
+        throw Object.assign(new RangeError('Slotlock recent change limit must be 1-100'), {
+          code: 'invalid_limit' as const,
+        });
+      }
+      const rows = await sql<ChangeRow[]>`
+        SELECT id::text, txid::text, type, resource_id, subject, data, occurred_at, actor
+          FROM slotlock.outbox
+         WHERE tenant_ref = ${params.tenantRef}
+         ORDER BY txid DESC, id DESC
+         LIMIT ${limit}`;
+      return rows.map(toChange);
     },
 
     async createWebhookEndpoint(params) {
