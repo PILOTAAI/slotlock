@@ -7,6 +7,21 @@ versioning.
 
 ### Added
 
+- Live updates from the change feed (RFC 0002 P1-5). With `subscriptions.changes`
+  (`createSlotlockStoreChangeSource(store, sql)`, which `slotlock serve` sets), MCP resource
+  subscriptions follow each tenant's change feed instead of re-reading every 10 seconds: one reader
+  per tenant per process, shared by its subscriptions, polls the feed by cursor (one indexed query,
+  every 250 ms while changes come, `SLOTLOCK_FEED_BUSY_MS`, backing off to 1 s when quiet,
+  `SLOTLOCK_FEED_IDLE_MS`) and re-reads only the subscriptions a change touches, each at most once a
+  second, so a booking is announced within about a second. Nothing is added to the write path: no
+  trigger, no `NOTIFY`. A cursor pruned past announces every watched resource once. The re-read every
+  `pollIntervalMs` stays as the fallback and revalidates the caller (15 s with a feed), and the
+  subscription caps are unchanged. `slotlockChangeFeedHead` is where a reader starts.
+- A2A streaming: the card declares `streaming`. `SendStreamingMessage` streams any skill's reply as
+  one message, and the `slotlock_watch_resources` skill streams a watch task with a status update
+  for each change to a watched resource's free/busy, from the same feed and caps as MCP
+  subscriptions, ending `TASK_STATE_COMPLETED` or, when access is withdrawn, `TASK_STATE_FAILED`.
+  Push notifications stay unsupported: webhooks deliver a tenant's changes to a URL.
 - Benchmarks on every release (RFC 0002, P2-1): once a tag's suite passes, release.yml runs
   `scripts/bench.mjs` against a PostgreSQL 16 service container, attaches `bench.json` and
   `bench.md` to the GitHub release and rebuilds the site, whose new Benchmarks page shows the newest

@@ -2,6 +2,7 @@
 // quoted from the 2026-07-28 specification (server/resources; basic/patterns/subscriptions;
 // transports/streamable-http §Receiving Messages; server/utilities/caching), read from the
 // modelcontextprotocol repository on 2026-09-28.
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   SLOTLOCK_AGENT_SERVER_VERSION,
@@ -24,6 +25,8 @@ import {
   modernRequest,
   rpc,
 } from './helpers/modern-mcp.js';
+import type { SlotlockAgentChangeSource } from '../change-watch.js';
+import { createFakeChangeFeed } from './helpers/change-feed.js';
 
 type BackendMethod = (
   context: SlotlockAgentInvocationContext,
@@ -850,5 +853,354 @@ describe('live calendar updates (MCP 2026-07-28 subscriptions/listen)', () => {
     ]) {
       expect(() => buildServer({ subscriptions })).toThrow(/subscriptions\.\w+ is invalid/);
     }
+  });
+});
+
+describe('live calendar updates from the change feed (RFC 0002 P1-5)', () => {
+  // A re-read every minute is only the fallback: a change must arrive long before it.
+  const feedServer = (feed: ReturnType<typeof createFakeChangeFeed>, extra: object = {}) =>
+    buildServer({
+      subscriptions: {
+        pollIntervalMs: 60_000,
+        keepAliveMs: 5_000,
+        maxDurationMs: 600_000,
+        changes: feed.source,
+        ...extra,
+      },
+    });
+
+  /** Every message the stream carries from now on, as it arrives. */
+  function collect(stream: SseReader): Record<string, unknown>[] {
+    const messages: Record<string, unknown>[] = [];
+    void (async () => {
+      for (;;) {
+        const message = await stream.message();
+        if (message === null) return;
+        messages.push(message);
+      }
+    })();
+    return messages;
+  }
+  const updated = (messages: Record<string, unknown>[]) =>
+    messages
+      .filter((message) => message.method === 'notifications/resources/updated')
+      .map((message) => (message.params as { uri: string }).uri);
+
+  async function open(server: ReturnType<typeof buildServer>, uris: string[], token = 'Bearer valid') {
+    const stream = new SseReader(await server.fetch(listen({ resourceSubscriptions: uris }, token)));
+    expect(await stream.message()).toMatchObject({
+      method: 'notifications/subscriptions/acknowledged',
+    });
+    const messages = collect(stream);
+    // The reader's first read, and the one re-read that covers whatever came in between.
+    await vi.advanceTimersByTimeAsync(0);
+    return { stream, messages };
+  }
+
+  it('announces a booking change within a second, without waiting for the re-read', async () => {
+    const feed = createFakeChangeFeed();
+    const { stream, messages } = await open(feedServer(feed), [URI_A, URI_B]);
+    expect(updated(messages)).toEqual([]);
+
+    calendars.set('vehicle-b', [HANDOVER]);
+    feed.publish('tenant-a', 'vehicle-b');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(updated(messages)).toEqual([URI_B]);
+    // A change to a resource it does not watch is read from the feed and announces nothing.
+    feed.publish('tenant-a', 'vehicle-z');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(updated(messages)).toEqual([URI_B]);
+    for (const [params] of feed.source.listChanges.mock.calls) {
+      expect(params.tenantRef).toBe('tenant-a');
+    }
+    await stream.cancel();
+  });
+
+  it('announces a change on a page read before a later page failed, on the next read', async () => {
+    // As the store's own source: no wake-up, so the reader polls at most a second apart.
+    const feed = createFakeChangeFeed({ wakes: false });
+    const { stream, messages } = await open(feedServer(feed), [URI_B]);
+    // Pages of `limit`; the second page of the first read after the burst fails once.
+    const entries: { resourceId: string | null }[] = [];
+    let failSecondPage = true;
+    feed.source.listChanges.mockImplementation(async ({ after, limit = 100 }) => {
+      const from = Number(after);
+      if (failSecondPage && from === 500) {
+        failSecondPage = false;
+        throw new Error('pool timeout');
+      }
+      const page = entries.slice(from, from + limit);
+      return { ok: true, changes: page, next: String(from + page.length) };
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    calendars.set('vehicle-b', [HANDOVER]);
+    entries.push({ resourceId: 'vehicle-b' });
+    for (let index = 1; index < 600; index += 1) entries.push({ resourceId: 'vehicle-z' });
+    // Well inside the 15-second revalidation: only the feed can have announced it.
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(failSecondPage).toBe(false);
+    expect(updated(messages)).toEqual([URI_B]);
+    await stream.cancel();
+  });
+
+  it("never tells one tenant's subscriber of another tenant's change", async () => {
+    const feed = createFakeChangeFeed();
+    const server = feedServer(feed);
+    const tenantA = await open(server, [URI_A]);
+    const tenantB = await open(server, [URI_A], 'Bearer third');
+    expect(feed.listening().sort()).toEqual(['tenant-a', 'tenant-b']);
+
+    calendars.set('vehicle-a', [HANDOVER]);
+    feed.publish('tenant-a', 'vehicle-a');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(updated(tenantA.messages)).toEqual([URI_A]);
+    // Tenant b's reader was not woken and read nothing new, so its subscriber re-read nothing.
+    expect(updated(tenantB.messages)).toEqual([]);
+    const readsOf = (tenantRef: string) =>
+      getFreeBusy.mock.calls.filter(([context]) => context.principal.tenantRef === tenantRef).length;
+    const tenantBReads = readsOf('tenant-b');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(readsOf('tenant-b')).toBe(tenantBReads);
+    await tenantA.stream.cancel();
+    await tenantB.stream.cancel();
+  });
+
+  it("shares one reader among a tenant's subscriptions", async () => {
+    const feed = createFakeChangeFeed();
+    const server = feedServer(feed);
+    const first = await open(server, [URI_A]);
+    const second = await open(server, [URI_A, URI_B], 'Bearer other');
+    expect(feed.source.watch?.mock.calls.map(([tenantRef]) => tenantRef)).toEqual(['tenant-a']);
+    expect(feed.source.head).toHaveBeenCalledTimes(1);
+
+    calendars.set('vehicle-a', [HANDOVER]);
+    feed.publish('tenant-a', 'vehicle-a');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(updated(first.messages)).toEqual([URI_A]);
+    expect(updated(second.messages)).toEqual([URI_A]);
+    await first.stream.cancel();
+    await second.stream.cancel();
+  });
+
+  it('re-syncs an expired cursor by announcing every watched resource once, then reads on from now', async () => {
+    const feed = createFakeChangeFeed();
+    const { stream, messages } = await open(feedServer(feed), [URI_A, URI_B]);
+    feed.expire('tenant-a');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(updated(messages)).toEqual([URI_A, URI_B]);
+    expect(feed.source.head).toHaveBeenCalledTimes(2);
+
+    // From the new position on, only what changes.
+    calendars.set('vehicle-a', [HANDOVER]);
+    feed.publish('tenant-a', 'vehicle-a');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(updated(messages)).toEqual([URI_A, URI_B, URI_A]);
+    await stream.cancel();
+  });
+
+  it('stops the reader and its wake-up when the last subscription closes or its request aborts', async () => {
+    const feed = createFakeChangeFeed();
+    const server = feedServer(feed);
+    const first = await open(server, [URI_A]);
+    await first.stream.cancel();
+    expect(feed.stopped).toEqual(['tenant-a']);
+    expect(feed.listening()).toEqual([]);
+
+    const abort = new AbortController();
+    const aborted = new SseReader(
+      await server.fetch(
+        new Request(listen({ resourceSubscriptions: [URI_B] }), { signal: abort.signal }),
+      ),
+    );
+    await aborted.message();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(feed.listening()).toEqual(['tenant-a']);
+    abort.abort();
+    expect(feed.stopped).toEqual(['tenant-a', 'tenant-a']);
+    expect(closedEvents()).toEqual([
+      { type: 'subscription', outcome: 'closed', reason: 'client', resources: 1 },
+      { type: 'subscription', outcome: 'closed', reason: 'client', resources: 1 },
+    ]);
+    feed.source.listChanges.mockClear();
+    getFreeBusy.mockClear();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(feed.source.listChanges).not.toHaveBeenCalled();
+    expect(getFreeBusy).not.toHaveBeenCalled();
+  });
+
+  it('reads a feed with no wake-up on a short interval that backs off to one second', async () => {
+    const feed = createFakeChangeFeed({ wakes: false });
+    const { stream, messages } = await open(feedServer(feed), [URI_A]);
+    await vi.advanceTimersByTimeAsync(30_000);
+    feed.source.listChanges.mockClear();
+    await vi.advanceTimersByTimeAsync(10_000);
+    // Quiet: once a second (SLOTLOCK_FEED_IDLE_MS), one indexed query for the tenant.
+    expect(feed.source.listChanges).toHaveBeenCalledTimes(10);
+
+    calendars.set('vehicle-a', [HANDOVER]);
+    feed.publish('tenant-a', 'vehicle-a');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(updated(messages)).toEqual([URI_A]);
+    await stream.cancel();
+  });
+
+  it('still re-reads at the fallback interval when the feed fails, and reports why', async () => {
+    const onError = vi.fn();
+    const feed = createFakeChangeFeed();
+    feed.source.listChanges.mockRejectedValue(new Error('feed down'));
+    const { stream, messages } = await open(
+      buildServer({
+        onError,
+        subscriptions: { pollIntervalMs: 60_000, maxDurationMs: 600_000, changes: feed.source },
+      }),
+      [URI_A],
+    );
+    expect(onError).toHaveBeenCalledWith(new Error('feed down'), { operation: null });
+    calendars.set('vehicle-a', [HANDOVER]);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(updated(messages)).toEqual([URI_A]);
+    await stream.cancel();
+  });
+
+  it('keeps the subscription caps', async () => {
+    const feed = createFakeChangeFeed();
+    const server = feedServer(feed, { maxPerPrincipal: 1, maxPerTenant: 1, maxTotal: 2 });
+    const first = await open(server, [URI_A]);
+    // Per principal, then per tenant.
+    expect((await server.fetch(listen({ resourceSubscriptions: [URI_B] }))).status).toBe(429);
+    expect(
+      (await server.fetch(listen({ resourceSubscriptions: [URI_B] }, 'Bearer other'))).status,
+    ).toBe(429);
+    const second = await open(server, [URI_B], 'Bearer third');
+    expect(feed.listening().sort()).toEqual(['tenant-a', 'tenant-b']);
+    await first.stream.cancel();
+    await second.stream.cancel();
+    expect(feed.listening()).toEqual([]);
+  });
+
+  it('reads the feed at most every quarter second and re-reads a subscription at most once a second, however fast changes come', async () => {
+    const feed = createFakeChangeFeed();
+    const { stream, messages } = await open(feedServer(feed), [URI_A]);
+    await vi.advanceTimersByTimeAsync(5_000);
+    feed.source.listChanges.mockClear();
+    getFreeBusy.mockClear();
+
+    // A burst: 40 changes to the watched resource in two seconds, each waking the reader.
+    for (let change = 0; change < 40; change += 1) {
+      const end = new Date(Date.parse(HANDOVER.end) + change * 60_000).toISOString();
+      calendars.set('vehicle-a', [{ ...HANDOVER, end }]);
+      feed.publish('tenant-a', 'vehicle-a');
+      await vi.advanceTimersByTimeAsync(50);
+    }
+    expect(feed.source.listChanges.mock.calls.length).toBeLessThanOrEqual(2_000 / 250 + 1);
+    expect(getFreeBusy.mock.calls.length).toBeLessThanOrEqual(3);
+    // The last change is still announced once the burst is over.
+    const before = getFreeBusy.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(getFreeBusy.mock.calls.length).toBeLessThanOrEqual(before + 1);
+    expect(updated(messages).length).toBeGreaterThanOrEqual(1);
+    expect(updated(messages).length).toBeLessThanOrEqual(4);
+    await stream.cancel();
+  });
+
+  it('revalidates the caller every 15 seconds by default with a feed, so a revoked key ends a quiet subscription', async () => {
+    const feed = createFakeChangeFeed();
+    const server = buildServer({ subscriptions: { maxDurationMs: 600_000, changes: feed.source } });
+    const stream = new SseReader(await server.fetch(listen({ resourceSubscriptions: [URI_A] })));
+    await stream.message();
+    await vi.advanceTimersByTimeAsync(0);
+    authenticate.mockResolvedValue(null);
+    // No change reaches the feed: only the periodic re-read can notice.
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(closedEvents()).toEqual([
+      { type: 'subscription', outcome: 'closed', reason: 'revoked', resources: 1 },
+    ]);
+    expect(feed.listening()).toEqual([]);
+  });
+
+  it("runs the shared reader outside the request that started it, and each subscription's re-reads in its own", async () => {
+    const requests = new AsyncLocalStorage<string>();
+    const feed = createFakeChangeFeed();
+    const feedContexts: (string | undefined)[] = [];
+    const listChanges = feed.source.listChanges.getMockImplementation();
+    feed.source.listChanges.mockImplementation(async (params) => {
+      feedContexts.push(requests.getStore());
+      return (listChanges as NonNullable<typeof listChanges>)(params);
+    });
+    const readContexts: [string | undefined, string][] = [];
+    const getFreeBusyImplementation = getFreeBusy.getMockImplementation();
+    getFreeBusy.mockImplementation(async (context, input) => {
+      readContexts.push([requests.getStore(), context.principal.subject]);
+      return (getFreeBusyImplementation as BackendMethod)(context, input);
+    });
+    const server = feedServer(feed);
+    const first = new SseReader(
+      await requests.run('first', () => server.fetch(listen({ resourceSubscriptions: [URI_A] }))),
+    );
+    await first.message();
+    const second = new SseReader(
+      await requests.run('second', () =>
+        server.fetch(listen({ resourceSubscriptions: [URI_A] }, 'Bearer other')),
+      ),
+    );
+    await second.message();
+    await vi.advanceTimersByTimeAsync(2_000);
+    feedContexts.length = 0;
+    readContexts.length = 0;
+
+    calendars.set('vehicle-a', [HANDOVER]);
+    feed.publish('tenant-a', 'vehicle-a');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(feedContexts.length).toBeGreaterThan(0);
+    expect(new Set(feedContexts)).toEqual(new Set([undefined]));
+    expect(readContexts.sort()).toEqual([
+      ['first', PRINCIPALS['Bearer valid']?.subject],
+      ['second', PRINCIPALS['Bearer other']?.subject],
+    ].sort());
+    await first.cancel();
+    await second.cancel();
+  });
+
+  it('polls when a custom source\'s watch throws, returns no promise or rejects, and frees everything when the subscription ends', async () => {
+    const failures: NonNullable<SlotlockAgentChangeSource['watch']>[] = [
+      () => {
+        throw new Error('watch threw');
+      },
+      (() => 'not a stop function') as never,
+      async () => {
+        throw new Error('watch rejected');
+      },
+    ];
+    for (const watch of failures) {
+      const onError = vi.fn();
+      const feed = createFakeChangeFeed({ wakes: false });
+      const source = { ...feed.source, watch };
+      const server = buildServer({
+        onError,
+        subscriptions: { maxPerPrincipal: 1, maxDurationMs: 600_000, changes: source },
+      });
+      const { stream, messages } = await open(server, [URI_A]);
+      expect(onError).toHaveBeenCalledTimes(1);
+      calendars.set('vehicle-a', [HANDOVER]);
+      feed.publish('tenant-a', 'vehicle-a');
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(updated(messages)).toEqual([URI_A]);
+
+      await stream.cancel();
+      feed.source.listChanges.mockClear();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(feed.source.listChanges).not.toHaveBeenCalled();
+      // The slot came back: the caller may open its one subscription again.
+      const again = await open(server, [URI_A]);
+      await again.stream.cancel();
+      calendars.set('vehicle-a', []);
+    }
+  });
+
+  it('rejects a change source without head and listChanges', () => {
+    expect(() =>
+      buildServer({ subscriptions: { changes: { head: async () => '0' } as never } }),
+    ).toThrow(/subscriptions\.changes is invalid/);
   });
 });

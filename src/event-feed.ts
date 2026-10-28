@@ -621,3 +621,15 @@ export function slotlockEventFeedMethods(
     },
   };
 }
+
+/**
+ * A position at or before every change that has not ended yet, so a reader that starts from it and
+ * follows `next` misses none still to come (it may read again some that ended just before). Live
+ * updates start here (agent-store-backend.ts, createSlotlockStoreChangeSource).
+ */
+export async function slotlockChangeFeedHead(sql: SlotlockSql): Promise<string> {
+  const [row] = await sql<{ horizon: string }[]>`
+    SELECT pg_snapshot_xmin(pg_current_snapshot())::text AS horizon`;
+  if (!row) throw new Error('slotlock: change feed head returned no row');
+  return encodePosition({ txid: row.horizon, id: '0', at: Date.now() });
+}

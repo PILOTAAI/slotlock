@@ -15,9 +15,13 @@ import {
   DefaultAgentCardResolver,
   JsonRpcTransportFactory,
 } from '@a2a-js/sdk/client';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SLOTLOCK_A2A_PROTOCOL_VERSION } from '../agent-server.js';
 import { FIXTURE_TOKEN, type SlotlockFixture, startSlotlockFixture } from './helpers/agent-fixture.js';
+import { createFakeChangeFeed } from './helpers/change-feed.js';
+
+// The watch skill's id (SLOTLOCK_A2A_WATCH_SKILL), as the card publishes it.
+const WATCH_SKILL = 'slotlock_watch_resources';
 
 const AUTH = { serviceParameters: { Authorization: `Bearer ${FIXTURE_TOKEN}` } };
 
@@ -68,7 +72,9 @@ describe('Slotlock with the official A2A JavaScript SDK', () => {
     const card = AgentCard.fromJSON(raw);
 
     expect(card.securityRequirements).toEqual([{ schemes: { bearer: { list: [] } } }]);
-    expect(card.skills).toHaveLength(14);
+    expect(card.skills).toHaveLength(15);
+    expect(card.capabilities).toMatchObject({ streaming: true, pushNotifications: false });
+    expect(card.skills.at(-1)?.id).toBe(WATCH_SKILL);
     for (const skill of card.skills) {
       expect(skill.examples.length).toBeGreaterThan(0);
       expect(JSON.parse(skill.examples[0] ?? '{}')).toMatchObject({ skill: skill.id });
@@ -141,5 +147,83 @@ describe('Slotlock with the official A2A JavaScript SDK', () => {
     await expect(
       client.listTasks(ListTasksRequest.fromJSON({ pageSize: 10 }), AUTH),
     ).resolves.toEqual({ tasks: [], nextPageToken: '', pageSize: 10, totalSize: 0 });
+  });
+
+  it('streams a skill reply as one message', async () => {
+    fixture = await startSlotlockFixture();
+    const client = await connect(fixture);
+    const events = [];
+    for await (const event of client.sendMessageStream(
+      invocation('interop-stream', 'slotlock_list_resources', { limit: 2 }),
+      AUTH,
+    )) {
+      events.push(event);
+    }
+    expect(events).toHaveLength(1);
+    expect(events[0]?.payload?.$case).toBe('message');
+    expect(replyData(events[0]?.payload?.value)).toMatchObject({ next_cursor: null });
+  });
+
+  it('streams a watch as a task with a status update for each change the feed carries', async () => {
+    const feed = createFakeChangeFeed();
+    const busy: Array<{ start: string; end: string }> = [];
+    fixture = await startSlotlockFixture({
+      subscriptions: { pollIntervalMs: 300_000, maxDurationMs: 600_000, changes: feed.source },
+    });
+    fixture.backend.getFreeBusy.mockImplementation(async (_context, input) => ({
+      resources: (input.resource_ids as string[]).map((resourceId) => {
+        if (resourceId !== 'resource-1') throw new Error('unknown resource');
+        return {
+          resource_id: resourceId,
+          busy,
+          coverage: { start: input.start, end: input.end, certainty: 'certain', reason: null },
+        };
+      }),
+    }));
+    const client = await connect(fixture);
+    const abort = new AbortController();
+    const stream = client.sendMessageStream(
+      invocation('interop-watch', WATCH_SKILL, { resource_ids: ['resource-1'] }),
+      { ...AUTH, signal: abort.signal },
+    );
+
+    const first = await stream.next();
+    expect(first.value?.payload?.$case).toBe('task');
+    const task = first.value?.payload?.value as { id: string; status?: { state: number } };
+    expect(task.status?.state).toBe(2); // TASK_STATE_WORKING
+    await vi.waitFor(() => expect(feed.listening()).toEqual(['fixture-tenant']));
+
+    const next = stream.next();
+    busy.push({ start: new Date(Date.now() + 3_600_000).toISOString(), end: new Date(Date.now() + 7_200_000).toISOString() });
+    const published = Date.now();
+    feed.publish('fixture-tenant', 'resource-1');
+    const update = (await next).value?.payload;
+    expect(Date.now() - published).toBeLessThan(2_000);
+    expect(update?.$case).toBe('statusUpdate');
+    const event = update?.value as {
+      taskId: string;
+      status?: { state: number; message?: { parts: Array<{ content?: { $case?: string; value?: unknown } }> } };
+    };
+    expect(event.taskId).toBe(task.id);
+    expect(event.status?.state).toBe(2);
+    expect(event.status?.message?.parts[0]?.content?.value).toEqual({
+      resource_id: 'resource-1',
+      uri: 'slotlock://resources/resource-1',
+    });
+
+    // Closing the stream ends the watch and its reader.
+    abort.abort();
+    await stream.return(undefined).catch(() => {});
+    await vi.waitFor(() => expect(feed.stopped).toEqual(['fixture-tenant']));
+  });
+
+  it('answers the watch skill outside a stream with an error reply', async () => {
+    fixture = await startSlotlockFixture();
+    const client = await connect(fixture);
+    const reply = await client.sendMessage(
+      invocation('interop-watch-sync', WATCH_SKILL, { resource_ids: ['resource-1'] }),
+      AUTH,
+    );
+    expect(replyData(reply)).toEqual({ error: { code: 'streaming_required' } });
   });
 });
