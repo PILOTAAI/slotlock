@@ -3,6 +3,30 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Added
+
+- The dashboard assistant: with `SLOTLOCK_ASSISTANT_SECRET`, an organization's owners connect a
+  model of their own in Settings (the Anthropic Messages API, or OpenAI-compatible chat
+  completions: OpenAI, OpenRouter, vLLM, Ollama, LM Studio), with a connection test, and every
+  member can operate Slotlock by chat on a new Assistant page. The server runs the tool loop (up to
+  8 model calls a message) with a fixed list of agent tools: reads run through the agent operation
+  boundary, and every write is a proposed change the member approves on a form before it runs once,
+  recorded as `dashboard-assistant:github:<user id>`, whose card shows the change in full under the
+  confirmation question's sentence. A proposal takes no series-write slot or rate token until it
+  runs, a message's reads share a budget, maintenance deletes every tenant's expired conversations
+  (`slotlock.sweep_assistant_conversations`, over the `assistant_tenants` list), and a new provider
+  or base URL takes the key again. The API key is sealed with AES-256-GCM, bound to the
+  tenant, and only its last four characters are shown. Two tenant tables under forced row-level
+  security, `assistant_settings` and `assistant_conversations`, which erasure deletes.
+  `createSlotlockRateLimiter` is the per-key token bucket it limits members' messages with, and
+  organization sessions now remember each organization's role (owners are admins). As webhooks
+  do, it refuses a model URL whose host is, or resolves to, a loopback, private, link-local, CGNAT,
+  unique-local or metadata address, when saved and at each connection (the resolved address is
+  checked as the socket connects, against DNS rebinding); `SLOTLOCK_ASSISTANT_PRIVATE_URLS=on`
+  allows them for a self-hosted model. `createSlotlockGuardedFetch` is that `fetch`.
+
 ## 0.5.1 - 2026-10-28
 
 ### Fixed

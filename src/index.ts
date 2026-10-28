@@ -31,6 +31,7 @@ export {
   type SlotlockWebhookResponse,
   type SlotlockWebhookScheduler,
   type SlotlockWebhookSender,
+  createSlotlockGuardedFetch,
   createSlotlockWebhookSender,
   deliverSlotlockWebhooks,
   isPrivateAddress,
@@ -186,10 +187,17 @@ export {
 } from './dashboard.js';
 export type {
   SlotlockDashboard,
+  SlotlockDashboardAssistantOptions,
   SlotlockDashboardOptions,
   SlotlockDashboardResources,
   SlotlockDashboardState,
 } from './dashboard.js';
+export {
+  createSlotlockAssistantStore,
+  createSlotlockMemoryAssistantStore,
+  SLOTLOCK_ASSISTANT_TOOL_USE,
+} from './assistant.js';
+export type { SlotlockAssistantStore } from './assistant.js';
 export type {
   CreateSlotlockApiKeyInput,
   SlotlockApiKey,

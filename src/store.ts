@@ -2475,6 +2475,66 @@ export interface SlotlockStore extends SlotlockEventFeed {
    * released with it. False when there was none.
    */
   leaveWaitlist(params: { tenantRef: string; id: string; holderRef?: string }): Promise<boolean>;
+  /** The tenant's dashboard assistant settings, or null when it has none. */
+  getAssistantSettings(params: { tenantRef: string }): Promise<SlotlockAssistantSettingsRecord | null>;
+  /**
+   * Set the tenant's assistant settings. `key` is the sealed key and its hint, null for none, or
+   * `'keep'` to keep the one stored (none, for a tenant without settings). A stored key is kept only
+   * for the provider and base URL it was entered for: `'keep'` with another provider or URL changes
+   * nothing and answers `{ saved: false }`, decided in the one statement that writes, so racing
+   * saves cannot carry the key elsewhere.
+   */
+  putAssistantSettings(params: {
+    tenantRef: string;
+    provider: 'anthropic' | 'openai';
+    baseUrl: string;
+    model: string;
+    key: { sealed: string; hint: string } | null | 'keep';
+    updatedBy?: string;
+  }): Promise<{ saved: boolean }>;
+  /** Remove the tenant's assistant settings, its key with them. False when it had none. */
+  deleteAssistantSettings(params: { tenantRef: string }): Promise<boolean>;
+  /** A member's live assistant conversation, or null when none is (or it expired). */
+  getAssistantConversation(params: {
+    tenantRef: string;
+    memberRef: string;
+  }): Promise<SlotlockAssistantConversationRecord | null>;
+  /**
+   * Store a member's conversation for `ttlMs` (1 second to a day) from now, replacing its messages.
+   * Its actions become those stored already that `keep` names, in their stored state
+   * (settleAssistantAction changes it), and the `added` ones not stored already: an action is never
+   * put back into a conversation that no longer has it. The tenant's expired conversations are
+   * deleted with it, and the tenant is listed for sweepAssistantConversations.
+   */
+  putAssistantConversation(params: {
+    tenantRef: string;
+    memberRef: string;
+    messages: unknown[];
+    added: Record<string, Record<string, unknown>>;
+    keep: readonly string[];
+    ttlMs: number;
+  }): Promise<void>;
+  /**
+   * Change one proposed action, only while its `status` is `from`: its fields are merged with
+   * `patch`. The action as changed, or null when it is not in that state (or not there): of two
+   * racing approvals, one wins.
+   */
+  settleAssistantAction(params: {
+    tenantRef: string;
+    memberRef: string;
+    actionId: string;
+    from: string;
+    patch: Record<string, unknown>;
+  }): Promise<Record<string, unknown> | null>;
+  /** Forget a member's conversation. False when there was none. */
+  deleteAssistantConversation(params: { tenantRef: string; memberRef: string }): Promise<boolean>;
+  /** Delete up to `limit` (default 1,000) of the tenant's expired assistant conversations: how many. */
+  pruneAssistantConversations(params: { tenantRef: string; limit?: number }): Promise<number>;
+  /**
+   * Delete up to `limit` (1-100,000, default 10,000) expired assistant conversations of every
+   * tenant (slotlock.sweep_assistant_conversations): how many, and nothing else.
+   */
+  sweepAssistantConversations(params?: { limit?: number }): Promise<number>;
   /**
    * Offer freed time to the waitlist, in the order entries joined: each waiting entry whose window
    * is free (on its resource, or on the first free member of its pool) gets a hold for its holder
@@ -2554,6 +2614,31 @@ export interface SlotlockStore extends SlotlockEventFeed {
     requiredSources?: string[];
     coverageMaxAgeMs?: number;
   }): Promise<Interval | null>;
+}
+
+/**
+ * The model a tenant's dashboard assistant uses (dashboard Settings, Assistant). The API key is held
+ * only sealed (assistant.ts sealSlotlockAssistantKey), never in the clear.
+ */
+export interface SlotlockAssistantSettingsRecord {
+  provider: 'anthropic' | 'openai';
+  baseUrl: string;
+  model: string;
+  /** The API key, sealed with the deployment's assistant secret; null when it has none. */
+  sealedKey: string | null;
+  /** The key's last four characters, to show; null when it has none. */
+  keyHint: string | null;
+  updatedBy: string | null;
+  updatedAt: Date;
+}
+
+/** One member's live conversation with the dashboard assistant, as assistant.ts keeps it. */
+export interface SlotlockAssistantConversationRecord {
+  messages: unknown[];
+  /** The writes it proposed, by id. */
+  actions: Record<string, Record<string, unknown>>;
+  updatedAt: Date;
+  expiresAt: Date;
 }
 
 /** One entry of a tenant's waitlist (joinWaitlist). */
@@ -3084,6 +3169,11 @@ export const SLOTLOCK_TENANT_WRITE_METHODS = Object.freeze([
   'checkInReservation',
   'joinWaitlist',
   'leaveWaitlist',
+  'putAssistantSettings',
+  'deleteAssistantSettings',
+  'putAssistantConversation',
+  'settleAssistantAction',
+  'deleteAssistantConversation',
 ] as const satisfies readonly (keyof SlotlockStore)[]);
 
 function tenantSuspendedError(): Error & { code: 'tenant_suspended' } {
@@ -5959,6 +6049,176 @@ function buildSlotlockStore(
         }
         return true;
       });
+    },
+
+    async getAssistantSettings(params) {
+      if (!isValidIdentity(params.tenantRef)) throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      const [row] = await sql<
+        {
+          provider: 'anthropic' | 'openai';
+          base_url: string;
+          model: string;
+          sealed_key: string | null;
+          key_hint: string | null;
+          updated_by: string | null;
+          updated_at: Date;
+        }[]
+      >`
+        SELECT provider, base_url, model, sealed_key, key_hint, updated_by, updated_at
+          FROM slotlock.assistant_settings WHERE tenant_ref = ${params.tenantRef}`;
+      if (!row) return null;
+      return {
+        provider: row.provider,
+        baseUrl: row.base_url,
+        model: row.model,
+        sealedKey: row.sealed_key,
+        keyHint: row.key_hint,
+        updatedBy: row.updated_by,
+        updatedAt: row.updated_at,
+      };
+    },
+
+    async putAssistantSettings(params) {
+      if (!isValidIdentity(params.tenantRef)) throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      const keep = params.key === 'keep';
+      const key = params.key === 'keep' ? null : params.key;
+      const saved = await sql`
+        INSERT INTO slotlock.assistant_settings AS stored
+          (tenant_ref, provider, base_url, model, sealed_key, key_hint, updated_by, updated_at)
+        VALUES (${params.tenantRef}, ${params.provider}, ${params.baseUrl}, ${params.model},
+                ${key?.sealed ?? null}, ${key?.hint ?? null}, ${params.updatedBy ?? null},
+                statement_timestamp())
+        ON CONFLICT (tenant_ref) DO UPDATE SET
+          provider = EXCLUDED.provider,
+          base_url = EXCLUDED.base_url,
+          model = EXCLUDED.model,
+          sealed_key = CASE WHEN ${keep}::boolean THEN stored.sealed_key ELSE EXCLUDED.sealed_key END,
+          key_hint = CASE WHEN ${keep}::boolean THEN stored.key_hint ELSE EXCLUDED.key_hint END,
+          updated_by = EXCLUDED.updated_by,
+          updated_at = EXCLUDED.updated_at
+        WHERE NOT ${keep}::boolean
+           OR stored.sealed_key IS NULL
+           OR (stored.provider = EXCLUDED.provider AND stored.base_url = EXCLUDED.base_url)
+        RETURNING 1`;
+      return { saved: saved.length > 0 };
+    },
+
+    async deleteAssistantSettings(params) {
+      if (!isValidIdentity(params.tenantRef)) return false;
+      const rows = await sql`
+        DELETE FROM slotlock.assistant_settings WHERE tenant_ref = ${params.tenantRef} RETURNING 1`;
+      return rows.length > 0;
+    },
+
+    async getAssistantConversation(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidIdentity(params.memberRef)) return null;
+      const [row] = await sql<
+        {
+          messages: unknown[];
+          actions: Record<string, Record<string, unknown>>;
+          updated_at: Date;
+          expires_at: Date;
+        }[]
+      >`
+        SELECT messages, actions, updated_at, expires_at FROM slotlock.assistant_conversations
+         WHERE tenant_ref = ${params.tenantRef} AND member_ref = ${params.memberRef}
+           AND expires_at > statement_timestamp()`;
+      if (!row) return null;
+      return {
+        messages: row.messages,
+        actions: row.actions,
+        updatedAt: row.updated_at,
+        expiresAt: row.expires_at,
+      };
+    },
+
+    async putAssistantConversation(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidIdentity(params.memberRef)) {
+        throw invalidIdentityError('Slotlock tenant and member references must be 1-500 UTF-8 bytes');
+      }
+      if (!Number.isSafeInteger(params.ttlMs) || params.ttlMs < 1_000 || params.ttlMs > 86_400_000) {
+        throw invalidIdentityError('Slotlock assistant conversation ttlMs must be 1 second to a day');
+      }
+      const messages = sql.json(params.messages as never);
+      const added = sql.json(params.added as never);
+      const keep = [...params.keep];
+      await sql`
+        DELETE FROM slotlock.assistant_conversations
+         WHERE tenant_ref = ${params.tenantRef} AND expires_at <= statement_timestamp()`;
+      await sql`
+        INSERT INTO slotlock.assistant_conversations AS stored
+          (tenant_ref, member_ref, messages, actions, updated_at, expires_at)
+        VALUES (${params.tenantRef}, ${params.memberRef}, ${messages}, ${added},
+                statement_timestamp(),
+                statement_timestamp() + make_interval(secs => ${params.ttlMs / 1_000}))
+        ON CONFLICT (tenant_ref, member_ref) DO UPDATE SET
+          messages = EXCLUDED.messages,
+          -- The stored ones kept, as they stand, then the new ones: never a settled one again.
+          actions = (
+            SELECT coalesce(jsonb_object_agg(existing.key, existing.value), '{}'::jsonb)
+              FROM jsonb_each(stored.actions) AS existing
+             WHERE existing.key = ANY(${keep}::text[])
+          ) || (
+            SELECT coalesce(jsonb_object_agg(fresh.key, fresh.value), '{}'::jsonb)
+              FROM jsonb_each(EXCLUDED.actions) AS fresh
+             WHERE NOT stored.actions ? fresh.key
+          ),
+          updated_at = EXCLUDED.updated_at,
+          expires_at = EXCLUDED.expires_at`;
+      await sql`
+        SELECT slotlock.register_assistant_tenant(
+          ${params.tenantRef}::text,
+          statement_timestamp() + make_interval(secs => ${params.ttlMs / 1_000}))`;
+    },
+
+    async settleAssistantAction(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidIdentity(params.memberRef)) return null;
+      const patch = sql.json(params.patch as never);
+      const [row] = await sql<{ action: Record<string, unknown> }[]>`
+        UPDATE slotlock.assistant_conversations
+           SET actions = jsonb_set(actions, ARRAY[${params.actionId}::text],
+                                   (actions -> ${params.actionId}::text) || ${patch}::jsonb)
+         WHERE tenant_ref = ${params.tenantRef} AND member_ref = ${params.memberRef}
+           AND expires_at > statement_timestamp()
+           AND actions -> ${params.actionId}::text ->> 'status' = ${params.from}
+        RETURNING actions -> ${params.actionId}::text AS action`;
+      return row?.action ?? null;
+    },
+
+    async pruneAssistantConversations(params) {
+      if (!isValidIdentity(params.tenantRef)) return 0;
+      const limit = params.limit ?? 1_000;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) {
+        throw invalidIdentityError('Slotlock assistant prune limit must be 1-10,000');
+      }
+      const rows = await sql`
+        DELETE FROM slotlock.assistant_conversations
+         WHERE tenant_ref = ${params.tenantRef}
+           AND member_ref IN (
+             SELECT member_ref FROM slotlock.assistant_conversations
+              WHERE tenant_ref = ${params.tenantRef} AND expires_at <= statement_timestamp()
+              LIMIT ${limit})
+           AND expires_at <= statement_timestamp()
+        RETURNING 1`;
+      return rows.length;
+    },
+
+    async sweepAssistantConversations(params) {
+      const limit = params?.limit ?? 10_000;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100_000) {
+        throw invalidIdentityError('Slotlock assistant sweep limit must be 1-100,000');
+      }
+      const [row] = await sql<{ deleted: string | number }[]>`
+        SELECT slotlock.sweep_assistant_conversations(${limit}::integer) AS deleted`;
+      return Number(row?.deleted ?? 0);
+    },
+
+    async deleteAssistantConversation(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidIdentity(params.memberRef)) return false;
+      const rows = await sql`
+        DELETE FROM slotlock.assistant_conversations
+         WHERE tenant_ref = ${params.tenantRef} AND member_ref = ${params.memberRef} RETURNING 1`;
+      return rows.length > 0;
     },
 
     async offerWaitlist(params) {

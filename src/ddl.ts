@@ -258,6 +258,7 @@ export const SLOTLOCK_TENANT_ADMIN_TABLES = Object.freeze([
   'tenant_suspensions',
   'webhook_tenants',
   'rate_buckets',
+  'assistant_tenants',
 ] as const);
 
 /**
@@ -271,6 +272,8 @@ export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.webhook_tenants(text)',
   'slotlock.unregister_webhook_tenant(text)',
   'slotlock.take_rate_token(text, double precision, double precision)',
+  'slotlock.register_assistant_tenant(text, timestamptz)',
+  'slotlock.sweep_assistant_conversations(integer)',
 ] as const);
 
 /**
@@ -902,6 +905,14 @@ BEGIN
   DELETE FROM slotlock.waitlist_entries WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  erased_table := 'assistant_conversations';
+  DELETE FROM slotlock.assistant_conversations WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'assistant_settings';
+  DELETE FROM slotlock.assistant_settings WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'resources';
   DELETE FROM slotlock.resources WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
@@ -917,6 +928,10 @@ BEGIN
   RETURN NEXT;
   erased_table := 'webhook_endpoints';
   DELETE FROM slotlock.webhook_endpoints WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'assistant_tenants';
+  DELETE FROM slotlock.assistant_tenants WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
   erased_table := 'webhook_tenants';
@@ -1045,6 +1060,106 @@ BEGIN
 END
 $slotlock_take_rate_token$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[5]} FROM PUBLIC;
+
+-- The tenants with a dashboard assistant conversation, and when the first of them expires. Forced
+-- row-level security hides every other tenant's conversations, from the owner too, so this list
+-- (names and a time only) is how maintenance finds the tenants whose conversations have expired,
+-- whichever server stored them: one only the dashboard (or its Worker) ever used included. No role
+-- but its owner reads it.
+CREATE TABLE IF NOT EXISTS slotlock.assistant_tenants (
+  tenant_ref text PRIMARY KEY,
+  next_expiry timestamptz NOT NULL,
+  CONSTRAINT slotlock_assistant_tenants_tenant_ref_valid
+    CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500)
+);
+CREATE INDEX IF NOT EXISTS slotlock_assistant_tenants_expiry_idx
+  ON slotlock.assistant_tenants (next_expiry);
+ALTER TABLE slotlock.assistant_tenants ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.assistant_tenants FROM PUBLIC;
+
+-- Record that the tenant has a conversation expiring at expires (the earliest is kept).
+CREATE OR REPLACE FUNCTION slotlock.register_assistant_tenant(requested_tenant_ref text, expires timestamptz)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_register_assistant_tenant$
+BEGIN
+  IF requested_tenant_ref IS NULL OR octet_length(requested_tenant_ref) NOT BETWEEN 1 AND 500
+     OR expires IS NULL THEN
+    RAISE EXCEPTION 'Slotlock assistant tenant arguments are invalid' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  INSERT INTO slotlock.assistant_tenants AS kept (tenant_ref, next_expiry)
+  VALUES (requested_tenant_ref, expires)
+  ON CONFLICT (tenant_ref) DO UPDATE SET next_expiry = LEAST(kept.next_expiry, EXCLUDED.next_expiry);
+END
+$slotlock_register_assistant_tenant$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[6]} FROM PUBLIC;
+
+-- Delete expired assistant conversations across every tenant: up to max_rows of them, from the
+-- tenants whose earliest expiry has passed, longest overdue first, each under its own tenant
+-- context (forced row-level security binds the owner too), putting the caller's settings back
+-- after. A tenant left with none leaves the list; one with more is listed at its next expiry.
+-- Only a count comes back.
+CREATE OR REPLACE FUNCTION slotlock.sweep_assistant_conversations(max_rows integer)
+RETURNS bigint
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_sweep_assistant_conversations$
+DECLARE
+  setting text;
+  previous jsonb := '{}'::jsonb;
+  due record;
+  deleted bigint := 0;
+  step bigint;
+  upcoming timestamptz;
+BEGIN
+  IF max_rows IS NULL OR max_rows NOT BETWEEN 1 AND 100000 THEN
+    RAISE EXCEPTION 'Slotlock assistant sweep size must be 1-100,000' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  FOR setting IN
+    SELECT DISTINCT contract.tenant_context_setting FROM slotlock.rls_policy_contracts contract
+  LOOP
+    previous := previous || jsonb_build_object(setting, current_setting(setting, true));
+  END LOOP;
+  FOR due IN
+    SELECT listed.tenant_ref FROM slotlock.assistant_tenants listed
+     WHERE listed.next_expiry <= now()
+     ORDER BY listed.next_expiry
+     LIMIT 1000
+       FOR UPDATE SKIP LOCKED
+  LOOP
+    EXIT WHEN deleted >= max_rows;
+    FOR setting IN SELECT jsonb_object_keys(previous) LOOP
+      PERFORM set_config(setting, due.tenant_ref, true);
+    END LOOP;
+    DELETE FROM slotlock.assistant_conversations gone
+     WHERE gone.tenant_ref = due.tenant_ref
+       AND gone.member_ref IN (
+         SELECT expired.member_ref FROM slotlock.assistant_conversations expired
+          WHERE expired.tenant_ref = due.tenant_ref AND expired.expires_at <= now()
+          LIMIT max_rows - deleted)
+       AND gone.expires_at <= now();
+    GET DIAGNOSTICS step = ROW_COUNT;
+    deleted := deleted + step;
+    SELECT min(live.expires_at) INTO upcoming FROM slotlock.assistant_conversations live
+     WHERE live.tenant_ref = due.tenant_ref;
+    IF upcoming IS NULL THEN
+      DELETE FROM slotlock.assistant_tenants WHERE tenant_ref = due.tenant_ref;
+    ELSE
+      UPDATE slotlock.assistant_tenants SET next_expiry = upcoming WHERE tenant_ref = due.tenant_ref;
+    END IF;
+  END LOOP;
+  FOR setting IN SELECT jsonb_object_keys(previous) LOOP
+    PERFORM set_config(setting, coalesce(previous ->> setting, ''), true);
+  END LOOP;
+  RETURN deleted;
+END
+$slotlock_sweep_assistant_conversations$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[7]} FROM PUBLIC;
 `;
 
 // A constraint an upgrade added NOT VALID (no table scan under its ACCESS EXCLUSIVE lock) is checked
@@ -1239,6 +1354,54 @@ CREATE INDEX IF NOT EXISTS slotlock_waitlist_entries_queue_idx
   ON slotlock.waitlist_entries (tenant_ref, created_at, id) WHERE status = 'waiting';
 CREATE INDEX IF NOT EXISTS slotlock_waitlist_entries_tenant_idx
   ON slotlock.waitlist_entries (tenant_ref, starts_at);
+
+-- The model a tenant's dashboard assistant uses (dashboard.ts, assistant.ts), one row a tenant.
+-- The API key is stored only sealed (AES-256-GCM under the deployment's SLOTLOCK_ASSISTANT_SECRET,
+-- bound to the tenant), with its last four characters to show.
+CREATE TABLE IF NOT EXISTS slotlock.assistant_settings (
+  tenant_ref text PRIMARY KEY,
+  provider text NOT NULL,
+  base_url text NOT NULL,
+  model text NOT NULL,
+  sealed_key text,
+  key_hint text,
+  updated_by text,
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_assistant_settings_tenant_ref_valid CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500),
+  CONSTRAINT slotlock_assistant_settings_provider_valid CHECK (provider IN ('anthropic', 'openai')),
+  CONSTRAINT slotlock_assistant_settings_base_url_valid CHECK (octet_length(base_url) BETWEEN 1 AND 2048),
+  CONSTRAINT slotlock_assistant_settings_model_valid CHECK (octet_length(model) BETWEEN 1 AND 200),
+  CONSTRAINT slotlock_assistant_settings_key_valid CHECK (
+    (sealed_key IS NULL) = (key_hint IS NULL)
+    AND (sealed_key IS NULL OR octet_length(sealed_key) BETWEEN 1 AND 8192)
+    AND (key_hint IS NULL OR char_length(key_hint) BETWEEN 1 AND 4)
+  ),
+  CONSTRAINT slotlock_assistant_settings_updated_by_valid
+    CHECK (updated_by IS NULL OR octet_length(updated_by) BETWEEN 1 AND 200)
+);
+
+-- One member's short-lived conversation with the dashboard assistant, and the writes it proposed
+-- (actions, by id, each pending until the member approves or dismisses it).
+CREATE TABLE IF NOT EXISTS slotlock.assistant_conversations (
+  tenant_ref text NOT NULL,
+  member_ref text NOT NULL,
+  messages jsonb NOT NULL DEFAULT '[]'::jsonb,
+  actions jsonb NOT NULL DEFAULT '{}'::jsonb,
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  expires_at timestamptz NOT NULL,
+  CONSTRAINT slotlock_assistant_conversations_pkey PRIMARY KEY (tenant_ref, member_ref),
+  CONSTRAINT slotlock_assistant_conversations_identity_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500 AND octet_length(member_ref) BETWEEN 1 AND 500
+  ),
+  CONSTRAINT slotlock_assistant_conversations_messages_valid CHECK (
+    jsonb_typeof(messages) = 'array' AND octet_length(messages::text) <= 262144
+  ),
+  CONSTRAINT slotlock_assistant_conversations_actions_valid CHECK (
+    jsonb_typeof(actions) = 'object' AND octet_length(actions::text) <= 131072
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_assistant_conversations_expiry_idx
+  ON slotlock.assistant_conversations (tenant_ref, expires_at);
 
 -- The tenant a reservation row belongs to: its own, or (a hold) its resource's.
 CREATE OR REPLACE FUNCTION slotlock.outbox_reservation_change()
@@ -2672,6 +2835,8 @@ export const SLOTLOCK_TENANT_TABLES = Object.freeze([
   'outbox_pruned',
   'webhook_endpoints',
   'waitlist_entries',
+  'assistant_settings',
+  'assistant_conversations',
 ] as const);
 
 const POSTGRES_SETTING_NAME = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/;
@@ -2756,6 +2921,10 @@ ALTER TABLE slotlock.webhook_endpoints ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.webhook_endpoints FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.waitlist_entries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.waitlist_entries FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.assistant_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.assistant_settings FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.assistant_conversations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.assistant_conversations FORCE ROW LEVEL SECURITY;
 
 -- One database must have one tenant-context contract. Re-applying with an adapter-specific
 -- setting deliberately rebinds the stable policies instead of silently keeping a prior setting.
@@ -2784,7 +2953,9 @@ BEGIN
          'outbox',
          'outbox_pruned',
          'webhook_endpoints',
-         'waitlist_entries'
+         'waitlist_entries',
+         'assistant_settings',
+         'assistant_conversations'
        )
   LOOP
     EXECUTE format(
@@ -2995,6 +3166,26 @@ BEGIN
       USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
       WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
   END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'assistant_settings'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.assistant_settings
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'assistant_conversations'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.assistant_conversations
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
 END
 $slotlock_rls$;
 
@@ -3031,6 +3222,10 @@ COMMENT ON POLICY tenant_isolation_v1 ON slotlock.outbox_pruned
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.webhook_endpoints
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.waitlist_entries
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.assistant_settings
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.assistant_conversations
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 
 INSERT INTO slotlock.rls_policy_contracts (
@@ -3071,7 +3266,9 @@ WHERE schemaname = 'slotlock'
     'outbox',
     'outbox_pruned',
     'webhook_endpoints',
-    'waitlist_entries'
+    'waitlist_entries',
+    'assistant_settings',
+    'assistant_conversations'
   )
   AND policyname = 'tenant_isolation_v1'
 ON CONFLICT (table_name) DO UPDATE

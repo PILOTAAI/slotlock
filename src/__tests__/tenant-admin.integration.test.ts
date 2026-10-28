@@ -440,6 +440,21 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
         if (!hook.ok) throw new Error(hook.code);
         const waiting = await tenant.joinWaitlist({ tenantRef, resourceId, ...slot(2), holderRef: 'waiting' });
         if (!waiting.ok) throw new Error(waiting.code);
+        await tenant.putAssistantSettings({
+          tenantRef,
+          provider: 'openai',
+          baseUrl: 'https://models.example.com/v1',
+          model: 'your-model',
+          key: { sealed: 'v1.sealed.key', hint: 'abcd' },
+        });
+        await tenant.putAssistantConversation({
+          tenantRef,
+          memberRef: `github:${uid}`,
+          messages: [{ role: 'user', text: 'Anything free tomorrow?' }],
+          added: {},
+          keep: [],
+          ttlMs: HOUR,
+        });
         expect(
           (
             await tenant.recordCalendarCoverage({

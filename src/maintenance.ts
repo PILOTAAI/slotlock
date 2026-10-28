@@ -19,7 +19,8 @@ export interface SlotlockMaintenanceResult {
   /**
    * Expired holds and the answers kept for keyed ones, and past the retention window event
    * idempotency answers, agents' event cancellations, booking references retired with no
-   * booking and feed changes, deleted. A cancelled booking's tombstone stays.
+   * booking and feed changes, deleted, and dashboard assistant conversations past their expiry.
+   * A cancelled booking's tombstone stays.
    */
   pruned: number;
   /**
@@ -115,6 +116,11 @@ export async function maintainSlotlockTenant(
     }
   }
   options.signal?.throwIfAborted();
+  // Conversations last 2 hours after their last message (dashboard.ts): an expired one is
+  // unreadable already, and deleted here.
+  pruned += await store.withTenant(tenantRef, (tenant) =>
+    tenant.pruneAssistantConversations({ tenantRef }),
+  );
   const zones = await store.withTenant(tenantRef, (tenant) =>
     tenant.followZoneRules({ tenantRef, move: options.followZoneRules === true }),
   );
@@ -153,6 +159,9 @@ export async function maintainSlotlockTenant(
 type WaitlistPage = { createdAt: Date; id: string };
 /** Pages of 50 that cover a tenant's whole waitlist (SLOTLOCK_MAX_WAITLIST_PER_TENANT). */
 const WAITLIST_PAGES = Math.ceil(SLOTLOCK_MAX_WAITLIST_PER_TENANT / 50);
+
+/** How often the scheduler sweeps every tenant's expired assistant conversations, at most. */
+const SWEEP_INTERVAL_MS = 15 * 60_000;
 
 /** Feed changes past the retention deleted per batch. */
 const CHANGE_PRUNE_BATCH = 1_000;
@@ -293,10 +302,25 @@ export function startSlotlockMaintenance(
       working = null;
     }
   };
+  // Expired assistant conversations of every tenant, the ones whose keys never call included (a
+  // tenant only the dashboard serves): one bounded sweep at most every quarter hour.
+  let lastSweep = 0;
+  const sweep = () => {
+    if (controller.signal.aborted || Date.now() - lastSweep < Math.min(intervalMs, SWEEP_INTERVAL_MS)) return;
+    lastSweep = Date.now();
+    options.store.sweepAssistantConversations().catch((error: unknown) => {
+      try {
+        ignoreRejection(options.onError?.(error));
+      } catch {
+        // Reporting must never stop maintenance.
+      }
+    });
+  };
   const tick = () => {
     for (const tenantRef of [...pinned.keys(), ...served.keys()]) {
       if (due(tenantRef)) enqueue(tenantRef);
     }
+    sweep();
   };
 
   const timer = setInterval(tick, Math.min(intervalMs, 60_000));

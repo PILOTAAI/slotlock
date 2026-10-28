@@ -304,6 +304,59 @@ resources, so you can give each person API keys without running `slotlock key cr
   own on the hours page: two windows a day, overnight or all day, or closed. One form sets them
   for every resource at once.
 
+#### Assistant: operate Slotlock by chat
+
+With `SLOTLOCK_ASSISTANT_SECRET` set (32+ random characters, `openssl rand -hex 32`), the dashboard
+gains an Assistant page where every member chats with a model their organization connects, instead
+of clicking. Each organization brings its own model:
+
+- **Connect it** in Settings, Assistant (owners only; with personal tenants, each person): the
+  provider (`Anthropic Messages API`, or `OpenAI-compatible`, which covers OpenAI, OpenRouter,
+  vLLM, Ollama and LM Studio), the base URL (`https://api.anthropic.com`, or the one ending in
+  `/v1`: `https://api.openai.com/v1`, `http://localhost:11434/v1`; https, or http only on
+  `localhost` or `127.0.0.1`), the model name (`your-model`) and the API key, which a local model
+  may not need. As with webhooks, a URL whose host is, or resolves to, a loopback, private,
+  link-local, shared (CGNAT), unique-local or metadata address (`169.254.169.254`) is refused, when
+  it is saved and at each connection (the address the socket connects to is checked, so a name
+  rebound to one is refused too), and the page says why. For a self-hosted model on the server's
+  own machine or network (Ollama, vLLM), the operator sets `SLOTLOCK_ASSISTANT_PRIVATE_URLS=on`.
+  On Cloudflare Workers the literal check applies and names are not resolved: a Worker's fetch
+  reaches no private network. Changing the provider or the base URL takes the key again (decided in the
+  database write, so racing saves cannot get past it), so the stored key is only ever sent where it
+  was entered for, even on an origin that serves several accounts. **Test connection** makes one real request
+  and checks the model answers with one correct tool call. The organization's messages, and the bookings and resources the assistant
+  reads, are sent to the provider it configures.
+- **The key** is stored sealed with AES-256-GCM under a key derived from `SLOTLOCK_ASSISTANT_SECRET`,
+  bound to the organization, in `slotlock.assistant_settings` (forced row-level security, erased
+  with the tenant). The dashboard shows only that it is set and its last four characters. Changing
+  the secret makes stored keys unreadable: owners enter them again.
+- **Reads run, writes wait.** The server runs the tool loop, up to 8 model calls a message, with a
+  fixed list of the agent tools (the reads: resources, free-busy, next free time, slots, pool
+  availability, events; the writes: holds, bookings, pool and bundle bookings, changes and
+  cancellations). A read runs at once through the same operation boundary as an agent's. A write
+  never runs when the model asks: it appears as a proposed change the member approves (or
+  dismisses) with a form, and only then runs, once (its idempotency key is the dashboard's), with
+  the same booking rules, tenant limits and rate limits as an agent, recorded as
+  `dashboard-assistant:github:<user id>` (shown as "Assistant for @login"). The card leads with
+  the sentence a confirmation would ask (the resource by name, the times in its zone, and for a
+  change or cancellation the event's title, resource and time as it stands) and then shows every
+  argument in full; a change too large to show (16 KB of arguments) is not proposed, and a
+  conversation has at most 4 waiting. A proposal is only checked: the series-write slot and the
+  write's rate token are taken when the approved change runs. A message's reads share a budget of
+  16 calls and 400 resource-days. API keys, webhooks, booking rules, pools, erasure and
+  coverage are never offered; a tool the model names outside the list is refused.
+- Tool results and booking data are data to the model, never instructions, and the system prompt
+  says so; the tool list does not change with what the model says. A member may send 10 messages
+  a minute; each model call has 30 seconds and a message 90. Conversations are kept per member in
+  `slotlock.assistant_conversations` for 2 hours after the last message, then deleted: by
+  `serve`'s maintenance, which sweeps every tenant's expired conversations every quarter hour (a
+  tenant only the dashboard serves included), by `slotlock maintain`, and whenever the tenant's
+  conversations are read (so on Workers too). They are bounded in UTF-8 bytes; **New conversation** forgets one. On Workers, the
+  assistant's agent calls are capped at 24 a request and by `tenant_read` and `tenant_write` of
+  `SLOTLOCK_LIMITS` in each isolate. A provider's failure is shown as a plain message, never with
+  the key or the provider's answer.
+- It works as plain forms: no script is needed.
+
 ### Dashboard on Cloudflare Workers
 
 The same dashboard can run as a Cloudflare Worker at an origin of its own (`workers/dashboard`),
@@ -337,7 +390,8 @@ this one and read its session secret, which signs in as any tenant.
 3. Create the GitHub OAuth app as above, with the callback URL
    `<SLOTLOCK_PUBLIC_URL>/dashboard/callback` on the Worker's origin.
 4. Store the secrets on the Worker: `npx wrangler secret put` for `SLOTLOCK_GITHUB_CLIENT_ID`,
-   `SLOTLOCK_GITHUB_CLIENT_SECRET` and `SLOTLOCK_SESSION_SECRET`.
+   `SLOTLOCK_GITHUB_CLIENT_SECRET` and `SLOTLOCK_SESSION_SECRET`, and `SLOTLOCK_ASSISTANT_SECRET`
+   for the assistant.
 5. Deploy: `npm ci --omit=dev` at the repository root (the Worker bundles Slotlock's sources), then
    `npx wrangler deploy --config <your configuration>` in `workers/dashboard`.
 

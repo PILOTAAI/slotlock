@@ -10,12 +10,20 @@
 // isolates, so three rate limiting bindings bound the requests of all of them together.
 import { AsyncLocalStorage } from 'node:async_hooks';
 import postgres from 'postgres';
+import {
+  type SlotlockAgentCalendarBackend,
+  type SlotlockAgentOperation,
+  type SlotlockAgentPrincipal,
+  slotlockAgentOperationScope,
+} from '../../src/agent-server.js';
+import { createSlotlockStoreAgentBackend } from '../../src/agent-store-backend.js';
 import { type SlotlockApiKeyStore, createSlotlockApiKeyStore } from '../../src/api-keys.js';
 import {
   SlotlockConfigError,
   type SlotlockEnv,
   readAvailability,
   readDashboardConfig,
+  readLimits,
   readServerUrl,
 } from '../../src/config.js';
 import {
@@ -26,7 +34,11 @@ import {
   createSlotlockDashboardResources,
   createSlotlockDashboardState,
 } from '../../src/dashboard.js';
-import { slotlockClientKey, slotlockClientNetwork } from '../../src/rate-limit.js';
+import {
+  createSlotlockRateLimiter,
+  slotlockClientKey,
+  slotlockClientNetwork,
+} from '../../src/rate-limit.js';
 import { createSlotlockStore } from '../../src/store.js';
 
 /**
@@ -67,8 +79,37 @@ export interface SlotlockDashboardWorkerOptions {
 
 interface RequestScope {
   keys: SlotlockApiKeyStore;
+  /** The assistant's agent backend, on the request's own client. */
+  agent: SlotlockAgentCalendarBackend;
+  /** Agent operations this request has run, for the per-request cap. */
+  agentCalls: { count: number };
   resources: SlotlockDashboardResources;
   state: SlotlockDashboardState;
+}
+
+/** Agent operations (the assistant's reads and approved writes) one dashboard request may run. */
+export const SLOTLOCK_WORKER_AGENT_CALLS_PER_REQUEST = 24;
+
+/**
+ * The assistant's agent limits on a Worker, which has no `slotlock serve` in front: at most
+ * SLOTLOCK_WORKER_AGENT_CALLS_PER_REQUEST operations a request, and the tenant read and write
+ * budgets of SLOTLOCK_LIMITS (`tenant_read`, `tenant_write`) as token buckets in this isolate.
+ * Workers run many isolates, so a tenant's budget is per isolate; the client rate limit binding
+ * bounds the requests themselves.
+ */
+export function createSlotlockWorkerAgentLimiter(vars: SlotlockEnv) {
+  const { rates } = readLimits(vars);
+  const reads = rates.tenant_read ? createSlotlockRateLimiter(rates.tenant_read) : null;
+  const writes = rates.tenant_write ? createSlotlockRateLimiter(rates.tenant_write) : null;
+  return (
+    calls: { count: number },
+    args: { principal: SlotlockAgentPrincipal; operation: SlotlockAgentOperation },
+  ): boolean => {
+    calls.count += 1;
+    if (calls.count > SLOTLOCK_WORKER_AGENT_CALLS_PER_REQUEST) return false;
+    const bucket = slotlockAgentOperationScope(args.operation) === 'write' ? writes : reads;
+    return bucket ? bucket.take(args.principal.tenantRef) : true;
+  };
 }
 
 /** Connections one request may hold: a Worker may have six open at once. */
@@ -123,6 +164,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
     | {
         dashboard: SlotlockDashboard;
         root: string;
+        availability: ReturnType<typeof readAvailability>;
         signInPaths: Set<string>;
         limits: {
           client: SlotlockRateLimit;
@@ -165,6 +207,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
     if (typeof env.HYPERDRIVE?.connectionString !== 'string') {
       throw new SlotlockConfigError('the HYPERDRIVE binding is required');
     }
+    const agentLimiter = createSlotlockWorkerAgentLimiter(vars);
     const dashboard = createSlotlockDashboard({
       publicUrl,
       serviceUrl,
@@ -174,6 +217,25 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       ...(config.organizations ? { organizations: config.organizations } : {}),
       ...(config.name ? { name: config.name } : {}),
       availability: readAvailability(vars),
+      // With SLOTLOCK_ASSISTANT_SECRET, the chat assistant; its tool calls reach Postgres through
+      // the request's client like every other page, and are bounded by the client rate limit.
+      ...(config.assistantSecret !== undefined
+        ? {
+            assistant: {
+              secret: config.assistantSecret,
+              backend: perRequest(() => current().agent),
+              // A Worker's fetch reaches no private network (nor this isolate's loopback), so the
+              // literal URL check is the one that applies; names are not resolved here.
+              fetch: (input: string | URL | Request, init?: RequestInit) => fetch(input, init),
+              resolve: async () => [],
+              consumeRateLimit: async (args: {
+                principal: SlotlockAgentPrincipal;
+                operation: SlotlockAgentOperation;
+              }) => agentLimiter(current().agentCalls, args),
+              ...(config.assistantPrivateUrls ? { privateUrls: true } : {}),
+            },
+          }
+        : {}),
       // Cloudflare sets CF-Connecting-IP itself, so one client's sign-ins in flight are capped.
       clientAddress: clientOf,
       keys: perRequest(() => current().keys),
@@ -193,6 +255,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
     return {
       dashboard,
       root,
+      availability: readAvailability(vars),
       signInPaths: new Set([`${base}/sign-in`, `${base}/callback`]),
       limits: { client, signIn, signInCeiling },
     };
@@ -217,7 +280,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
           headers: { 'content-type': 'text/plain; charset=utf-8' },
         });
       }
-      const { dashboard, root, signInPaths, limits } = built;
+      const { dashboard, root, signInPaths, limits, availability } = built;
       const path = new URL(request.url).pathname;
       if (path === '/') return Response.redirect(root, 302);
       if (!dashboard.handles(request)) {
@@ -249,9 +312,14 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
         onnotice: () => {},
       });
       try {
+        const store = createSlotlockStore(sql);
         const requestScope: RequestScope = {
           keys: createSlotlockApiKeyStore(sql),
-          resources: createSlotlockDashboardResources(createSlotlockStore(sql)),
+          agentCalls: { count: 0 },
+          agent: createSlotlockStoreAgentBackend(store, {
+            availabilityRules: async () => availability.map((rule) => ({ ...rule })),
+          }),
+          resources: createSlotlockDashboardResources(store),
           state: createSlotlockDashboardState(sql),
         };
         return await scope.run(requestScope, () => dashboard.fetch(request));

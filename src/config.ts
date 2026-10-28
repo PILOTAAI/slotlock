@@ -132,6 +132,16 @@ export interface SlotlockServeDashboardConfig {
   organizations?: string[];
   /** What the deployment is called in the dashboard (SLOTLOCK_DASHBOARD_NAME). */
   name?: string;
+  /**
+   * Seals each tenant's model API key for the dashboard assistant (SLOTLOCK_ASSISTANT_SECRET).
+   * Without it the assistant is off.
+   */
+  assistantSecret?: string;
+  /**
+   * Let the assistant reach a model at a local or private network address
+   * (SLOTLOCK_ASSISTANT_PRIVATE_URLS=on): a self-hosted model on the same machine or network.
+   */
+  assistantPrivateUrls?: boolean;
 }
 
 const DASHBOARD_VARIABLES = [
@@ -179,6 +189,17 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
       'SLOTLOCK_DASHBOARD_USERS is required to serve the dashboard: * for every GitHub account, or a comma-separated list of GitHub user ids (gh api users/<login> --jq .id)',
     );
   }
+  const assistantSecret = readSecret(env, 'SLOTLOCK_ASSISTANT_SECRET');
+  if (
+    assistantSecret !== undefined &&
+    [sessionSecret, ...others].includes(assistantSecret)
+  ) {
+    throw new SlotlockConfigError('SLOTLOCK_ASSISTANT_SECRET must differ from every other secret');
+  }
+  const privateUrls = optional(env, 'SLOTLOCK_ASSISTANT_PRIVATE_URLS') ?? 'off';
+  if (privateUrls !== 'on' && privateUrls !== 'off') {
+    throw new SlotlockConfigError('SLOTLOCK_ASSISTANT_PRIVATE_URLS must be on or off');
+  }
   const orgs = readDashboardOrganizations(env);
   const name = optional(env, 'SLOTLOCK_DASHBOARD_NAME')?.trim();
   if (name !== undefined && name !== '' && !SLOTLOCK_DASHBOARD_NAME_PATTERN.test(name)) {
@@ -193,6 +214,8 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
     allowedUsers: users === '*' ? '*' : [...new Set(users.split(','))],
     ...(orgs !== undefined ? { organizations: orgs } : {}),
     ...(name !== undefined && name !== '' ? { name } : {}),
+    ...(assistantSecret !== undefined ? { assistantSecret } : {}),
+    ...(assistantSecret !== undefined && privateUrls === 'on' ? { assistantPrivateUrls: true } : {}),
   };
 }
 

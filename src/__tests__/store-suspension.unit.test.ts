@@ -34,6 +34,8 @@ const READS = [
   'findNextAvailableFor',
   'isTenantSuspended',
   'listWaitlist',
+  'getAssistantSettings',
+  'getAssistantConversation',
 ];
 const UPKEEP = [
   'rollCalendarEventHorizon',
@@ -47,6 +49,8 @@ const UPKEEP = [
   'reportStaleCoverage',
   'releaseNoShows',
   'offerWaitlist',
+  'pruneAssistantConversations',
+  'sweepAssistantConversations',
 ];
 const ADMINISTRATION = [
   'applySchema',

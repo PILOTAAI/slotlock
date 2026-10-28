@@ -55,7 +55,12 @@ function fakeStore() {
     params: Record<string, unknown>;
   }[] = [];
   let gate: Promise<void> | null = null;
+  const sweeps = { count: 0 };
   const store = {
+    async sweepAssistantConversations() {
+      sweeps.count += 1;
+      return 0;
+    },
     async withTenant(tenantRef: string, callback: (tenant: unknown) => Promise<unknown>) {
       if (gate) await gate;
       return callback({
@@ -79,6 +84,9 @@ function fakeStore() {
         async releaseNoShows() {
           return 0;
         },
+        async pruneAssistantConversations() {
+          return 0;
+        },
         async offerWaitlist() {
           return { offered: 0, expired: 0, next: null };
         },
@@ -95,6 +103,7 @@ function fakeStore() {
   return {
     store,
     calls,
+    sweeps,
     roll: (tenantRef: string, ...results: CalendarHorizonRollResult[]) => rolls.set(tenantRef, results),
     prune: (tenantRef: string, ...results: CalendarEventRetentionResult[]) => prunes.set(tenantRef, results),
     purge: (tenantRef: string, ...results: BookingRetentionResult[]) => purges.set(tenantRef, results),
@@ -341,6 +350,19 @@ describe('startSlotlockMaintenance', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     await settle();
     expect(tenantsMaintained(fake)).toEqual(['fleet-a', 'fleet-b', 'fleet-a', 'fleet-b']);
+    await scheduler.close();
+  });
+
+  it("sweeps every tenant's expired assistant conversations at once, then every quarter hour, with no tenant of its own", async () => {
+    const fake = fakeStore();
+    const scheduler = startSlotlockMaintenance({ store: fake.store, sql: fakeSql().sql, tenants: [], intervalMs: HOUR });
+    const sweeps = () => fake.sweeps.count;
+    await settle();
+    expect(sweeps()).toBe(1);
+    await vi.advanceTimersByTimeAsync(14 * 60_000);
+    expect(sweeps()).toBe(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sweeps()).toBe(2);
     await scheduler.close();
   });
 
