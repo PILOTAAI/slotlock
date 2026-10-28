@@ -30,6 +30,13 @@ versioning.
 - A key created in the dashboard records the person who created it (`github:<user id>`) as
   `createdBy`, not the tenant; for a personal tenant the two are the same.
 
+### Fixed
+
+- Time an agent frees is offered to the waitlist at once, as the application API's cancels already
+  were: an agent releasing its holds (`slotlock_release_slots`), deleting or moving an event, and a
+  booking moved through `PUT /v1/reservations`. Before, it waited for the next maintenance pass, up
+  to an hour.
+
 ## 0.4.1 - 2026-10-28
 
 ### Fixed

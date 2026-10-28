@@ -6,7 +6,11 @@ import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { SlotlockApplicationInvocationContext } from '../application-api.js';
-import { createSlotlockStoreApplicationBackend } from '../agent-store-backend.js';
+import type { SlotlockAgentInvocationContext } from '../agent-server.js';
+import {
+  createSlotlockStoreAgentBackend,
+  createSlotlockStoreApplicationBackend,
+} from '../agent-store-backend.js';
 import { maintainSlotlockTenant } from '../maintenance.js';
 import { SLOTLOCK_MAX_WAITLIST_PER_HOLDER, type SlotlockStore, createSlotlockStore } from '../store.js';
 
@@ -108,6 +112,76 @@ describe.skipIf(!url)('waitlists and check-in (real Postgres)', () => {
       await application.releaseHold(context('slotlock_release_hold'), { hold_id: offered?.holdId as string }),
     ).toEqual({ released: true });
     expect((await entries({ resourceId: van }))[1]).toMatchObject({ holderRef: 'second', status: 'offered' });
+  });
+
+  it('offers what an agent or an application frees at once: a released hold, a deleted or moved event, a moved booking', async () => {
+    const agent = createSlotlockStoreAgentBackend(store, { availabilityRules: async () => [] });
+    const as = (operation: string): SlotlockAgentInvocationContext => ({
+      principal: { subject: 'agent', tenantRef },
+      operation: operation as SlotlockAgentInvocationContext['operation'],
+      signal: new AbortController().signal,
+    });
+    const event = async (resourceId: string) =>
+      (await agent.createEvent(as('slotlock_create_event'), {
+        resource_id: resourceId,
+        starts_at: at(9).toISOString(),
+        ends_at: at(17).toISOString(),
+        timezone: 'UTC',
+        idempotency_key: `e-${randomUUID()}`,
+      })) as { event: { id: string; revision: number } };
+    const wait = async (resourceId: string) => {
+      const joined = await join({ resourceId, start: at(10), end: at(12), holderRef: `w-${randomUUID()}` });
+      expect(joined.ok).toBe(true);
+      expect((await entries({ resourceId }))[0]?.status).toBe('waiting');
+    };
+    const offeredOn = async (resourceId: string) => (await entries({ resourceId }))[0]?.status;
+
+    const held = await resource();
+    const holds = (await agent.holdSlots?.(as('slotlock_hold_slots'), {
+      slots: [{ resource_id: held, start: at(9).toISOString(), end: at(17).toISOString() }],
+      ttl_seconds: 600,
+      idempotency_key: `h-${randomUUID()}`,
+    })) as unknown as { holds: { hold_id: string }[] };
+    await wait(held);
+    await agent.releaseSlots?.(as('slotlock_release_slots'), { hold_id: holds.holds[0]?.hold_id as string });
+    expect(await offeredOn(held)).toBe('offered');
+
+    const deleted = await resource();
+    const gone = await event(deleted);
+    await wait(deleted);
+    await agent.deleteEvent(as('slotlock_delete_event'), {
+      event_id: gone.event.id,
+      expected_revision: gone.event.revision,
+      idempotency_key: `d-${randomUUID()}`,
+    });
+    expect(await offeredOn(deleted)).toBe('offered');
+
+    const moved = await resource();
+    const shifted = await event(moved);
+    await wait(moved);
+    await agent.updateEvent(as('slotlock_update_event'), {
+      event_id: shifted.event.id,
+      expected_revision: shifted.event.revision,
+      resource_id: moved,
+      starts_at: at(13).toISOString(),
+      ends_at: at(17).toISOString(),
+      timezone: 'UTC',
+      idempotency_key: `u-${randomUUID()}`,
+    });
+    expect(await offeredOn(moved)).toBe('offered');
+
+    const rebooked = await resource();
+    const booking = await book(rebooked, at(9), at(17));
+    await wait(rebooked);
+    await application.putReservation(context('slotlock_put_reservation'), {
+      resource_id: rebooked,
+      reservation_ref: booking,
+      start: at(13).toISOString(),
+      end: at(17).toISOString(),
+      buffer_after_minutes: 0,
+      revision: 2,
+    });
+    expect(await offeredOn(rebooked)).toBe('offered');
   });
 
   it('offers a pool entry the first member that comes free', async () => {
