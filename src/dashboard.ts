@@ -232,6 +232,33 @@ const ownerDigest = (owner: string) =>
   createHash('sha256').update(`slotlock-dashboard-owner.${owner}`).digest();
 
 /**
+ * Records accepted write confirmations (`SlotlockAgentConfirmationOptions.consumeAcceptance`) in
+ * Postgres, shared by every server on the database: true the first time a confirmation's nonce is
+ * recorded, false while it stays recorded, so an accepted confirmation runs its write once on any
+ * server. Kept until the confirmation's own expiry, through the same function and table as the
+ * dashboard's records (only a SHA-256 digest of the nonce is stored); pass a client, not a
+ * transaction.
+ */
+export function createSlotlockAcceptanceRecords(
+  sql: SlotlockSql,
+): (acceptance: { nonce: string; expiresAt: Date }) => Promise<boolean> {
+  if (!('begin' in sql)) {
+    throw new Error(
+      'createSlotlockAcceptanceRecords needs a client, not a transaction: a rollback would undo its records',
+    );
+  }
+  const client = sql as Sql;
+  return async ({ nonce, expiresAt }) => {
+    const digest = createHash('sha256').update(`slotlock-confirmation.${nonce}`).digest();
+    return (await client.begin('isolation level read committed', async (tx) => {
+      const [row] = await tx<{ used: boolean }[]>`
+        SELECT slotlock.use_dashboard_token('confirmation', ${digest}, ${expiresAt}, NULL::bytea) AS used`;
+      return row?.used === true;
+    })) as boolean;
+  };
+}
+
+/**
  * The dashboard's records in Postgres, shared by every server on the database. Run `applySchema()`
  * and `grantApplicationRole()` first: the serving role reaches the records only through
  * SLOTLOCK_DASHBOARD_FUNCTIONS. Only SHA-256 digests of the values are stored.

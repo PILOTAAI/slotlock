@@ -178,6 +178,7 @@ export {
 export {
   createSlotlockDashboard,
   createSlotlockDashboardResources,
+  createSlotlockAcceptanceRecords,
   createSlotlockDashboardState,
   createSlotlockMemoryDashboardState,
   SLOTLOCK_DASHBOARD_MAX_RESOURCES,

@@ -1383,12 +1383,14 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
   (provider and sync authority) are kept until you erase the tenant. After the window a retried
   command is evaluated afresh under its expected revision, and a pruned agent identity can be
   created again. `retentionDays` (1-3650) changes the window; keep it longer than any client retries.
-- **Erasure.** Include Slotlock resources, reservations, tombstones, archives, event content,
-  occurrences, commands and coverage rows in your tenant-erasure workflow and delete order, and
-  delete the tenant's API keys with `createSlotlockApiKeyStore(sql).erase({ tenantRef })`. Only
-  their SHA-256 digests stay, with nothing about the tenant, so an erased key is never accepted
-  again. The dashboard's records hold no tenant and expire within 12 hours; a form record carries a
-  SHA-256 digest of the GitHub user id that sent it.
+- **Erasure.** `slotlock tenant erase --confirm <tenant>`, or the store's `eraseTenant({ tenantRef })`,
+  deletes everything the tenant owns in one transaction, waiting for its transactions in flight:
+  resources, holds, bookings, events with their attendees and reminders, cancellations,
+  idempotency records, coverage, API keys, and a personal tenant's dashboard records. Call it from
+  your own erasure workflow; nothing is deleted table by table. Only the API keys' SHA-256 digests
+  stay, with nothing about the tenant, so an erased key is never accepted again. The dashboard's
+  other records hold no tenant and expire within 12 hours; a form record carries a SHA-256 digest
+  of the GitHub user id that sent it, and an accepted write confirmation a digest of its nonce.
 
 ### Production checklist
 

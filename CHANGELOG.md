@@ -141,6 +141,15 @@ versioning.
   transaction (`now()`). A store made from a caller's transaction runs in savepoints of it, so a hold
   that expired while that transaction ran still looked live there and could be confirmed after its
   expiry. Its time to live also starts when it is asked for, not when the caller's transaction did.
+- An accepted write confirmation runs its write once. `slotlock serve` records each acceptance's
+  nonce in Postgres until it expires, on every server sharing the database, and refuses the same
+  acceptance sent again (`confirmation_invalid`); before, it could be sent again until it expired
+  (the write's idempotency key or revision then decided). `SlotlockAgentConfirmationOptions` takes
+  `consumeAcceptance` for this, and `createSlotlockAcceptanceRecords(sql)` implements it. Run
+  `slotlock migrate`: `serve` refuses to start with `SLOTLOCK_CONFIRM_WRITES` on a schema that cannot
+  record them.
+- The production checklist's erasure item names `slotlock tenant erase` and `eraseTenant`, which
+  delete everything a tenant owns in one transaction, instead of a table-by-table delete.
 
 - The OpenAPI document declares the `404` and `409` the agent-tool routes answer: `404` on
   free/busy, next available and reading or listing events, and `404` and `409` (`overlap`, a stale

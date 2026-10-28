@@ -250,7 +250,7 @@ describe('deployment DDL name resolution', () => {
       SLOTLOCK_CORE_DDL.indexOf('$slotlock_use_dashboard_token$;'),
     );
     expect(SLOTLOCK_CORE_DDL).toContain('CHECK (octet_length(token_hash) = 32)');
-    expect(SLOTLOCK_CORE_DDL).toContain("CHECK (kind IN ('sign_in', 'form', 'ended_session'))");
+    expect(SLOTLOCK_CORE_DDL).toContain("CHECK (kind IN ('sign_in', 'form', 'ended_session', 'confirmation'))");
     expect(SLOTLOCK_CORE_DDL).toContain("CHECK (kind <> 'form' OR owner_hash IS NOT NULL)");
     // The database's clock refuses an expired token, or one claiming to outlive a day, before
     // anything is written; a live token's record lasts exactly as long as the token.

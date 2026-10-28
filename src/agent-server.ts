@@ -643,6 +643,15 @@ export interface SlotlockAgentConfirmationOptions {
   secrets: readonly (string | Uint8Array)[];
   /** How long a confirmation prompt stays answerable, in seconds: 30-3,600, default 600. */
   ttlSeconds?: number;
+  /**
+   * Optional. Records an accepted confirmation, by the nonce its sealed state carries: true the first
+   * time, false for one already recorded, which the server then refuses (`confirmation_invalid`) so
+   * an acceptance runs its write once. Keep each nonce until `expiresAt`, across every server that
+   * shares the secrets (`createSlotlockAcceptanceRecords` does, in Postgres). Without it an accepted
+   * state can be sent again until it expires; it names the same principal, write and arguments, so
+   * the write's idempotency key or expected revision then decides.
+   */
+  consumeAcceptance?: (acceptance: { nonce: string; expiresAt: Date }) => Promise<boolean>;
 }
 
 /**
@@ -2181,6 +2190,7 @@ interface ConfirmationPolicy {
   operations: ReadonlySet<SlotlockAgentOperation>;
   keys: Buffer[];
   ttlMs: number;
+  consumeAcceptance?: SlotlockAgentConfirmationOptions['consumeAcceptance'];
 }
 
 function validateConfirmation(
@@ -2201,7 +2211,15 @@ function validateConfirmation(
   if (!Number.isInteger(ttlSeconds) || ttlSeconds < 30 || ttlSeconds > 3_600) {
     throw invalid('ttlSeconds');
   }
-  return { operations: new Set(value.operations), keys, ttlMs: ttlSeconds * 1_000 };
+  if (value.consumeAcceptance !== undefined && typeof value.consumeAcceptance !== 'function') {
+    throw invalid('consumeAcceptance');
+  }
+  return {
+    operations: new Set(value.operations),
+    keys,
+    ttlMs: ttlSeconds * 1_000,
+    ...(value.consumeAcceptance ? { consumeAcceptance: value.consumeAcceptance } : {}),
+  };
 }
 
 /** An empty `elicitation` object declares form mode (2026-07-28 client/elicitation §Capabilities). */
@@ -3164,6 +3182,18 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
           operation,
           argsDigest: gate.argsDigest,
         });
+        if (gate.decision === 'accepted' && confirmation.consumeAcceptance) {
+          // Once only: the same accepted state sent again is refused, on any server.
+          const state = openRequestState(confirmation.keys, params.requestState)?.payload;
+          const nonce = state?.nonce;
+          if (typeof nonce !== 'string' || typeof state?.exp !== 'number') {
+            gate.decision = 'invalid';
+          } else if (
+            !(await confirmation.consumeAcceptance({ nonce, expiresAt: new Date(state.exp) }))
+          ) {
+            gate.decision = 'invalid';
+          }
+        }
         // Before the call it decides, as on every other protocol.
         emit({ type: 'confirmation', operation, outcome: CONFIRMATION_OUTCOME[gate.decision] });
         return gate.decision === 'accepted' ? null : CONFIRMATION_HALT[gate.decision];

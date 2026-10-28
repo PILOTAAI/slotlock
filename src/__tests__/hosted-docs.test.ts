@@ -143,4 +143,13 @@ describe('hosted safety in the documentation', () => {
     expect(page).toContain('<!-- include README.md#confirm-before-writing body -->');
     expect(page).not.toMatch(/A person can confirm each one/);
   });
+
+  it('tells operators to erase a tenant with the one call that does it, not table by table', () => {
+    const start = readme.indexOf('- **Erasure.**');
+    expect(start, 'canary: the erasure item exists').toBeGreaterThanOrEqual(0);
+    const item = readme.slice(start, readme.indexOf('\n\n', start));
+    expect(item).toContain('eraseTenant({ tenantRef })');
+    expect(item).toContain('slotlock tenant erase');
+    expect(item).not.toMatch(/delete order|in your tenant-erasure workflow and/);
+  });
 });

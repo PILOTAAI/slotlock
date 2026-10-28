@@ -9,6 +9,7 @@ import { createSlotlockApiKeyStore } from '../api-keys.js';
 import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from '../ddl.js';
 import {
   SLOTLOCK_DASHBOARD_MAX_RESOURCES,
+  createSlotlockAcceptanceRecords,
   createSlotlockDashboard,
   createSlotlockDashboardResources,
   createSlotlockDashboardState,
@@ -200,6 +201,43 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
     await state.use('sign_in', randomBytes(18).toString('base64url'), Date.now() + 3_600_000);
     expect(await expired()).toBeLessThanOrEqual(Math.max(0, before - 100));
     await expect(state.use('sign_in', 'x'.repeat(22), Number.NaN)).rejects.toThrow('finite expiry');
+  });
+
+  it('records an accepted write confirmation once, on any server, as the serving role', async () => {
+    const [first, second] = [createSlotlockAcceptanceRecords(connectAsServer()), createSlotlockAcceptanceRecords(connectAsServer())];
+    const acceptance = { nonce: randomBytes(12).toString('base64url'), expiresAt: new Date(Date.now() + 10 * MIN) };
+    expect(await first(acceptance)).toBe(true);
+    expect(await second(acceptance)).toBe(false);
+    expect(await first(acceptance)).toBe(false);
+    // Under its own kind: the same value as a sign-in is another record.
+    const state = createSlotlockDashboardState(connectAsServer());
+    expect(await state.use('sign_in', acceptance.nonce, Date.now() + 10 * MIN)).toBe(true);
+    // An acceptance the database's clock holds expired runs nothing and stores nothing.
+    expect(await first({ nonce: randomBytes(12).toString('base64url'), expiresAt: new Date(Date.now() - 1_000) })).toBe(false);
+  });
+
+  it('widens a 0.3.0 schema to hold confirmations, and leaves a widened one alone', async () => {
+    const definition = async () =>
+      (
+        await admin<{ def: string }[]>`
+          SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
+           WHERE conname = 'slotlock_dashboard_tokens_kind_valid'`
+      )[0]?.def;
+    // As 0.3.0 left it, which held no confirmations.
+    await admin`DELETE FROM slotlock.dashboard_tokens WHERE kind = 'confirmation'`;
+    await admin`ALTER TABLE slotlock.dashboard_tokens DROP CONSTRAINT slotlock_dashboard_tokens_kind_valid`;
+    await admin`ALTER TABLE slotlock.dashboard_tokens ADD CONSTRAINT slotlock_dashboard_tokens_kind_valid
+                  CHECK (kind IN ('sign_in', 'form', 'ended_session'))`;
+    expect(await definition()).not.toContain('confirmation');
+    const owner = createSlotlockStore(admin);
+    await owner.applySchema();
+    expect(await definition()).toContain('confirmation');
+    const widened = await admin<{ oid: number }[]>`
+      SELECT oid FROM pg_constraint WHERE conname = 'slotlock_dashboard_tokens_kind_valid'`;
+    await owner.applySchema();
+    const after = await admin<{ oid: number }[]>`
+      SELECT oid FROM pg_constraint WHERE conname = 'slotlock_dashboard_tokens_kind_valid'`;
+    expect(after).toEqual(widened);
   });
 
   it('keeps a record exactly as long as its token can be accepted', async () => {
