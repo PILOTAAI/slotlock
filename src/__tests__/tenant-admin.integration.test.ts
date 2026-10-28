@@ -451,7 +451,8 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
           tenantRef,
           memberRef: `github:${uid}`,
           messages: [{ role: 'user', text: 'Anything free tomorrow?' }],
-          actions: {},
+          added: {},
+          keep: [],
           ttlMs: HOUR,
         });
         expect(

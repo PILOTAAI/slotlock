@@ -50,6 +50,7 @@ const UPKEEP = [
   'releaseNoShows',
   'offerWaitlist',
   'pruneAssistantConversations',
+  'sweepAssistantConversations',
 ];
 const ADMINISTRATION = [
   'applySchema',

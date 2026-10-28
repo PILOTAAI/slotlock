@@ -2479,7 +2479,10 @@ export interface SlotlockStore extends SlotlockEventFeed {
   getAssistantSettings(params: { tenantRef: string }): Promise<SlotlockAssistantSettingsRecord | null>;
   /**
    * Set the tenant's assistant settings. `key` is the sealed key and its hint, null for none, or
-   * `'keep'` to keep the one stored (none, for a tenant without settings).
+   * `'keep'` to keep the one stored (none, for a tenant without settings). A stored key is kept only
+   * for the provider and base URL it was entered for: `'keep'` with another provider or URL changes
+   * nothing and answers `{ saved: false }`, decided in the one statement that writes, so racing
+   * saves cannot carry the key elsewhere.
    */
   putAssistantSettings(params: {
     tenantRef: string;
@@ -2488,7 +2491,7 @@ export interface SlotlockStore extends SlotlockEventFeed {
     model: string;
     key: { sealed: string; hint: string } | null | 'keep';
     updatedBy?: string;
-  }): Promise<void>;
+  }): Promise<{ saved: boolean }>;
   /** Remove the tenant's assistant settings, its key with them. False when it had none. */
   deleteAssistantSettings(params: { tenantRef: string }): Promise<boolean>;
   /** A member's live assistant conversation, or null when none is (or it expired). */
@@ -2497,16 +2500,18 @@ export interface SlotlockStore extends SlotlockEventFeed {
     memberRef: string;
   }): Promise<SlotlockAssistantConversationRecord | null>;
   /**
-   * Store a member's conversation for `ttlMs` (1 second to a day) from now, replacing its messages
-   * and keeping exactly the actions given: one stored already keeps its stored state
-   * (settleAssistantAction changes it), and one left out is dropped. The tenant's expired
-   * conversations are deleted with it.
+   * Store a member's conversation for `ttlMs` (1 second to a day) from now, replacing its messages.
+   * Its actions become those stored already that `keep` names, in their stored state
+   * (settleAssistantAction changes it), and the `added` ones not stored already: an action is never
+   * put back into a conversation that no longer has it. The tenant's expired conversations are
+   * deleted with it, and the tenant is listed for sweepAssistantConversations.
    */
   putAssistantConversation(params: {
     tenantRef: string;
     memberRef: string;
     messages: unknown[];
-    actions: Record<string, Record<string, unknown>>;
+    added: Record<string, Record<string, unknown>>;
+    keep: readonly string[];
     ttlMs: number;
   }): Promise<void>;
   /**
@@ -2525,6 +2530,11 @@ export interface SlotlockStore extends SlotlockEventFeed {
   deleteAssistantConversation(params: { tenantRef: string; memberRef: string }): Promise<boolean>;
   /** Delete up to `limit` (default 1,000) of the tenant's expired assistant conversations: how many. */
   pruneAssistantConversations(params: { tenantRef: string; limit?: number }): Promise<number>;
+  /**
+   * Delete up to `limit` (1-100,000, default 10,000) expired assistant conversations of every
+   * tenant (slotlock.sweep_assistant_conversations): how many, and nothing else.
+   */
+  sweepAssistantConversations(params?: { limit?: number }): Promise<number>;
   /**
    * Offer freed time to the waitlist, in the order entries joined: each waiting entry whose window
    * is free (on its resource, or on the first free member of its pool) gets a hold for its holder
@@ -6072,7 +6082,7 @@ function buildSlotlockStore(
       if (!isValidIdentity(params.tenantRef)) throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
       const keep = params.key === 'keep';
       const key = params.key === 'keep' ? null : params.key;
-      await sql`
+      const saved = await sql`
         INSERT INTO slotlock.assistant_settings AS stored
           (tenant_ref, provider, base_url, model, sealed_key, key_hint, updated_by, updated_at)
         VALUES (${params.tenantRef}, ${params.provider}, ${params.baseUrl}, ${params.model},
@@ -6085,7 +6095,12 @@ function buildSlotlockStore(
           sealed_key = CASE WHEN ${keep}::boolean THEN stored.sealed_key ELSE EXCLUDED.sealed_key END,
           key_hint = CASE WHEN ${keep}::boolean THEN stored.key_hint ELSE EXCLUDED.key_hint END,
           updated_by = EXCLUDED.updated_by,
-          updated_at = EXCLUDED.updated_at`;
+          updated_at = EXCLUDED.updated_at
+        WHERE NOT ${keep}::boolean
+           OR stored.sealed_key IS NULL
+           OR (stored.provider = EXCLUDED.provider AND stored.base_url = EXCLUDED.base_url)
+        RETURNING 1`;
+      return { saved: saved.length > 0 };
     },
 
     async deleteAssistantSettings(params) {
@@ -6125,24 +6140,35 @@ function buildSlotlockStore(
         throw invalidIdentityError('Slotlock assistant conversation ttlMs must be 1 second to a day');
       }
       const messages = sql.json(params.messages as never);
-      const actions = sql.json(params.actions as never);
+      const added = sql.json(params.added as never);
+      const keep = [...params.keep];
       await sql`
         DELETE FROM slotlock.assistant_conversations
          WHERE tenant_ref = ${params.tenantRef} AND expires_at <= statement_timestamp()`;
       await sql`
         INSERT INTO slotlock.assistant_conversations AS stored
           (tenant_ref, member_ref, messages, actions, updated_at, expires_at)
-        VALUES (${params.tenantRef}, ${params.memberRef}, ${messages}, ${actions},
+        VALUES (${params.tenantRef}, ${params.memberRef}, ${messages}, ${added},
                 statement_timestamp(),
                 statement_timestamp() + make_interval(secs => ${params.ttlMs / 1_000}))
         ON CONFLICT (tenant_ref, member_ref) DO UPDATE SET
           messages = EXCLUDED.messages,
+          -- The stored ones kept, as they stand, then the new ones: never a settled one again.
           actions = (
-            SELECT coalesce(jsonb_object_agg(kept.key, coalesce(stored.actions -> kept.key, kept.value)), '{}'::jsonb)
-              FROM jsonb_each(EXCLUDED.actions) AS kept
+            SELECT coalesce(jsonb_object_agg(existing.key, existing.value), '{}'::jsonb)
+              FROM jsonb_each(stored.actions) AS existing
+             WHERE existing.key = ANY(${keep}::text[])
+          ) || (
+            SELECT coalesce(jsonb_object_agg(fresh.key, fresh.value), '{}'::jsonb)
+              FROM jsonb_each(EXCLUDED.actions) AS fresh
+             WHERE NOT stored.actions ? fresh.key
           ),
           updated_at = EXCLUDED.updated_at,
           expires_at = EXCLUDED.expires_at`;
+      await sql`
+        SELECT slotlock.register_assistant_tenant(
+          ${params.tenantRef}::text,
+          statement_timestamp() + make_interval(secs => ${params.ttlMs / 1_000}))`;
     },
 
     async settleAssistantAction(params) {
@@ -6175,6 +6201,16 @@ function buildSlotlockStore(
            AND expires_at <= statement_timestamp()
         RETURNING 1`;
       return rows.length;
+    },
+
+    async sweepAssistantConversations(params) {
+      const limit = params?.limit ?? 10_000;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100_000) {
+        throw invalidIdentityError('Slotlock assistant sweep limit must be 1-100,000');
+      }
+      const [row] = await sql<{ deleted: string | number }[]>`
+        SELECT slotlock.sweep_assistant_conversations(${limit}::integer) AS deleted`;
+      return Number(row?.deleted ?? 0);
     },
 
     async deleteAssistantConversation(params) {

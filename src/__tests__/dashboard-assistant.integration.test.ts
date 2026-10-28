@@ -82,7 +82,7 @@ describe.skipIf(!url)('assistant records (real Postgres)', () => {
       { provider: 'anthropic', baseUrl: 'https://api.example.com', model: 'your-model', key: { sealed, hint: '1234' } },
       'github:1',
     );
-    await adapter.putConversation(tenant, 'github:1', { messages: [{ role: 'user', text: 'secret plans' }], actions: {} }, 60_000);
+    await adapter.putConversation(tenant, 'github:1', { messages: [{ role: 'user', text: 'secret plans' }], added: {}, keep: [] }, 60_000);
 
     const mine = await adapter.getSettings(tenant);
     expect(mine).toMatchObject({ provider: 'anthropic', model: 'your-model', keyHint: '1234', updatedBy: 'github:1' });
@@ -114,26 +114,26 @@ describe.skipIf(!url)('assistant records (real Postgres)', () => {
     expect(Number(bare?.count)).toBe(0);
     expect((await adapter.getSettings(tenant))?.baseUrl).toBe('https://api.example.com');
 
-    // Saved without a new key, the key stays.
-    await adapter.putSettings(tenant, { provider: 'openai', baseUrl: 'http://localhost:11434/v1', model: 'other', key: 'keep' });
-    expect(await adapter.getSettings(tenant)).toMatchObject({ provider: 'openai', keyHint: '1234', sealedKey: sealed });
+    // Saved without a new key for the same provider and URL, the key stays.
+    await adapter.putSettings(tenant, { provider: 'anthropic', baseUrl: 'https://api.example.com', model: 'other', key: 'keep' });
+    expect(await adapter.getSettings(tenant)).toMatchObject({ model: 'other', keyHint: '1234', sealedKey: sealed });
   });
 
   it('lets one of many racing approvals claim an action, and lapses a conversation', async () => {
     const adapter = createSlotlockDashboardResources(store).assistant;
     if (!adapter) throw new Error('the store adapter keeps assistant records');
     const action = { operation: 'slotlock_delete_event', input: { event_id: 'agent:x' }, status: 'pending' };
-    await adapter.putConversation(tenant, 'github:2', { messages: [], actions: { a1: action } }, 60_000);
+    await adapter.putConversation(tenant, 'github:2', { messages: [], added: { a1: action }, keep: ['a1'] }, 60_000);
     // Stored again with the action pending: the stored state wins over the copy sent.
     const claims = await Promise.all(
       Array.from({ length: 6 }, () => adapter.settleAction(tenant, 'github:2', 'a1', 'pending', { status: 'approved' })),
     );
     expect(claims.filter((claim) => claim !== null)).toEqual([{ ...action, status: 'approved' }]);
-    await adapter.putConversation(tenant, 'github:2', { messages: [{ role: 'note', text: 'n' }], actions: { a1: action } }, 60_000);
+    await adapter.putConversation(tenant, 'github:2', { messages: [{ role: 'note', text: 'n' }], added: { a1: action }, keep: ['a1'] }, 60_000);
     expect((await adapter.getConversation(tenant, 'github:2'))?.actions.a1?.status).toBe('approved');
     expect(await adapter.settleAction(other, 'github:2', 'a1', 'approved', { status: 'done' })).toBeNull();
 
-    await adapter.putConversation(tenant, 'github:3', { messages: [], actions: {} }, 1_000);
+    await adapter.putConversation(tenant, 'github:3', { messages: [], added: {}, keep: [] }, 1_000);
     expect(await adapter.getConversation(tenant, 'github:3')).not.toBeNull();
     await new Promise((resolve) => setTimeout(resolve, 1_100));
     expect(await adapter.getConversation(tenant, 'github:3')).toBeNull();
@@ -142,8 +142,8 @@ describe.skipIf(!url)('assistant records (real Postgres)', () => {
   it('L3: deletes expired conversations in the maintenance pass', async () => {
     const adapter = createSlotlockDashboardResources(store).assistant;
     if (!adapter) throw new Error('the store adapter keeps assistant records');
-    await adapter.putConversation(tenant, 'github:7', { messages: [], actions: {} }, 1_000);
-    await adapter.putConversation(tenant, 'github:8', { messages: [], actions: {} }, 60_000);
+    await adapter.putConversation(tenant, 'github:7', { messages: [], added: {}, keep: [] }, 1_000);
+    await adapter.putConversation(tenant, 'github:8', { messages: [], added: {}, keep: [] }, 60_000);
     await new Promise((resolve) => setTimeout(resolve, 1_100));
     const count = async () =>
       Number(
@@ -229,11 +229,95 @@ describe.skipIf(!url)('assistant records (real Postgres)', () => {
     }
   });
 
+  it('sweeps every tenant’s expired conversations, a tenant no key ever served included', async () => {
+    const adapter = createSlotlockDashboardResources(store).assistant;
+    if (!adapter) throw new Error('the store adapter keeps assistant records');
+    const chatOnly = `github-org:${600_000 + Math.floor(Math.random() * 99_999)}`;
+    try {
+      await adapter.putConversation(chatOnly, 'github:41', { messages: [], added: {}, keep: [] }, 1_000);
+      await adapter.putConversation(other, 'github:42', { messages: [], added: {}, keep: [] }, 1_000);
+      await adapter.putConversation(other, 'github:43', { messages: [], added: {}, keep: [] }, 60_000);
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+      const rows = async () =>
+        (
+          await admin<{ tenant_ref: string; member_ref: string }[]>`
+          SELECT tenant_ref, member_ref FROM slotlock.assistant_conversations
+           WHERE member_ref IN ('github:41', 'github:42', 'github:43') ORDER BY member_ref`
+        ).map(({ member_ref }) => member_ref);
+      expect(await rows()).toEqual(['github:41', 'github:42', 'github:43']);
+      // As the serving role, outside any tenant: one statement for every tenant.
+      expect(await store.sweepAssistantConversations()).toBeGreaterThanOrEqual(2);
+      expect(await rows()).toEqual(['github:43']);
+      const listed = await admin<{ tenant_ref: string; next_expiry: Date }[]>`
+        SELECT tenant_ref, next_expiry FROM slotlock.assistant_tenants
+         WHERE tenant_ref IN (${chatOnly}, ${other})`;
+      expect(listed.map(({ tenant_ref }) => tenant_ref)).toEqual([other]);
+      expect(listed[0]?.next_expiry.getTime()).toBeGreaterThan(Date.now());
+    } finally {
+      await admin`SELECT * FROM slotlock.erase_tenant(${chatOnly}::text)`;
+    }
+  });
+
+  it("deletes a tenant's expired conversations when one of its conversations is read", async () => {
+    const adapter = createSlotlockDashboardResources(store).assistant;
+    if (!adapter) throw new Error('the store adapter keeps assistant records');
+    await adapter.putConversation(other, 'github:51', { messages: [], added: {}, keep: [] }, 1_000);
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    await adapter.getConversation(other, 'github:52');
+    const [row] = await admin<{ count: string }[]>`
+      SELECT count(*) FROM slotlock.assistant_conversations WHERE tenant_ref = ${other} AND member_ref = 'github:51'`;
+    expect(Number(row?.count)).toBe(0);
+  });
+
+  it('puts no action back into a conversation that no longer has it, and keeps a settled one settled', async () => {
+    const adapter = createSlotlockDashboardResources(store).assistant;
+    if (!adapter) throw new Error('the store adapter keeps assistant records');
+    const pending = { operation: 'slotlock_delete_event', input: { event_id: 'agent:y' }, status: 'pending' };
+    await adapter.putConversation(other, 'github:61', { messages: [], added: { x1: pending }, keep: [] }, 60_000);
+    await adapter.settleAction(other, 'github:61', 'x1', 'pending', { status: 'done', input: {} });
+    // A stale turn carries x1 as it stood: the row's state stands.
+    await adapter.putConversation(other, 'github:61', { messages: [], added: { x1: pending }, keep: ['x1'] }, 60_000);
+    expect((await adapter.getConversation(other, 'github:61'))?.actions.x1).toMatchObject({ status: 'done', input: {} });
+    // Reset while the turn ran: the row is gone, and only new actions go in.
+    await adapter.deleteConversation(other, 'github:61');
+    await adapter.putConversation(other, 'github:61', { messages: [], added: { x2: pending }, keep: ['x1'] }, 60_000);
+    expect(Object.keys((await adapter.getConversation(other, 'github:61'))?.actions ?? {})).toEqual(['x2']);
+  });
+
+  it('keeps the key only for the provider and base URL it was entered for, in the write itself', async () => {
+    const adapter = createSlotlockDashboardResources(store).assistant;
+    if (!adapter) throw new Error('the store adapter keeps assistant records');
+    const shared = `github-org:${500_000 + Math.floor(Math.random() * 99_999)}`;
+    try {
+      const base = { provider: 'openai' as const, baseUrl: 'https://gateway.example.com/team-a/v1', model: 'your-model' };
+      await adapter.putSettings(shared, { ...base, key: { sealed: 'v1.a.b', hint: 'abcd' } });
+      for (const changed of [
+        { ...base, baseUrl: 'https://gateway.example.com/team-b/v1' },
+        { ...base, provider: 'anthropic' as const },
+      ]) {
+        expect(await adapter.putSettings(shared, { ...changed, key: 'keep' })).toEqual({ saved: false });
+        expect(await adapter.getSettings(shared)).toMatchObject({ ...base, sealedKey: 'v1.a.b' });
+      }
+      // Racing saves to another URL: none carries the key there.
+      const raced = await Promise.all(
+        Array.from({ length: 5 }, (_, index) =>
+          adapter.putSettings(shared, { ...base, baseUrl: `https://elsewhere-${index}.example.com/v1`, key: 'keep' }),
+        ),
+      );
+      expect(raced.every(({ saved }) => !saved)).toBe(true);
+      expect((await adapter.getSettings(shared))?.baseUrl).toBe(base.baseUrl);
+      expect(await adapter.putSettings(shared, { ...base, model: 'other-model', key: 'keep' })).toEqual({ saved: true });
+      expect(await adapter.putSettings(shared, { ...base, baseUrl: 'https://other.example.com/v1', key: null })).toEqual({ saved: true });
+    } finally {
+      await admin`SELECT * FROM slotlock.erase_tenant(${shared}::text)`;
+    }
+  });
+
   it("erases a tenant's settings and conversations, and no other tenant's", async () => {
     const adapter = createSlotlockDashboardResources(store).assistant;
     if (!adapter) throw new Error('the store adapter keeps assistant records');
     await adapter.putSettings(other, { provider: 'openai', baseUrl: 'https://api.example.com/v1', model: 'm', key: null });
-    await adapter.putConversation(other, 'github:9', { messages: [], actions: {} }, 60_000);
+    await adapter.putConversation(other, 'github:9', { messages: [], added: {}, keep: [] }, 60_000);
     const erased = await store.eraseTenant({ tenantRef: tenant });
     expect(erased.rows.assistant_settings).toBe(1);
     expect(erased.rows.assistant_conversations).toBeGreaterThanOrEqual(2);

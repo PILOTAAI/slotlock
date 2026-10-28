@@ -321,8 +321,9 @@ of clicking. Each organization brings its own model:
   rebound to one is refused too), and the page says why. For a self-hosted model on the server's
   own machine or network (Ollama, vLLM), the operator sets `SLOTLOCK_ASSISTANT_PRIVATE_URLS=on`.
   On Cloudflare Workers the literal check applies and names are not resolved: a Worker's fetch
-  reaches no private network. Changing the provider or the URL's origin takes the key again, so the
-  stored key is only ever sent where it was entered for. **Test connection** makes one real request
+  reaches no private network. Changing the provider or the base URL takes the key again (decided in the
+  database write, so racing saves cannot get past it), so the stored key is only ever sent where it
+  was entered for, even on an origin that serves several accounts. **Test connection** makes one real request
   and checks the model answers with one correct tool call. The organization's messages, and the bookings and resources the assistant
   reads, are sent to the provider it configures.
 - **The key** is stored sealed with AES-256-GCM under a key derived from `SLOTLOCK_ASSISTANT_SECRET`,
@@ -347,8 +348,10 @@ of clicking. Each organization brings its own model:
 - Tool results and booking data are data to the model, never instructions, and the system prompt
   says so; the tool list does not change with what the model says. A member may send 10 messages
   a minute; each model call has 30 seconds and a message 90. Conversations are kept per member in
-  `slotlock.assistant_conversations` for 2 hours after the last message, then deleted by
-  maintenance, and bounded in UTF-8 bytes; **New conversation** forgets one. On Workers, the
+  `slotlock.assistant_conversations` for 2 hours after the last message, then deleted: by
+  `serve`'s maintenance, which sweeps every tenant's expired conversations every quarter hour (a
+  tenant only the dashboard serves included), by `slotlock maintain`, and whenever the tenant's
+  conversations are read (so on Workers too). They are bounded in UTF-8 bytes; **New conversation** forgets one. On Workers, the
   assistant's agent calls are capped at 24 a request and by `tenant_read` and `tenant_write` of
   `SLOTLOCK_LIMITS` in each isolate. A provider's failure is shown as a plain message, never with
   the key or the provider's answer.

@@ -146,13 +146,21 @@ export interface SlotlockAssistantStore {
       key: { sealed: string; hint: string } | null | 'keep';
     },
     actor?: string,
-  ): Promise<void>;
+  ): Promise<{ saved: boolean }>;
   deleteSettings(tenantRef: string, actor?: string): Promise<boolean>;
   getConversation(tenantRef: string, memberRef: string): Promise<SlotlockAssistantConversationRecord | null>;
+  /**
+   * Replace a member's messages; keep the stored actions `keep` names, as they stand, and add the
+   * `added` ones not stored already (store.ts putAssistantConversation).
+   */
   putConversation(
     tenantRef: string,
     memberRef: string,
-    conversation: { messages: unknown[]; actions: Record<string, Record<string, unknown>> },
+    conversation: {
+      messages: unknown[];
+      added: Record<string, Record<string, unknown>>;
+      keep: readonly string[];
+    },
     ttlMs: number,
   ): Promise<void>;
   settleAction(
@@ -184,10 +192,13 @@ export function createSlotlockAssistantStore(store: SlotlockStore): SlotlockAssi
       ),
     deleteSettings: (tenantRef, actor) =>
       store.withTenant(tenantRef, (tenant) => tenant.deleteAssistantSettings({ tenantRef }), by(actor)),
+    // Each read deletes the tenant's expired conversations first, so they go on a deployment whose
+    // maintenance never meets the tenant (a Worker's) too.
     getConversation: (tenantRef, memberRef) =>
-      store.withTenant(tenantRef, (tenant) =>
-        tenant.getAssistantConversation({ tenantRef, memberRef }),
-      ),
+      store.withTenant(tenantRef, async (tenant) => {
+        await tenant.pruneAssistantConversations({ tenantRef, limit: 100 });
+        return tenant.getAssistantConversation({ tenantRef, memberRef });
+      }),
     putConversation: (tenantRef, memberRef, conversation, ttlMs) =>
       store.withTenant(tenantRef, (tenant) =>
         tenant.putAssistantConversation({ tenantRef, memberRef, ...conversation, ttlMs }),
@@ -224,6 +235,13 @@ export function createSlotlockMemoryAssistantStore(
     },
     async putSettings(tenantRef, next, actor) {
       const stored = settings.get(tenantRef);
+      if (
+        next.key === 'keep' &&
+        stored?.sealedKey &&
+        (stored.provider !== next.provider || stored.baseUrl !== next.baseUrl)
+      ) {
+        return { saved: false };
+      }
       const key =
         next.key === 'keep'
           ? { sealed: stored?.sealedKey ?? null, hint: stored?.keyHint ?? null }
@@ -237,6 +255,7 @@ export function createSlotlockMemoryAssistantStore(
         updatedBy: actor ?? null,
         updatedAt: new Date(now()),
       });
+      return { saved: true };
     },
     async deleteSettings(tenantRef) {
       return settings.delete(tenantRef);
@@ -253,11 +272,14 @@ export function createSlotlockMemoryAssistantStore(
     },
     async putConversation(tenantRef, memberRef, conversation, ttlMs) {
       const stored = live(tenantRef, memberRef);
-      const actions = copy(conversation.actions);
-      // As the store: exactly the actions given, one stored already keeping its stored state.
-      for (const id of Object.keys(actions)) {
+      // As the store: the stored ones kept as they stand, then the new ones not stored already.
+      const actions: Record<string, Record<string, unknown>> = {};
+      for (const id of conversation.keep) {
         const kept = stored?.actions[id];
         if (kept) actions[id] = copy(kept);
+      }
+      for (const [id, action] of Object.entries(conversation.added)) {
+        if (!stored?.actions[id]) actions[id] = copy(action);
       }
       conversations.set(keyOf(tenantRef, memberRef), {
         messages: copy(conversation.messages),

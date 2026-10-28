@@ -258,6 +258,7 @@ export const SLOTLOCK_TENANT_ADMIN_TABLES = Object.freeze([
   'tenant_suspensions',
   'webhook_tenants',
   'rate_buckets',
+  'assistant_tenants',
 ] as const);
 
 /**
@@ -271,6 +272,8 @@ export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.webhook_tenants(text)',
   'slotlock.unregister_webhook_tenant(text)',
   'slotlock.take_rate_token(text, double precision, double precision)',
+  'slotlock.register_assistant_tenant(text, timestamptz)',
+  'slotlock.sweep_assistant_conversations(integer)',
 ] as const);
 
 /**
@@ -927,6 +930,10 @@ BEGIN
   DELETE FROM slotlock.webhook_endpoints WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  erased_table := 'assistant_tenants';
+  DELETE FROM slotlock.assistant_tenants WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'webhook_tenants';
   DELETE FROM slotlock.webhook_tenants WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
@@ -1053,6 +1060,106 @@ BEGIN
 END
 $slotlock_take_rate_token$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[5]} FROM PUBLIC;
+
+-- The tenants with a dashboard assistant conversation, and when the first of them expires. Forced
+-- row-level security hides every other tenant's conversations, from the owner too, so this list
+-- (names and a time only) is how maintenance finds the tenants whose conversations have expired,
+-- whichever server stored them: one only the dashboard (or its Worker) ever used included. No role
+-- but its owner reads it.
+CREATE TABLE IF NOT EXISTS slotlock.assistant_tenants (
+  tenant_ref text PRIMARY KEY,
+  next_expiry timestamptz NOT NULL,
+  CONSTRAINT slotlock_assistant_tenants_tenant_ref_valid
+    CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500)
+);
+CREATE INDEX IF NOT EXISTS slotlock_assistant_tenants_expiry_idx
+  ON slotlock.assistant_tenants (next_expiry);
+ALTER TABLE slotlock.assistant_tenants ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.assistant_tenants FROM PUBLIC;
+
+-- Record that the tenant has a conversation expiring at expires (the earliest is kept).
+CREATE OR REPLACE FUNCTION slotlock.register_assistant_tenant(requested_tenant_ref text, expires timestamptz)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_register_assistant_tenant$
+BEGIN
+  IF requested_tenant_ref IS NULL OR octet_length(requested_tenant_ref) NOT BETWEEN 1 AND 500
+     OR expires IS NULL THEN
+    RAISE EXCEPTION 'Slotlock assistant tenant arguments are invalid' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  INSERT INTO slotlock.assistant_tenants AS kept (tenant_ref, next_expiry)
+  VALUES (requested_tenant_ref, expires)
+  ON CONFLICT (tenant_ref) DO UPDATE SET next_expiry = LEAST(kept.next_expiry, EXCLUDED.next_expiry);
+END
+$slotlock_register_assistant_tenant$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[6]} FROM PUBLIC;
+
+-- Delete expired assistant conversations across every tenant: up to max_rows of them, from the
+-- tenants whose earliest expiry has passed, longest overdue first, each under its own tenant
+-- context (forced row-level security binds the owner too), putting the caller's settings back
+-- after. A tenant left with none leaves the list; one with more is listed at its next expiry.
+-- Only a count comes back.
+CREATE OR REPLACE FUNCTION slotlock.sweep_assistant_conversations(max_rows integer)
+RETURNS bigint
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_sweep_assistant_conversations$
+DECLARE
+  setting text;
+  previous jsonb := '{}'::jsonb;
+  due record;
+  deleted bigint := 0;
+  step bigint;
+  upcoming timestamptz;
+BEGIN
+  IF max_rows IS NULL OR max_rows NOT BETWEEN 1 AND 100000 THEN
+    RAISE EXCEPTION 'Slotlock assistant sweep size must be 1-100,000' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  FOR setting IN
+    SELECT DISTINCT contract.tenant_context_setting FROM slotlock.rls_policy_contracts contract
+  LOOP
+    previous := previous || jsonb_build_object(setting, current_setting(setting, true));
+  END LOOP;
+  FOR due IN
+    SELECT listed.tenant_ref FROM slotlock.assistant_tenants listed
+     WHERE listed.next_expiry <= now()
+     ORDER BY listed.next_expiry
+     LIMIT 1000
+       FOR UPDATE SKIP LOCKED
+  LOOP
+    EXIT WHEN deleted >= max_rows;
+    FOR setting IN SELECT jsonb_object_keys(previous) LOOP
+      PERFORM set_config(setting, due.tenant_ref, true);
+    END LOOP;
+    DELETE FROM slotlock.assistant_conversations gone
+     WHERE gone.tenant_ref = due.tenant_ref
+       AND gone.member_ref IN (
+         SELECT expired.member_ref FROM slotlock.assistant_conversations expired
+          WHERE expired.tenant_ref = due.tenant_ref AND expired.expires_at <= now()
+          LIMIT max_rows - deleted)
+       AND gone.expires_at <= now();
+    GET DIAGNOSTICS step = ROW_COUNT;
+    deleted := deleted + step;
+    SELECT min(live.expires_at) INTO upcoming FROM slotlock.assistant_conversations live
+     WHERE live.tenant_ref = due.tenant_ref;
+    IF upcoming IS NULL THEN
+      DELETE FROM slotlock.assistant_tenants WHERE tenant_ref = due.tenant_ref;
+    ELSE
+      UPDATE slotlock.assistant_tenants SET next_expiry = upcoming WHERE tenant_ref = due.tenant_ref;
+    END IF;
+  END LOOP;
+  FOR setting IN SELECT jsonb_object_keys(previous) LOOP
+    PERFORM set_config(setting, coalesce(previous ->> setting, ''), true);
+  END LOOP;
+  RETURN deleted;
+END
+$slotlock_sweep_assistant_conversations$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[7]} FROM PUBLIC;
 `;
 
 // A constraint an upgrade added NOT VALID (no table scan under its ACCESS EXCLUSIVE lock) is checked

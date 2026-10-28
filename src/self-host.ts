@@ -1392,6 +1392,9 @@ async function maintainTenant(
         sum.capped = pass.capped;
         if (pass.capped && pass.extended + pass.pruned === 0 && !pass.rollPending) break;
       }
+      // Every tenant's expired assistant conversations, a tenant only the dashboard serves
+      // included. Counted nowhere: the counts above are this tenant's.
+      await store.sweepAssistantConversations();
       return sum;
     });
     return total ?? null;

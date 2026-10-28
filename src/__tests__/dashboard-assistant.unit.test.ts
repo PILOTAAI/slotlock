@@ -915,10 +915,65 @@ describe('security review fixes', () => {
     expect(await elsewhere.text()).toContain('Enter the API key again');
     expect((await save({ provider: 'anthropic', base_url: model.baseUrl })).status).toBe(400);
     expect((await assistantStore.getSettings('github-org:91'))?.baseUrl).toBe(model.baseUrl);
-    // The same origin, another path or model: the key stays.
-    expect((await save({ provider: 'openai', base_url: `${model.baseUrl}/` })).status).toBe(303);
+    // The same origin, another path: a shared origin may serve another account's API there.
+    expect((await save({ provider: 'openai', base_url: `${model.baseUrl}/other` })).status).toBe(400);
+    expect((await assistantStore.getSettings('github-org:91'))?.baseUrl).toBe(model.baseUrl);
+    // The same URL (a trailing slash is not another one) and another model: the key stays.
+    expect((await save({ provider: 'openai', base_url: `${model.baseUrl}/`, model: 'other-model' })).status).toBe(303);
+    expect(await assistantStore.getSettings('github-org:91')).toMatchObject({ model: 'other-model', keyHint: 'wxyz' });
     // A new key, or none, may go anywhere allowed.
     expect((await save({ provider: 'openai', base_url: 'https://api.example.com/v1', api_key: 'sk-new-0000' })).status).toBe(303);
     expect((await save({ provider: 'anthropic', base_url: 'https://api.example.org', clear_key: '1' })).status).toBe(303);
+  });
+});
+
+describe('re-review fixes', () => {
+  let model: FakeModel;
+  beforeAll(async () => {
+    model = await startFakeModel('openai');
+  });
+  afterAll(() => model.close());
+
+  it('never puts back as pending a change approved, then reset, while a turn ran', async () => {
+    const target = dashboard();
+    await connect(target, await signIn(target, 'alice'), model, 'openai');
+    const bob = await signIn(target, 'bob');
+    model.script(
+      { calls: [{ name: 'slotlock_delete_event', input: { event_id: 'agent:abc', expected_revision: 1 } }] },
+      { text: 'Proposed.' },
+    );
+    await chat(target, bob, 'Cancel it');
+    const actionId = /name="action" value="([^"]+)"/.exec(await page(target, bob))?.[1] as string;
+    model.script(async () => {
+      // While this turn runs: the member approves the change, then starts a new conversation.
+      expect((await post(target, '/dashboard/assistant/approve', { action: actionId }, bob)).status).toBe(303);
+      expect((await post(target, '/dashboard/assistant/reset', {}, bob)).status).toBe(303);
+      return { text: 'Anything else?' };
+    });
+    expect((await chat(target, bob, 'And now?')).status).toBe(303);
+    expect(backend.deleteEvent).toHaveBeenCalledTimes(1);
+    const stored = await assistantStore.getConversation('github-org:91', 'github:12');
+    expect(stored?.actions[actionId]).toBeUndefined();
+    expect(await page(target, bob)).not.toContain('name="action"');
+    expect((await post(target, '/dashboard/assistant/approve', { action: actionId }, bob)).status).toBe(409);
+    expect(backend.deleteEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a change approved while a turn ran as approved, not pending', async () => {
+    const target = dashboard();
+    await connect(target, await signIn(target, 'alice'), model, 'openai');
+    const bob = await signIn(target, 'bob');
+    model.script(
+      { calls: [{ name: 'slotlock_delete_event', input: { event_id: 'agent:abc', expected_revision: 1 } }] },
+      { text: 'Proposed.' },
+    );
+    await chat(target, bob, 'Cancel it');
+    const actionId = /name="action" value="([^"]+)"/.exec(await page(target, bob))?.[1] as string;
+    model.script(async () => {
+      expect((await post(target, '/dashboard/assistant/approve', { action: actionId }, bob)).status).toBe(303);
+      return { text: 'Anything else?' };
+    });
+    await chat(target, bob, 'And now?');
+    expect((await assistantStore.getConversation('github-org:91', 'github:12'))?.actions[actionId]?.status).toBe('done');
   });
 });

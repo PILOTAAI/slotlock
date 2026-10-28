@@ -2148,28 +2148,22 @@ ${
       return settingsPage(session, 400, 'An API key is up to 4,096 characters without spaces.');
     }
     const tenantRef = tenantOf(session);
-    // The key goes where the URL points: a new provider or origin takes the key again, so an owner
-    // cannot send the stored one somewhere it was never meant for.
-    const stored = await store.getSettings(tenantRef);
-    if (
-      apiKey === '' &&
-      form.get('clear_key') !== '1' &&
-      stored?.sealedKey &&
-      (stored.provider !== provider || new URL(stored.baseUrl).origin !== new URL(baseUrl).origin)
-    ) {
-      return settingsPage(
-        session,
-        400,
-        'Enter the API key again: the provider or the URL’s origin changed, and the stored key is only sent where it was entered for. Or remove the key.',
-      );
-    }
     const key =
       apiKey !== ''
         ? { sealed: await sealSlotlockAssistantKey(assistantOptions.secret, tenantRef, apiKey), hint: apiKey.slice(-4) }
         : form.get('clear_key') === '1'
           ? null
           : ('keep' as const);
-    await store.putSettings(tenantRef, { provider, baseUrl, model, key }, personOf(session));
+    // The stored key is only kept for the provider and URL it was entered for: the store decides
+    // that in the write itself, so an owner cannot send it elsewhere, however saves race.
+    const { saved } = await store.putSettings(tenantRef, { provider, baseUrl, model, key }, personOf(session));
+    if (!saved) {
+      return settingsPage(
+        session,
+        400,
+        'Enter the API key again: the provider or the base URL changed, and the stored key is only sent where it was entered for. Or remove the key.',
+      );
+    }
     return redirect(303, `${root}/settings#assistant`);
   }
 
@@ -2303,10 +2297,17 @@ ${
       report(turn.failure instanceof Error ? turn.failure.message : 'assistant provider failed');
     }
     const messages = boundSlotlockAssistantEntries([...entries, ...turn.added]);
+    // Only this turn's proposals are added; the rest are kept as the row holds them now, so one
+    // approved (or a conversation reset) while the turn ran is never put back as it stood.
+    const kept = pruneSlotlockAssistantActions(messages, { ...(stored?.actions ?? {}), ...proposed });
     await store.putConversation(
       tenantRef,
       member,
-      { messages, actions: pruneSlotlockAssistantActions(messages, { ...(stored?.actions ?? {}), ...proposed }) },
+      {
+        messages,
+        added: Object.fromEntries(Object.entries(proposed).filter(([id]) => id in kept)),
+        keep: Object.keys(kept),
+      },
       conversationTtl,
     );
     return redirect(303, `${root}/assistant#latest`);
@@ -2363,7 +2364,7 @@ ${
       await store.putConversation(
         tenantRef,
         member,
-        { messages, actions: pruneSlotlockAssistantActions(messages, stored.actions) },
+        { messages, added: {}, keep: Object.keys(pruneSlotlockAssistantActions(messages, stored.actions)) },
         conversationTtl,
       );
     }
