@@ -1272,7 +1272,8 @@ impl Client {
     ///
     /// Set the booking rules every member of one pool has unless its own rules set the same rule,
     /// over the tenant's defaults, from now on; `null` clears them. They take any resource rule
-    /// but check_in_minutes.
+    /// but check_in_minutes. At most 1,000 pools have them: one more is 409
+    /// pool_rules_limit_reached.
     pub fn set_pool_booking_rules(&self, input: &SetPoolBookingRulesInput) -> Result<Value, Error> {
         self.call("slotlock_set_pool_booking_rules", serde_json::to_value(input)?)
     }

@@ -941,7 +941,8 @@ public sealed partial class SlotlockClient
     /// <remarks>
     /// Set the booking rules every member of one pool has unless its own rules set the same rule,
     /// over the tenant's defaults, from now on; `null` clears them. They take any resource rule
-    /// but check_in_minutes.
+    /// but check_in_minutes. At most 1,000 pools have them: one more is 409
+    /// pool_rules_limit_reached.
     /// </remarks>
     /// <param name="pool">pool</param>
     /// <param name="rules">rules</param>

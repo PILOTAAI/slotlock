@@ -769,7 +769,8 @@ public abstract class SlotlockOperations {
   /**
    * Set a pool's booking rules. Set the booking rules every member of one pool has unless its own
    * rules set the same rule, over the tenant's defaults, from now on; `null` clears them. They
-   * take any resource rule but check_in_minutes.
+   * take any resource rule but check_in_minutes. At most 1,000 pools have them: one more is 409
+   * pool_rules_limit_reached.
    *
    * @param pool {@code pool}, string
    * @param rules {@code rules}, object (may be null)

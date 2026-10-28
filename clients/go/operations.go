@@ -917,7 +917,8 @@ func (in SetPoolBookingRulesInput) values() map[string]any {
 
 // SetPoolBookingRules: Set a pool's booking rules. Set the booking rules every member of one pool
 // has unless its own rules set the same rule, over the tenant's defaults, from now on; `null`
-// clears them. They take any resource rule but check_in_minutes.
+// clears them. They take any resource rule but check_in_minutes. At most 1,000 pools have them:
+// one more is 409 pool_rules_limit_reached.
 func (c *Client) SetPoolBookingRules(ctx context.Context, in SetPoolBookingRulesInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_set_pool_booking_rules", in.values())
 }
