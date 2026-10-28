@@ -3,14 +3,7 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
-## 0.5.0 - 2026-10-28
-
-### Documentation
-
-- The production checklist advises a `transaction_timeout` on the serving role (PostgreSQL 17+),
-  so a caller's transaction a store call runs inside cannot hold its locks and snapshot without
-  bound; on 16, `idle_in_transaction_session_timeout` and `statement_timeout`. A test pins the
-  setting on the CI's PostgreSQL 17 and 18.
+## Unreleased
 
 ### Added
 
@@ -25,6 +18,18 @@ versioning.
   security, `assistant_settings` and `assistant_conversations`, which erasure deletes.
   `createSlotlockRateLimiter` is the per-key token bucket it limits members' messages with, and
   organization sessions now remember each organization's role (owners are admins).
+
+## 0.5.0 - 2026-10-28
+
+### Documentation
+
+- The production checklist advises a `transaction_timeout` on the serving role (PostgreSQL 17+),
+  so a caller's transaction a store call runs inside cannot hold its locks and snapshot without
+  bound; on 16, `idle_in_transaction_session_timeout` and `statement_timeout`. A test pins the
+  setting on the CI's PostgreSQL 17 and 18.
+
+### Added
+
 - How long history is kept is a setting: `SLOTLOCK_RETENTION_DAYS` (`retentionDays` in
   `createSlotlockStore`), 1 to 3,650 days, 30 by default. It sets how long the change feed is kept
   and how far back a cursor reaches, and ended waitlist entries; above 30 days, retired idempotency
