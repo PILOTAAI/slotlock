@@ -301,6 +301,9 @@
                                   "type": "integer",
                                   "minimum": 1,
                                   "maximum": 1440
+                                },
+                                "require_certain": {
+                                  "type": "boolean"
                                 }
                               },
                               "additionalProperties": false
@@ -4300,6 +4303,9 @@
                                   "type": "integer",
                                   "minimum": 1,
                                   "maximum": 1440
+                                },
+                                "require_certain": {
+                                  "type": "boolean"
                                 }
                               },
                               "additionalProperties": false
@@ -4579,6 +4585,9 @@
                                   "type": "integer",
                                   "minimum": 1,
                                   "maximum": 1440
+                                },
+                                "require_certain": {
+                                  "type": "boolean"
                                 }
                               },
                               "additionalProperties": false
@@ -4798,6 +4807,9 @@
                                   "type": "integer",
                                   "minimum": 1,
                                   "maximum": 1440
+                                },
+                                "require_certain": {
+                                  "type": "boolean"
                                 }
                               },
                               "additionalProperties": false
@@ -5156,6 +5168,9 @@
                                   "type": "integer",
                                   "minimum": 1,
                                   "maximum": 1440
+                                },
+                                "require_certain": {
+                                  "type": "boolean"
                                 }
                               },
                               "additionalProperties": false
@@ -5451,6 +5466,9 @@
                                   "type": "integer",
                                   "minimum": 1,
                                   "maximum": 1440
+                                },
+                                "require_certain": {
+                                  "type": "boolean"
                                 }
                               },
                               "additionalProperties": false
@@ -5583,6 +5601,9 @@
                             "type": "integer",
                             "minimum": 1,
                             "maximum": 1440
+                          },
+                          "require_certain": {
+                            "type": "boolean"
                           }
                         },
                         "additionalProperties": false
@@ -5714,6 +5735,9 @@
                                   "type": "integer",
                                   "minimum": 1,
                                   "maximum": 1440
+                                },
+                                "require_certain": {
+                                  "type": "boolean"
                                 }
                               },
                               "additionalProperties": false
@@ -5947,6 +5971,9 @@
                                   "type": "integer",
                                   "minimum": 1,
                                   "maximum": 1440
+                                },
+                                "require_certain": {
+                                  "type": "boolean"
                                 }
                               },
                               "additionalProperties": false
@@ -8438,6 +8465,80 @@
                   "required": [
                     "revision",
                     "replayed"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "slotlock_delete_coverage",
+        "summary": "Retire a source",
+        "description": "Forget a source's coverage of the resource, for a calendar sync that is disconnected or replaced: free/busy and a resource whose booking rules require certainty stop waiting on it. 404 coverage_not_found for a source with no coverage of the resource.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "parameters": [
+          {
+            "name": "resource_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          {
+            "name": "source",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "deleted": {
+                      "type": "boolean",
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "deleted"
                   ],
                   "additionalProperties": false
                 }

@@ -1155,6 +1155,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
   it('serves the GitHub sign-in dashboard beside MCP when configured, and keeps its secrets out of the log', async () => {
     const clientSecret = randomBytes(20).toString('hex');
     const sessionSecret = randomBytes(32).toString('hex');
+    const metricsToken = randomBytes(32).toString('hex');
     // Keys of a person still allowed, and of one removed from the allowlist.
     const keyFor = async (tenant: string) => {
       const out = output();
@@ -1184,6 +1185,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         SLOTLOCK_DASHBOARD_USERS: '4242',
         SLOTLOCK_DASHBOARD_ORGS: '91',
         SLOTLOCK_LIMITS: 'sign_in=3/m:3',
+        SLOTLOCK_METRICS_TOKEN: metricsToken,
       },
       stdout,
       stderr,
@@ -1244,12 +1246,27 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       expect((await mcp(removedKey)).status).toBe(401);
       expect((await mcp(orgKey)).status).toBe(200);
       expect((await mcp(droppedOrgKey)).status).toBe(401);
+
+      // Metrics: only to their own token, counting the calls above by operation and outcome.
+      expect((await fetch(`${origin}/metrics`)).status).toBe(401);
+      expect(
+        (await fetch(`${origin}/metrics`, { headers: { Authorization: `Bearer ${sessionSecret}` } })).status,
+      ).toBe(401);
+      const scrape = await fetch(`${origin}/metrics`, { headers: { Authorization: `bearer  ${metricsToken}` } });
+      expect(scrape.status).toBe(200);
+      expect(scrape.headers.get('content-type')).toBe('text/plain; version=0.0.4; charset=utf-8');
+      const text = await scrape.text();
+      expect(text).toMatch(/^slotlock_calls_total\{protocol="mcp",operation="slotlock_list_resources",outcome="ok"\} 2$/m);
+      expect(text).toMatch(/^slotlock_build_info\{version="\d+\.\d+\.\d+[^"]*",tzdata="[^"]+"\} 1$/m);
+      expect(text).not.toContain('github');
+      // The two refused scrapes above are counted, never with what they sent.
+      expect(text).toMatch(/^slotlock_refusals_total\{reason="metrics_auth_refused"\} 2$/m);
     } finally {
       shutdown.abort();
     }
     expect(await serving).toBe(0);
     expect(stderr.text()).toBe('');
-    for (const secretValue of [clientSecret, sessionSecret]) {
+    for (const secretValue of [clientSecret, sessionSecret, metricsToken]) {
       expect(stdout.text()).not.toContain(secretValue);
     }
   });

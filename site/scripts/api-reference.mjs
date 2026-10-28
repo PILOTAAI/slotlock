@@ -38,6 +38,7 @@ export const GROUPS = [
       'slotlock_record_coverage',
       'slotlock_get_coverage',
       'slotlock_record_coverage_failure',
+      'slotlock_delete_coverage',
     ],
   },
   {

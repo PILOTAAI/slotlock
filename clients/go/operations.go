@@ -54,6 +54,7 @@ var operations = func() map[string]operation {
 		{name: "slotlock_join_waitlist", method: "POST", path: "/v1/waitlist", pathParams: nil, query: nil},
 		{name: "slotlock_leave_waitlist", method: "DELETE", path: "/v1/waitlist/{entry_id}", pathParams: []string{"entry_id"}, query: nil},
 		{name: "slotlock_record_coverage", method: "PUT", path: "/v1/resources/{resource_id}/coverage/{source}", pathParams: []string{"resource_id", "source"}, query: nil},
+		{name: "slotlock_delete_coverage", method: "DELETE", path: "/v1/resources/{resource_id}/coverage/{source}", pathParams: []string{"resource_id", "source"}, query: nil},
 		{name: "slotlock_get_coverage", method: "GET", path: "/v1/resources/{resource_id}/coverage", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_record_coverage_failure", method: "POST", path: "/v1/resources/{resource_id}/coverage/{source}/failure", pathParams: []string{"resource_id", "source"}, query: nil},
 		{name: "slotlock_list_tenant_events", method: "GET", path: "/v1/tenant/events", pathParams: nil, query: []string{"resource_id", "start", "end", "limit", "cursor"}},
@@ -1352,6 +1353,28 @@ func (in RecordCoverageInput) values() map[string]any {
 // forward; repeating one changes nothing.
 func (c *Client) RecordCoverage(ctx context.Context, in RecordCoverageInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_record_coverage", in.values())
+}
+
+// DeleteCoverageInput holds the arguments of [Client.DeleteCoverage].
+type DeleteCoverageInput struct {
+	ResourceID string
+
+	Source string
+}
+
+func (in DeleteCoverageInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_id"] = in.ResourceID
+	values["source"] = in.Source
+	return values
+}
+
+// DeleteCoverage: Retire a source. Forget a source's coverage of the resource, for a calendar
+// sync that is disconnected or replaced: free/busy and a resource whose booking rules require
+// certainty stop waiting on it. 404 coverage_not_found for a source with no coverage of the
+// resource.
+func (c *Client) DeleteCoverage(ctx context.Context, in DeleteCoverageInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_delete_coverage", in.values())
 }
 
 // GetCoverageInput holds the arguments of [Client.GetCoverage].

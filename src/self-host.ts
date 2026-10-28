@@ -70,8 +70,10 @@ import {
 import {
   type SlotlockNodeServerAddress,
   type SlotlockNodeServerCloseResult,
+  type SlotlockNodeServerFetchTarget,
   createSlotlockNodeServer,
 } from './node-server.js';
+import { type SlotlockMetrics, createSlotlockMetrics } from './metrics.js';
 import { slotlockPackageVersion } from './package-version.js';
 import { createSlotlockRequestLimits } from './rate-limit.js';
 import {
@@ -93,6 +95,7 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_AUTH_TOKEN',
   'SLOTLOCK_CONFIRMATION_SECRET',
   'SLOTLOCK_CONFIRM_WRITES',
+  'SLOTLOCK_METRICS_TOKEN',
   'SLOTLOCK_PUBLIC_URL',
   'SLOTLOCK_TENANT',
   'SLOTLOCK_AVAILABILITY',
@@ -186,6 +189,8 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
    * (`slotlock key create`) authenticate whether or not it is set, each as its own tenant and scopes.
    */
   authToken?: string;
+  /** The bearer token `/metrics` answers (SLOTLOCK_METRICS_TOKEN); no metrics without it. */
+  metricsToken?: string;
   /**
    * Writes that wait for a person's confirmation (MCP 2026-07-28) and are refused elsewhere. None
    * unless SLOTLOCK_CONFIRM_WRITES opts in: every authenticated write takes effect at once.
@@ -352,6 +357,19 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
   const trustedProxyHeader = readTrustedProxyHeader(env);
   if (trustedProxyHeader !== undefined) config.trustedProxyHeader = trustedProxyHeader;
   if (authToken !== undefined) config.authToken = authToken;
+  const metricsToken = readSecret(env, 'SLOTLOCK_METRICS_TOKEN');
+  if (metricsToken !== undefined) {
+    const others = [
+      authToken,
+      confirmationSecret,
+      env.SLOTLOCK_SESSION_SECRET?.trim(),
+      env.SLOTLOCK_GITHUB_CLIENT_SECRET?.trim(),
+    ];
+    if (others.includes(metricsToken)) {
+      throw new SlotlockConfigError('SLOTLOCK_METRICS_TOKEN must differ from every other secret');
+    }
+    config.metricsToken = metricsToken;
+  }
   const dashboard = readDashboardConfig(env);
   if (dashboard !== undefined) config.dashboard = dashboard;
   const organizations = readDashboardOrganizations(env);
@@ -437,6 +455,7 @@ function secretsIn(env: SlotlockEnv): string[] {
     'SLOTLOCK_CONFIRMATION_SECRET',
     'SLOTLOCK_GITHUB_CLIENT_SECRET',
     'SLOTLOCK_SESSION_SECRET',
+    'SLOTLOCK_METRICS_TOKEN',
   ]) {
     const value = env[name]?.trim();
     if (value) secrets.push(value);
@@ -557,6 +576,48 @@ export interface SlotlockRunningServer {
   address: SlotlockNodeServerAddress;
   /** End open subscriptions, drain in-flight requests, then close the database pool. */
   close(): Promise<SlotlockNodeServerCloseResult>;
+}
+
+/**
+ * `GET <path>` answers the metrics to `Authorization: Bearer <token>`, before the request limits:
+ * a scrape is in memory and names no tenant. Anything else goes on to `target`.
+ */
+function serveMetrics(
+  target: SlotlockNodeServerFetchTarget,
+  metrics: SlotlockMetrics,
+  path: string,
+  token: string,
+): SlotlockNodeServerFetchTarget {
+  const expected = createHash('sha256').update(token).digest();
+  return {
+    fetch(request, connection) {
+      if (new URL(request.url).pathname !== path) return target.fetch(request, connection);
+      // The scheme is case-insensitive (RFC 9110); the token is compared as digests, in constant time.
+      const presented = /^bearer +(\S+) *$/i.exec(request.headers.get('authorization') ?? '')?.[1] ?? '';
+      const given = createHash('sha256').update(presented).digest();
+      if (!timingSafeEqual(given, expected)) {
+        metrics.refusedScrape();
+        return Promise.resolve(
+          new Response('Unauthorized\n', {
+            status: 401,
+            headers: { 'Content-Type': 'text/plain; charset=utf-8', 'WWW-Authenticate': 'Bearer' },
+          }),
+        );
+      }
+      if (request.method !== 'GET' && request.method !== 'HEAD') {
+        return Promise.resolve(new Response(null, { status: 405, headers: { Allow: 'GET, HEAD' } }));
+      }
+      return Promise.resolve(
+        new Response(request.method === 'HEAD' ? null : metrics.render(), {
+          headers: {
+            'Content-Type': 'text/plain; version=0.0.4; charset=utf-8',
+            'Cache-Control': 'no-store',
+          },
+        }),
+      );
+    },
+    ...(target.shutdown ? { shutdown: () => target.shutdown?.() } : {}),
+  };
 }
 
 /**
@@ -708,6 +769,13 @@ export async function startSlotlockServer(
     let maintenance: SlotlockMaintenanceScheduler | undefined;
     let webhooks: SlotlockWebhookScheduler | undefined;
     const basePath = publicUrl.pathname.replace(/\/$/, '');
+    const metrics =
+      config.metricsToken === undefined
+        ? undefined
+        : createSlotlockMetrics({
+            version: slotlockPackageVersion(),
+            ...(process.versions.tz ? { tzdata: process.versions.tz } : {}),
+          });
     const limits = createSlotlockRequestLimits({
       limits: config.limits,
       ...(config.sharedLimits
@@ -737,7 +805,10 @@ export async function startSlotlockServer(
         return principal;
       },
       // Counts and pseudonyms only: never an address, a credential or a tenant.
-      onRefusals: (counts) => log.info('refusals', { ...counts }),
+      onRefusals: (counts) => {
+        metrics?.refusals(counts);
+        log.info('refusals', { ...counts });
+      },
       // Behind a proxy without the setting, every client shares the proxy's address budget.
       onIgnoredClientField: (field) =>
         log.warn('client_address_field_ignored', { field, setting: 'SLOTLOCK_TRUSTED_PROXY_HEADER' }),
@@ -773,7 +844,11 @@ export async function startSlotlockServer(
           : { ready: false, checks: ['database_unreachable'] };
       },
       // Outcomes and counts only: the server never reports arguments or identities.
-      onEvent: ({ type, ...fields }) => log.info(type, snakeCaseKeys(fields)),
+      onEvent: (event) => {
+        metrics?.event(event);
+        const { type, ...fields } = event;
+        log.info(type, snakeCaseKeys(fields));
+      },
       // What an agent sees only as internal_error: the operation and the error's message and code,
       // never the arguments or the request, with every configured secret redacted.
       onError: (error, { operation }) =>
@@ -835,7 +910,11 @@ export async function startSlotlockServer(
           }
         : agentServer,
     );
-    const listener = createSlotlockNodeServer(target, {
+    const served =
+      metrics && config.metricsToken !== undefined
+        ? serveMetrics(target, metrics, `${basePath}/metrics`, config.metricsToken)
+        : target;
+    const listener = createSlotlockNodeServer(served, {
       requestOrigin: publicUrl.origin,
       onError: (error, phase) => log.error('http_error', { phase, ...describeError(error) }),
     });
@@ -847,7 +926,10 @@ export async function startSlotlockServer(
       tenants: [config.tenantRef],
       intervalMs: SERVE_MAINTENANCE_INTERVAL_MS,
       // Counts only, never the tenant.
-      onPass: (result) => log.info('maintenance', { ...result }),
+      onPass: (result) => {
+        metrics?.maintenance(result);
+        log.info('maintenance', { ...result });
+      },
       onError: (error) => log.error('maintenance_failed', describeError(error)),
     });
     if (config.webhooks !== 'off') {
@@ -876,7 +958,10 @@ export async function startSlotlockServer(
             },
           }),
         // Counts only, never the tenant or a URL.
-        onPass: (_tenant, result) => log.info('webhooks', { ...result }),
+        onPass: (_tenant, result) => {
+          metrics?.webhooks(result);
+          log.info('webhooks', { ...result });
+        },
         onError: (error) => log.error('webhooks_failed', describeError(error)),
       });
     }
@@ -1351,6 +1436,8 @@ Environment:
                                  work with or without it
   SLOTLOCK_CONFIRMATION_SECRET   Signs pending write confirmations, 32+ random characters (serve;
                                  required when SLOTLOCK_CONFIRM_WRITES is not none)
+  SLOTLOCK_METRICS_TOKEN         Serves Prometheus metrics at /metrics to this bearer token, 32+
+                                 random characters (serve; off without it)
   SLOTLOCK_CONFIRM_WRITES        none (default), all, or a comma-separated list of write tools
                                  that wait for a person (MCP 2026-07-28 form elicitation; refused
                                  with confirmation_required on REST, A2A and older MCP)

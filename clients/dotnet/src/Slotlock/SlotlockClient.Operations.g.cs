@@ -59,6 +59,7 @@ public sealed partial class SlotlockClient
         ["slotlock_join_waitlist"] = new("POST", "/v1/waitlist", [], []),
         ["slotlock_leave_waitlist"] = new("DELETE", "/v1/waitlist/{entry_id}", ["entry_id"], []),
         ["slotlock_record_coverage"] = new("PUT", "/v1/resources/{resource_id}/coverage/{source}", ["resource_id", "source"], []),
+        ["slotlock_delete_coverage"] = new("DELETE", "/v1/resources/{resource_id}/coverage/{source}", ["resource_id", "source"], []),
         ["slotlock_get_coverage"] = new("GET", "/v1/resources/{resource_id}/coverage", ["resource_id"], []),
         ["slotlock_record_coverage_failure"] = new("POST", "/v1/resources/{resource_id}/coverage/{source}/failure", ["resource_id", "source"], []),
         ["slotlock_list_tenant_events"] = new("GET", "/v1/tenant/events", [], ["resource_id", "start", "end", "limit", "cursor"]),
@@ -1380,6 +1381,28 @@ public sealed partial class SlotlockClient
         values["end"] = Json.ToNode(end);
         values["revision"] = Json.ToNode(revision);
         return CallAsync("slotlock_record_coverage", values, cancellationToken);
+    }
+
+    /// <summary>Retire a source.</summary>
+    /// <remarks>
+    /// Forget a source's coverage of the resource, for a calendar sync that is disconnected or
+    /// replaced: free/busy and a resource whose booking rules require certainty stop waiting on
+    /// it. 404 coverage_not_found for a source with no coverage of the resource.
+    /// </remarks>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="source">source</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> DeleteCoverageAsync(
+        string resourceId,
+        string source,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_id"] = Json.ToNode(resourceId);
+        values["source"] = Json.ToNode(source);
+        return CallAsync("slotlock_delete_coverage", values, cancellationToken);
     }
 
     /// <summary>A resource's coverage and its health.</summary>

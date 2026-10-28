@@ -317,6 +317,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
+        name: "slotlock_delete_coverage",
+        method: "DELETE",
+        path: "/v1/resources/{resource_id}/coverage/{source}",
+        path_params: &["resource_id", "source"],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_get_coverage",
         method: "GET",
         path: "/v1/resources/{resource_id}/coverage",
@@ -855,6 +862,13 @@ pub struct RecordCoverageInput {
     pub revision: i64,
 }
 
+/// The arguments of [`Client::delete_coverage`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DeleteCoverageInput {
+    pub resource_id: String,
+    pub source: String,
+}
+
 /// The arguments of [`Client::get_coverage`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct GetCoverageInput {
@@ -1366,6 +1380,15 @@ impl Client {
     /// nothing.
     pub fn record_coverage(&self, input: &RecordCoverageInput) -> Result<Value, Error> {
         self.call("slotlock_record_coverage", serde_json::to_value(input)?)
+    }
+
+    /// Retire a source.
+    ///
+    /// Forget a source's coverage of the resource, for a calendar sync that is disconnected or
+    /// replaced: free/busy and a resource whose booking rules require certainty stop waiting on
+    /// it. 404 coverage_not_found for a source with no coverage of the resource.
+    pub fn delete_coverage(&self, input: &DeleteCoverageInput) -> Result<Value, Error> {
+        self.call("slotlock_delete_coverage", serde_json::to_value(input)?)
     }
 
     /// A resource's coverage and its health.

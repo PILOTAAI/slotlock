@@ -39,6 +39,7 @@ export {
   slotlockWebhookRetryDelayMs,
   startSlotlockWebhookDelivery,
 } from './webhooks.js';
+export { type SlotlockMetrics, createSlotlockMetrics } from './metrics.js';
 export { expandRules } from './rules.js';
 export {
   availabilityRuleProblem,

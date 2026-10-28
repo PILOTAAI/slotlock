@@ -193,6 +193,7 @@ export const TOOL_ERRORS = {
     'booking_rule_max_advance',
     'booking_rule_slot_step',
     'booking_rule_outside_hours',
+    'booking_rule_uncertain',
     'bundles_unavailable',
     'owner_event_quota_exceeded',
   ],
@@ -211,6 +212,7 @@ export const TOOL_ERRORS = {
     'booking_rule_max_advance',
     'booking_rule_slot_step',
     'booking_rule_outside_hours',
+    'booking_rule_uncertain',
     'store_inconsistent',
   ],
   slotlock_get_event: ['event_not_found'],
@@ -227,6 +229,7 @@ export const TOOL_ERRORS = {
     'booking_rule_max_advance',
     'booking_rule_slot_step',
     'booking_rule_outside_hours',
+    'booking_rule_uncertain',
     'store_inconsistent',
   ],
   slotlock_delete_event: [
