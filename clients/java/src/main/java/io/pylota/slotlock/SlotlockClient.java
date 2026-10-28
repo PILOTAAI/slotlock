@@ -46,7 +46,7 @@ import java.util.regex.Pattern;
  */
 public final class SlotlockClient extends SlotlockOperations {
   /** This client's version, sent in its User-Agent. */
-  public static final String VERSION = "0.5.0";
+  public static final String VERSION = "0.5.1";
 
   private static final Set<String> LOOPBACK = Set.of("localhost", "127.0.0.1", "[::1]", "::1");
 
