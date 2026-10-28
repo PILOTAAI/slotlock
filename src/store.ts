@@ -2355,7 +2355,7 @@ export interface SlotlockStore extends SlotlockEventFeed {
     tenantRef: string;
     /** Rows per class per call, 1-1000. Defaults to 100. */
     limit?: number;
-    /** Replay window in whole days, 1-3650. Defaults to `SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS`. */
+    /** Replay window in whole days, 1-3650. Defaults to the store's `retentionDays`, at least 30. */
     retentionDays?: number;
   }): Promise<CalendarEventRetentionResult>;
   /**
@@ -2466,8 +2466,8 @@ export interface SlotlockStore extends SlotlockEventFeed {
     /** Rows per class per call, 1-1000. Defaults to 100. */
     limit?: number;
     /**
-     * How long a stray retirement is kept, in whole days, 1-3650. Defaults to
-     * `SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS`.
+     * How long a stray retirement is kept, in whole days, 1-3650. Defaults to the store's
+     * `retentionDays`, at least 30.
      */
     retentionDays?: number;
   }): Promise<BookingRetentionResult>;
@@ -2625,9 +2625,10 @@ export interface SlotlockStoreOptions {
   tenantLockTimeoutMs?: number;
   /**
    * How many days history is kept, 1-3,650 (default 30): the change feed (and how far back a cursor
-   * reaches), retired idempotency answers and booking references, past events' commands, and
-   * waitlist entries that ended. Maintenance prunes what is older; set the same on every store over
-   * one database, or a cursor may name changes another has pruned.
+   * reaches) and waitlist entries that ended; and, when longer than 30 days, retired idempotency
+   * answers, booking references and past events' commands (never shorter, so a delayed retry is still
+   * answered as the first try was). Maintenance prunes what is older. A cursor whose change any
+   * store has pruned answers `cursor_expired`, so stores set differently never skip a change.
    */
   retentionDays?: number;
 }
@@ -2695,8 +2696,8 @@ async function lockTenantLimit(
 /**
  * Rows a tenant added within this many days count against its limits whatever time they hold, so
  * bookings and events dated in the past, and cancellations, add at most the limit in any such
- * window. Ended history is not pruned: over a longer time it can still grow. The same window
- * maintenance keeps event idempotency records and stray retirements for.
+ * window. Ended history is not pruned: over a longer time it can still grow. Maintenance keeps
+ * event idempotency records and stray retirements at least as long (the store's `retentionDays`).
  */
 const TENANT_LIMIT_RECENT_DAYS = SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS;
 
@@ -5346,7 +5347,10 @@ function buildSlotlockStore(
           code: 'invalid_limit' as const,
         });
       }
-      const keepDays = params.retentionDays ?? retentionDays;
+      // Never under the default: a shorter retention trims the feed, not how long a retried write
+      // is answered as the first was.
+      const keepDays =
+        params.retentionDays ?? Math.max(retentionDays, SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS);
       if (
         !Number.isSafeInteger(keepDays) ||
         keepDays < 1 ||
@@ -5442,7 +5446,10 @@ function buildSlotlockStore(
           code: 'invalid_limit' as const,
         });
       }
-      const keepDays = params.retentionDays ?? retentionDays;
+      // Never under the default: a shorter retention trims the feed, not how long a retried write
+      // is answered as the first was.
+      const keepDays =
+        params.retentionDays ?? Math.max(retentionDays, SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS);
       if (
         !Number.isSafeInteger(keepDays) ||
         keepDays < 1 ||

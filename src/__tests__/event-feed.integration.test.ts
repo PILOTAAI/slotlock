@@ -286,13 +286,32 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
     const weekLong = createSlotlockStore(sql, { retentionDays: 7 });
     // Kept a year, a 45-day-old change stays, and a cursor from then still reads.
     expect(await yearLong.pruneChanges({ tenantRef: other, limit: 100 })).toBe(0);
-    const old = Buffer.from(`1:1:1:${Date.now() - 45 * 86_400_000}`).toString('base64url');
+    const first = await yearLong.listChanges({ tenantRef: other });
+    if (!first.ok) throw new Error(first.code);
+    // Its position carries when it happened, 45 days ago.
+    const old = first.changes[0]?.position as string;
     expect(await yearLong.listChanges({ tenantRef: other, after: old })).toMatchObject({ ok: true });
     expect(await store.listChanges({ tenantRef: other, after: old })).toEqual({ ok: false, code: 'cursor_expired' });
     // Kept a week, an 8-day-old cursor is expired, and the change is pruned.
     const week = Buffer.from(`1:1:1:${Date.now() - 8 * 86_400_000}`).toString('base64url');
     expect(await weekLong.listChanges({ tenantRef: other, after: week })).toEqual({ ok: false, code: 'cursor_expired' });
     expect(await weekLong.pruneChanges({ tenantRef: other, limit: 100 })).toBeGreaterThan(0);
+    // A cursor whose change another store pruned is expired, never read past unseen.
+    const fresh = await store.createExternalReservation({
+      tenantRef: other, externalRef: 'R-2', resourceId: resource.id, start: at(72), end: at(73), bufferAfterMs: 0, revision: 1,
+    });
+    expect(fresh.ok).toBe(true);
+    const page = await yearLong.listChanges({ tenantRef: other });
+    if (!page.ok) throw new Error(page.code);
+    const cursor = page.changes[0]?.position as string;
+    await sql`UPDATE slotlock.outbox SET occurred_at = now() - interval '10 days' WHERE tenant_ref = ${other}`;
+    expect(await yearLong.listChanges({ tenantRef: other, after: cursor })).toMatchObject({ ok: true });
+    expect(await weekLong.pruneChanges({ tenantRef: other, limit: 100 })).toBeGreaterThan(0);
+    expect(await yearLong.listChanges({ tenantRef: other, after: cursor })).toEqual({ ok: false, code: 'cursor_expired' });
+    // An empty feed's cursor names no change, and stays readable.
+    const empty = await yearLong.listChanges({ tenantRef: `${other}-empty` });
+    if (!empty.ok) throw new Error(empty.code);
+    expect(await yearLong.listChanges({ tenantRef: `${other}-empty`, after: empty.next })).toMatchObject({ ok: true });
     expect(() => createSlotlockStore(sql, { retentionDays: 0 })).toThrow(/retentionDays/);
     expect(() => createSlotlockStore(sql, { retentionDays: 3_651 })).toThrow(/retentionDays/);
     await store.eraseTenant({ tenantRef: other });

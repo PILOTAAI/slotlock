@@ -174,6 +174,11 @@ export interface SlotlockDatabaseConfig {
    */
   migrateDatabaseUrl?: string;
   tenantRef: string;
+  /**
+   * How long history is kept, in days (SLOTLOCK_RETENTION_DAYS); 30 without it. Every command that
+   * prunes or reads the feed takes it, so `maintain` from cron prunes as `serve` reads.
+   */
+  retentionDays?: number;
 }
 
 export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
@@ -186,8 +191,6 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
    * (`slotlock key create`) authenticate whether or not it is set, each as its own tenant and scopes.
    */
   authToken?: string;
-  /** How long history is kept, in days (SLOTLOCK_RETENTION_DAYS); 30 without it. */
-  retentionDays?: number;
   /**
    * Writes that wait for a person's confirmation (MCP 2026-07-28) and are refused elsewhere. None
    * unless SLOTLOCK_CONFIRM_WRITES opts in: every authenticated write takes effect at once.
@@ -290,6 +293,8 @@ export function readSlotlockDatabaseConfig(env: SlotlockEnv): SlotlockDatabaseCo
     );
   }
   const config: SlotlockDatabaseConfig = { databaseUrl, tenantRef: readTenant(env) };
+  const retentionDays = readRetentionDays(env);
+  if (retentionDays !== undefined) config.retentionDays = retentionDays;
   const migrateDatabaseUrl = readDatabaseUrl(env, 'SLOTLOCK_MIGRATE_DATABASE_URL');
   if (migrateDatabaseUrl !== undefined) config.migrateDatabaseUrl = migrateDatabaseUrl;
   return config;
@@ -363,8 +368,6 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
   };
   const trustedProxyHeader = readTrustedProxyHeader(env);
   if (trustedProxyHeader !== undefined) config.trustedProxyHeader = trustedProxyHeader;
-  const retentionDays = readRetentionDays(env);
-  if (retentionDays !== undefined) config.retentionDays = retentionDays;
   if (authToken !== undefined) config.authToken = authToken;
   const dashboard = readDashboardConfig(env);
   if (dashboard !== undefined) config.dashboard = dashboard;
@@ -1226,7 +1229,10 @@ async function maintainTenant(
 ): Promise<(Omit<SlotlockMaintenanceResult, 'rollPending'> & { passes: number }) | null> {
   const sql = connect(config.databaseUrl, 2);
   try {
-    const store = createSlotlockStore(sql);
+    const store = createSlotlockStore(
+      sql,
+      config.retentionDays !== undefined ? { retentionDays: config.retentionDays } : {},
+    );
     const total = await withSlotlockMaintenanceLock(sql, config.tenantRef, async () => {
       const sum = {
         extended: 0,
@@ -1377,8 +1383,9 @@ Environment:
   SLOTLOCK_REST_API              on (default): also serve the tools as a REST API under /v1, and
                                  the application API for admin keys, described at /openapi.json;
                                  off: MCP and A2A only
-  SLOTLOCK_RETENTION_DAYS        Days of history kept: the change feed, retired answers, ended
-                                 waitlist entries (1-3650, default 30)
+  SLOTLOCK_RETENTION_DAYS        Days of history kept: the change feed, ended waitlist entries,
+                                 and retired answers (never under 30) (1-3650, default 30;
+                                 serve and maintain)
   SLOTLOCK_SHARED_LIMITS         on: tenant request budgets are shared by every server through the
                                  database, so N servers allow a tenant its rate once; off (default):
                                  each server keeps its own

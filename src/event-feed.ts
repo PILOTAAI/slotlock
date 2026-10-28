@@ -291,6 +291,17 @@ export function slotlockEventFeedMethods(
       if (after && after.at < Date.now() - retentionDays * 86_400_000) {
         return { ok: false, code: 'cursor_expired' };
       }
+      // A cursor names the last change it read (0 before the first). Changes are pruned oldest
+      // first, so when that one is gone those after it may be too: whichever server pruned it, and
+      // however long it keeps them, reading on could skip some unseen.
+      if (after && after.id !== '0') {
+        const [kept] = await sql<{ kept: boolean }[]>`
+          SELECT EXISTS (
+            SELECT 1 FROM slotlock.outbox
+             WHERE tenant_ref = ${params.tenantRef} AND id = ${after.id}::bigint
+          ) AS kept`;
+        if (kept?.kept !== true) return { ok: false, code: 'cursor_expired' };
+      }
       const rows = await sql<ChangeRow[]>`
         SELECT id::text, txid::text, type, resource_id, subject, data, occurred_at, actor
           FROM slotlock.outbox

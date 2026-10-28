@@ -106,7 +106,7 @@
         },
         {
           "name": "SLOTLOCK_RETENTION_DAYS",
-          "description": "Days of history kept: the change feed and how far back a cursor reaches, retired idempotency answers, ended waitlist entries. 1-3650; default 30.",
+          "description": "Days of history kept: the change feed (who made each change included) and how far back a cursor reaches, and ended waitlist entries; retried writes are answered for at least 30 days whatever it is. 1-3650; default 30.",
           "format": "number"
         },
         {
