@@ -1781,7 +1781,7 @@ describe('resource detail, webhooks and the waitlist', () => {
     const saved = await post(
       target,
       '/base/dashboard/resources/rules',
-      { csrf: token, id: OWN, min_notice_minutes: '60', slot_step_minutes: '15', max_advance_days: '', turnaround_minutes: '', check_in_minutes: '20', enforce_hours: '1' },
+      { csrf: token, id: OWN, min_notice_minutes: '60', slot_step_minutes: '15', max_advance_days: '', turnaround_minutes: '', check_in_minutes: '20', enforce_hours: '1', require_certain: '1' },
       session,
     );
     expect(saved.status).toBe(303);
@@ -1789,12 +1789,13 @@ describe('resource detail, webhooks and the waitlist', () => {
     expect(store.setRules).toHaveBeenLastCalledWith(
       'github:4242',
       OWN,
-      { minNoticeMinutes: 60, slotStepMinutes: 15, checkInMinutes: 20, enforceHours: true },
+      { minNoticeMinutes: 60, slotStepMinutes: 15, checkInMinutes: 20, enforceHours: true, requireCertain: true },
       'github:4242',
     );
     const shown = await (await get(target, `/base/dashboard/resources/${OWN}`, session)).text();
     expect(shown).toContain('name="min_notice_minutes" value="60"');
     expect(shown).toMatch(/name="enforce_hours" value="1" checked/);
+    expect(shown).toMatch(/name="require_certain" value="1" checked/);
 
     // Empty fields clear every rule; a value the store refuses says why.
     await post(target, '/base/dashboard/resources/rules', { csrf: token, id: OWN }, session);

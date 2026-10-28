@@ -1396,6 +1396,7 @@ ${field('turnaroundMinutes', 'Turnaround after each booking', 'min')}
 ${field('checkInMinutes', 'Release if not checked in after', 'min')}
 </div>
 <label class="choice"><input type="checkbox" name="enforce_hours" value="1"${rules.enforceHours ? html` checked` : html``}> Only inside bookable hours</label>
+<label class="choice"><input type="checkbox" name="require_certain" value="1"${rules.requireCertain ? html` checked` : html``}> Only in time its calendar syncs have read today</label>
 <p class="fine">Leave a field empty for no rule.</p>
 <button class="primary" type="submit">Save rules</button>
 </form>
@@ -1446,6 +1447,7 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
       rules[name] = Number(value);
     }
     if (form.get('enforce_hours') === '1') rules.enforceHours = true;
+    if (form.get('require_certain') === '1') rules.requireCertain = true;
     try {
       await options.resources.setRules(
         tenantOf(session),

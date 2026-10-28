@@ -7,6 +7,14 @@ versioning.
 
 ### Added
 
+- The booking rule `requireCertain` (`require_certain`): a booking must lie in time every calendar
+  sync recording coverage for the resource has read within a day, or it is refused (`uncertain`,
+  `booking_rule_uncertain` to an agent), rather than booked over what a stale or failing sync may
+  hide. Searches on such a resource, the store's and the agents', require the same coverage, of the
+  slot and its turnaround, within the same day. The dashboard's rules form has it.
+- `DELETE /v1/resources/{id}/coverage/{source}` (`slotlock_delete_coverage`, `deleteCoverage`)
+  retires a calendar sync: free/busy and `requireCertain` stop waiting on its coverage.
+
 - The dashboard is an app with a sidebar: an Overview with the coming week's bookings, events and
   live holds across every resource and the agents' latest changes, named by key; Resources; API
   keys, with the endpoints; and Settings. `SLOTLOCK_DASHBOARD_NAME` (`name` in

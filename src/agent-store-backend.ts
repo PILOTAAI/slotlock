@@ -365,6 +365,7 @@ const BOOKING_RULE_CODES: Readonly<Record<SlotlockBookingRule, string>> = Object
   max_advance: 'booking_rule_max_advance',
   slot_step: 'booking_rule_slot_step',
   outside_hours: 'booking_rule_outside_hours',
+  uncertain: 'booking_rule_uncertain',
 });
 
 function operationError(
@@ -1191,6 +1192,7 @@ function bookingRulesOutput(rules: SlotlockBookingRules | undefined) {
     ...(rules.turnaroundMinutes !== undefined ? { turnaround_minutes: rules.turnaroundMinutes } : {}),
     ...(rules.enforceHours !== undefined ? { enforce_hours: rules.enforceHours } : {}),
     ...(rules.checkInMinutes !== undefined ? { check_in_minutes: rules.checkInMinutes } : {}),
+    ...(rules.requireCertain !== undefined ? { require_certain: rules.requireCertain } : {}),
   };
 }
 
@@ -1204,6 +1206,7 @@ function bookingRulesInput(value: unknown): SlotlockBookingRules | null {
   if (input.turnaround_minutes !== undefined) rules.turnaroundMinutes = input.turnaround_minutes as number;
   if (input.enforce_hours !== undefined) rules.enforceHours = input.enforce_hours as boolean;
   if (input.check_in_minutes !== undefined) rules.checkInMinutes = input.check_in_minutes as number;
+  if (input.require_certain !== undefined) rules.requireCertain = input.require_certain as boolean;
   return rules;
 }
 
@@ -1769,6 +1772,19 @@ export function createSlotlockStoreApplicationBackend(
         });
         if (!result.ok) throw applicationRefusal(result.code);
         return { recorded: true };
+      }, WRITE);
+    },
+
+    async deleteCoverage(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const resource = await requireResource(tenant, tenantOf(context), input.resource_id as string);
+        const deleted = await tenant.deleteCoverage({
+          tenantRef: tenantOf(context),
+          resourceId: resource.id,
+          source: input.source as string,
+        });
+        if (!deleted) throw applicationRefusal('coverage_not_found');
+        return { deleted: true };
       }, WRITE);
     },
 
