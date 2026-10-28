@@ -20,6 +20,7 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_hold_slots", new Operation("POST", "/v1/slot-holds", List.of(), List.of())),
           Map.entry("slotlock_book_together", new Operation("POST", "/v1/bundles", List.of(), List.of())),
           Map.entry("slotlock_book_pool", new Operation("POST", "/v1/pool-bookings", List.of(), List.of())),
+          Map.entry("slotlock_get_pool_availability", new Operation("GET", "/v1/pool-availability", List.of(), List.of("pool", "start", "end"))),
           Map.entry("slotlock_release_slots", new Operation("DELETE", "/v1/slot-holds/{hold_id}", List.of("hold_id"), List.of())),
           Map.entry("slotlock_list_events", new Operation("GET", "/v1/events", List.of(), List.of("resource_ids", "start", "end", "cursor", "limit"))),
           Map.entry("slotlock_create_event", new Operation("POST", "/v1/events", List.of(), List.of())),
@@ -364,6 +365,26 @@ public abstract class SlotlockOperations {
    */
   public Map<String, Object> bookPool(String pool, String startsAt, String endsAt, String timezone, String idempotencyKey) {
     return bookPool(pool, startsAt, endsAt, timezone, idempotencyKey, null);
+  }
+
+  /**
+   * Get pool availability. How many members of a pool (a vehicle class, a room type) are free
+   * across a window, each only where its booking rules let a booking start: the window split
+   * where that number changes, each part with how many are free, and coverage certainty. Book one
+   * with slotlock_book_pool. 404 pool_not_found when the pool has no member you may book.
+   *
+   * @param pool {@code pool}, string
+   * @param start {@code start}, string
+   * @param end {@code end}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> getPoolAvailability(String pool, String start, String end) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("pool", pool);
+    values.put("start", start);
+    values.put("end", end);
+    return call("slotlock_get_pool_availability", values);
   }
 
   /**

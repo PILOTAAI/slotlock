@@ -153,6 +153,16 @@ function bookPool(
   return backend.bookPool(context, input);
 }
 
+/** `slotlock_get_pool_availability`, from a backend that knows pools, as `holdSlots`. */
+function getPoolAvailability(
+  backend: SlotlockAgentCalendarBackend,
+  context: SlotlockAgentInvocationContext,
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  if (!backend.getPoolAvailability) throw new SlotlockAgentOperationError('pools_unavailable', 409);
+  return backend.getPoolAvailability(context, input);
+}
+
 /** `slotlock_book_together`, from a backend that books bundles, as `holdSlots`. */
 function bookTogether(
   backend: SlotlockAgentCalendarBackend,
@@ -400,6 +410,7 @@ export type SlotlockAgentOperation =
   | 'slotlock_release_slots'
   | 'slotlock_book_together'
   | 'slotlock_book_pool'
+  | 'slotlock_get_pool_availability'
   | 'slotlock_create_event'
   | 'slotlock_get_event'
   | 'slotlock_list_events'
@@ -447,6 +458,7 @@ const OPERATION_SCOPES: Readonly<Record<SlotlockAgentOperation, SlotlockAgentSco
   slotlock_hold_slots: 'write',
   slotlock_book_together: 'write',
   slotlock_book_pool: 'write',
+  slotlock_get_pool_availability: 'read',
   slotlock_release_slots: 'write',
   slotlock_create_event: 'write',
   slotlock_get_event: 'read',
@@ -577,6 +589,14 @@ export interface SlotlockAgentCalendarBackend {
   ): Promise<Record<string, unknown>>;
   /** Optional. Book any one free member of a pool (`slotlock_book_pool`), else `pools_unavailable`. */
   bookPool?(
+    context: SlotlockAgentInvocationContext,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+  /**
+   * Optional. How many of a pool's members are free across a window
+   * (`slotlock_get_pool_availability`), else `pools_unavailable`.
+   */
+  getPoolAvailability?(
     context: SlotlockAgentInvocationContext,
     input: Record<string, unknown>,
   ): Promise<Record<string, unknown>>;
@@ -1060,6 +1080,33 @@ const OPERATION_DEFINITIONS = [
       title: 'Van hire',
       idempotency_key: 'van-hire-2027-03-02',
     },
+  },
+  {
+    name: 'slotlock_get_pool_availability',
+    title: 'Get pool availability',
+    description:
+      'How many members of a pool (a vehicle class, a room type) are free across a window, each only where its booking rules let a booking start: the window split where that number changes, each part with how many are free, and coverage certainty. Book one with slotlock_book_pool. 404 pool_not_found when the pool has no member you may book.',
+    input: z
+      .object({ pool: POOL, start: DATE_TIME, end: DATE_TIME })
+      .strict()
+      .refine(boundedAgentWindow),
+    output: z
+      .object({
+        pool: POOL,
+        members: z.number().int().min(1).max(100),
+        intervals: z
+          .array(
+            z
+              .object({ start: DATE_TIME, end: DATE_TIME, free: z.number().int().min(0).max(100) })
+              .strict(),
+          )
+          .max(20_001),
+        coverage: COVERAGE,
+      })
+      .strict(),
+    risk: { readOnly: true, destructive: false, idempotent: true },
+    invoke: getPoolAvailability,
+    example: { pool: 'van', ...EXAMPLE_WINDOW },
   },
   {
     name: 'slotlock_book_together',

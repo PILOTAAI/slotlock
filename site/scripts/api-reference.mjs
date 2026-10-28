@@ -29,6 +29,7 @@ export const GROUPS = [
       'slotlock_get_free_busy',
       'slotlock_find_next_available',
       'slotlock_find_available_slots',
+      'slotlock_get_pool_availability',
       'slotlock_list_busy',
       'slotlock_set_resource_availability',
       'slotlock_set_tenant_availability',
