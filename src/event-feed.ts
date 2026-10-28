@@ -316,16 +316,15 @@ export function slotlockEventFeedMethods(
          ORDER BY page.txid, page.id`;
       const head = rows[0];
       if (!head) throw new Error('slotlock: change page returned no row');
-      if (after) {
-        const pruned =
-          head.pruned_txid === null
-            ? // Pruned before the position was kept (0.4): by date, as 0.4 did.
-              after.at < Date.now() - SLOTLOCK_CHANGE_RETENTION_DAYS * 86_400_000
-            : BigInt(head.pruned_txid) > BigInt(after.txid) ||
-              (BigInt(head.pruned_txid) === BigInt(after.txid) &&
-                BigInt(head.pruned_id ?? 0) > BigInt(after.id));
-        // Whichever server pruned it, and however long it keeps changes: reading on could skip one.
-        if (pruned) return { ok: false, code: 'cursor_expired' };
+      // Whichever server pruned it, and however long it keeps changes: reading on could skip one.
+      if (
+        after &&
+        head.pruned_txid !== null &&
+        (BigInt(head.pruned_txid) > BigInt(after.txid) ||
+          (BigInt(head.pruned_txid) === BigInt(after.txid) &&
+            BigInt(head.pruned_id ?? 0) > BigInt(after.id)))
+      ) {
+        return { ok: false, code: 'cursor_expired' };
       }
       const changes = rows.flatMap((row) => (row.id === null ? [] : [toChange(row as ChangeRow)]));
       const last = changes.at(-1);
@@ -571,47 +570,39 @@ export function slotlockEventFeedMethods(
 
     async pruneChanges(params) {
       if (!isIdentity(params.tenantRef)) throw identityError();
+      // Oldest first in feed order, and only up to the first change kept: a change still within the
+      // retention, one an enabled webhook has still to receive, or one of a transaction later than
+      // the oldest still running. So every change kept is after every change pruned (the trigger
+      // on the feed records how far), and a reader starting over reads on past the gap.
       const rows = await sql<{ deleted: number }[]>`
-        WITH doomed AS MATERIALIZED (
-          SELECT id FROM slotlock.outbox
-           WHERE tenant_ref = ${params.tenantRef}
-             AND occurred_at < now() - make_interval(days => ${retentionDays})
-             -- Nothing an enabled webhook has still to receive, however old.
-             AND NOT EXISTS (
-               SELECT 1 FROM slotlock.webhook_endpoints endpoint
-                WHERE endpoint.tenant_ref = outbox.tenant_ref AND endpoint.disabled_at IS NULL
-                  AND (outbox.txid, outbox.id) > (endpoint.cursor_txid, endpoint.cursor_id)
-             )
-           ORDER BY occurred_at
+        WITH head AS MATERIALIZED (
+          SELECT outbox.id, outbox.txid,
+                 outbox.occurred_at >= now() - make_interval(days => ${retentionDays})
+                 OR EXISTS (
+                   SELECT 1 FROM slotlock.webhook_endpoints endpoint
+                    WHERE endpoint.tenant_ref = outbox.tenant_ref AND endpoint.disabled_at IS NULL
+                      AND (outbox.txid, outbox.id) > (endpoint.cursor_txid, endpoint.cursor_id)
+                 ) AS kept
+            FROM slotlock.outbox
+           WHERE outbox.tenant_ref = ${params.tenantRef}
+             AND outbox.txid < pg_snapshot_xmin(pg_current_snapshot())
+           ORDER BY outbox.txid, outbox.id
            LIMIT ${params.limit}
+        ), doomed AS MATERIALIZED (
+          SELECT change.id, change.txid FROM head change
+           WHERE NOT EXISTS (
+             SELECT 1 FROM head keeper
+              WHERE keeper.kept AND (keeper.txid, keeper.id) <= (change.txid, change.id))
         ), missed AS (
           -- A disabled endpoint that had not received one of them has lost it.
           UPDATE slotlock.webhook_endpoints endpoint SET changes_pruned = true
            WHERE endpoint.tenant_ref = ${params.tenantRef} AND endpoint.disabled_at IS NOT NULL
              AND NOT endpoint.changes_pruned
              AND EXISTS (
-               SELECT 1 FROM doomed JOIN slotlock.outbox change ON change.id = doomed.id
-                WHERE (change.txid, change.id) > (endpoint.cursor_txid, endpoint.cursor_id))
+               SELECT 1 FROM doomed
+                WHERE (doomed.txid, doomed.id) > (endpoint.cursor_txid, endpoint.cursor_id))
         ), deleted AS (
-          DELETE FROM slotlock.outbox change USING doomed WHERE change.id = doomed.id
-          RETURNING change.txid, change.id
-        ), mark AS (
-          -- The furthest change pruned, never moved back. A tenant's first mark is at least its
-          -- oldest kept transaction, which every change an earlier version pruned is before.
-          INSERT INTO slotlock.outbox_pruned AS mark (tenant_ref, txid, id)
-          SELECT ${params.tenantRef}, furthest.txid, furthest.id FROM (
-            SELECT txid, id FROM deleted
-            UNION ALL
-            SELECT min(txid), 0 FROM slotlock.outbox
-             WHERE tenant_ref = ${params.tenantRef}
-               AND NOT EXISTS (
-                 SELECT 1 FROM slotlock.outbox_pruned WHERE tenant_ref = ${params.tenantRef})
-            HAVING min(txid) IS NOT NULL
-            ORDER BY txid DESC, id DESC
-            LIMIT 1
-          ) furthest
-          ON CONFLICT (tenant_ref) DO UPDATE SET txid = excluded.txid, id = excluded.id
-           WHERE (excluded.txid, excluded.id) > (mark.txid, mark.id)
+          DELETE FROM slotlock.outbox change USING doomed WHERE change.id = doomed.id RETURNING 1
         )
         SELECT count(*)::int AS deleted FROM deleted`;
       return rows[0]?.deleted ?? 0;
