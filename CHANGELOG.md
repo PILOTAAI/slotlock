@@ -3,6 +3,14 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Fixed
+
+- The Python client is published to PyPI again. 0.4.0's PyPI job could not build it: hatchling, the
+  build backend, now needs `tomlkit`, which the release's pinned build requirements did not list.
+  0.4.1 is otherwise 0.4.0; the other packages are released at 0.4.1 with no change.
+
 ## 0.4.0 - 2026-10-28
 
 ### Added
