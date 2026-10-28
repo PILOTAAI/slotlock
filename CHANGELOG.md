@@ -3,6 +3,15 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Fixed
+
+- Time an agent frees is offered to the waitlist at once, as the application API's cancels already
+  were: an agent releasing its holds (`slotlock_release_slots`), deleting or moving an event, and a
+  booking moved through `PUT /v1/reservations`. Before, it waited for the next maintenance pass, up
+  to an hour.
+
 ## 0.4.1 - 2026-10-28
 
 ### Fixed
