@@ -15,6 +15,14 @@ const knownIssues = facts.version.startsWith('0.2.');
 
 export const toolNames: string[] = facts.tools.map((tool) => tool.name);
 
+/** `Python, Go, Rust, Java and .NET`, from the client directories in the repository. */
+const clientList = `${facts.clients.slice(0, -1).join(', ')} and ${facts.clients.at(-1)}`;
+
+/** How long the change feed keeps changes, naming the setting once the server has one. */
+const retention = facts.retentionSetting
+  ? `${facts.changeRetentionDays} days by default (\`${facts.retentionSetting}\`)`
+  : `${facts.changeRetentionDays} days`;
+
 export interface Heading {
   soft: string;
   strong: string;
@@ -23,7 +31,7 @@ export interface Heading {
 export const meta = {
   title: 'Slotlock: the calendar AI agents cannot double-book',
   description:
-    'Slotlock is an open-source calendar for AI agents. Each resource is its own calendar, agents hold and book time over MCP or A2A and show free slots as an MCP App, and PostgreSQL refuses any overlapping write and returns the conflict as data.',
+    'Slotlock is an open-source calendar for AI agents. Each resource is its own calendar; agents hold and book time over MCP, A2A or REST and show free slots as an MCP App; people manage it in a GitHub sign-in dashboard; PostgreSQL refuses any overlapping write and returns the conflict as data.',
 };
 
 export interface InstallTarget {
@@ -44,7 +52,7 @@ export const hero = {
     soft: 'Slotlock is a calendar for AI agents.',
     strong: 'Two agents, one slot, one booking.',
   } satisfies Heading,
-  lede: 'Each car, room, person and machine is its own calendar: agents find, hold and book time over MCP or A2A, a person can pick the slot in the chat, and PostgreSQL refuses every overlapping write with the conflict returned as data.',
+  lede: 'Each car, room, person and machine is its own calendar. Agents find, hold and book time over MCP, A2A or REST, a person picks the slot in the chat, and PostgreSQL refuses every overlapping write with the conflict returned as data.',
   install: [
     // Offered only while the README documents the Docker quickstart (facts.composeUp).
     ...(facts.composeUp
@@ -277,16 +285,18 @@ export const heroRefusal = {
 export const heroAria =
   'A calendar for four resources from 08:00 to 18:00, each in its own local time: a van, a meeting room, a clinician and a machine. At 09:41 Agent A finds the van free from 10:00 to 12:00 and holds it for ten minutes. Agent B tries to hold 11:00 to 13:00 on the same van; PostgreSQL refuses it with the code overlap, shown as a red outline. Agent B asks for the next certain two hours, gets 12:00 to 14:00 and holds that until 09:51. Agent A confirms its hold, which becomes a booking. The clinician has a busy block imported from an iCalendar feed, and the time after 14:00 is marked unproven because the feed has only been read up to then. The van, the room and the machine close when their rules say the bookable hours end.';
 
-export const specStrip = [
-  'PostgreSQL EXCLUDE',
-  'Expiring holds',
-  `MCP ${facts.mcpModern}`,
-  'MCP Apps',
-  `A2A ${facts.a2a}`,
-  'Standard Webhooks',
-  'RFC 9457 errors',
-  'iCalendar and JSCalendar',
-  facts.license,
+/** What is in the box, one line per layer. */
+export const specStrip: { label: string; value: string }[] = [
+  { label: 'Overlaps', value: 'PostgreSQL EXCLUDE constraint, expiring holds' },
+  {
+    label: 'Agents',
+    value: `MCP ${facts.mcpModern}, MCP Apps, A2A ${facts.a2a}, ${facts.toolCount} tools`,
+  },
+  {
+    label: 'Applications',
+    value: `REST, OpenAPI, RFC 9457 errors, ${facts.clientCount} language clients`,
+  },
+  { label: 'Interchange', value: 'CloudEvents, Standard Webhooks, iCalendar, JSCalendar' },
 ];
 
 export const proof = {
@@ -329,7 +339,7 @@ export const steps = {
     {
       n: '02',
       title: 'Find a slot and hold it',
-      body: '`slotlock_find_available_slots` lists certain slots; `slotlock_hold_slots` keeps up to five while a person chooses.',
+      body: `\`slotlock_find_available_slots\` lists certain slots; \`slotlock_hold_slots\` keeps up to ${facts.holdSlotsMax} for ${facts.holdTtlMin} to ${facts.holdTtlMax} seconds while a person chooses.`,
       link: { label: 'Holds', href: '/docs/concepts/#holds' },
     },
     {
@@ -343,8 +353,8 @@ export const steps = {
     inputs: ['Your provider adapters', 'iCalendar feeds'],
     core: 'Slotlock engine',
     store: 'PostgreSQL · schema slotlock',
-    outputs: ['MCP', 'A2A', 'TypeScript'],
-    aria: 'Diagram: your provider adapters and iCalendar feeds send busy time into the Slotlock engine, which stores everything in the slotlock schema of PostgreSQL and serves agents over MCP, A2A and TypeScript.',
+    outputs: ['MCP', 'A2A', 'REST', 'TypeScript'],
+    aria: 'Diagram: your provider adapters and iCalendar feeds send busy time into the Slotlock engine, which stores everything in the slotlock schema of PostgreSQL and serves agents and applications over MCP, A2A, REST and TypeScript.',
   },
 };
 
@@ -355,7 +365,7 @@ export const model = {
     soft: 'Calendars belong to resources,',
     strong: 'each with its own rules and clock.',
   },
-  lede: 'Rules run in the resource’s own time zone, daylight saving included, and a feed that has not been read makes time unproven instead of free.',
+  lede: 'Rules run in the resource’s own time zone, daylight saving included. Time a calendar feed has not read is unproven, not free, and with `requireCertain` a booking there is refused.',
   /** The van's WeeklyAvailabilityRule; the week strip below is drawn from these numbers. */
   weekly: {
     rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR',
@@ -477,35 +487,203 @@ export const picker = {
   link: { label: 'MCP Apps', href: '/docs/connect/#mcp-apps' },
 };
 
+/** The org dashboard (src/dashboard.ts), drawn with the labels its Overview shows. */
+export const dashboard = {
+  id: 'dashboard',
+  counter: '05',
+  heading: { soft: 'Sign in with GitHub.', strong: 'See what every agent booked.' },
+  lede: 'The server serves a dashboard at `/dashboard`. Its pages render on the server, work without JavaScript, and follow light and dark.',
+  view: {
+    brand: 'Slotlock',
+    org: 'acme-rentals',
+    nav: ['Overview', 'Resources', 'Waitlist', 'API keys', 'Webhooks', 'Settings'],
+    title: 'Overview',
+    stats: [
+      { label: `Booked, next ${facts.dashboardAgendaDays} days`, value: '18' },
+      { label: 'Live holds', value: '3' },
+      { label: 'Resources', value: '12' },
+      { label: 'Active keys', value: '4' },
+    ],
+    upcoming: [
+      { day: 'Today', time: '10:00–12:00', what: 'Van AB12 CDE', kind: 'Booking' },
+      { day: 'Today', time: '12:00–14:00', what: 'Van AB12 CDE', kind: 'Hold' },
+      { day: 'Today', time: '13:00–14:30', what: 'Room 3', kind: 'Event' },
+      { day: 'Tomorrow', time: '09:00–17:00', what: 'Van CD34 EFG', kind: 'Booking' },
+    ],
+    activity: [
+      { text: 'Hold booked', on: 'Van AB12 CDE', who: 'booking-agent', when: '2 min ago', tone: 'good' },
+      { text: 'Waitlist offer sent', on: 'Van CD34 EFG', who: 'Slotlock', when: '18 min ago', tone: 'good' },
+      { text: 'No-show released', on: 'Room 3', who: 'Slotlock', when: '1 h ago', tone: 'bad' },
+      { text: 'Calendar sync is behind', on: 'Dr Shah', who: 'Slotlock', when: '3 h ago', tone: 'bad' },
+    ],
+  },
+  aria: `The dashboard's Overview for the GitHub organization acme-rentals. A sidebar lists Overview, Resources, Waitlist, API keys, Webhooks and Settings. Four counts: 18 booked in the next ${facts.dashboardAgendaDays} days, 3 live holds, 12 resources, 4 active keys. Upcoming lists today's van booking, a hold on the same van, an event in Room 3, and tomorrow's booking of a second van. Agent activity lists, newest first: a hold booked by the key booking-agent, a waitlist offer, a no-show released, and a calendar sync that is behind.`,
+  points: [
+    ...(facts.dashboardOrgs
+      ? [
+          {
+            title: 'A tenant per GitHub organization',
+            body: 'With `SLOTLOCK_DASHBOARD_ORGS`, an organization is one tenant its members share. Removing it signs its sessions out and stops its keys.',
+          },
+        ]
+      : []),
+    {
+      title: 'A page for each part',
+      body: 'Each resource’s hours, booking rules and pool; the waitlist; API keys with the MCP and A2A endpoints; webhooks with each endpoint’s delivery health.',
+    },
+    ...(facts.dashboardWorker
+      ? [
+          {
+            title: 'On your server or on Cloudflare',
+            body: 'From `slotlock serve`, or as a Worker at its own origin that reaches your PostgreSQL through Hyperdrive.',
+          },
+        ]
+      : []),
+  ],
+  link: { label: 'Dashboard', href: '/docs/dashboard/' },
+};
+
+export type CapabilityVisual = 'holds' | 'pools' | 'rules' | 'waitlist' | 'feed' | 'metrics';
+
 /** What 0.4 adds beyond one hold and one booking, each linked to its operation's page. */
 export const capabilities = {
   id: 'capabilities',
-  counter: '05',
+  counter: '06',
   heading: { soft: 'Beyond one booking.', strong: 'What a fleet or a clinic needs.' },
   items: [
-    { title: 'Book together', body: 'Several resources, all or none, in one transaction.', href: '/docs/api/book-together/' },
-    { title: 'Pools', body: 'Book a vehicle class or room type; the first free member is taken.', href: '/docs/api/book-pool/' },
-    { title: 'Waitlists', body: 'Freed time is offered in order, as a hold for the next person.', href: '/docs/api/join-waitlist/' },
-    { title: 'Check-in', body: 'A booking nobody claims is released and offered on.', href: '/docs/api/check-in-reservation/' },
-    { title: 'Booking rules', body: 'Notice, how far ahead, slot steps, turnaround and hours.', href: '/docs/api/set-resource-booking-rules/' },
-    { title: 'Webhooks', body: 'Every change, signed as Standard Webhooks, in commit order.', href: '/docs/api/create-webhook/' },
+    {
+      visual: 'holds',
+      title: 'Agent holds',
+      body: `Up to ${facts.holdSlotsMax} candidate slots, held as one group while a person chooses; booking one releases the rest. Each agent may hold ${facts.holderHolds} at once and ${facts.holderHeldHoursText} hours in all.`,
+      href: '/docs/api/hold-slots/',
+    },
+    {
+      visual: 'pools',
+      title: 'Pools',
+      body: 'Book a vehicle class or room type and get the first free member, in one transaction, so a class sells out at its size. `slotlock_get_pool_availability` says how many are free, and when.',
+      href: '/docs/api/get-pool-availability/',
+    },
+    {
+      visual: 'rules',
+      title: 'Booking rules',
+      body: 'Notice, how far ahead, slot steps, turnaround and hours, judged by the database clock. `require_certain` refuses a booking in time no calendar sync has read within a day.',
+      href: '/docs/api/set-resource-booking-rules/',
+    },
+    {
+      visual: 'waitlist',
+      title: 'Waitlists and check-in',
+      body: 'Freed time goes to the waitlist in join order, as a hold for the next person. A booking nobody checks in to is released and offered on.',
+      href: '/docs/api/join-waitlist/',
+    },
+    {
+      visual: 'feed',
+      title: 'Change feed and webhooks',
+      body: `Every committed change as a CloudEvent, read by a cursor that never skips one, kept ${retention}. Webhooks send them in order, signed as Standard Webhooks.`,
+      href: '/docs/api/list-changes/',
+    },
+    ...(facts.metrics
+      ? [
+          {
+            visual: 'metrics',
+            title: 'Prometheus metrics',
+            body: 'With `SLOTLOCK_METRICS_TOKEN`, `/metrics` counts calls by protocol, operation and outcome, refusals, maintenance and deliveries. No label names a tenant.',
+            href: '/docs/scaling/#observe-it',
+          },
+        ]
+      : []),
+  ] satisfies { visual: CapabilityVisual; title: string; body: string; href: string }[],
+  more: [
+    { title: 'Book together', body: 'Several resources, all or none.', href: '/docs/api/book-together/' },
+    { title: 'Feed health', body: 'Each sync’s window, last read and error.', href: '/docs/api/get-coverage/' },
     { title: 'History', body: 'Who changed what, and what it was before.', href: '/docs/api/get-resource-history/' },
     { title: 'Calendar formats', body: 'Hours as VAVAILABILITY, events as JSCalendar.', href: '/docs/api/export-resource-availability/' },
   ],
+  /** The drawings inside the cards: illustrative values in the shapes the API returns. */
+  scenes: {
+    holds: [
+      { time: '10:00–12:00', state: 'held' },
+      { time: '12:00–14:00', state: 'held' },
+      { time: '14:00–16:00', state: 'taken' },
+    ],
+    holdsAria: 'Three candidate slots in one hold group: two held, one already taken.',
+    pool: {
+      name: 'van-class',
+      members: 4,
+      day: '2027-03-01',
+      intervals: [
+        { from: 9, to: 11, free: 3 },
+        { from: 11, to: 14, free: 1 },
+        { from: 14, to: 16, free: 0 },
+        { from: 16, to: 18, free: 2 },
+      ],
+    },
+    poolAria: 'A pool of four vans across a day: three free from 9 to 11, one from 11 to 14, none from 14 to 16, two from 16 to 18.',
+    rules: [
+      ['min_notice_minutes', '60'],
+      ['slot_step_minutes', '30'],
+      ['turnaround_minutes', '15'],
+      ['check_in_minutes', '15'],
+      ['require_certain', 'true'],
+    ],
+    rulesAria: 'Booking rules for one resource: an hour of notice, starts every 30 minutes, 15 minutes of turnaround, check-in within 15 minutes, and certain coverage required.',
+    waitlist: [
+      { n: '1', who: 'entry 1', state: 'offered, held' },
+      { n: '2', who: 'entry 2', state: 'waiting' },
+      { n: '3', who: 'entry 3', state: 'waiting' },
+    ],
+    waitlistAria: 'A waitlist of three: the first entry has been offered the freed time as a hold, the others wait.',
+    feed: [
+      'io.pylota.slotlock.hold.created',
+      'io.pylota.slotlock.reservation.created',
+      'io.pylota.slotlock.reservation.no_show',
+      'io.pylota.slotlock.waitlist.offered',
+    ],
+    feedAria: 'Four change types in commit order: a hold created, a reservation created, a no-show, and a waitlist offer.',
+    metrics: [
+      ['slotlock_calls_total{protocol="mcp",operation="slotlock_hold_slots",outcome="ok"}', '412'],
+      ['slotlock_calls_total{protocol="mcp",operation="slotlock_hold_slots",outcome="overlap"}', '9'],
+      ['slotlock_webhook_deliveries_total{result="delivered"}', '1288'],
+    ],
+    metricsAria: 'Prometheus counters: hold calls by outcome, and webhook deliveries.',
+  },
 };
 
 export const developers = {
   id: 'developers',
-  counter: '06',
-  heading: { soft: 'One registry, three ways in.', strong: 'MCP, A2A or a TypeScript import.' },
-  lede: `The ${facts.toolCount} tools and their JSON Schemas come from one registry, so a refusal reads the same on every transport. Applications use the same operations over REST, from five typed clients.`,
-  links: [
-    { label: 'Every tool, field by field', href: '/docs/tools/' },
-    { label: 'Connect Claude Code, Cursor or VS Code', href: '/docs/connect/' },
-    { label: 'REST and OpenAPI', href: '/docs/reference/#rest-and-openapi' },
-    { label: 'Clients for Python, Go, Rust, Java and .NET', href: '/docs/clients/' },
+  counter: '07',
+  heading: { soft: 'One registry, four ways in.', strong: 'MCP, A2A, REST or TypeScript.' },
+  lede: `The ${facts.toolCount} tools and their JSON Schemas come from one registry, so a refusal reads the same on every transport.`,
+  /** The REST tab's example: pool availability, in the shape openapi.json gives it. */
+  restPool: 'van-class',
+  rows: [
     {
-      label: 'Live calendar updates',
+      label: 'MCP',
+      body: `${facts.toolCount} tools on MCP ${facts.mcpModern} and ${facts.mcpLegacy}, with the slot picker as an MCP App.`,
+      href: '/docs/connect/',
+    },
+    {
+      label: 'A2A',
+      body: `The same operations as A2A ${facts.a2a} skills, with an agent card.`,
+      href: '/docs/reference/#endpoints',
+    },
+    {
+      label: 'REST',
+      body: 'The tools and the application API, described at `/openapi.json`, refusals as RFC 9457 problem details.',
+      href: '/docs/reference/#rest-and-openapi',
+    },
+    {
+      label: 'Clients',
+      body: `${clientList}: one method per operation, generated from the OpenAPI document.`,
+      href: '/docs/clients/',
+    },
+    {
+      label: 'TypeScript',
+      body: 'The engine as a library on your PostgreSQL; the availability maths needs no database.',
+      href: '/docs/library/',
+    },
+    {
+      label: 'Live updates',
+      body: `On MCP ${facts.mcpModern} each resource is an MCP resource, and a subscription hears when its free/busy changes.`,
       href: '/docs/reference/#calendar-resources-and-live-updates',
     },
   ],
@@ -513,7 +691,7 @@ export const developers = {
 
 export const security = {
   id: 'security',
-  counter: '07',
+  counter: '08',
   heading: { soft: 'Agents propose.', strong: 'A person confirms, PostgreSQL decides.' },
   approval: {
     eyebrow: 'slotlock_create_event · input required',
@@ -529,7 +707,7 @@ export const security = {
   aria: `A confirmation form shown to a person before an agent's write runs. It reads: Book vehicle-42 for 29 March 2027, 10:00 to 11:00, Europe/London: Vehicle handover, with one tick box and Decline and Accept buttons. Below it, the receipt after acceptance: the event was created at revision 1.`,
   statements: [
     'Tenancy comes from your `authenticate` callback. No tool argument can choose a tenant.',
-    'Forced row-level security returns nothing when the tenant setting is missing.',
+    'Forced row-level security returns nothing when the tenant setting is missing, and `slotlock serve` refuses to run as a superuser or a `BYPASSRLS` role.',
     `A pending confirmation is sealed to the caller, the tool, the exact arguments and an expiry (${facts.confirmTtlSeconds} seconds by default).`,
     'A client that cannot ask a person (MCP 2025 revisions, A2A) gets `confirmation_required`, and the write never runs.',
   ],
@@ -537,7 +715,7 @@ export const security = {
 
 export const compare = {
   id: 'compare',
-  counter: '08',
+  counter: '09',
   heading: { soft: 'Compared with', strong: 'a bookings table and a cron job.' },
   columns: ['', 'Table and cron job', 'Slotlock'],
   rows: [
@@ -554,7 +732,7 @@ export const compare = {
     [
       'A stale external feed',
       'Missing data reads as free time.',
-      'Time the feed has not covered is unproven.',
+      'Time the feed has not covered is unproven; `requireCertain` refuses bookings there.',
     ],
     [
       'Retries',
@@ -572,6 +750,11 @@ export const compare = {
       'Signed webhooks, in commit order, replayable.',
     ],
     [
+      'Seeing what happened',
+      'Whatever logging someone added.',
+      'A dashboard of what each key changed, history per booking, and Prometheus metrics.',
+    ],
+    [
       'Agent access',
       'You write and maintain the tools.',
       `${facts.toolCount} MCP tools and A2A skills with JSON Schemas.`,
@@ -581,12 +764,46 @@ export const compare = {
 
 export const openSource = {
   id: 'open-source',
-  counter: '09',
-  heading: { soft: `${facts.license}, on the PostgreSQL`, strong: 'you already run.' },
+  counter: '10',
+  heading: { soft: 'Run it where your data is,', strong: `${facts.license}, on the PostgreSQL you run.` },
+  deploy: [
+    ...(facts.composeUp
+      ? [
+          {
+            title: 'Docker Compose',
+            body: 'The server and PostgreSQL 18 on 127.0.0.1, with MCP, A2A, REST and, with four settings, the dashboard.',
+            command: facts.composeUp,
+            link: { label: 'Quickstart', href: '/docs/quickstart/' },
+          },
+        ]
+      : []),
+    {
+      title: 'Your Node.js app',
+      body: `The engine as a library on PostgreSQL 16 to 18 with btree_gist; Node.js ${facts.nodeEngine.replace('>=', '')} or newer.`,
+      command: `npm install slotlock@${facts.version} postgres`,
+      link: { label: 'Library', href: '/docs/library/' },
+    },
+    ...(facts.dashboardWorker
+      ? [
+          {
+            title: 'Dashboard on Cloudflare',
+            body: 'The dashboard as a Worker at its own origin, through Hyperdrive to your PostgreSQL. Agents keep using the server.',
+            command: 'cd workers/dashboard && npm ci',
+            link: { label: 'Worker setup', href: `${REPO_URL}#dashboard-on-cloudflare-workers` },
+          },
+        ]
+      : []),
+    {
+      title: 'Hosted',
+      body: 'Not open yet: `slotlock serve` run for you, with the dashboard, free while it is a preview.',
+      command: null,
+      link: { label: 'Hosted Slotlock', href: '/docs/hosted/' },
+    },
+  ],
   repo: {
     name: 'PILOTAAI/slotlock',
     caption: 'Repository on GitHub',
-    includes: ['Engine', 'Schema and RLS', 'MCP and A2A server', 'Node listener'],
+    includes: ['Engine', 'Schema and RLS', 'MCP, A2A and REST server', 'Dashboard', `${facts.clientCount} clients`],
     run: facts.composeUp ?? 'npm ci && npm run build',
     cta: 'View on GitHub',
   },
@@ -594,9 +811,8 @@ export const openSource = {
     'GOVERNANCE.md commits the engine, the spec and the server to Apache-2.0 or another OSI-approved licence.',
     'Contributions are signed off under the Developer Certificate of Origin. There is no CLA.',
     facts.composeUp
-      ? 'Docker Compose runs PostgreSQL 18 and the server on 127.0.0.1; writes wait for a person by default.'
+      ? 'Under Compose, agents’ writes wait for a person by default (`SLOTLOCK_CONFIRM_WRITES=all`).'
       : 'Needs Node.js 22.12 or newer and PostgreSQL 16 or newer with btree_gist.',
-    'Run it next to your own data, or use [hosted Slotlock](/docs/hosted/) once it opens.',
   ],
 };
 
@@ -614,6 +830,14 @@ export const faq = {
         ? `Not ${facts.version}: it can accept a double booking around a daylight-saving change. Read the [known issues](/docs/known-issues/), and use 0.3.0 once it is published; the README keeps the production checklist.`
         : `${facts.version} is a 0.x release, so a minor release may change the API, as [versioning](/docs/versioning/) explains; the README keeps the production checklist.`,
     },
+    ...(facts.dashboardOrgs
+      ? [
+          {
+            q: 'Can a team share one calendar?',
+            a: 'Yes. With `SLOTLOCK_DASHBOARD_ORGS`, a GitHub organization is one tenant: its members share the keys, resources and hours, and the key list says who made each key.',
+          },
+        ]
+      : []),
     {
       q: 'Does a model decide anything?',
       a: 'No. Models call tools. The database decides overlaps, your authorize callback decides permissions, and a person can be asked to confirm each write.',
@@ -630,7 +854,8 @@ export const closing = {
 
 export const nav = [
   { label: 'Docs', href: '/docs/' },
-  { label: 'In the chat', href: '#picker' },
+  { label: 'Dashboard', href: '#dashboard' },
+  { label: 'Capabilities', href: '#capabilities' },
   { label: 'Developers', href: '#developers' },
   { label: 'Security', href: '#security' },
   { label: 'Open source', href: '#open-source' },
@@ -644,6 +869,7 @@ export const footer = {
       links: [
         { label: 'Introduction', href: '/docs/' },
         { label: 'Concepts', href: '/docs/concepts/' },
+        { label: 'Dashboard', href: '/docs/dashboard/' },
         { label: 'Security model', href: '/docs/security/' },
         { label: 'Changelog', href: '/docs/changelog/' },
       ],
