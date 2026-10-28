@@ -246,8 +246,19 @@ resources, so you can give each person API keys without running `slotlock key cr
 
 - Each person gets a tenant of their own, `github:<user id>`: the keys, resources and bookings in it
   are theirs alone. Keys made with `slotlock key create` act in `SLOTLOCK_TENANT` instead.
-- Sign-in asks GitHub for no scope, uses `state` and PKCE, and keeps nothing from GitHub but the user
-  id and login: the GitHub token is used once and dropped.
+- **For organizations instead of people**, set `SLOTLOCK_DASHBOARD_ORGS` to the GitHub organization
+  ids the dashboard serves (`gh api orgs/<login> --jq .id`). Each is then one tenant,
+  `github-org:<id>`, that its members share: keys, resources and hours. A person signs in to the
+  served organizations they are an active member of, switching between them when there are several;
+  someone in none of them is refused. Membership is read at each sign-in, so a person who leaves keeps
+  the dashboard until their session ends (12 hours at most), and keys they made work until revoked.
+  Removing an id from the list signs its sessions out and stops its keys at once. An organization
+  that restricts OAuth apps must approve the dashboard's app (its Settings, Third-party access), or
+  GitHub hides the membership. `SLOTLOCK_DASHBOARD_USERS` still says who may sign in at all, and a
+  key records the person who created it (`github:<user id>`).
+- Sign-in uses `state` and PKCE, and keeps nothing from GitHub but the user id and login (and, with
+  organizations, the served ones the person belongs to): the GitHub token is used once and dropped.
+  It asks for no scope, or `read:org` with organizations.
 - A session is a signed, HttpOnly cookie that lasts 12 hours. The allowlist is checked on every
   request, dashboard and API alike: removing an id and restarting the server signs that person out
   and stops every key in their tenant at once.

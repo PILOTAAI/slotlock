@@ -92,7 +92,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
 
   afterAll(async () => {
     await admin`DELETE FROM slotlock.resources WHERE tenant_ref IN (${tenantRef}, ${otherTenantRef})`;
-    await admin`DELETE FROM slotlock.api_keys WHERE tenant_ref IN (${tenantRef}, ${otherTenantRef}, 'github:4242', 'github:999')`;
+    await admin`DELETE FROM slotlock.api_keys WHERE tenant_ref IN (${tenantRef}, ${otherTenantRef}, 'github:4242', 'github:999', 'github-org:91', 'github-org:92')`;
     await admin.unsafe(`DROP OWNED BY ${role}`).catch(() => undefined);
     await admin.unsafe(`DROP ROLE IF EXISTS ${role}`);
     await admin.end();
@@ -1168,6 +1168,9 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     };
     const allowedKey = await keyFor('github:4242');
     const removedKey = await keyFor('github:999');
+    // An organization's keys work while the dashboard serves it, and stop when it no longer does.
+    const orgKey = await keyFor('github-org:91');
+    const droppedOrgKey = await keyFor('github-org:92');
     const shutdown = new AbortController();
     const stdout = output();
     const stderr = output();
@@ -1178,6 +1181,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         SLOTLOCK_GITHUB_CLIENT_SECRET: clientSecret,
         SLOTLOCK_SESSION_SECRET: sessionSecret,
         SLOTLOCK_DASHBOARD_USERS: '4242',
+        SLOTLOCK_DASHBOARD_ORGS: '91',
         SLOTLOCK_LIMITS: 'sign_in=3/m:3',
       },
       stdout,
@@ -1237,6 +1241,8 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       expect((await mcp()).status).toBe(401);
       expect((await mcp(allowedKey)).status).toBe(200);
       expect((await mcp(removedKey)).status).toBe(401);
+      expect((await mcp(orgKey)).status).toBe(200);
+      expect((await mcp(droppedOrgKey)).status).toBe(401);
     } finally {
       shutdown.abort();
     }

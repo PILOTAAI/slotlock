@@ -122,6 +122,8 @@ export interface SlotlockServeDashboardConfig {
   sessionSecret: string;
   /** GitHub user ids that may sign in, or `'*'` for every GitHub account. */
   allowedUsers: '*' | string[];
+  /** GitHub organization ids whose members share a tenant each (SLOTLOCK_DASHBOARD_ORGS). */
+  organizations?: string[];
 }
 
 const DASHBOARD_VARIABLES = [
@@ -169,11 +171,18 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
       'SLOTLOCK_DASHBOARD_USERS is required to serve the dashboard: * for every GitHub account, or a comma-separated list of GitHub user ids (gh api users/<login> --jq .id)',
     );
   }
+  const orgs = optional(env, 'SLOTLOCK_DASHBOARD_ORGS')?.replaceAll(' ', '');
+  if (orgs !== undefined && !/^[1-9]\d{0,19}(,[1-9]\d{0,19})*$/.test(orgs)) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_DASHBOARD_ORGS must be a comma-separated list of GitHub organization ids (gh api orgs/<login> --jq .id)',
+    );
+  }
   return {
     githubClientId,
     githubClientSecret,
     sessionSecret,
     allowedUsers: users === '*' ? '*' : [...new Set(users.split(','))],
+    ...(orgs !== undefined ? { organizations: [...new Set(orgs.split(','))] } : {}),
   };
 }
 

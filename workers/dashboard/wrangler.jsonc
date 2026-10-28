@@ -69,6 +69,9 @@
     "SLOTLOCK_SERVICE_URL": "https://slotlock.example.com",
     // Who may sign in: "*" for every GitHub account (each gets its own tenant), or GitHub ids.
     "SLOTLOCK_DASHBOARD_USERS": "*"
+    // For organizations instead of people: GitHub organization ids, each one tenant its members
+    // share (gh api orgs/<login> --jq .id). Uncomment and set:
+    // "SLOTLOCK_DASHBOARD_ORGS": "123456"
   },
   // Workers Logs keep each request's URL for up to 7 days; a sign-in callback's query holds its
   // OAuth code and state, so query strings are removed from logged URLs. redact_query_string is the

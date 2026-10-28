@@ -417,6 +417,10 @@ describe('slotlock serve configuration', () => {
         readSlotlockServeConfig(dashboardEnv({ SLOTLOCK_DASHBOARD_USERS: '*' })).dashboard
           ?.allowedUsers,
       ).toBe('*');
+      expect(
+        readSlotlockServeConfig(dashboardEnv({ SLOTLOCK_DASHBOARD_ORGS: '91, 92,91' })).dashboard
+          ?.organizations,
+      ).toEqual(['91', '92']);
     });
 
     it.each([
@@ -427,6 +431,7 @@ describe('slotlock serve configuration', () => {
       ['the session secret is weak', { SLOTLOCK_SESSION_SECRET: 'z'.repeat(40) }, /SLOTLOCK_SESSION_SECRET is too weak/],
       ['no one is allowed', { SLOTLOCK_DASHBOARD_USERS: undefined }, /SLOTLOCK_DASHBOARD_USERS is required/],
       ['users are logins, not ids', { SLOTLOCK_DASHBOARD_USERS: 'octocat' }, /SLOTLOCK_DASHBOARD_USERS is required/],
+      ['organizations are logins, not ids', { SLOTLOCK_DASHBOARD_ORGS: 'acme-fleet' }, /SLOTLOCK_DASHBOARD_ORGS must be/],
       ['only the users are set', { SLOTLOCK_GITHUB_CLIENT_ID: undefined, SLOTLOCK_GITHUB_CLIENT_SECRET: undefined, SLOTLOCK_SESSION_SECRET: undefined }, /SLOTLOCK_GITHUB_CLIENT_ID is required/],
     ])('refuses to start when %s', (_case, overrides, message) => {
       expect(refusal(dashboardEnv(overrides)).message).toMatch(message);

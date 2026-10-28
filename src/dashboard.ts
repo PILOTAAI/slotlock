@@ -51,6 +51,7 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/keys/revoke',
   '/resources',
   '/hours',
+  '/organization',
 ]);
 const SIGN_IN_AGAIN = 'That sign-in did not finish here, or took too long. Sign in again.';
 const GITHUB_ERROR_CODE = /^[a-z0-9_]{1,64}$/;
@@ -150,11 +151,22 @@ export interface SlotlockDashboardOptions {
     authorizeUrl?: string;
     tokenUrl?: string;
     userUrl?: string;
+    membershipsUrl?: string;
   };
   /** Seals sessions and sign-in state and derives CSRF tokens: 32+ random characters. */
   sessionSecret: string;
   /** GitHub user ids (numbers, as strings) that may sign in, or `'*'` for every GitHub account. */
   allowedUsers: '*' | readonly string[];
+  /**
+   * GitHub organization ids (numbers, as strings) this dashboard serves. With them, a tenant is an
+   * organization (`github-org:<id>`), not a person: sign-in asks for `read:org`, and a person signs
+   * in to the served organizations they are an active member of, sharing each one's keys and
+   * resources with its other members. Membership is read at each sign-in; leaving an organization
+   * ends access at the next sign-in, at most a session (12 hours) later, and removing an
+   * organization from this list signs its sessions out at once. Without it, each person is their
+   * own tenant (`github:<id>`).
+   */
+  organizations?: readonly string[];
   keys: SlotlockApiKeyStore;
   resources: SlotlockDashboardResources;
   /** Shared by every server behind this origin: see SlotlockDashboardState. */
@@ -358,7 +370,19 @@ interface Session {
   /** Random per session; the CSRF token is derived from it. */
   sid: string;
   exp: number;
+  /** With organizations: the served ones the person belongs to, read at sign-in, and the one in use. */
+  orgs?: Organization[];
+  org?: string;
 }
+
+interface Organization {
+  id: string;
+  login: string;
+}
+
+/** Served organizations one session lists at most: the session is a cookie of at most 4 KB. */
+const MAX_SESSION_ORGANIZATIONS = 20;
+const ORGANIZATION_ID = /^[1-9]\d{0,19}$/;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -602,6 +626,13 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const authorizeUrl = options.github.authorizeUrl ?? 'https://github.com/login/oauth/authorize';
   const tokenUrl = options.github.tokenUrl ?? 'https://github.com/login/oauth/access_token';
   const userUrl = options.github.userUrl ?? 'https://api.github.com/user';
+  const membershipsUrl =
+    options.github.membershipsUrl ??
+    'https://api.github.com/user/memberships/orgs?state=active&per_page=100';
+  const served = options.organizations ? new Set(options.organizations) : null;
+  if (served && (served.size === 0 || [...served].some((id) => !ORGANIZATION_ID.test(id)))) {
+    throw new Error('Slotlock dashboard organizations must be GitHub organization ids');
+  }
   const fetchImpl = options.fetch ?? fetch;
   const now = options.now ?? Date.now;
   if (Buffer.byteLength(options.sessionSecret, 'utf8') < 32) {
@@ -679,6 +710,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       typeof payload.login !== 'string' ||
       typeof payload.sid !== 'string' ||
       !allowed(payload.uid) ||
+      !organizationsHold(payload) ||
       (await options.state.sessionEnded(payload.sid, payload.exp as number))
     ) {
       return null;
@@ -686,11 +718,28 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     return payload as unknown as Session;
   }
 
+  /**
+   * With organizations, the session names one the server still serves, from its own list; without
+   * them, it names none. A session from the other mode is signed out.
+   */
+  function organizationsHold(payload: Record<string, unknown>): boolean {
+    if (!served) return payload.org === undefined && payload.orgs === undefined;
+    if (typeof payload.org !== 'string' || !served.has(payload.org) || !Array.isArray(payload.orgs)) {
+      return false;
+    }
+    return (payload.orgs as unknown[]).some(
+      (org) => isRecord(org) && org.id === payload.org && typeof org.login === 'string',
+    );
+  }
+
   const csrfToken = (session: Session) =>
     createHmac('sha256', secret)
       .update(`slotlock-dashboard-csrf-v1.${session.sid}`)
       .digest('base64url');
-  const tenantOf = (session: Session) => `github:${session.uid}`;
+  const tenantOf = (session: Session) =>
+    served ? `github-org:${session.org as string}` : `github:${session.uid}`;
+  /** Who did something, for the record: the person, whatever tenant they act in. */
+  const personOf = (session: Session) => `github:${session.uid}`;
 
   function respond(
     status: number,
@@ -719,8 +768,15 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     respond(status, '', { Location: location }, cookies);
 
   function layout(title: string, content: Html, session: Session | null): Html {
+    const current = session?.orgs?.find((org) => org.id === session.org);
+    const organization =
+      session && current
+        ? (session.orgs?.length ?? 0) > 1
+          ? html`<form class="org" method="post" action="${root}/organization"><input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="organization">Organization</label><select id="organization" name="organization">${(session.orgs ?? []).map((org) => html`<option value="${org.id}"${org.id === current.id ? html` selected` : html``}>${org.login}</option>`)}</select><button class="link" type="submit">Switch</button></form>`
+          : html`<span class="org">${current.login}</span>`
+        : html``;
     const account = session
-      ? html`<div class="account"><span class="login">@${session.login}</span>
+      ? html`<div class="account">${organization}<span class="login">@${session.login}</span>
           <form method="post" action="${root}/sign-out"><input type="hidden" name="csrf" value="${csrfToken(session)}"><button class="link" type="submit">Sign out</button></form></div>`
       : html``;
     return html`<!doctype html>
@@ -1008,6 +1064,21 @@ ${
     return respond(200, layout('Your new key', content, session));
   }
 
+  /** Act in another of the session's organizations: the same session, sealed again. */
+  function switchOrganization(session: Session, form: URLSearchParams): Response {
+    const wanted = form.get('organization') ?? '';
+    const org = session.orgs?.find((candidate) => candidate.id === wanted);
+    if (!served || !org) {
+      return respond(
+        400,
+        layout('Refused', html`<p class="notice">You cannot act for that organization.</p>`, session),
+      );
+    }
+    const sealed = seal('slotlock-dashboard-session-v1', { ...session, org: org.id });
+    const left = Math.max(1, Math.floor((session.exp - now()) / 1000));
+    return redirect(303, root, [setCookie(SESSION_COOKIE, sealed, left)]);
+  }
+
   async function startSignIn(): Promise<Response> {
     const state = randomBytes(32).toString('base64url');
     const verifier = randomBytes(32).toString('base64url');
@@ -1019,6 +1090,8 @@ ${
       state,
       code_challenge: challenge,
       code_challenge_method: 'S256',
+      // Reading organization membership needs read:org; a personal tenant needs no scope at all.
+      ...(served ? { scope: 'read:org' } : {}),
     }).toString();
     const sealed = seal('slotlock-dashboard-sign-in-v1', {
       state,
@@ -1091,13 +1164,59 @@ ${
     return { uid: String(body.id), login: body.login };
   }
 
+  /**
+   * The served organizations the token's person is an active member of, by login, or null when
+   * GitHub does not answer. Only `state: active` counts; at most MAX_SESSION_ORGANIZATIONS.
+   */
+  async function readMemberships(token: string): Promise<Organization[] | null> {
+    const response = await fetchImpl(membershipsUrl, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': GITHUB_API_VERSION,
+        'User-Agent': USER_AGENT,
+      },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      report(`GitHub membership lookup failed: HTTP ${response.status}`);
+      return null;
+    }
+    const body: unknown = await response.json().catch(() => null);
+    if (!Array.isArray(body)) return null;
+    const found = new Map<string, Organization>();
+    for (const membership of body) {
+      if (!isRecord(membership) || membership.state !== 'active') continue;
+      const organization = membership.organization;
+      if (
+        !isRecord(organization) ||
+        !Number.isSafeInteger(organization.id) ||
+        (organization.id as number) <= 0 ||
+        typeof organization.login !== 'string' ||
+        !GITHUB_LOGIN.test(organization.login)
+      ) {
+        continue;
+      }
+      const id = String(organization.id);
+      if (served?.has(id)) found.set(id, { id, login: organization.login });
+    }
+    return [...found.values()]
+      .sort((a, b) => a.login.localeCompare(b.login))
+      .slice(0, MAX_SESSION_ORGANIZATIONS);
+  }
+
   async function askGitHub(
     code: string,
     verifier: string,
-  ): Promise<{ uid: string; login: string } | null> {
+  ): Promise<{ uid: string; login: string; orgs?: Organization[] } | null> {
     try {
       const token = await exchangeCode(code, verifier);
-      return token === null ? null : await readGitHubUser(token);
+      if (token === null) return null;
+      const user = await readGitHubUser(token);
+      if (!user || !served) return user;
+      const orgs = await readMemberships(token);
+      return orgs === null ? null : { ...user, orgs };
     } catch (error) {
       report(`GitHub sign-in failed: ${error instanceof Error ? error.name : 'unknown error'}`);
       return null;
@@ -1140,7 +1259,7 @@ ${
     const verifier = pending.verifier;
     signInsInFlight += 1;
     if (client !== undefined) signInsByClient.set(client, fromClient + 1);
-    let user: { uid: string; login: string } | null;
+    let user: { uid: string; login: string; orgs?: Organization[] } | null;
     try {
       // Recorded before GitHub is asked, so a replayed callback is refused on every server unasked.
       if (!(await options.state.use('sign_in', pending.state, pending.exp as number))) {
@@ -1163,11 +1282,20 @@ ${
         clearSignIn,
       ]);
     }
+    const orgs = user.orgs ?? [];
+    if (served && orgs.length === 0) {
+      return signedOutPage(
+        403,
+        `@${user.login} is not a member of an organization this Slotlock server serves.`,
+        [clearSignIn],
+      );
+    }
     const session = seal('slotlock-dashboard-session-v1', {
       uid: user.uid,
       login: user.login,
       sid: randomBytes(24).toString('base64url'),
       exp: now() + SESSION_TTL_MS,
+      ...(served ? { orgs, org: (orgs[0] as Organization).id } : {}),
     });
     return redirect(303, root, [
       clearSignIn,
@@ -1210,7 +1338,7 @@ ${
         tenantRef: tenantOf(session),
         name: form.get('name') ?? '',
         scopes,
-        createdBy: tenantOf(session),
+        createdBy: personOf(session),
         ...(typeof days === 'number' ? { expiresAt: new Date(now() + days * DAY_MS) } : {}),
       });
       return shownOncePage(session, created.key, created.apiKey, false);
@@ -1365,6 +1493,8 @@ ${
         return addResource(session, form);
       case '/hours':
         return saveHours(session, form);
+      case '/organization':
+        return switchOrganization(session, form);
       default:
         return respond(
           404,
@@ -1468,13 +1598,15 @@ const DASHBOARD_CSS = `:root {
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--paper); color: var(--ink); font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
 code, pre, input[readonly] { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
-.bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 24px; border-bottom: 1px solid var(--line); }
+.bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding: 14px 24px; border-bottom: 1px solid var(--line); }
 .brand { display: inline-flex; align-items: center; gap: 8px; color: var(--ink); text-decoration: none; }
 .mark { width: 20px; height: 20px; fill: none; stroke: var(--accent); stroke-width: 7; stroke-linecap: round; stroke-linejoin: round; }
 .name { font-weight: 650; font-size: 16px; }
 .by { color: var(--ink-3); font-size: 12px; }
-.account { display: flex; align-items: center; gap: 12px; color: var(--ink-2); }
+.account { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; color: var(--ink-2); min-width: 0; }
 .account form { margin: 0; }
+.org { display: flex; align-items: center; gap: 6px; color: var(--ink); font-weight: 600; }
+.org select { font: inherit; font-weight: 600; padding: 4px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--paper); color: var(--ink); }
 main { max-width: 1040px; margin: 0 auto; padding: 32px 24px 64px; display: grid; gap: 40px; }
 h1 { font-size: 28px; line-height: 1.2; margin: 0 0 12px; letter-spacing: -0.01em; }
 h2 { font-size: 18px; margin: 0 0 6px; }
@@ -1526,6 +1658,7 @@ form > .table { margin-bottom: 12px; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 @media (max-width: 720px) {
   .bar { padding: 12px 16px; }
+  .brand .by { display: none; }
   main { padding: 24px 16px 48px; }
   thead { display: none; }
   table, tbody, tr, td { display: block; }
