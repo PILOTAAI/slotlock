@@ -610,6 +610,50 @@ describe('release automation', () => {
     }
   });
 
+  it('benchmarks a tag after its suite passes, without holding up any publish, and publishes the results', () => {
+    const release = workflow('release.yml');
+    const job = (name: string) => {
+      const start = release.indexOf(`\n  ${name}:\n`);
+      expect(start, name).toBeGreaterThan(0);
+      const next = release.slice(start + 1).search(/\n {2}[\w-]+:\n/);
+      return release.slice(start, next === -1 ? undefined : start + 1 + next);
+    };
+    // The v* tag push is release.yml's only trigger (above), so it runs on every release.
+    expect(release).toMatch(/^on:\n {2}push:\n {4}tags: \['v\*'\]\n\n/m);
+    const bench = job('bench');
+    expect(bench).toContain('needs: build');
+    expect(bench).toContain('continue-on-error: true');
+    expect(bench).toMatch(/ {4}permissions:\n {6}contents: read\n {4}services:/);
+    // The same pinned PostgreSQL as the suite.
+    const image = (text: string) => /\n {8}image: (\S+)/.exec(text)?.[1];
+    expect(image(bench)).toBe(image(job('build')));
+    expect(bench).toContain('node scripts/bench.mjs --clients 8 --seconds 8 --out bench-results');
+    expect(bench).toContain('name: bench-results');
+
+    const publish = job('bench-publish');
+    expect(publish).toContain('needs: [bench, github-release]');
+    expect(publish).toContain('continue-on-error: true');
+    const granted = /\n {4}permissions:\n((?: {6}.*\n)+)/.exec(publish)?.[1] ?? '';
+    expect(
+      granted.split('\n').filter((line) => /^ {6}[\w-]+:/.test(line)).map((line) => line.trim()),
+    ).toEqual(['contents: write', 'actions: write']);
+    expect(publish).toContain(
+      'gh release upload "$GITHUB_REF_NAME" bench-results/bench.json bench-results/bench.md --clobber',
+    );
+    expect(publish).toContain('gh workflow run site.yml --ref main');
+    expect(publish).not.toContain('actions/checkout@');
+
+    // Only bench-publish waits on the benchmark, and nothing on bench-publish, so a slow or failed
+    // benchmark delays no publish.
+    expect([...release.matchAll(/\n {4}needs: .*\bbench(?:-publish)?\b/g)]).toHaveLength(1);
+
+    // The site can be started that way, and reads the releases with a token.
+    const site = workflow('site.yml');
+    expect(site).toMatch(/\n {2}workflow_dispatch:\n/);
+    expect(site).toContain('GITHUB_TOKEN: ${{ github.token }}');
+    expect(site).toMatch(/^permissions:\n {2}contents: read\n/m);
+  });
+
   it('names only scripts that exist', () => {
     let count = 0;
     for (const { file, text } of workflows) {

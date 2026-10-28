@@ -3,8 +3,9 @@
 # suite has passed it also calls image.yml, which pushes the server image to GHCR and then publishes
 # server.json to the MCP Registry, each after a required reviewer approves its environment (ghcr,
 # mcp-registry), and publishes the five language clients, each after a reviewer approves its
-# registry's environment (docs/release/clients.md). tag-release.yml pushes the tag of a merged
-# version; an admin can push one by hand.
+# registry's environment (docs/release/clients.md). In parallel, and informational only, it runs the
+# pgbench workloads (scripts/bench.mjs) and attaches the results to the release for the docs.
+# tag-release.yml pushes the tag of a merged version; an admin can push one by hand.
 # Nothing in this workflow can make a version public on npm.
 #
 # Staging uses npm trusted publishing: npm exchanges this job's GitHub OIDC token (id-token: write)
@@ -420,3 +421,79 @@ jobs:
               --notes-file notes.md "${prerelease[@]}" "release/$TARBALL" release/SHA256SUMS
           fi
           echo "### GitHub release $GITHUB_REF_NAME" >> "$GITHUB_STEP_SUMMARY"
+
+  # RFC 0002's pgbench workloads (scripts/bench.mjs), on the tagged commit once its suite has passed.
+  # Informational: nothing waits on these two jobs and a failure fails no release, so they never hold
+  # up npm or a registry. bench-publish attaches bench.json and bench.md to the GitHub release and
+  # rebuilds the site, which reads the latest release's bench.json into /docs/benchmarks/.
+  bench:
+    name: Benchmark (informational)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    continue-on-error: true
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16.15@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+        env:
+          POSTGRES_USER: slotlock_ci
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: slotlock
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username=slotlock_ci --dbname=slotlock"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      # The runner image's PostgreSQL 16 packages ship psql and pgbench; the script needs nothing
+      # from npm.
+      - name: Check psql and pgbench
+        run: psql --version && pgbench --version
+      - name: Run the workloads (8 clients, 8 s a run)
+        env:
+          DATABASE_URL: postgresql://slotlock_ci:ci-only-password@localhost:5432/slotlock
+        run: |
+          node scripts/bench.mjs --clients 8 --seconds 8 --out bench-results
+          cat bench-results/bench.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bench-results
+          path: bench-results/
+          if-no-files-found: error
+          retention-days: 30
+
+  bench-publish:
+    name: Publish the benchmark (informational)
+    needs: [bench, github-release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      # Attach the results to the release.
+      contents: write
+      # Start Site on main, which reads them (a GITHUB_TOKEN push would start nothing).
+      actions: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: bench-results
+          path: bench-results
+      - name: Attach the results to the release and rebuild the site
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" bench-results/bench.json bench-results/bench.md --clobber
+          gh workflow run site.yml --ref main
+          echo "### Benchmark attached to $GITHUB_REF_NAME; Site started on main" >> "$GITHUB_STEP_SUMMARY"

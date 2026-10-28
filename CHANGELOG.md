@@ -22,6 +22,13 @@ versioning.
   for each change to a watched resource's free/busy, from the same feed and caps as MCP
   subscriptions, ending `TASK_STATE_COMPLETED` or, when access is withdrawn, `TASK_STATE_FAILED`.
   Push notifications stay unsupported: webhooks deliver a tenant's changes to a URL.
+- Benchmarks on every release (RFC 0002, P2-1): once a tag's suite passes, release.yml runs
+  `scripts/bench.mjs` against a PostgreSQL 16 service container, attaches `bench.json` and
+  `bench.md` to the GitHub release and rebuilds the site, whose new Benchmarks page shows the newest
+  results with the method and caveats. The job is informational: nothing waits on it and its failure
+  fails no release. The script now also measures free/busy reads and the non-overlapping workload
+  with durable commits off, records the PostgreSQL version, CPU count, clients and duration, and
+  writes both files with `--out DIR`.
 
 ## 0.5.2 - 2026-10-28
 
