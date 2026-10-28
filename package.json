@@ -1,6 +1,6 @@
 {
   "name": "slotlock",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "private": true,
   "type": "module",
   "description": "Resource-first, deterministic calendar and availability engine for AI agents.",
