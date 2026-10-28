@@ -115,6 +115,12 @@ export function readAvailability(env: SlotlockEnv): WeeklyAvailabilityRule[] {
   });
 }
 
+/**
+ * A dashboard name (SLOTLOCK_DASHBOARD_NAME): 1-60 characters, none of them a control, format
+ * (bidi, zero-width) or line separator character, `<` or `>`.
+ */
+export const SLOTLOCK_DASHBOARD_NAME_PATTERN = /^[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}<>]{1,60}$/u;
+
 /** The GitHub sign-in dashboard (dashboard.ts), served at `<publicUrl>/dashboard` when configured. */
 export interface SlotlockServeDashboardConfig {
   githubClientId: string;
@@ -175,9 +181,9 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
   }
   const orgs = readDashboardOrganizations(env);
   const name = optional(env, 'SLOTLOCK_DASHBOARD_NAME')?.trim();
-  if (name !== undefined && !/^[^\u0000-\u001f\u007f<>]{1,60}$/u.test(name)) {
+  if (name !== undefined && name !== '' && !SLOTLOCK_DASHBOARD_NAME_PATTERN.test(name)) {
     throw new SlotlockConfigError(
-      'SLOTLOCK_DASHBOARD_NAME must be 1-60 characters, without <, > or control characters',
+      'SLOTLOCK_DASHBOARD_NAME must be 1-60 characters, without <, > or control or invisible characters',
     );
   }
   return {

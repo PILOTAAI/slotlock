@@ -1648,7 +1648,7 @@ describe('the overview', () => {
     const { session } = await signIn(target);
     const html = await (await get(target, '/base/dashboard', session)).text();
     expect(html).toContain('<span class="name">Acme Fleet Calendar</span>');
-    for (const name of ['', ' padded', '<b>x</b>', 'x'.repeat(61), 'line\nbreak']) {
+    for (const name of ['', ' padded', '<b>x</b>', 'x'.repeat(61), 'line\nbreak', 'Acme\u202eteeLF', 'zero\u200bwidth', 'c1\u0085']) {
       expect(() => dashboard({ name })).toThrow(/dashboard name/);
     }
   });

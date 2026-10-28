@@ -429,6 +429,9 @@ describe('slotlock serve configuration', () => {
           ?.name,
       ).toBe('Acme Fleet');
       expect('name' in (readSlotlockServeConfig(dashboardEnv({ SLOTLOCK_DASHBOARD_NAME: '' })).dashboard ?? {})).toBe(false);
+      expect(refusal(dashboardEnv({ SLOTLOCK_DASHBOARD_NAME: 'Acme\u202eteeLF' })).message).toMatch(
+        /SLOTLOCK_DASHBOARD_NAME must be/,
+      );
       expect(refusal(dashboardEnv({ SLOTLOCK_DASHBOARD_NAME: '<b>' })).message).toMatch(
         /SLOTLOCK_DASHBOARD_NAME must be/,
       );

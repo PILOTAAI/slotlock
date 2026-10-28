@@ -54,6 +54,10 @@ describe.skipIf(!url)('the dashboard overview (real Postgres)', () => {
     const lapsed = await store.acquireHold({ tenantRef: tenant, resourceId: van.id, start: at(60), end: at(61), ttlMs: 1_000 });
     expect(lapsed.ok).toBe(true);
     await store.createReservation({ tenantRef: other, resourceId: theirs.id, start: at(12), end: at(13) });
+    // A parity shadow: a confirmed row without a tenant, on the tenant's resource. Not a booking.
+    await sql`
+      INSERT INTO slotlock.reservations (resource_id, starts_at, ends_at)
+      VALUES (${van.id}, ${at(70)}, ${at(71)})`;
     await new Promise((resolve) => setTimeout(resolve, 1_100));
 
     const adapter = createSlotlockDashboardResources(store);

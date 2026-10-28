@@ -16,6 +16,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Sql } from 'postgres';
 import type { SlotlockApiKey, SlotlockApiKeyScope, SlotlockApiKeyStore } from './api-keys.js';
+import { SLOTLOCK_DASHBOARD_NAME_PATTERN } from './config.js';
 import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from './ddl.js';
 import { ignoreRejection } from './hooks.js';
 import type { SlotlockChange } from './event-feed.js';
@@ -438,7 +439,6 @@ const AGENDA_DAYS = 7;
 const AGENDA_LIMIT = 200;
 const AGENDA_SHOWN = 30;
 const ACTIVITY_LIMIT = 20;
-const BRAND_NAME = /^[^\u0000-\u001f\u007f<>]{1,60}$/u;
 
 const icon = (paths: string) =>
   new Html(
@@ -738,8 +738,8 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     throw new Error('Slotlock dashboard organizations must be GitHub organization ids');
   }
   const brandName = options.name ?? 'Slotlock';
-  if (!BRAND_NAME.test(brandName) || brandName.trim() !== brandName) {
-    throw new Error('Slotlock dashboard name must be 1-60 characters, without <, > or controls');
+  if (!SLOTLOCK_DASHBOARD_NAME_PATTERN.test(brandName) || brandName.trim() !== brandName) {
+    throw new Error('Slotlock dashboard name must be 1-60 characters, without <, > or control or invisible characters');
   }
   const fetchImpl = options.fetch ?? fetch;
   const now = options.now ?? Date.now;
@@ -898,7 +898,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     const name = current?.login ?? session.login;
     const badge = html`<span class="avatar" aria-hidden="true">${name.slice(0, 1).toUpperCase()}</span>`;
     if (current && choices.length > 1) {
-      return html`<form class="workspace" method="post" action="${root}/organization" data-autosubmit>${badge}<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="organization">Organization</label><select id="organization" name="organization">${choices.map((org) => html`<option value="${org.id}"${org.id === current.id ? html` selected` : html``}>${org.login}</option>`)}</select><button class="quiet" type="submit">Switch</button></form>`;
+      return html`<form class="workspace" method="post" action="${root}/organization">${badge}<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="organization">Organization</label><select id="organization" name="organization">${choices.map((org) => html`<option value="${org.id}"${org.id === current.id ? html` selected` : html``}>${org.login}</option>`)}</select><button class="quiet" type="submit">Switch</button></form>`;
     }
     return html`<div class="workspace">${badge}<span class="workspace-name">${current ? name : `@${name}`}</span></div>`;
   }
@@ -1904,12 +1904,7 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
 }
 
 // Copies the value of the element a button names. Loaded as a file, so the policy needs no inline code.
-const DASHBOARD_JS = `document.documentElement.classList.add('js');
-document.addEventListener('change', (event) => {
-  const form = event.target instanceof Element ? event.target.closest('form[data-autosubmit]') : null;
-  if (form) form.requestSubmit();
-});
-document.addEventListener('click', (event) => {
+const DASHBOARD_JS = `document.addEventListener('click', (event) => {
   const button = event.target instanceof Element ? event.target.closest('[data-copy]') : null;
   if (!button) return;
   const field = document.getElementById(button.getAttribute('data-copy'));
@@ -1958,7 +1953,6 @@ code, pre, input[readonly] { font-family: ui-monospace, SFMono-Regular, Menlo, m
 .side-top { display: grid; gap: 14px; padding: 0 6px; }
 .workspace { display: flex; align-items: center; gap: 8px; margin: 0; padding: 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); min-width: 0; }
 .workspace-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.js .workspace button { display: none; }
 .workspace select { flex: 1; min-width: 0; height: 28px; border: 0; padding: 0 2px; font-weight: 600; background: transparent; }
 .avatar { display: inline-grid; place-items: center; width: 24px; height: 24px; flex: none; border-radius: 6px; background: var(--accent-wash); color: var(--accent); font-size: 12px; font-weight: 700; }
 .nav { display: grid; gap: 2px; }
