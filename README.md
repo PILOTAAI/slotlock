@@ -321,8 +321,9 @@ of clicking. Each organization brings its own model:
   rebound to one is refused too), and the page says why. For a self-hosted model on the server's
   own machine or network (Ollama, vLLM), the operator sets `SLOTLOCK_ASSISTANT_PRIVATE_URLS=on`.
   On Cloudflare Workers the literal check applies and names are not resolved: a Worker's fetch
-  reaches no private network. **Test connection** makes one real request and checks the model answers with one
-  correct tool call. The organization's messages, and the bookings and resources the assistant
+  reaches no private network. Changing the provider or the URL's origin takes the key again, so the
+  stored key is only ever sent where it was entered for. **Test connection** makes one real request
+  and checks the model answers with one correct tool call. The organization's messages, and the bookings and resources the assistant
   reads, are sent to the provider it configures.
 - **The key** is stored sealed with AES-256-GCM under a key derived from `SLOTLOCK_ASSISTANT_SECRET`,
   bound to the organization, in `slotlock.assistant_settings` (forced row-level security, erased
@@ -335,17 +336,24 @@ of clicking. Each organization brings its own model:
   never runs when the model asks: it appears as a proposed change the member approves (or
   dismisses) with a form, and only then runs, once (its idempotency key is the dashboard's), with
   the same booking rules, tenant limits and rate limits as an agent, recorded as
-  `dashboard-assistant:<GitHub login>`. API keys, webhooks, booking rules, pools, erasure and
+  `dashboard-assistant:github:<user id>` (shown as "Assistant for @login"). The card leads with
+  the sentence a confirmation would ask (the resource by name, the times in its zone, and for a
+  change or cancellation the event's title, resource and time as it stands) and then shows every
+  argument in full; a change too large to show (16 KB of arguments) is not proposed, and a
+  conversation has at most 4 waiting. A proposal is only checked: the series-write slot and the
+  write's rate token are taken when the approved change runs. A message's reads share a budget of
+  16 calls and 400 resource-days. API keys, webhooks, booking rules, pools, erasure and
   coverage are never offered; a tool the model names outside the list is refused.
 - Tool results and booking data are data to the model, never instructions, and the system prompt
   says so; the tool list does not change with what the model says. A member may send 10 messages
   a minute; each model call has 30 seconds and a message 90. Conversations are kept per member in
-  `slotlock.assistant_conversations` for 2 hours after the last message, bounded in length;
-  **New conversation** forgets one. A provider's failure is shown as a plain message, never with
+  `slotlock.assistant_conversations` for 2 hours after the last message, then deleted by
+  maintenance, and bounded in UTF-8 bytes; **New conversation** forgets one. On Workers, the
+  assistant's agent calls are capped at 24 a request and by `tenant_read` and `tenant_write` of
+  `SLOTLOCK_LIMITS` in each isolate. A provider's failure is shown as a plain message, never with
   the key or the provider's answer.
 - It works as plain forms: no script is needed.
 
-### Dashboard on Cloudflare Workers
 ### Dashboard on Cloudflare Workers
 
 The same dashboard can run as a Cloudflare Worker at an origin of its own (`workers/dashboard`),

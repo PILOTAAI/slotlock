@@ -49,6 +49,7 @@ const UPKEEP = [
   'reportStaleCoverage',
   'releaseNoShows',
   'offerWaitlist',
+  'pruneAssistantConversations',
 ];
 const ADMINISTRATION = [
   'applySchema',

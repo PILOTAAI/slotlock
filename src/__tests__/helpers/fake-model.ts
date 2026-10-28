@@ -16,7 +16,11 @@ export interface FakeModelCall {
 export type FakeModelAnswer =
   | { text?: string; calls?: FakeModelCall[] }
   | { status: number; body: string }
-  | ((request: FakeModelRequest) => { text?: string; calls?: FakeModelCall[] });
+  | ((
+      request: FakeModelRequest,
+    ) =>
+      | { text?: string; calls?: FakeModelCall[] }
+      | Promise<{ text?: string; calls?: FakeModelCall[] }>);
 
 export interface FakeModelRequest {
   path: string;
@@ -92,7 +96,7 @@ export async function startFakeModel(format: FakeModelFormat): Promise<FakeModel
   const server = createServer((incoming, outgoing) => {
     const chunks: Buffer[] = [];
     incoming.on('data', (chunk: Buffer) => chunks.push(chunk));
-    incoming.on('end', () => {
+    incoming.on('end', async () => {
       let body: Record<string, unknown> = {};
       try {
         body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
@@ -111,7 +115,7 @@ export async function startFakeModel(format: FakeModelFormat): Promise<FakeModel
         outgoing.writeHead(answer.status, { 'content-type': 'application/json' }).end(answer.body);
         return;
       }
-      const resolved = typeof answer === 'function' ? answer(request) : answer;
+      const resolved = typeof answer === 'function' ? await answer(request) : answer;
       outgoing
         .writeHead(200, { 'content-type': 'application/json' })
         .end(JSON.stringify(fakeModelBody(format, resolved)));

@@ -79,6 +79,9 @@ function fakeStore() {
         async releaseNoShows() {
           return 0;
         },
+        async pruneAssistantConversations() {
+          return 0;
+        },
         async offerWaitlist() {
           return { offered: 0, expired: 0, next: null };
         },

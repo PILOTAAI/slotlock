@@ -2698,6 +2698,31 @@ function confirmationLookup(
 }
 
 /**
+ * The sentence a person is asked to confirm for a write, as the confirmation flow words it: the
+ * resource by name and the times in its own zone, and for a change or deletion the event as it
+ * stands (its title, resource and time), each read as `principal` only where its scopes and
+ * `authorize` allow that read. The dashboard assistant shows it on a proposed change.
+ */
+export async function describeSlotlockAgentWrite(args: {
+  backend: SlotlockAgentCalendarBackend;
+  authorize: SlotlockAgentServerOptions['authorize'];
+  principal: SlotlockAgentPrincipal;
+  operation: SlotlockAgentWriteOperation;
+  input: Record<string, unknown>;
+  signal: AbortSignal;
+}): Promise<string> {
+  const lookup = confirmationLookup(
+    { backend: args.backend, authorize: args.authorize },
+    { principal: args.principal, signal: args.signal },
+  );
+  try {
+    return await confirmationMessage(args.operation, args.input, lookup);
+  } finally {
+    lookup.close();
+  }
+}
+
+/**
  * The sentence a person confirms: what changes, where and when. The facts the server establishes
  * (the resource, the times in its own zone, every date a repeat books, the event as it stands) come
  * first; text the agent chose comes last, quoted, so it cannot pass itself off as any of them. Each

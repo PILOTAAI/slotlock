@@ -10,7 +10,12 @@
 // isolates, so three rate limiting bindings bound the requests of all of them together.
 import { AsyncLocalStorage } from 'node:async_hooks';
 import postgres from 'postgres';
-import type { SlotlockAgentCalendarBackend } from '../../src/agent-server.js';
+import {
+  type SlotlockAgentCalendarBackend,
+  type SlotlockAgentOperation,
+  type SlotlockAgentPrincipal,
+  slotlockAgentOperationScope,
+} from '../../src/agent-server.js';
 import { createSlotlockStoreAgentBackend } from '../../src/agent-store-backend.js';
 import { type SlotlockApiKeyStore, createSlotlockApiKeyStore } from '../../src/api-keys.js';
 import {
@@ -18,6 +23,7 @@ import {
   type SlotlockEnv,
   readAvailability,
   readDashboardConfig,
+  readLimits,
   readServerUrl,
 } from '../../src/config.js';
 import {
@@ -28,7 +34,11 @@ import {
   createSlotlockDashboardResources,
   createSlotlockDashboardState,
 } from '../../src/dashboard.js';
-import { slotlockClientKey, slotlockClientNetwork } from '../../src/rate-limit.js';
+import {
+  createSlotlockRateLimiter,
+  slotlockClientKey,
+  slotlockClientNetwork,
+} from '../../src/rate-limit.js';
 import { createSlotlockStore } from '../../src/store.js';
 
 /**
@@ -71,8 +81,35 @@ interface RequestScope {
   keys: SlotlockApiKeyStore;
   /** The assistant's agent backend, on the request's own client. */
   agent: SlotlockAgentCalendarBackend;
+  /** Agent operations this request has run, for the per-request cap. */
+  agentCalls: { count: number };
   resources: SlotlockDashboardResources;
   state: SlotlockDashboardState;
+}
+
+/** Agent operations (the assistant's reads and approved writes) one dashboard request may run. */
+export const SLOTLOCK_WORKER_AGENT_CALLS_PER_REQUEST = 24;
+
+/**
+ * The assistant's agent limits on a Worker, which has no `slotlock serve` in front: at most
+ * SLOTLOCK_WORKER_AGENT_CALLS_PER_REQUEST operations a request, and the tenant read and write
+ * budgets of SLOTLOCK_LIMITS (`tenant_read`, `tenant_write`) as token buckets in this isolate.
+ * Workers run many isolates, so a tenant's budget is per isolate; the client rate limit binding
+ * bounds the requests themselves.
+ */
+export function createSlotlockWorkerAgentLimiter(vars: SlotlockEnv) {
+  const { rates } = readLimits(vars);
+  const reads = rates.tenant_read ? createSlotlockRateLimiter(rates.tenant_read) : null;
+  const writes = rates.tenant_write ? createSlotlockRateLimiter(rates.tenant_write) : null;
+  return (
+    calls: { count: number },
+    args: { principal: SlotlockAgentPrincipal; operation: SlotlockAgentOperation },
+  ): boolean => {
+    calls.count += 1;
+    if (calls.count > SLOTLOCK_WORKER_AGENT_CALLS_PER_REQUEST) return false;
+    const bucket = slotlockAgentOperationScope(args.operation) === 'write' ? writes : reads;
+    return bucket ? bucket.take(args.principal.tenantRef) : true;
+  };
 }
 
 /** Connections one request may hold: a Worker may have six open at once. */
@@ -170,6 +207,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
     if (typeof env.HYPERDRIVE?.connectionString !== 'string') {
       throw new SlotlockConfigError('the HYPERDRIVE binding is required');
     }
+    const agentLimiter = createSlotlockWorkerAgentLimiter(vars);
     const dashboard = createSlotlockDashboard({
       publicUrl,
       serviceUrl,
@@ -190,6 +228,10 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
               // literal URL check is the one that applies; names are not resolved here.
               fetch: (input: string | URL | Request, init?: RequestInit) => fetch(input, init),
               resolve: async () => [],
+              consumeRateLimit: async (args: {
+                principal: SlotlockAgentPrincipal;
+                operation: SlotlockAgentOperation;
+              }) => agentLimiter(current().agentCalls, args),
               ...(config.assistantPrivateUrls ? { privateUrls: true } : {}),
             },
           }
@@ -273,6 +315,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
         const store = createSlotlockStore(sql);
         const requestScope: RequestScope = {
           keys: createSlotlockApiKeyStore(sql),
+          agentCalls: { count: 0 },
           agent: createSlotlockStoreAgentBackend(store, {
             availabilityRules: async () => availability.map((rule) => ({ ...rule })),
           }),

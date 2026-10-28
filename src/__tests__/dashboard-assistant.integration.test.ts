@@ -1,13 +1,22 @@
 // The assistant's records against real Postgres, as a LOGIN role without BYPASSRLS that
 // grantApplicationRole granted: both tables are under forced row-level security, a tenant reads and
 // writes only its own settings and conversations, an approval is claimed once however many race,
-// a conversation lapses, and erase_tenant deletes both. Skipped without DATABASE_URL.
+// a conversation lapses and maintenance deletes it, a long conversation in any script stays under
+// the tables' CHECKs, and erase_tenant deletes both. Skipped without DATABASE_URL.
 import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createSlotlockApiKeyStore } from '../api-keys.js';
+import { createSlotlockStoreAgentBackend } from '../agent-store-backend.js';
 import { openSlotlockAssistantKey, sealSlotlockAssistantKey } from '../assistant.js';
-import { createSlotlockDashboardResources } from '../dashboard.js';
+import {
+  createSlotlockDashboard,
+  createSlotlockDashboardResources,
+  createSlotlockDashboardState,
+} from '../dashboard.js';
+import { maintainSlotlockTenant } from '../maintenance.js';
 import { type SlotlockStore, createSlotlockStore } from '../store.js';
+import { startFakeModel } from './helpers/fake-model.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
 const SECRET = randomBytes(32).toString('hex');
@@ -128,6 +137,96 @@ describe.skipIf(!url)('assistant records (real Postgres)', () => {
     expect(await adapter.getConversation(tenant, 'github:3')).not.toBeNull();
     await new Promise((resolve) => setTimeout(resolve, 1_100));
     expect(await adapter.getConversation(tenant, 'github:3')).toBeNull();
+  });
+
+  it('L3: deletes expired conversations in the maintenance pass', async () => {
+    const adapter = createSlotlockDashboardResources(store).assistant;
+    if (!adapter) throw new Error('the store adapter keeps assistant records');
+    await adapter.putConversation(tenant, 'github:7', { messages: [], actions: {} }, 1_000);
+    await adapter.putConversation(tenant, 'github:8', { messages: [], actions: {} }, 60_000);
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    const count = async () =>
+      Number(
+        (
+          await admin<{ count: string }[]>`
+          SELECT count(*) FROM slotlock.assistant_conversations
+           WHERE tenant_ref = ${tenant} AND member_ref IN ('github:7', 'github:8')`
+        )[0]?.count,
+      );
+    expect(await count()).toBe(2);
+    const pass = await maintainSlotlockTenant(store, tenant);
+    expect(pass.pruned).toBeGreaterThanOrEqual(1);
+    expect(await count()).toBe(1);
+    expect(await adapter.getConversation(tenant, 'github:8')).not.toBeNull();
+  });
+
+  it('L2: answers a long CJK conversation to the end, under the CHECK on messages and actions', async () => {
+    const model = await startFakeModel('openai');
+    const org = 700_000 + Math.floor(Math.random() * 99_999);
+    const orgTenant = `github-org:${org}`;
+    const cjk = '明日の午前中に空いている車を探して予約してください。'.repeat(160);
+    try {
+      const dashboard = createSlotlockDashboard({
+        publicUrl: 'https://slotlock.example.com',
+        github: { clientId: 'Ov23liL2', clientSecret: randomBytes(20).toString('hex') },
+        sessionSecret: randomBytes(32).toString('hex'),
+        allowedUsers: '*',
+        organizations: [String(org)],
+        keys: createSlotlockApiKeyStore(application),
+        resources: createSlotlockDashboardResources(store),
+        state: createSlotlockDashboardState(application),
+        fetch: async (input) => {
+          const target = String(input);
+          if (target.endsWith('/access_token')) return Response.json({ access_token: 'gho_x' });
+          if (target === 'https://api.github.com/user') return Response.json({ id: 31, login: 'cjk-owner' });
+          return Response.json([{ state: 'active', role: 'admin', organization: { id: org, login: 'cjk-fleet' } }]);
+        },
+        assistant: {
+          secret: SECRET,
+          privateUrls: true,
+          rate: { perSecond: 100, burst: 100 },
+          backend: createSlotlockStoreAgentBackend(store, { availabilityRules: async () => [] }),
+        },
+      });
+      const origin = 'https://slotlock.example.com';
+      const start = await dashboard.fetch(new Request(`${origin}/dashboard/sign-in`));
+      const state = new URL(start.headers.get('location') as string).searchParams.get('state');
+      const pending = start.headers.getSetCookie()[0]?.split('; ')[0] as string;
+      const callback = await dashboard.fetch(
+        new Request(`${origin}/dashboard/callback?code=c&state=${state}`, { headers: { cookie: pending } }),
+      );
+      const cookie = callback.headers.getSetCookie().find((value) => value.startsWith('__Host-slotlock-session='))?.split('; ')[0] as string;
+      const post = async (path: string, fields: Record<string, string>) => {
+        const form = await (await dashboard.fetch(new Request(`${origin}/dashboard/keys`, { headers: { cookie } }))).text();
+        const csrf = /name="csrf" value="([^"]+)"/.exec(form)?.[1] as string;
+        const once = /name="once" value="([^"]+)"/.exec(form)?.[1] as string;
+        return dashboard.fetch(
+          new Request(`${origin}${path}`, {
+            method: 'POST',
+            headers: { cookie, origin, 'content-type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({ csrf, once, ...fields }).toString(),
+          }),
+        );
+      };
+      expect((await post('/dashboard/settings/assistant', { provider: 'openai', base_url: model.baseUrl, model: 'your-model' })).status).toBe(303);
+      // Each turn: a read whose result is long, then a long answer, every one in CJK.
+      model.script((request) =>
+        ((request.body.messages as Array<{ role: string }>).at(-1)?.role === 'tool'
+          ? { text: cjk.slice(0, 8_000) }
+          : { text: cjk.slice(0, 3_000), calls: [{ name: 'slotlock_list_resources', input: {} }] }),
+      );
+      for (let turn = 0; turn < 20; turn += 1) {
+        expect((await post('/dashboard/assistant', { message: cjk.slice(0, 2_000) })).status, `turn ${turn}`).toBe(303);
+      }
+      const [row] = await admin<{ messages: number; actions: number }[]>`
+        SELECT octet_length(messages::text) AS messages, octet_length(actions::text) AS actions
+          FROM slotlock.assistant_conversations WHERE tenant_ref = ${orgTenant} AND member_ref = 'github:31'`;
+      expect(row?.messages).toBeGreaterThan(100_000);
+      expect(row?.messages).toBeLessThanOrEqual(262_144);
+    } finally {
+      await model.close();
+      await admin`SELECT * FROM slotlock.erase_tenant(${orgTenant}::text)`;
+    }
   });
 
   it("erases a tenant's settings and conversations, and no other tenant's", async () => {

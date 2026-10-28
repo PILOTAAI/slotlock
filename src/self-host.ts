@@ -952,11 +952,11 @@ export async function startSlotlockServer(
                     ...(config.dashboard.assistantPrivateUrls ? { privateUrls: true } : {}),
                     backend: agentBackend,
                     consumeRateLimit: limits.consumeRateLimit,
-                    authorize: async ({ principal, operation, input }) => {
-                      if (!authorizeSlotlockServeOperation({ principal, operation })) return false;
-                      await limits.admit({ principal, operation, input });
-                      return true;
-                    },
+                    // Checks only: a proposal holds nothing. The series-write slot and the write
+                    // token are taken when an approved change runs (admit, consumeRateLimit).
+                    authorize: async ({ principal, operation }) =>
+                      authorizeSlotlockServeOperation({ principal, operation }),
+                    admit: (args) => limits.admit(args),
                   },
                 }
               : {}),

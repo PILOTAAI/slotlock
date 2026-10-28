@@ -69,8 +69,18 @@ export const SLOTLOCK_ASSISTANT_MAX_STEPS = 8;
 export const SLOTLOCK_ASSISTANT_MAX_MESSAGE = 2_000;
 /** Entries a conversation keeps; the oldest exchanges go first. */
 const MAX_ENTRIES = 60;
-/** Characters of the stored conversation, past which the oldest exchanges go first. */
-const MAX_STORED_CHARACTERS = 200_000;
+/**
+ * UTF-8 bytes of the stored conversation as JSON, past which the oldest exchanges go first.
+ * PostgreSQL's jsonb text adds at most one space per `:` or `,`, so at most half again: under the
+ * table's 262,144-byte CHECK on `messages::text` whatever the text.
+ */
+export const SLOTLOCK_ASSISTANT_MAX_STORED_BYTES = 160_000;
+/** UTF-8 bytes of the kept actions as JSON: under the 131,072-byte CHECK on `actions::text` as above. */
+const MAX_ACTIONS_BYTES = 80_000;
+/** UTF-8 bytes of one proposed change's arguments as JSON; a larger one is not proposed. */
+export const SLOTLOCK_ASSISTANT_MAX_ACTION_BYTES = 16_000;
+/** Proposed changes one conversation may have waiting at once (4 of the largest fit the bound). */
+export const SLOTLOCK_ASSISTANT_MAX_PENDING = 4;
 /** Characters of one tool result the model is shown. */
 const MAX_TOOL_RESULT = 8_000;
 /** Characters of the model's text kept from one answer. */
@@ -120,6 +130,8 @@ export interface SlotlockAssistantAction {
   status: 'pending' | 'approved' | 'dismissed' | 'done' | 'failed';
   /** What it did (`done`), or the code it failed with (`failed`). */
   outcome?: string;
+  /** The change in a sentence, with its resource and event resolved (the confirmation question). */
+  summary?: string;
 }
 
 /** Where the dashboard keeps assistant settings and conversations: the store, under each tenant's RLS. */
@@ -241,9 +253,15 @@ export function createSlotlockMemoryAssistantStore(
     },
     async putConversation(tenantRef, memberRef, conversation, ttlMs) {
       const stored = live(tenantRef, memberRef);
+      const actions = copy(conversation.actions);
+      // As the store: exactly the actions given, one stored already keeping its stored state.
+      for (const id of Object.keys(actions)) {
+        const kept = stored?.actions[id];
+        if (kept) actions[id] = copy(kept);
+      }
       conversations.set(keyOf(tenantRef, memberRef), {
         messages: copy(conversation.messages),
-        actions: { ...copy(conversation.actions), ...(stored?.actions ?? {}) },
+        actions,
         updatedAt: new Date(now()),
         expiresAt: new Date(now() + ttlMs),
       });
@@ -863,13 +881,76 @@ export async function runSlotlockAssistantTurn(
 export function boundSlotlockAssistantEntries(
   entries: readonly SlotlockAssistantEntry[],
 ): SlotlockAssistantEntry[] {
-  let kept = [...entries];
-  const tooBig = () => kept.length > MAX_ENTRIES || JSON.stringify(kept).length > MAX_STORED_CHARACTERS;
-  while (kept.length > 0 && tooBig()) {
+  // PostgreSQL's jsonb holds no NUL character: one would fail the write.
+  let kept = JSON.parse(
+    JSON.stringify(entries, (_key, value: unknown) =>
+      typeof value === 'string' ? value.replaceAll('\u0000', '') : value,
+    ),
+  ) as SlotlockAssistantEntry[];
+  const tooBig = () =>
+    kept.length > MAX_ENTRIES ||
+    Buffer.byteLength(JSON.stringify(kept), 'utf8') > SLOTLOCK_ASSISTANT_MAX_STORED_BYTES;
+  // The oldest exchanges first, whole.
+  while (tooBig()) {
     const next = kept.findIndex((entry, index) => index > 0 && entry.role === 'user');
-    kept = next === -1 ? [] : kept.slice(next);
+    if (next === -1) break;
+    kept = kept.slice(next);
+  }
+  // One exchange too big alone: its steps (a call and its results) from the oldest, those that
+  // proposed no change first; the member's message and the last answer stay.
+  for (const keepProposals of [true, false]) {
+    while (tooBig()) {
+      const step = kept.findIndex(
+        (entry, index) =>
+          entry.role === 'assistant' &&
+          entry.calls.length > 0 &&
+          kept[index + 1]?.role === 'tool' &&
+          !(
+            keepProposals &&
+            (kept[index + 1] as Extract<SlotlockAssistantEntry, { role: 'tool' }>).results.some(
+              (result) => result.action !== undefined,
+            )
+          ),
+      );
+      if (step === -1) break;
+      kept.splice(step, 2);
+    }
+  }
+  if (tooBig()) {
+    kept = kept.map((entry) =>
+      'text' in entry && entry.text.length > 1_000 ? { ...entry, text: `${entry.text.slice(0, 1_000)} …` } : entry,
+    );
+  }
+  return tooBig() ? [] : kept;
+}
+
+/**
+ * The actions a conversation keeps: those its kept entries show, the oldest settled ones dropped
+ * first past MAX_ACTIONS_BYTES (a waiting one is kept: SLOTLOCK_ASSISTANT_MAX_PENDING bounds them).
+ */
+export function pruneSlotlockAssistantActions(
+  entries: readonly SlotlockAssistantEntry[],
+  actions: Readonly<Record<string, Record<string, unknown>>>,
+): Record<string, Record<string, unknown>> {
+  const shown: string[] = [];
+  for (const entry of entries) {
+    if (entry.role !== 'tool') continue;
+    for (const result of entry.results) if (result.action && actions[result.action]) shown.push(result.action);
+  }
+  const kept: Record<string, Record<string, unknown>> = {};
+  for (const id of shown) kept[id] = actions[id] as Record<string, unknown>;
+  for (const id of shown) {
+    if (Buffer.byteLength(JSON.stringify(kept), 'utf8') <= MAX_ACTIONS_BYTES) break;
+    if (kept[id]?.status !== 'pending') delete kept[id];
   }
   return kept;
+}
+
+/** How many of a conversation's actions wait for the member. */
+export function pendingSlotlockAssistantActions(
+  actions: Readonly<Record<string, Record<string, unknown>>>,
+): number {
+  return Object.values(actions).filter((action) => action.status === 'pending').length;
 }
 
 /** Read stored entries back, dropping anything malformed. */

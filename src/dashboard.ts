@@ -22,12 +22,16 @@ import {
   type SlotlockAgentOperationDispatchOptions,
   type SlotlockAgentOperationDispatchResult,
   type SlotlockAgentPrincipal,
+  type SlotlockAgentWriteOperation,
+  describeSlotlockAgentWrite,
   invokeSlotlockAgentOperation,
   slotlockAgentTools,
 } from './agent-server.js';
 import {
   SLOTLOCK_ASSISTANT_API_KEY,
+  SLOTLOCK_ASSISTANT_MAX_ACTION_BYTES,
   SLOTLOCK_ASSISTANT_MAX_MESSAGE,
+  SLOTLOCK_ASSISTANT_MAX_PENDING,
   SLOTLOCK_ASSISTANT_MODEL_NAME,
   SLOTLOCK_ASSISTANT_TOOL_USE,
   type SlotlockAssistantAction,
@@ -37,6 +41,8 @@ import {
   boundSlotlockAssistantEntries,
   createSlotlockAssistantStore,
   openSlotlockAssistantKey,
+  pendingSlotlockAssistantActions,
+  pruneSlotlockAssistantActions,
   checkSlotlockAssistantHost,
   readSlotlockAssistantBaseUrl,
   slotlockAssistantUrlAllowed,
@@ -81,6 +87,8 @@ export const SLOTLOCK_DASHBOARD_MAX_RESOURCES = 100;
 const SESSION_TTL_MS = 12 * 3_600_000;
 const SIGN_IN_TTL_MS = 10 * 60_000;
 const MAX_FORM_BYTES = 8_192;
+/** A message to the assistant: 2,000 characters, each up to 9 bytes as a form encodes it. */
+const MAX_ASSISTANT_FORM_BYTES = 24_576;
 /**
  * Sign-ins (record, then GitHub's token and user) one instance runs at once; more are told to retry.
  * This also bounds how fast unauthenticated callbacks can write sign-in records.
@@ -257,8 +265,23 @@ export interface SlotlockDashboardAssistantOptions {
   /** Seals each tenant's API key (SLOTLOCK_ASSISTANT_SECRET): 32+ random characters. */
   secret: string;
   backend: SlotlockAgentCalendarBackend;
-  /** As the agent server's: false refuses an operation. Every offered operation by default. */
+  /**
+   * As the agent server's: false refuses an operation. Every offered operation by default. It also
+   * checks a write the model proposes, so it must hold nothing: limits that hold a slot go in
+   * `admit`.
+   */
   authorize?: SlotlockAgentOperationDispatchOptions['authorize'];
+  /**
+   * Taken when a read runs and when an approved write runs, never for a proposal: the agent
+   * request limits' `admit` (serve's series-write slots), which may hold a slot until the request
+   * is answered, or throw a SlotlockAgentOperationError to refuse.
+   */
+  admit?: (args: {
+    principal: SlotlockAgentPrincipal;
+    operation: SlotlockAgentOperation;
+    input: Record<string, unknown>;
+  }) => Promise<void>;
+  /** As the agent server's; charged for each read and each approved write, never for a proposal. */
   consumeRateLimit?: SlotlockAgentOperationDispatchOptions['consumeRateLimit'];
   /**
    * Allow a model at a local or private network address (SLOTLOCK_ASSISTANT_PRIVATE_URLS): a
@@ -1290,8 +1313,10 @@ ${served ? html`<td data-label="Created by">${key.createdBy === personOf(session
                 ? 'A deleted key'
                 : /^github:\d+$/.test(change.actor)
                   ? `GitHub user ${change.actor.slice(7)}`
-                  : change.actor.startsWith('dashboard-assistant:')
-                    ? `Assistant for @${change.actor.slice(20, 80)}`
+                  : /^dashboard-assistant:github:\d+$/.test(change.actor)
+                    ? change.actor === assistantActor(session)
+                      ? `Assistant for @${session.login}`
+                      : `Assistant for GitHub user ${change.actor.slice(27)}`
                     : change.actor.slice(0, 60)));
       const where = change.resourceId
         ? resourceName(byId.get(change.resourceId), change.resourceId)
@@ -1793,25 +1818,96 @@ ${
       .map((tool) => tool.name as string),
   );
   const ACTION_ID = /^[A-Za-z0-9_-]{16}$/;
+  /** Reads one member message may make, and the resource-days they may cover together. */
+  const MAX_READS_PER_TURN = 16;
+  const MAX_READ_COST_PER_TURN = 400;
+  /** What a read costs the turn: the resources it names times the days its window spans. */
+  const readCostOf = (input: unknown): number => {
+    if (!isRecord(input)) return 1;
+    const ids = Array.isArray(input.resource_ids) ? input.resource_ids.length : 1;
+    const start = typeof input.start === 'string' ? Date.parse(input.start) : Number.NaN;
+    const end = typeof input.end === 'string' ? Date.parse(input.end) : Number.NaN;
+    const days = Number.isFinite(start) && Number.isFinite(end) && end > start ? Math.ceil((end - start) / DAY_MS) : 1;
+    return Math.max(1, ids) * Math.max(1, days);
+  };
+  /**
+   * Who the assistant acts as, for the record and for ownership: the member by GitHub user id,
+   * which a rename does not change. Shown as "Assistant for @login".
+   */
+  const assistantActor = (session: Session) => `dashboard-assistant:github:${session.uid}`;
+  const CONFIRMED_WRITES: ReadonlySet<string> = new Set<SlotlockAgentWriteOperation>([
+    'slotlock_create_event',
+    'slotlock_update_event',
+    'slotlock_delete_event',
+    'slotlock_book_together',
+    'slotlock_book_pool',
+  ]);
+
+  /**
+   * The sentence a proposed change's card leads with: the agent server's confirmation question
+   * (the resource by name, the times in its zone, an event as it stands: its title, resource and
+   * time), or for holds the slots by resource. Read as the member's assistant, under `authorize`.
+   */
+  async function summarize(
+    session: Session,
+    operation: SlotlockAgentOperation,
+    input: Record<string, unknown>,
+  ): Promise<string> {
+    const assistant = assistantOptions as SlotlockDashboardAssistantOptions;
+    let text: string;
+    if (CONFIRMED_WRITES.has(operation)) {
+      text = await describeSlotlockAgentWrite({
+        backend: assistant.backend,
+        authorize: assistantAuthorize,
+        principal: assistantPrincipal(session),
+        operation: operation as SlotlockAgentWriteOperation,
+        input,
+        signal: AbortSignal.timeout(assistantTimeout),
+      }).catch(() => '');
+    } else if (operation === 'slotlock_hold_slots' && Array.isArray(input.slots)) {
+      const names = new Map(
+        (await options.resources.list(tenantOf(session))).map((resource) => [resource.id, resourceName(resource, resource.id)]),
+      );
+      const slots = (input.slots as Array<Record<string, unknown>>).map(
+        (slot) => `${names.get(String(slot.resource_id)) ?? `resource ${String(slot.resource_id)}`} ${String(slot.start)} to ${String(slot.end)}`,
+      );
+      text = `Hold ${slots.join('; ')} for ${String(input.ttl_seconds ?? '')} seconds, as alternatives.`;
+    } else if (operation === 'slotlock_release_slots') {
+      text = `Release the hold ${String(input.hold_id)} and every slot held with it.`;
+    } else {
+      text = '';
+    }
+    // At most 1,500 UTF-8 bytes, so four waiting changes stay within the conversation's bound.
+    return text.length > 500 ? `${text.slice(0, 500)}…` : text;
+  }
 
   /** Owners of the organization in use may change its assistant; a person always may their own. */
   const isAdmin = (session: Session) =>
     !served || session.orgs?.find((org) => org.id === session.org)?.role === 'admin';
-  /** Who the assistant acts as for the record: the member, by GitHub login. */
-  const assistantActor = (session: Session) => `dashboard-assistant:${session.login}`;
+  const assistantPrincipal = (session: Session): SlotlockAgentPrincipal => ({
+    subject: assistantActor(session),
+    tenantRef: tenantOf(session),
+    scopes: ['read', 'write'],
+  });
+  /** The fixed list, then the embedder's check: nothing the model sends adds to it. */
+  const assistantAuthorize: SlotlockAgentOperationDispatchOptions['authorize'] = async (args) =>
+    SLOTLOCK_ASSISTANT_TOOL_USE[args.operation] !== 'excluded' &&
+    (assistantOptions?.authorize ? await assistantOptions.authorize(args) : true);
 
+  /**
+   * One agent operation as the member's assistant. A `propose` call is checked as an agent's is
+   * (arguments, scopes, authorize) and halted by `confirm` before it runs; it takes no admission
+   * slot and no rate token, which the write takes when it runs, approved (`run`).
+   */
   function dispatch(
     session: Session,
     operation: SlotlockAgentOperation,
     input: unknown,
+    mode: 'run' | 'propose',
     confirm?: SlotlockAgentOperationDispatchOptions['confirm'],
   ): Promise<SlotlockAgentOperationDispatchResult> {
     const assistant = assistantOptions as SlotlockDashboardAssistantOptions;
-    const principal: SlotlockAgentPrincipal = {
-      subject: assistantActor(session),
-      tenantRef: tenantOf(session),
-      scopes: ['read', 'write'],
-    };
+    const principal = assistantPrincipal(session);
     return invokeSlotlockAgentOperation({
       operation,
       input,
@@ -1821,11 +1917,14 @@ ${
       options: {
         backend: assistant.backend,
         authenticate: async () => principal,
-        // The fixed list decides first; nothing the model sends adds to it.
-        authorize: async (args) =>
-          SLOTLOCK_ASSISTANT_TOOL_USE[args.operation] !== 'excluded' &&
-          (assistant.authorize ? await assistant.authorize(args) : true),
-        ...(assistant.consumeRateLimit ? { consumeRateLimit: assistant.consumeRateLimit } : {}),
+        authorize: async (args) => {
+          if (!(await assistantAuthorize(args))) return false;
+          if (mode === 'run') await assistant.admit?.(args);
+          return true;
+        },
+        ...(assistant.consumeRateLimit && mode === 'run'
+          ? { consumeRateLimit: assistant.consumeRateLimit }
+          : {}),
         ...(confirm ? { confirm } : {}),
         onError: (error) => {
           try {
@@ -1865,17 +1964,22 @@ ${
     };
   }
 
-  /** A field of a proposed change, as the card shows it. */
-  function fieldValue(name: string, value: unknown, names: ReadonlyMap<string, string>): string {
+  /**
+   * A field of a proposed change, as the card shows it: all of it, wrapped, never cut (the
+   * proposal is bounded instead). A resource is named, with its id beside the name.
+   */
+  function fieldValue(name: string, value: unknown, names: ReadonlyMap<string, string>): Html {
+    const named = (id: string) => (names.has(id) ? `${names.get(id) as string} (${id})` : id);
     if (typeof value === 'string') {
-      if ((name === 'resource_id' || name === 'hold_id') && names.has(value)) return names.get(value) as string;
-      return value.length > 200 ? `${value.slice(0, 200)}…` : value;
+      return html`<span class="wrap">${name === 'resource_id' ? named(value) : value}</span>`;
     }
     if (Array.isArray(value) && value.every((item) => typeof item === 'string')) {
-      return value.map((item) => names.get(item) ?? item).join(', ');
+      return html`<span class="wrap">${(value as string[]).map((item) => (name === 'resource_ids' ? named(item) : item)).join(', ')}</span>`;
     }
-    const text = JSON.stringify(value);
-    return text.length > 300 ? `${text.slice(0, 300)}…` : text;
+    if (typeof value === 'number' || typeof value === 'boolean' || value === null) {
+      return html`${String(value)}`;
+    }
+    return html`<pre class="wrap">${JSON.stringify(value, null, 2)}</pre>`;
   }
 
   function actionCard(
@@ -1885,6 +1989,7 @@ ${
   ): Html {
     const token = csrfToken(session);
     const fields = Object.entries(action.input).filter(([name]) => name !== 'idempotency_key');
+    const summary = action.summary ? html`<p class="action-summary">${action.summary}</p>` : html``;
     const state = {
       pending: { text: 'Waiting for you', tone: 'held' },
       approved: { text: 'Running', tone: 'held' },
@@ -1896,17 +2001,18 @@ ${
       action.status === 'pending'
         ? html`<div class="action-buttons"><form class="inline" method="post" action="${root}/assistant/approve"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="action" value="${action.id}"><button class="primary" type="submit">Approve</button></form><form class="inline" method="post" action="${root}/assistant/dismiss"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="action" value="${action.id}"><button type="submit">Dismiss</button></form></div>`
         : html``;
-    return html`<li class="action-card" id="action-${action.id}"><div class="action-head"><span class="title">${toolTitles.get(action.operation) ?? action.operation}</span><span class="pill ${state.tone}">${state.text}</span></div><dl class="facts">${fields.map(
+    return html`<li class="action-card" id="action-${action.id}"><div class="action-head"><span class="title">${toolTitles.get(action.operation) ?? action.operation}</span><span class="pill ${state.tone}">${state.text}</span></div>${summary}<dl class="facts">${fields.map(
       ([name, value]) => html`<dt>${name.replaceAll('_', ' ')}</dt><dd>${fieldValue(name, value, names)}</dd>`,
     )}</dl>${action.status === 'failed' && action.outcome ? html`<p class="fine">Refused: <code>${action.outcome}</code></p>` : html``}${buttons}</li>`;
   }
 
   function readAction(id: string, value: unknown): SlotlockAssistantAction | null {
-    if (!isRecord(value) || typeof value.operation !== 'string' || !isRecord(value.input)) return null;
+    if (!isRecord(value) || typeof value.operation !== 'string') return null;
     return {
       id,
       operation: value.operation as SlotlockAgentOperation,
-      input: value.input,
+      input: isRecord(value.input) ? value.input : {},
+      ...(typeof value.summary === 'string' ? { summary: value.summary } : {}),
       status: (typeof value.status === 'string' ? value.status : 'failed') as SlotlockAssistantAction['status'],
       ...(typeof value.outcome === 'string' ? { outcome: value.outcome } : {}),
     };
@@ -2042,6 +2148,21 @@ ${
       return settingsPage(session, 400, 'An API key is up to 4,096 characters without spaces.');
     }
     const tenantRef = tenantOf(session);
+    // The key goes where the URL points: a new provider or origin takes the key again, so an owner
+    // cannot send the stored one somewhere it was never meant for.
+    const stored = await store.getSettings(tenantRef);
+    if (
+      apiKey === '' &&
+      form.get('clear_key') !== '1' &&
+      stored?.sealedKey &&
+      (stored.provider !== provider || new URL(stored.baseUrl).origin !== new URL(baseUrl).origin)
+    ) {
+      return settingsPage(
+        session,
+        400,
+        'Enter the API key again: the provider or the URL’s origin changed, and the stored key is only sent where it was entered for. Or remove the key.',
+      );
+    }
     const key =
       apiKey !== ''
         ? { sealed: await sealSlotlockAssistantKey(assistantOptions.secret, tenantRef, apiKey), hint: apiKey.slice(-4) }
@@ -2116,6 +2237,9 @@ ${
       { role: 'user', text },
     ]);
     const proposed: Record<string, Record<string, unknown>> = {};
+    const pendingBefore = pendingSlotlockAssistantActions(stored?.actions ?? {});
+    let reads = 0;
+    let readCost = 0;
     const current = session.orgs?.find((org) => org.id === session.org);
     const turn = await runSlotlockAssistantTurn({
       model: found.model,
@@ -2131,13 +2255,22 @@ ${
       turnTimeoutMs: assistantTurnTimeout,
       ...(assistantOptions.maxSteps !== undefined ? { maxSteps: assistantOptions.maxSteps } : {}),
       read: async (operation, input) => {
-        const outcome = await dispatch(session, operation, input);
+        // A turn's reads share one budget of resource-days, so 8 steps of wide reads cannot each
+        // scan a hundred resources over years.
+        reads += 1;
+        readCost += readCostOf(input);
+        if (reads > MAX_READS_PER_TURN || readCost > MAX_READ_COST_PER_TURN) {
+          return { ok: false, code: 'turn_read_budget_exceeded' };
+        }
+        const outcome = await dispatch(session, operation, input, 'run');
         return outcome.ok
           ? outcome
           : { ok: false, code: outcome.code, ...(outcome.details ? { details: outcome.details } : {}) };
       },
       propose: async (operation, input) => {
-        if (Object.keys(proposed).length >= 5) return { ok: false, code: 'too_many_proposals' };
+        if (pendingBefore + Object.keys(proposed).length >= SLOTLOCK_ASSISTANT_MAX_PENDING) {
+          return { ok: false, code: 'too_many_pending_changes' };
+        }
         const id = randomBytes(12).toString('base64url');
         const prepared =
           isRecord(input) && keyed.has(operation)
@@ -2146,24 +2279,34 @@ ${
         let checked: Record<string, unknown> | undefined;
         // Every check an agent's call passes (arguments, scopes, authorize, rate limit), then halted
         // here: it runs only when the member approves it.
-        const outcome = await dispatch(session, operation, prepared, async ({ input: parsed }) => {
+        const outcome = await dispatch(session, operation, prepared, 'propose', async ({ input: parsed }) => {
           checked = parsed;
           return { status: 409, code: 'approval_required' };
         });
         if (checked === undefined || outcome.ok || outcome.code !== 'approval_required') {
           return { ok: false, code: outcome.ok ? 'internal_error' : outcome.code };
         }
-        proposed[id] = { operation, input: checked, status: 'pending' };
+        // The card shows every argument: one too large to show is not proposed.
+        if (Buffer.byteLength(JSON.stringify(checked), 'utf8') > SLOTLOCK_ASSISTANT_MAX_ACTION_BYTES) {
+          return { ok: false, code: 'change_too_large_to_show' };
+        }
+        proposed[id] = {
+          operation,
+          input: checked,
+          status: 'pending',
+          summary: await summarize(session, operation, checked),
+        };
         return { ok: true, actionId: id };
       },
     });
     if (turn.failure !== undefined) {
       report(turn.failure instanceof Error ? turn.failure.message : 'assistant provider failed');
     }
+    const messages = boundSlotlockAssistantEntries([...entries, ...turn.added]);
     await store.putConversation(
       tenantRef,
       member,
-      { messages: boundSlotlockAssistantEntries([...entries, ...turn.added]), actions: proposed },
+      { messages, actions: pruneSlotlockAssistantActions(messages, { ...(stored?.actions ?? {}), ...proposed }) },
       conversationTtl,
     );
     return redirect(303, `${root}/assistant#latest`);
@@ -2180,9 +2323,13 @@ ${
     const tenantRef = tenantOf(session);
     const member = personOf(session);
     const claimed = ACTION_ID.test(id)
-      ? await store.settleAction(tenantRef, member, id, 'pending', {
-          status: decision === 'approve' ? 'approved' : 'dismissed',
-        })
+      ? await store.settleAction(
+          tenantRef,
+          member,
+          id,
+          'pending',
+          decision === 'approve' ? { status: 'approved' } : { status: 'dismissed', input: {} },
+        )
       : null;
     const action = claimed ? readAction(id, claimed) : null;
     if (!action) return assistantPage(session, 409, 'That change was already approved or dismissed.');
@@ -2191,16 +2338,17 @@ ${
     if (decision === 'dismiss') {
       event = `The member dismissed the proposed change ${id} (${title}); it did not run.`;
     } else if (SLOTLOCK_ASSISTANT_TOOL_USE[action.operation] !== 'propose') {
-      await store.settleAction(tenantRef, member, id, 'approved', { status: 'failed', outcome: 'tool_not_available' });
+      await store.settleAction(tenantRef, member, id, 'approved', { status: 'failed', outcome: 'tool_not_available', input: {} });
       event = `The proposed change ${id} (${title}) could not run: tool_not_available.`;
     } else {
-      const outcome = await dispatch(session, action.operation, action.input);
+      const outcome = await dispatch(session, action.operation, action.input, 'run');
+      // Settled, the card keeps what it said, not the arguments: the actions stay small.
       await store.settleAction(
         tenantRef,
         member,
         id,
         'approved',
-        outcome.ok ? { status: 'done' } : { status: 'failed', outcome: outcome.code },
+        outcome.ok ? { status: 'done', input: {} } : { status: 'failed', outcome: outcome.code, input: {} },
       );
       const result = JSON.stringify(outcome.ok ? outcome.data : { error: { code: outcome.code } });
       event = `The member approved the proposed change ${id} (${title}). ${outcome.ok ? 'It ran' : 'It was refused'}: ${result.length > 4_000 ? `${result.slice(0, 4_000)} …[truncated]` : result}`;
@@ -2211,10 +2359,11 @@ ${
         ...readSlotlockAssistantEntries(stored.messages),
         { role: 'event', text: event },
       ];
+      const messages = boundSlotlockAssistantEntries(entries);
       await store.putConversation(
         tenantRef,
         member,
-        { messages: boundSlotlockAssistantEntries(entries), actions: {} },
+        { messages, actions: pruneSlotlockAssistantActions(messages, stored.actions) },
         conversationTtl,
       );
     }
@@ -2661,11 +2810,14 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
   }
 
   /** The form, `'too_large'` past MAX_FORM_BYTES (read no further), or null for another type. */
-  async function readForm(request: Request): Promise<URLSearchParams | 'too_large' | null> {
+  async function readForm(
+    request: Request,
+    maxBytes = MAX_FORM_BYTES,
+  ): Promise<URLSearchParams | 'too_large' | null> {
     const type = request.headers.get('content-type')?.split(';')[0]?.trim();
     if (type !== 'application/x-www-form-urlencoded') return null;
     const declared = Number(request.headers.get('content-length'));
-    if (Number.isFinite(declared) && declared > MAX_FORM_BYTES) return 'too_large';
+    if (Number.isFinite(declared) && declared > maxBytes) return 'too_large';
     if (!request.body) return new URLSearchParams();
     const reader = request.body.getReader();
     const chunks: Uint8Array[] = [];
@@ -2674,7 +2826,7 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > MAX_FORM_BYTES) {
+      if (size > maxBytes) {
         await reader.cancel().catch(() => undefined);
         return 'too_large';
       }
@@ -2774,7 +2926,7 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
     }
     const session = await readSession(request);
     if (!session) return redirect(303, root);
-    const form = await readForm(request);
+    const form = await readForm(request, route === '/assistant' ? MAX_ASSISTANT_FORM_BYTES : MAX_FORM_BYTES);
     if (form === 'too_large') {
       return respond(
         413,
@@ -3178,6 +3330,8 @@ form > label { margin-bottom: 4px; }
 .action-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .action-card .facts { font-size: 13px; }
 .action-card .facts dd { overflow-wrap: anywhere; }
+.action-card pre.wrap { white-space: pre-wrap; margin: 0; padding: 8px; font-size: 12px; }
+.action-summary { margin: 0; color: var(--ink); font-weight: 500; overflow-wrap: anywhere; }
 .action-buttons, .row-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: end; margin: 0; }
 textarea { font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--ink); resize: vertical; min-height: 64px; min-width: 0; }

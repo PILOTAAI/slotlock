@@ -2497,9 +2497,10 @@ export interface SlotlockStore extends SlotlockEventFeed {
     memberRef: string;
   }): Promise<SlotlockAssistantConversationRecord | null>;
   /**
-   * Store a member's conversation for `ttlMs` (1 second to a day) from now, replacing its messages.
-   * Actions are added; one stored already keeps its stored state (settleAssistantAction changes it).
-   * The tenant's expired conversations are deleted with it.
+   * Store a member's conversation for `ttlMs` (1 second to a day) from now, replacing its messages
+   * and keeping exactly the actions given: one stored already keeps its stored state
+   * (settleAssistantAction changes it), and one left out is dropped. The tenant's expired
+   * conversations are deleted with it.
    */
   putAssistantConversation(params: {
     tenantRef: string;
@@ -2522,6 +2523,8 @@ export interface SlotlockStore extends SlotlockEventFeed {
   }): Promise<Record<string, unknown> | null>;
   /** Forget a member's conversation. False when there was none. */
   deleteAssistantConversation(params: { tenantRef: string; memberRef: string }): Promise<boolean>;
+  /** Delete up to `limit` (default 1,000) of the tenant's expired assistant conversations: how many. */
+  pruneAssistantConversations(params: { tenantRef: string; limit?: number }): Promise<number>;
   /**
    * Offer freed time to the waitlist, in the order entries joined: each waiting entry whose window
    * is free (on its resource, or on the first free member of its pool) gets a hold for its holder
@@ -6134,7 +6137,10 @@ function buildSlotlockStore(
                 statement_timestamp() + make_interval(secs => ${params.ttlMs / 1_000}))
         ON CONFLICT (tenant_ref, member_ref) DO UPDATE SET
           messages = EXCLUDED.messages,
-          actions = EXCLUDED.actions || stored.actions,
+          actions = (
+            SELECT coalesce(jsonb_object_agg(kept.key, coalesce(stored.actions -> kept.key, kept.value)), '{}'::jsonb)
+              FROM jsonb_each(EXCLUDED.actions) AS kept
+          ),
           updated_at = EXCLUDED.updated_at,
           expires_at = EXCLUDED.expires_at`;
     },
@@ -6151,6 +6157,24 @@ function buildSlotlockStore(
            AND actions -> ${params.actionId}::text ->> 'status' = ${params.from}
         RETURNING actions -> ${params.actionId}::text AS action`;
       return row?.action ?? null;
+    },
+
+    async pruneAssistantConversations(params) {
+      if (!isValidIdentity(params.tenantRef)) return 0;
+      const limit = params.limit ?? 1_000;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) {
+        throw invalidIdentityError('Slotlock assistant prune limit must be 1-10,000');
+      }
+      const rows = await sql`
+        DELETE FROM slotlock.assistant_conversations
+         WHERE tenant_ref = ${params.tenantRef}
+           AND member_ref IN (
+             SELECT member_ref FROM slotlock.assistant_conversations
+              WHERE tenant_ref = ${params.tenantRef} AND expires_at <= statement_timestamp()
+              LIMIT ${limit})
+           AND expires_at <= statement_timestamp()
+        RETURNING 1`;
+      return rows.length;
     },
 
     async deleteAssistantConversation(params) {

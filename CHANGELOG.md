@@ -13,7 +13,10 @@ versioning.
   member can operate Slotlock by chat on a new Assistant page. The server runs the tool loop (up to
   8 model calls a message) with a fixed list of agent tools: reads run through the agent operation
   boundary, and every write is a proposed change the member approves on a form before it runs once,
-  recorded as `dashboard-assistant:<login>`. The API key is sealed with AES-256-GCM, bound to the
+  recorded as `dashboard-assistant:github:<user id>`, whose card shows the change in full under the
+  confirmation question's sentence. A proposal takes no series-write slot or rate token until it
+  runs, a message's reads share a budget, maintenance deletes expired conversations, and a new
+  provider or origin takes the key again. The API key is sealed with AES-256-GCM, bound to the
   tenant, and only its last four characters are shown. Two tenant tables under forced row-level
   security, `assistant_settings` and `assistant_conversations`, which erasure deletes.
   `createSlotlockRateLimiter` is the per-key token bucket it limits members' messages with, and

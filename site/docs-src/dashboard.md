@@ -52,7 +52,8 @@ page: every member of an organization can ask in plain words ("what's free tomor
 - **Reads run; writes wait for you.** The assistant looks things up at once. A booking, hold, change
   or cancellation appears as a card to **Approve** or **Dismiss**, and runs only when approved,
   once, under the same booking rules and limits as an agent. Activity names it
-  `Assistant for @<login>`.
+  `Assistant for @<login>`. The card shows every detail of the change, with the booking it
+  changes named by title, resource and time.
 - It cannot touch API keys, webhooks, booking rules, pools or erasure.
 - Up to 10 messages a minute per member; a conversation is kept for 2 hours.
 

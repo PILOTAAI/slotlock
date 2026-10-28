@@ -11,8 +11,12 @@ import type {
 } from '../agent-server.js';
 import type { SlotlockApiKeyStore } from '../api-keys.js';
 import {
+  SLOTLOCK_ASSISTANT_MAX_STORED_BYTES,
   SLOTLOCK_ASSISTANT_TOOL_USE,
+  type SlotlockAssistantEntry,
   type SlotlockAssistantStore,
+  boundSlotlockAssistantEntries,
+  pruneSlotlockAssistantActions,
   createSlotlockMemoryAssistantStore,
   openSlotlockAssistantKey,
   readSlotlockAssistantBaseUrl,
@@ -21,10 +25,17 @@ import {
 } from '../assistant.js';
 import {
   type SlotlockDashboardOptions,
+  type SlotlockDashboardResources,
   createSlotlockDashboard,
   createSlotlockMemoryDashboardState,
 } from '../dashboard.js';
 import { createSlotlockGuardedFetch } from '../webhooks.js';
+import { SLOTLOCK_DEFAULT_LIMITS } from '../config.js';
+import { createSlotlockRequestLimits } from '../rate-limit.js';
+import {
+  SLOTLOCK_WORKER_AGENT_CALLS_PER_REQUEST,
+  createSlotlockWorkerAgentLimiter,
+} from '../../workers/dashboard/worker.js';
 import {
   type FakeModel,
   type FakeModelFormat,
@@ -71,7 +82,19 @@ function fakeBackend() {
     getFreeBusy: vi.fn(async () => ({})),
     findNextAvailable: vi.fn(async () => ({})),
     createEvent: vi.fn(async () => ({})),
-    getEvent: vi.fn(async () => ({})),
+    // The event a change or cancellation names, as the store reads it back.
+    getEvent: vi.fn(async (_context: SlotlockAgentInvocationContext, input: Record<string, unknown>) => ({
+      event: {
+        event_id: String(input.event_id),
+        resource_id: RESOURCE.id,
+        starts_at: '2027-03-02T10:00:00Z',
+        ends_at: '2027-03-02T11:00:00Z',
+        timezone: 'Europe/London',
+        title: 'Ana pickup',
+        revision: 1,
+      },
+    })),
+    describeResource: vi.fn(async () => ({ name: RESOURCE.external_ref, timezone: RESOURCE.timezone })),
     listEvents: vi.fn(async () => ({ events: [], next_cursor: null })),
     updateEvent: vi.fn(async () => ({})),
     // Idempotent by key, like the store: a repeat answers `replayed`.
@@ -99,7 +122,10 @@ let backend: ReturnType<typeof fakeBackend>;
 let assistantStore: SlotlockAssistantStore;
 let reported: unknown[];
 
-function dashboard(overrides: Partial<SlotlockDashboardOptions['assistant']> = {}) {
+function dashboard(
+  overrides: Partial<SlotlockDashboardOptions['assistant']> = {},
+  resourceOverrides: Partial<SlotlockDashboardResources> = {},
+) {
   return createSlotlockDashboard({
     publicUrl: ORIGIN,
     github: { clientId: 'Ov23liAssistant', clientSecret: 'f'.repeat(20) + '0123456789abcdef0123' },
@@ -114,6 +140,7 @@ function dashboard(overrides: Partial<SlotlockDashboardOptions['assistant']> = {
       },
       setHours: async () => 0,
       assistant: assistantStore,
+      ...resourceOverrides,
     },
     state: createSlotlockMemoryDashboardState(),
     fetch: github,
@@ -200,7 +227,7 @@ describe.each(['anthropic', 'openai'] as const)('the assistant over %s', (format
 
     expect(backend.listResources).toHaveBeenCalledTimes(1);
     const context = backend.listResources.mock.calls[0]?.[0] as SlotlockAgentInvocationContext;
-    expect(context.principal).toMatchObject({ tenantRef: 'github-org:91', subject: 'dashboard-assistant:bob' });
+    expect(context.principal).toMatchObject({ tenantRef: 'github-org:91', subject: 'dashboard-assistant:github:12' });
     expect(model.requests).toHaveLength(2);
     const [first, second] = model.requests;
     // The vendor's request format, with the key where the vendor expects it.
@@ -268,7 +295,7 @@ describe.each(['anthropic', 'openai'] as const)('the assistant over %s', (format
       SlotlockAgentInvocationContext,
       Record<string, unknown>,
     ];
-    expect(context.principal.subject).toBe('dashboard-assistant:bob');
+    expect(context.principal.subject).toBe('dashboard-assistant:github:12');
     // The dashboard's key, from the action: the model's own does not count.
     expect(input).toEqual({
       event_id: 'agent:abc',
@@ -611,5 +638,287 @@ describe('private model addresses (SLOTLOCK_ASSISTANT_PRIVATE_URLS)', () => {
     const bob = await signIn(closed, 'bob');
     expect((await chat(closed, bob, 'hello')).status).toBe(409);
     expect(model.requests).toHaveLength(0);
+  });
+});
+
+describe('security review fixes', () => {
+  let model: FakeModel;
+  beforeAll(async () => {
+    model = await startFakeModel('openai');
+  });
+  afterAll(() => model.close());
+  beforeEach(() => {
+    model.requests.length = 0;
+  });
+
+  const proposeAndShow = async (target: Dashboard, bob: string, name: string, input: Record<string, unknown>) => {
+    model.script({ calls: [{ name, input }] }, { text: 'Proposed.' });
+    await chat(target, bob, 'Please');
+    return page(target, bob);
+  };
+
+  // M1: the card is the whole action; ids are resolved; what cannot be shown is not proposed.
+  it('M1: shows every one of 100 attendees on the card it asks the member to approve', async () => {
+    const target = dashboard();
+    await connect(target, await signIn(target, 'alice'), model, 'openai');
+    const bob = await signIn(target, 'bob');
+    const attendees = Array.from({ length: 100 }, (_, index) => ({
+      address: `guest-${String(index).padStart(3, '0')}@example.com`,
+      role: 'required',
+      participation_status: 'needs_action',
+    }));
+    const html = await proposeAndShow(target, bob, 'slotlock_create_event', {
+      resource_id: RESOURCE.id,
+      starts_at: '2027-03-02T10:00:00Z',
+      ends_at: '2027-03-02T11:00:00Z',
+      timezone: 'Europe/London',
+      title: 'Ana pickup',
+      description: `Long notes ${'x'.repeat(5_000)} END-OF-DESCRIPTION`,
+      attendees,
+    });
+    expect(html).toContain('Waiting for you');
+    for (const { address } of attendees) expect(html, address).toContain(address);
+    expect(html).toContain('END-OF-DESCRIPTION');
+    // The resource by name, from the confirmation question.
+    expect(html).toContain('vehicle-1');
+    expect(html).not.toContain('…</');
+  });
+
+  it.each([
+    ['slotlock_update_event', { event_id: 'agent:abc', expected_revision: 1, title: 'Moved pickup' }],
+    ['slotlock_delete_event', { event_id: 'agent:abc', expected_revision: 1 }],
+  ])('M1: names the event %s changes by its title, resource and time', async (name, input) => {
+    const target = dashboard();
+    await connect(target, await signIn(target, 'alice'), model, 'openai');
+    const bob = await signIn(target, 'bob');
+    const html = await proposeAndShow(target, bob, name, input);
+    const summary = /<p class="action-summary">([^<]+)<\/p>/.exec(html)?.[1] ?? '';
+    expect(summary).toContain('vehicle-1');
+    expect(summary).toContain('Ana pickup');
+    expect(summary).toMatch(/10:00/);
+    expect(summary).toMatch(/2 Mar|Mar 2|2027-03-02/);
+    expect(backend.getEvent).toHaveBeenCalled();
+  });
+
+  it('M1: refuses to propose a change too large to show in full', async () => {
+    const target = dashboard();
+    await connect(target, await signIn(target, 'alice'), model, 'openai');
+    const bob = await signIn(target, 'bob');
+    const attendees = Array.from({ length: 100 }, (_, index) => ({
+      address: `guest-${index}@example.com`,
+      name: `Guest ${index} ${'n'.repeat(150)}`,
+      role: 'required',
+      participation_status: 'needs_action',
+    }));
+    const html = await proposeAndShow(target, bob, 'slotlock_create_event', {
+      resource_id: RESOURCE.id,
+      starts_at: '2027-03-02T10:00:00Z',
+      ends_at: '2027-03-02T11:00:00Z',
+      timezone: 'Europe/London',
+      attendees,
+    });
+    expect(html).not.toContain('name="action"');
+    expect(toolResultsSent('openai', model.requests[1])).toEqual([JSON.stringify({ error: { code: 'change_too_large_to_show' } })]);
+  });
+
+  // M2: a proposal holds no series-write slot: another tenant's series write runs meanwhile.
+  it("M2: lets another tenant's update_event through while a proposed one waits in a running turn", async () => {
+    const limits = createSlotlockRequestLimits({
+      limits: SLOTLOCK_DEFAULT_LIMITS,
+      basePath: '',
+      authenticate: async () => null,
+    });
+    const admitted: string[] = [];
+    const target = dashboard({
+      authorize: async () => true,
+      admit: async (args) => {
+        admitted.push(args.operation);
+        await limits.admit(args);
+      },
+      consumeRateLimit: limits.consumeRateLimit,
+    });
+    const served = limits.serve({
+      fetch: async (request) => {
+        if (new URL(request.url).pathname !== '/agent') return target.fetch(request);
+        try {
+          await limits.admit({
+            principal: { subject: 'agent:other', tenantRef: 'github-org:92', scopes: ['read', 'write'] },
+            operation: 'slotlock_update_event',
+            input: { event_id: 'agent:theirs', expected_revision: 1 },
+          });
+          return new Response('admitted');
+        } catch (error) {
+          return new Response((error as { code: string }).code, { status: (error as { status: number }).status });
+        }
+      },
+    });
+    const via = async (path: string, fields: Record<string, string>, cookie: string) => {
+      const form = await (await get(target, '/dashboard/keys', cookie)).text();
+      const csrf = /name="csrf" value="([^"]+)"/.exec(form)?.[1] as string;
+      const once = /name="once" value="([^"]+)"/.exec(form)?.[1] as string;
+      return served.fetch(
+        new Request(`${ORIGIN}${path}`, {
+          method: 'POST',
+          headers: { cookie, origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ csrf, once, ...fields }).toString(),
+        }),
+        { remoteAddress: '127.0.0.1' },
+      );
+    };
+    try {
+      await connect(target, await signIn(target, 'alice'), model, 'openai');
+      const bob = await signIn(target, 'bob');
+      let other: { status: number; text: string } | undefined;
+      model.script(
+        { calls: [{ name: 'slotlock_update_event', input: { event_id: 'agent:abc', expected_revision: 1, title: 'Moved' } }] },
+        async () => {
+          // The turn is still running: the proposal must not be holding the series-write slot.
+          const answer = await served.fetch(new Request(`${ORIGIN}/agent`), { remoteAddress: '127.0.0.2' });
+          other = { status: answer.status, text: await answer.text() };
+          return { text: 'Proposed the move.' };
+        },
+      );
+      expect((await via('/dashboard/assistant', { message: 'Move it' }, bob)).status).toBe(303);
+      expect(other).toEqual({ status: 200, text: 'admitted' });
+      expect(admitted).toEqual([]);
+      const actionId = /name="action" value="([^"]+)"/.exec(await page(target, bob))?.[1] as string;
+      expect((await via('/dashboard/assistant/approve', { action: actionId }, bob)).status).toBe(303);
+      // The slot and the write token are taken when the approved change runs.
+      expect(admitted).toEqual(['slotlock_update_event']);
+      expect(backend.updateEvent).toHaveBeenCalledTimes(1);
+    } finally {
+      limits.close();
+    }
+  });
+
+  // L1: the principal and actor are the member's GitHub user id; the login is only shown.
+  it('L1: acts as dashboard-assistant:github:<uid> and shows it as the assistant for @login', async () => {
+    const changes = [
+      { id: 'seq:2', type: 'event.created', actor: 'dashboard-assistant:github:12', resourceId: null, occurredAt: new Date() },
+      { id: 'seq:1', type: 'event.created', actor: 'dashboard-assistant:github:11', resourceId: null, occurredAt: new Date() },
+    ];
+    const target = dashboard({}, { recentChanges: async () => changes as never });
+    await connect(target, await signIn(target, 'alice'), model, 'openai');
+    const bob = await signIn(target, 'bob');
+    model.script({ calls: [{ name: 'slotlock_list_resources', input: {} }] }, { text: 'One.' });
+    await chat(target, bob, 'List');
+    expect((backend.listResources.mock.calls[0]?.[0] as SlotlockAgentInvocationContext).principal.subject).toBe(
+      'dashboard-assistant:github:12',
+    );
+    const overview = await (await get(target, '/dashboard', bob)).text();
+    expect(overview).toContain('Assistant for @bob');
+    expect(overview).toContain('Assistant for GitHub user 11');
+  });
+
+  // L2: bounded in UTF-8 bytes, whatever the script; actions pruned with their messages.
+  it('L2: keeps a conversation of long CJK messages under the stored byte bound', () => {
+    const cjk = '予約可能な時間帯を確認してください。'.repeat(220);
+    let entries: SlotlockAssistantEntry[] = [];
+    for (let turn = 0; turn < 40; turn += 1) {
+      entries = boundSlotlockAssistantEntries([
+        ...entries,
+        { role: 'user', text: cjk.slice(0, 2_000) },
+        { role: 'assistant', text: '', calls: [{ id: `c${turn}`, name: 'slotlock_list_resources', input: {} }] },
+        { role: 'tool', results: [{ id: `c${turn}`, name: 'slotlock_list_resources', content: cjk.slice(0, 4_000), error: false }] },
+        { role: 'assistant', text: cjk.slice(0, 8_000), calls: [] },
+      ]);
+      expect(Buffer.byteLength(JSON.stringify(entries), 'utf8')).toBeLessThanOrEqual(SLOTLOCK_ASSISTANT_MAX_STORED_BYTES);
+      expect(entries[0]?.role).toBe('user');
+    }
+    // One exchange alone over the bound is cut down, not dropped: the message and answer stay.
+    const huge = boundSlotlockAssistantEntries([
+      { role: 'user', text: 'Find everything' },
+      ...Array.from({ length: 8 }, (_, step): SlotlockAssistantEntry[] => [
+        { role: 'assistant', text: cjk.slice(0, 8_000), calls: [{ id: `s${step}`, name: 'slotlock_list_events', input: {} }] },
+        { role: 'tool', results: [{ id: `s${step}`, name: 'slotlock_list_events', content: cjk.slice(0, 8_000), error: false }] },
+      ]).flat(),
+      { role: 'assistant', text: 'Done.', calls: [] },
+    ]);
+    expect(huge[0]).toEqual({ role: 'user', text: 'Find everything' });
+    expect(huge.at(-1)).toEqual({ role: 'assistant', text: 'Done.', calls: [] });
+    expect(Buffer.byteLength(JSON.stringify(huge), 'utf8')).toBeLessThanOrEqual(SLOTLOCK_ASSISTANT_MAX_STORED_BYTES);
+    // NUL, which jsonb refuses, is dropped.
+    expect(boundSlotlockAssistantEntries([{ role: 'user', text: 'a\u0000b' }])).toEqual([{ role: 'user', text: 'ab' }]);
+  });
+
+  it('L2: drops the actions whose messages were dropped', () => {
+    const entries: SlotlockAssistantEntry[] = [
+      { role: 'user', text: 'x' },
+      { role: 'tool', results: [{ id: 'c', name: 'slotlock_delete_event', content: '{}', error: false, action: 'kept' }] },
+    ];
+    expect(
+      Object.keys(
+        pruneSlotlockAssistantActions(entries, {
+          kept: { status: 'pending', operation: 'slotlock_delete_event' },
+          gone: { status: 'pending', operation: 'slotlock_delete_event' },
+        }),
+      ),
+    ).toEqual(['kept']);
+  });
+
+  it('L2: answers every message of a long CJK conversation, never an error page', async () => {
+    const target = dashboard({ rate: { perSecond: 100, burst: 100 } });
+    await connect(target, await signIn(target, 'alice'), model, 'openai');
+    const bob = await signIn(target, 'bob');
+    const cjk = '明日の午前中に空いている車を探して予約してください。'.repeat(160);
+    model.script({ text: cjk.slice(0, 8_000) });
+    for (let turn = 0; turn < 25; turn += 1) {
+      expect((await chat(target, bob, cjk.slice(0, 2_000))).status, `turn ${turn}`).toBe(303);
+    }
+    const stored = await assistantStore.getConversation('github-org:91', 'github:12');
+    expect(Buffer.byteLength(JSON.stringify(stored?.messages), 'utf8')).toBeLessThanOrEqual(SLOTLOCK_ASSISTANT_MAX_STORED_BYTES);
+  });
+
+  // L4: reads share one budget a turn; the Worker caps agent calls a request and per tenant.
+  it("L4: refuses a turn's reads past its budget of resource-days, on every path", async () => {
+    const target = dashboard();
+    await connect(target, await signIn(target, 'alice'), model, 'openai');
+    const bob = await signIn(target, 'bob');
+    const wide = {
+      resource_ids: Array.from({ length: 50 }, (_, index) => `resource-${index}`),
+      start: '2027-03-01T00:00:00Z',
+      end: '2027-03-31T00:00:00Z',
+    };
+    model.script({ calls: [{ name: 'slotlock_list_events', input: wide }] }, { text: 'Too wide.' });
+    await chat(target, bob, 'Everything this month');
+    expect(backend.listEvents).not.toHaveBeenCalled();
+    expect(toolResultsSent('openai', model.requests[1])).toEqual([JSON.stringify({ error: { code: 'turn_read_budget_exceeded' } })]);
+    model.requests.length = 0;
+    model.script({ calls: Array.from({ length: 8 }, () => ({ name: 'slotlock_list_resources', input: {} })) });
+    await chat(target, bob, 'Loop');
+    // 16 reads run, then the turn's budget is spent.
+    expect(backend.listResources).toHaveBeenCalledTimes(16);
+  });
+
+  it('L4: limits the Worker assistant’s agent calls per request and per tenant', () => {
+    const limiter = createSlotlockWorkerAgentLimiter({ SLOTLOCK_LIMITS: 'tenant_write=1/m:2' });
+    const write = { principal: { subject: 's', tenantRef: 'github-org:1' }, operation: 'slotlock_update_event' as const };
+    expect(limiter({ count: 0 }, write)).toBe(true);
+    expect(limiter({ count: 0 }, write)).toBe(true);
+    expect(limiter({ count: 0 }, write)).toBe(false);
+    expect(limiter({ count: 0 }, { ...write, principal: { subject: 's', tenantRef: 'github-org:2' } })).toBe(true);
+    const calls = { count: 0 };
+    const read = { principal: { subject: 's', tenantRef: 'github-org:3' }, operation: 'slotlock_list_resources' as const };
+    for (let index = 0; index < SLOTLOCK_WORKER_AGENT_CALLS_PER_REQUEST; index += 1) expect(limiter(calls, read)).toBe(true);
+    expect(limiter(calls, read)).toBe(false);
+  });
+
+  // L5: a new provider or origin takes the key again.
+  it('L5: makes the owner enter the key again when the provider or origin changes', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, 'openai');
+    const save = (fields: Record<string, string>) =>
+      post(target, '/dashboard/settings/assistant', { model: 'your-model', api_key: '', ...fields }, alice);
+    const elsewhere = await save({ provider: 'openai', base_url: 'https://attacker.example.com/v1' });
+    expect(elsewhere.status).toBe(400);
+    expect(await elsewhere.text()).toContain('Enter the API key again');
+    expect((await save({ provider: 'anthropic', base_url: model.baseUrl })).status).toBe(400);
+    expect((await assistantStore.getSettings('github-org:91'))?.baseUrl).toBe(model.baseUrl);
+    // The same origin, another path or model: the key stays.
+    expect((await save({ provider: 'openai', base_url: `${model.baseUrl}/` })).status).toBe(303);
+    // A new key, or none, may go anywhere allowed.
+    expect((await save({ provider: 'openai', base_url: 'https://api.example.com/v1', api_key: 'sk-new-0000' })).status).toBe(303);
+    expect((await save({ provider: 'anthropic', base_url: 'https://api.example.org', clear_key: '1' })).status).toBe(303);
   });
 });

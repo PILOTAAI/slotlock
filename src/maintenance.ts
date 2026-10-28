@@ -19,7 +19,8 @@ export interface SlotlockMaintenanceResult {
   /**
    * Expired holds and the answers kept for keyed ones, and past the retention window event
    * idempotency answers, agents' event cancellations, booking references retired with no
-   * booking and feed changes, deleted. A cancelled booking's tombstone stays.
+   * booking and feed changes, deleted, and dashboard assistant conversations past their expiry.
+   * A cancelled booking's tombstone stays.
    */
   pruned: number;
   /**
@@ -115,6 +116,11 @@ export async function maintainSlotlockTenant(
     }
   }
   options.signal?.throwIfAborted();
+  // Conversations last 2 hours after their last message (dashboard.ts): an expired one is
+  // unreadable already, and deleted here.
+  pruned += await store.withTenant(tenantRef, (tenant) =>
+    tenant.pruneAssistantConversations({ tenantRef }),
+  );
   const zones = await store.withTenant(tenantRef, (tenant) =>
     tenant.followZoneRules({ tenantRef, move: options.followZoneRules === true }),
   );
