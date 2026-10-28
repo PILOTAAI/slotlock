@@ -5,6 +5,13 @@ versioning.
 
 ## Unreleased
 
+### Documentation
+
+- The production checklist advises a `transaction_timeout` on the serving role (PostgreSQL 17+),
+  so a caller's transaction a store call runs inside cannot hold its locks and snapshot without
+  bound; on 16, `idle_in_transaction_session_timeout` and `statement_timeout`. A test pins the
+  setting on the CI's PostgreSQL 17 and 18.
+
 ### Added
 
 - How long history is kept is a setting: `SLOTLOCK_RETENTION_DAYS` (`retentionDays` in

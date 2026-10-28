@@ -1463,6 +1463,13 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
     server (`SLOTLOCK_LIMITS`); behind a proxy, set `SLOTLOCK_TRUSTED_PROXY_HEADER` and firewall
     the server so nothing reaches it except through that proxy. Embedding the
     agent server, give it a `consumeRateLimit`. Watch serve's `refusals` log line for floods.
+13. Bound how long a transaction may run. A store over your own transaction (a savepoint per call)
+    keeps its locks and its snapshot for as long as yours runs, and a hold you confirm inside it is
+    judged by the statement's clock, not the transaction's. On PostgreSQL 17 and later, give the
+    serving role a `transaction_timeout` above your longest legitimate transaction
+    (`ALTER ROLE slotlock_app SET transaction_timeout = '60s'`): PostgreSQL ends one that runs
+    longer, rolling back what it did, and closes its connection (the pool opens another). On 16, set `idle_in_transaction_session_timeout`
+    and `statement_timeout`, which bound idle gaps and single statements but not the whole.
 
 ## Supported versions
 
