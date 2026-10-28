@@ -111,4 +111,42 @@ describe.skipIf(!url)('pools (real Postgres)', () => {
     await store.archiveResource({ tenantRef, id: bikes[2] as string });
     expect((await store.listPools({ tenantRef })).find(({ pool }) => pool === 'bike')?.capacity).toBe(2);
   });
+
+  it('says how many members are free across a window, part by part', async () => {
+    const pool = `suv-${randomUUID().slice(0, 8)}`;
+    await members(pool, 3);
+    await book(pool, 10, 14);
+    await book(pool, 12, 16);
+    const availability = (start: number, end: number) =>
+      backend.getPoolAvailability?.(context('slotlock_get_pool_availability'), {
+        pool,
+        start: at(start),
+        end: at(end),
+      }) as Promise<Record<string, unknown>>;
+    expect(await availability(8, 18)).toEqual({
+      pool,
+      members: 3,
+      intervals: [
+        { start: at(8), end: at(10), free: 3 },
+        { start: at(10), end: at(12), free: 2 },
+        { start: at(12), end: at(14), free: 1 },
+        { start: at(14), end: at(16), free: 2 },
+        { start: at(16), end: at(18), free: 3 },
+      ],
+      coverage: { start: at(8), end: at(18), certainty: 'certain', reason: null },
+    });
+    // Booked out where every member is taken.
+    await book(pool, 12, 13);
+    expect((await availability(12, 14)).intervals).toEqual([
+      { start: at(12), end: at(13), free: 0 },
+      { start: at(13), end: at(14), free: 1 },
+    ]);
+    await expect(
+      backend.getPoolAvailability?.(context('slotlock_get_pool_availability'), {
+        pool: 'no-such-pool',
+        start: at(8),
+        end: at(9),
+      }) as Promise<unknown>,
+    ).rejects.toMatchObject({ code: 'pool_not_found', status: 404 });
+  });
 });

@@ -1408,6 +1408,137 @@
     }
   },
   {
+    "name": "slotlock_get_pool_availability",
+    "title": "Get pool availability",
+    "description": "How many members of a pool (a vehicle class, a room type) are free across a window: the window split where that number changes, each part with how many are free, and coverage certainty. Book one with slotlock_book_pool. 404 pool_not_found when the pool has no member you may book.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "pool": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+        },
+        "start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "pool",
+        "start",
+        "end"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "pool": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+        },
+        "members": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "intervals": {
+          "maxItems": 20001,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "start": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "free": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100
+              }
+            },
+            "required": [
+              "start",
+              "end",
+              "free"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "coverage": {
+          "type": "object",
+          "properties": {
+            "start": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "end": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "certainty": {
+              "type": "string",
+              "enum": [
+                "certain",
+                "uncertain"
+              ]
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 100
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "start",
+            "end",
+            "certainty",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "pool",
+        "members",
+        "intervals",
+        "coverage"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "Get pool availability",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "ui": {
+        "resourceUri": "ui://slotlock/calendar",
+        "visibility": [
+          "model",
+          "app"
+        ]
+      }
+    }
+  },
+  {
     "name": "slotlock_book_together",
     "title": "Book resources together",
     "description": "Book the same time on 2-20 resources at once, all or none: a van with its driver, a room with its projector. If any of them is taken, nothing is booked, and the refusal names that resource_id. Find such a time with slotlock_find_available_slots and require_free. A retry with the same idempotency_key answers the same events.",

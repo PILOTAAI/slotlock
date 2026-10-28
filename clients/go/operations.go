@@ -18,6 +18,7 @@ var operations = func() map[string]operation {
 		{name: "slotlock_hold_slots", method: "POST", path: "/v1/slot-holds", pathParams: nil, query: nil},
 		{name: "slotlock_book_together", method: "POST", path: "/v1/bundles", pathParams: nil, query: nil},
 		{name: "slotlock_book_pool", method: "POST", path: "/v1/pool-bookings", pathParams: nil, query: nil},
+		{name: "slotlock_get_pool_availability", method: "GET", path: "/v1/pool-availability", pathParams: nil, query: []string{"pool", "start", "end"}},
 		{name: "slotlock_release_slots", method: "DELETE", path: "/v1/slot-holds/{hold_id}", pathParams: []string{"hold_id"}, query: nil},
 		{name: "slotlock_list_events", method: "GET", path: "/v1/events", pathParams: nil, query: []string{"resource_ids", "start", "end", "cursor", "limit"}},
 		{name: "slotlock_create_event", method: "POST", path: "/v1/events", pathParams: nil, query: nil},
@@ -325,6 +326,31 @@ func (in BookPoolInput) values() map[string]any {
 // no member you may book. A retry with the same idempotency_key answers the same event.
 func (c *Client) BookPool(ctx context.Context, in BookPoolInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_book_pool", in.values())
+}
+
+// GetPoolAvailabilityInput holds the arguments of [Client.GetPoolAvailability].
+type GetPoolAvailabilityInput struct {
+	Pool string
+
+	Start string
+
+	End string
+}
+
+func (in GetPoolAvailabilityInput) values() map[string]any {
+	values := map[string]any{}
+	values["pool"] = in.Pool
+	values["start"] = in.Start
+	values["end"] = in.End
+	return values
+}
+
+// GetPoolAvailability: Get pool availability. How many members of a pool (a vehicle class, a room
+// type) are free across a window: the window split where that number changes, each part with how
+// many are free, and coverage certainty. Book one with slotlock_book_pool. 404 pool_not_found
+// when the pool has no member you may book.
+func (c *Client) GetPoolAvailability(ctx context.Context, in GetPoolAvailabilityInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_get_pool_availability", in.values())
 }
 
 // ReleaseSlotsInput holds the arguments of [Client.ReleaseSlots].

@@ -585,6 +585,60 @@ export function createSlotlockStoreAgentBackend(
       }, WRITE);
     },
 
+    async getPoolAvailability(context, input) {
+      const window = interval(input as { start: string; end: string });
+      const pool = input.pool as string;
+      const charge = busyBudget();
+      return withTenant(store, context, async (tenantStore) => {
+        const tenantRef = context.principal.tenantRef;
+        const members = await tenantStore.listPoolMembers({ tenantRef, pool, visibility: 'shared' });
+        if (members.length === 0) throw new SlotlockAgentOperationError('pool_not_found', 404);
+        // Each member's busy time, as edges: a count of busy members that rises and falls.
+        const edges = new Map<number, number>([
+          [window.start.getTime(), 0],
+          [window.end.getTime(), 0],
+        ]);
+        let complete = true;
+        for (const member of members) {
+          const sources = await requiredSources(options, context, member);
+          const freeBusy = await readFreeBusy(tenantStore, {
+            tenantRef,
+            resourceId: member.id,
+            window,
+            requiredSources: [...sources],
+            ...(options.coverageMaxAgeMs !== undefined
+              ? { coverageMaxAgeMs: options.coverageMaxAgeMs }
+              : {}),
+          });
+          charge(freeBusy.busy.length);
+          if (freeBusy.coverage.state !== 'complete') complete = false;
+          for (const busy of freeBusy.busy) {
+            edges.set(busy.start.getTime(), (edges.get(busy.start.getTime()) ?? 0) + 1);
+            edges.set(busy.end.getTime(), (edges.get(busy.end.getTime()) ?? 0) - 1);
+          }
+        }
+        const times = [...edges.keys()].sort((a, b) => a - b);
+        const intervals: { start: string; end: string; free: number }[] = [];
+        let busy = 0;
+        for (const [index, at] of times.entries()) {
+          busy += edges.get(at) ?? 0;
+          const next = times[index + 1];
+          if (next === undefined || at >= window.end.getTime()) break;
+          const free = members.length - busy;
+          const last = intervals.at(-1);
+          // Parts with the same count are one.
+          if (last && last.free === free) last.end = new Date(next).toISOString();
+          else intervals.push({ start: new Date(at).toISOString(), end: new Date(next).toISOString(), free });
+        }
+        return {
+          pool,
+          members: members.length,
+          intervals,
+          coverage: coverageProjection(window, complete),
+        };
+      });
+    },
+
     async bookTogether(context, rawInput) {
       const input = rawInput as {
         resource_ids: string[];
