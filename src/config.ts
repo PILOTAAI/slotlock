@@ -171,19 +171,30 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
       'SLOTLOCK_DASHBOARD_USERS is required to serve the dashboard: * for every GitHub account, or a comma-separated list of GitHub user ids (gh api users/<login> --jq .id)',
     );
   }
-  const orgs = optional(env, 'SLOTLOCK_DASHBOARD_ORGS')?.replaceAll(' ', '');
-  if (orgs !== undefined && !/^[1-9]\d{0,19}(,[1-9]\d{0,19})*$/.test(orgs)) {
-    throw new SlotlockConfigError(
-      'SLOTLOCK_DASHBOARD_ORGS must be a comma-separated list of GitHub organization ids (gh api orgs/<login> --jq .id)',
-    );
-  }
+  const orgs = readDashboardOrganizations(env);
   return {
     githubClientId,
     githubClientSecret,
     sessionSecret,
     allowedUsers: users === '*' ? '*' : [...new Set(users.split(','))],
-    ...(orgs !== undefined ? { organizations: [...new Set(orgs.split(','))] } : {}),
+    ...(orgs !== undefined ? { organizations: orgs } : {}),
   };
+}
+
+/**
+ * The GitHub organization ids of SLOTLOCK_DASHBOARD_ORGS, or undefined when unset. Read on its own as
+ * well: a server whose dashboard runs elsewhere (on Cloudflare Workers) still takes those
+ * organizations' keys, and only theirs.
+ */
+export function readDashboardOrganizations(env: SlotlockEnv): string[] | undefined {
+  const orgs = optional(env, 'SLOTLOCK_DASHBOARD_ORGS')?.replaceAll(' ', '');
+  if (orgs === undefined) return undefined;
+  if (!/^[1-9]\d{0,19}(,[1-9]\d{0,19})*$/.test(orgs)) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_DASHBOARD_ORGS must be a comma-separated list of GitHub organization ids (gh api orgs/<login> --jq .id)',
+    );
+  }
+  return [...new Set(orgs.split(','))];
 }
 
 /** A token bucket: `perSecond` tokens come back each second, and it holds at most `burst`. */

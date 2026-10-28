@@ -1,9 +1,10 @@
 // The dashboard: people sign in with GitHub and manage the API keys and calendar resources of a
-// personal tenant, `github:<user id>`. It is server-rendered HTML with no inline script or style,
+// tenant: their own, `github:<user id>`, or with `organizations`, a GitHub organization's,
+// `github-org:<organization id>`, shared by its owners and members. It is server-rendered HTML with no inline script or style,
 // so its Content-Security-Policy allows nothing but this server's own stylesheet and script.
 //
-// Sign-in is GitHub's OAuth web flow with `state` and PKCE (S256) and no scope: the token is used
-// once, to read who signed in, and dropped. A session is an HMAC-sealed cookie (`__Host-`,
+// Sign-in is GitHub's OAuth web flow with `state` and PKCE (S256), with no scope (`read:org` with
+// organizations): the token is used once, to read who signed in and their memberships, and dropped. A session is an HMAC-sealed cookie (`__Host-`,
 // HttpOnly, Secure, SameSite=Lax) that lasts 12 hours and is checked against the allowlist on every
 // request. Every form carries a CSRF token bound to the session, and every POST must come from this
 // server's own origin.
@@ -161,7 +162,8 @@ export interface SlotlockDashboardOptions {
    * GitHub organization ids (numbers, as strings) this dashboard serves. With them, a tenant is an
    * organization (`github-org:<id>`), not a person: sign-in asks for `read:org`, and a person signs
    * in to the served organizations they are an active member of, sharing each one's keys and
-   * resources with its other members. Membership is read at each sign-in; leaving an organization
+   * resources with its other members: owners and members, not billing managers, from the first
+   * 100 memberships GitHub lists, up to 20 served organizations. Membership is read at each sign-in; leaving an organization
    * ends access at the next sign-in, at most a session (12 hours) later, and removing an
    * organization from this list signs its sessions out at once. Without it, each person is their
    * own tenant (`github:<id>`).
@@ -655,19 +657,27 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     }
   }
 
-  const formMac = (session: Session, nonce: string) =>
+  // Bound to the organization too: a page opened before a switch cannot write into the new one.
+  const formMac = (session: Session, nonce: string, org = session.org ?? '') =>
     createHmac('sha256', secret)
-      .update(`slotlock-dashboard-form-v1.${session.sid}.${nonce}`)
+      .update(`slotlock-dashboard-form-v2.${session.sid}.${org}.${nonce}`)
       .digest('base64url');
   /** Random, and bound to the session by a MAC: a made-up or another session's value is refused unwritten. */
   const formNonce = (session: Session) => {
     const nonce = randomBytes(18).toString('base64url');
     return `${nonce}.${formMac(session, nonce)}`;
   };
-  const isFormNonce = (session: Session, once: string) => {
+  /** `ok`, `other_org` for a form from a page of another of the session's organizations, else `bad`. */
+  const checkFormNonce = (session: Session, once: string): 'ok' | 'other_org' | 'bad' => {
     const match = FORM_NONCE.exec(once);
+    if (match === null) return 'bad';
+    const [, nonce, mac] = match as unknown as [string, string, string];
     // Compared as text, like the cookie MACs: decoding would drop the last character's spare bits.
-    return match !== null && safeEqual(match[2] as string, formMac(session, match[1] as string));
+    if (safeEqual(mac, formMac(session, nonce))) return 'ok';
+    const other = session.orgs?.some(
+      (org) => org.id !== session.org && safeEqual(mac, formMac(session, nonce, org.id)),
+    );
+    return other ? 'other_org' : 'bad';
   };
 
   function seal(context: string, payload: Record<string, unknown>): string {
@@ -769,10 +779,11 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
 
   function layout(title: string, content: Html, session: Session | null): Html {
     const current = session?.orgs?.find((org) => org.id === session.org);
+    const choices = (session?.orgs ?? []).filter((org) => served?.has(org.id));
     const organization =
       session && current
-        ? (session.orgs?.length ?? 0) > 1
-          ? html`<form class="org" method="post" action="${root}/organization"><input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="organization">Organization</label><select id="organization" name="organization">${(session.orgs ?? []).map((org) => html`<option value="${org.id}"${org.id === current.id ? html` selected` : html``}>${org.login}</option>`)}</select><button class="link" type="submit">Switch</button></form>`
+        ? choices.length > 1
+          ? html`<form class="org" method="post" action="${root}/organization"><input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="organization">Organization</label><select id="organization" name="organization">${choices.map((org) => html`<option value="${org.id}"${org.id === current.id ? html` selected` : html``}>${org.login}</option>`)}</select><button class="link" type="submit">Switch</button></form>`
           : html`<span class="org">${current.login}</span>`
         : html``;
     const account = session
@@ -802,7 +813,11 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
 <p>Sign in with GitHub to create API keys for the Slotlock tools, add the resources your agents book, and connect an MCP or A2A client.</p>
 ${notice ? html`<p class="notice" role="alert">${notice}</p>` : html``}
 <a class="button primary" href="${root}/sign-in">Sign in with GitHub</a>
-<p class="fine">Slotlock reads only your public GitHub profile, to know who you are, and keeps nothing from GitHub but your user id and login.</p>
+<p class="fine">${
+      served
+        ? 'Slotlock reads your GitHub profile and which organizations you belong to, and keeps nothing from GitHub but your user id, login, and the organizations this server serves.'
+        : 'Slotlock reads only your public GitHub profile, to know who you are, and keeps nothing from GitHub but your user id and login.'
+    }</p>
 </section>`;
     return respond(status, layout('Sign in', content, null), {}, cookies);
   }
@@ -823,6 +838,7 @@ ${notice ? html`<p class="notice" role="alert">${notice}</p>` : html``}
 <td data-label="Key"><code>${key.prefix}…</code></td>
 <td data-label="Access">${key.scopes.includes('admin') ? 'Full' : key.scopes.includes('write') ? 'Read and write' : 'Read only'}</td>
 <td data-label="Created">${formatDate(key.createdAt)}</td>
+${served ? html`<td data-label="Created by">${key.createdBy === personOf(session) ? 'You' : key.createdBy?.startsWith('github:') ? `GitHub user ${key.createdBy.slice(7)}` : 'Unknown'}</td>` : html``}
 <td data-label="Last used">${key.lastUsedAt ? formatDate(key.lastUsedAt) : 'Never'}</td>
 <td data-label="Expires">${key.expiresAt ? formatDate(key.expiresAt) : 'Never'}</td>
 <td data-label="Status"><span class="status ${status.toLowerCase()}">${status}</span></td>
@@ -846,7 +862,7 @@ ${notice ? html`<p class="notice" role="alert">${notice}</p>` : html``}
 <dl class="endpoints"><dt>MCP</dt><dd><code>${mcpUrl}</code></dd><dt>A2A</dt><dd><code>${a2aUrl}</code></dd></dl>
 </section>
 <section>
-<div class="head"><div><h2>API keys</h2><p>Each key acts in your calendar only. Give every agent its own, with the least access it needs.</p></div></div>
+<div class="head"><div><h2>API keys</h2><p>${served ? 'Each key acts in this organization only, and every member can rotate or revoke it.' : 'Each key acts in your calendar only.'} Give every agent its own, with the least access it needs.</p></div></div>
 <form class="create" method="post" action="${root}/keys">
 <input type="hidden" name="csrf" value="${token}">
 <input type="hidden" name="once" value="${formNonce(session)}">
@@ -858,7 +874,7 @@ ${notice ? html`<p class="notice" role="alert">${notice}</p>` : html``}
 ${
   keys.length === 0
     ? html`<p class="empty">No keys yet. Create one to connect an agent.</p>`
-    : html`<div class="table"><table><thead><tr><th>Name</th><th>Key</th><th>Access</th><th>Created</th><th>Last used</th><th>Expires</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
+    : html`<div class="table"><table><thead><tr><th>Name</th><th>Key</th><th>Access</th><th>Created</th>${served ? html`<th>Created by</th>` : html``}<th>Last used</th><th>Expires</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
 <tbody>${keyRows(keys, token, session)}</tbody></table></div>`
 }
 </section>
@@ -1051,8 +1067,10 @@ ${
     apiKey: SlotlockApiKey,
     rotated: boolean,
   ): Response {
+    const org = session.orgs?.find((candidate) => candidate.id === session.org);
     const content = html`<section class="card once">
 <h1>${rotated ? 'Key rotated' : 'Key created'}: ${apiKey.name}</h1>
+${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html``}
 <p class="notice warn" role="alert">Copy this key now. Slotlock keeps only its fingerprint, so it will not be shown again.${rotated ? ' The old key no longer works.' : ''}</p>
 <div class="copy"><input id="key" readonly value="${key}" aria-label="API key"><button type="button" data-copy="key">Copy</button></div>
 <h2>Add it to an MCP client</h2>
@@ -1067,7 +1085,9 @@ ${
   /** Act in another of the session's organizations: the same session, sealed again. */
   function switchOrganization(session: Session, form: URLSearchParams): Response {
     const wanted = form.get('organization') ?? '';
-    const org = session.orgs?.find((candidate) => candidate.id === wanted);
+    const org = session.orgs?.find(
+      (candidate) => candidate.id === wanted && served?.has(candidate.id),
+    );
     if (!served || !org) {
       return respond(
         400,
@@ -1187,7 +1207,14 @@ ${
     if (!Array.isArray(body)) return null;
     const found = new Map<string, Organization>();
     for (const membership of body) {
-      if (!isRecord(membership) || membership.state !== 'active') continue;
+      // Owners and members only: a billing manager is not a member, and may invite more of them.
+      if (
+        !isRecord(membership) ||
+        membership.state !== 'active' ||
+        (membership.role !== 'admin' && membership.role !== 'member')
+      ) {
+        continue;
+      }
       const organization = membership.organization;
       if (
         !isRecord(organization) ||
@@ -1458,10 +1485,18 @@ ${
       );
     }
     if (once !== null) {
+      const checked = checkFormNonce(session, once);
+      if (checked === 'other_org') {
+        return dashboardPage(
+          session,
+          409,
+          'That page was for another organization. Nothing was changed: check the organization and try again.',
+        );
+      }
       let first: boolean;
       try {
         first =
-          isFormNonce(session, once) &&
+          checked === 'ok' &&
           (await options.state.use('form', once, session.exp, session.uid));
       } catch (error) {
         if ((error as { code?: unknown }).code !== 'dashboard_form_limit') throw error;

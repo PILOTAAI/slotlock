@@ -1339,7 +1339,10 @@ describe('organizations', () => {
   const MEMBERSHIPS = 'https://api.github.com/user/memberships/orgs?state=active&per_page=100';
 
   /** GitHub with the user's active org memberships, as GET /user/memberships/orgs lists them. */
-  function githubWithOrgs(orgs: { id: number; login: string }[], membershipsStatus = 200) {
+  function githubWithOrgs(
+    orgs: { id: number; login: string; role?: string }[],
+    membershipsStatus = 200,
+  ) {
     const base = fakeGitHub();
     const fetch = vi.fn(async (input: string | URL | Request, init: RequestInit = {}) => {
       const url = String(input);
@@ -1347,7 +1350,11 @@ describe('organizations', () => {
         base.calls.push({ url, init });
         if (membershipsStatus !== 200) return new Response('nope', { status: membershipsStatus });
         return Response.json([
-          ...orgs.map((organization) => ({ state: 'active', role: 'member', organization })),
+          ...orgs.map(({ role = 'member', ...organization }) => ({
+            state: 'active',
+            role,
+            organization,
+          })),
           // GitHub lists only what state=active asks for; a pending one must still never count.
           { state: 'pending', role: 'member', organization: ELSEWHERE },
         ]);
@@ -1358,7 +1365,7 @@ describe('organizations', () => {
   }
 
   const orgDashboard = (
-    orgs: { id: number; login: string }[],
+    orgs: { id: number; login: string; role?: string }[],
     overrides: Partial<Parameters<typeof createSlotlockDashboard>[0]> = {},
   ) => {
     github = githubWithOrgs(orgs);
@@ -1431,6 +1438,66 @@ describe('organizations', () => {
       expect(refused.status).toBe(400);
       expect(cookie(refused, '__Host-slotlock-session')).toBeUndefined();
     }
+  });
+
+  it('counts owners and members, never billing managers', async () => {
+    const billing = await signIn(orgDashboard([{ ...ACME, role: 'billing_manager' }]));
+    expect(billing.callback.status).toBe(403);
+    expect(billing.session).toBeUndefined();
+    const owner = await signIn(orgDashboard([{ ...ACME, role: 'admin' }]));
+    expect(owner.callback.status).toBe(303);
+  });
+
+  it('refuses a form from a page of the organization the person switched away from', async () => {
+    const target = orgDashboard([ACME, GLOBEX]);
+    const { session } = await signIn(target);
+    // Opened while acting for acme-fleet: the create-key form's single-use value.
+    const acmePage = await (await get(target, '/base/dashboard', session)).text();
+    const stale = /action="\/base\/dashboard\/keys">\s*<input type="hidden" name="csrf" value="[^"]+">\s*<input type="hidden" name="once" value="([^"]+)"/.exec(acmePage)?.[1] as string;
+    expect(stale).toBeDefined();
+    const token = await csrf(target, session);
+    const switched = await post(target, '/base/dashboard/organization', { csrf: token, organization: String(GLOBEX.id) }, session);
+    const moved = cookie(switched, '__Host-slotlock-session')?.pair as string;
+    const refused = await post(
+      target,
+      '/base/dashboard/keys',
+      { csrf: token, once: stale, name: 'Acme agent', access: 'full', expires: 'never' },
+      moved,
+    );
+    expect(refused.status).toBe(409);
+    expect(await refused.text()).toContain('another organization');
+    expect(keys.store.create).not.toHaveBeenCalled();
+  });
+
+  it('names who made each key, and the organization a new key is for', async () => {
+    const target = orgDashboard([ACME]);
+    const { session } = await signIn(target);
+    const created = await post(
+      target,
+      '/base/dashboard/keys',
+      { csrf: await csrf(target, session), name: 'Fleet agent', access: 'read', expires: '30' },
+      session,
+    );
+    expect(await created.text()).toContain('For the organization <strong>acme-fleet</strong>');
+    const [row] = [...keys.rows.values()];
+    keys.rows.set('other', { ...(row as NonNullable<typeof row>), id: randomUUID(), createdBy: 'github:777' });
+    const page = await (await get(target, '/base/dashboard', session)).text();
+    expect(page).toContain('<td data-label="Created by">You</td>');
+    expect(page).toContain('<td data-label="Created by">GitHub user 777</td>');
+  });
+
+  it('offers only organizations the server still serves', async () => {
+    const { session } = await signIn(orgDashboard([ACME, GLOBEX]));
+    const narrowed = dashboard({ fetch: github.fetch, organizations: [String(ACME.id)] });
+    const page = await (await get(narrowed, '/base/dashboard', session)).text();
+    expect(page).not.toContain('globex');
+    const refused = await post(
+      narrowed,
+      '/base/dashboard/organization',
+      { csrf: await csrf(narrowed, session), organization: String(GLOBEX.id) },
+      session,
+    );
+    expect(refused.status).toBe(400);
   });
 
   it("signs out a session whose organization the server no longer serves", async () => {

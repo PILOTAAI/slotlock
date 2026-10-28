@@ -9,9 +9,11 @@ versioning.
 
 - Organizations in the dashboard: with `SLOTLOCK_DASHBOARD_ORGS` (GitHub organization ids), a
   tenant is an organization, `github-org:<id>`, that its members share. Sign-in asks for `read:org`
-  and reads the person's active memberships; a member of several served organizations switches
-  between them, and someone in none is refused. Removing an organization from the list signs its
-  sessions out and stops its keys in `slotlock serve`. `createSlotlockDashboard` takes
+  and reads the person's active memberships as an owner or member (not a billing manager); a member
+  of several served organizations switches between them, and someone in none is refused. A form
+  works only for the organization it was opened in, and the key list says who made each key.
+  Removing an organization from the list signs its sessions out and stops its keys in `slotlock
+  serve`, which reads the list whether or not it serves the dashboard itself. `createSlotlockDashboard` takes
   `organizations`.
 
 ### Changed

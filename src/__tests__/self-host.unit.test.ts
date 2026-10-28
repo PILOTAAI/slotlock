@@ -423,6 +423,15 @@ describe('slotlock serve configuration', () => {
       ).toEqual(['91', '92']);
     });
 
+    it('reads the organizations without the dashboard, for a dashboard on Cloudflare Workers', () => {
+      const config = readSlotlockServeConfig(serveEnv({ SLOTLOCK_DASHBOARD_ORGS: '91' }));
+      expect(config.dashboard).toBeUndefined();
+      expect(config.organizations).toEqual(['91']);
+      expect(refusal(serveEnv({ SLOTLOCK_DASHBOARD_ORGS: 'acme' })).message).toMatch(
+        /SLOTLOCK_DASHBOARD_ORGS must be/,
+      );
+    });
+
     it.each([
       ['the client id is missing', { SLOTLOCK_GITHUB_CLIENT_ID: undefined }, /SLOTLOCK_GITHUB_CLIENT_ID is required/],
       ['the client id has a space', { SLOTLOCK_GITHUB_CLIENT_ID: 'a b' }, /SLOTLOCK_GITHUB_CLIENT_ID is required/],
