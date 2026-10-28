@@ -77,7 +77,12 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
 | `http://localhost:8080/a2a` | A2A 1.0, same token; card at `/.well-known/agent-card.json` |
 | `http://localhost:8080/v1/…` | [REST](#rest-and-openapi): the tools, and the [application API](#application-api) for admin keys; described at `/openapi.json` |
 | `http://localhost:8080/healthz` | Readiness, including the database |
+| `http://localhost:8080/metrics` | Prometheus metrics, with `Authorization: Bearer <SLOTLOCK_METRICS_TOKEN>`; off without it |
 
+- Metrics count calls by protocol, operation and outcome (`slotlock_calls_total`, with their
+  duration in `slotlock_call_duration_seconds`), confirmations, subscriptions, refusals, maintenance
+  and webhook deliveries. No label names a tenant, key or client. `createSlotlockMetrics` builds
+  them for a server of your own, from its hooks.
 - The server runs as a role that owns nothing and cannot bypass row-level security; a one-off
   `migrate` service applies the schema as the owner.
 - `SLOTLOCK_AVAILABILITY` sets the default bookable hours. A resource can have its own

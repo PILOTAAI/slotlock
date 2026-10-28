@@ -7,6 +7,10 @@ versioning.
 
 ### Added
 
+- Prometheus metrics: with `SLOTLOCK_METRICS_TOKEN`, `slotlock serve` answers `/metrics` to that
+  bearer token: calls by protocol, operation and outcome with their duration, confirmations,
+  subscriptions, refusals, maintenance and webhook deliveries, labelled by closed sets only (never a
+  tenant, key or client). `createSlotlockMetrics` counts the same from a server's own hooks.
 - The booking rule `requireCertain` (`require_certain`): a booking must lie in time every calendar
   sync recording coverage for the resource has read within a day, or it is refused (`uncertain`,
   `booking_rule_uncertain` to an agent), rather than booked over what a stale or failing sync may
