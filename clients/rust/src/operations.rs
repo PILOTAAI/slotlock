@@ -65,6 +65,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
+        name: "slotlock_get_pool_availability",
+        method: "GET",
+        path: "/v1/pool-availability",
+        path_params: &[],
+        query: &["pool", "start", "end"],
+    },
+    Operation {
         name: "slotlock_release_slots",
         method: "DELETE",
         path: "/v1/slot-holds/{hold_id}",
@@ -310,6 +317,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
+        name: "slotlock_delete_coverage",
+        method: "DELETE",
+        path: "/v1/resources/{resource_id}/coverage/{source}",
+        path_params: &["resource_id", "source"],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_get_coverage",
         method: "GET",
         path: "/v1/resources/{resource_id}/coverage",
@@ -491,6 +505,14 @@ pub struct BookPoolInput {
     pub idempotency_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+}
+
+/// The arguments of [`Client::get_pool_availability`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GetPoolAvailabilityInput {
+    pub pool: String,
+    pub start: String,
+    pub end: String,
 }
 
 /// The arguments of [`Client::release_slots`].
@@ -840,6 +862,13 @@ pub struct RecordCoverageInput {
     pub revision: i64,
 }
 
+/// The arguments of [`Client::delete_coverage`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DeleteCoverageInput {
+    pub resource_id: String,
+    pub source: String,
+}
+
 /// The arguments of [`Client::get_coverage`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct GetCoverageInput {
@@ -1017,6 +1046,16 @@ impl Client {
     /// member you may book. A retry with the same idempotency_key answers the same event.
     pub fn book_pool(&self, input: &BookPoolInput) -> Result<Value, Error> {
         self.call("slotlock_book_pool", serde_json::to_value(input)?)
+    }
+
+    /// Get pool availability.
+    ///
+    /// How many members of a pool (a vehicle class, a room type) are free across a window, each
+    /// only where its booking rules let a booking start: the window split where that number
+    /// changes, each part with how many are free, and coverage certainty. Book one with
+    /// slotlock_book_pool. 404 pool_not_found when the pool has no member you may book.
+    pub fn get_pool_availability(&self, input: &GetPoolAvailabilityInput) -> Result<Value, Error> {
+        self.call("slotlock_get_pool_availability", serde_json::to_value(input)?)
     }
 
     /// Release held slots.
@@ -1341,6 +1380,15 @@ impl Client {
     /// nothing.
     pub fn record_coverage(&self, input: &RecordCoverageInput) -> Result<Value, Error> {
         self.call("slotlock_record_coverage", serde_json::to_value(input)?)
+    }
+
+    /// Retire a source.
+    ///
+    /// Forget a source's coverage of the resource, for a calendar sync that is disconnected or
+    /// replaced: free/busy and a resource whose booking rules require certainty stop waiting on
+    /// it. 404 coverage_not_found for a source with no coverage of the resource.
+    pub fn delete_coverage(&self, input: &DeleteCoverageInput) -> Result<Value, Error> {
+        self.call("slotlock_delete_coverage", serde_json::to_value(input)?)
     }
 
     /// A resource's coverage and its health.

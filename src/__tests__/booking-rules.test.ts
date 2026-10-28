@@ -42,6 +42,7 @@ describe('booking rules', () => {
       { slotStepMinutes: 1.5 },
       { turnaroundMinutes: 1_441 },
       { enforceHours: 'yes' },
+      { requireCertain: 1 },
       { bufferBeforeMinutes: 10 },
     ]) {
       expect(() => parseBookingRules(bad), JSON.stringify(bad)).toThrow(TypeError);

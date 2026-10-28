@@ -64,6 +64,13 @@ OPERATIONS: dict[str, Operation] = {
         (),
         (),
     ),
+    "slotlock_get_pool_availability": Operation(
+        "slotlock_get_pool_availability",
+        "GET",
+        "/v1/pool-availability",
+        (),
+        ("pool", "start", "end"),
+    ),
     "slotlock_release_slots": Operation(
         "slotlock_release_slots",
         "DELETE",
@@ -305,6 +312,13 @@ OPERATIONS: dict[str, Operation] = {
     "slotlock_record_coverage": Operation(
         "slotlock_record_coverage",
         "PUT",
+        "/v1/resources/{resource_id}/coverage/{source}",
+        ("resource_id", "source"),
+        (),
+    ),
+    "slotlock_delete_coverage": Operation(
+        "slotlock_delete_coverage",
+        "DELETE",
         "/v1/resources/{resource_id}/coverage/{source}",
         ("resource_id", "source"),
         (),
@@ -592,6 +606,17 @@ class Operations(Transport):
         if title is not None:
             values["title"] = title
         return self.call("slotlock_book_pool", values)
+
+    def get_pool_availability(self, *, pool: str, start: str, end: str) -> dict[str, Any]:
+        """Get pool availability.
+
+        How many members of a pool (a vehicle class, a room type) are free across a window, each
+        only where its booking rules let a booking start: the window split where that number
+        changes, each part with how many are free, and coverage certainty. Book one with
+        slotlock_book_pool. 404 pool_not_found when the pool has no member you may book.
+        """
+        values: dict[str, Any] = {"pool": pool, "start": start, "end": end}
+        return self.call("slotlock_get_pool_availability", values)
 
     def release_slots(self, hold_id: str) -> dict[str, Any]:
         """Release held slots.
@@ -1227,6 +1252,16 @@ class Operations(Transport):
             "revision": revision,
         }
         return self.call("slotlock_record_coverage", values)
+
+    def delete_coverage(self, resource_id: str, source: str) -> dict[str, Any]:
+        """Retire a source.
+
+        Forget a source's coverage of the resource, for a calendar sync that is disconnected or
+        replaced: free/busy and a resource whose booking rules require certainty stop waiting on
+        it. 404 coverage_not_found for a source with no coverage of the resource.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id, "source": source}
+        return self.call("slotlock_delete_coverage", values)
 
     def get_coverage(self, resource_id: str) -> dict[str, Any]:
         """A resource's coverage and its health.

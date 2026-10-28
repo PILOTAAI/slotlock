@@ -42,6 +42,12 @@ export const SLOTLOCK_REST_ROUTES: readonly SlotlockRestRoute[] = Object.freeze(
   { method: 'POST', path: '/v1/bundles', operation: 'slotlock_book_together', refusals: [404, 409] },
   { method: 'POST', path: '/v1/pool-bookings', operation: 'slotlock_book_pool', refusals: [404, 409] },
   {
+    method: 'GET',
+    path: '/v1/pool-availability',
+    operation: 'slotlock_get_pool_availability',
+    refusals: [404, 409],
+  },
+  {
     method: 'DELETE',
     path: '/v1/slot-holds/{hold_id}',
     operation: 'slotlock_release_slots',

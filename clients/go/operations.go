@@ -18,6 +18,7 @@ var operations = func() map[string]operation {
 		{name: "slotlock_hold_slots", method: "POST", path: "/v1/slot-holds", pathParams: nil, query: nil},
 		{name: "slotlock_book_together", method: "POST", path: "/v1/bundles", pathParams: nil, query: nil},
 		{name: "slotlock_book_pool", method: "POST", path: "/v1/pool-bookings", pathParams: nil, query: nil},
+		{name: "slotlock_get_pool_availability", method: "GET", path: "/v1/pool-availability", pathParams: nil, query: []string{"pool", "start", "end"}},
 		{name: "slotlock_release_slots", method: "DELETE", path: "/v1/slot-holds/{hold_id}", pathParams: []string{"hold_id"}, query: nil},
 		{name: "slotlock_list_events", method: "GET", path: "/v1/events", pathParams: nil, query: []string{"resource_ids", "start", "end", "cursor", "limit"}},
 		{name: "slotlock_create_event", method: "POST", path: "/v1/events", pathParams: nil, query: nil},
@@ -53,6 +54,7 @@ var operations = func() map[string]operation {
 		{name: "slotlock_join_waitlist", method: "POST", path: "/v1/waitlist", pathParams: nil, query: nil},
 		{name: "slotlock_leave_waitlist", method: "DELETE", path: "/v1/waitlist/{entry_id}", pathParams: []string{"entry_id"}, query: nil},
 		{name: "slotlock_record_coverage", method: "PUT", path: "/v1/resources/{resource_id}/coverage/{source}", pathParams: []string{"resource_id", "source"}, query: nil},
+		{name: "slotlock_delete_coverage", method: "DELETE", path: "/v1/resources/{resource_id}/coverage/{source}", pathParams: []string{"resource_id", "source"}, query: nil},
 		{name: "slotlock_get_coverage", method: "GET", path: "/v1/resources/{resource_id}/coverage", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_record_coverage_failure", method: "POST", path: "/v1/resources/{resource_id}/coverage/{source}/failure", pathParams: []string{"resource_id", "source"}, query: nil},
 		{name: "slotlock_list_tenant_events", method: "GET", path: "/v1/tenant/events", pathParams: nil, query: []string{"resource_id", "start", "end", "limit", "cursor"}},
@@ -325,6 +327,32 @@ func (in BookPoolInput) values() map[string]any {
 // no member you may book. A retry with the same idempotency_key answers the same event.
 func (c *Client) BookPool(ctx context.Context, in BookPoolInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_book_pool", in.values())
+}
+
+// GetPoolAvailabilityInput holds the arguments of [Client.GetPoolAvailability].
+type GetPoolAvailabilityInput struct {
+	Pool string
+
+	Start string
+
+	End string
+}
+
+func (in GetPoolAvailabilityInput) values() map[string]any {
+	values := map[string]any{}
+	values["pool"] = in.Pool
+	values["start"] = in.Start
+	values["end"] = in.End
+	return values
+}
+
+// GetPoolAvailability: Get pool availability. How many members of a pool (a vehicle class, a room
+// type) are free across a window, each only where its booking rules let a booking start: the
+// window split where that number changes, each part with how many are free, and coverage
+// certainty. Book one with slotlock_book_pool. 404 pool_not_found when the pool has no member you
+// may book.
+func (c *Client) GetPoolAvailability(ctx context.Context, in GetPoolAvailabilityInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_get_pool_availability", in.values())
 }
 
 // ReleaseSlotsInput holds the arguments of [Client.ReleaseSlots].
@@ -1325,6 +1353,28 @@ func (in RecordCoverageInput) values() map[string]any {
 // forward; repeating one changes nothing.
 func (c *Client) RecordCoverage(ctx context.Context, in RecordCoverageInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_record_coverage", in.values())
+}
+
+// DeleteCoverageInput holds the arguments of [Client.DeleteCoverage].
+type DeleteCoverageInput struct {
+	ResourceID string
+
+	Source string
+}
+
+func (in DeleteCoverageInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_id"] = in.ResourceID
+	values["source"] = in.Source
+	return values
+}
+
+// DeleteCoverage: Retire a source. Forget a source's coverage of the resource, for a calendar
+// sync that is disconnected or replaced: free/busy and a resource whose booking rules require
+// certainty stop waiting on it. 404 coverage_not_found for a source with no coverage of the
+// resource.
+func (c *Client) DeleteCoverage(ctx context.Context, in DeleteCoverageInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_delete_coverage", in.values())
 }
 
 // GetCoverageInput holds the arguments of [Client.GetCoverage].

@@ -77,7 +77,12 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
 | `http://localhost:8080/a2a` | A2A 1.0, same token; card at `/.well-known/agent-card.json` |
 | `http://localhost:8080/v1/…` | [REST](#rest-and-openapi): the tools, and the [application API](#application-api) for admin keys; described at `/openapi.json` |
 | `http://localhost:8080/healthz` | Readiness, including the database |
+| `http://localhost:8080/metrics` | Prometheus metrics, with `Authorization: Bearer <SLOTLOCK_METRICS_TOKEN>`; off without it |
 
+- Metrics count calls by protocol, operation and outcome (`slotlock_calls_total`, with their
+  duration in `slotlock_call_duration_seconds`), confirmations, subscriptions, refusals, maintenance
+  and webhook deliveries. No label names a tenant, key or client. `createSlotlockMetrics` builds
+  them for a server of your own, from its hooks.
 - The server runs as a role that owns nothing and cannot bypass row-level security; a one-off
   `migrate` service applies the schema as the owner.
 - `SLOTLOCK_AVAILABILITY` sets the default bookable hours. A resource can have its own
@@ -153,10 +158,13 @@ slotlock rules clear --resource vehicle-42
 | `turnaroundMinutes` | keeps this long free after it: its trailing buffer, which the database enforces |
 | `enforceHours` | lies inside the resource's bookable hours |
 | `checkInMinutes` | is claimed (`checkInReservation`) this long after its start, or maintenance releases it |
+| `requireCertain` | lies in time every calendar sync recording coverage for the resource has read within a day |
 
 - Holds, reservations, moves and agents' events are checked when they are made, by the database's
   clock; a refusal names the rule (`booking_rule_violated` with `rule` in the store,
-  `booking_rule_min_notice`, `_max_advance`, `_slot_step` or `_outside_hours` to an agent).
+  `booking_rule_min_notice`, `_max_advance`, `_slot_step`, `_outside_hours` or `_uncertain` to an
+  agent). Under `requireCertain`, a search (the store's and the tools') needs those syncs' coverage
+  too, read within a day, of the slot and its turnaround, so it offers no slot they leave unproven.
 - A series is judged on its first occurrence for notice and advance, and on every occurrence for
   step and hours. Imported calendar events are not checked: they happened elsewhere.
 - Searches (`slotlock_find_next_available`, `slotlock_find_available_slots`, `findNextAvailableFor`)
@@ -863,6 +871,7 @@ export async function startCalendarServer(config: CalendarServerConfig) {
 | `slotlock_release_slots` | Release a hold and the rest of its group | write |
 | `slotlock_book_together` | Book the same time on 2-20 resources, all or none | write |
 | `slotlock_book_pool` | Book any one free member of a pool (a vehicle class, a room type) | write |
+| `slotlock_get_pool_availability` | How many of a pool's members are free across a window | read |
 | `slotlock_list_events` | Events the caller created in a window | read-only |
 | `slotlock_get_event` | One event the caller created | read-only |
 | `slotlock_create_event` | Create an event of up to 3,660 days (idempotent) | write |
@@ -891,8 +900,9 @@ Rentals sell a class, not a plate. Put interchangeable resources in a pool
 members with `slotlock_list_resources` and `pool`, and book the class with `slotlock_book_pool`,
 which takes the first member that is free and allows the booking, in one transaction: a class of
 five sells exactly five for a time, however many race (`pool_full` after that). To see how many are
-free, search the members with `slotlock_find_available_slots` and `require_free: 1`: each slot names
-the members free in `resource_ids`. `GET /v1/pools` lists the pools with their capacity. The older names `calendar.<verb>` and `calendar_<verb>` still work and
+free, `slotlock_get_pool_availability` splits a window where that number changes; to see which,
+search the members with `slotlock_find_available_slots` and `require_free: 1`: each slot names the
+members free in `resource_ids`. `GET /v1/pools` lists the pools with their capacity. The older names `calendar.<verb>` and `calendar_<verb>` still work and
 are no longer advertised.
 
 ### Errors
@@ -1033,6 +1043,7 @@ never cached. W3C `traceparent`, `tracestate` and `baggage` reach your backend a
 | `DELETE /v1/slot-holds/{hold_id}` | `slotlock_release_slots` |
 | `POST /v1/bundles` | `slotlock_book_together` |
 | `POST /v1/pool-bookings` | `slotlock_book_pool` |
+| `GET /v1/pool-availability` | `slotlock_get_pool_availability` |
 | `GET /v1/events` | `slotlock_list_events` |
 | `POST /v1/events` | `slotlock_create_event` |
 | `GET /v1/events/{event_id}` | `slotlock_get_event` |
@@ -1182,7 +1193,9 @@ not commit. A change carries ids, times and states, never titles, descriptions o
 - Feed health: `GET /v1/resources/{id}/coverage` shows each source's window, when it was last read,
   its last error (`POST /v1/resources/{id}/coverage/{source}/failure` records one) and whether it is
   stale (not read for a day, so the time it covers is unproven, never free). A source that goes stale
-  is put on the feed once, as `coverage.stale`, until it is read again.
+  is put on the feed once, as `coverage.stale`, until it is read again. Retire a sync you have
+  disconnected or replaced with `DELETE /v1/resources/{id}/coverage/{source}` (`deleteCoverage`):
+  nothing waits on it after that, `requireCertain` included.
 - `slotlock serve` delivers (`SLOTLOCK_WEBHOOKS`): never to an address on a private network, which
   it checks when it connects, and following no redirect. `private` allows those, for testing.
 - In the library: `listChanges`, `createWebhookEndpoint` and the rest are store methods, and

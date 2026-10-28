@@ -11,7 +11,7 @@ import type {
   SlotlockApplicationInvocationContext,
 } from './application-api.js';
 import { type SlotlockBookingRule, type SlotlockBookingRules, bookingSearch } from './booking-rules.js';
-import { findNextAvailable } from './engine.js';
+import { findNextAvailable, mergeIntervals } from './engine.js';
 import { expandRules } from './rules.js';
 import { emitVAvailability, parseVAvailability, toJSCalendarEvent } from './interop.js';
 import {
@@ -365,6 +365,7 @@ const BOOKING_RULE_CODES: Readonly<Record<SlotlockBookingRule, string>> = Object
   max_advance: 'booking_rule_max_advance',
   slot_step: 'booking_rule_slot_step',
   outside_hours: 'booking_rule_outside_hours',
+  uncertain: 'booking_rule_uncertain',
 });
 
 function operationError(
@@ -583,6 +584,92 @@ export function createSlotlockStoreAgentBackend(
         }
         throw new SlotlockAgentOperationError('pool_full', 409);
       }, WRITE);
+    },
+
+    async getPoolAvailability(context, input) {
+      const window = interval(input as { start: string; end: string });
+      const pool = input.pool as string;
+      const charge = busyBudget();
+      let windowsLeft = MAX_REQUEST_RULE_WINDOWS;
+      const now = new Date();
+      return withTenant(store, context, async (tenantStore) => {
+        const tenantRef = context.principal.tenantRef;
+        const members = await tenantStore.listPoolMembers({ tenantRef, pool, visibility: 'shared' });
+        if (members.length === 0) throw new SlotlockAgentOperationError('pool_not_found', 404);
+        // Each member's busy time, as edges: a count of busy members that rises and falls.
+        const edges = new Map<number, number>([
+          [window.start.getTime(), 0],
+          [window.end.getTime(), 0],
+        ]);
+        let complete = true;
+        for (const member of members) {
+          const sources = await requiredSources(options, context, member);
+          const freeBusy = await readFreeBusy(tenantStore, {
+            tenantRef,
+            resourceId: member.id,
+            window,
+            requiredSources: [...sources],
+            ...(options.coverageMaxAgeMs !== undefined
+              ? { coverageMaxAgeMs: options.coverageMaxAgeMs }
+              : {}),
+          });
+          charge(freeBusy.busy.length);
+          if (freeBusy.coverage.state !== 'complete') complete = false;
+          // Not free either where its booking rules refuse a booking: before its notice, past how
+          // far ahead it books, and, when it enforces them, outside its bookable hours. Its slot
+          // step is not counted: it moves when a booking may start, not whether the member is free.
+          const rules = member.bookingRules;
+          const search = bookingSearch({ rules, timezone: member.timezone, window, now });
+          const latestStart =
+            rules?.maxAdvanceDays !== undefined
+              ? now.getTime() + rules.maxAdvanceDays * 86_400_000
+              : window.end.getTime();
+          let open: Interval[] = search
+            ? [{ start: search.window.start, end: new Date(Math.min(search.window.end.getTime(), latestStart)) }]
+            : [];
+          if (rules?.enforceHours === true && open.length > 0) {
+            const hours = member.availabilityRules ?? (await options.availabilityRules(context, member));
+            const windows = expandRules(hours, window, member.timezone);
+            windowsLeft -= windows.length;
+            if (windowsLeft < 0) throw new SlotlockAgentOperationError('calendar_work_limit', 400);
+            open = windows.flatMap((hoursWindow) => {
+              const start = Math.max(hoursWindow.start.getTime(), (open[0] as Interval).start.getTime());
+              const end = Math.min(hoursWindow.end.getTime(), (open[0] as Interval).end.getTime());
+              return end > start ? [{ start: new Date(start), end: new Date(end) }] : [];
+            });
+          }
+          const closed: Interval[] = [];
+          let from = window.start.getTime();
+          for (const part of mergeIntervals(open.filter((part) => part.end > part.start))) {
+            if (part.start.getTime() > from) closed.push({ start: new Date(from), end: part.start });
+            from = Math.max(from, part.end.getTime());
+          }
+          if (from < window.end.getTime()) closed.push({ start: new Date(from), end: window.end });
+          for (const taken of mergeIntervals([...freeBusy.busy, ...closed])) {
+            edges.set(taken.start.getTime(), (edges.get(taken.start.getTime()) ?? 0) + 1);
+            edges.set(taken.end.getTime(), (edges.get(taken.end.getTime()) ?? 0) - 1);
+          }
+        }
+        const times = [...edges.keys()].sort((a, b) => a - b);
+        const intervals: { start: string; end: string; free: number }[] = [];
+        let busy = 0;
+        for (const [index, at] of times.entries()) {
+          busy += edges.get(at) ?? 0;
+          const next = times[index + 1];
+          if (next === undefined || at >= window.end.getTime()) break;
+          const free = members.length - busy;
+          const last = intervals.at(-1);
+          // Parts with the same count are one.
+          if (last && last.free === free) last.end = new Date(next).toISOString();
+          else intervals.push({ start: new Date(at).toISOString(), end: new Date(next).toISOString(), free });
+        }
+        return {
+          pool,
+          members: members.length,
+          intervals,
+          coverage: coverageProjection(window, complete),
+        };
+      });
     },
 
     async bookTogether(context, rawInput) {
@@ -1191,6 +1278,7 @@ function bookingRulesOutput(rules: SlotlockBookingRules | undefined) {
     ...(rules.turnaroundMinutes !== undefined ? { turnaround_minutes: rules.turnaroundMinutes } : {}),
     ...(rules.enforceHours !== undefined ? { enforce_hours: rules.enforceHours } : {}),
     ...(rules.checkInMinutes !== undefined ? { check_in_minutes: rules.checkInMinutes } : {}),
+    ...(rules.requireCertain !== undefined ? { require_certain: rules.requireCertain } : {}),
   };
 }
 
@@ -1204,6 +1292,7 @@ function bookingRulesInput(value: unknown): SlotlockBookingRules | null {
   if (input.turnaround_minutes !== undefined) rules.turnaroundMinutes = input.turnaround_minutes as number;
   if (input.enforce_hours !== undefined) rules.enforceHours = input.enforce_hours as boolean;
   if (input.check_in_minutes !== undefined) rules.checkInMinutes = input.check_in_minutes as number;
+  if (input.require_certain !== undefined) rules.requireCertain = input.require_certain as boolean;
   return rules;
 }
 
@@ -1769,6 +1858,19 @@ export function createSlotlockStoreApplicationBackend(
         });
         if (!result.ok) throw applicationRefusal(result.code);
         return { recorded: true };
+      }, WRITE);
+    },
+
+    async deleteCoverage(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const resource = await requireResource(tenant, tenantOf(context), input.resource_id as string);
+        const deleted = await tenant.deleteCoverage({
+          tenantRef: tenantOf(context),
+          resourceId: resource.id,
+          source: input.source as string,
+        });
+        if (!deleted) throw applicationRefusal('coverage_not_found');
+        return { deleted: true };
       }, WRITE);
     },
 

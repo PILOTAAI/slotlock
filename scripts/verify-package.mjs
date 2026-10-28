@@ -120,6 +120,8 @@ const expectedFiles = new Set([
   'index.d.ts',
   'maintenance.js',
   'maintenance.d.ts',
+  'metrics.js',
+  'metrics.d.ts',
   'mcp-app.js',
   'mcp-app.d.ts',
   'mcp-modern.js',
@@ -762,7 +764,7 @@ if (databaseUrl) {
         { jsonrpc: '2.0', id: 2, method: 'tools/list' },
         { 'MCP-Protocol-Version': '2025-11-25' },
       );
-      assert.equal((await tools.json()).result.tools.length, 13);
+      assert.equal((await tools.json()).result.tools.length, 14);
       // The REST API: its document is public, its routes take the same token, and a write that
       // waits for a person (SLOTLOCK_CONFIRM_WRITES=all, set above; the default is none) answers 428.
       const openApi = await fetch(`${listening.address}/openapi.json`);

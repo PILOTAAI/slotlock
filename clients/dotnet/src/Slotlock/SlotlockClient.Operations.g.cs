@@ -23,6 +23,7 @@ public sealed partial class SlotlockClient
         ["slotlock_hold_slots"] = new("POST", "/v1/slot-holds", [], []),
         ["slotlock_book_together"] = new("POST", "/v1/bundles", [], []),
         ["slotlock_book_pool"] = new("POST", "/v1/pool-bookings", [], []),
+        ["slotlock_get_pool_availability"] = new("GET", "/v1/pool-availability", [], ["pool", "start", "end"]),
         ["slotlock_release_slots"] = new("DELETE", "/v1/slot-holds/{hold_id}", ["hold_id"], []),
         ["slotlock_list_events"] = new("GET", "/v1/events", [], ["resource_ids", "start", "end", "cursor", "limit"]),
         ["slotlock_create_event"] = new("POST", "/v1/events", [], []),
@@ -58,6 +59,7 @@ public sealed partial class SlotlockClient
         ["slotlock_join_waitlist"] = new("POST", "/v1/waitlist", [], []),
         ["slotlock_leave_waitlist"] = new("DELETE", "/v1/waitlist/{entry_id}", ["entry_id"], []),
         ["slotlock_record_coverage"] = new("PUT", "/v1/resources/{resource_id}/coverage/{source}", ["resource_id", "source"], []),
+        ["slotlock_delete_coverage"] = new("DELETE", "/v1/resources/{resource_id}/coverage/{source}", ["resource_id", "source"], []),
         ["slotlock_get_coverage"] = new("GET", "/v1/resources/{resource_id}/coverage", ["resource_id"], []),
         ["slotlock_record_coverage_failure"] = new("POST", "/v1/resources/{resource_id}/coverage/{source}/failure", ["resource_id", "source"], []),
         ["slotlock_list_tenant_events"] = new("GET", "/v1/tenant/events", [], ["resource_id", "start", "end", "limit", "cursor"]),
@@ -334,6 +336,32 @@ public sealed partial class SlotlockClient
         values["idempotency_key"] = Json.ToNode(idempotencyKey);
         if (title.HasValue) values["title"] = Json.ToNode(title.Value);
         return CallAsync("slotlock_book_pool", values, cancellationToken);
+    }
+
+    /// <summary>Get pool availability.</summary>
+    /// <remarks>
+    /// How many members of a pool (a vehicle class, a room type) are free across a window, each
+    /// only where its booking rules let a booking start: the window split where that number
+    /// changes, each part with how many are free, and coverage certainty. Book one with
+    /// slotlock_book_pool. 404 pool_not_found when the pool has no member you may book.
+    /// </remarks>
+    /// <param name="pool">pool</param>
+    /// <param name="start">start</param>
+    /// <param name="end">end</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> GetPoolAvailabilityAsync(
+        string pool,
+        string start,
+        string end,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["pool"] = Json.ToNode(pool);
+        values["start"] = Json.ToNode(start);
+        values["end"] = Json.ToNode(end);
+        return CallAsync("slotlock_get_pool_availability", values, cancellationToken);
     }
 
     /// <summary>Release held slots.</summary>
@@ -1353,6 +1381,28 @@ public sealed partial class SlotlockClient
         values["end"] = Json.ToNode(end);
         values["revision"] = Json.ToNode(revision);
         return CallAsync("slotlock_record_coverage", values, cancellationToken);
+    }
+
+    /// <summary>Retire a source.</summary>
+    /// <remarks>
+    /// Forget a source's coverage of the resource, for a calendar sync that is disconnected or
+    /// replaced: free/busy and a resource whose booking rules require certainty stop waiting on
+    /// it. 404 coverage_not_found for a source with no coverage of the resource.
+    /// </remarks>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="source">source</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> DeleteCoverageAsync(
+        string resourceId,
+        string source,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_id"] = Json.ToNode(resourceId);
+        values["source"] = Json.ToNode(source);
+        return CallAsync("slotlock_delete_coverage", values, cancellationToken);
     }
 
     /// <summary>A resource's coverage and its health.</summary>

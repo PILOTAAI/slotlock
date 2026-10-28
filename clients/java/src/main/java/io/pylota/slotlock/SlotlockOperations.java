@@ -20,6 +20,7 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_hold_slots", new Operation("POST", "/v1/slot-holds", List.of(), List.of())),
           Map.entry("slotlock_book_together", new Operation("POST", "/v1/bundles", List.of(), List.of())),
           Map.entry("slotlock_book_pool", new Operation("POST", "/v1/pool-bookings", List.of(), List.of())),
+          Map.entry("slotlock_get_pool_availability", new Operation("GET", "/v1/pool-availability", List.of(), List.of("pool", "start", "end"))),
           Map.entry("slotlock_release_slots", new Operation("DELETE", "/v1/slot-holds/{hold_id}", List.of("hold_id"), List.of())),
           Map.entry("slotlock_list_events", new Operation("GET", "/v1/events", List.of(), List.of("resource_ids", "start", "end", "cursor", "limit"))),
           Map.entry("slotlock_create_event", new Operation("POST", "/v1/events", List.of(), List.of())),
@@ -55,6 +56,7 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_join_waitlist", new Operation("POST", "/v1/waitlist", List.of(), List.of())),
           Map.entry("slotlock_leave_waitlist", new Operation("DELETE", "/v1/waitlist/{entry_id}", List.of("entry_id"), List.of())),
           Map.entry("slotlock_record_coverage", new Operation("PUT", "/v1/resources/{resource_id}/coverage/{source}", List.of("resource_id", "source"), List.of())),
+          Map.entry("slotlock_delete_coverage", new Operation("DELETE", "/v1/resources/{resource_id}/coverage/{source}", List.of("resource_id", "source"), List.of())),
           Map.entry("slotlock_get_coverage", new Operation("GET", "/v1/resources/{resource_id}/coverage", List.of("resource_id"), List.of())),
           Map.entry("slotlock_record_coverage_failure", new Operation("POST", "/v1/resources/{resource_id}/coverage/{source}/failure", List.of("resource_id", "source"), List.of())),
           Map.entry("slotlock_list_tenant_events", new Operation("GET", "/v1/tenant/events", List.of(), List.of("resource_id", "start", "end", "limit", "cursor"))),
@@ -363,6 +365,26 @@ public abstract class SlotlockOperations {
    */
   public Map<String, Object> bookPool(String pool, String startsAt, String endsAt, String timezone, String idempotencyKey) {
     return bookPool(pool, startsAt, endsAt, timezone, idempotencyKey, null);
+  }
+
+  /**
+   * Get pool availability. How many members of a pool (a vehicle class, a room type) are free
+   * across a window, each only where its booking rules let a booking start: the window split
+   * where that number changes, each part with how many are free, and coverage certainty. Book one
+   * with slotlock_book_pool. 404 pool_not_found when the pool has no member you may book.
+   *
+   * @param pool {@code pool}, string
+   * @param start {@code start}, string
+   * @param end {@code end}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> getPoolAvailability(String pool, String start, String end) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("pool", pool);
+    values.put("start", start);
+    values.put("end", end);
+    return call("slotlock_get_pool_availability", values);
   }
 
   /**
@@ -1186,6 +1208,23 @@ public abstract class SlotlockOperations {
     values.put("end", end);
     values.put("revision", revision);
     return call("slotlock_record_coverage", values);
+  }
+
+  /**
+   * Retire a source. Forget a source's coverage of the resource, for a calendar sync that is
+   * disconnected or replaced: free/busy and a resource whose booking rules require certainty stop
+   * waiting on it. 404 coverage_not_found for a source with no coverage of the resource.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param source {@code source}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> deleteCoverage(String resourceId, String source) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("resource_id", resourceId);
+    values.put("source", source);
+    return call("slotlock_delete_coverage", values);
   }
 
   /**

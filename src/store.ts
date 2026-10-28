@@ -1468,6 +1468,9 @@ async function bookingRuling(
   return { rule: judge.broken(interval), turnaroundMs: judge.turnaroundMs };
 }
 
+/** How recently a sync must have read a resource whose booking rules require certainty. */
+const CERTAIN_COVERAGE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
 /**
  * The resource's booking rules, read once, as a check of any interval booked now (by the database's
  * clock at this statement) and the turnaround a booking keeps.
@@ -1500,6 +1503,24 @@ async function bookingJudge(
     archived_at: null,
   });
   const hours = availabilityRules ?? defaultHours;
+  // Every sync covering the resource, and whether it was read within a day, by the same clock.
+  const coverage =
+    rules?.requireCertain === true
+      ? await tx<{ starts_at: Date; ends_at: Date; fresh: boolean }[]>`
+          SELECT starts_at, ends_at,
+                 observed_at >= statement_timestamp()
+                   - make_interval(secs => ${CERTAIN_COVERAGE_MAX_AGE_MS / 1000}) AS fresh
+            FROM slotlock.calendar_coverage WHERE resource_id = ${resourceId}`
+      : [];
+  const turnaroundMs = bookingBufferAfterMs(rules);
+  // The booking and the turnaround it keeps, as a search judges the slot.
+  const uncertain = (interval: Interval) =>
+    coverage.some(
+      (source) =>
+        !source.fresh ||
+        source.starts_at > interval.start ||
+        source.ends_at.getTime() < interval.end.getTime() + turnaroundMs,
+    );
   // A later occurrence of a series is judged on its step and hours only: notice and advance are
   // about when the booking was made, which its first occurrence answers.
   const later =
@@ -1517,8 +1538,8 @@ async function bookingJudge(
         hours,
         interval,
         now: row.now,
-      }),
-    turnaroundMs: bookingBufferAfterMs(rules),
+      }) ?? (uncertain(interval) ? 'uncertain' : null),
+    turnaroundMs,
   };
 }
 
@@ -2392,6 +2413,11 @@ export interface SlotlockStore extends SlotlockEventFeed {
     error: string;
   }): Promise<{ ok: true } | { ok: false; code: 'coverage_not_found' | 'invalid_identity' }>;
   /**
+   * Retire a source (a sync disconnected or replaced): its coverage of the resource is forgotten, so
+   * free/busy and the booking rule `requireCertain` stop waiting on it. False when there was none.
+   */
+  deleteCoverage(params: { tenantRef: string; resourceId: string; source: string }): Promise<boolean>;
+  /**
    * Each source's coverage of one resource and how healthy it is: when it was last read, its last
    * error, and whether it is `stale` (not read for `maxAgeMs`, default a day, as free/busy judges).
    */
@@ -3043,6 +3069,7 @@ export const SLOTLOCK_TENANT_WRITE_METHODS = Object.freeze([
   'deleteWebhookEndpoint',
   'enableWebhookEndpoint',
   'recordCoverageFailure',
+  'deleteCoverage',
   'checkInReservation',
   'joinWaitlist',
   'leaveWaitlist',
@@ -5626,6 +5653,18 @@ function buildSlotlockStore(
       return rows.length > 0 ? { ok: true } : { ok: false, code: 'coverage_not_found' };
     },
 
+    async deleteCoverage(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidIdentity(params.source) || !isValidResourceId(params.resourceId)) {
+        return false;
+      }
+      const rows = await sql`
+        DELETE FROM slotlock.calendar_coverage
+         WHERE tenant_ref = ${params.tenantRef} AND resource_id = ${params.resourceId}
+           AND source = ${params.source}
+         RETURNING source`;
+      return rows.length > 0;
+    },
+
     async listCoverage(params) {
       if (!isValidIdentity(params.tenantRef) || !isValidResourceId(params.resourceId)) {
         throw invalidIdentityError('Slotlock coverage identity is invalid');
@@ -6015,8 +6054,9 @@ function buildSlotlockStore(
           code: 'invalid_coverage_age' as const,
         });
       }
-      const owner = await sql<{ id: string }[]>`
-        SELECT id FROM slotlock.resources
+      const owner = await sql<{ id: string; require_certain: boolean }[]>`
+        SELECT id, COALESCE((booking_rules->>'requireCertain')::boolean, false) AS require_certain
+          FROM slotlock.resources
          WHERE id = ${params.resourceId} AND tenant_ref = ${params.tenantRef}`;
       if (!owner[0]) {
         throw Object.assign(new Error('Slotlock resource belongs to another tenant'), {
@@ -6075,7 +6115,17 @@ function buildSlotlockStore(
           FROM recurring_sources
          WHERE earliest_possible_at < ${window.end}`;
       const localRecurrenceRequired = Number(localRecurrenceCoverage?.source_count ?? 0) > 0;
-      const providerRequiredSources = callerRequiredSources.filter(
+      // A resource that requires certainty requires every sync recording coverage of it, as its
+      // writes do (bookingJudge), and judges them by the same day.
+      const requireCertain = owner[0].require_certain;
+      const recordedSources = requireCertain
+        ? (
+            await sql<{ source: string }[]>`
+              SELECT source FROM slotlock.calendar_coverage
+               WHERE tenant_ref = ${params.tenantRef} AND resource_id = ${params.resourceId}`
+          ).map(({ source }) => source)
+        : [];
+      const providerRequiredSources = [...new Set([...callerRequiredSources, ...recordedSources])].filter(
         (source) => source !== SLOTLOCK_LOCAL_RECURRENCE_COVERAGE_SOURCE,
       );
       if (!localRecurrenceRequired && providerRequiredSources.length === 0) {
@@ -6089,7 +6139,8 @@ function buildSlotlockStore(
           coverage: { state: 'complete', missingSources: [] },
         };
       }
-      const ageSeconds = coverageMaxAgeMs / 1000;
+      const ageSeconds =
+        (requireCertain ? Math.min(coverageMaxAgeMs, CERTAIN_COVERAGE_MAX_AGE_MS) : coverageMaxAgeMs) / 1000;
       const coverageRows =
         providerRequiredSources.length === 0
           ? []

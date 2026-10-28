@@ -29,6 +29,7 @@ export const GROUPS = [
       'slotlock_get_free_busy',
       'slotlock_find_next_available',
       'slotlock_find_available_slots',
+      'slotlock_get_pool_availability',
       'slotlock_list_busy',
       'slotlock_set_resource_availability',
       'slotlock_set_tenant_availability',
@@ -37,6 +38,7 @@ export const GROUPS = [
       'slotlock_record_coverage',
       'slotlock_get_coverage',
       'slotlock_record_coverage_failure',
+      'slotlock_delete_coverage',
     ],
   },
   {
