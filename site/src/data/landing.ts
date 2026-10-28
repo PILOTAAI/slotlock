@@ -23,6 +23,28 @@ const retention = facts.retentionSetting
   ? `${facts.changeRetentionDays} days by default (\`${facts.retentionSetting}\`)`
   : `${facts.changeRetentionDays} days`;
 
+/** A tool's title as the registry gives it, which is what the dashboard shows. */
+const toolTitle = (name: string): string => {
+  const tool = facts.tools.find((entry) => entry.name === name);
+  if (!tool) throw new Error(`landing: no tool ${name} in facts.json`);
+  return tool.title;
+};
+
+/** `A, B and C`. */
+const listed = (items: readonly string[]): string =>
+  items.length < 2 ? (items[0] ?? '') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
+
+/** The dashboard's sidebar, in the order src/dashboard.ts lists it. */
+const dashboardNav = [
+  'Overview',
+  'Resources',
+  'Waitlist',
+  'API keys',
+  'Webhooks',
+  ...(facts.assistant ? ['Assistant'] : []),
+  'Settings',
+];
+
 export interface Heading {
   soft: string;
   strong: string;
@@ -496,7 +518,7 @@ export const dashboard = {
   view: {
     brand: 'Slotlock',
     org: 'acme-rentals',
-    nav: ['Overview', 'Resources', 'Waitlist', 'API keys', 'Webhooks', 'Settings'],
+    nav: dashboardNav,
     title: 'Overview',
     stats: [
       { label: `Booked, next ${facts.dashboardAgendaDays} days`, value: '18' },
@@ -517,7 +539,7 @@ export const dashboard = {
       { text: 'Calendar sync is behind', on: 'Dr Shah', who: 'Slotlock', when: '3 h ago', tone: 'bad' },
     ],
   },
-  aria: `The dashboard's Overview for the GitHub organization acme-rentals. A sidebar lists Overview, Resources, Waitlist, API keys, Webhooks and Settings. Four counts: 18 booked in the next ${facts.dashboardAgendaDays} days, 3 live holds, 12 resources, 4 active keys. Upcoming lists today's van booking, a hold on the same van, an event in Room 3, and tomorrow's booking of a second van. Agent activity lists, newest first: a hold booked by the key booking-agent, a waitlist offer, a no-show released, and a calendar sync that is behind.`,
+  aria: `The dashboard's Overview for the GitHub organization acme-rentals. A sidebar lists ${listed(dashboardNav)}. Four counts: 18 booked in the next ${facts.dashboardAgendaDays} days, 3 live holds, 12 resources, 4 active keys. Upcoming lists today's van booking, a hold on the same van, an event in Room 3, and tomorrow's booking of a second van. Agent activity lists, newest first: a hold booked by the key booking-agent, a waitlist offer, a no-show released, and a calendar sync that is behind.`,
   points: [
     ...(facts.dashboardOrgs
       ? [
@@ -529,7 +551,7 @@ export const dashboard = {
       : []),
     {
       title: 'A page for each part',
-      body: 'Each resource’s hours, booking rules and pool; the waitlist; API keys with the MCP and A2A endpoints; webhooks with each endpoint’s delivery health.',
+      body: `Each resource’s hours, booking rules and pool; the waitlist; API keys with the MCP and A2A endpoints; webhooks with each endpoint’s delivery health${facts.assistant ? '; the assistant' : ''}.`,
     },
     ...(facts.dashboardWorker
       ? [
@@ -541,6 +563,47 @@ export const dashboard = {
       : []),
   ],
   link: { label: 'Dashboard', href: '/docs/dashboard/' },
+  /** The Assistant page (src/dashboard.ts assistantPage), drawn with the labels it shows. */
+  assistant: facts.assistant
+    ? {
+        heading: 'Operate it by chat',
+        view: {
+          path: 'slotlock.example.com/dashboard/assistant',
+          title: 'Assistant',
+          reset: 'New conversation',
+          question: 'Is a van free on 1 March from 09:00 to 11:00? Book one for Ana.',
+          read: `Read: ${toolTitle('slotlock_get_pool_availability')}`,
+          answer: 'Three of the four vans in van-class are free then. I have proposed a booking for Ana.',
+          card: {
+            title: toolTitle('slotlock_book_pool'),
+            state: 'Waiting for you',
+            summary:
+              'Book any one of pool van-class for 2027-03-01 09:00–11:00 UTC+00:00 (Europe/London): "Ana".',
+            fields: [
+              ['pool', 'van-class'],
+              ['starts at', '2027-03-01T09:00:00Z'],
+              ['ends at', '2027-03-01T11:00:00Z'],
+              ['timezone', 'Europe/London'],
+              ['title', 'Ana'],
+            ],
+            approve: 'Approve',
+            dismiss: 'Dismiss',
+          },
+          composer: 'Find a free van tomorrow morning and book it for Ana',
+          send: 'Send',
+          recorded: 'Assistant for @ana',
+        },
+        aria: `The dashboard's Assistant page. A member asks: is a van free on 1 March from 09:00 to 11:00, book one for Ana. A line shows the assistant read the pool's availability, and it answers that three of the four vans in van-class are free then. Below, a proposed change titled ${toolTitle('slotlock_book_pool')}, waiting for the member: book any one of pool van-class for 1 March 2027, 09:00 to 11:00, Europe/London, titled Ana, with every argument listed and Approve and Dismiss buttons. Once approved, activity records it as Assistant for @ana.`,
+        statements: [
+          `Owners connect their organization’s own model in Settings: the ${facts.assistantProviders[0]}, or an ${facts.assistantProviders[1]} API (${listed(facts.assistantCompatible)}). Every member chats on the Assistant page.`,
+          `Reads (free/busy, slots, pool availability, events) answer at once, up to ${facts.assistantMaxSteps} model calls a message.`,
+          'Every write is a proposed change, shown in full on a card. It runs once, when the member approves it, under the same booking rules and limits as an agent, recorded as “Assistant for @login”.',
+          'API keys, webhooks, booking rules, pool membership, coverage and erasure are never offered.',
+          'The model’s API key is sealed with AES-256-GCM and never shown again, only its last four characters.',
+          'A model URL on a loopback, private or metadata address is refused unless the operator sets `SLOTLOCK_ASSISTANT_PRIVATE_URLS=on`. The page works without JavaScript.',
+        ],
+      }
+    : null,
 };
 
 export type CapabilityVisual = 'holds' | 'pools' | 'rules' | 'waitlist' | 'feed' | 'metrics';
@@ -835,6 +898,14 @@ export const faq = {
           {
             q: 'Can a team share one calendar?',
             a: 'Yes. With `SLOTLOCK_DASHBOARD_ORGS`, a GitHub organization is one tenant: its members share the keys, resources and hours, and the key list says who made each key.',
+          },
+        ]
+      : []),
+    ...(facts.assistant
+      ? [
+          {
+            q: 'Can people operate it by chat?',
+            a: `Yes, on the dashboard’s Assistant page, with a model the organization connects (${facts.assistantProviders[0]} or ${facts.assistantProviders[1]}). It reads at once; every change waits on a card until a member approves it. The model’s key is never shown, and conversations are kept ${facts.assistantConversationHours} hours.`,
           },
         ]
       : []),

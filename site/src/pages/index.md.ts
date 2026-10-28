@@ -74,6 +74,13 @@ export const GET: APIRoute = () => {
     dashboard.lede,
     dashboard.aria,
     list(dashboard.points.map((point) => `**${point.title}.** ${point.body}`)),
+    ...(dashboard.assistant
+      ? [
+          `### ${dashboard.assistant.heading}`,
+          dashboard.assistant.aria,
+          list(dashboard.assistant.statements),
+        ]
+      : []),
     `[${dashboard.link.label}](${abs(dashboard.link.href)})`,
     heading(capabilities.heading),
     list(
