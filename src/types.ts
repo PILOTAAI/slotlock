@@ -200,6 +200,11 @@ export type AcquireHoldResult =
   | { ok: false; code: 'recurrence_not_materialized' }
   /** The resource's tenant has as many holds as its `holds` limit, expired ones deleted. */
   | { ok: false; code: 'hold_limit_reached'; limit: number }
+  /**
+   * The holder's live holds would together hold more hours than `maxHeldHoursPerHolder` allows
+   * (`limit`, in hours): one agent cannot keep a resource's month from everyone, a hold at a time.
+   */
+  | { ok: false; code: 'held_time_limit_reached'; limit: number }
   /** The booking breaks one of the resource's booking rules (`SlotlockResource.bookingRules`). */
   | { ok: false; code: 'booking_rule_violated'; rule: SlotlockBookingRule }
   | { ok: false; code: 'overlap'; conflictingReservationId: string | null };

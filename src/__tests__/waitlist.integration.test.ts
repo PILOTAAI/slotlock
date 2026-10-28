@@ -11,7 +11,9 @@ import {
   createSlotlockStoreAgentBackend,
   createSlotlockStoreApplicationBackend,
 } from '../agent-store-backend.js';
+import { SLOTLOCK_DEFAULT_LIMITS } from '../config.js';
 import { maintainSlotlockTenant } from '../maintenance.js';
+import { createSlotlockMaintenanceStore } from '../self-host.js';
 import { SLOTLOCK_MAX_WAITLIST_PER_HOLDER, type SlotlockStore, createSlotlockStore } from '../store.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
@@ -246,6 +248,25 @@ describe.skipIf(!url)('waitlists and check-in (real Postgres)', () => {
       ok: false,
       code: 'waitlist_limit_reached',
     });
+  });
+
+  it("offers through maintenance within the holder's limits, as a request would hold", async () => {
+    const [held, van] = [await resource(), await resource()];
+    const maintenance = createSlotlockMaintenanceStore(sql, { ...SLOTLOCK_DEFAULT_LIMITS.caps, holder_holds: 1 });
+    const hold = await store.withTenant(tenantRef, (tenant) =>
+      tenant.acquireHold({
+        tenantRef, principalRef: 'capped', holderRef: 'capped', idempotencyKey: `cap-${randomUUID()}`,
+        resourceId: held, start: at(60), end: at(61), ttlMs: 10 * MINUTE,
+      }),
+    );
+    expect(hold.ok).toBe(true);
+    expect((await join({ resourceId: van, start: at(60), end: at(61), holderRef: 'capped' })).ok).toBe(true);
+    // Free, but the holder holds all it may: not offered, and still waiting.
+    await maintenance.withTenant(tenantRef, (tenant) => tenant.offerWaitlist({ tenantRef }));
+    expect(await entries({ resourceId: van })).toEqual([expect.objectContaining({ holderRef: 'capped', status: 'waiting' })]);
+    // Under the default limit it is.
+    await offer();
+    expect(await entries({ resourceId: van })).toEqual([expect.objectContaining({ holderRef: 'capped', status: 'offered' })]);
   });
 
   it("shows another tenant none of the waitlist, and lets only the tenant's own entry go", async () => {

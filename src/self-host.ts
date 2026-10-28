@@ -658,7 +658,24 @@ export function createSlotlockServeStore(
     defaultAvailabilityRules: availability,
     tenantLimits: serveTenantLimits(caps),
     maxTenantTransactions: caps.tenant_transactions,
+    maxHoldsPerHolder: caps.holder_holds,
+    maxHeldHoursPerHolder: caps.holder_held_hours,
     tenantLockTimeoutMs: SERVE_LOCK_TIMEOUT_MS,
+  });
+}
+
+/**
+ * The store maintenance writes through, `serve`'s and `maintain`'s: the same tenant and per-holder
+ * limits as requests, so a waitlist offer is a hold like any other.
+ */
+export function createSlotlockMaintenanceStore(
+  sql: SlotlockSql,
+  caps: SlotlockLimits['caps'],
+): SlotlockStore {
+  return createSlotlockStore(sql, {
+    tenantLimits: serveTenantLimits(caps),
+    maxHoldsPerHolder: caps.holder_holds,
+    maxHeldHoursPerHolder: caps.holder_held_hours,
   });
 }
 
@@ -921,7 +938,7 @@ export async function startSlotlockServer(
     const address = await listener.listen({ host: config.host, port: config.port });
     maintenance = startSlotlockMaintenance({
       // One tenant at a time, and its long passes may wait on a request's locks for longer.
-      store: createSlotlockStore(sql, { tenantLimits: serveTenantLimits(caps) }),
+      store: createSlotlockMaintenanceStore(sql, caps),
       sql,
       tenants: [config.tenantRef],
       intervalMs: SERVE_MAINTENANCE_INTERVAL_MS,
@@ -1291,10 +1308,11 @@ function parseKeyScopes(value: string | undefined): SlotlockApiKeyScope[] {
  */
 async function maintainTenant(
   config: SlotlockDatabaseConfig,
+  caps: SlotlockLimits['caps'],
 ): Promise<(Omit<SlotlockMaintenanceResult, 'rollPending'> & { passes: number }) | null> {
   const sql = connect(config.databaseUrl, 2);
   try {
-    const store = createSlotlockStore(sql);
+    const store = createSlotlockMaintenanceStore(sql, caps);
     const total = await withSlotlockMaintenanceLock(sql, config.tenantRef, async () => {
       const sum = {
         extended: 0,
@@ -1469,7 +1487,8 @@ Environment:
                                  tenant_transactions (2: one tenant's database transactions at
                                  once, of the pool's 10); what one tenant may store:
                                  tenant_holds (10000), tenant_reservations, tenant_events and
-                                 tenant_coverage (100000)
+                                 tenant_coverage (100000), holder_holds (20) and
+                                 holder_held_hours (2160), which maintain keeps too
   SLOTLOCK_TRUSTED_PROXY_HEADER  The request field a proxy in front sets to the client address,
                                  such as CF-Connecting-IP (default: the connection's address);
                                  set it only when every request comes through that proxy
@@ -1645,7 +1664,7 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
         return 0;
       }
       case 'maintain': {
-        const result = await maintainTenant(readSlotlockDatabaseConfig(io.env));
+        const result = await maintainTenant(readSlotlockDatabaseConfig(io.env), readLimits(io.env).caps);
         if (!result) {
           io.stderr.write('slotlock: another server is maintaining this tenant now; nothing to do\n');
           return 0;
