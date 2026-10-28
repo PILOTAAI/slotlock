@@ -105,6 +105,11 @@
           "default": "on"
         },
         {
+          "name": "SLOTLOCK_RETENTION_DAYS",
+          "description": "Days of history kept: the change feed and how far back a cursor reaches, retired idempotency answers, ended waitlist entries. 1-3650; default 30.",
+          "format": "number"
+        },
+        {
           "name": "SLOTLOCK_SHARED_LIMITS",
           "description": "on: tenant request budgets (SLOTLOCK_LIMITS' tenant_* and app_*) are shared by every server of a deployment through PostgreSQL, so N servers allow a tenant its rate once, not N times. off: each server keeps its own.",
           "default": "off"

@@ -7,6 +7,11 @@ versioning.
 
 ### Added
 
+- How long history is kept is a setting: `SLOTLOCK_RETENTION_DAYS` (`retentionDays` in
+  `createSlotlockStore`), 1 to 3,650 days, 30 by default. It sets how long the change feed is kept
+  and how far back a cursor reaches, retired idempotency answers and booking references, and ended
+  waitlist entries. Set the same on every server over one database.
+
 - The dashboard is an app with a sidebar: an Overview with the coming week's bookings, events and
   live holds across every resource and the agents' latest changes, named by key; Resources; API
   keys, with the endpoints; and Settings. `SLOTLOCK_DASHBOARD_NAME` (`name` in

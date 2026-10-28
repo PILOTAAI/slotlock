@@ -269,8 +269,14 @@ export function isWebhookUrl(value: unknown): value is string {
   return url.protocol === 'http:' && (url.hostname === 'localhost' || url.hostname === '127.0.0.1');
 }
 
-/** The feed's methods on `sql`: the store's own client, or its tenant transaction. */
-export function slotlockEventFeedMethods(sql: SlotlockSql): SlotlockEventFeed {
+/**
+ * The feed's methods on `sql`: the store's own client, or its tenant transaction. Changes are kept
+ * `retentionDays` (default SLOTLOCK_CHANGE_RETENTION_DAYS), and a cursor reaches back as far.
+ */
+export function slotlockEventFeedMethods(
+  sql: SlotlockSql,
+  retentionDays: number = SLOTLOCK_CHANGE_RETENTION_DAYS,
+): SlotlockEventFeed {
   return {
     async listChanges(params) {
       if (!isIdentity(params.tenantRef)) throw identityError();
@@ -282,7 +288,7 @@ export function slotlockEventFeedMethods(sql: SlotlockSql): SlotlockEventFeed {
       }
       const after = params.after === undefined ? null : decodePosition(params.after);
       if (params.after !== undefined && !after) return { ok: false, code: 'invalid_cursor' };
-      if (after && after.at < Date.now() - SLOTLOCK_CHANGE_RETENTION_DAYS * 86_400_000) {
+      if (after && after.at < Date.now() - retentionDays * 86_400_000) {
         return { ok: false, code: 'cursor_expired' };
       }
       const rows = await sql<ChangeRow[]>`
@@ -541,7 +547,7 @@ export function slotlockEventFeedMethods(sql: SlotlockSql): SlotlockEventFeed {
         WITH doomed AS MATERIALIZED (
           SELECT id FROM slotlock.outbox
            WHERE tenant_ref = ${params.tenantRef}
-             AND occurred_at < now() - make_interval(days => ${SLOTLOCK_CHANGE_RETENTION_DAYS})
+             AND occurred_at < now() - make_interval(days => ${retentionDays})
              -- Nothing an enabled webhook has still to receive, however old.
              AND NOT EXISTS (
                SELECT 1 FROM slotlock.webhook_endpoints endpoint

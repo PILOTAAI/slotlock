@@ -473,6 +473,14 @@ describe('slotlock serve configuration', () => {
     });
   });
 
+  it('reads how many days of history to keep', () => {
+    expect('retentionDays' in readSlotlockServeConfig(serveEnv())).toBe(false);
+    expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_RETENTION_DAYS: '90' })).retentionDays).toBe(90);
+    for (const value of ['0', '3651', '30d', '-1']) {
+      expect(refusal(serveEnv({ SLOTLOCK_RETENTION_DAYS: value })).message).toMatch(/SLOTLOCK_RETENTION_DAYS/);
+    }
+  });
+
   it('reads the database settings alone for migrate and resource', () => {
     expect(readSlotlockDatabaseConfig({ DATABASE_URL, SLOTLOCK_TENANT: 'fleet-7' })).toEqual({
       databaseUrl: DATABASE_URL,

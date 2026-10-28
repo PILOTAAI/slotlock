@@ -275,6 +275,29 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
     await store.eraseTenant({ tenantRef: other });
   });
 
+  it('keeps history as long as the store is told, and reaches back as far', async () => {
+    const other = `feed-retain-${randomUUID()}`;
+    const resource = await store.createResource({ tenantRef: other, externalRef: 'v', timezone: 'UTC' });
+    await store.createExternalReservation({
+      tenantRef: other, externalRef: 'R-1', resourceId: resource.id, start: at(70), end: at(71), bufferAfterMs: 0, revision: 1,
+    });
+    await sql`UPDATE slotlock.outbox SET occurred_at = now() - interval '45 days' WHERE tenant_ref = ${other}`;
+    const yearLong = createSlotlockStore(sql, { retentionDays: 365 });
+    const weekLong = createSlotlockStore(sql, { retentionDays: 7 });
+    // Kept a year, a 45-day-old change stays, and a cursor from then still reads.
+    expect(await yearLong.pruneChanges({ tenantRef: other, limit: 100 })).toBe(0);
+    const old = Buffer.from(`1:1:1:${Date.now() - 45 * 86_400_000}`).toString('base64url');
+    expect(await yearLong.listChanges({ tenantRef: other, after: old })).toMatchObject({ ok: true });
+    expect(await store.listChanges({ tenantRef: other, after: old })).toEqual({ ok: false, code: 'cursor_expired' });
+    // Kept a week, an 8-day-old cursor is expired, and the change is pruned.
+    const week = Buffer.from(`1:1:1:${Date.now() - 8 * 86_400_000}`).toString('base64url');
+    expect(await weekLong.listChanges({ tenantRef: other, after: week })).toEqual({ ok: false, code: 'cursor_expired' });
+    expect(await weekLong.pruneChanges({ tenantRef: other, limit: 100 })).toBeGreaterThan(0);
+    expect(() => createSlotlockStore(sql, { retentionDays: 0 })).toThrow(/retentionDays/);
+    expect(() => createSlotlockStore(sql, { retentionDays: 3_651 })).toThrow(/retentionDays/);
+    await store.eraseTenant({ tenantRef: other });
+  });
+
   it('is erased with the tenant', async () => {
     const other = `feed-erase-${randomUUID()}`;
     const resource = await store.createResource({ tenantRef: other, externalRef: 'v', timezone: 'UTC' });

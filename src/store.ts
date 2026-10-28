@@ -2623,6 +2623,13 @@ export interface SlotlockStoreOptions {
    * to retry. Not set inside a caller's transaction.
    */
   tenantLockTimeoutMs?: number;
+  /**
+   * How many days history is kept, 1-3,650 (default 30): the change feed (and how far back a cursor
+   * reaches), retired idempotency answers and booking references, past events' commands, and
+   * waitlist entries that ended. Maintenance prunes what is older; set the same on every store over
+   * one database, or a cursor may name changes another has pruned.
+   */
+  retentionDays?: number;
 }
 
 /** Per-tenant row limits, each a whole number from 1 to 10,000,000 (resources: to 100,000). */
@@ -3124,6 +3131,12 @@ function buildSlotlockStore(
   }
   const configuredTenantLimits = tenantLimitsOption(options.tenantLimits);
   const { maxTenantTransactions, tenantLockTimeoutMs } = options;
+  const retentionDays = options.retentionDays ?? SLOTLOCK_CHANGE_RETENTION_DAYS;
+  if (!Number.isSafeInteger(retentionDays) || retentionDays < 1 || retentionDays > 3_650) {
+    throw Object.assign(new Error('Slotlock retentionDays must be a whole number from 1 to 3650'), {
+      code: 'invalid_retention' as const,
+    });
+  }
   const whole = (value: number | undefined, max: number) =>
     value === undefined || (Number.isSafeInteger(value) && value >= 1 && value <= max);
   if (!whole(maxTenantTransactions, 1_000) || !whole(tenantLockTimeoutMs, 600_000)) {
@@ -3148,6 +3161,7 @@ function buildSlotlockStore(
     agentOwnerEventQuota: configuredAgentOwnerEventQuota,
     agentOwnerCommandQuota: configuredAgentOwnerCommandQuota,
     tenantLimits: configuredTenantLimits,
+    retentionDays,
   };
 
   /**
@@ -3198,7 +3212,7 @@ function buildSlotlockStore(
   }
 
   const store: SlotlockStore = {
-    ...slotlockEventFeedMethods(sql),
+    ...slotlockEventFeedMethods(sql, retentionDays),
     async applySchema(migrationOptions) {
       // PostgreSQL's IF NOT EXISTS DDL is idempotent after commit but not race-free: two fresh
       // application instances can still collide on pg_namespace/pg_extension unique indexes.
@@ -5332,11 +5346,11 @@ function buildSlotlockStore(
           code: 'invalid_limit' as const,
         });
       }
-      const retentionDays = params.retentionDays ?? SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS;
+      const keepDays = params.retentionDays ?? retentionDays;
       if (
-        !Number.isSafeInteger(retentionDays) ||
-        retentionDays < 1 ||
-        retentionDays > MAX_EVENT_COMMAND_RETENTION_DAYS
+        !Number.isSafeInteger(keepDays) ||
+        keepDays < 1 ||
+        keepDays > MAX_EVENT_COMMAND_RETENTION_DAYS
       ) {
         throw Object.assign(new Error('Slotlock retention window must be 1-3650 days'), {
           code: 'invalid_retention_window' as const,
@@ -5389,7 +5403,7 @@ function buildSlotlockStore(
              WHERE tombstone.tenant_ref = ${params.tenantRef}
                AND tombstone.stray
                AND tombstone.cancelled_at <
-                   clock_timestamp() - (${retentionDays}::int * interval '1 day')
+                   clock_timestamp() - (${keepDays}::int * interval '1 day')
              ORDER BY tombstone.cancelled_at, tombstone.external_ref
              LIMIT ${limit}
              FOR UPDATE OF tombstone SKIP LOCKED
@@ -5428,11 +5442,11 @@ function buildSlotlockStore(
           code: 'invalid_limit' as const,
         });
       }
-      const retentionDays = params.retentionDays ?? SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS;
+      const keepDays = params.retentionDays ?? retentionDays;
       if (
-        !Number.isSafeInteger(retentionDays) ||
-        retentionDays < 1 ||
-        retentionDays > MAX_EVENT_COMMAND_RETENTION_DAYS
+        !Number.isSafeInteger(keepDays) ||
+        keepDays < 1 ||
+        keepDays > MAX_EVENT_COMMAND_RETENTION_DAYS
       ) {
         throw Object.assign(new Error('Slotlock retention window must be 1-3650 days'), {
           code: 'invalid_retention_window' as const,
@@ -5447,7 +5461,7 @@ function buildSlotlockStore(
               FROM slotlock.calendar_event_commands command
              WHERE command.tenant_ref = ${params.tenantRef}
                AND command.created_at <
-                   clock_timestamp() - (${retentionDays}::int * interval '1 day')
+                   clock_timestamp() - (${keepDays}::int * interval '1 day')
              ORDER BY command.created_at, command.owner_ref, command.idempotency_key
              LIMIT ${limit}
              FOR UPDATE OF command SKIP LOCKED
@@ -5470,7 +5484,7 @@ function buildSlotlockStore(
              WHERE tombstone.tenant_ref = ${params.tenantRef}
                AND tombstone.owner_ref LIKE 'agent:%'
                AND tombstone.cancelled_at <
-                   clock_timestamp() - (${retentionDays}::int * interval '1 day')
+                   clock_timestamp() - (${keepDays}::int * interval '1 day')
                AND NOT EXISTS (
                  SELECT 1 FROM slotlock.calendar_event_commands command
                   WHERE command.tenant_ref = tombstone.tenant_ref
@@ -5489,7 +5503,7 @@ function buildSlotlockStore(
                AND tombstone.external_ref = candidate.external_ref
                AND tombstone.owner_ref LIKE 'agent:%'
                AND tombstone.cancelled_at <
-                   clock_timestamp() - (${retentionDays}::int * interval '1 day')
+                   clock_timestamp() - (${keepDays}::int * interval '1 day')
                AND NOT EXISTS (
                  SELECT 1 FROM slotlock.calendar_event_commands command
                   WHERE command.tenant_ref = tombstone.tenant_ref
@@ -5894,7 +5908,7 @@ function buildSlotlockStore(
           await tx`
             DELETE FROM slotlock.waitlist_entries
              WHERE tenant_ref = ${tenantRef} AND status <> 'waiting'
-               AND ends_at < statement_timestamp() - make_interval(days => ${SLOTLOCK_CHANGE_RETENTION_DAYS})`;
+               AND ends_at < statement_timestamp() - make_interval(days => ${retentionDays})`;
         }
         // One page in join order; the caller passes `next` back for the rest.
         const waiting = await tx<WaitlistRow[]>`
