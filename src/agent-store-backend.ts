@@ -654,12 +654,14 @@ export function createSlotlockStoreAgentBackend(
     async releaseSlots(context, input) {
       const id = input.hold_id as string;
       if (!STORE_ID_PATTERN.test(id)) return { released: false };
-      return withTenant(store, context, async (tenantStore) =>
+      const result = await withTenant(store, context, async (tenantStore) =>
         tenantStore.releaseHold(id, {
           tenantRef: context.principal.tenantRef,
           holderRef: agentOwnerRef(context),
         }).then(({ released }) => ({ released })),
       );
+      if (result.released) await offerFreedTime(store, context.principal.tenantRef);
+      return result;
     },
 
     async describeResource(context, resourceId) {
@@ -942,7 +944,7 @@ export function createSlotlockStoreAgentBackend(
       ) {
         throw new SlotlockAgentOperationError('event_not_found', 404);
       }
-      return withTenant(store, context, async (tenantStore) => {
+      const moved = await withTenant(store, context, async (tenantStore) => {
         const current = await tenantStore.getCalendarEvent({
           tenantRef: context.principal.tenantRef,
           ownerRef: agentOwnerRef(context),
@@ -1034,10 +1036,13 @@ export function createSlotlockStoreAgentBackend(
         if (!updated) throw new SlotlockAgentOperationError('store_inconsistent', 503);
         return { event: projectSlotlockCalendarEvent(updated), replayed: result.idempotent };
       }, WRITE);
+      // A moved or shortened event may have freed the time it held.
+      if (!moved.replayed) await offerFreedTime(store, context.principal.tenantRef);
+      return moved;
     },
 
     async deleteEvent(context, input) {
-      return withTenant(store, context, async (tenantStore) => {
+      const deleted = await withTenant(store, context, async (tenantStore) => {
         const externalRef = input.event_id as string;
         const current = await tenantStore.getCalendarEvent({
           tenantRef: context.principal.tenantRef,
@@ -1061,6 +1066,8 @@ export function createSlotlockStoreAgentBackend(
           replayed: result.idempotent,
         };
       }, WRITE);
+      if (!deleted.replayed) await offerFreedTime(store, context.principal.tenantRef);
+      return deleted;
     },
   };
 }
@@ -1642,7 +1649,7 @@ export function createSlotlockStoreApplicationBackend(
     },
 
     async putReservation(context, input) {
-      return withTenant(store, context, async (tenant) => {
+      const put = await withTenant(store, context, async (tenant) => {
         const resource = await requireResource(tenant, tenantOf(context), input.resource_id as string);
         const command = {
           tenantRef: tenantOf(context),
@@ -1661,6 +1668,11 @@ export function createSlotlockStoreApplicationBackend(
         if (!result.ok) throw applicationRefusal(result.code);
         return { reservation: reservationOutput(result.reservation), replayed: result.idempotent };
       }, WRITE);
+      // A move frees the time the booking held.
+      if ((input.revision as number) > 1 && !put.replayed) {
+        await offerFreedTime(store, tenantOf(context));
+      }
+      return put;
     },
 
     async cancelReservation(context, input) {

@@ -545,7 +545,8 @@ waits for a window that is taken now. When it comes free (a cancel, a released o
 no-show), `offerWaitlist` gives it to the entries in the order they joined: the first whose window
 is free, on its resource or the first free member of its pool, gets a hold for its holder, and the
 feed says so (`waitlist.offered`, with `hold_id`). Confirm the hold to book it; let it go and the next
-is offered. Cancels and releases through the API offer at once; maintenance offers the rest and
+is offered. Cancels, releases and moves, whether an agent (MCP, A2A) or the application API makes
+them, offer at once; maintenance offers what lapses on its own (an expired hold, a no-show) and
 expires entries whose window has started (`waitlist.expired`). With `checkInMinutes` in a
 resource's booking rules, maintenance releases a booking made since the rule was set that nobody
 checked in that long after its start, or after it was made for a walk-in (`reservation.no_show`),
