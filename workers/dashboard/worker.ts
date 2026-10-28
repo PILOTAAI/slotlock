@@ -171,6 +171,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       github: { clientId: config.githubClientId, clientSecret: config.githubClientSecret },
       sessionSecret: config.sessionSecret,
       allowedUsers: config.allowedUsers,
+      ...(config.organizations ? { organizations: config.organizations } : {}),
       availability: readAvailability(vars),
       // Cloudflare sets CF-Connecting-IP itself, so one client's sign-ins in flight are capped.
       clientAddress: clientOf,

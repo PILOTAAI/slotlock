@@ -50,6 +50,7 @@ import {
   optional,
   readAvailability,
   readDashboardConfig,
+  readDashboardOrganizations,
   readLimits,
   readSecret,
   readServerUrl,
@@ -104,6 +105,7 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_GITHUB_CLIENT_SECRET',
   'SLOTLOCK_SESSION_SECRET',
   'SLOTLOCK_DASHBOARD_USERS',
+  'SLOTLOCK_DASHBOARD_ORGS',
   'HOST',
   'PORT',
 ] as const);
@@ -193,6 +195,11 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
   availability: readonly WeeklyAvailabilityRule[];
   /** Set exactly when SLOTLOCK_GITHUB_CLIENT_ID is. */
   dashboard?: SlotlockServeDashboardConfig;
+  /**
+   * GitHub organization ids (SLOTLOCK_DASHBOARD_ORGS) whose `github-org:<id>` tenants this server's
+   * keys may act for, whether it serves the dashboard or another server (a Worker) does.
+   */
+  organizations?: string[];
   /**
    * Serve the REST API under /v1, with the application API for admin keys, and its OpenAPI document
    * (SLOTLOCK_REST_API: on unless off).
@@ -345,6 +352,8 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
   if (authToken !== undefined) config.authToken = authToken;
   const dashboard = readDashboardConfig(env);
   if (dashboard !== undefined) config.dashboard = dashboard;
+  const organizations = readDashboardOrganizations(env);
+  if (organizations !== undefined) config.organizations = organizations;
   if (confirmWrites.length > 0 && confirmationSecret !== undefined) {
     config.confirmationSecret = confirmationSecret;
   }
@@ -549,10 +558,13 @@ export interface SlotlockRunningServer {
 }
 
 /**
- * Whether the dashboard's allowlist lets a tenant act: every tenant when there is no dashboard or it
- * allows everyone, and a `github:<id>` tenant only while that id is listed.
+ * Whether the dashboard's allowlists let a tenant act: a `github-org:<id>` tenant only while
+ * SLOTLOCK_DASHBOARD_ORGS lists that organization, wherever the dashboard runs; otherwise every tenant when there is no dashboard or it allows
+ * everyone, and a `github:<id>` tenant only while that id is listed.
  */
 function dashboardAllows(config: SlotlockServeConfig, tenantRef: string): boolean {
+  const orgId = /^github-org:(\d+)$/.exec(tenantRef)?.[1];
+  if (orgId !== undefined) return config.organizations?.includes(orgId) === true;
   const users = config.dashboard?.allowedUsers;
   if (users === undefined || users === '*') return true;
   const githubId = /^github:(\d+)$/.exec(tenantRef)?.[1];
@@ -800,6 +812,9 @@ export async function startSlotlockServer(
             },
             sessionSecret: config.dashboard.sessionSecret,
             allowedUsers: config.dashboard.allowedUsers,
+            ...(config.dashboard.organizations
+              ? { organizations: config.dashboard.organizations }
+              : {}),
             keys: createSlotlockApiKeyStore(sql),
             resources: createSlotlockDashboardResources(store),
             state: createSlotlockDashboardState(sql),
@@ -1372,6 +1387,7 @@ Environment:
   SLOTLOCK_GITHUB_CLIENT_SECRET  That app's client secret (dashboard)
   SLOTLOCK_SESSION_SECRET        Signs dashboard sessions, 32+ random characters (dashboard)
   SLOTLOCK_DASHBOARD_USERS       * or comma-separated GitHub user ids that may sign in (dashboard)
+  SLOTLOCK_DASHBOARD_ORGS        comma-separated GitHub organization ids: each is one shared tenant
   HOST                           Listen address (default 127.0.0.1)
   PORT                           Listen port (default 8080)
 
