@@ -3,6 +3,19 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Fixed
+
+- Upgrading from 0.4, a feed cursor 0.4 gave no longer reads past changes 0.4 pruned: 0.4 pruned
+  by age, not in feed order, so the position 0.5.0 starts each tenant at did not cover every one it
+  took. A cursor 0.4 gave expires after 30 days, as it did in 0.4; one this version gives expires
+  only once a change after it is pruned.
+- A reader starting the feed over reads from the pruned position on, so a change another server
+  left before it (pruning out of order) cannot end a page that is expired at once.
+- The trigger that records how far the feed was pruned is replaced in place, never dropped first,
+  and the upgrade locks the feed while it reads where each tenant starts.
+
 ## 0.5.0 - 2026-10-28
 
 ### Documentation
@@ -21,12 +34,10 @@ versioning.
 - A feed cursor answers `cursor_expired` exactly when a change after it has been deleted, by this
   server's maintenance or any other (an older server's in a rolling deploy, an operator's): a trigger
   on the feed records how far each tenant's was pruned (`slotlock.outbox_pruned`, created once and
-  started at each tenant's oldest kept change). How old a cursor is no longer matters (except one
-  0.4 gave, which still expires after 30 days: 0.4 pruned by age, not in feed order), so a server
+  started at each tenant's oldest kept change). How old a cursor is no longer matters, so a server
   keeping changes longer than the one that pruned them never reads past a gap unseen, and a reader
   that is up to date stays readable. Maintenance prunes the oldest changes in feed order, never past
-  one it keeps or a transaction still running, and a reader starting over reads from the mark, so
-  it always reads on.
+  one it keeps or a transaction still running, so a reader starting over always reads on.
 - One holder's holds are bounded in time as well as number: `maxHeldHoursPerHolder` in
   `createSlotlockStore` refuses a hold that would bring the holder's live holds past that many
   hours together (`held_time_limit_reached`), and `maxHoldsPerHolder` sets the count that was fixed
