@@ -1,3 +1,4 @@
+import { AsyncResource } from 'node:async_hooks';
 import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import {
@@ -691,14 +692,16 @@ export interface SlotlockAgentConfirmationOptions {
 export interface SlotlockAgentSubscriptionOptions {
   /**
    * How often an open subscription re-reads its resources regardless, in ms: 1,000-300,000. Default
-   * 10,000, or 60,000 with `changes`, where it is only the fallback for what the feed does not carry
-   * (bookable hours, a revoked key) and for a feed that stopped.
+   * 10,000, or 15,000 with `changes`, where it is the fallback for what the feed does not carry
+   * (bookable hours, a revoked key or permission) and for a feed that stopped.
    */
   pollIntervalMs?: number;
   /**
    * The change feed to follow (createSlotlockStoreChangeSource, or your own over
-   * SlotlockEventFeed.listChanges): a change is announced within a fraction of a second instead of
-   * at the next re-read.
+   * SlotlockEventFeed.listChanges), polled by one reader per tenant every SLOTLOCK_FEED_BUSY_MS to
+   * SLOTLOCK_FEED_IDLE_MS: a change is announced within about a second instead of at the next
+   * re-read. A subscription re-reads its resources at most once a second, however many changes
+   * touch them.
    */
   changes?: SlotlockAgentChangeSource;
   /** When the server ends a subscription gracefully, in ms: 60,000-86,400,000, default 900,000. */
@@ -2131,6 +2134,8 @@ const INVISIBLE_STATUSES: ReadonlySet<number> = new Set([400, 403, 404]);
 const MAX_RESOURCE_SUBSCRIPTIONS = 20;
 /** Consecutive failed re-reads after which a subscription is abandoned. */
 const MAX_POLL_FAILURES = 3;
+/** The least time between the starts of two re-reads of one subscription a change asked for, in ms. */
+const CHANGE_REREAD_MIN_MS = 1_000;
 
 /** An open subscription, or a slot reserved by one still opening (not yet `streaming`). */
 interface SubscriptionSlot {
@@ -2178,7 +2183,7 @@ function validateSubscriptions(
   };
   const maxTotal = bounded('maxTotal', 1, 10_000, 256);
   return {
-    pollIntervalMs: bounded('pollIntervalMs', 1_000, 300_000, changes ? 60_000 : 10_000),
+    pollIntervalMs: bounded('pollIntervalMs', 1_000, 300_000, changes ? 15_000 : 10_000),
     changes,
     maxDurationMs: bounded('maxDurationMs', 60_000, 86_400_000, 900_000),
     keepAliveMs: bounded('keepAliveMs', 1_000, 60_000, 15_000),
@@ -3672,6 +3677,9 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     let owedAll = false;
     let failures = 0;
     let nextPoll: ReturnType<typeof setTimeout> | undefined;
+    // Changes coalesce: a re-read starts at most once every CHANGE_REREAD_MIN_MS.
+    let lastRefresh = 0;
+    let touchTimer: ReturnType<typeof setTimeout> | undefined;
     const pollRequest = new Request(request.url, {
       method: 'POST',
       headers: request.headers,
@@ -3700,7 +3708,10 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
         return;
       }
       refreshing = true;
+      lastRefresh = Date.now();
       clearTimeout(nextPoll);
+      clearTimeout(touchTimer);
+      touchTimer = undefined;
       try {
         const outcome = await readFreeBusy(
           { request: pollRequest, trace: call.trace },
@@ -3742,17 +3753,37 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
         refreshing = false;
       }
       if (stopped) return;
+      schedule();
       if (again) {
         again = false;
-        void refresh(false);
+        touch(false);
+      }
+    };
+    const touch = (all: boolean): void => {
+      if (stopped) return;
+      if (all) owedAll = true;
+      if (refreshing) {
+        again = true;
         return;
       }
-      schedule();
+      const wait = lastRefresh + CHANGE_REREAD_MIN_MS - Date.now();
+      if (wait <= 0) {
+        void refresh(false);
+      } else if (touchTimer === undefined) {
+        touchTimer = unref(
+          setTimeout(() => {
+            touchTimer = undefined;
+            void refresh(false);
+          }, wait),
+        );
+      }
     };
+    // The tenant's reader is shared and runs outside any request; this subscription's re-reads run
+    // in its own request's async context.
     const watcher: SlotlockChangeWatcher = {
       resourceIds: new Set(watched.resourceIds),
-      touched: () => void refresh(false),
-      resync: () => void refresh(true),
+      touched: AsyncResource.bind(() => touch(false)),
+      resync: AsyncResource.bind(() => touch(true)),
     };
     const leave = changeReaders?.join(principal.tenantRef, watcher);
     schedule();
@@ -3760,6 +3791,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       if (stopped) return;
       stopped = true;
       clearTimeout(nextPoll);
+      clearTimeout(touchTimer);
       stop.abort();
       leave?.();
     };

@@ -1,8 +1,11 @@
 // Following a tenant's change feed for live updates (RFC 0002 P1-5): one reader per tenant per
 // server, shared by every open subscription of that tenant, that reads the feed by cursor and tells
-// each subscription which of its resources a change touched. It wakes when the source says the feed
-// grew (PostgreSQL LISTEN/NOTIFY in self-host.ts) and otherwise reads on a short adaptive interval.
-// A reader knows only its own tenant: it reads that tenant's feed and tells that tenant's watchers.
+// each subscription which of its resources a change touched. It polls the feed on a short adaptive
+// interval: SLOTLOCK_FEED_BUSY_MS after a read that found changes, backing off to
+// SLOTLOCK_FEED_IDLE_MS when quiet, so one tenant with open subscriptions costs one indexed query per
+// interval. A reader knows only its own tenant: it reads that tenant's feed and tells that tenant's
+// watchers. Its reads and callbacks run outside any request's async context.
+import { AsyncResource } from 'node:async_hooks';
 
 /** What a reader needs from a change: the calendar resource it touched, if any. */
 export interface SlotlockAgentChange {
@@ -22,9 +25,10 @@ export interface SlotlockAgentChangeSource {
     | { ok: false; code: string }
   >;
   /**
-   * Call `wake` whenever the tenant's feed may have grown, until the returned stop function is
-   * called. A wake carries nothing but itself. Optional: without it the feed is read every
-   * `FEED_IDLE_MS` when quiet.
+   * Optional, for a custom source that learns of new changes itself: call `wake` whenever the
+   * tenant's feed may have grown, until the returned stop function is called. A wake carries nothing
+   * but itself, and reads stay at least SLOTLOCK_FEED_BUSY_MS apart. Without it (the store's own
+   * source) the feed is polled. If it throws or rejects, the reader polls instead.
    */
   watch?(tenantRef: string, wake: () => void): Promise<() => unknown>;
 }
@@ -40,12 +44,15 @@ export interface SlotlockChangeWatcher {
 
 /** Changes read per page. */
 const FEED_PAGE = 500;
-/** How soon the feed is read again after a read that found changes, in ms. */
-const FEED_BUSY_MS = 250;
-/** The longest a quiet feed goes unread without a wake-up source, in ms. */
-export const FEED_IDLE_MS = 2_000;
-/** The longest a quiet feed goes unread while a wake-up source is listening, in ms. */
-export const FEED_LISTENING_IDLE_MS = 15_000;
+/**
+ * How soon a tenant's feed is read again after a read that found changes, in ms; also the least time
+ * between the starts of two reads of one tenant's feed, however often it is woken.
+ */
+export const SLOTLOCK_FEED_BUSY_MS = 250;
+/** How often a quiet tenant's feed is read, in ms: the poll backs off to this from the busy rate. */
+export const SLOTLOCK_FEED_IDLE_MS = 1_000;
+/** How often a quiet feed is read while a custom source's `watch` is listening, in ms. */
+const FEED_LISTENING_IDLE_MS = 15_000;
 
 interface TenantReader {
   watchers: Set<SlotlockChangeWatcher>;
@@ -57,6 +64,8 @@ interface TenantReader {
   closed: boolean;
   listening: boolean;
   delay: number;
+  /** When the last read started (Date.now()), to keep reads SLOTLOCK_FEED_BUSY_MS apart. */
+  lastStart: number;
   timer?: ReturnType<typeof setTimeout>;
   stopWatch?: () => unknown;
 }
@@ -79,6 +88,9 @@ export function createSlotlockChangeReaders(
   readonly size: number;
 } {
   const readers = new Map<string, TenantReader>();
+  // Created with the server, outside any request: a reader shared by many subscriptions must not run
+  // its reads and its watchers' callbacks in the async context of whichever request started it.
+  const scope = new AsyncResource('SlotlockChangeReader');
 
   function schedule(tenantRef: string, reader: TenantReader, delay: number): void {
     if (reader.closed) return;
@@ -103,11 +115,18 @@ export function createSlotlockChangeReaders(
       reader.again = true;
       return;
     }
+    const wait = reader.lastStart + SLOTLOCK_FEED_BUSY_MS - Date.now();
+    if (wait > 0) {
+      // Too soon after the last read began: read once when the spacing is up.
+      schedule(tenantRef, reader, wait);
+      return;
+    }
+    reader.lastStart = Date.now();
     reader.reading = true;
     clearTimeout(reader.timer);
     const joined = [...reader.joined];
     reader.joined.clear();
-    const idle = reader.listening ? FEED_LISTENING_IDLE_MS : FEED_IDLE_MS;
+    const idle = reader.listening ? FEED_LISTENING_IDLE_MS : SLOTLOCK_FEED_IDLE_MS;
     let found = false;
     try {
       let touched: Set<string> | 'all' = new Set();
@@ -153,7 +172,9 @@ export function createSlotlockChangeReaders(
       for (const watcher of joined) {
         if (!told.has(watcher) && reader.watchers.has(watcher)) watcher.touched();
       }
-      reader.delay = found ? FEED_BUSY_MS : Math.min(Math.max(reader.delay * 2, FEED_BUSY_MS), idle);
+      reader.delay = found
+        ? SLOTLOCK_FEED_BUSY_MS
+        : Math.min(Math.max(reader.delay * 2, SLOTLOCK_FEED_BUSY_MS), idle);
     } catch (error) {
       onError(error);
       for (const watcher of joined) reader.joined.add(watcher);
@@ -170,56 +191,65 @@ export function createSlotlockChangeReaders(
     }
   }
 
+  function join(tenantRef: string, watcher: SlotlockChangeWatcher): () => void {
+    let reader = readers.get(tenantRef);
+    if (!reader) {
+      const created: TenantReader = {
+        watchers: new Set(),
+        joined: new Set(),
+        reading: false,
+        again: false,
+        closed: false,
+        listening: false,
+        delay: SLOTLOCK_FEED_BUSY_MS,
+        lastStart: 0,
+      };
+      reader = created;
+      readers.set(tenantRef, created);
+      const { watch } = source;
+      if (watch) {
+        // A wake comes in whatever context the source calls it from; the read runs in the reader's.
+        const wake = scope.bind(() => {
+          // A wake while quiet reads at once; a read under way reads again when it ends.
+          if (!created.closed) void read(tenantRef, created);
+        });
+        // A source that throws, rejects or returns no stop function leaves the reader polling.
+        Promise.resolve()
+          .then(() => watch.call(source, tenantRef, wake))
+          .then((stopWatch) => {
+            if (typeof stopWatch !== 'function') {
+              throw new Error('slotlock: subscriptions.changes.watch returned no stop function');
+            }
+            if (created.closed) {
+              return Promise.resolve(stopWatch()).then(() => undefined);
+            }
+            created.stopWatch = stopWatch;
+            created.listening = true;
+            return undefined;
+          })
+          .catch(onError);
+      }
+    }
+    const current = reader;
+    current.watchers.add(watcher);
+    current.joined.add(watcher);
+    void read(tenantRef, current);
+    let left = false;
+    return () => {
+      if (left) return;
+      left = true;
+      current.watchers.delete(watcher);
+      current.joined.delete(watcher);
+      if (current.watchers.size === 0) stop(tenantRef, current);
+    };
+  }
+
   return {
     get size() {
       return readers.size;
     },
     join(tenantRef, watcher) {
-      let reader = readers.get(tenantRef);
-      if (!reader) {
-        const created: TenantReader = {
-          watchers: new Set(),
-          joined: new Set(),
-          reading: false,
-          again: false,
-          closed: false,
-          listening: false,
-          delay: FEED_BUSY_MS,
-        };
-        reader = created;
-        readers.set(tenantRef, created);
-        if (source.watch) {
-          source
-            .watch(tenantRef, () => {
-              if (created.closed) return;
-              // A wake while quiet reads at once; a read under way reads again when it ends.
-              void read(tenantRef, created);
-            })
-            .then(
-              (stopWatch) => {
-                if (created.closed) {
-                  Promise.resolve(stopWatch()).catch(onError);
-                  return;
-                }
-                created.stopWatch = stopWatch;
-                created.listening = true;
-              },
-              onError,
-            );
-        }
-      }
-      const current = reader;
-      current.watchers.add(watcher);
-      current.joined.add(watcher);
-      void read(tenantRef, current);
-      let left = false;
-      return () => {
-        if (left) return;
-        left = true;
-        current.watchers.delete(watcher);
-        current.joined.delete(watcher);
-        if (current.watchers.size === 0) stop(tenantRef, current);
-      };
+      return scope.runInAsyncScope(() => join(tenantRef, watcher));
     },
   };
 }

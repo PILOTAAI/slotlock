@@ -1,7 +1,7 @@
-// Live updates from the change feed against real Postgres (RFC 0002 P1-5): a commit that appends to
-// a tenant's feed NOTIFYs that tenant's channel only, with no payload; the store's change source
-// reads the tenant's own feed under row-level security; and an MCP subscriber hears of a booking
-// within a short bound, with no 10-second re-read. Skipped without DATABASE_URL.
+// Live updates from the change feed against real Postgres (RFC 0002 P1-5): no NOTIFY anywhere (it
+// would serialize every outbox commit on the cluster-wide notify lock); the tenant's reader polls its
+// own feed, at most once a second when idle; and an MCP subscriber hears of a booking within 1.5 s,
+// with no 10-second re-read. Skipped without DATABASE_URL.
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -9,8 +9,8 @@ import { createSlotlockAgentServer, slotlockCalendarResourceUri } from '../agent
 import {
   createSlotlockStoreAgentBackend,
   createSlotlockStoreChangeSource,
-  slotlockChangeChannel,
 } from '../agent-store-backend.js';
+import { SLOTLOCK_CORE_DDL, SLOTLOCK_STRUCTURE_DDL } from '../ddl.js';
 import { type SlotlockStore, createSlotlockStore } from '../store.js';
 import { SseReader, modernRequest } from './helpers/modern-mcp.js';
 
@@ -55,46 +55,40 @@ describe.skipIf(!url)('live updates from the change feed (real Postgres)', () =>
     if (!booked.ok) throw new Error(booked.code);
   };
 
-  it("wakes only the tenant whose feed grew, with no payload, and reads only that tenant's changes", async () => {
-    const vanA = await van(tenantA);
-    const vanB = await van(tenantB);
-    const source = createSlotlockStoreChangeSource(store, sql);
-    const payloads: string[] = [];
-    const listening = await sql.listen(slotlockChangeChannel(tenantA), (payload) => payloads.push(payload));
-    const wakes = { a: 0, b: 0 };
-    const stopA = await source.watch?.(tenantA, () => {
-      wakes.a += 1;
-    });
-    const stopB = await source.watch?.(tenantB, () => {
-      wakes.b += 1;
-    });
-    // Each listener wakes once when it starts listening.
-    await vi.waitFor(() => expect(wakes).toEqual({ a: 1, b: 1 }));
-    const headA = await source.head(tenantA);
-    const headB = await source.head(tenantB);
-
-    await book(tenantA, vanA, 1);
-    await vi.waitFor(() => expect(wakes.a).toBe(2), { timeout: 2_000 });
-    expect(payloads).toEqual(['']);
-    const pageA = await source.listChanges({ tenantRef: tenantA, after: headA, limit: 500 });
-    expect(pageA).toMatchObject({ ok: true, changes: [{ resourceId: vanA }] });
-
-    // Tenant b's feed is unchanged and its listener was never woken by tenant a's commit.
-    const pageB = await source.listChanges({ tenantRef: tenantB, after: headB, limit: 500 });
-    expect(pageB).toMatchObject({ ok: true, changes: [] });
-    expect(wakes.b).toBe(1);
-
-    await book(tenantB, vanB, 1);
-    await vi.waitFor(() => expect(wakes.b).toBe(2), { timeout: 2_000 });
-    expect(wakes.a).toBe(2);
-    await stopA?.();
-    await stopB?.();
-    await listening.unlisten();
+  it('takes no NOTIFY lock: the DDL has no pg_notify, and applying it drops a leftover trigger', async () => {
+    for (const ddl of [SLOTLOCK_CORE_DDL, SLOTLOCK_STRUCTURE_DDL]) {
+      expect(ddl).not.toMatch(/pg_notify|\bNOTIFY\b/);
+    }
+    // What a database that applied the pre-release NOTIFY trigger still has.
+    await sql.unsafe(`
+      CREATE OR REPLACE FUNCTION slotlock.outbox_notify() RETURNS trigger LANGUAGE plpgsql AS $f$
+      BEGIN PERFORM pg_catalog.pg_notify('slotlock_feed_leftover', ''); RETURN NULL; END $f$;
+      CREATE OR REPLACE TRIGGER slotlock_outbox_notify
+        AFTER INSERT ON slotlock.outbox REFERENCING NEW TABLE AS added
+        FOR EACH STATEMENT EXECUTE FUNCTION slotlock.outbox_notify();`);
+    const leftovers = async () => [
+      ...(await sql`SELECT tgname FROM pg_catalog.pg_trigger
+        WHERE tgrelid = 'slotlock.outbox'::regclass AND tgname = 'slotlock_outbox_notify'`),
+      ...(await sql`SELECT proname FROM pg_catalog.pg_proc
+        WHERE pronamespace = 'slotlock'::regnamespace AND proname = 'outbox_notify'`),
+    ];
+    expect(await leftovers()).toHaveLength(2);
+    await store.applySchema();
+    expect(await leftovers()).toEqual([]);
   });
 
-  it('announces a booking to an MCP subscriber within two seconds, with the re-read at five minutes', async () => {
+  it('announces a booking to an MCP subscriber within 1.5 s by polling, at most one feed query a second when idle', async () => {
     const vanA = await van(tenantA);
     const otherA = await van(tenantA);
+    const source = createSlotlockStoreChangeSource(store, sql);
+    let feedQueries = 0;
+    const changes: typeof source = {
+      head: (tenantRef) => source.head(tenantRef),
+      listChanges: (params) => {
+        feedQueries += 1;
+        return source.listChanges(params);
+      },
+    };
     const server = createSlotlockAgentServer({
       publicBaseUrl: 'http://localhost/slotlock',
       allowInsecureLocalhost: true,
@@ -103,7 +97,7 @@ describe.skipIf(!url)('live updates from the change feed (real Postgres)', () =>
       authenticate: async () => ({ subject: 'live-test', tenantRef: tenantA }),
       authorize: async () => true,
       health: async () => ({ ready: true, checks: [] }),
-      subscriptions: { pollIntervalMs: 300_000, changes: createSlotlockStoreChangeSource(store, sql) },
+      subscriptions: { pollIntervalMs: 300_000, changes },
     });
     const stream = new SseReader(
       await server.fetch(
@@ -124,20 +118,27 @@ describe.skipIf(!url)('live updates from the change feed (real Postgres)', () =>
       }
     })();
 
+    // Idle, the tenant's reader polls its feed at most once a second (one indexed query).
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    feedQueries = 0;
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    expect(feedQueries).toBeGreaterThanOrEqual(2);
+    expect(feedQueries).toBeLessThanOrEqual(4);
+
     // A booking of another of the tenant's vans is read from the feed and announces nothing.
     await book(tenantA, otherA, 2);
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
     expect(messages).toEqual([]);
 
     const booked = Date.now();
     await book(tenantA, vanA, 3);
-    await vi.waitFor(() => expect(messages).toHaveLength(1), { timeout: 2_000, interval: 20 });
-    expect(Date.now() - booked).toBeLessThan(2_000);
+    await vi.waitFor(() => expect(messages).toHaveLength(1), { timeout: 1_500, interval: 20 });
+    expect(Date.now() - booked).toBeLessThan(1_500);
     expect(messages[0]).toMatchObject({
       method: 'notifications/resources/updated',
       params: { uri: slotlockCalendarResourceUri(vanA) },
     });
     await stream.cancel();
     await server.shutdown();
-  });
+  }, 15_000);
 });

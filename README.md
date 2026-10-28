@@ -851,7 +851,7 @@ const ALLOWED_OPERATIONS: ReadonlySet<SlotlockAgentOperation> = new Set([
 
 export interface CalendarServerConfig {
   store: SlotlockStore;
-  /** The store's client: live updates LISTEN on it for the database's wake-ups. */
+  /** The store's client: live updates read the change feed's head with it. */
   sql: Sql;
   publicBaseUrl: string;
   port: number;
@@ -1056,14 +1056,14 @@ returns busy time and coverage for the next `resourceWindowDays` (30). `subscrip
 
 - With `subscriptions.changes` (`createSlotlockStoreChangeSource(store, sql)`; `slotlock serve`
   sets it), changes come from the tenant's change feed: one reader per tenant per process, shared by
-  all its subscriptions, follows the feed by cursor and is woken by PostgreSQL `LISTEN/NOTIFY` at
-  each commit. The notification names a digest of the tenant and carries nothing else; the reader
-  reads only its own tenant's feed, under row-level security. A change re-reads the subscriptions
-  watching its resource, and each announces only what actually changed in its window. Without a
-  wake-up (a pooler in transaction mode drops `LISTEN`) the feed is read every 2 s when quiet, one
-  indexed query per tenant. A cursor the feed has pruned past announces every watched resource
-  once, then follows from now.
-- Each subscription is also re-read every `pollIntervalMs` (60 s with a feed, 10 s without one,
+  all its subscriptions, polls the feed by cursor, one indexed query per read, under the tenant's
+  row-level security. It reads again 250 ms after a read that found changes
+  (`SLOTLOCK_FEED_BUSY_MS`, also the least gap between two reads) and backs off to once a second
+  when quiet (`SLOTLOCK_FEED_IDLE_MS`), so a booking is announced within about a second. A change
+  re-reads the subscriptions watching its resource, at most once a second each however many
+  changes arrive, and each announces only what actually changed in its window. A cursor the feed
+  has pruned past announces every watched resource once, then follows from now.
+- Each subscription is also re-read every `pollIntervalMs` (15 s with a feed, 10 s without one,
   which is then the only way changes are found), re-checking the caller each time, so a revoked key
   or what the feed does not carry (bookable hours) is caught.
 - A subscription ends after `maxDurationMs` (15 minutes), on `shutdown()`, or when access is lost.
@@ -1530,9 +1530,9 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
 7. Monitor conflicts, refused rules, sync lag, capped maintenance runs, quota errors and confirmation outcomes.
 8. Keep writes confirmation-gated wherever your policy needs a person (`slotlock serve`:
    `SLOTLOCK_CONFIRM_WRITES`, `none` by default).
-9. Size live updates: one feed query per tenant with an open subscription per wake-up (or per 2 s
-   without `LISTEN`), a backend read per subscription a change touches, and at most `maxTotal`
-   backend reads per `pollIntervalMs`.
+9. Size live updates: one indexed feed query per second per tenant with an open subscription (four
+   a second while its feed is busy), at most one backend read a second per subscription a change
+   touches, and at most `maxTotal` backend reads per `pollIntervalMs`.
 10. Give each agent its own API key with the narrowest scope and an expiry.
 11. After each deployment, check it end to end with a short-lived admin key, then revoke the key:
     `SLOTLOCK_URL=https://… SLOTLOCK_ADMIN_KEY=… node scripts/smoke-deployment.mjs`, from a clone

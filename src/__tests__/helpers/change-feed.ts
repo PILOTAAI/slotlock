@@ -1,5 +1,6 @@
 // An in-memory change feed for live-update tests: each tenant's changes in order, a position that is
-// the count read so far, a wake-up per tenant like LISTEN/NOTIFY, and an expired cursor on demand.
+// the count read so far, an optional wake-up per tenant (a custom source's `watch`), and an expired
+// cursor on demand.
 import { vi } from 'vitest';
 import type { SlotlockAgentChangeSource } from '../../change-watch.js';
 
@@ -34,7 +35,7 @@ export function createFakeChangeFeed(options: { wakes?: boolean } = {}) {
   } satisfies SlotlockAgentChangeSource;
   return {
     source,
-    /** Append a change for the tenant and wake its listener, as a commit's NOTIFY would. */
+    /** Append a change for the tenant and wake its listener, if any. */
     publish(tenantRef: string, resourceId: string | null) {
       log(tenantRef).push({ resourceId });
       listeners.get(tenantRef)?.();

@@ -142,9 +142,13 @@ export {
   createSlotlockStoreApplicationBackend,
   createSlotlockStoreChangeSource,
   projectSlotlockCalendarEvent,
-  slotlockChangeChannel,
 } from './agent-store-backend.js';
-export type { SlotlockAgentChange, SlotlockAgentChangeSource } from './change-watch.js';
+export {
+  SLOTLOCK_FEED_BUSY_MS,
+  SLOTLOCK_FEED_IDLE_MS,
+  type SlotlockAgentChange,
+  type SlotlockAgentChangeSource,
+} from './change-watch.js';
 export type {
   SlotlockStoreAgentBackendOptions,
   SlotlockStoreApplicationBackendOptions,

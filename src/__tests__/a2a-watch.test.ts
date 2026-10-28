@@ -156,7 +156,7 @@ describe('the A2A watch skill', () => {
 
     busy.set('vehicle-a', [{ start: '2027-03-02T09:00:00.000Z', end: '2027-03-02T10:00:00.000Z' }]);
     feed.publish('tenant-a', 'vehicle-a');
-    await vi.advanceTimersByTimeAsync(250);
+    await vi.advanceTimersByTimeAsync(1_000);
     expect(await stream.message()).toMatchObject({
       result: {
         statusUpdate: {
@@ -184,7 +184,7 @@ describe('the A2A watch skill', () => {
     await vi.advanceTimersByTimeAsync(0);
     authenticate.mockResolvedValue(null);
     feed.publish('tenant-a', 'vehicle-a');
-    await vi.advanceTimersByTimeAsync(250);
+    await vi.advanceTimersByTimeAsync(1_000);
     expect(await stream.message()).toMatchObject({
       result: {
         statusUpdate: {

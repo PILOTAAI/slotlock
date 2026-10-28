@@ -23,7 +23,7 @@ const ALLOWED_OPERATIONS: ReadonlySet<SlotlockAgentOperation> = new Set([
 
 export interface CalendarServerConfig {
   store: SlotlockStore;
-  /** The store's client: live updates LISTEN on it for the database's wake-ups. */
+  /** The store's client: live updates read the change feed's head with it. */
   sql: Sql;
   publicBaseUrl: string;
   port: number;
