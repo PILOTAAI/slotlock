@@ -74,6 +74,9 @@ behind.
 - **Traces:** every call takes a W3C `traceparent` (the header, or MCP `_meta`) and reports it in
   `onEvent` (`traceId`), so an OpenTelemetry exporter can join Slotlock's spans to the caller's.
   `slotlock serve` writes each call as a JSON line with `trace_id`.
+- **Metrics:** with `SLOTLOCK_METRICS_TOKEN`, `slotlock serve` answers Prometheus at `/metrics`:
+  `slotlock_calls_total` and `slotlock_call_duration_seconds` by protocol, operation and outcome,
+  refusals, maintenance and webhook deliveries. Labels never name a tenant.
 - **SLOs worth publishing:** availability of `/healthz`; p99 latency of `slotlock_create_event`
   and free/busy; the share of webhook deliveries within a minute; maintenance passes that finish.
 - **Signals to alert on:** `server_busy` (503) rising, `coverage.stale` on the change feed,
