@@ -21,6 +21,8 @@ export const SUMMARIES = {
   slotlock_release_slots: 'Release one of your holds and the rest of its group at once.',
   slotlock_book_together: 'Book the same time on 2-20 resources at once, all or none.',
   slotlock_book_pool: 'Book any one member of a pool, such as a vehicle class, for a time.',
+  slotlock_get_pool_availability:
+    'How many members of a pool are free across a window, such as vans free each hour.',
   slotlock_create_event:
     'Book time on a resource. If the time is taken, the database refuses it with `overlap`.',
   slotlock_get_event: 'Read one event this caller created.',
@@ -41,6 +43,8 @@ export const DETAILS = {
     'Each free candidate is held for `ttl_seconds`, busy for everyone else; a taken one is listed in `refused` with its code. Book one with `slotlock_create_event`’s `hold_id`: the others are released in the same transaction. A hold is yours alone, and one agent may have 20 live at once.',
   slotlock_book_pool:
     'Members are tried in a fixed order (the order `slotlock_list_resources` with `pool` lists them) and the first that is free and allows the booking is booked, in one transaction: a class of five sells exactly five bookings for a time, however many race. The event names the member. A retry with the same key answers the member it booked, even if an earlier one has since come free.',
+  slotlock_get_pool_availability:
+    'The window is split where the number of free members changes; each part says how many are free, counting only the members you may book, and each only where its booking rules let a booking start (after its notice, within how far ahead it books, inside its hours when it enforces them). A member’s slot step is not counted. The count is certain only when `coverage.certainty` is `certain`. Book one of them with `slotlock_book_pool`.',
   slotlock_book_together:
     'One event per resource, in one transaction: if any resource is taken or breaks its booking rules, nothing is booked and the refusal names that `resource_id`. Bundles take their resources in one order, so two racing over the same ones end with one booked and one refused, never stuck. Find the time first with `slotlock_find_available_slots` and `require_free`.',
   slotlock_release_slots:
@@ -173,6 +177,7 @@ export const TOOL_ERRORS = {
   slotlock_find_available_slots: ['resource_not_found', 'invalid_arguments'],
   slotlock_hold_slots: ['holds_unavailable', 'idempotency_conflict'],
   slotlock_release_slots: ['holds_unavailable'],
+  slotlock_get_pool_availability: ['pool_not_found', 'pools_unavailable'],
   slotlock_book_pool: [
     'pool_full',
     'pool_not_found',
