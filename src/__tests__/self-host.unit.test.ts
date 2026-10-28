@@ -423,6 +423,17 @@ describe('slotlock serve configuration', () => {
       ).toEqual(['91', '92']);
     });
 
+    it('reads a metrics token only when strong and unlike every other secret', () => {
+      expect('metricsToken' in readSlotlockServeConfig(serveEnv())).toBe(false);
+      const token = secret();
+      expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_METRICS_TOKEN: token })).metricsToken).toBe(token);
+      expect(refusal(serveEnv({ SLOTLOCK_METRICS_TOKEN: 'z'.repeat(40) })).message).toMatch(/SLOTLOCK_METRICS_TOKEN/);
+      const shared = secret();
+      const message = refusal(serveEnv({ SLOTLOCK_AUTH_TOKEN: shared, SLOTLOCK_METRICS_TOKEN: shared })).message;
+      expect(message).toMatch(/SLOTLOCK_METRICS_TOKEN must differ/);
+      expect(message).not.toContain(shared);
+    });
+
     it('reads the name the dashboard calls the deployment', () => {
       expect(
         readSlotlockServeConfig(dashboardEnv({ SLOTLOCK_DASHBOARD_NAME: ' Acme Fleet ' })).dashboard

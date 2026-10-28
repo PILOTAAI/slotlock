@@ -80,6 +80,11 @@
           "isSecret": true
         },
         {
+          "name": "SLOTLOCK_METRICS_TOKEN",
+          "description": "Serves Prometheus metrics at /metrics to this bearer token: at least 32 random characters, different from every other secret. Off without it.",
+          "isSecret": true
+        },
+        {
           "name": "PORT",
           "description": "Port the server listens on inside the container.",
           "format": "number",

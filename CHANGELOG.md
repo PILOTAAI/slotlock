@@ -7,6 +7,11 @@ versioning.
 
 ### Added
 
+- Prometheus metrics: with `SLOTLOCK_METRICS_TOKEN`, `slotlock serve` answers `/metrics` to that
+  bearer token: calls by protocol, operation and outcome with their duration, confirmations,
+  subscriptions, refusals, maintenance and webhook deliveries, labelled by closed sets only (never a
+  tenant, key or client). `createSlotlockMetrics` counts the same from a server's own hooks.
+
 - The dashboard is an app with a sidebar: an Overview with the coming week's bookings, events and
   live holds across every resource and the agents' latest changes, named by key; Resources; API
   keys, with the endpoints; and Settings. `SLOTLOCK_DASHBOARD_NAME` (`name` in

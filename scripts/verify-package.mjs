@@ -120,6 +120,8 @@ const expectedFiles = new Set([
   'index.d.ts',
   'maintenance.js',
   'maintenance.d.ts',
+  'metrics.js',
+  'metrics.d.ts',
   'mcp-app.js',
   'mcp-app.d.ts',
   'mcp-modern.js',
