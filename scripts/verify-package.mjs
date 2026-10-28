@@ -380,7 +380,8 @@ try {
     await fetch(address.origin + '/slotlock/.well-known/agent-card.json')
   ).json();
   assert.equal(agentCard.supportedInterfaces[0].protocolVersion, SLOTLOCK_A2A_PROTOCOL_VERSION);
-  assert.equal(agentCard.capabilities.streaming, false);
+  assert.equal(agentCard.capabilities.streaming, true);
+  assert.equal(agentCard.capabilities.pushNotifications, false);
 
   const unauthorized = await fetch(address.origin + '/slotlock/mcp', {
     method: 'POST',
