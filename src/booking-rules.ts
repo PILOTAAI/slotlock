@@ -117,6 +117,41 @@ export function parseBookingRules(value: unknown): SlotlockBookingRules {
 }
 
 /**
+ * The rules that apply to a resource, merged from its own and its pool's and tenant's defaults
+ * (each validated when it was set), read leniently: each field is kept when it is valid on its own
+ * and dropped (named in `dropped`) when not. No cross-field check: a merge may join a pool's offset
+ * to a resource's own shorter step, and the offset then applies modulo the step. A merge never
+ * reads as refusing every booking.
+ */
+export function parseEffectiveBookingRules(value: unknown): { rules: SlotlockBookingRules; dropped: string[] } {
+  const rules: SlotlockBookingRules = {};
+  const dropped: string[] = [];
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return { rules, dropped: ['(not an object)'] };
+  }
+  for (const [key, field] of Object.entries(value as Record<string, unknown>)) {
+    if (key === 'enforceHours' || key === 'requireCertain') {
+      if (typeof field === 'boolean') rules[key] = field;
+      else dropped.push(key);
+      continue;
+    }
+    const limits = (LIMITS as Record<string, readonly [number, number]>)[key];
+    if (
+      limits === undefined ||
+      typeof field !== 'number' ||
+      !Number.isSafeInteger(field) ||
+      field < limits[0] ||
+      field > limits[1]
+    ) {
+      dropped.push(key);
+      continue;
+    }
+    rules[key as keyof typeof LIMITS] = field;
+  }
+  return { rules, dropped };
+}
+
+/**
  * Default booking rules for a tenant or a pool from untrusted input: booking rules without
  * `checkInMinutes`, which only a resource's own rules set (it releases the bookings made after it
  * was set, and that moment is the resource's).

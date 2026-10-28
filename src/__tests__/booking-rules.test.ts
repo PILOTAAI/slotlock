@@ -10,6 +10,7 @@ import {
   nextStepStart,
   parseBookingRuleDefaults,
   parseBookingRules,
+  parseEffectiveBookingRules,
 } from '../booking-rules.js';
 import { findNextAvailable } from '../engine.js';
 import { expandRules } from '../rules.js';
@@ -66,6 +67,27 @@ describe('booking rules', () => {
       bufferBeforeMinutes: 15,
     });
     expect(() => parseBookingRuleDefaults({ checkInMinutes: 15 })).toThrow(TypeError);
+  });
+
+  it('reads merged rules leniently: an offset past a shorter step applies modulo it, a bad field is dropped', () => {
+    const merged = parseEffectiveBookingRules({ slotStepMinutes: 30, stepOffsetMinutes: 45, minNoticeMinutes: 60 });
+    expect(merged).toEqual({ rules: { slotStepMinutes: 30, stepOffsetMinutes: 45, minNoticeMinutes: 60 }, dropped: [] });
+    const judge = (start: string) =>
+      bookingRuleBroken({
+        rules: merged.rules,
+        timezone: 'UTC',
+        hours: WEEKDAYS,
+        interval: { start: d(start), end: d('2027-03-01T11:30:00Z') },
+        now,
+      });
+    expect(judge('2027-03-01T10:15:00Z')).toBeNull();
+    expect(judge('2027-03-01T10:45:00Z')).toBeNull();
+    expect(judge('2027-03-01T10:30:00Z')).toBe('slot_step');
+    // Nothing is refused wholesale: the valid fields apply, the rest are named.
+    expect(parseEffectiveBookingRules({ minNoticeMinutes: -5, turnaroundMinutes: 10, other: 1 })).toEqual({
+      rules: { turnaroundMinutes: 10 },
+      dropped: ['minNoticeMinutes', 'other'],
+    });
   });
 
   it('starts steps past local midnight by the offset, in the resource’s zone', () => {

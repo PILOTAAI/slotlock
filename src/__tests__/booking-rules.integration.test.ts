@@ -164,6 +164,10 @@ describe.skipIf(!url)('booking rules on writes and searches (real Postgres)', ()
       UPDATE slotlock.reservations SET occupied_starts_at = starts_at
        WHERE resource_id = ${id} AND buffer_before_ms > 0`).rejects.toMatchObject({ code: '23514' });
     await expect(insert(at(13), at(14), 24 * HOUR + 1)).rejects.toMatchObject({ code: '23514' });
+    // Nor may it be cleared: a NULL occupied start reads as the start, dropping the buffer.
+    await expect(sql`
+      UPDATE slotlock.reservations SET occupied_starts_at = NULL
+       WHERE resource_id = ${id} AND buffer_before_ms > 0`).rejects.toMatchObject({ code: '23514' });
     // Free/busy reads the occupied time: the 11:00-11:01 lead is busy too.
     expect(await store.getFreeBusy({ tenantRef, resourceId: id, window: { start: at(9), end: at(13) } })).toMatchObject({
       busy: [{ start: at(10), end: at(12) }],

@@ -9,6 +9,7 @@ import {
   bookingSearchBlocked,
   bookingSearchReach,
   parseBookingRuleDefaults,
+  parseEffectiveBookingRules,
   bookingBufferAfterMs,
   bookingRuleBroken,
   bookingSearch,
@@ -1628,6 +1629,8 @@ function pgCode(err: unknown): string | undefined {
 
 /** Members a pool booking or search considers at most, in id order. */
 export const SLOTLOCK_MAX_POOL_MEMBERS = 100;
+/** The most pools of one tenant that may have default booking rules (`setBookingRuleDefaults`). */
+export const SLOTLOCK_MAX_POOL_RULE_DEFAULTS = 1_000;
 
 /** A pool's name: 1-100 of a-z, 0-9, `.`, `_` and `-`, starting with a letter or digit. */
 interface WaitlistRow {
@@ -1736,7 +1739,14 @@ function toResource(row: ResourceRow): SlotlockResource {
     resource.bookingRules = storedBookingRules(row.booking_rules);
   }
   if (row.effective_booking_rules !== null && row.effective_booking_rules !== undefined) {
-    resource.effectiveBookingRules = storedBookingRules(row.effective_booking_rules);
+    // Merged from levels each validated alone: read leniently, never as refusing everything.
+    const { rules, dropped } = parseEffectiveBookingRules(row.effective_booking_rules);
+    if (dropped.length > 0) {
+      console.warn(
+        JSON.stringify({ message: 'slotlock ignored invalid booking rules', resource: row.id, dropped }),
+      );
+    }
+    if (Object.keys(rules).length > 0) resource.effectiveBookingRules = rules;
   }
   return resource;
 }
@@ -2175,7 +2185,9 @@ export interface SlotlockStore extends SlotlockEventFeed {
    * resource's rules as they apply (`effectiveBookingRules`) are the tenant's, overlaid by its
    * pool's, overlaid by its own, a field set at a narrower level winning. They apply to bookings made
    * from then on. `checkInMinutes` is only a resource's own (`invalid_booking_rules`, as for rules
-   * outside their bounds); `pool` is a pool name (`invalid_pool`). Returns the rules stored.
+   * outside their bounds); `pool` is a pool name (`invalid_pool`). At most
+   * SLOTLOCK_MAX_POOL_RULE_DEFAULTS pools a tenant have them (`pool_rules_limit_reached` for one
+   * more). Returns the rules stored.
    */
   setBookingRuleDefaults(params: {
     tenantRef: string;
@@ -3845,12 +3857,29 @@ function buildSlotlockStore(
           code: 'invalid_booking_rules' as const,
         });
       }
-      await sql`
-        INSERT INTO slotlock.booking_rule_defaults (tenant_ref, pool_ref, rules)
-        VALUES (${params.tenantRef}, ${pool}, ${sql.json({ ...rules })}::jsonb)
-        ON CONFLICT (tenant_ref, pool_ref)
-        DO UPDATE SET rules = EXCLUDED.rules, updated_at = statement_timestamp()`;
-      return rules;
+      const tenantRef = params.tenantRef;
+      return inTransaction(sql, async (tx) => {
+        if (pool !== '') {
+          // Counted under the tenant's lock, so racing writes stop at the cap.
+          await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`slotlock:rule-defaults:${tenantRef}`}, 0))`;
+          const [counted] = await tx<{ pools: number; exists: boolean }[]>`
+            SELECT count(*)::int AS pools, bool_or(pool_ref = ${pool}) IS TRUE AS exists
+              FROM slotlock.booking_rule_defaults
+             WHERE tenant_ref = ${tenantRef} AND pool_ref <> ''`;
+          if (!counted?.exists && (counted?.pools ?? 0) >= SLOTLOCK_MAX_POOL_RULE_DEFAULTS) {
+            throw Object.assign(
+              new Error(`Slotlock keeps default booking rules for at most ${SLOTLOCK_MAX_POOL_RULE_DEFAULTS} pools a tenant`),
+              { code: 'pool_rules_limit_reached' as const, limit: SLOTLOCK_MAX_POOL_RULE_DEFAULTS },
+            );
+          }
+        }
+        await tx`
+          INSERT INTO slotlock.booking_rule_defaults (tenant_ref, pool_ref, rules)
+          VALUES (${tenantRef}, ${pool}, ${tx.json({ ...rules })}::jsonb)
+          ON CONFLICT (tenant_ref, pool_ref)
+          DO UPDATE SET rules = EXCLUDED.rules, updated_at = statement_timestamp()`;
+        return rules;
+      });
     },
 
     async getBookingRuleDefaults(params) {
@@ -3861,7 +3890,7 @@ function buildSlotlockStore(
         SELECT pool_ref, rules FROM slotlock.booking_rule_defaults
          WHERE tenant_ref = ${params.tenantRef}
          ORDER BY pool_ref
-         LIMIT 1001`;
+         LIMIT ${SLOTLOCK_MAX_POOL_RULE_DEFAULTS + 1}`;
       const defaults: SlotlockBookingRuleDefaults = { tenant: null, pools: {} };
       for (const row of rows) {
         const rules = storedBookingRules(row.rules);

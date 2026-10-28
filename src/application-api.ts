@@ -606,7 +606,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_set_pool_booking_rules',
       title: "Set a pool's booking rules",
       description:
-        "Set the booking rules every member of one pool has unless its own rules set the same rule, over the tenant's defaults, from now on; `null` clears them. They take any resource rule but check_in_minutes.",
+        "Set the booking rules every member of one pool has unless its own rules set the same rule, over the tenant's defaults, from now on; `null` clears them. They take any resource rule but check_in_minutes. At most 1,000 pools have them: one more is 409 pool_rules_limit_reached.",
       method: 'PUT',
       path: '/v1/pools/{pool}/booking-rules',
       input: z.object({ pool: POOL, rules: DEFAULT_BOOKING_RULES.nullable() }).strict(),

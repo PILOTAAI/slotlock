@@ -20,6 +20,8 @@ describe.skipIf(!url)('default booking rules (real Postgres, application role)',
   const password = randomBytes(24).toString('hex');
   const tenant = `rules-defaults-${randomUUID()}`;
   const other = `rules-defaults-${randomUUID()}`;
+  const third = `rules-defaults-${randomUUID()}`;
+  const many = `rules-defaults-${randomUUID()}`;
   let admin: ReturnType<typeof postgres>;
   let application: ReturnType<typeof postgres>;
   let store: SlotlockStore;
@@ -44,7 +46,7 @@ describe.skipIf(!url)('default booking rules (real Postgres, application role)',
   });
 
   afterAll(async () => {
-    for (const ref of [tenant, other]) await admin`SELECT * FROM slotlock.erase_tenant(${ref}::text)`;
+    for (const ref of [tenant, other, third, many]) await admin`SELECT * FROM slotlock.erase_tenant(${ref}::text)`;
     await application?.end({ timeout: 5 });
     await admin.unsafe(`DROP OWNED BY ${role}`).catch(() => undefined);
     await admin.unsafe(`DROP ROLE IF EXISTS ${role}`);
@@ -62,10 +64,10 @@ describe.skipIf(!url)('default booking rules (real Postgres, application role)',
     });
   }
 
-  const book = (resourceId: string, start: Date, end: Date) =>
-    as(tenant, (scoped) =>
+  const book = (resourceId: string, start: Date, end: Date, tenantRef = tenant) =>
+    as(tenantRef, (scoped) =>
       scoped.createExternalReservation({
-        tenantRef: tenant,
+        tenantRef,
         externalRef: `b-${randomUUID()}`,
         resourceId,
         start,
@@ -158,6 +160,86 @@ describe.skipIf(!url)('default booking rules (real Postgres, application role)',
     });
   });
 
+  it('applies an offset merged onto a shorter step modulo the step, never locking the resource', async () => {
+    // A pool's step and offset under a resource's own shorter step.
+    const pooled = await resource(tenant, 'hourly');
+    await as(tenant, async (scoped) => {
+      await scoped.setBookingRuleDefaults({
+        tenantRef: tenant,
+        pool: 'hourly',
+        rules: { slotStepMinutes: 60, stepOffsetMinutes: 45 },
+      });
+      await scoped.setResourceBookingRules({ tenantRef: tenant, id: pooled, rules: { slotStepMinutes: 30 } });
+    });
+    expect(
+      await as(tenant, async (scoped) => (await scoped.getResource({ tenantRef: tenant, id: pooled }))?.effectiveBookingRules),
+    ).toMatchObject({ slotStepMinutes: 30, stepOffsetMinutes: 45 });
+    // 45 past a 30-minute step is 15 past it: :15 and :45.
+    expect(await book(pooled, at(30, 15), at(31))).toMatchObject({ ok: true });
+    expect(await book(pooled, at(31, 45), at(32, 15))).toMatchObject({ ok: true });
+    expect(await book(pooled, at(33), at(34))).toMatchObject({ ok: false, rule: 'slot_step' });
+
+    // The tenant's step and offset under a pool's shorter step.
+    const member = await resource(third, 'short');
+    await as(third, async (scoped) => {
+      await scoped.setBookingRuleDefaults({
+        tenantRef: third,
+        pool: null,
+        rules: { slotStepMinutes: 60, stepOffsetMinutes: 45 },
+      });
+      await scoped.setBookingRuleDefaults({ tenantRef: third, pool: 'short', rules: { slotStepMinutes: 20 } });
+    });
+    // 45 past a 20-minute step is 5 past it.
+    expect(await book(member, at(30, 5), at(31), third)).toMatchObject({ ok: true });
+    expect(await book(member, at(31, 25), at(32), third)).toMatchObject({ ok: true });
+    expect(await book(member, at(33), at(34), third)).toMatchObject({ ok: false, rule: 'slot_step' });
+    const slot = await as(third, (scoped) =>
+      scoped.findNextAvailableFor({
+        tenantRef: third,
+        resourceId: member,
+        searchWindow: { start: at(35, 1), end: at(40) },
+        durationMs: HOUR,
+        rules: [{ rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR,SA,SU', startMinutes: 0, durationMinutes: 24 * 60 }],
+      }),
+    );
+    expect(slot).toEqual({ start: at(35, 5), end: at(36, 5) });
+  });
+
+  it('keeps default rules for at most 1,000 pools a tenant, and reads them all back', async () => {
+    await admin`
+      INSERT INTO slotlock.booking_rule_defaults (tenant_ref, pool_ref, rules)
+      SELECT ${many}, 'pool-' || lpad(n::text, 4, '0'), '{"minNoticeMinutes": 1}'::jsonb
+        FROM generate_series(1, 999) AS n`;
+    await as(many, async (scoped) => {
+      await scoped.setBookingRuleDefaults({ tenantRef: many, pool: null, rules: { minNoticeMinutes: 2 } });
+      // The 1,000th pool fits; the 1,001st is refused; one already there may still change.
+      await scoped.setBookingRuleDefaults({ tenantRef: many, pool: 'zz-last', rules: { minNoticeMinutes: 3 } });
+      await expect(
+        scoped.setBookingRuleDefaults({ tenantRef: many, pool: 'zz-over', rules: { minNoticeMinutes: 3 } }),
+      ).rejects.toMatchObject({ code: 'pool_rules_limit_reached', limit: 1_000 });
+      expect(
+        await scoped.setBookingRuleDefaults({ tenantRef: many, pool: 'pool-0001', rules: { minNoticeMinutes: 4 } }),
+      ).toEqual({ minNoticeMinutes: 4 });
+      const defaults = await scoped.getBookingRuleDefaults({ tenantRef: many });
+      expect(defaults.tenant).toEqual({ minNoticeMinutes: 2 });
+      expect(Object.keys(defaults.pools)).toHaveLength(1_000);
+      expect(defaults.pools['zz-last']).toEqual({ minNoticeMinutes: 3 });
+    });
+    const backend = createSlotlockStoreApplicationBackend(store);
+    const context = (operation: string): SlotlockApplicationInvocationContext => ({
+      principal: { subject: 'app', tenantRef: many },
+      operation: operation as SlotlockApplicationInvocationContext['operation'],
+      signal: new AbortController().signal,
+    });
+    await expect(
+      backend.setPoolBookingRules(context('slotlock_set_pool_booking_rules'), { pool: 'zz-over', rules: {} }),
+    ).rejects.toMatchObject({ code: 'pool_rules_limit_reached', status: 409 });
+    const listed = (await backend.getBookingRuleDefaults(context('slotlock_get_booking_rule_defaults'), {})) as {
+      pools: unknown[];
+    };
+    expect(listed.pools).toHaveLength(1_000);
+  });
+
   it('refuses check-in, unknown rules and bad pool names as defaults', async () => {
     await as(tenant, async (scoped) => {
       await expect(
@@ -206,7 +288,7 @@ describe.skipIf(!url)('default booking rules (real Postgres, application role)',
       SELECT * FROM slotlock.erase_tenant(${other}::text)`;
     expect(Number(erased.find((row) => row.erased_table === 'booking_rule_defaults')?.erased_rows)).toBe(1);
     expect(await count(other)).toBe(0);
-    expect(await count(tenant)).toBe(1);
+    expect(await count(tenant)).toBe(2);
   });
 
   it('serves them over the application API', async () => {
@@ -231,6 +313,7 @@ describe.skipIf(!url)('default booking rules (real Postgres, application role)',
     expect(defaults).toEqual({
       tenant: { min_notice_minutes: 30, buffer_before_minutes: 10 },
       pools: [
+        { pool: 'hourly', rules: { slot_step_minutes: 60, step_offset_minutes: 45 } },
         { pool: 'suv', rules: { slot_step_minutes: 30, step_offset_minutes: 15 } },
         { pool: 'van', rules: { min_notice_minutes: 0, buffer_before_minutes: 15 } },
       ],

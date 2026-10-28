@@ -1847,6 +1847,17 @@ describe('resource detail, webhooks and the waitlist', () => {
     expect(page).toContain(
       'Inherited: Minimum notice 120 (every resource); Buffer before 15 (pool van); Only inside bookable hours (pool van).',
     );
+    // An inherited on-or-off rule is a choice of its default, on or off, so it can be turned off here.
+    expect(page).toContain(
+      '<select name="enforce_hours"><option value="" selected>As its default (on, pool van)</option><option value="1">On</option><option value="0">Off</option></select>',
+    );
+    expect(page).toContain('name="require_certain" value="1"> Only in time');
+    const token0 = await csrf(withDefaults, session);
+    await post(withDefaults, '/base/dashboard/resources/rules', { csrf: token0, id: OWN, enforce_hours: '0' }, session);
+    expect(store.setRules).toHaveBeenLastCalledWith('github:4242', OWN, { enforceHours: false }, 'github:4242');
+    const off = await (await get(withDefaults, `/base/dashboard/resources/${OWN}`, session)).text();
+    expect(off).toContain('<option value="0" selected>Off</option>');
+    row.bookingRules = { turnaroundMinutes: 10 };
     // Without the defaults, what applies beyond its own is said to come from defaults.
     delete row.bookingRules;
     row.effectiveBookingRules = { minNoticeMinutes: 30 };

@@ -1551,6 +1551,17 @@ ${current ? html`<p class="fine">Membership is read from GitHub when you sign in
       const from = inherited.get(name);
       return html`<label>${label}<span class="unit-input"><input type="number" inputmode="numeric" min="${String(RULE_LIMITS[name][0])}" max="${String(RULE_LIMITS[name][1])}" name="${RULE_FIELDS[name]}" value="${rules[name] === undefined ? '' : String(rules[name])}"${from ? html` placeholder="${String(from.value)}"` : html``}><span>${unit}</span></span></label>`;
     };
+    // On or off: a checkbox, or, once a default sets it (or the resource turned it off), a choice
+    // of the default, on or off, so a resource can turn an inherited rule off.
+    const toggle = (name: 'enforceHours' | 'requireCertain', key: string, label: string) => {
+      const from = inherited.get(name);
+      if (from === undefined && rules[name] !== false) {
+        return html`<label class="choice"><input type="checkbox" name="${key}" value="1"${rules[name] ? html` checked` : html``}> ${label}</label>`;
+      }
+      const chosen = (value: boolean | undefined) => (rules[name] === value ? html` selected` : html``);
+      const fallback = from ? `As its default (${from.value ? 'on' : 'off'}, ${from.from})` : 'Off';
+      return html`<label>${label}<select name="${key}"><option value=""${chosen(undefined)}>${fallback}</option><option value="1"${chosen(true)}>On</option><option value="0"${chosen(false)}>Off</option></select></label>`;
+    };
     const content = html`${noticeOf(notice)}
 <p><a class="back" href="${root}/resources">Resources</a></p>
 ${pageHead(resourceName(resource, resource.id))}
@@ -1574,8 +1585,8 @@ ${field('bufferBeforeMinutes', 'Kept free before each booking', 'min')}
 ${field('turnaroundMinutes', 'Turnaround after each booking', 'min')}
 ${field('checkInMinutes', 'Release if not checked in after', 'min')}
 </div>
-<label class="choice"><input type="checkbox" name="enforce_hours" value="1"${rules.enforceHours ? html` checked` : html``}> Only inside bookable hours</label>
-<label class="choice"><input type="checkbox" name="require_certain" value="1"${rules.requireCertain ? html` checked` : html``}> Only in time its calendar syncs have read today</label>
+${toggle('enforceHours', 'enforce_hours', 'Only inside bookable hours')}
+${toggle('requireCertain', 'require_certain', 'Only in time its calendar syncs have read today')}
 ${inheritedNote(inherited)}
 <p class="fine">Leave a field empty for no rule${inherited.size > 0 ? ' of its own' : ''}.</p>
 <button class="primary" type="submit">Save rules</button>
@@ -1626,8 +1637,15 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
       }
       rules[name] = Number(value);
     }
-    if (form.get('enforce_hours') === '1') rules.enforceHours = true;
-    if (form.get('require_certain') === '1') rules.requireCertain = true;
+    // '1' on, '0' off (over a default that is on), anything else not set.
+    const choice = (key: string) => {
+      const value = form.get(key);
+      return value === '1' ? true : value === '0' ? false : undefined;
+    };
+    const enforceHours = choice('enforce_hours');
+    if (enforceHours !== undefined) rules.enforceHours = enforceHours;
+    const requireCertain = choice('require_certain');
+    if (requireCertain !== undefined) rules.requireCertain = requireCertain;
     try {
       await options.resources.setRules(
         tenantOf(session),

@@ -183,6 +183,10 @@ slotlock rules clear --resource vehicle-42
   pool's, overlaid by its own: a rule set at a narrower level wins. `checkInMinutes` is a resource's
   own only. The dashboard's resource page shows which rules a resource inherits, and from where.
 - With no rule set anywhere, nothing changes: every rule is opt-in.
+- A tenant has default rules for at most 1,000 pools (`pool_rules_limit_reached`, 409, for one
+  more). Merged rules are read leniently: a pool's `stepOffsetMinutes` under a resource's shorter
+  step applies modulo that step, and a field that is invalid on its own is ignored (and logged),
+  never read as refusing every booking.
 
 ### Without Docker
 
@@ -969,7 +973,9 @@ Rentals sell a class, not a plate. Put interchangeable resources in a pool
 members with `slotlock_list_resources` and `pool`, and book the class with `slotlock_book_pool`,
 which takes the first member that is free and allows the booking, in one transaction: a class of
 five sells exactly five for a time, however many race (`pool_full` after that). To see how many are
-free, `slotlock_get_pool_availability` splits a window where that number changes; to see which,
+free, `slotlock_get_pool_availability` splits a window where that number changes (counting each
+member busy over its bookings' occupied time, buffers included, but not the buffers a new booking
+would keep, so a member it counts free may still refuse a booking that abuts another); to see which,
 search the members with `slotlock_find_available_slots` and `require_free: 1`: each slot names the
 members free in `resource_ids`. `GET /v1/pools` lists the pools with their capacity. The older names `calendar.<verb>` and `calendar_<verb>` still work and
 are no longer advertised.
@@ -1529,7 +1535,13 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
     server (`SLOTLOCK_LIMITS`); behind a proxy, set `SLOTLOCK_TRUSTED_PROXY_HEADER` and firewall
     the server so nothing reaches it except through that proxy. Embedding the
     agent server, give it a `consumeRateLimit`. Watch serve's `refusals` log line for floods.
-13. Bound how long a transaction may run. A store over your own transaction (a savepoint per call)
+13. On an upgrade, migrate first, then, as a library user, run `grantApplicationRole` again right
+    after `applySchema` and before serving traffic: a release that adds a table (the leading-buffer
+    release adds `booking_rule_defaults`, which every booking reads) fails every booking with a
+    permission error until the serving role is granted it. `slotlock migrate` does both. A migration
+    that rebuilds a constraint holds its table's lock for the whole build (see the CHANGELOG's
+    Upgrading notes).
+14. Bound how long a transaction may run. A store over your own transaction (a savepoint per call)
     keeps its locks and its snapshot for as long as yours runs, and a hold you confirm inside it is
     judged by the statement's clock, not the transaction's. On PostgreSQL 17 and later, give the
     serving role a `transaction_timeout` above your longest legitimate transaction

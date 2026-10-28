@@ -20,16 +20,29 @@ versioning.
   a resource's rules as they apply (`effectiveBookingRules`, `effective_booking_rules`) are the
   tenant's, overlaid by its pool's, overlaid by its own. A new tenant table under forced row-level
   security, `booking_rule_defaults`, which erasure deletes. The dashboard's rules form has both new
-  rules and shows each inherited rule and where it comes from.
+  rules and shows each inherited rule and where it comes from; an inherited on-or-off rule
+  (`enforceHours`, `requireCertain`) is a choice of default, on or off, so a resource can turn it
+  off. At most 1,000 pools a tenant have defaults (`pool_rules_limit_reached`). Merged rules are
+  read leniently: an offset under a shorter step applies modulo it, and an invalid field is ignored
+  and logged, never read as refusing every booking.
+- Pool availability counts a member busy over its bookings' occupied time, buffers included, not
+  the buffers a new booking would keep.
 
 ### Upgrading
 
 - The migration adds `reservations.buffer_before_ms` and `occupied_starts_at` and
   `calendar_events.buffer_before_ms` without rewriting a row (existing rows keep no leading buffer,
   so their occupied time is unchanged), adds their checks NOT VALID and validates them after it
-  commits, and rebuilds `slotlock_reservations_no_overlap` once, under the migration's lock.
-  `slotlock migrate` applies row-level security to the new table and grants it to the serving role;
-  a library user runs `applyTenantRls` and `grantApplicationRole` again.
+  commits, and rebuilds `slotlock_reservations_no_overlap` once.
+- The rebuild holds an ACCESS EXCLUSIVE lock on `slotlock.reservations` for the whole index build,
+  about 15 seconds per million rows as measured in review: every read and write of reservations
+  waits until it ends. Schedule it, and for a very large table raise the migration's
+  `statementTimeoutMs` (`SlotlockMigrationOptions`, default 900,000 ms) so the build is not
+  cancelled.
+- `slotlock migrate` applies row-level security to the new table and grants it to the serving role.
+  A library user runs `applyTenantRls`, then `grantApplicationRole` right after `applySchema` and
+  before serving traffic: until then every booking fails with a permission error on
+  `booking_rule_defaults`, which every booking reads.
 
 ## 0.5.2 - 2026-10-28
 

@@ -131,4 +131,38 @@ describe.skipIf(!url)('upgrading a database from before leading buffers', () => 
     expect(await book(at(2.5), at(3.5))).toMatchObject({ ok: false, code: 'overlap' });
     expect(await book(at(3), at(3.5))).toMatchObject({ ok: true });
   });
+
+  it('replaces a first, NULL-blind occupied-start check, so a buffered row cannot drop its start', async () => {
+    await sql.unsafe(`
+      ALTER TABLE slotlock.reservations DROP CONSTRAINT slotlock_reservations_occupied_start_valid;
+      ALTER TABLE slotlock.reservations
+        ADD CONSTRAINT slotlock_reservations_occupied_start_valid CHECK (
+          (occupied_starts_at IS NULL AND buffer_before_ms = 0)
+          OR occupied_starts_at = starts_at - buffer_before_ms * interval '1 millisecond'
+        );
+    `);
+    const [resource] = await sql<{ id: string }[]>`
+      INSERT INTO slotlock.resources (tenant_ref, external_ref, timezone)
+      VALUES (${tenantRef}, ${`van-${randomUUID()}`}, 'UTC') RETURNING id`;
+    const start = new Date(Math.ceil(Date.now() / HOUR) * HOUR + 96 * HOUR);
+    const [row] = await sql<{ id: string }[]>`
+      INSERT INTO slotlock.reservations (resource_id, starts_at, ends_at, buffer_before_ms)
+      VALUES (${resource?.id as string}, ${start}, ${new Date(start.getTime() + HOUR)}, ${HOUR / 2})
+      RETURNING id`;
+    const clear = () => sql`UPDATE slotlock.reservations SET occupied_starts_at = NULL WHERE id = ${row?.id as string}`;
+    // The first form lets it through (a NULL comparison passes a CHECK); put it back.
+    await sql.begin(async (tx) => {
+      await tx`UPDATE slotlock.reservations SET occupied_starts_at = NULL WHERE id = ${row?.id as string}`;
+      throw new Error('rollback');
+    }).catch((error: Error) => expect(error.message).toBe('rollback'));
+
+    await store.applySchema();
+
+    const [check] = await sql<{ definition: string; validated: boolean }[]>`
+      SELECT pg_get_constraintdef(oid) AS definition, convalidated AS validated FROM pg_constraint
+       WHERE conname = 'slotlock_reservations_occupied_start_valid'`;
+    expect(check?.definition).toContain('occupied_starts_at IS NOT NULL');
+    expect(check?.validated).toBe(true);
+    await expect(clear()).rejects.toMatchObject({ code: '23514' });
+  });
 });

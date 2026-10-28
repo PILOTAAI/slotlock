@@ -1665,9 +1665,11 @@ CREATE TABLE IF NOT EXISTS slotlock.reservations (
   CONSTRAINT slotlock_reservations_buffer_before_valid CHECK (
     buffer_before_ms >= 0 AND buffer_before_ms <= 86400000
   ),
+  -- NULL only without a leading buffer: a NULL occupied start reads as the start itself.
   CONSTRAINT slotlock_reservations_occupied_start_valid CHECK (
     (occupied_starts_at IS NULL AND buffer_before_ms = 0)
-    OR occupied_starts_at = starts_at - buffer_before_ms * interval '1 millisecond'
+    OR (occupied_starts_at IS NOT NULL
+        AND occupied_starts_at = starts_at - buffer_before_ms * interval '1 millisecond')
   ),
   CONSTRAINT slotlock_reservations_status_valid CHECK (status IN ('held', 'confirmed')),
   -- A hold must carry its expiry; a confirmed reservation must not (expiry is hold-only state).
@@ -2082,15 +2084,20 @@ BEGIN
         buffer_before_ms >= 0 AND buffer_before_ms <= 86400000
       ) NOT VALID;
   END IF;
+  -- A first form of this check let a NULL occupied start through with a leading buffer (the
+  -- comparison is NULL, which a CHECK passes): replaced wherever it lacks the IS NOT NULL guard.
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
      WHERE conname = 'slotlock_reservations_occupied_start_valid'
        AND conrelid = 'slotlock.reservations'::regclass
+       AND pg_catalog.pg_get_constraintdef(oid) LIKE '%occupied_starts_at IS NOT NULL%'
   ) THEN
+    ALTER TABLE slotlock.reservations DROP CONSTRAINT IF EXISTS slotlock_reservations_occupied_start_valid;
     ALTER TABLE slotlock.reservations
       ADD CONSTRAINT slotlock_reservations_occupied_start_valid CHECK (
         (occupied_starts_at IS NULL AND buffer_before_ms = 0)
-        OR occupied_starts_at = starts_at - buffer_before_ms * interval '1 millisecond'
+        OR (occupied_starts_at IS NOT NULL
+            AND occupied_starts_at = starts_at - buffer_before_ms * interval '1 millisecond')
       ) NOT VALID;
   END IF;
 END $$;
