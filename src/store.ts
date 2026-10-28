@@ -2377,7 +2377,7 @@ export interface SlotlockStore extends SlotlockEventFeed {
     tenantRef: string;
     /** Rows per class per call, 1-1000. Defaults to 100. */
     limit?: number;
-    /** Replay window in whole days, 1-3650. Defaults to `SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS`. */
+    /** Replay window in whole days, 1-3650. Defaults to the store's `retentionDays`, at least 30. */
     retentionDays?: number;
   }): Promise<CalendarEventRetentionResult>;
   /**
@@ -2493,8 +2493,8 @@ export interface SlotlockStore extends SlotlockEventFeed {
     /** Rows per class per call, 1-1000. Defaults to 100. */
     limit?: number;
     /**
-     * How long a stray retirement is kept, in whole days, 1-3650. Defaults to
-     * `SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS`.
+     * How long a stray retirement is kept, in whole days, 1-3650. Defaults to the store's
+     * `retentionDays`, at least 30.
      */
     retentionDays?: number;
   }): Promise<BookingRetentionResult>;
@@ -2651,6 +2651,14 @@ export interface SlotlockStoreOptions {
    */
   tenantLockTimeoutMs?: number;
   /**
+   * How many days history is kept, 1-3,650 (default 30): the change feed (and how far back a cursor
+   * reaches) and waitlist entries that ended; and, when longer than 30 days, retired idempotency
+   * answers, booking references and past events' commands (never shorter, so a delayed retry is still
+   * answered as the first try was). Maintenance prunes what is older. A cursor before a change any
+   * store has pruned answers `cursor_expired`, so stores set differently never skip a change.
+   */
+  retentionDays?: number;
+  /**
    * Live holds one holder (`acquireHold`'s `holderRef`) may have at once, 1-10,000. Defaults to
    * SLOTLOCK_MAX_HOLDS_PER_HOLDER (20).
    */
@@ -2725,8 +2733,8 @@ async function lockTenantLimit(
 /**
  * Rows a tenant added within this many days count against its limits whatever time they hold, so
  * bookings and events dated in the past, and cancellations, add at most the limit in any such
- * window. Ended history is not pruned: over a longer time it can still grow. The same window
- * maintenance keeps event idempotency records and stray retirements for.
+ * window. Ended history is not pruned: over a longer time it can still grow. Maintenance keeps
+ * event idempotency records and stray retirements at least as long (the store's `retentionDays`).
  */
 const TENANT_LIMIT_RECENT_DAYS = SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS;
 
@@ -3162,6 +3170,12 @@ function buildSlotlockStore(
   }
   const configuredTenantLimits = tenantLimitsOption(options.tenantLimits);
   const { maxTenantTransactions, tenantLockTimeoutMs, maxHeldHoursPerHolder } = options;
+  const retentionDays = options.retentionDays ?? SLOTLOCK_CHANGE_RETENTION_DAYS;
+  if (!Number.isSafeInteger(retentionDays) || retentionDays < 1 || retentionDays > 3_650) {
+    throw Object.assign(new Error('Slotlock retentionDays must be a whole number from 1 to 3650'), {
+      code: 'invalid_retention' as const,
+    });
+  }
   const maxHoldsPerHolder = options.maxHoldsPerHolder ?? SLOTLOCK_MAX_HOLDS_PER_HOLDER;
   if (
     !Number.isSafeInteger(maxHoldsPerHolder) ||
@@ -3201,6 +3215,7 @@ function buildSlotlockStore(
     agentOwnerEventQuota: configuredAgentOwnerEventQuota,
     agentOwnerCommandQuota: configuredAgentOwnerCommandQuota,
     tenantLimits: configuredTenantLimits,
+    retentionDays,
     maxHoldsPerHolder,
     ...(maxHeldHoursPerHolder !== undefined ? { maxHeldHoursPerHolder } : {}),
   };
@@ -3253,7 +3268,7 @@ function buildSlotlockStore(
   }
 
   const store: SlotlockStore = {
-    ...slotlockEventFeedMethods(sql),
+    ...slotlockEventFeedMethods(sql, retentionDays),
     async applySchema(migrationOptions) {
       // PostgreSQL's IF NOT EXISTS DDL is idempotent after commit but not race-free: two fresh
       // application instances can still collide on pg_namespace/pg_extension unique indexes.
@@ -5402,11 +5417,14 @@ function buildSlotlockStore(
           code: 'invalid_limit' as const,
         });
       }
-      const retentionDays = params.retentionDays ?? SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS;
+      // Never under the default: a shorter retention trims the feed, not how long a retried write
+      // is answered as the first was.
+      const keepDays =
+        params.retentionDays ?? Math.max(retentionDays, SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS);
       if (
-        !Number.isSafeInteger(retentionDays) ||
-        retentionDays < 1 ||
-        retentionDays > MAX_EVENT_COMMAND_RETENTION_DAYS
+        !Number.isSafeInteger(keepDays) ||
+        keepDays < 1 ||
+        keepDays > MAX_EVENT_COMMAND_RETENTION_DAYS
       ) {
         throw Object.assign(new Error('Slotlock retention window must be 1-3650 days'), {
           code: 'invalid_retention_window' as const,
@@ -5459,7 +5477,7 @@ function buildSlotlockStore(
              WHERE tombstone.tenant_ref = ${params.tenantRef}
                AND tombstone.stray
                AND tombstone.cancelled_at <
-                   clock_timestamp() - (${retentionDays}::int * interval '1 day')
+                   clock_timestamp() - (${keepDays}::int * interval '1 day')
              ORDER BY tombstone.cancelled_at, tombstone.external_ref
              LIMIT ${limit}
              FOR UPDATE OF tombstone SKIP LOCKED
@@ -5498,11 +5516,14 @@ function buildSlotlockStore(
           code: 'invalid_limit' as const,
         });
       }
-      const retentionDays = params.retentionDays ?? SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS;
+      // Never under the default: a shorter retention trims the feed, not how long a retried write
+      // is answered as the first was.
+      const keepDays =
+        params.retentionDays ?? Math.max(retentionDays, SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS);
       if (
-        !Number.isSafeInteger(retentionDays) ||
-        retentionDays < 1 ||
-        retentionDays > MAX_EVENT_COMMAND_RETENTION_DAYS
+        !Number.isSafeInteger(keepDays) ||
+        keepDays < 1 ||
+        keepDays > MAX_EVENT_COMMAND_RETENTION_DAYS
       ) {
         throw Object.assign(new Error('Slotlock retention window must be 1-3650 days'), {
           code: 'invalid_retention_window' as const,
@@ -5517,7 +5538,7 @@ function buildSlotlockStore(
               FROM slotlock.calendar_event_commands command
              WHERE command.tenant_ref = ${params.tenantRef}
                AND command.created_at <
-                   clock_timestamp() - (${retentionDays}::int * interval '1 day')
+                   clock_timestamp() - (${keepDays}::int * interval '1 day')
              ORDER BY command.created_at, command.owner_ref, command.idempotency_key
              LIMIT ${limit}
              FOR UPDATE OF command SKIP LOCKED
@@ -5540,7 +5561,7 @@ function buildSlotlockStore(
              WHERE tombstone.tenant_ref = ${params.tenantRef}
                AND tombstone.owner_ref LIKE 'agent:%'
                AND tombstone.cancelled_at <
-                   clock_timestamp() - (${retentionDays}::int * interval '1 day')
+                   clock_timestamp() - (${keepDays}::int * interval '1 day')
                AND NOT EXISTS (
                  SELECT 1 FROM slotlock.calendar_event_commands command
                   WHERE command.tenant_ref = tombstone.tenant_ref
@@ -5559,7 +5580,7 @@ function buildSlotlockStore(
                AND tombstone.external_ref = candidate.external_ref
                AND tombstone.owner_ref LIKE 'agent:%'
                AND tombstone.cancelled_at <
-                   clock_timestamp() - (${retentionDays}::int * interval '1 day')
+                   clock_timestamp() - (${keepDays}::int * interval '1 day')
                AND NOT EXISTS (
                  SELECT 1 FROM slotlock.calendar_event_commands command
                   WHERE command.tenant_ref = tombstone.tenant_ref
@@ -5976,7 +5997,7 @@ function buildSlotlockStore(
           await tx`
             DELETE FROM slotlock.waitlist_entries
              WHERE tenant_ref = ${tenantRef} AND status <> 'waiting'
-               AND ends_at < statement_timestamp() - make_interval(days => ${SLOTLOCK_CHANGE_RETENTION_DAYS})`;
+               AND ends_at < statement_timestamp() - make_interval(days => ${retentionDays})`;
         }
         // One page in join order; the caller passes `next` back for the rest.
         const waiting = await tx<WaitlistRow[]>`

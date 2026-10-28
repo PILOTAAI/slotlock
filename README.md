@@ -1070,7 +1070,8 @@ curl "http://localhost:8080/v1/resources" -H "Authorization: Bearer $SLOTLOCK_AP
   quoted Structured Field String (`Idempotency-Key: "booking-BK-42"`) or the bare key, equal to the
   argument when both are sent. A write that needs one and gets neither answers
   `400 idempotency_key_required`; the same key with another request, `422 idempotency_conflict`.
-  An event write's key is kept 30 days, then removed by maintenance, after which the key is new; a
+  An event write's key is kept 30 days (or `SLOTLOCK_RETENTION_DAYS`), then removed by maintenance,
+  after which the key is new; a
   hold's until the hold would have expired, is released or is confirmed.
 - REST cannot ask a person, so a write listed in `confirmation` answers `428 confirmation_required`.
 - Free/busy and the next-available search read each resource they name once, however often it is
@@ -1160,8 +1161,12 @@ not commit. A change carries ids, times and states, never titles, descriptions o
 - `GET /v1/changes?cursor=…` lists them oldest first as [CloudEvents 1.0](https://cloudevents.io)
   (`io.pylota.slotlock.hold.created`, `.reservation.cancelled`, `.event.updated`, …). Follow
   `next_cursor`, which comes back even when nothing is new: it never skips a change, even one whose
-  transaction commits after a later one's. Changes are kept 30 days; an older cursor answers
-  `410 cursor_expired`.
+  transaction commits after a later one's. Changes are kept 30 days (`SLOTLOCK_RETENTION_DAYS`,
+  `retentionDays` in `createSlotlockStore`, 1-3,650, for `serve` and `maintain` alike); a cursor
+  that a pruned change came after, whichever server pruned it, answers `410 cursor_expired`. A change keeps who made
+  it (`actor`) and a booking's or waitlist entry's reference: keep references opaque, not emails,
+  when the feed is kept long. A shorter retention never shortens how long a retried write is
+  answered as the first was: that stays at least 30 days.
 - `POST /v1/webhooks` with an https `url` (and `event_types`, optionally) sends each change from
   then on as a [Standard Webhooks](https://www.standardwebhooks.com) request: `webhook-id` (the
   change's id, the same on every retry), `webhook-timestamp` and `webhook-signature`, keyed by the
@@ -1458,6 +1463,13 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
     server (`SLOTLOCK_LIMITS`); behind a proxy, set `SLOTLOCK_TRUSTED_PROXY_HEADER` and firewall
     the server so nothing reaches it except through that proxy. Embedding the
     agent server, give it a `consumeRateLimit`. Watch serve's `refusals` log line for floods.
+13. Bound how long a transaction may run. A store over your own transaction (a savepoint per call)
+    keeps its locks and its snapshot for as long as yours runs, and a hold you confirm inside it is
+    judged by the statement's clock, not the transaction's. On PostgreSQL 17 and later, give the
+    serving role a `transaction_timeout` above your longest legitimate transaction
+    (`ALTER ROLE slotlock_app SET transaction_timeout = '60s'`): PostgreSQL ends one that runs
+    longer, rolling back what it did, and closes its connection (the pool opens another). On 16, set `idle_in_transaction_session_timeout`
+    and `statement_timeout`, which bound idle gaps and single statements but not the whole.
 
 ## Supported versions
 

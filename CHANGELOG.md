@@ -5,8 +5,26 @@ versioning.
 
 ## Unreleased
 
+### Documentation
+
+- The production checklist advises a `transaction_timeout` on the serving role (PostgreSQL 17+),
+  so a caller's transaction a store call runs inside cannot hold its locks and snapshot without
+  bound; on 16, `idle_in_transaction_session_timeout` and `statement_timeout`. A test pins the
+  setting on the CI's PostgreSQL 17 and 18.
+
 ### Added
 
+- How long history is kept is a setting: `SLOTLOCK_RETENTION_DAYS` (`retentionDays` in
+  `createSlotlockStore`), 1 to 3,650 days, 30 by default. It sets how long the change feed is kept
+  and how far back a cursor reaches, and ended waitlist entries; above 30 days, retired idempotency
+  answers and booking references too (never under 30). `slotlock maintain` reads it as `serve` does.
+- A feed cursor answers `cursor_expired` exactly when a change after it has been deleted, by this
+  server's maintenance or any other (an older server's in a rolling deploy, an operator's): a trigger
+  on the feed records how far each tenant's was pruned (`slotlock.outbox_pruned`, created once and
+  started at each tenant's oldest kept change). How old a cursor is no longer matters, so a server
+  keeping changes longer than the one that pruned them never reads past a gap unseen, and a reader
+  that is up to date stays readable. Maintenance prunes the oldest changes in feed order, never past
+  one it keeps or a transaction still running, so a reader starting over always reads on.
 - One holder's holds are bounded in time as well as number: `maxHeldHoursPerHolder` in
   `createSlotlockStore` refuses a hold that would bring the holder's live holds past that many
   hours together (`held_time_limit_reached`), and `maxHoldsPerHolder` sets the count that was fixed
