@@ -24,6 +24,7 @@ import {
   createSlotlockDashboard,
   createSlotlockMemoryDashboardState,
 } from '../dashboard.js';
+import { createSlotlockGuardedFetch } from '../webhooks.js';
 import {
   type FakeModel,
   type FakeModelFormat,
@@ -119,7 +120,9 @@ function dashboard(overrides: Partial<SlotlockDashboardOptions['assistant']> = {
     onError: (error) => {
       reported.push(error);
     },
-    assistant: { secret: ASSISTANT_SECRET, backend, timeoutMs: 5_000, ...overrides },
+    // The fake model listens on 127.0.0.1: these tests run with SLOTLOCK_ASSISTANT_PRIVATE_URLS on,
+    // and the private-address tests below turn it off.
+    assistant: { secret: ASSISTANT_SECRET, backend, timeoutMs: 5_000, privateUrls: true, ...overrides },
   });
 }
 
@@ -420,12 +423,13 @@ describe('assistant settings', () => {
     expect(await page(target, bob)).toContain('An admin of this organization can connect one');
   });
 
-  it('accepts an https base URL, or http on this machine only', () => {
-    expect(readSlotlockAssistantBaseUrl('https://api.example.com/v1/')).toBe('https://api.example.com/v1');
-    expect(readSlotlockAssistantBaseUrl('http://localhost:11434/v1')).toBe('http://localhost:11434/v1');
-    expect(readSlotlockAssistantBaseUrl('http://127.0.0.1:1234/v1')).toBe('http://127.0.0.1:1234/v1');
+  it('accepts an https base URL, or http on this machine only with private URLs allowed', () => {
+    const allowed = { privateUrls: true };
+    expect(readSlotlockAssistantBaseUrl('https://api.example.com/v1/')).toEqual({ ok: true, url: 'https://api.example.com/v1' });
+    expect(readSlotlockAssistantBaseUrl('http://localhost:11434/v1', allowed)).toEqual({ ok: true, url: 'http://localhost:11434/v1' });
+    expect(readSlotlockAssistantBaseUrl('http://127.0.0.1:1234/v1', allowed)).toEqual({ ok: true, url: 'http://127.0.0.1:1234/v1' });
     for (const refused of ['http://models.internal/v1', 'https://user:pw@api.example.com', 'https://api.example.com/?x=1', 'ftp://x', 'nope']) {
-      expect(readSlotlockAssistantBaseUrl(refused), refused).toBeNull();
+      expect(readSlotlockAssistantBaseUrl(refused, allowed), refused).toEqual({ ok: false, reason: 'invalid' });
     }
   });
 
@@ -503,5 +507,109 @@ describe('the assistant across organizations', () => {
     expect(limited.status).toBe(429);
     // Another member has a budget of their own.
     expect((await chat(target, await signIn(target, 'alice'), 'mine')).status).toBe(303);
+  });
+});
+
+describe('private model addresses (SLOTLOCK_ASSISTANT_PRIVATE_URLS)', () => {
+  let model: FakeModel;
+  beforeAll(async () => {
+    model = await startFakeModel('openai');
+  });
+  afterAll(() => model.close());
+  beforeEach(() => {
+    model.requests.length = 0;
+  });
+
+  /** A resolver that answers every name with these addresses, as dns.lookup would. */
+  const resolvingTo =
+    (...addresses: string[]): typeof import('node:dns').lookup =>
+      ((_hostname: string, _options: object, callback: (error: null, list: { address: string; family: number }[]) => void) =>
+        callback(null, addresses.map((address) => ({ address, family: address.includes(':') ? 6 : 4 })))) as never;
+
+  it('refuses loopback, private, link-local, shared, unique-local and metadata URLs by default', () => {
+    for (const url of [
+      'http://localhost:11434/v1',
+      'http://127.0.0.1:1234/v1',
+      'http://[::1]:8000/v1',
+      'https://10.0.0.5/v1',
+      'https://192.168.1.20/v1',
+      'https://172.16.4.4/v1',
+      'https://169.254.169.254/latest',
+      'https://100.64.0.1/v1',
+      'https://[fd00::1]/v1',
+      'https://[fe80::1]/v1',
+      'https://[::ffff:127.0.0.1]/v1',
+      'https://models.localhost/v1',
+    ]) {
+      expect(readSlotlockAssistantBaseUrl(url), url).toEqual({ ok: false, reason: 'private' });
+      expect(readSlotlockAssistantBaseUrl(url, { privateUrls: true }).ok, url).toBe(true);
+    }
+    expect(readSlotlockAssistantBaseUrl('https://93.184.215.14/v1').ok).toBe(true);
+  });
+
+  it('says why a loopback or private URL is refused when an owner saves it, and stores nothing', async () => {
+    const target = dashboard({ privateUrls: false });
+    const alice = await signIn(target, 'alice');
+    for (const url of [model.baseUrl, 'https://10.1.2.3/v1', 'https://169.254.169.254/v1']) {
+      const refused = await post(target, '/dashboard/settings/assistant', { provider: 'openai', base_url: url, model: 'your-model' }, alice);
+      expect(refused.status, url).toBe(400);
+      const html = await refused.text();
+      expect(html).toContain('local or private network address');
+      expect(html).toContain('SLOTLOCK_ASSISTANT_PRIVATE_URLS=on');
+    }
+    expect(await assistantStore.getSettings('github-org:91')).toBeNull();
+  });
+
+  it('refuses a name that resolves to a private address when saved', async () => {
+    const target = dashboard({ privateUrls: false, resolve: async () => ['127.0.0.1'] });
+    const alice = await signIn(target, 'alice');
+    const refused = await post(target, '/dashboard/settings/assistant', { provider: 'openai', base_url: 'https://model.example.test/v1', model: 'your-model' }, alice);
+    expect(refused.status).toBe(400);
+    expect(await refused.text()).toContain('local or private network address');
+    expect(await assistantStore.getSettings('github-org:91')).toBeNull();
+  });
+
+  it('refuses at call time a name that resolves to 127.0.0.1 as the connection is made (DNS rebinding)', async () => {
+    const port = new URL(model.baseUrl).port;
+    // Public when saved; rebound to loopback by the time the dashboard connects.
+    const target = dashboard({
+      privateUrls: false,
+      resolve: async () => ['93.184.215.14'],
+      fetch: createSlotlockGuardedFetch({ resolve: resolvingTo('127.0.0.1') }),
+    });
+    const alice = await signIn(target, 'alice');
+    const saved = await post(target, '/dashboard/settings/assistant', { provider: 'openai', base_url: `https://model.example.test:${port}/v1`, model: 'your-model', api_key: API_KEY }, alice);
+    expect(saved.status).toBe(303);
+    const bob = await signIn(target, 'bob');
+    expect((await chat(target, bob, 'hello')).status).toBe(303);
+    const html = await page(target, bob);
+    expect(html).toContain('resolves to, a local or private network address');
+    expect(model.requests).toHaveLength(0);
+    expect((await post(target, '/dashboard/settings/assistant/test', {}, alice)).status).toBe(502);
+    expect(model.requests).toHaveLength(0);
+  });
+
+  it('checks the resolved address when it connects, and reaches it with the switch on', async () => {
+    const port = new URL(model.baseUrl).port;
+    const url = `http://model.example.test:${port}/v1/chat/completions`;
+    const init = { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' };
+    await expect(createSlotlockGuardedFetch({ resolve: resolvingTo('127.0.0.1') })(url, init)).rejects.toMatchObject({ code: 'private_address' });
+    await expect(createSlotlockGuardedFetch({ resolve: resolvingTo('93.184.215.14', '10.0.0.1') })(url, init)).rejects.toMatchObject({ code: 'private_address' });
+    await expect(createSlotlockGuardedFetch()(`http://127.0.0.1:${port}/v1/chat/completions`, init)).rejects.toMatchObject({ code: 'private_address' });
+    expect(model.requests).toHaveLength(0);
+    model.script({ text: 'Hello from the box.' });
+    const reached = await createSlotlockGuardedFetch({ allowPrivateNetworks: true, resolve: resolvingTo('127.0.0.1') })(url, init);
+    expect(reached.status).toBe(200);
+    expect(JSON.stringify(await reached.json())).toContain('Hello from the box.');
+    expect(model.requests).toHaveLength(1);
+  });
+
+  it('refuses a stored private URL at call time once the switch is off', async () => {
+    const open = dashboard({ privateUrls: true });
+    await connect(open, await signIn(open, 'alice'), model, 'openai');
+    const closed = dashboard({ privateUrls: false });
+    const bob = await signIn(closed, 'bob');
+    expect((await chat(closed, bob, 'hello')).status).toBe(409);
+    expect(model.requests).toHaveLength(0);
   });
 });

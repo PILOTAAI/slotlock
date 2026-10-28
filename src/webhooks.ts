@@ -8,6 +8,7 @@ import { lookup as dnsLookup } from 'node:dns';
 import { Agent as HttpAgent, request as httpRequest } from 'node:http';
 import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
 import { BlockList, isIP } from 'node:net';
+import { Readable } from 'node:stream';
 import type { SlotlockChange, SlotlockEventFeed } from './event-feed.js';
 import { ignoreRejection } from './hooks.js';
 
@@ -142,27 +143,17 @@ export function createSlotlockWebhookSender(
   options: { timeoutMs?: number; allowPrivateNetworks?: boolean } = {},
 ): SlotlockWebhookSender {
   const timeoutMs = options.timeoutMs ?? 15_000;
-  const lookup: typeof dnsLookup = ((hostname: string, lookupOptions: object, callback: Function) => {
-    dnsLookup(hostname, { ...lookupOptions, all: true }, (error, addresses) => {
-      if (error) return callback(error);
-      const list = addresses as unknown as { address: string; family: number }[];
-      if (!options.allowPrivateNetworks && list.some(({ address }) => isPrivateAddress(address))) {
-        return callback(Object.assign(new Error(`webhook host ${hostname} resolves to a private address`), { code: 'webhook_private_address' }));
-      }
-      const all = (lookupOptions as { all?: boolean }).all;
-      if (all) return callback(null, list);
-      const first = list[0];
-      return first ? callback(null, first.address, first.family) : callback(new Error('no address'));
-    });
-  }) as unknown as typeof dnsLookup;
+  const lookup = slotlockPrivateAddressLookup({
+    allowPrivateNetworks: options.allowPrivateNetworks === true,
+    code: 'webhook_private_address',
+    what: 'webhook',
+  });
   return (request) =>
     new Promise((resolve, reject) => {
       const url = new URL(request.url);
-      if (isIP(url.hostname.replace(/^\[|\]$/g, '')) && !options.allowPrivateNetworks) {
-        if (isPrivateAddress(url.hostname.replace(/^\[|\]$/g, ''))) {
-          reject(Object.assign(new Error('webhook URL names a private address'), { code: 'webhook_private_address' }));
-          return;
-        }
+      if (!options.allowPrivateNetworks && namesPrivateAddress(url)) {
+        reject(Object.assign(new Error('webhook URL names a private address'), { code: 'webhook_private_address' }));
+        return;
       }
       const send = url.protocol === 'https:' ? httpsRequest : httpRequest;
       const outgoing = send(
@@ -204,6 +195,105 @@ export function createSlotlockWebhookSender(
       outgoing.on('error', reject);
       outgoing.end(request.body);
     });
+}
+
+/** Whether a URL's host is an IP address literal that isPrivateAddress refuses. */
+function namesPrivateAddress(url: URL): boolean {
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  return isIP(host) !== 0 && isPrivateAddress(host);
+}
+
+/**
+ * A `dns.lookup` that answers every address a name resolves to, and refuses (an error with `code`)
+ * a name with any private one unless `allowPrivateNetworks`. Given to a socket's connect, it checks
+ * the addresses the connection will use, so a name rebound to a private address after an earlier
+ * check is still refused. `resolve` stands in for `dns.lookup` (tests).
+ */
+export function slotlockPrivateAddressLookup(options: {
+  allowPrivateNetworks: boolean;
+  code: string;
+  what: string;
+  resolve?: typeof dnsLookup;
+}): typeof dnsLookup {
+  const resolve = options.resolve ?? dnsLookup;
+  return ((hostname: string, lookupOptions: object, callback: Function) => {
+    resolve(hostname, { ...lookupOptions, all: true }, (error, addresses) => {
+      if (error) return callback(error);
+      const list = addresses as unknown as { address: string; family: number }[];
+      if (!options.allowPrivateNetworks && list.some(({ address }) => isPrivateAddress(address))) {
+        return callback(Object.assign(new Error(`${options.what} host ${hostname} resolves to a private address`), { code: options.code }));
+      }
+      const all = (lookupOptions as { all?: boolean }).all;
+      if (all) return callback(null, list);
+      const first = list[0];
+      return first ? callback(null, first.address, first.family) : callback(new Error('no address'));
+    });
+  }) as unknown as typeof dnsLookup;
+}
+
+/**
+ * A `fetch` for a server reaching a URL a tenant chose (the dashboard assistant's model): Node's
+ * http client with the webhooks' address check. A URL naming a private address, or a host that
+ * resolves to one when the socket connects, is refused with an error whose `code` is
+ * `private_address`, unless `allowPrivateNetworks`. No redirect is followed (the answer is
+ * returned as is) and no proxy from the environment is used. Takes a string body only.
+ */
+export function createSlotlockGuardedFetch(
+  options: { allowPrivateNetworks?: boolean; resolve?: typeof dnsLookup } = {},
+): typeof fetch {
+  const allow = options.allowPrivateNetworks === true;
+  const lookup = slotlockPrivateAddressLookup({
+    allowPrivateNetworks: allow,
+    code: 'private_address',
+    what: 'requested',
+    ...(options.resolve ? { resolve: options.resolve } : {}),
+  });
+  const refused = () =>
+    Object.assign(new Error('the URL names a private address'), { code: 'private_address' });
+  return (async (input: string | URL | Request, init: RequestInit = {}) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new TypeError('unsupported URL');
+    if (!allow && namesPrivateAddress(url)) throw refused();
+    const body = init.body === undefined || init.body === null ? undefined : String(init.body);
+    const headers: Record<string, string> = {};
+    new Headers(init.headers).forEach((value, name) => {
+      headers[name] = value;
+    });
+    if (body !== undefined) headers['content-length'] = String(Buffer.byteLength(body));
+    const send = url.protocol === 'https:' ? httpsRequest : httpRequest;
+    return new Promise<Response>((resolve, reject) => {
+      const outgoing = send(
+        url,
+        {
+          method: init.method ?? 'GET',
+          headers,
+          // An agent of its own: a proxy from the environment would skip the address check.
+          agent: url.protocol === 'https:' ? new HttpsAgent({ lookup }) : new HttpAgent({ lookup } as never),
+          lookup,
+          ...(init.signal ? { signal: init.signal } : {}),
+        },
+        (response) => {
+          const status = response.statusCode ?? 0;
+          const answer = new Headers();
+          for (const [name, value] of Object.entries(response.headers)) {
+            for (const each of Array.isArray(value) ? value : value === undefined ? [] : [value]) {
+              answer.append(name, each);
+            }
+          }
+          if (status < 200 || status > 599) {
+            response.destroy();
+            reject(new Error(`unexpected HTTP status ${status}`));
+            return;
+          }
+          const stream =
+            status === 204 || status === 304 ? null : (Readable.toWeb(response) as ReadableStream<Uint8Array>);
+          resolve(new Response(stream, { status, headers: answer }));
+        },
+      );
+      outgoing.on('error', reject);
+      outgoing.end(body);
+    });
+  }) as typeof fetch;
 }
 
 export interface SlotlockWebhookPassResult {

@@ -17,7 +17,11 @@ versioning.
   tenant, and only its last four characters are shown. Two tenant tables under forced row-level
   security, `assistant_settings` and `assistant_conversations`, which erasure deletes.
   `createSlotlockRateLimiter` is the per-key token bucket it limits members' messages with, and
-  organization sessions now remember each organization's role (owners are admins).
+  organization sessions now remember each organization's role (owners are admins). As webhooks
+  do, it refuses a model URL whose host is, or resolves to, a loopback, private, link-local, CGNAT,
+  unique-local or metadata address, when saved and at each connection (the resolved address is
+  checked as the socket connects, against DNS rebinding); `SLOTLOCK_ASSISTANT_PRIVATE_URLS=on`
+  allows them for a self-hosted model. `createSlotlockGuardedFetch` is that `fetch`.
 
 ## 0.5.0 - 2026-10-28
 

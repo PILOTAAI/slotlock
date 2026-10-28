@@ -109,6 +109,7 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_GITHUB_CLIENT_SECRET',
   'SLOTLOCK_SESSION_SECRET',
   'SLOTLOCK_ASSISTANT_SECRET',
+  'SLOTLOCK_ASSISTANT_PRIVATE_URLS',
   'SLOTLOCK_DASHBOARD_USERS',
   'SLOTLOCK_DASHBOARD_ORGS',
   'SLOTLOCK_DASHBOARD_NAME',
@@ -948,6 +949,7 @@ export async function startSlotlockServer(
                   // operations, rate limits and series-write slots as an API key's.
                   assistant: {
                     secret: config.dashboard.assistantSecret,
+                    ...(config.dashboard.assistantPrivateUrls ? { privateUrls: true } : {}),
                     backend: agentBackend,
                     consumeRateLimit: limits.consumeRateLimit,
                     authorize: async ({ principal, operation, input }) => {
@@ -1549,6 +1551,10 @@ Environment:
   SLOTLOCK_ASSISTANT_SECRET      Turns on the dashboard assistant and seals each organization's
                                  model API key with it, 32+ random characters (dashboard; off
                                  without it)
+  SLOTLOCK_ASSISTANT_PRIVATE_URLS off (default): refuse an assistant model URL whose host is, or
+                                 resolves to, a loopback, private, link-local, CGNAT, unique-local
+                                 or metadata address; on: allow them, for a self-hosted model
+                                 (Ollama, vLLM) on this machine or network
   SLOTLOCK_DASHBOARD_USERS       * or comma-separated GitHub user ids that may sign in (dashboard)
   SLOTLOCK_DASHBOARD_ORGS        comma-separated GitHub organization ids: each is one shared tenant
   SLOTLOCK_DASHBOARD_NAME        What the dashboard calls this deployment (default Slotlock)

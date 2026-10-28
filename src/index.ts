@@ -31,6 +31,7 @@ export {
   type SlotlockWebhookResponse,
   type SlotlockWebhookScheduler,
   type SlotlockWebhookSender,
+  createSlotlockGuardedFetch,
   createSlotlockWebhookSender,
   deliverSlotlockWebhooks,
   isPrivateAddress,

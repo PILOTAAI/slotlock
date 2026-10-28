@@ -37,7 +37,9 @@ import {
   boundSlotlockAssistantEntries,
   createSlotlockAssistantStore,
   openSlotlockAssistantKey,
+  checkSlotlockAssistantHost,
   readSlotlockAssistantBaseUrl,
+  slotlockAssistantUrlAllowed,
   readSlotlockAssistantEntries,
   runSlotlockAssistantTurn,
   sealSlotlockAssistantKey,
@@ -47,6 +49,8 @@ import {
 } from './assistant.js';
 import { SLOTLOCK_DASHBOARD_NAME_PATTERN, type SlotlockRate } from './config.js';
 import { createSlotlockRateLimiter } from './rate-limit.js';
+import { createSlotlockGuardedFetch } from './webhooks.js';
+import { lookup as dnsLookup } from 'node:dns/promises';
 import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from './ddl.js';
 import { ignoreRejection } from './hooks.js';
 import { SLOTLOCK_BOOKING_RULE_LIMITS, type SlotlockBookingRules } from './booking-rules.js';
@@ -256,8 +260,21 @@ export interface SlotlockDashboardAssistantOptions {
   /** As the agent server's: false refuses an operation. Every offered operation by default. */
   authorize?: SlotlockAgentOperationDispatchOptions['authorize'];
   consumeRateLimit?: SlotlockAgentOperationDispatchOptions['consumeRateLimit'];
-  /** Reaches the model providers; the global fetch by default. */
+  /**
+   * Allow a model at a local or private network address (SLOTLOCK_ASSISTANT_PRIVATE_URLS): a
+   * base URL whose host is, or resolves to, a loopback, private, link-local, shared, unique-local
+   * or metadata address. Off by default: such URLs are refused when saved and at each call.
+   */
+  privateUrls?: boolean;
+  /**
+   * Reaches the model providers. By default Node.js's http client, which checks every address a
+   * host resolves to as the connection is made (createSlotlockGuardedFetch), so a name rebound to
+   * a private address is refused too. A replacement must make that check itself, or reach no
+   * private network (a Cloudflare Worker's fetch).
+   */
   fetch?: typeof fetch;
+  /** The addresses a host resolves to, to refuse a private one when saved: dns.lookup by default. */
+  resolve?: (hostname: string) => Promise<string[]>;
   /** Messages and connection tests one member may send: 10 a minute, 10 at once, by default. */
   rate?: SlotlockRate;
   /** One model call's limit (30 s by default) and one message's (90 s). */
@@ -1746,7 +1763,15 @@ ${
   /** The assistant's records, when the assistant is on and the adapter keeps them. Per request (Workers). */
   const assistantStore = (): SlotlockAssistantStore | undefined =>
     assistantOptions ? options.resources.assistant : undefined;
-  const assistantFetch = assistantOptions?.fetch ?? ((input, init) => fetch(input, init));
+  const privateUrls = assistantOptions?.privateUrls === true;
+  const assistantFetch =
+    assistantOptions?.fetch ?? createSlotlockGuardedFetch({ allowPrivateNetworks: privateUrls });
+  const resolveHost =
+    assistantOptions?.resolve ??
+    (async (hostname: string) =>
+      (await dnsLookup(hostname, { all: true })).map(({ address }) => address));
+  const PRIVATE_URL_REFUSAL =
+    'That URL is, or resolves to, a local or private network address (loopback, private, link-local, shared, unique-local or cloud metadata), which this server does not reach. For a model on its own machine or network, the server’s operator can allow them with SLOTLOCK_ASSISTANT_PRIVATE_URLS=on.';
   const assistantTimeout = assistantOptions?.timeoutMs ?? 30_000;
   const assistantTurnTimeout = assistantOptions?.turnTimeoutMs ?? 90_000;
   const conversationTtl = assistantOptions?.conversationTtlMs ?? 2 * 3_600_000;
@@ -1819,6 +1844,12 @@ ${
     const store = assistantStore();
     const settings = store ? await store.getSettings(tenantOf(session)) : null;
     if (!settings || !assistantOptions) return null;
+    if (
+      !slotlockAssistantUrlAllowed(settings.baseUrl, privateUrls) ||
+      !(await checkSlotlockAssistantHost(settings.baseUrl, { privateUrls, resolve: resolveHost }))
+    ) {
+      return { problem: PRIVATE_URL_REFUSAL };
+    }
     let apiKey: string | null = null;
     if (settings.sealedKey !== null) {
       apiKey = await openSlotlockAssistantKey(assistantOptions.secret, tenantOf(session), settings.sealedKey);
@@ -1985,18 +2016,24 @@ ${
     if (!store || !assistantOptions) return notFound(session);
     if (!isAdmin(session)) return adminOnly(session);
     const provider = form.get('provider');
-    const baseUrl = readSlotlockAssistantBaseUrl(form.get('base_url') ?? '');
+    const checkedUrl = readSlotlockAssistantBaseUrl(form.get('base_url') ?? '', { privateUrls });
     const model = (form.get('model') ?? '').trim();
     const apiKey = (form.get('api_key') ?? '').trim();
     if (provider !== 'anthropic' && provider !== 'openai') {
       return settingsPage(session, 400, 'Choose a provider from the list.');
     }
-    if (baseUrl === null) {
+    if (!checkedUrl.ok) {
       return settingsPage(
         session,
         400,
-        'Give an https base URL (http only for localhost or 127.0.0.1), with no user name, query or #fragment.',
+        checkedUrl.reason === 'private'
+          ? PRIVATE_URL_REFUSAL
+          : 'Give an https base URL (http only for localhost or 127.0.0.1), with no user name, query or #fragment.',
       );
+    }
+    const baseUrl = checkedUrl.url;
+    if (!(await checkSlotlockAssistantHost(baseUrl, { privateUrls, resolve: resolveHost }))) {
+      return settingsPage(session, 400, PRIVATE_URL_REFUSAL);
     }
     if (!SLOTLOCK_ASSISTANT_MODEL_NAME.test(model)) {
       return settingsPage(session, 400, 'Give the model name, 1 to 200 characters without spaces.');

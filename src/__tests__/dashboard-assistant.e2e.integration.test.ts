@@ -179,6 +179,8 @@ describe.skipIf(!url || !playwright)('the dashboard assistant in a browser (real
       fetch: githubFetch,
       assistant: {
         secret: randomBytes(32).toString('hex'),
+        // The fake model is on this machine, as a self-hosted one would be.
+        privateUrls: true,
         backend: createSlotlockStoreAgentBackend(store, {
           availabilityRules: async () => [
             { rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR,SA,SU', startMinutes: 480, durationMinutes: 600 },

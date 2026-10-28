@@ -182,7 +182,17 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       // With SLOTLOCK_ASSISTANT_SECRET, the chat assistant; its tool calls reach Postgres through
       // the request's client like every other page, and are bounded by the client rate limit.
       ...(config.assistantSecret !== undefined
-        ? { assistant: { secret: config.assistantSecret, backend: perRequest(() => current().agent) } }
+        ? {
+            assistant: {
+              secret: config.assistantSecret,
+              backend: perRequest(() => current().agent),
+              // A Worker's fetch reaches no private network (nor this isolate's loopback), so the
+              // literal URL check is the one that applies; names are not resolved here.
+              fetch: (input: string | URL | Request, init?: RequestInit) => fetch(input, init),
+              resolve: async () => [],
+              ...(config.assistantPrivateUrls ? { privateUrls: true } : {}),
+            },
+          }
         : {}),
       // Cloudflare sets CF-Connecting-IP itself, so one client's sign-ins in flight are capped.
       clientAddress: clientOf,

@@ -137,6 +137,11 @@ export interface SlotlockServeDashboardConfig {
    * Without it the assistant is off.
    */
   assistantSecret?: string;
+  /**
+   * Let the assistant reach a model at a local or private network address
+   * (SLOTLOCK_ASSISTANT_PRIVATE_URLS=on): a self-hosted model on the same machine or network.
+   */
+  assistantPrivateUrls?: boolean;
 }
 
 const DASHBOARD_VARIABLES = [
@@ -191,6 +196,10 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
   ) {
     throw new SlotlockConfigError('SLOTLOCK_ASSISTANT_SECRET must differ from every other secret');
   }
+  const privateUrls = optional(env, 'SLOTLOCK_ASSISTANT_PRIVATE_URLS') ?? 'off';
+  if (privateUrls !== 'on' && privateUrls !== 'off') {
+    throw new SlotlockConfigError('SLOTLOCK_ASSISTANT_PRIVATE_URLS must be on or off');
+  }
   const orgs = readDashboardOrganizations(env);
   const name = optional(env, 'SLOTLOCK_DASHBOARD_NAME')?.trim();
   if (name !== undefined && name !== '' && !SLOTLOCK_DASHBOARD_NAME_PATTERN.test(name)) {
@@ -206,6 +215,7 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
     ...(orgs !== undefined ? { organizations: orgs } : {}),
     ...(name !== undefined && name !== '' ? { name } : {}),
     ...(assistantSecret !== undefined ? { assistantSecret } : {}),
+    ...(assistantSecret !== undefined && privateUrls === 'on' ? { assistantPrivateUrls: true } : {}),
   };
 }
 

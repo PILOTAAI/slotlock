@@ -41,7 +41,9 @@ page: every member of an organization can ask in plain words ("what's free tomor
 - **Each organization connects its own model** in Settings, Assistant. Only its owners can: the
   provider (Anthropic Messages API, or OpenAI-compatible for OpenAI, OpenRouter, vLLM, Ollama and
   LM Studio), the base URL (https, or http on `localhost`), the model name and the API key
-  (optional for a local model). **Test connection** makes one real request and checks for one
+  (optional for a local model). A URL on a local or private network address (loopback, private,
+  link-local, CGNAT, unique-local, cloud metadata) is refused, as webhooks' are, unless the server
+  sets `SLOTLOCK_ASSISTANT_PRIVATE_URLS=on` for a model on its own machine or network. **Test connection** makes one real request and checks for one
   correct tool call.
 - **The organization's data is sent to the provider it configures**: members' messages, and the
   resources and bookings the assistant reads for them.

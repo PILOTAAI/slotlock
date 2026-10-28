@@ -18,6 +18,8 @@ import {
   slotlockAgentOperationScope,
   slotlockAgentTools,
 } from './agent-server.js';
+import { isIP } from 'node:net';
+import { isPrivateAddress } from './webhooks.js';
 import type {
   SlotlockAssistantConversationRecord,
   SlotlockAssistantSettingsRecord,
@@ -328,22 +330,61 @@ export async function openSlotlockAssistantKey(
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
+/** Whether a URL's host names this machine or a private network by itself: `localhost`, or an IP literal isPrivateAddress refuses. */
+function namesPrivateHost(url: URL): boolean {
+  const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  return isIP(host) !== 0 && isPrivateAddress(host);
+}
+
 /**
  * A provider base URL as stored: https, or http on localhost or 127.0.0.1 (a model on the server's
- * own machine); no credentials, query or fragment; no trailing slash. Null for anything else.
+ * own machine); no credentials, query or fragment; no trailing slash. Unless `privateUrls`, a URL
+ * whose host is `localhost` or a loopback, private, link-local, shared (CGNAT), unique-local or
+ * metadata address (the webhooks' isPrivateAddress) is refused as `private`; a name that resolves
+ * to one is refused when it is resolved (checkSlotlockAssistantHost, and at each connection).
  */
-export function readSlotlockAssistantBaseUrl(value: string): string | null {
+export function readSlotlockAssistantBaseUrl(
+  value: string,
+  options: { privateUrls?: boolean } = {},
+): { ok: true; url: string } | { ok: false; reason: 'invalid' | 'private' } {
   let url: URL;
   try {
     url = new URL(value.trim());
   } catch {
-    return null;
+    return { ok: false, reason: 'invalid' };
   }
   const secure = url.protocol === 'https:';
   const local = url.protocol === 'http:' && LOOPBACK_HOSTS.has(url.hostname);
-  if ((!secure && !local) || url.username || url.password || url.search || url.hash) return null;
+  if ((!secure && !local) || url.username || url.password || url.search || url.hash) {
+    return { ok: false, reason: 'invalid' };
+  }
   const href = url.href.replace(/\/+$/, '');
-  return href.length <= 2_048 ? href : null;
+  if (href.length > 2_048) return { ok: false, reason: 'invalid' };
+  if (options.privateUrls !== true && namesPrivateHost(url)) return { ok: false, reason: 'private' };
+  return { ok: true, url: href };
+}
+
+/**
+ * Whether a base URL's host resolves only to public addresses: `resolve` lists them (dns.lookup's,
+ * on Node.js). True when `privateUrls`, or when the host is an IP literal readSlotlockAssistantBaseUrl
+ * already checked; false when any address is private. A name that does not resolve is not refused
+ * here: the connection fails later, plainly.
+ */
+export async function checkSlotlockAssistantHost(
+  baseUrl: string,
+  options: { privateUrls?: boolean; resolve?: (hostname: string) => Promise<string[]> },
+): Promise<boolean> {
+  if (options.privateUrls === true || !options.resolve) return true;
+  const host = new URL(baseUrl).hostname.replace(/^\[|\]$/g, '');
+  if (isIP(host) !== 0) return !isPrivateAddress(host);
+  let addresses: string[];
+  try {
+    addresses = await options.resolve(host);
+  } catch {
+    return true;
+  }
+  return !addresses.some((address) => isPrivateAddress(address));
 }
 
 /** A model name: 1-200 printable characters, no spaces. */
@@ -396,7 +437,14 @@ export function slotlockAssistantTools(): SlotlockAssistantTool[] {
 /** Why a provider call failed, in words safe to show (never the key, never the provider's body). */
 export class SlotlockAssistantProviderError extends Error {
   constructor(
-    readonly reason: 'timeout' | 'refused_key' | 'not_found' | 'rate_limited' | 'unavailable' | 'bad_answer',
+    readonly reason:
+      | 'timeout'
+      | 'refused_key'
+      | 'not_found'
+      | 'rate_limited'
+      | 'unavailable'
+      | 'bad_answer'
+      | 'private_address',
     readonly status?: number,
   ) {
     super(`slotlock assistant provider: ${reason}${status === undefined ? '' : ` (HTTP ${status})`}`);
@@ -418,6 +466,8 @@ export function slotlockAssistantProviderMessage(error: unknown): string {
       return 'The model provider is limiting requests. Try again in a minute.';
     case 'bad_answer':
       return 'The model answered in a form the assistant cannot read.';
+    case 'private_address':
+      return 'The model’s URL is, or resolves to, a local or private network address, which this server does not reach. An admin can change it in Settings.';
     default:
       return 'The model provider could not be reached. Try again in a moment.';
   }
@@ -614,6 +664,9 @@ export async function callSlotlockAssistantModel(request: ModelRequest): Promise
     });
   } catch (error) {
     const name = (error as { name?: unknown } | null)?.name;
+    if ((error as { code?: unknown } | null)?.code === 'private_address') {
+      throw new SlotlockAssistantProviderError('private_address');
+    }
     throw new SlotlockAssistantProviderError(
       name === 'TimeoutError' || name === 'AbortError' || request.signal.aborted ? 'timeout' : 'unavailable',
     );
@@ -675,6 +728,11 @@ export async function testSlotlockAssistantModel(args: {
 export type SlotlockAssistantToolOutcome =
   | { ok: true; data: Record<string, unknown> }
   | { ok: false; code: string; details?: Readonly<Record<string, string>> };
+
+/** A URL checked again before each call: one stored under looser rules is refused, not reached. */
+export function slotlockAssistantUrlAllowed(baseUrl: string, privateUrls: boolean): boolean {
+  return readSlotlockAssistantBaseUrl(baseUrl, { privateUrls }).ok;
+}
 
 export interface SlotlockAssistantTurnOptions {
   model: SlotlockAssistantModel;

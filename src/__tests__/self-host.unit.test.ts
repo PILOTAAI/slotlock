@@ -497,6 +497,15 @@ describe('slotlock serve configuration', () => {
       expect(refusal(dashboardEnv({ SLOTLOCK_ASSISTANT_SECRET: 'z'.repeat(40) })).message).toMatch(
         /SLOTLOCK_ASSISTANT_SECRET is too weak/,
       );
+      // Private model URLs: off unless on, and only with the assistant.
+      expect(readSlotlockServeConfig(dashboardEnv({ SLOTLOCK_ASSISTANT_SECRET: own })).dashboard).not.toHaveProperty('assistantPrivateUrls');
+      expect(
+        readSlotlockServeConfig(dashboardEnv({ SLOTLOCK_ASSISTANT_SECRET: own, SLOTLOCK_ASSISTANT_PRIVATE_URLS: 'on' })).dashboard
+          ?.assistantPrivateUrls,
+      ).toBe(true);
+      expect(refusal(dashboardEnv({ SLOTLOCK_ASSISTANT_PRIVATE_URLS: 'yes' })).message).toMatch(
+        /SLOTLOCK_ASSISTANT_PRIVATE_URLS must be on or off/,
+      );
     });
   });
 

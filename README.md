@@ -315,7 +315,13 @@ of clicking. Each organization brings its own model:
   vLLM, Ollama and LM Studio), the base URL (`https://api.anthropic.com`, or the one ending in
   `/v1`: `https://api.openai.com/v1`, `http://localhost:11434/v1`; https, or http only on
   `localhost` or `127.0.0.1`), the model name (`your-model`) and the API key, which a local model
-  may not need. **Test connection** makes one real request and checks the model answers with one
+  may not need. As with webhooks, a URL whose host is, or resolves to, a loopback, private,
+  link-local, shared (CGNAT), unique-local or metadata address (`169.254.169.254`) is refused, when
+  it is saved and at each connection (the address the socket connects to is checked, so a name
+  rebound to one is refused too), and the page says why. For a self-hosted model on the server's
+  own machine or network (Ollama, vLLM), the operator sets `SLOTLOCK_ASSISTANT_PRIVATE_URLS=on`.
+  On Cloudflare Workers the literal check applies and names are not resolved: a Worker's fetch
+  reaches no private network. **Test connection** makes one real request and checks the model answers with one
   correct tool call. The organization's messages, and the bookings and resources the assistant
   reads, are sent to the provider it configures.
 - **The key** is stored sealed with AES-256-GCM under a key derived from `SLOTLOCK_ASSISTANT_SECRET`,
