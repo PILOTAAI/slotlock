@@ -50,7 +50,7 @@ describe('Slotlock with the official MCP TypeScript SDK', () => {
     await expect(connected.ping()).resolves.toEqual({});
 
     const { tools } = await connected.listTools();
-    expect(tools).toHaveLength(13);
+    expect(tools).toHaveLength(14);
     for (const tool of tools) expect(tool.name).toMatch(PORTABLE_TOOL_NAME);
     expect(tools.map((tool) => tool.name)).toContain('slotlock_get_free_busy');
   });

@@ -12,7 +12,9 @@ versioning.
   hours together (`held_time_limit_reached`), and `maxHoldsPerHolder` sets the count that was fixed
   at 20. `slotlock serve` sets them with `SLOTLOCK_LIMITS` (`holder_holds`, 20;
   `holder_held_hours`, 2,160).
-
+- `slotlock_get_pool_availability` (`GET /v1/pool-availability`): how many of a pool's members are
+  free across a window, the window split where that number changes, with coverage certainty, so an
+  agent can say "three vans free 9 to 11, one after" before booking with `slotlock_book_pool`.
 - Prometheus metrics: with `SLOTLOCK_METRICS_TOKEN`, `slotlock serve` answers `/metrics` to that
   bearer token: calls by protocol, operation and outcome with their duration, confirmations,
   subscriptions, refusals, maintenance and webhook deliveries, labelled by closed sets only (never a

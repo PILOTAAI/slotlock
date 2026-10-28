@@ -64,6 +64,13 @@ OPERATIONS: dict[str, Operation] = {
         (),
         (),
     ),
+    "slotlock_get_pool_availability": Operation(
+        "slotlock_get_pool_availability",
+        "GET",
+        "/v1/pool-availability",
+        (),
+        ("pool", "start", "end"),
+    ),
     "slotlock_release_slots": Operation(
         "slotlock_release_slots",
         "DELETE",
@@ -599,6 +606,17 @@ class Operations(Transport):
         if title is not None:
             values["title"] = title
         return self.call("slotlock_book_pool", values)
+
+    def get_pool_availability(self, *, pool: str, start: str, end: str) -> dict[str, Any]:
+        """Get pool availability.
+
+        How many members of a pool (a vehicle class, a room type) are free across a window, each
+        only where its booking rules let a booking start: the window split where that number
+        changes, each part with how many are free, and coverage certainty. Book one with
+        slotlock_book_pool. 404 pool_not_found when the pool has no member you may book.
+        """
+        values: dict[str, Any] = {"pool": pool, "start": start, "end": end}
+        return self.call("slotlock_get_pool_availability", values)
 
     def release_slots(self, hold_id: str) -> dict[str, Any]:
         """Release held slots.

@@ -65,6 +65,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
+        name: "slotlock_get_pool_availability",
+        method: "GET",
+        path: "/v1/pool-availability",
+        path_params: &[],
+        query: &["pool", "start", "end"],
+    },
+    Operation {
         name: "slotlock_release_slots",
         method: "DELETE",
         path: "/v1/slot-holds/{hold_id}",
@@ -498,6 +505,14 @@ pub struct BookPoolInput {
     pub idempotency_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+}
+
+/// The arguments of [`Client::get_pool_availability`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GetPoolAvailabilityInput {
+    pub pool: String,
+    pub start: String,
+    pub end: String,
 }
 
 /// The arguments of [`Client::release_slots`].
@@ -1031,6 +1046,16 @@ impl Client {
     /// member you may book. A retry with the same idempotency_key answers the same event.
     pub fn book_pool(&self, input: &BookPoolInput) -> Result<Value, Error> {
         self.call("slotlock_book_pool", serde_json::to_value(input)?)
+    }
+
+    /// Get pool availability.
+    ///
+    /// How many members of a pool (a vehicle class, a room type) are free across a window, each
+    /// only where its booking rules let a booking start: the window split where that number
+    /// changes, each part with how many are free, and coverage certainty. Book one with
+    /// slotlock_book_pool. 404 pool_not_found when the pool has no member you may book.
+    pub fn get_pool_availability(&self, input: &GetPoolAvailabilityInput) -> Result<Value, Error> {
+        self.call("slotlock_get_pool_availability", serde_json::to_value(input)?)
     }
 
     /// Release held slots.
