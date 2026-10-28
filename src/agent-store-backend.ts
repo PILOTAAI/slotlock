@@ -192,23 +192,12 @@ function interval(input: { start: string; end: string }): Interval {
   return { start: new Date(input.start), end: new Date(input.end) };
 }
 
-/**
- * The sources a search must prove coverage for: the configured ones, and, for a resource whose
- * booking rules require certainty, every sync recording coverage for it, as its writes require.
- */
-async function requiredSources(
+function requiredSources(
   options: SlotlockStoreAgentBackendOptions,
   context: SlotlockAgentInvocationContext,
   resource: SlotlockResource,
-  tenantStore: SlotlockTenantStore,
 ): Promise<readonly string[]> {
-  const configured = (await options.requiredCoverageSources?.(context, resource)) ?? [];
-  if (resource.bookingRules?.requireCertain !== true) return configured;
-  const recorded = await tenantStore.listCoverage({
-    tenantRef: context.principal.tenantRef,
-    resourceId: resource.id,
-  });
-  return [...new Set([...configured, ...recorded.map(({ source }) => source)])];
+  return options.requiredCoverageSources?.(context, resource) ?? Promise.resolve([]);
 }
 
 function coverageProjection(window: Interval, complete: boolean) {
@@ -739,7 +728,7 @@ export function createSlotlockStoreAgentBackend(
             context.principal.tenantRef,
             resourceId,
           );
-          const sources = await requiredSources(options, context, resource, tenantStore);
+          const sources = await requiredSources(options, context, resource);
           const result = await readFreeBusy(tenantStore, {
             tenantRef: context.principal.tenantRef,
             resourceId,
@@ -786,7 +775,7 @@ export function createSlotlockStoreAgentBackend(
             window,
             now: new Date(),
           });
-          const sources = await requiredSources(options, context, resource, tenantStore);
+          const sources = await requiredSources(options, context, resource);
           const freeBusy = await readFreeBusy(tenantStore, {
             tenantRef: context.principal.tenantRef,
             resourceId,
@@ -1783,6 +1772,19 @@ export function createSlotlockStoreApplicationBackend(
         });
         if (!result.ok) throw applicationRefusal(result.code);
         return { recorded: true };
+      }, WRITE);
+    },
+
+    async deleteCoverage(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const resource = await requireResource(tenant, tenantOf(context), input.resource_id as string);
+        const deleted = await tenant.deleteCoverage({
+          tenantRef: tenantOf(context),
+          resourceId: resource.id,
+          source: input.source as string,
+        });
+        if (!deleted) throw applicationRefusal('coverage_not_found');
+        return { deleted: true };
       }, WRITE);
     },
 

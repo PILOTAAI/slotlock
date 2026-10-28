@@ -285,4 +285,51 @@ describe.skipIf(!url)('booking rules on writes and searches (real Postgres)', ()
     await store.setResourceBookingRules({ tenantRef, id, rules: null });
     expect(await book(id, at(12), at(13))).toMatchObject({ ok: true });
   });
+
+  it("searches the store as it writes under requireCertain, and lets a retired sync go", async () => {
+    const id = await ruled({ requireCertain: true, turnaroundMinutes: 60 });
+    const covered = await store.recordCalendarCoverage({
+      tenantRef,
+      resourceId: id,
+      source: 'google:pool',
+      window: { start: at(0), end: at(24) },
+      revision: 1,
+    });
+    expect(covered.ok).toBe(true);
+    const search = (start: Date, end: Date) =>
+      store.findNextAvailableFor({
+        tenantRef,
+        resourceId: id,
+        rules: WEEKDAYS,
+        searchWindow: { start, end },
+        durationMs: HOUR,
+      });
+    // Inside what the sync read, a slot the write then takes.
+    const slot = await search(at(9), at(17));
+    expect(slot).toEqual({ start: at(9), end: at(10) });
+    if (!slot) throw new Error('no slot');
+    expect(await book(id, slot.start, slot.end)).toMatchObject({ ok: true });
+    // Past it, none offered, and a write there is refused alike; free/busy says incomplete.
+    expect(await search(at(33), at(41))).toBeNull();
+    expect(await book(id, at(33), at(34))).toMatchObject({ ok: false, rule: 'uncertain' });
+    expect(
+      (await store.getFreeBusy({ tenantRef, resourceId: id, window: { start: at(33), end: at(41) } })).coverage.state,
+    ).not.toBe('complete');
+    // The turnaround must lie in read time too: a booking ending at the edge is refused.
+    expect(await book(id, at(22, 30), at(23, 30))).toMatchObject({ ok: false, rule: 'uncertain' });
+
+    // A sync that covers only a sliver blocks everything else, until it is retired.
+    await store.recordCalendarCoverage({
+      tenantRef,
+      resourceId: id,
+      source: 'old-sync',
+      window: { start: at(0), end: at(1) },
+      revision: 1,
+    });
+    expect(await book(id, at(14), at(15))).toMatchObject({ ok: false, rule: 'uncertain' });
+    expect(await store.deleteCoverage({ tenantRef, resourceId: id, source: 'old-sync' })).toBe(true);
+    expect(await store.deleteCoverage({ tenantRef, resourceId: id, source: 'old-sync' })).toBe(false);
+    expect(await store.deleteCoverage({ tenantRef: `${tenantRef}-other`, resourceId: id, source: 'google:pool' })).toBe(false);
+    expect(await book(id, at(14), at(15))).toMatchObject({ ok: true });
+  });
 });

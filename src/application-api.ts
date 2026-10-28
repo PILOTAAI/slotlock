@@ -33,6 +33,7 @@ export type SlotlockApplicationOperation =
   | 'slotlock_get_resource_history'
   | 'slotlock_get_coverage'
   | 'slotlock_record_coverage_failure'
+  | 'slotlock_delete_coverage'
   | 'slotlock_get_reservation_history'
   | 'slotlock_get_tenant_event_history'
   | 'slotlock_acquire_hold'
@@ -100,6 +101,7 @@ export interface SlotlockApplicationBackend {
   getResourceHistory: Handler;
   getCoverage: Handler;
   recordCoverageFailure: Handler;
+  deleteCoverage: Handler;
   getReservationHistory: Handler;
   getTenantEventHistory: Handler;
   acquireHold: Handler;
@@ -923,6 +925,19 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       risk: { readOnly: false, destructive: false, idempotent: true },
       invoke: 'recordCoverageFailure',
       example: { resource_id: EXAMPLE_RESOURCE_ID, source: 'google:fleet@example.com', error: 'HTTP 401 from the calendar API' },
+    },
+    {
+      name: 'slotlock_delete_coverage',
+      title: 'Retire a source',
+      description:
+        "Forget a source's coverage of the resource, for a calendar sync that is disconnected or replaced: free/busy and a resource whose booking rules require certainty stop waiting on it. 404 coverage_not_found for a source with no coverage of the resource.",
+      method: 'DELETE',
+      path: '/v1/resources/{resource_id}/coverage/{source}',
+      input: z.object({ resource_id: RESOURCE_ID, source: SOURCE }).strict(),
+      output: z.object({ deleted: z.literal(true) }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: false },
+      invoke: 'deleteCoverage',
+      example: { resource_id: EXAMPLE_RESOURCE_ID, source: 'google:fleet@example.com' },
     },
     {
       name: 'slotlock_list_tenant_events',
