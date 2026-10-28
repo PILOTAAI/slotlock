@@ -38,7 +38,7 @@ export const DETAILS = {
   slotlock_find_available_slots:
     'Each slot is free of busy time and inside the resource’s bookable hours, found the way `slotlock_find_next_available` finds one, and they never overlap on one resource. The list is empty unless the coverage of every resource asked about is `certain`. In an MCP Apps host the calendar view lets the person pick one, and sends the agent a message naming it.',
   slotlock_hold_slots:
-    'Each free candidate is held for `ttl_seconds`, busy for everyone else; a taken one is listed in `refused` with its code. Book one with `slotlock_create_event`’s `hold_id`: the others are released in the same transaction. A hold is yours alone, and one agent may have 20 live at once.',
+    'Each free candidate is held for `ttl_seconds`, busy for everyone else; a taken one is listed in `refused` with its code. Book one with `slotlock_create_event`’s `hold_id`: the others are released in the same transaction. A hold is yours alone, and one agent may have 20 live at once (`hold_limit_reached`), holding a bounded number of hours together (`held_time_limit_reached`).',
   slotlock_book_pool:
     'Members are tried in a fixed order (the order `slotlock_list_resources` with `pool` lists them) and the first that is free and allows the booking is booked, in one transaction: a class of five sells exactly five bookings for a time, however many race. The event names the member. A retry with the same key answers the member it booked, even if an earlier one has since come free.',
   slotlock_book_together:

@@ -657,6 +657,8 @@ export function createSlotlockServeStore(
     defaultAvailabilityRules: availability,
     tenantLimits: serveTenantLimits(caps),
     maxTenantTransactions: caps.tenant_transactions,
+    maxHoldsPerHolder: caps.holder_holds,
+    maxHeldHoursPerHolder: caps.holder_held_hours,
     tenantLockTimeoutMs: SERVE_LOCK_TIMEOUT_MS,
   });
 }
@@ -1468,7 +1470,8 @@ Environment:
                                  tenant_transactions (2: one tenant's database transactions at
                                  once, of the pool's 10); what one tenant may store:
                                  tenant_holds (10000), tenant_reservations, tenant_events and
-                                 tenant_coverage (100000)
+                                 tenant_coverage (100000), holder_holds (20) and
+                                 holder_held_hours (2160)
   SLOTLOCK_TRUSTED_PROXY_HEADER  The request field a proxy in front sets to the client address,
                                  such as CF-Connecting-IP (default: the connection's address);
                                  set it only when every request comes through that proxy

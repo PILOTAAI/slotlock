@@ -7,6 +7,12 @@ versioning.
 
 ### Added
 
+- One holder's holds are bounded in time as well as number: `maxHeldHoursPerHolder` in
+  `createSlotlockStore` refuses a hold that would bring the holder's live holds past that many
+  hours together (`held_time_limit_reached`), and `maxHoldsPerHolder` sets the count that was fixed
+  at 20. `slotlock serve` sets them with `SLOTLOCK_LIMITS` (`holder_holds`, 20;
+  `holder_held_hours`, 2,160).
+
 - Prometheus metrics: with `SLOTLOCK_METRICS_TOKEN`, `slotlock serve` answers `/metrics` to that
   bearer token: calls by protocol, operation and outcome with their duration, confirmations,
   subscriptions, refusals, maintenance and webhook deliveries, labelled by closed sets only (never a
