@@ -125,8 +125,21 @@ versioning.
   that requires one and gets neither answers `400 idempotency_key_required`. Keys are kept 30 days
   for event writes and while the hold could be live for holds; the docs publish the policy.
 
-- The application API's resource has `booking_rules` (`null` when it has none), and
-  `SlotlockApplicationBackend` has `setResourceBookingRules`: a backend of your own implements it.
+- The application API's resource has `booking_rules` (`null` when it has none) and `pool` (`null`
+  when it is in none).
+- `SlotlockApplicationBackend` has twenty more methods, one per new application operation:
+  `setResourceBookingRules`, `setResourcePool`, `listPools`, `getResourceHistory`,
+  `getReservationHistory`, `getTenantEventHistory`, `getCoverage`, `recordCoverageFailure`,
+  `listChanges`, `createWebhook`, `listWebhooks`, `deleteWebhook`, `enableWebhook`,
+  `exportResourceAvailability`, `importResourceAvailability`, `exportTenantEvent`,
+  `checkInReservation`, `joinWaitlist`, `listWaitlist` and `leaveWaitlist`. A backend of your own
+  implements them, or wraps `createSlotlockStoreApplicationBackend`, which has them all. The agent
+  backend's new methods (`holdSlots`, `releaseSlots`, `bookTogether`, `bookPool`) are optional: on
+  a backend without one, its tool answers `409` with `holds_unavailable`, `bundles_unavailable` or
+  `pools_unavailable`.
+- Maintenance results (`SlotlockMaintenanceResult`, and `POST /v1/maintenance`) have more counts:
+  `zoneShifts`, `staleSources`, `noShows` and `waitlistOffers` (`zone_shifts`, `stale_sources`,
+  `no_shows`, `waitlist_offers`).
 - The three write tools carry `_meta.ui.visibility: ["model"]`: MCP Apps hosts no longer let a view
   call them (the default is model and app).
 
