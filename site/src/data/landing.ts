@@ -23,7 +23,7 @@ export interface Heading {
 export const meta = {
   title: 'Slotlock: the calendar AI agents cannot double-book',
   description:
-    'Slotlock is an open-source calendar for AI agents. Each resource is its own calendar, holds expire on their own, and PostgreSQL refuses any overlapping write and returns the conflict as data.',
+    'Slotlock is an open-source calendar for AI agents. Each resource is its own calendar, agents hold and book time over MCP or A2A and show free slots as an MCP App, and PostgreSQL refuses any overlapping write and returns the conflict as data.',
 };
 
 export interface InstallTarget {
@@ -44,7 +44,7 @@ export const hero = {
     soft: 'Slotlock is a calendar for AI agents.',
     strong: 'Two agents, one slot, one booking.',
   } satisfies Heading,
-  lede: 'Each car, room, person and machine is its own calendar: agents find and book time over MCP or A2A, or hold it from TypeScript, and PostgreSQL refuses every overlapping write with the conflict returned as data.',
+  lede: 'Each car, room, person and machine is its own calendar: agents find, hold and book time over MCP or A2A, a person can pick the slot in the chat, and PostgreSQL refuses every overlapping write with the conflict returned as data.',
   install: [
     // Offered only while the README documents the Docker quickstart (facts.composeUp).
     ...(facts.composeUp
@@ -208,7 +208,7 @@ export interface LogLine {
   step: number;
 }
 
-/** The calls, in order. Library calls run inside store.withTenant; tool calls go over MCP. */
+/** The calls, in order, as two agents make them over MCP. */
 export const heroLog: LogLine[] = [
   {
     time: '09:41:02.108',
@@ -222,18 +222,18 @@ export const heroLog: LogLine[] = [
   {
     time: '09:41:02.131',
     agent: 'A',
-    call: 'acquireHold',
-    args: '10:00–12:00, ttl 10 min',
-    result: 'ok: held to 09:51:02',
+    call: 'slotlock_hold_slots',
+    args: '10:00–12:00, 600 s',
+    result: 'held to 09:51:02',
     tone: 'hold',
     step: 2,
   },
   {
     time: '09:41:02.133',
     agent: 'B',
-    call: 'acquireHold',
-    args: '11:00–13:00, ttl 10 min',
-    result: "code: 'overlap'",
+    call: 'slotlock_hold_slots',
+    args: '11:00–13:00, 600 s',
+    result: "refused: 'overlap'",
     tone: 'refused',
     step: 3,
   },
@@ -249,18 +249,18 @@ export const heroLog: LogLine[] = [
   {
     time: '09:41:02.164',
     agent: 'B',
-    call: 'acquireHold',
-    args: '12:00–14:00, ttl 10 min',
-    result: 'ok: held to 09:51:02',
+    call: 'slotlock_hold_slots',
+    args: '12:00–14:00, 600 s',
+    result: 'held to 09:51:02',
     tone: 'hold',
     step: 5,
   },
   {
     time: '09:41:37.402',
     agent: 'A',
-    call: 'confirmHold',
-    args: 'hold of 10:00–12:00',
-    result: 'ok: confirmed',
+    call: 'slotlock_create_event',
+    args: 'from its hold_id',
+    result: 'booked, revision 1',
     tone: 'ok',
     step: 6,
   },
@@ -269,7 +269,7 @@ export const heroLog: LogLine[] = [
 export const heroRefusal = {
   title: 'Refused by PostgreSQL',
   body: 'Agent B asked for 11:00–13:00, but part of it is already held.',
-  result: "{ ok: false, code: 'overlap', conflictingReservationId: '3f9c…' }",
+  result: "{ holds: [], refused: [{ index: 0, code: 'overlap' }] }",
   next: 'Next certain slot',
   chip: '12:00–14:00',
 };
@@ -280,10 +280,12 @@ export const heroAria =
 export const specStrip = [
   'PostgreSQL EXCLUDE',
   'Expiring holds',
-  'Half-open [start, end)',
   `MCP ${facts.mcpModern}`,
+  'MCP Apps',
   `A2A ${facts.a2a}`,
-  'iCalendar in and out',
+  'Standard Webhooks',
+  'RFC 9457 errors',
+  'iCalendar and JSCalendar',
   facts.license,
 ];
 
@@ -327,13 +329,13 @@ export const steps = {
     {
       n: '02',
       title: 'Find a slot and hold it',
-      body: `Agents ask \`slotlock_find_next_available\` for the earliest certain slot. From TypeScript, \`acquireHold\` keeps it for up to ${facts.maxHoldDays} days on the database clock.`,
+      body: '`slotlock_find_available_slots` lists certain slots; `slotlock_hold_slots` keeps up to five while a person chooses.',
       link: { label: 'Holds', href: '/docs/concepts/#holds' },
     },
     {
       n: '03',
       title: 'Confirm, or let it lapse',
-      body: '`confirmHold` turns the hold into a booking. An expired hold is cleared by the next writer that wants the time, with no cron job.',
+      body: 'Booking a `hold_id` turns that hold into the event and frees the rest. An expired hold is cleared by the next writer, with no cron job.',
       link: { label: 'The exclusion constraint', href: '/docs/concepts/#the-exclusion-constraint' },
     },
   ],
@@ -448,16 +450,60 @@ export function legendCounts(): Record<BlockKind, number> {
   return counts;
 }
 
+/** The MCP Apps slot picker (src/mcp-app.ts), drawn with the words the view itself shows. */
+export const picker = {
+  id: 'picker',
+  counter: '04',
+  heading: { soft: 'The agent shows the free slots.', strong: 'A person picks one in the chat.' },
+  lede: 'Search results open in an MCP App, a calendar view any MCP Apps host renders in a sandbox, MCP-UI’s renderer included.',
+  view: {
+    title: 'Pick a time',
+    resource: 'Van AB12 CDE · Europe/London',
+    days: ['Mon 29', 'Tue 30', 'Wed 31'],
+    groups: [
+      { label: 'Morning', times: ['09:00', '10:30'] },
+      { label: 'Afternoon', times: ['12:00', '14:00', '15:30'] },
+    ],
+    picked: '12:00',
+    held: 'Held until 09:51',
+    button: 'Book this time',
+    sent: 'Sent to your agent',
+  },
+  aria: 'A calendar view inside a chat: the van AB12 CDE, three days to choose from, and Tuesday’s free times grouped into morning and afternoon. The 12:00 slot is picked and held until 09:51, and the Book this time button sends one message to the agent, which books it through the usual confirmation.',
+  points: [
+    'Picking a time sends the agent one message; the agent books it through the usual confirmation.',
+    'The view makes no network requests, and write tools are visible to the model only.',
+  ],
+  link: { label: 'MCP Apps', href: '/docs/connect/#mcp-apps' },
+};
+
+/** What 0.4 adds beyond one hold and one booking, each linked to its operation's page. */
+export const capabilities = {
+  id: 'capabilities',
+  counter: '05',
+  heading: { soft: 'Beyond one booking.', strong: 'What a fleet or a clinic needs.' },
+  items: [
+    { title: 'Book together', body: 'Several resources, all or none, in one transaction.', href: '/docs/api/book-together/' },
+    { title: 'Pools', body: 'Book a vehicle class or room type; the first free member is taken.', href: '/docs/api/book-pool/' },
+    { title: 'Waitlists', body: 'Freed time is offered in order, as a hold for the next person.', href: '/docs/api/join-waitlist/' },
+    { title: 'Check-in', body: 'A booking nobody claims is released and offered on.', href: '/docs/api/check-in-reservation/' },
+    { title: 'Booking rules', body: 'Notice, how far ahead, slot steps, turnaround and hours.', href: '/docs/api/set-resource-booking-rules/' },
+    { title: 'Webhooks', body: 'Every change, signed as Standard Webhooks, in commit order.', href: '/docs/api/create-webhook/' },
+    { title: 'History', body: 'Who changed what, and what it was before.', href: '/docs/api/get-resource-history/' },
+    { title: 'Calendar formats', body: 'Hours as VAVAILABILITY, events as JSCalendar.', href: '/docs/api/export-resource-availability/' },
+  ],
+};
+
 export const developers = {
   id: 'developers',
-  counter: '04',
+  counter: '06',
   heading: { soft: 'One registry, three ways in.', strong: 'MCP, A2A or a TypeScript import.' },
-  lede: `The ${facts.toolCount} tools and their JSON Schemas come from one registry, so a refusal reads the same on every transport.`,
+  lede: `The ${facts.toolCount} tools and their JSON Schemas come from one registry, so a refusal reads the same on every transport. Applications use the same operations over REST, from five typed clients.`,
   links: [
     { label: 'Every tool, field by field', href: '/docs/tools/' },
-    { label: 'Error codes', href: '/docs/tools/#error-codes' },
     { label: 'Connect Claude Code, Cursor or VS Code', href: '/docs/connect/' },
-    { label: 'Confirmation before writes', href: '/docs/security/#confirmation-before-writes' },
+    { label: 'REST and OpenAPI', href: '/docs/reference/#rest-and-openapi' },
+    { label: 'Clients for Python, Go, Rust, Java and .NET', href: '/docs/clients/' },
     {
       label: 'Live calendar updates',
       href: '/docs/reference/#calendar-resources-and-live-updates',
@@ -467,7 +513,7 @@ export const developers = {
 
 export const security = {
   id: 'security',
-  counter: '05',
+  counter: '07',
   heading: { soft: 'Agents propose.', strong: 'A person confirms, PostgreSQL decides.' },
   approval: {
     eyebrow: 'slotlock_create_event · input required',
@@ -486,14 +532,12 @@ export const security = {
     'Forced row-level security returns nothing when the tenant setting is missing.',
     `A pending confirmation is sealed to the caller, the tool, the exact arguments and an expiry (${facts.confirmTtlSeconds} seconds by default).`,
     'A client that cannot ask a person (MCP 2025 revisions, A2A) gets `confirmation_required`, and the write never runs.',
-    `Live updates are capped at ${facts.subscriptionsPerPrincipal} streams per principal and ${facts.subscriptionsTotal} per server by default.`,
-    `Idempotency evidence is kept for ${facts.retentionDays} days by default, then pruned to return quota.`,
   ],
 };
 
 export const compare = {
   id: 'compare',
-  counter: '06',
+  counter: '08',
   heading: { soft: 'Compared with', strong: 'a bookings table and a cron job.' },
   columns: ['', 'Table and cron job', 'Slotlock'],
   rows: [
@@ -508,11 +552,6 @@ export const compare = {
       'They expire on the database clock; the next writer clears them.',
     ],
     [
-      'Back-to-back bookings',
-      'Boundary rules vary by query.',
-      'Half-open intervals: ending and starting at 12:00 never collide.',
-    ],
-    [
       'A stale external feed',
       'Missing data reads as free time.',
       'Time the feed has not covered is unproven.',
@@ -521,6 +560,16 @@ export const compare = {
       'Retries',
       'A retry can book twice.',
       'A replay with the same idempotency key returns the first result.',
+    ],
+    [
+      'A cancellation',
+      'The slot sits empty until someone looks.',
+      'The waitlist is offered it in order, as a hold.',
+    ],
+    [
+      'Telling other systems',
+      'A trigger or a poller, if anyone wrote one.',
+      'Signed webhooks, in commit order, replayable.',
     ],
     [
       'Agent access',
@@ -532,7 +581,7 @@ export const compare = {
 
 export const openSource = {
   id: 'open-source',
-  counter: '07',
+  counter: '09',
   heading: { soft: `${facts.license}, on the PostgreSQL`, strong: 'you already run.' },
   repo: {
     name: 'PILOTAAI/slotlock',
@@ -548,7 +597,6 @@ export const openSource = {
       ? 'Docker Compose runs PostgreSQL 18 and the server on 127.0.0.1; writes wait for a person by default.'
       : 'Needs Node.js 22.12 or newer and PostgreSQL 16 or newer with btree_gist.',
     'Run it next to your own data, or use [hosted Slotlock](/docs/hosted/) once it opens.',
-    'Report vulnerabilities privately through the repository’s Security tab.',
   ],
 };
 
@@ -558,11 +606,7 @@ export const faq = {
   items: [
     {
       q: 'Does it sync with Google Calendar or Outlook?',
-      a: 'Not by itself. Provider adapters live in your application; Slotlock normalises their changes, reads and writes iCalendar, and records how much of each feed has been read.',
-    },
-    {
-      q: 'Why not take a lock in my application?',
-      a: 'A lock protects the code paths that remember to take it. The constraint covers every write that reaches the table, including the ones an agent makes.',
+      a: 'Not by itself. Provider adapters live in your application; Slotlock normalises their changes, reads and writes iCalendar, exports JSCalendar, and records how much of each feed has been read.',
     },
     {
       q: 'Is it ready for production?',
@@ -586,6 +630,7 @@ export const closing = {
 
 export const nav = [
   { label: 'Docs', href: '/docs/' },
+  { label: 'In the chat', href: '#picker' },
   { label: 'Developers', href: '#developers' },
   { label: 'Security', href: '#security' },
   { label: 'Open source', href: '#open-source' },

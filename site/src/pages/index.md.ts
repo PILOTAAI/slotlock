@@ -1,6 +1,7 @@
 // The landing page as Markdown, built from the same copy module as the HTML page.
 import type { APIRoute } from 'astro';
 import {
+  capabilities,
   closing,
   compare,
   developers,
@@ -16,6 +17,7 @@ import {
   model,
   ruleCode,
   openSource,
+  picker,
   proof,
   RACE_TEST_URL,
   REPO_URL,
@@ -39,7 +41,7 @@ export const GET: APIRoute = () => {
     hero.lede,
     list(hero.install.map((target) => `${target.label}: \`${target.command}\` (${target.note})`)),
     `What the calendar at the top of the page shows: ${heroAria}`,
-    `The calls, in order (mcp: MCP tool call, ts: TypeScript store):\n\n${list(
+    `The calls, in order, over MCP:\n\n${list(
       heroLog.map(
         (line) =>
           `${line.time} agent ${line.agent}: \`${line.call}\` ${line.args} → ${line.result}`,
@@ -62,6 +64,13 @@ export const GET: APIRoute = () => {
     model.lede,
     `Weekly rule for the van:\n\n\`\`\`ts\n${ruleCode()}\n\`\`\``,
     `Legend of the calendar above: ${legend.map((item) => `${item.label} ${counts[item.kind]}`).join(', ')}.`,
+    heading(picker.heading),
+    picker.lede,
+    picker.aria,
+    list(picker.points),
+    `[${picker.link.label}](${abs(picker.link.href)})`,
+    heading(capabilities.heading),
+    list(capabilities.items.map((item) => `[${item.title}](${abs(item.href)}): ${item.body}`)),
     heading(developers.heading),
     developers.lede,
     `\`\`\`sh\n${facts.claudeMcpAdd}\n\`\`\``,

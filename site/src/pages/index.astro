@@ -10,6 +10,7 @@ import Icon from '../components/landing/Icon.astro';
 import Lockup from '../components/Lockup.astro';
 import Rich from '../components/landing/Rich.astro';
 import {
+  capabilities,
   closing,
   compare,
   DDL_URL,
@@ -27,6 +28,7 @@ import {
   weekWindows,
   nav,
   openSource,
+  picker,
   proof,
   RACE_TEST_URL,
   REPO_URL,
@@ -401,6 +403,80 @@ const canonical = new URL('/', Astro.site).toString();
               </div>
             </div>
           </div>
+        </div>
+      </section>
+
+      <section class="band band--tint" id={picker.id} aria-labelledby="picker-title">
+        <div class="wrap">
+          <div class="head head--split">
+            <p class="counter">{picker.counter} / In the chat</p>
+            <h2 class="h2" id="picker-title">
+              <span class="soft">{picker.heading.soft}</span>
+              <span class="strong">{picker.heading.strong}</span>
+            </h2>
+            <p class="lede">{picker.lede}</p>
+          </div>
+          <div class="security-grid">
+            <div class="picker" role="img" aria-label={picker.aria}>
+              <div class="picker__card" aria-hidden="true">
+                <p class="eyebrow eyebrow--plain">{picker.view.title}</p>
+                <p class="picker__resource">{picker.view.resource}</p>
+                <div class="picker__days">
+                  {picker.view.days.map((day, index) => <span class={index === 1 ? 'on' : undefined}>{day}</span>)}
+                </div>
+                {
+                  picker.view.groups.map((group) => (
+                    <div class="picker__group">
+                      <span class="picker__label">{group.label}</span>
+                      <div class="picker__times">
+                        {group.times.map((time) => (
+                          <span class={time === picker.view.picked ? 'on' : undefined}>{time}</span>
+                        ))}
+                      </div>
+                    </div>
+                  ))
+                }
+                <div class="picker__foot">
+                  <span class="picker__held">{picker.view.held}</span>
+                  <span class="picker__book">{picker.view.button}</span>
+                </div>
+              </div>
+              <div class="receipt" aria-hidden="true">
+                <Icon name="check" />
+                <strong>{picker.view.sent}</strong>
+              </div>
+            </div>
+            <div>
+              <ul class="statements">
+                {picker.points.map((point) => <li><Rich text={point} /></li>)}
+              </ul>
+              <p><a class="arrow-link" href={picker.link.href}>{picker.link.label} <Icon name="arrow" /></a></p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band" id={capabilities.id} aria-labelledby="capabilities-title">
+        <div class="wrap">
+          <div class="head">
+            <p class="counter">{capabilities.counter} / Capabilities</p>
+            <h2 class="h2" id="capabilities-title">
+              <span class="soft">{capabilities.heading.soft}</span>
+              <span class="strong">{capabilities.heading.strong}</span>
+            </h2>
+          </div>
+          <ul class="caps">
+            {
+              capabilities.items.map((item) => (
+                <li>
+                  <a href={item.href}>
+                    <strong>{item.title}</strong>
+                    <span>{item.body}</span>
+                  </a>
+                </li>
+              ))
+            }
+          </ul>
         </div>
       </section>
 

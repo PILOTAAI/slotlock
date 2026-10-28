@@ -1638,6 +1638,144 @@ svg {
   gap: 2px;
 }
 
+/* ---------- In the chat (the MCP Apps picker) ---------- */
+
+.picker {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.picker__card {
+  padding: 18px;
+  border-radius: var(--radius-lg);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  box-shadow: 0 16px 40px -24px var(--shadow);
+}
+
+.picker__card .eyebrow {
+  font-size: 11px;
+}
+
+.picker__resource {
+  margin: 6px 0 14px;
+  font-size: 15px;
+}
+
+.picker__days,
+.picker__times {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.picker__days {
+  margin-bottom: 14px;
+}
+
+.picker__days span,
+.picker__times span {
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.picker__days .on,
+.picker__times .on {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--paper);
+}
+
+.picker__group {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.picker__label {
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+.picker__foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.picker__held {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+
+.picker__book {
+  padding: 8px 16px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  background: var(--ink);
+  color: var(--paper);
+}
+
+/* ---------- Capabilities ---------- */
+
+.caps {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+@media (min-width: 640px) {
+  .caps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1024px) {
+  .caps {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+.caps a {
+  display: grid;
+  gap: 6px;
+  height: 100%;
+  padding: 18px 20px;
+  border-radius: var(--radius-lg);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  color: inherit;
+  text-decoration: none;
+}
+
+.caps a:hover {
+  border-color: var(--line-strong);
+}
+
+.caps strong {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: 20px;
+  letter-spacing: -0.01em;
+}
+
+.caps span {
+  color: var(--ink-2);
+  font-size: 14.5px;
+  line-height: 1.5;
+}
+
 /* ---------- Security ---------- */
 
 .security-grid {
