@@ -153,10 +153,13 @@ slotlock rules clear --resource vehicle-42
 | `turnaroundMinutes` | keeps this long free after it: its trailing buffer, which the database enforces |
 | `enforceHours` | lies inside the resource's bookable hours |
 | `checkInMinutes` | is claimed (`checkInReservation`) this long after its start, or maintenance releases it |
+| `requireCertain` | lies in time every calendar sync recording coverage for the resource has read within a day |
 
 - Holds, reservations, moves and agents' events are checked when they are made, by the database's
   clock; a refusal names the rule (`booking_rule_violated` with `rule` in the store,
-  `booking_rule_min_notice`, `_max_advance`, `_slot_step` or `_outside_hours` to an agent).
+  `booking_rule_min_notice`, `_max_advance`, `_slot_step`, `_outside_hours` or `_uncertain` to an
+  agent). Under `requireCertain`, a search needs those syncs' coverage too, so it offers no slot
+  they leave unproven.
 - A series is judged on its first occurrence for notice and advance, and on every occurrence for
   step and hours. Imported calendar events are not checked: they happened elsewhere.
 - Searches (`slotlock_find_next_available`, `slotlock_find_available_slots`, `findNextAvailableFor`)

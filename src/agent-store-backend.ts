@@ -192,12 +192,23 @@ function interval(input: { start: string; end: string }): Interval {
   return { start: new Date(input.start), end: new Date(input.end) };
 }
 
-function requiredSources(
+/**
+ * The sources a search must prove coverage for: the configured ones, and, for a resource whose
+ * booking rules require certainty, every sync recording coverage for it, as its writes require.
+ */
+async function requiredSources(
   options: SlotlockStoreAgentBackendOptions,
   context: SlotlockAgentInvocationContext,
   resource: SlotlockResource,
+  tenantStore: SlotlockTenantStore,
 ): Promise<readonly string[]> {
-  return options.requiredCoverageSources?.(context, resource) ?? Promise.resolve([]);
+  const configured = (await options.requiredCoverageSources?.(context, resource)) ?? [];
+  if (resource.bookingRules?.requireCertain !== true) return configured;
+  const recorded = await tenantStore.listCoverage({
+    tenantRef: context.principal.tenantRef,
+    resourceId: resource.id,
+  });
+  return [...new Set([...configured, ...recorded.map(({ source }) => source)])];
 }
 
 function coverageProjection(window: Interval, complete: boolean) {
@@ -365,6 +376,7 @@ const BOOKING_RULE_CODES: Readonly<Record<SlotlockBookingRule, string>> = Object
   max_advance: 'booking_rule_max_advance',
   slot_step: 'booking_rule_slot_step',
   outside_hours: 'booking_rule_outside_hours',
+  uncertain: 'booking_rule_uncertain',
 });
 
 function operationError(
@@ -727,7 +739,7 @@ export function createSlotlockStoreAgentBackend(
             context.principal.tenantRef,
             resourceId,
           );
-          const sources = await requiredSources(options, context, resource);
+          const sources = await requiredSources(options, context, resource, tenantStore);
           const result = await readFreeBusy(tenantStore, {
             tenantRef: context.principal.tenantRef,
             resourceId,
@@ -774,7 +786,7 @@ export function createSlotlockStoreAgentBackend(
             window,
             now: new Date(),
           });
-          const sources = await requiredSources(options, context, resource);
+          const sources = await requiredSources(options, context, resource, tenantStore);
           const freeBusy = await readFreeBusy(tenantStore, {
             tenantRef: context.principal.tenantRef,
             resourceId,
@@ -1191,6 +1203,7 @@ function bookingRulesOutput(rules: SlotlockBookingRules | undefined) {
     ...(rules.turnaroundMinutes !== undefined ? { turnaround_minutes: rules.turnaroundMinutes } : {}),
     ...(rules.enforceHours !== undefined ? { enforce_hours: rules.enforceHours } : {}),
     ...(rules.checkInMinutes !== undefined ? { check_in_minutes: rules.checkInMinutes } : {}),
+    ...(rules.requireCertain !== undefined ? { require_certain: rules.requireCertain } : {}),
   };
 }
 
@@ -1204,6 +1217,7 @@ function bookingRulesInput(value: unknown): SlotlockBookingRules | null {
   if (input.turnaround_minutes !== undefined) rules.turnaroundMinutes = input.turnaround_minutes as number;
   if (input.enforce_hours !== undefined) rules.enforceHours = input.enforce_hours as boolean;
   if (input.check_in_minutes !== undefined) rules.checkInMinutes = input.check_in_minutes as number;
+  if (input.require_certain !== undefined) rules.requireCertain = input.require_certain as boolean;
   return rules;
 }
 

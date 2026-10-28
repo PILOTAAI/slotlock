@@ -226,6 +226,7 @@ const BOOKING_RULES = z
     turnaround_minutes: z.number().int().min(0).max(1_440).optional(),
     enforce_hours: z.boolean().optional(),
     check_in_minutes: z.number().int().min(1).max(1_440).optional(),
+    require_certain: z.boolean().optional(),
   })
   .strict();
 

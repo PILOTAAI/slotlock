@@ -229,4 +229,60 @@ describe.skipIf(!url)('booking rules on writes and searches (real Postgres)', ()
     })) as { start: string };
     expect(next.start).toBe(at(10).toISOString());
   });
+
+  it('books only in time every sync covering the resource has read lately, when certainty is required', async () => {
+    const id = await ruled({ requireCertain: true });
+    // No sync covers it: nothing is unproven.
+    expect(await book(id, at(9), at(10))).toMatchObject({ ok: true });
+    const covered = await store.recordCalendarCoverage({
+      tenantRef,
+      resourceId: id,
+      source: 'google:fleet',
+      window: { start: at(0), end: at(24) },
+      revision: 1,
+    });
+    expect(covered.ok).toBe(true);
+    expect(await book(id, at(10), at(11))).toMatchObject({ ok: true });
+    // Past what the sync read: it may hide a booking there.
+    expect(await book(id, at(30), at(31))).toMatchObject({
+      ok: false,
+      code: 'booking_rule_violated',
+      rule: 'uncertain',
+    });
+    const agentBackend = createSlotlockStoreAgentBackend(store, { availabilityRules: async () => WEEKDAYS });
+    const context = (operation: string): SlotlockAgentInvocationContext => ({
+      principal: { subject: 'rules-agent', tenantRef },
+      operation: operation as SlotlockAgentInvocationContext['operation'],
+      signal: new AbortController().signal,
+    });
+    await expect(
+      agentBackend.createEvent(context('slotlock_create_event'), {
+        resource_id: id,
+        starts_at: at(30).toISOString(),
+        ends_at: at(31).toISOString(),
+        timezone: 'UTC',
+        idempotency_key: `k-${randomUUID()}`,
+      }),
+    ).rejects.toMatchObject({ code: 'booking_rule_uncertain', status: 409 });
+
+    // Searches as the write judges: inside the read window a slot, past it none, called uncertain.
+    const search = (start: Date, end: Date) =>
+      agentBackend.findNextAvailable(context('slotlock_find_next_available'), {
+        resource_ids: [id],
+        start: start.toISOString(),
+        end: end.toISOString(),
+        duration_minutes: 60,
+      }) as Promise<{ start: string | null; coverage: { certainty: string } }>;
+    expect(await search(at(11), at(17))).toMatchObject({ start: at(11).toISOString(), coverage: { certainty: 'certain' } });
+    expect(await search(at(33), at(41))).toMatchObject({ start: null, coverage: { certainty: 'uncertain' } });
+
+    // A sync not read for a day leaves even what it covered unproven.
+    await sql`UPDATE slotlock.calendar_coverage SET observed_at = now() - interval '25 hours'
+               WHERE resource_id = ${id}`;
+    expect(await book(id, at(12), at(13))).toMatchObject({ ok: false, rule: 'uncertain' });
+
+    // Without the rule, the same stale sync does not stop a write.
+    await store.setResourceBookingRules({ tenantRef, id, rules: null });
+    expect(await book(id, at(12), at(13))).toMatchObject({ ok: true });
+  });
 });

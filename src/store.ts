@@ -1500,6 +1500,19 @@ async function bookingJudge(
     archived_at: null,
   });
   const hours = availabilityRules ?? defaultHours;
+  // Every sync covering the resource, and whether it was read within a day, by the same clock.
+  const coverage =
+    rules?.requireCertain === true
+      ? await tx<{ starts_at: Date; ends_at: Date; fresh: boolean }[]>`
+          SELECT starts_at, ends_at,
+                 observed_at >= statement_timestamp() - interval '24 hours' AS fresh
+            FROM slotlock.calendar_coverage WHERE resource_id = ${resourceId}`
+      : [];
+  const uncertain = (interval: Interval) =>
+    coverage.some(
+      (source) =>
+        !source.fresh || source.starts_at > interval.start || source.ends_at < interval.end,
+    );
   // A later occurrence of a series is judged on its step and hours only: notice and advance are
   // about when the booking was made, which its first occurrence answers.
   const later =
@@ -1517,7 +1530,7 @@ async function bookingJudge(
         hours,
         interval,
         now: row.now,
-      }),
+      }) ?? (uncertain(interval) ? 'uncertain' : null),
     turnaroundMs: bookingBufferAfterMs(rules),
   };
 }

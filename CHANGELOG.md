@@ -7,6 +7,11 @@ versioning.
 
 ### Added
 
+- The booking rule `requireCertain` (`require_certain`): a booking must lie in time every calendar
+  sync recording coverage for the resource has read within a day, or it is refused (`uncertain`,
+  `booking_rule_uncertain` to an agent), rather than booked over what a stale or failing sync may
+  hide. Searches on such a resource require the same coverage. The dashboard's rules form has it.
+
 - The dashboard is an app with a sidebar: an Overview with the coming week's bookings, events and
   live holds across every resource and the agents' latest changes, named by key; Resources; API
   keys, with the endpoints; and Settings. `SLOTLOCK_DASHBOARD_NAME` (`name` in

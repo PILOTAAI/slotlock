@@ -301,6 +301,9 @@
                                   "type": "integer",
                                   "minimum": 1,
                                   "maximum": 1440
+                                },
+                                "require_certain": {
+                                  "type": "boolean"
                                 }
                               },
                               "additionalProperties": false
@@ -4143,6 +4146,9 @@
                                   "type": "integer",
                                   "minimum": 1,
                                   "maximum": 1440
+                                },
+                                "require_certain": {
+                                  "type": "boolean"
                                 }
                               },
                               "additionalProperties": false
@@ -4422,6 +4428,9 @@
                                   "type": "integer",
                                   "minimum": 1,
                                   "maximum": 1440
+                                },
+                                "require_certain": {
+                                  "type": "boolean"
                                 }
                               },
                               "additionalProperties": false
@@ -4641,6 +4650,9 @@
                                   "type": "integer",
                                   "minimum": 1,
                                   "maximum": 1440
+                                },
+                                "require_certain": {
+                                  "type": "boolean"
                                 }
                               },
                               "additionalProperties": false
@@ -4999,6 +5011,9 @@
                                   "type": "integer",
                                   "minimum": 1,
                                   "maximum": 1440
+                                },
+                                "require_certain": {
+                                  "type": "boolean"
                                 }
                               },
                               "additionalProperties": false
@@ -5294,6 +5309,9 @@
                                   "type": "integer",
                                   "minimum": 1,
                                   "maximum": 1440
+                                },
+                                "require_certain": {
+                                  "type": "boolean"
                                 }
                               },
                               "additionalProperties": false
@@ -5426,6 +5444,9 @@
                             "type": "integer",
                             "minimum": 1,
                             "maximum": 1440
+                          },
+                          "require_certain": {
+                            "type": "boolean"
                           }
                         },
                         "additionalProperties": false
@@ -5557,6 +5578,9 @@
                                   "type": "integer",
                                   "minimum": 1,
                                   "maximum": 1440
+                                },
+                                "require_certain": {
+                                  "type": "boolean"
                                 }
                               },
                               "additionalProperties": false
@@ -5790,6 +5814,9 @@
                                   "type": "integer",
                                   "minimum": 1,
                                   "maximum": 1440
+                                },
+                                "require_certain": {
+                                  "type": "boolean"
                                 }
                               },
                               "additionalProperties": false
