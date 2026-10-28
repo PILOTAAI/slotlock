@@ -132,6 +132,11 @@ versioning.
 
 ### Fixed
 
+- Retrying a recurring event's create (or any put) with the same idempotency key and arguments
+  after UTC midnight replays the first result again. The command's hash included the window its
+  occurrences are stored over, which for a series is the rolling horizon starting at the current
+  UTC midnight, so the next day's retry was refused as `idempotency_conflict`. A command stored by
+  0.3.0 still replays: a one-off event's always, a series' on the day it was stored.
 - A hold's expiry is judged at each statement (`statement_timestamp()`), not at the start of the
   transaction (`now()`). A store made from a caller's transaction runs in savepoints of it, so a hold
   that expired while that transaction ran still looked live there and could be confirmed after its
