@@ -85,4 +85,37 @@ describe.skipIf(!url)('the dashboard overview (real Postgres)', () => {
     expect(theirs.every(({ id }) => !recent.some((mine) => mine.id === id))).toBe(true);
     await expect(store.listRecentChanges({ tenantRef: tenant, limit: 101 })).rejects.toMatchObject({ code: 'invalid_limit' });
   });
+
+  it("sets rules and pools, keeps webhooks, and offers an offered entry's time on when it leaves", async () => {
+    const adapter = createSlotlockDashboardResources(store);
+    const car = await store.createResource({ tenantRef: tenant, externalRef: `car-${randomUUID()}`, timezone: 'UTC' });
+    const ruled = await adapter.setRules?.(tenant, car.id, { minNoticeMinutes: 30, checkInMinutes: 15 });
+    expect(ruled?.bookingRules).toEqual({ minNoticeMinutes: 30, checkInMinutes: 15 });
+    await expect(adapter.setRules?.(tenant, car.id, { slotStepMinutes: 0 })).rejects.toMatchObject({ code: 'invalid_booking_rules' });
+    expect(await adapter.setRules?.(other, car.id, null)).toBeNull();
+    expect((await adapter.setPool?.(tenant, car.id, 'sedans'))?.pool).toBe('sedans');
+    await expect(adapter.setPool?.(tenant, car.id, 'not a pool!')).rejects.toMatchObject({ code: 'invalid_pool' });
+
+    const created = await adapter.webhooks?.create(tenant, 'https://hooks.example.com/slotlock', ['reservation.created']);
+    expect(created).toMatchObject({ ok: true, secret: expect.stringMatching(/^whsec_/) });
+    const id = created?.ok ? created.endpoint.id : '';
+    expect((await adapter.webhooks?.list(tenant))?.map((endpoint) => endpoint.id)).toContain(id);
+    expect(await adapter.webhooks?.list(other)).toEqual([]);
+    expect(await adapter.webhooks?.remove(other, id)).toBe(false);
+    expect(await adapter.webhooks?.remove(tenant, id)).toBe(true);
+
+    // Two waiting for the same free hour: the first is offered it; when it leaves, the second is.
+    const join = (holderRef: string) =>
+      store.withTenant(tenant, (t) => t.joinWaitlist({ tenantRef: tenant, resourceId: car.id, start: at(100), end: at(101), holderRef }));
+    const first = await join('first');
+    await join('second');
+    await store.withTenant(tenant, (t) => t.offerWaitlist({ tenantRef: tenant }));
+    const offered = (await adapter.waitlist?.list(tenant, 10)) ?? [];
+    expect(offered.map(({ status }) => status)).toEqual(['offered', 'waiting']);
+    expect(await adapter.waitlist?.leave(other, first.ok ? first.entry.id : '')).toBe(false);
+    expect(await adapter.waitlist?.leave(tenant, first.ok ? first.entry.id : '')).toBe(true);
+    expect((await adapter.waitlist?.list(tenant, 10))?.map(({ holderRef, status }) => [holderRef, status])).toEqual([
+      ['second', 'offered'],
+    ]);
+  });
 });

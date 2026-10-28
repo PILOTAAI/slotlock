@@ -19,8 +19,14 @@ import type { SlotlockApiKey, SlotlockApiKeyScope, SlotlockApiKeyStore } from '.
 import { SLOTLOCK_DASHBOARD_NAME_PATTERN } from './config.js';
 import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from './ddl.js';
 import { ignoreRejection } from './hooks.js';
-import type { SlotlockChange } from './event-feed.js';
-import type { SlotlockSql, SlotlockStore } from './store.js';
+import type { SlotlockBookingRules } from './booking-rules.js';
+import {
+  type CreateWebhookEndpointResult,
+  SLOTLOCK_CHANGE_TYPES,
+  type SlotlockChange,
+  type SlotlockWebhookEndpoint,
+} from './event-feed.js';
+import type { SlotlockSql, SlotlockStore, SlotlockWaitlistEntry } from './store.js';
 import type {
   Interval,
   SlotlockAgendaEntry,
@@ -58,6 +64,12 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/keys/rotate',
   '/keys/revoke',
   '/resources',
+  '/resources/rules',
+  '/resources/pool',
+  '/webhooks',
+  '/webhooks/delete',
+  '/webhooks/enable',
+  '/waitlist/leave',
   '/hours',
   '/organization',
 ]);
@@ -118,6 +130,36 @@ export interface SlotlockDashboardResources {
   agenda?(tenantRef: string, window: Interval, limit: number): Promise<SlotlockAgendaEntry[]>;
   /** The tenant's latest changes, newest first: the overview's activity. */
   recentChanges?(tenantRef: string, limit: number): Promise<SlotlockChange[]>;
+  /**
+   * Set the booking rules of one of the tenant's resources (null clears them): the resource, or
+   * null when it is not the tenant's. Invalid rules throw with `code: 'invalid_booking_rules'`.
+   */
+  setRules?(
+    tenantRef: string,
+    id: string,
+    rules: SlotlockBookingRules | null,
+  ): Promise<SlotlockResource | null>;
+  /** Put one of the tenant's resources in a pool, or none: as setRules; `code: 'invalid_pool'`. */
+  setPool?(tenantRef: string, id: string, pool: string | null): Promise<SlotlockResource | null>;
+  /** The tenant's waitlist, oldest first, and leaving it (false when the entry is not the tenant's). */
+  waitlist?: {
+    list(tenantRef: string, limit: number): Promise<SlotlockWaitlistEntry[]>;
+    leave(tenantRef: string, id: string): Promise<boolean>;
+  };
+  /** The tenant's webhook endpoints, as the event feed keeps them. */
+  webhooks?: {
+    list(tenantRef: string): Promise<SlotlockWebhookEndpoint[]>;
+    create(
+      tenantRef: string,
+      url: string,
+      eventTypes: readonly string[] | undefined,
+    ): Promise<CreateWebhookEndpointResult>;
+    remove(tenantRef: string, id: string): Promise<boolean>;
+    enable(
+      tenantRef: string,
+      id: string,
+    ): Promise<SlotlockWebhookEndpoint | null | { code: 'changes_pruned' }>;
+  };
 }
 
 /**
@@ -241,6 +283,46 @@ export function createSlotlockDashboardResources(store: SlotlockStore): Slotlock
       store.withTenant(tenantRef, (tenant) => tenant.listAgenda({ tenantRef, window, limit })),
     recentChanges: (tenantRef, limit) =>
       store.withTenant(tenantRef, (tenant) => tenant.listRecentChanges({ tenantRef, limit })),
+    setRules: (tenantRef, id, rules) =>
+      store.withTenant(tenantRef, (tenant) => tenant.setResourceBookingRules({ tenantRef, id, rules })),
+    setPool: (tenantRef, id, pool) =>
+      store.withTenant(tenantRef, (tenant) => tenant.setResourcePool({ tenantRef, id, pool })),
+    waitlist: {
+      list: (tenantRef, limit) =>
+        store.withTenant(tenantRef, (tenant) => tenant.listWaitlist({ tenantRef, limit })),
+      async leave(tenantRef, id) {
+        const left = await store.withTenant(tenantRef, (tenant) =>
+          tenant.leaveWaitlist({ tenantRef, id }),
+        );
+        // An offered entry's hold went with it: offer that time to the next, as the API does.
+        if (left) {
+          await store
+            .withTenant(tenantRef, (tenant) => tenant.offerWaitlist({ tenantRef, limit: 20 }))
+            .catch(() => undefined);
+        }
+        return left;
+      },
+    },
+    webhooks: {
+      list: (tenantRef) =>
+        store.withTenant(tenantRef, (tenant) => tenant.listWebhookEndpoints({ tenantRef })),
+      create: (tenantRef, url, eventTypes) =>
+        store.withTenant(tenantRef, (tenant) =>
+          tenant.createWebhookEndpoint({
+            tenantRef,
+            url,
+            ...(eventTypes !== undefined ? { eventTypes } : {}),
+          }),
+        ),
+      remove: async (tenantRef, id) =>
+        (
+          await store.withTenant(tenantRef, (tenant) =>
+            tenant.deleteWebhookEndpoint({ tenantRef, id }),
+          )
+        ).deleted,
+      enable: (tenantRef, id) =>
+        store.withTenant(tenantRef, (tenant) => tenant.enableWebhookEndpoint({ tenantRef, id })),
+    },
   };
 }
 
@@ -439,6 +521,16 @@ const AGENDA_DAYS = 7;
 const AGENDA_LIMIT = 200;
 const AGENDA_SHOWN = 30;
 const ACTIVITY_LIMIT = 20;
+const WAITLIST_SHOWN = 200;
+const RESOURCE_PAGE = /^\/resources\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+/** The booking rules form's fields, by rule. */
+const RULE_FIELDS = Object.freeze({
+  minNoticeMinutes: 'min_notice_minutes',
+  maxAdvanceDays: 'max_advance_days',
+  slotStepMinutes: 'slot_step_minutes',
+  turnaroundMinutes: 'turnaround_minutes',
+  checkInMinutes: 'check_in_minutes',
+} as const);
 
 const icon = (paths: string) =>
   new Html(
@@ -451,6 +543,8 @@ const ICONS = Object.freeze({
   overview: icon('<path d="M4 13h6V4H4zM14 20h6v-9h-6zM4 20h6v-3H4zM14 7h6V4h-6z"/>'),
   resources: icon('<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>'),
   keys: icon('<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/>'),
+  waitlist: icon('<path d="M4 6h16M4 12h10M4 18h6"/><circle cx="18" cy="16" r="3"/>'),
+  webhooks: icon('<path d="M9 7a3 3 0 1 1 4 2.8L16 15M6.5 13.5A3 3 0 1 0 9 18h6M15 18a3 3 0 1 0 1.5-5.6"/>'),
   settings: icon(
     '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
   ),
@@ -883,11 +977,19 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const redirect = (status: number, location: string, cookies: string[] = []) =>
     respond(status, '', { Location: location }, cookies);
 
-  type Section = 'overview' | 'resources' | 'keys' | 'settings';
-  const NAV: ReadonlyArray<{ section: Section; label: string; path: string; icon: Html }> = [
+  type Section = 'overview' | 'resources' | 'waitlist' | 'keys' | 'webhooks' | 'settings';
+  // Pages for what the adapter offers, so a custom one without a waitlist shows none. Read per
+  // request: on Workers the adapter exists only inside one.
+  const nav = (): ReadonlyArray<{ section: Section; label: string; path: string; icon: Html }> => [
     { section: 'overview', label: 'Overview', path: '', icon: ICONS.overview },
     { section: 'resources', label: 'Resources', path: '/resources', icon: ICONS.resources },
+    ...(options.resources.waitlist
+      ? [{ section: 'waitlist' as const, label: 'Waitlist', path: '/waitlist', icon: ICONS.waitlist }]
+      : []),
     { section: 'keys', label: 'API keys', path: '/keys', icon: ICONS.keys },
+    ...(options.resources.webhooks
+      ? [{ section: 'webhooks' as const, label: 'Webhooks', path: '/webhooks', icon: ICONS.webhooks }]
+      : []),
     { section: 'settings', label: 'Settings', path: '/settings', icon: ICONS.settings },
   ];
 
@@ -923,7 +1025,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
 </body>
 </html>`;
     }
-    const links = NAV.map(
+    const links = nav().map(
       (item) =>
         html`<a href="${root}${item.path}"${item.section === section ? html` aria-current="page"` : html``}>${item.icon}<span>${item.label}</span></a>`,
     );
@@ -1157,7 +1259,7 @@ ${
     ? html`<p class="empty">No resources yet. Agents can only book what is listed here.</p>`
     : html`<div class="table"><table><thead><tr><th>Reference</th><th>Time zone</th><th>Bookable hours</th><th>Resource id</th></tr></thead><tbody>${resources.map(
         (resource) =>
-          html`<tr><td data-label="Reference" class="strong">${resource.externalRef ?? ''}</td><td data-label="Time zone">${resource.timezone}</td><td data-label="Bookable hours">${hoursSummary(resource.availabilityRules)} <a href="${root}/hours?resource=${resource.id}">Set hours</a></td><td data-label="Resource id"><code class="muted">${resource.id}</code></td></tr>`,
+          html`<tr><td data-label="Reference" class="strong"><span class="cell"><a href="${root}/resources/${resource.id}">${resourceName(resource, resource.id)}</a>${resource.pool ? html`<span class="meta">Pool ${resource.pool}</span>` : html``}</span></td><td data-label="Time zone">${resource.timezone}</td><td data-label="Bookable hours">${hoursSummary(resource.availabilityRules)} <a href="${root}/hours?resource=${resource.id}">Set hours</a></td><td data-label="Resource id"><code class="muted">${resource.id}</code></td></tr>`,
       )}</tbody></table></div>`
 }`;
     return respond(status, layout('Resources', content, session, 'resources'));
@@ -1195,10 +1297,307 @@ ${current ? html`<p class="fine">Membership is read from GitHub when you sign in
     return respond(200, layout('Settings', content, session, 'settings'));
   }
 
+  /** The tenant's resource with that id and every resource (for names), or null for anything else. */
+  async function resourceDetailPage(
+    session: Session,
+    id: string,
+    status = 200,
+    notice?: string,
+  ): Promise<Response> {
+    const tenantRef = tenantOf(session);
+    const resource = await ownResource(session, id);
+    if (!resource) return notFound(session);
+    const start = new Date(now());
+    const window = { start, end: new Date(start.getTime() + AGENDA_DAYS * DAY_MS) };
+    const [agenda, changes, keys] = await Promise.all([
+      options.resources.agenda?.(tenantRef, window, AGENDA_LIMIT),
+      options.resources.recentChanges?.(tenantRef, 100),
+      options.keys.list({ tenantRef }),
+    ]);
+    const byId = new Map([[resource.id, resource]]);
+    const mine = agenda?.filter((entry) => entry.resourceId === resource.id);
+    const activity = changes?.filter((change) => change.resourceId === resource.id).slice(0, 10);
+    const token = csrfToken(session);
+    const rules = resource.bookingRules ?? {};
+    const field = (name: keyof typeof RULE_FIELDS, label: string, unit: string, max: number) =>
+      html`<label>${label}<span class="unit-input"><input type="number" inputmode="numeric" min="0" max="${String(max)}" name="${RULE_FIELDS[name]}" value="${rules[name] === undefined ? '' : String(rules[name])}"><span>${unit}</span></span></label>`;
+    const content = html`${noticeOf(notice)}
+<p><a class="back" href="${root}/resources">Resources</a></p>
+${pageHead(resourceName(resource, resource.id))}
+<dl class="facts"><dt>Time zone</dt><dd>${resource.timezone}</dd><dt>Bookable hours</dt><dd>${hoursSummary(resource.availabilityRules)} <a href="${root}/hours?resource=${resource.id}">Set hours</a></dd><dt>Resource id</dt><dd><code class="muted">${resource.id}</code></dd></dl>
+<div class="split">
+<div class="stack">
+${
+  options.resources.setRules
+    ? html`<section class="panel">
+<h2>Booking rules</h2>
+<form method="post" action="${root}/resources/rules">
+<input type="hidden" name="csrf" value="${token}">
+<input type="hidden" name="once" value="${formNonce(session)}">
+<input type="hidden" name="id" value="${resource.id}">
+<div class="grid-form">
+${field('minNoticeMinutes', 'Minimum notice', 'min', 525_600)}
+${field('maxAdvanceDays', 'Book up to', 'days ahead', 3_660)}
+${field('slotStepMinutes', 'Start on a step of', 'min', 1_440)}
+${field('turnaroundMinutes', 'Turnaround after each booking', 'min', 1_440)}
+${field('checkInMinutes', 'Release if not checked in after', 'min', 1_440)}
+</div>
+<label class="choice"><input type="checkbox" name="enforce_hours" value="1"${rules.enforceHours ? html` checked` : html``}> Only inside bookable hours</label>
+<p class="fine">Leave a field empty for no rule.</p>
+<button class="primary" type="submit">Save rules</button>
+</form>
+</section>`
+    : html``
+}
+${
+  options.resources.setPool
+    ? html`<section class="panel">
+<h2>Pool</h2>
+<form class="create" method="post" action="${root}/resources/pool">
+<input type="hidden" name="csrf" value="${token}">
+<input type="hidden" name="once" value="${formNonce(session)}">
+<input type="hidden" name="id" value="${resource.id}">
+<label>Pool name<input name="pool" maxlength="100" value="${resource.pool ?? ''}" placeholder="suv"></label>
+<button type="submit">Save pool</button>
+</form>
+<p class="fine">Agents can book any free member of a pool. Leave it empty for none.</p>
+</section>`
+    : html``
+}
+</div>
+<div class="stack">
+${mine ? html`<section class="panel"><h2>Upcoming</h2>${agendaPanel(mine, byId, mine.length > AGENDA_SHOWN)}</section>` : html``}
+${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activity, byId, keys)}</section>` : html``}
+</div>
+</div>`;
+    return respond(status, layout(resourceName(resource, resource.id), content, session, 'resources'));
+  }
+
+  async function saveRules(session: Session, form: URLSearchParams): Promise<Response> {
+    const id = form.get('id') ?? '';
+    const resource = await ownResource(session, id);
+    if (!resource || !options.resources.setRules) return notFound(session);
+    const rules: SlotlockBookingRules = {};
+    for (const [name, key] of Object.entries(RULE_FIELDS) as [keyof typeof RULE_FIELDS, string][]) {
+      const value = (form.get(key) ?? '').trim();
+      if (value === '') continue;
+      if (!/^\d{1,7}$/.test(value)) {
+        return resourceDetailPage(session, id, 400, 'Rules are whole numbers. Leave a field empty for none.');
+      }
+      rules[name] = Number(value);
+    }
+    if (form.get('enforce_hours') === '1') rules.enforceHours = true;
+    try {
+      await options.resources.setRules(
+        tenantOf(session),
+        id,
+        Object.keys(rules).length === 0 ? null : rules,
+      );
+    } catch (error) {
+      if ((error as { code?: unknown }).code !== 'invalid_booking_rules') throw error;
+      return resourceDetailPage(session, id, 400, (error as Error).message);
+    }
+    return redirect(303, `${root}/resources/${id}`);
+  }
+
+  async function savePool(session: Session, form: URLSearchParams): Promise<Response> {
+    const id = form.get('id') ?? '';
+    const resource = await ownResource(session, id);
+    if (!resource || !options.resources.setPool) return notFound(session);
+    const pool = (form.get('pool') ?? '').trim();
+    try {
+      await options.resources.setPool(tenantOf(session), id, pool === '' ? null : pool);
+    } catch (error) {
+      if ((error as { code?: unknown }).code !== 'invalid_pool') throw error;
+      return resourceDetailPage(
+        session,
+        id,
+        400,
+        'A pool name is 1 to 100 letters, digits, dots, dashes or underscores.',
+      );
+    }
+    return redirect(303, `${root}/resources/${id}`);
+  }
+
+  function endpointState(endpoint: SlotlockWebhookEndpoint): { text: string; tone: string } {
+    if (endpoint.disabledAt) return { text: 'Disabled', tone: 'revoked' };
+    if (endpoint.failingSince) return { text: 'Failing', tone: 'held' };
+    return { text: 'Delivering', tone: 'active' };
+  }
+
+  async function webhooksPage(session: Session, status = 200, notice?: string): Promise<Response> {
+    const hooks = options.resources.webhooks;
+    if (!hooks) return notFound(session);
+    const endpoints = await hooks.list(tenantOf(session));
+    const token = csrfToken(session);
+    const failing = endpoints.filter((endpoint) => endpoint.failingSince && !endpoint.disabledAt);
+    const disabled = endpoints.filter((endpoint) => endpoint.disabledAt);
+    const rows = endpoints.map((endpoint) => {
+      const state = endpointState(endpoint);
+      const problem = endpoint.disabledAt
+        ? `${endpoint.disabledReason ?? 'Disabled'} (${formatDate(endpoint.disabledAt)})`
+        : endpoint.failingSince
+          ? `Since ${formatDate(endpoint.failingSince)}, ${String(endpoint.attempts)} attempts${endpoint.lastStatus ? `, last HTTP ${endpoint.lastStatus}` : ''}${endpoint.lastError ? `: ${endpoint.lastError.slice(0, 120)}` : ''}`
+          : '';
+      return html`<tr>
+<td data-label="URL" class="strong wrap"><code>${endpoint.url}</code></td>
+<td data-label="Events">${endpoint.eventTypes ? endpoint.eventTypes.join(', ') : 'All'}</td>
+<td data-label="Status"><span class="cell"><span class="pill ${state.tone}">${state.text}</span>${problem ? html`<span class="meta wrap">${problem}</span>` : html``}</span></td>
+<td data-label="Added">${formatDate(endpoint.createdAt)}</td>
+<td class="actions">${
+        endpoint.disabledAt
+          ? html`<form class="inline" method="post" action="${root}/webhooks/enable"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${endpoint.id}"><button type="submit">Enable</button></form>`
+          : html``
+      }<details class="act danger"><summary>Delete</summary><div class="pop"><p>Nothing more is sent to it. The feed keeps its changes.</p>
+<form method="post" action="${root}/webhooks/delete"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${endpoint.id}"><button class="danger" type="submit">Delete webhook</button></form></div></details></td>
+</tr>`;
+    });
+    const content = html`${noticeOf(notice)}
+${pageHead('Webhooks')}
+<div class="stats">
+<div class="stat"><span class="stat-label">Endpoints</span><span class="stat-value">${String(endpoints.length)}</span></div>
+<div class="stat"><span class="stat-label">Failing</span><span class="stat-value">${String(failing.length)}</span></div>
+<div class="stat"><span class="stat-label">Disabled</span><span class="stat-value">${String(disabled.length)}</span></div>
+</div>
+<section class="panel">
+<h2>Add an endpoint</h2>
+<form method="post" action="${root}/webhooks">
+<input type="hidden" name="csrf" value="${token}">
+<input type="hidden" name="once" value="${formNonce(session)}">
+<label>URL<input name="url" type="url" required maxlength="2048" placeholder="https://example.com/slotlock"></label>
+<details class="types"><summary>Events: all, or choose</summary><div class="checks">${SLOTLOCK_CHANGE_TYPES.map(
+      (type) =>
+        html`<label class="choice"><input type="checkbox" name="event_type" value="${type}"> <code>${type}</code></label>`,
+    )}</div></details>
+<button class="primary" type="submit">Add endpoint</button>
+</form>
+<p class="fine">Signed as Standard Webhooks with a secret shown once. An endpoint failing for a day is disabled.</p>
+</section>
+${
+  endpoints.length === 0
+    ? html`<p class="empty">No webhooks. Add one to hear about bookings as they change.</p>`
+    : html`<div class="table"><table><thead><tr><th>URL</th><th>Events</th><th>Status</th><th>Added</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>`
+}`;
+    return respond(status, layout('Webhooks', content, session, 'webhooks'));
+  }
+
+  async function addWebhook(session: Session, form: URLSearchParams): Promise<Response> {
+    const hooks = options.resources.webhooks;
+    if (!hooks) return notFound(session);
+    const types = form.getAll('event_type');
+    const created = await hooks.create(
+      tenantOf(session),
+      (form.get('url') ?? '').trim(),
+      types.length === 0 ? undefined : types,
+    );
+    if (!created.ok) {
+      const message =
+        created.code === 'webhook_limit_reached'
+          ? `You have ${String(created.limit)} webhooks, as many as Slotlock allows. Delete one first.`
+          : created.code === 'invalid_webhook_url'
+            ? 'Give an https URL, with no user name, password or #fragment.'
+            : 'Choose events from the list.';
+      return webhooksPage(session, created.code === 'webhook_limit_reached' ? 409 : 400, message);
+    }
+    const content = html`<section class="card once">
+<h1>Webhook added</h1>
+<p><code>${created.endpoint.url}</code></p>
+<p class="notice warn" role="alert">Copy the signing secret now. It will not be shown again.</p>
+<div class="copy"><input id="secret" readonly value="${created.secret}" aria-label="Signing secret"><button type="button" data-copy="secret">Copy</button></div>
+<p>Verify each delivery's <code>webhook-signature</code> with it, using a Standard Webhooks library.</p>
+<a class="button primary" href="${root}/webhooks">Done</a>
+</section>`;
+    return respond(200, layout('Webhook added', content, session, 'webhooks'));
+  }
+
+  async function changeWebhook(
+    session: Session,
+    form: URLSearchParams,
+    change: 'remove' | 'enable',
+  ): Promise<Response> {
+    const hooks = options.resources.webhooks;
+    if (!hooks) return notFound(session);
+    const id = form.get('id') ?? '';
+    if (change === 'remove') {
+      if (!(await hooks.remove(tenantOf(session), id))) {
+        return webhooksPage(session, 404, 'That webhook is not one of yours.');
+      }
+      return redirect(303, `${root}/webhooks`);
+    }
+    const enabled = await hooks.enable(tenantOf(session), id);
+    if (enabled === null) return webhooksPage(session, 404, 'That webhook is not one of yours.');
+    if ('code' in enabled) {
+      return webhooksPage(
+        session,
+        409,
+        'It missed changes older than the feed keeps. Delete it, add it again, and read what it missed from the feed.',
+      );
+    }
+    return redirect(303, `${root}/webhooks`);
+  }
+
+  async function waitlistPage(session: Session, status = 200, notice?: string): Promise<Response> {
+    const waitlist = options.resources.waitlist;
+    if (!waitlist) return notFound(session);
+    const tenantRef = tenantOf(session);
+    const [entries, resources] = await Promise.all([
+      waitlist.list(tenantRef, WAITLIST_SHOWN),
+      options.resources.list(tenantRef),
+    ]);
+    const byId = new Map(resources.map((resource) => [resource.id, resource]));
+    const token = csrfToken(session);
+    const rows = entries.map((entry) => {
+      const resource = entry.resourceId ? byId.get(entry.resourceId) : undefined;
+      const zone = resource?.timezone ?? 'UTC';
+      const day = dayLabel(entry.start, zone, now());
+      const what = entry.resourceId
+        ? resourceName(resource, entry.resourceId)
+        : `Pool ${entry.pool ?? ''}`;
+      const offered = entry.offeredResourceId
+        ? resourceName(byId.get(entry.offeredResourceId), entry.offeredResourceId)
+        : null;
+      const tone = entry.status === 'offered' ? 'active' : entry.status === 'expired' ? 'revoked' : 'held';
+      return html`<tr>
+<td data-label="When" class="strong">${day.label} ${clock(entry.start, zone)}–${clock(entry.end, zone)}</td>
+<td data-label="For">${what}</td>
+<td data-label="Holder"><code>${entry.holderRef}</code></td>
+<td data-label="Status"><span class="cell"><span class="pill ${tone}">${entry.status === 'offered' ? 'Offered' : entry.status === 'expired' ? 'Expired' : 'Waiting'}</span>${offered && entry.offeredAt ? html`<span class="meta">${offered}, ${ago(entry.offeredAt, now())}</span>` : html``}</span></td>
+<td data-label="Joined">${ago(entry.createdAt, now())}</td>
+<td class="actions"><details class="act danger"><summary>Remove</summary><div class="pop"><p>${entry.status === 'offered' ? 'Its offered hold is released and offered to the next.' : 'It stops waiting.'}</p>
+<form method="post" action="${root}/waitlist/leave"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${entry.id}"><button class="danger" type="submit">Remove entry</button></form></div></details></td>
+</tr>`;
+    });
+    const waiting = entries.filter((entry) => entry.status === 'waiting').length;
+    const offered = entries.filter((entry) => entry.status === 'offered').length;
+    const content = html`${noticeOf(notice)}
+${pageHead('Waitlist')}
+<div class="stats">
+<div class="stat"><span class="stat-label">Waiting</span><span class="stat-value">${String(waiting)}</span></div>
+<div class="stat"><span class="stat-label">Offered</span><span class="stat-value">${String(offered)}</span></div>
+</div>
+${
+  entries.length === 0
+    ? html`<p class="empty">Nobody is waiting. Agents add entries when the time they want is taken.</p>`
+    : html`<div class="table"><table><thead><tr><th>When</th><th>For</th><th>Holder</th><th>Status</th><th>Joined</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>${entries.length >= WAITLIST_SHOWN ? html`<p class="fine">Showing the first ${String(WAITLIST_SHOWN)}.</p>` : html``}`
+}`;
+    return respond(status, layout('Waitlist', content, session, 'waitlist'));
+  }
+
+  async function leaveWaitlist(session: Session, form: URLSearchParams): Promise<Response> {
+    const waitlist = options.resources.waitlist;
+    if (!waitlist) return notFound(session);
+    if (!(await waitlist.leave(tenantOf(session), form.get('id') ?? ''))) {
+      return waitlistPage(session, 404, 'That entry is not on your waitlist.');
+    }
+    return redirect(303, `${root}/waitlist`);
+  }
+
   /** The page a form was sent from, to show what went wrong with it. */
   function pageFor(route: string) {
     if (route.startsWith('/keys')) return keysPage;
-    if (route === '/resources' || route === '/hours') return resourcesPage;
+    if (route.startsWith('/webhooks') && options.resources.webhooks) return webhooksPage;
+    if (route.startsWith('/waitlist') && options.resources.waitlist) return waitlistPage;
+    if (route.startsWith('/resources') || route === '/hours') return resourcesPage;
     return overviewPage;
   }
 
@@ -1820,6 +2219,18 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         return saveHours(session, form);
       case '/organization':
         return switchOrganization(session, form);
+      case '/resources/rules':
+        return saveRules(session, form);
+      case '/resources/pool':
+        return savePool(session, form);
+      case '/webhooks':
+        return addWebhook(session, form);
+      case '/webhooks/delete':
+        return changeWebhook(session, form, 'remove');
+      case '/webhooks/enable':
+        return changeWebhook(session, form, 'enable');
+      case '/waitlist/leave':
+        return leaveWaitlist(session, form);
       default:
         return respond(
           404,
@@ -1846,11 +2257,15 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
             }
             case '/keys':
             case '/resources':
+            case '/webhooks':
+            case '/waitlist':
             case '/settings': {
               const session = await readSession(request);
               if (!session) return redirect(303, root);
               if (route === '/keys') return await keysPage(session);
               if (route === '/resources') return await resourcesPage(session);
+              if (route === '/webhooks') return await webhooksPage(session);
+              if (route === '/waitlist') return await waitlistPage(session);
               return settingsPage(session);
             }
             case '/style.css':
@@ -1865,11 +2280,19 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
               const session = await readSession(request);
               return session ? await hoursEditor(session, url) : redirect(303, root);
             }
-            default:
+            default: {
+              const resourceId = RESOURCE_PAGE.exec(route)?.[1];
+              if (resourceId !== undefined) {
+                const session = await readSession(request);
+                return session
+                  ? await resourceDetailPage(session, resourceId.toLowerCase())
+                  : redirect(303, root);
+              }
               return respond(
                 404,
                 layout('Not found', html`<p class="notice">Nothing is here.</p>`, null),
               );
+            }
           }
         }
         if (request.method === 'POST') return await handlePost(request, route);
@@ -2060,6 +2483,22 @@ form > .table { margin-bottom: 12px; }
 .sign-in { width: 100%; max-width: 400px; padding: 28px; border: 1px solid var(--line); border-radius: 14px; background: var(--paper); box-shadow: var(--shadow); display: grid; gap: 12px; }
 .sign-in h1 { font-size: 20px; }
 .sign-in p { margin: 0; }
+.stack { display: grid; gap: 20px; align-content: start; min-width: 0; }
+.grid-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 12px; align-items: end; }
+.cell { display: grid; justify-items: start; gap: 2px; }
+.unit-input { display: flex; align-items: center; gap: 8px; }
+.unit-input input { width: 100%; }
+.unit-input span { color: var(--ink-3); white-space: nowrap; }
+form .choice { margin: 4px 0 10px; }
+.types { margin: 12px 0; }
+.types summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
+.checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px 16px; margin-top: 10px; }
+.checks .choice { font-size: 13px; margin: 0; }
+td .meta { display: block; margin-top: 2px; }
+td[data-label] > .pill { justify-self: start; }
+td.wrap, .wrap { white-space: normal; overflow-wrap: anywhere; }
+form.inline { display: inline; margin: 0; }
+form > label { margin-bottom: 4px; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 @media (max-width: 1000px) {
   .split { grid-template-columns: minmax(0, 1fr); }
