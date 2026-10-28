@@ -2214,8 +2214,9 @@ export interface SlotlockStore extends SlotlockEventFeed {
     /**
      * Who the hold belongs to, 1-500 UTF-8 bytes, inside `tenantRef` (required with it): an agent
      * acting for one person, say. `releaseHold` and `putCalendarEvent`'s `fromHold` with a
-     * `holderRef` take only their own, and a holder may have `SLOTLOCK_MAX_HOLDS_PER_HOLDER` live at
-     * once. Without it the hold has no holder and no cap: an application holding for its customers.
+     * `holderRef` take only their own, and a holder may have `maxHoldsPerHolder` (20) live at once,
+     * holding at most `maxHeldHoursPerHolder` together when that is set. Without it the hold has no
+     * holder and no cap: an application holding for its customers.
      */
     holderRef?: string;
     /**
@@ -2657,6 +2658,16 @@ export interface SlotlockStoreOptions {
    * store has pruned answers `cursor_expired`, so stores set differently never skip a change.
    */
   retentionDays?: number;
+  /**
+   * Live holds one holder (`acquireHold`'s `holderRef`) may have at once, 1-10,000. Defaults to
+   * SLOTLOCK_MAX_HOLDS_PER_HOLDER (20).
+   */
+  maxHoldsPerHolder?: number;
+  /**
+   * Hours one holder's live holds may hold together, 1-876,000 (none by default): past it a hold is
+   * refused with `held_time_limit_reached`, however few holds it has.
+   */
+  maxHeldHoursPerHolder?: number;
 }
 
 /** Per-tenant row limits, each a whole number from 1 to 10,000,000 (resources: to 100,000). */
@@ -3158,12 +3169,27 @@ function buildSlotlockStore(
     );
   }
   const configuredTenantLimits = tenantLimitsOption(options.tenantLimits);
-  const { maxTenantTransactions, tenantLockTimeoutMs } = options;
+  const { maxTenantTransactions, tenantLockTimeoutMs, maxHeldHoursPerHolder } = options;
   const retentionDays = options.retentionDays ?? SLOTLOCK_CHANGE_RETENTION_DAYS;
   if (!Number.isSafeInteger(retentionDays) || retentionDays < 1 || retentionDays > 3_650) {
     throw Object.assign(new Error('Slotlock retentionDays must be a whole number from 1 to 3650'), {
       code: 'invalid_retention' as const,
     });
+  }
+  const maxHoldsPerHolder = options.maxHoldsPerHolder ?? SLOTLOCK_MAX_HOLDS_PER_HOLDER;
+  if (
+    !Number.isSafeInteger(maxHoldsPerHolder) ||
+    maxHoldsPerHolder < 1 ||
+    maxHoldsPerHolder > 10_000 ||
+    (maxHeldHoursPerHolder !== undefined &&
+      (!Number.isSafeInteger(maxHeldHoursPerHolder) ||
+        maxHeldHoursPerHolder < 1 ||
+        maxHeldHoursPerHolder > 876_000))
+  ) {
+    throw Object.assign(
+      new Error('Slotlock maxHoldsPerHolder must be 1-10000 and maxHeldHoursPerHolder 1-876000, whole numbers'),
+      { code: 'invalid_holder_limits' as const },
+    );
   }
   const whole = (value: number | undefined, max: number) =>
     value === undefined || (Number.isSafeInteger(value) && value >= 1 && value <= max);
@@ -3190,6 +3216,8 @@ function buildSlotlockStore(
     agentOwnerCommandQuota: configuredAgentOwnerCommandQuota,
     tenantLimits: configuredTenantLimits,
     retentionDays,
+    maxHoldsPerHolder,
+    ...(maxHeldHoursPerHolder !== undefined ? { maxHeldHoursPerHolder } : {}),
   };
 
   /**
@@ -4188,6 +4216,8 @@ function buildSlotlockStore(
             if (!resource) return { ok: false, code: 'resource_not_found' };
             if (resource.archived) return { ok: false, code: 'resource_archived' };
             if (holdLimit !== null) return { ok: false, code: 'hold_limit_reached', limit: holdLimit };
+            // Seconds the holder already holds, turnaround included, when its time is capped.
+            let heldSeconds: number | null = null;
             if (holderRef !== undefined) {
               // One holder's live holds, counted under a lock on the holder so racing holds stop
               // at the cap: an agent cannot hold a resource's whole week.
@@ -4196,19 +4226,32 @@ function buildSlotlockStore(
                 tenantRef,
                 holderRef,
               ])}, 0))`;
-              const [held] = await tx<{ count: number }[]>`
-                SELECT count(*)::int AS count FROM slotlock.reservations
+              const [held] = await tx<{ count: number; seconds: number }[]>`
+                SELECT count(*)::int AS count,
+                       COALESCE(sum(extract(epoch FROM
+                         ends_at + buffer_after_ms * interval '1 millisecond' - starts_at)), 0)::float8
+                         AS seconds
+                  FROM slotlock.reservations
                  WHERE holder_ref = ${holderRef} AND tenant_ref IS NULL AND status = 'held'
                    AND expires_at > statement_timestamp()
                    AND resource_id IN (SELECT id FROM slotlock.resources WHERE tenant_ref = ${tenantRef ?? null})`;
-              if ((held?.count ?? 0) >= SLOTLOCK_MAX_HOLDS_PER_HOLDER) {
-                return { ok: false, code: 'hold_limit_reached', limit: SLOTLOCK_MAX_HOLDS_PER_HOLDER };
+              if ((held?.count ?? 0) >= maxHoldsPerHolder) {
+                return { ok: false, code: 'hold_limit_reached', limit: maxHoldsPerHolder };
               }
+              if (maxHeldHoursPerHolder !== undefined) heldSeconds = held?.seconds ?? 0;
             }
             const ruling = await bookingRuling(tx, params.resourceId, params, defaultHours);
             if (ruling.rule) return { ok: false, code: 'booking_rule_violated', rule: ruling.rule };
             written = Math.max(bufferAfterMs, ruling.turnaroundMs);
             const reach = occupiedEnd({ end: params.end, bufferAfterMs: written });
+            if (
+              heldSeconds !== null &&
+              maxHeldHoursPerHolder !== undefined &&
+              heldSeconds + (reach.getTime() - params.start.getTime()) / 1000 >
+                maxHeldHoursPerHolder * 3_600
+            ) {
+              return { ok: false, code: 'held_time_limit_reached', limit: maxHeldHoursPerHolder };
+            }
             if (
               resource.tenant_ref !== null &&
               !(await recurrenceCoversWrite(tx, {

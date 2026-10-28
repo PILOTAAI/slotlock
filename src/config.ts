@@ -249,6 +249,8 @@ const CAP_RANGES = Object.freeze({
   tenant_reservations: [1, 10_000_000],
   tenant_events: [1, 10_000_000],
   tenant_coverage: [1, 10_000_000],
+  holder_holds: [1, 10_000],
+  holder_held_hours: [1, 876_000],
 } as const);
 export type SlotlockCapName = keyof typeof CAP_RANGES;
 export const SLOTLOCK_CAP_NAMES = Object.freeze(Object.keys(CAP_RANGES) as SlotlockCapName[]);
@@ -297,6 +299,8 @@ export interface SlotlockLimits {
  *   agent or application writes it. Every write surface of the server shares them, so no admin
  *   key can grow the shared database without end; a write past one answers 409 with its
  *   `*_limit_reached` code.
+ * - `holder_holds` and `holder_held_hours`: one holder's (an agent's) live holds, how many and how
+ *   many hours they hold together (`hold_limit_reached`, `held_time_limit_reached`).
  */
 export const SLOTLOCK_DEFAULT_LIMITS: SlotlockLimits = Object.freeze({
   rates: Object.freeze({
@@ -327,6 +331,9 @@ export const SLOTLOCK_DEFAULT_LIMITS: SlotlockLimits = Object.freeze({
     tenant_reservations: 100_000,
     tenant_events: 100_000,
     tenant_coverage: 100_000,
+    // One agent's live holds: 20 at once (candidates for a few bookings), holding 90 days in all.
+    holder_holds: 20,
+    holder_held_hours: 2_160,
   }),
 });
 

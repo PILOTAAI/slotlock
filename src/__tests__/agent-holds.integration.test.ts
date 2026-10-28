@@ -207,4 +207,42 @@ describe.skipIf(!url)('agent holds (real Postgres)', () => {
     });
     expect(application.ok).toBe(true);
   });
+
+  it('bounds one holder by the hours its holds hold together, and by a count the store is given', async () => {
+    const id = await van();
+    const tight = createSlotlockStore(sql, { maxHoldsPerHolder: 3, maxHeldHoursPerHolder: 10 });
+    const holdFor = (start: string, end: string, holderRef = 'hoarder') =>
+      tight.withTenant(tenantRef, (tenant) =>
+        tenant.acquireHold({
+          tenantRef,
+          principalRef: holderRef,
+          holderRef,
+          idempotencyKey: `t-${randomUUID()}`,
+          resourceId: id,
+          start: new Date(start),
+          end: new Date(end),
+          ttlMs: 60_000,
+        }),
+      );
+    // Eight hours held, then two more: ten, the limit. One hour more is refused, by time.
+    expect((await holdFor(at(40, 0), at(40, 8))).ok).toBe(true);
+    expect((await holdFor(at(41, 0), at(41, 2))).ok).toBe(true);
+    expect(await holdFor(at(42, 0), at(42, 1))).toEqual({ ok: false, code: 'held_time_limit_reached', limit: 10 });
+    // Another holder has its own.
+    expect((await holdFor(at(42, 0), at(42, 1), 'other')).ok).toBe(true);
+    // The count: three short holds, then a fourth refused by number.
+    for (const hour of [1, 3, 5]) expect((await holdFor(at(43, hour), at(43, hour + 1), 'counted')).ok).toBe(true);
+    expect(await holdFor(at(43, 8), at(43, 9), 'counted')).toEqual({ ok: false, code: 'hold_limit_reached', limit: 3 });
+    // Turnaround is held too: nine hours and one after it are the ten.
+    const buffered = await tight.withTenant(tenantRef, (tenant) =>
+      tenant.acquireHold({
+        tenantRef, principalRef: 'buffered', holderRef: 'buffered', idempotencyKey: `t-${randomUUID()}`,
+        resourceId: id, start: new Date(at(44, 0)), end: new Date(at(44, 9)), bufferAfterMs: 3_600_000, ttlMs: 60_000,
+      }),
+    );
+    expect(buffered.ok).toBe(true);
+    expect(await holdFor(at(45, 0), at(45, 1), 'buffered')).toEqual({ ok: false, code: 'held_time_limit_reached', limit: 10 });
+    expect(() => createSlotlockStore(sql, { maxHeldHoursPerHolder: 0 })).toThrow(/maxHeldHoursPerHolder/);
+    expect(() => createSlotlockStore(sql, { maxHoldsPerHolder: 10_001 })).toThrow(/maxHoldsPerHolder/);
+  });
 });

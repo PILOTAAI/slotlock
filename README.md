@@ -885,7 +885,10 @@ An agent offering a person several times holds them first, so none is taken whil
 decides: `slotlock_hold_slots` holds each free candidate in one group (and lists the taken ones in
 `refused`), and `slotlock_create_event` with one `hold_id` books that time and releases the rest in
 the same transaction. A hold belongs to the agent that took it: another agent can neither book nor
-release it. One agent may have 20 live holds at once; unbooked ones expire by the database clock.
+release it. One agent may have 20 live holds at once, holding at most 2,160 hours together in
+`slotlock serve` (`SLOTLOCK_LIMITS`: `holder_holds`, `holder_held_hours`; `maxHoldsPerHolder` and
+`maxHeldHoursPerHolder` in `createSlotlockStore`); past either it is refused, `hold_limit_reached` or
+`held_time_limit_reached`. Unbooked holds expire by the database clock.
 Notice was judged when the time was held, so booking the hold does not judge it again.
 
 A booking that needs several resources at once (a van and its driver, a room and its projector)

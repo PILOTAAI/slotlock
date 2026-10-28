@@ -18,6 +18,11 @@ versioning.
   keeping changes longer than the one that pruned them never reads past a gap unseen, and a reader
   that is up to date stays readable. Maintenance prunes the oldest changes in feed order, never past
   one it keeps or a transaction still running, so a reader starting over always reads on.
+- One holder's holds are bounded in time as well as number: `maxHeldHoursPerHolder` in
+  `createSlotlockStore` refuses a hold that would bring the holder's live holds past that many
+  hours together (`held_time_limit_reached`), and `maxHoldsPerHolder` sets the count that was fixed
+  at 20. `slotlock serve` sets them with `SLOTLOCK_LIMITS` (`holder_holds`, 20;
+  `holder_held_hours`, 2,160).
 - `slotlock_get_pool_availability` (`GET /v1/pool-availability`): how many of a pool's members are
   free across a window, the window split where that number changes, with coverage certainty, so an
   agent can say "three vans free 9 to 11, one after" before booking with `slotlock_book_pool`.
