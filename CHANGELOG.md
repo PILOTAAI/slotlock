@@ -7,6 +7,15 @@ versioning.
 
 ### Added
 
+- The dashboard is an app with a sidebar: an Overview with the coming week's bookings, events and
+  live holds across every resource and the agents' latest changes, named by key; Resources; API
+  keys, with the endpoints; and Settings. `SLOTLOCK_DASHBOARD_NAME` (`name` in
+  `createSlotlockDashboard`) names the deployment. Works without JavaScript, light and dark.
+- `listAgenda` reads what occupies a tenant's resources in a window, every resource at once:
+  bookings, calendar events' occurrences and live holds. `listRecentChanges` reads a tenant's
+  latest changes, newest first. `SlotlockDashboardResources` takes both as optional `agenda` and
+  `recentChanges`.
+
 - Organizations in the dashboard: with `SLOTLOCK_DASHBOARD_ORGS` (GitHub organization ids), a
   tenant is an organization, `github-org:<id>`, that its members share. Sign-in asks for `read:org`
   and reads the person's active memberships as an owner or member (not a billing manager); a member

@@ -244,6 +244,11 @@ resources, so you can give each person API keys without running `slotlock key cr
 3. Run `slotlock serve` and open `<SLOTLOCK_PUBLIC_URL>/dashboard`. With Compose, set the four in
    `.env` (empty, the default, leaves the dashboard off) and run `docker compose up --detach`.
 
+- Its pages: an Overview with the coming week's bookings, events and live holds across every
+  resource (each in its resource's time zone) and the latest changes agents made, named by key;
+  Resources, with their bookable hours; API keys, with the MCP and A2A endpoints; and Settings.
+  Everything on them is read from the tenant's own data. `SLOTLOCK_DASHBOARD_NAME` sets what the
+  dashboard calls the deployment (Slotlock by default).
 - Each person gets a tenant of their own, `github:<user id>`: the keys, resources and bookings in it
   are theirs alone. Keys made with `slotlock key create` act in `SLOTLOCK_TENANT` instead.
 - **For organizations instead of people**, set `SLOTLOCK_DASHBOARD_ORGS` to the GitHub organization

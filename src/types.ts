@@ -162,6 +162,23 @@ export interface SlotlockHold {
   groupId?: string;
 }
 
+/** One entry of a tenant's agenda (`listAgenda`): what occupies a resource, and from when. */
+export interface SlotlockAgendaEntry {
+  id: string;
+  resourceId: string;
+  start: Date;
+  end: Date;
+  /** A booking, a calendar event's occurrence, or a live hold. */
+  kind: 'booking' | 'event' | 'hold';
+  /** The booking's reference; null for an event's occurrence and a hold. */
+  reference: string | null;
+  /** The calendar event's summary; null for a booking and a hold. */
+  summary: string | null;
+  /** When the hold lapses; null for a booking and an event. */
+  expiresAt: Date | null;
+  source: string | null;
+}
+
 export type AcquireHoldResult =
   /** `idempotent`: a retry of a keyed hold, answered with the hold the first request made. */
   | { ok: true; hold: SlotlockHold; idempotent: boolean }

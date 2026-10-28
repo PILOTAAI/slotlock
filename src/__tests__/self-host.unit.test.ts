@@ -423,6 +423,20 @@ describe('slotlock serve configuration', () => {
       ).toEqual(['91', '92']);
     });
 
+    it('reads the name the dashboard calls the deployment', () => {
+      expect(
+        readSlotlockServeConfig(dashboardEnv({ SLOTLOCK_DASHBOARD_NAME: ' Acme Fleet ' })).dashboard
+          ?.name,
+      ).toBe('Acme Fleet');
+      expect('name' in (readSlotlockServeConfig(dashboardEnv({ SLOTLOCK_DASHBOARD_NAME: '' })).dashboard ?? {})).toBe(false);
+      expect(refusal(dashboardEnv({ SLOTLOCK_DASHBOARD_NAME: 'Acme\u202eteeLF' })).message).toMatch(
+        /SLOTLOCK_DASHBOARD_NAME must be/,
+      );
+      expect(refusal(dashboardEnv({ SLOTLOCK_DASHBOARD_NAME: '<b>' })).message).toMatch(
+        /SLOTLOCK_DASHBOARD_NAME must be/,
+      );
+    });
+
     it('reads the organizations without the dashboard, for a dashboard on Cloudflare Workers', () => {
       const config = readSlotlockServeConfig(serveEnv({ SLOTLOCK_DASHBOARD_ORGS: '91' }));
       expect(config.dashboard).toBeUndefined();
