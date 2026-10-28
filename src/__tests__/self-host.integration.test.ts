@@ -1251,13 +1251,15 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       expect(
         (await fetch(`${origin}/metrics`, { headers: { Authorization: `Bearer ${sessionSecret}` } })).status,
       ).toBe(401);
-      const scrape = await fetch(`${origin}/metrics`, { headers: { Authorization: `Bearer ${metricsToken}` } });
+      const scrape = await fetch(`${origin}/metrics`, { headers: { Authorization: `bearer  ${metricsToken}` } });
       expect(scrape.status).toBe(200);
       expect(scrape.headers.get('content-type')).toBe('text/plain; version=0.0.4; charset=utf-8');
       const text = await scrape.text();
       expect(text).toMatch(/^slotlock_calls_total\{protocol="mcp",operation="slotlock_list_resources",outcome="ok"\} 2$/m);
       expect(text).toMatch(/^slotlock_build_info\{version="\d+\.\d+\.\d+[^"]*",tzdata="[^"]+"\} 1$/m);
       expect(text).not.toContain('github');
+      // The two refused scrapes above are counted, never with what they sent.
+      expect(text).toMatch(/^slotlock_refusals_total\{reason="metrics_auth_refused"\} 2$/m);
     } finally {
       shutdown.abort();
     }

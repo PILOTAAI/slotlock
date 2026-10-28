@@ -432,6 +432,9 @@ describe('slotlock serve configuration', () => {
       const message = refusal(serveEnv({ SLOTLOCK_AUTH_TOKEN: shared, SLOTLOCK_METRICS_TOKEN: shared })).message;
       expect(message).toMatch(/SLOTLOCK_METRICS_TOKEN must differ/);
       expect(message).not.toContain(shared);
+      expect(
+        refusal(serveEnv({ SLOTLOCK_GITHUB_CLIENT_SECRET: shared, SLOTLOCK_METRICS_TOKEN: shared })).message,
+      ).toMatch(/SLOTLOCK_METRICS_TOKEN must differ/);
     });
 
     it('reads the name the dashboard calls the deployment', () => {

@@ -358,7 +358,12 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
   if (authToken !== undefined) config.authToken = authToken;
   const metricsToken = readSecret(env, 'SLOTLOCK_METRICS_TOKEN');
   if (metricsToken !== undefined) {
-    const others = [authToken, confirmationSecret, env.SLOTLOCK_SESSION_SECRET?.trim()];
+    const others = [
+      authToken,
+      confirmationSecret,
+      env.SLOTLOCK_SESSION_SECRET?.trim(),
+      env.SLOTLOCK_GITHUB_CLIENT_SECRET?.trim(),
+    ];
     if (others.includes(metricsToken)) {
       throw new SlotlockConfigError('SLOTLOCK_METRICS_TOKEN must differ from every other secret');
     }
@@ -582,14 +587,15 @@ function serveMetrics(
   path: string,
   token: string,
 ): SlotlockNodeServerFetchTarget {
-  const expected = createHash('sha256').update(`Bearer ${token}`).digest();
+  const expected = createHash('sha256').update(token).digest();
   return {
     fetch(request, connection) {
       if (new URL(request.url).pathname !== path) return target.fetch(request, connection);
-      const given = createHash('sha256')
-        .update(request.headers.get('authorization') ?? '')
-        .digest();
+      // The scheme is case-insensitive (RFC 9110); the token is compared as digests, in constant time.
+      const presented = /^bearer +(\S+) *$/i.exec(request.headers.get('authorization') ?? '')?.[1] ?? '';
+      const given = createHash('sha256').update(presented).digest();
       if (!timingSafeEqual(given, expected)) {
+        metrics.refusedScrape();
         return Promise.resolve(
           new Response('Unauthorized\n', {
             status: 401,

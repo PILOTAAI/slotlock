@@ -41,6 +41,8 @@ export interface SlotlockMetrics {
   maintenance(result: SlotlockMaintenanceResult): void;
   /** Count a webhook delivery pass (its `onPass`). */
   webhooks(result: SlotlockWebhookPassResult): void;
+  /** Count a scrape refused for its credential. */
+  refusedScrape(): void;
   /** Everything counted so far, as a scrape answers it. */
   render(): string;
 }
@@ -184,6 +186,9 @@ export function createSlotlockMetrics(info: {
       for (const kind of MAINTENANCE_COUNTS) {
         if (result[kind] > 0) upkeep.add({ kind }, result[kind]);
       }
+    },
+    refusedScrape() {
+      refused.add({ reason: 'metrics_auth_refused' });
     },
     webhooks(result) {
       if (result.delivered > 0) deliveries.add({ result: 'delivered' }, result.delivered);
