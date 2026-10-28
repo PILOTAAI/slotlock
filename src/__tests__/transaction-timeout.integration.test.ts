@@ -39,9 +39,13 @@ describe.skipIf(!url)('transaction_timeout (real Postgres)', () => {
       await scoped.begin(async (tx) => tx`SELECT 1`);
       // Past it: PostgreSQL ends it, and the session with it (a pool opens another). One message,
       // so nothing is sent on the connection after it is gone.
+      // postgres.js reports the closed connection (CONNECTION_CLOSED) rather than the server's
+      // "terminating connection due to transaction timeout", depending on which it reads first.
       await expect(scoped.unsafe('BEGIN; SELECT pg_sleep(1); COMMIT')).rejects.toThrow(
-        /transaction timeout/i,
+        /transaction timeout|CONNECTION_CLOSED/i,
       );
+      // The pool connects again for the next one.
+      expect(await scoped`SELECT 1 AS one`).toEqual([{ one: 1 }]);
     } finally {
       await scoped.end({ timeout: 0 }).catch(() => undefined);
     }
