@@ -191,6 +191,27 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
+        name: "slotlock_get_booking_rule_defaults",
+        method: "GET",
+        path: "/v1/booking-rules",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_set_tenant_booking_rules",
+        method: "PUT",
+        path: "/v1/booking-rules",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_set_pool_booking_rules",
+        method: "PUT",
+        path: "/v1/pools/{pool}/booking-rules",
+        path_params: &["pool"],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_get_resource_history",
         method: "GET",
         path: "/v1/resources/{resource_id}/history",
@@ -693,6 +714,24 @@ pub struct SetResourcePoolInput {
 pub struct ListPoolsInput {
 }
 
+/// The arguments of [`Client::get_booking_rule_defaults`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GetBookingRuleDefaultsInput {
+}
+
+/// The arguments of [`Client::set_tenant_booking_rules`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SetTenantBookingRulesInput {
+    pub rules: Option<Value>,
+}
+
+/// The arguments of [`Client::set_pool_booking_rules`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SetPoolBookingRulesInput {
+    pub pool: String,
+    pub rules: Option<Value>,
+}
+
 /// The arguments of [`Client::get_resource_history`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct GetResourceHistoryInput {
@@ -1182,10 +1221,12 @@ impl Client {
     /// Set a resource's booking rules.
     ///
     /// Set what a booking on one resource must satisfy from now on: minimum notice, how far
-    /// ahead, the step starts fall on (from local midnight in the resource's time zone), the
-    /// turnaround kept free after each booking, and whether bookings must lie inside its hours.
-    /// `null` clears them. Holds, reservations, moves and agents' events are refused with the
-    /// rule they break; searches offer only what they allow.
+    /// ahead, the step starts fall on (from local midnight in the resource's time zone, offset by
+    /// step_offset_minutes), the time kept free before and after each booking, and whether
+    /// bookings must lie inside its hours. `null` clears them. A rule it does not set comes from
+    /// its pool's or the tenant's defaults (slotlock_set_pool_booking_rules,
+    /// slotlock_set_tenant_booking_rules). Holds, reservations, moves and agents' events are
+    /// refused with the rule they break; searches offer only what they allow.
     pub fn set_resource_booking_rules(&self, input: &SetResourceBookingRulesInput) -> Result<Value, Error> {
         self.call("slotlock_set_resource_booking_rules", serde_json::to_value(input)?)
     }
@@ -1207,6 +1248,34 @@ impl Client {
     /// archived.
     pub fn list_pools(&self, input: &ListPoolsInput) -> Result<Value, Error> {
         self.call("slotlock_list_pools", serde_json::to_value(input)?)
+    }
+
+    /// Get default booking rules.
+    ///
+    /// The tenant's default booking rules, and each pool's that has them. A resource's rules as
+    /// they apply (effective_booking_rules) are the tenant's defaults, overlaid by its pool's,
+    /// overlaid by its own: a rule set at a narrower level wins.
+    pub fn get_booking_rule_defaults(&self, input: &GetBookingRuleDefaultsInput) -> Result<Value, Error> {
+        self.call("slotlock_get_booking_rule_defaults", serde_json::to_value(input)?)
+    }
+
+    /// Set default booking rules.
+    ///
+    /// Set the booking rules every resource of the tenant has unless its pool or its own rules
+    /// set the same rule, from now on; `null` clears them. They take any resource rule but
+    /// check_in_minutes, which only a resource sets.
+    pub fn set_tenant_booking_rules(&self, input: &SetTenantBookingRulesInput) -> Result<Value, Error> {
+        self.call("slotlock_set_tenant_booking_rules", serde_json::to_value(input)?)
+    }
+
+    /// Set a pool's booking rules.
+    ///
+    /// Set the booking rules every member of one pool has unless its own rules set the same rule,
+    /// over the tenant's defaults, from now on; `null` clears them. They take any resource rule
+    /// but check_in_minutes. At most 1,000 pools have them: one more is 409
+    /// pool_rules_limit_reached.
+    pub fn set_pool_booking_rules(&self, input: &SetPoolBookingRulesInput) -> Result<Value, Error> {
+        self.call("slotlock_set_pool_booking_rules", serde_json::to_value(input)?)
     }
 
     /// A resource's history.

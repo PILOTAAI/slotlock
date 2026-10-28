@@ -208,7 +208,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       // Outside their bounds, unknown, or without a resource: refused before anything is written.
       for (const args of [
         ['rules', 'set', '{"slotStepMinutes":0}', '--resource', 'rules-van'],
-        ['rules', 'set', '{"bufferBeforeMinutes":5}', '--resource', 'rules-van'],
+        ['rules', 'set', '{"leadMinutes":5}', '--resource', 'rules-van'],
         ['rules', 'set', '{}'],
       ]) {
         expect((await run(args)).code, args.join(' ')).toBe(2);

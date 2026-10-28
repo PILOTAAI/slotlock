@@ -18,6 +18,18 @@ export interface SlotlockBookingRules {
    */
   slotStepMinutes?: number;
   /**
+   * Where the steps fall: this many minutes past each step from local midnight (with a 30-minute
+   * step, 15 starts bookings on :15 and :45): 0 to one less than the step. Without a step it is
+   * kept and does nothing.
+   */
+  stepOffsetMinutes?: number;
+  /**
+   * Minutes kept free before each booking made under the rule (preparation, travel), as its
+   * leading buffer: the database refuses a booking whose time, or trailing buffer, reaches into
+   * it. 0-1,440. A booking made before the rule, or imported, keeps none.
+   */
+  bufferBeforeMinutes?: number;
+  /**
    * Minutes kept free after each booking made under the rule (cleaning, handover, travel), as its
    * trailing buffer, so the database refuses a booking that would start inside it: 0-1,440. A
    * booking made before the rule, or imported, keeps the buffer it has.
@@ -55,6 +67,8 @@ export const SLOTLOCK_BOOKING_RULE_LIMITS = Object.freeze({
   minNoticeMinutes: [0, 525_600],
   maxAdvanceDays: [1, 3_660],
   slotStepMinutes: [1, DAY_MINUTES],
+  stepOffsetMinutes: [0, DAY_MINUTES - 1],
+  bufferBeforeMinutes: [0, DAY_MINUTES],
   turnaroundMinutes: [0, DAY_MINUTES],
   checkInMinutes: [1, DAY_MINUTES],
 } as const);
@@ -92,6 +106,61 @@ export function parseBookingRules(value: unknown): SlotlockBookingRules {
     }
     rules.requireCertain = input.requireCertain;
   }
+  if (
+    rules.stepOffsetMinutes !== undefined &&
+    rules.slotStepMinutes !== undefined &&
+    rules.stepOffsetMinutes >= rules.slotStepMinutes
+  ) {
+    throw new TypeError('Slotlock booking rule stepOffsetMinutes must be less than slotStepMinutes');
+  }
+  return rules;
+}
+
+/**
+ * The rules that apply to a resource, merged from its own and its pool's and tenant's defaults
+ * (each validated when it was set), read leniently: each field is kept when it is valid on its own
+ * and dropped (named in `dropped`) when not. No cross-field check: a merge may join a pool's offset
+ * to a resource's own shorter step, and the offset then applies modulo the step. A merge never
+ * reads as refusing every booking.
+ */
+export function parseEffectiveBookingRules(value: unknown): { rules: SlotlockBookingRules; dropped: string[] } {
+  const rules: SlotlockBookingRules = {};
+  const dropped: string[] = [];
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return { rules, dropped: ['(not an object)'] };
+  }
+  for (const [key, field] of Object.entries(value as Record<string, unknown>)) {
+    if (key === 'enforceHours' || key === 'requireCertain') {
+      if (typeof field === 'boolean') rules[key] = field;
+      else dropped.push(key);
+      continue;
+    }
+    const limits = (LIMITS as Record<string, readonly [number, number]>)[key];
+    if (
+      limits === undefined ||
+      typeof field !== 'number' ||
+      !Number.isSafeInteger(field) ||
+      field < limits[0] ||
+      field > limits[1]
+    ) {
+      dropped.push(key);
+      continue;
+    }
+    rules[key as keyof typeof LIMITS] = field;
+  }
+  return { rules, dropped };
+}
+
+/**
+ * Default booking rules for a tenant or a pool from untrusted input: booking rules without
+ * `checkInMinutes`, which only a resource's own rules set (it releases the bookings made after it
+ * was set, and that moment is the resource's).
+ */
+export function parseBookingRuleDefaults(value: unknown): SlotlockBookingRules {
+  const rules = parseBookingRules(value);
+  if (rules.checkInMinutes !== undefined) {
+    throw new TypeError('Slotlock default booking rules have no checkInMinutes: set it on the resource');
+  }
   return rules;
 }
 
@@ -100,28 +169,45 @@ export function bookingBufferAfterMs(rules: SlotlockBookingRules | undefined, ow
   return Math.max(ownMs, (rules?.turnaroundMinutes ?? 0) * MINUTE_MS);
 }
 
+/** The leading buffer a booking made under the rules keeps. */
+export function bookingBufferBeforeMs(rules: SlotlockBookingRules | undefined): number {
+  return (rules?.bufferBeforeMinutes ?? 0) * MINUTE_MS;
+}
+
+/** The step's offset as it applies: none without a step, and always less than the step. */
+function stepOffset(rules: SlotlockBookingRules | undefined): number {
+  const step = rules?.slotStepMinutes;
+  return step === undefined ? 0 : (rules?.stepOffsetMinutes ?? 0) % step;
+}
+
 /** Minutes past local midnight in `timezone`, with the fraction. */
 function localMinutes(instant: Date, timezone: string): number {
   const local = instant.getTime() + zonedOffsetMinutes(instant, timezone) * MINUTE_MS;
   return (((local / MINUTE_MS) % DAY_MINUTES) + DAY_MINUTES) % DAY_MINUTES;
 }
 
-function onStep(instant: Date, stepMinutes: number, timezone: string): boolean {
+/** Whether `instant` falls on a step: `offset` minutes past a multiple of the step, local time. */
+function onStep(instant: Date, stepMinutes: number, timezone: string, offset = 0): boolean {
   const minutes = localMinutes(instant, timezone);
-  return Number.isInteger(minutes) && minutes % stepMinutes === 0;
+  return Number.isInteger(minutes) && minutes >= offset && (minutes - offset) % stepMinutes === 0;
 }
 
 /**
- * The first instant at or after `from` that starts on a step in `timezone`. A step that does not
+ * The first instant at or after `from` that starts on a step in `timezone`, `offsetMinutes` past
+ * each multiple of the step from local midnight (0 to the step less one). A step that does not
  * divide the day starts again at local midnight. Across a clock change it moves forward until the
  * local time is on a step.
  */
-export function nextStepStart(from: Date, stepMinutes: number, timezone: string): Date {
+export function nextStepStart(from: Date, stepMinutes: number, timezone: string, offsetMinutes = 0): Date {
+  const offset = offsetMinutes % stepMinutes;
   let candidate = from;
-  for (let attempt = 0; attempt < 4; attempt++) {
-    if (onStep(candidate, stepMinutes, timezone)) return candidate;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    if (onStep(candidate, stepMinutes, timezone, offset)) return candidate;
     const minutes = localMinutes(candidate, timezone);
-    const next = Math.min(Math.ceil(minutes / stepMinutes + 1e-9) * stepMinutes, DAY_MINUTES);
+    const next = Math.min(
+      offset + Math.max(0, Math.ceil((minutes - offset) / stepMinutes + 1e-9)) * stepMinutes,
+      DAY_MINUTES,
+    );
     const ahead = Math.max(next - minutes, 1 / 60_000);
     candidate = new Date(Math.ceil(candidate.getTime() + ahead * MINUTE_MS));
   }
@@ -151,7 +237,10 @@ export function bookingRuleBroken(params: {
   ) {
     return 'max_advance';
   }
-  if (rules.slotStepMinutes !== undefined && !onStep(interval.start, rules.slotStepMinutes, params.timezone)) {
+  if (
+    rules.slotStepMinutes !== undefined &&
+    !onStep(interval.start, rules.slotStepMinutes, params.timezone, stepOffset(rules))
+  ) {
     return 'slot_step';
   }
   if (rules.enforceHours === true) {
@@ -167,10 +256,22 @@ export function bookingRuleBroken(params: {
   return null;
 }
 
+/** How a search honours the rules (`bookingSearch`). */
+export interface SlotlockBookingSearch {
+  /** The part of the asked window a booking made now may start in. */
+  window: Interval;
+  /** The trailing buffer each slot keeps. */
+  bufferAfterMs: number;
+  /** The leading buffer each slot keeps. */
+  bufferBeforeMs: number;
+  /** The first allowed start at or after a candidate. */
+  align?: (start: Date) => Date;
+}
+
 /**
  * How a search honours the rules: the part of `window` a booking made at `now` may start in, the
- * trailing buffer each slot keeps, and how a candidate start moves to a step. `null` when no start
- * in the window is allowed.
+ * buffers each slot keeps, and how a candidate start moves to a step. `null` when no start in the
+ * window is allowed.
  */
 export function bookingSearch(params: {
   rules: SlotlockBookingRules | undefined;
@@ -178,34 +279,60 @@ export function bookingSearch(params: {
   window: Interval;
   now: Date;
   bufferAfterMs?: number;
-}): { window: Interval; bufferAfterMs: number; align?: (start: Date) => Date } | null {
+}): SlotlockBookingSearch | null {
   const { rules, window, now } = params;
   let start = window.start.getTime();
-  let end = window.end.getTime();
+  const end = window.end.getTime();
   if (rules?.minNoticeMinutes !== undefined) {
     start = Math.max(start, now.getTime() + rules.minNoticeMinutes * MINUTE_MS);
   }
   const bufferAfterMs = bookingBufferAfterMs(rules, params.bufferAfterMs ?? 0);
+  const bufferBeforeMs = bookingBufferBeforeMs(rules);
   const step = rules?.slotStepMinutes;
+  const offset = stepOffset(rules);
+  const toStep =
+    step === undefined ? undefined : (from: Date) => nextStepStart(from, step, params.timezone, offset);
   const searched = { start: new Date(start), end: new Date(end) };
   if (rules?.maxAdvanceDays !== undefined) {
     // The latest allowed start bounds where a slot may start; it may still end after it.
     const latestStart = now.getTime() + rules.maxAdvanceDays * DAY_MINUTES * MINUTE_MS;
     if (latestStart < start || end <= start) return null;
-    const align =
-      step === undefined ? undefined : (from: Date) => nextStepStart(from, step, params.timezone);
     return {
       window: searched,
       bufferAfterMs,
+      bufferBeforeMs,
       align: (from: Date) => {
-        const aligned = align ? align(from) : from;
+        const aligned = toStep ? toStep(from) : from;
         // Past the latest start, no slot: move it beyond the window so it cannot fit.
         return aligned.getTime() > latestStart ? new Date(end + 1) : aligned;
       },
     };
   }
   if (end <= start) return null;
-  return step === undefined
-    ? { window: searched, bufferAfterMs }
-    : { window: searched, bufferAfterMs, align: (from) => nextStepStart(from, step, params.timezone) };
+  return toStep === undefined
+    ? { window: searched, bufferAfterMs, bufferBeforeMs }
+    : { window: searched, bufferAfterMs, bufferBeforeMs, align: toStep };
+}
+
+/**
+ * The time a search must read as free or busy: its window, widened by the buffers a slot in it
+ * keeps (before its first start and after its last end).
+ */
+export function bookingSearchReach(search: SlotlockBookingSearch): Interval {
+  return {
+    start: new Date(search.window.start.getTime() - search.bufferBeforeMs),
+    end: new Date(search.window.end.getTime() + search.bufferAfterMs),
+  };
+}
+
+/**
+ * Busy time as the slot times it rules out. A slot [s, s + d) keeping buffers occupies
+ * [s - before, s + d + after), so it meets busy [b, e) exactly when [s, s + d) meets
+ * [b - after, e + before): the database refuses the same booking.
+ */
+export function bookingSearchBlocked(busy: readonly Interval[], search: SlotlockBookingSearch): Interval[] {
+  return busy.map((interval) => ({
+    start: new Date(interval.start.getTime() - search.bufferAfterMs),
+    end: new Date(interval.end.getTime() + search.bufferBeforeMs),
+  }));
 }

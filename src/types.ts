@@ -34,8 +34,14 @@ export interface SlotlockResource {
   visibility?: 'shared' | 'private';
   /** When the tenant archived it: no longer listed or booked, its history kept. Absent in use. */
   archivedAt?: Date;
-  /** What a booking on it must satisfy (`SlotlockBookingRules`). Absent when it has none. */
+  /** Its own booking rules (`SlotlockBookingRules`). Absent when it has none. */
   bookingRules?: SlotlockBookingRules;
+  /**
+   * What a booking on it must satisfy: the tenant's default rules, overlaid by its pool's, overlaid
+   * by its own (`setBookingRuleDefaults`), a field set at a narrower level winning. Absent when no
+   * rule applies.
+   */
+  effectiveBookingRules?: SlotlockBookingRules;
   /**
    * The pool it belongs to: interchangeable resources sharing a name, such as a vehicle class or a
    * room type, booked by the class (`slotlock_book_pool`). Absent when it is in none.
@@ -459,6 +465,14 @@ export interface CalendarEventRetentionResult {
 }
 
 /** What erasing a tenant deleted. */
+/** A tenant's default booking rules (`SlotlockStore.getBookingRuleDefaults`). */
+export interface SlotlockBookingRuleDefaults {
+  /** The tenant's own defaults, under every pool's; null when it has none. */
+  tenant: SlotlockBookingRules | null;
+  /** Each pool's defaults, by pool name, for the pools that have them. */
+  pools: Record<string, SlotlockBookingRules>;
+}
+
 export interface SlotlockTenantErasure {
   /** Rows deleted, by table (every table the tenant owns rows in is named, with 0 for none). */
   rows: Record<string, number>;

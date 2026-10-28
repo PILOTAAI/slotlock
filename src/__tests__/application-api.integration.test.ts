@@ -112,6 +112,7 @@ describe.skipIf(!url)('the application API on the real store', () => {
           timezone: 'Europe/London',
           availability: null,
           booking_rules: null,
+          effective_booking_rules: null,
           visibility: 'shared',
           archived_at: null,
           pool: null,

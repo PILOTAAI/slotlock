@@ -16,6 +16,7 @@ const READS = [
   'listHistory',
   'listPoolMembers',
   'listPools',
+  'getBookingRuleDefaults',
   'listChanges',
   'listWebhookEndpoints',
   'getResource',
@@ -105,6 +106,8 @@ function fakeClient(
     },
     {
       savepoint: async (callback: (savepoint: TransactionSql) => Promise<unknown>) => callback(tx),
+      // A raw SQL fragment, read as part of the query that holds it.
+      unsafe: (text: string) => text,
     },
   ) as unknown as TransactionSql;
   const client = {

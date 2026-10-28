@@ -12,7 +12,13 @@ import type {
   SlotlockApplicationBackend,
   SlotlockApplicationInvocationContext,
 } from './application-api.js';
-import { type SlotlockBookingRule, type SlotlockBookingRules, bookingSearch } from './booking-rules.js';
+import {
+  type SlotlockBookingRule,
+  type SlotlockBookingRules,
+  bookingSearch,
+  bookingSearchBlocked,
+  bookingSearchReach,
+} from './booking-rules.js';
 import { findNextAvailable, mergeIntervals } from './engine.js';
 import { expandRules } from './rules.js';
 import { emitVAvailability, parseVAvailability, toJSCalendarEvent } from './interop.js';
@@ -639,7 +645,7 @@ export function createSlotlockStoreAgentBackend(
           // Not free either where its booking rules refuse a booking: before its notice, past how
           // far ahead it books, and, when it enforces them, outside its bookable hours. Its slot
           // step is not counted: it moves when a booking may start, not whether the member is free.
-          const rules = member.bookingRules;
+          const rules = member.effectiveBookingRules;
           const search = bookingSearch({ rules, timezone: member.timezone, window, now });
           const latestStart =
             rules?.maxAdvanceDays !== undefined
@@ -877,7 +883,7 @@ export function createSlotlockStoreAgentBackend(
           // Only what a booking made now may take: the resource's booking rules bound the search,
           // as they bound the write that follows it.
           const search = bookingSearch({
-            rules: resource.bookingRules,
+            rules: resource.effectiveBookingRules,
             timezone: resource.timezone,
             window,
             now: new Date(),
@@ -886,11 +892,8 @@ export function createSlotlockStoreAgentBackend(
           const freeBusy = await readFreeBusy(tenantStore, {
             tenantRef: context.principal.tenantRef,
             resourceId,
-            // A slot's turnaround may run past the window: what it reaches must be free too.
-            window: {
-              start: window.start,
-              end: new Date(window.end.getTime() + (search?.bufferAfterMs ?? 0)),
-            },
+            // A slot's buffers may run past the window: what they reach must be free too.
+            window: search ? bookingSearchReach({ ...search, window }) : window,
             requiredSources: [...sources],
             ...(options.coverageMaxAgeMs !== undefined
               ? { coverageMaxAgeMs: options.coverageMaxAgeMs }
@@ -907,12 +910,8 @@ export function createSlotlockStoreAgentBackend(
           const windows = expandRules(rules, search.window, resource.timezone);
           windowsLeft -= windows.length;
           if (windowsLeft < 0) throw new SlotlockAgentOperationError('calendar_work_limit', 400);
-          // A slot [s, s + d) with its turnaround meets busy [b, e) when [s, s + d) meets [b - t, e).
           const candidate = findNextAvailable({
-            busy: freeBusy.busy.map((busy) => ({
-              start: new Date(busy.start.getTime() - search.bufferAfterMs),
-              end: busy.end,
-            })),
+            busy: bookingSearchBlocked(freeBusy.busy, search),
             windows,
             durationMs,
             ...(search.align ? { align: search.align } : {}),
@@ -1200,7 +1199,11 @@ export interface SlotlockStoreApplicationBackendOptions {
 function storeRefusal(error: unknown): unknown {
   const code = (error as { code?: unknown } | null)?.code;
   if (typeof code !== 'string') return error;
-  if (code === 'resource_limit_reached' || code === 'resource_visibility_conflict') {
+  if (
+    code === 'resource_limit_reached' ||
+    code === 'resource_visibility_conflict' ||
+    code === 'pool_rules_limit_reached'
+  ) {
     return new SlotlockAgentOperationError(code, 409);
   }
   if (code.startsWith('invalid_') && code !== 'invalid_transaction_isolation') {
@@ -1296,6 +1299,8 @@ function bookingRulesOutput(rules: SlotlockBookingRules | undefined) {
     ...(rules.minNoticeMinutes !== undefined ? { min_notice_minutes: rules.minNoticeMinutes } : {}),
     ...(rules.maxAdvanceDays !== undefined ? { max_advance_days: rules.maxAdvanceDays } : {}),
     ...(rules.slotStepMinutes !== undefined ? { slot_step_minutes: rules.slotStepMinutes } : {}),
+    ...(rules.stepOffsetMinutes !== undefined ? { step_offset_minutes: rules.stepOffsetMinutes } : {}),
+    ...(rules.bufferBeforeMinutes !== undefined ? { buffer_before_minutes: rules.bufferBeforeMinutes } : {}),
     ...(rules.turnaroundMinutes !== undefined ? { turnaround_minutes: rules.turnaroundMinutes } : {}),
     ...(rules.enforceHours !== undefined ? { enforce_hours: rules.enforceHours } : {}),
     ...(rules.checkInMinutes !== undefined ? { check_in_minutes: rules.checkInMinutes } : {}),
@@ -1310,6 +1315,10 @@ function bookingRulesInput(value: unknown): SlotlockBookingRules | null {
   if (input.min_notice_minutes !== undefined) rules.minNoticeMinutes = input.min_notice_minutes as number;
   if (input.max_advance_days !== undefined) rules.maxAdvanceDays = input.max_advance_days as number;
   if (input.slot_step_minutes !== undefined) rules.slotStepMinutes = input.slot_step_minutes as number;
+  if (input.step_offset_minutes !== undefined) rules.stepOffsetMinutes = input.step_offset_minutes as number;
+  if (input.buffer_before_minutes !== undefined) {
+    rules.bufferBeforeMinutes = input.buffer_before_minutes as number;
+  }
   if (input.turnaround_minutes !== undefined) rules.turnaroundMinutes = input.turnaround_minutes as number;
   if (input.enforce_hours !== undefined) rules.enforceHours = input.enforce_hours as boolean;
   if (input.check_in_minutes !== undefined) rules.checkInMinutes = input.check_in_minutes as number;
@@ -1324,6 +1333,7 @@ function resourceOutput(resource: SlotlockResource) {
     timezone: resource.timezone,
     availability: rulesOutput(resource.availabilityRules),
     booking_rules: bookingRulesOutput(resource.bookingRules),
+    effective_booking_rules: bookingRulesOutput(resource.effectiveBookingRules),
     visibility: resource.visibility ?? 'shared',
     archived_at: resource.archivedAt?.toISOString() ?? null,
     pool: resource.pool ?? null,
@@ -1635,6 +1645,44 @@ export function createSlotlockStoreApplicationBackend(
       return withTenant(store, context, async (tenant) => ({
         pools: await tenant.listPools({ tenantRef: tenantOf(context) }),
       }));
+    },
+
+    async getBookingRuleDefaults(context) {
+      return withTenant(store, context, async (tenant) => {
+        const defaults = await tenant.getBookingRuleDefaults({ tenantRef: tenantOf(context) });
+        return {
+          tenant: bookingRulesOutput(defaults.tenant ?? undefined),
+          pools: Object.entries(defaults.pools).map(([pool, rules]) => ({
+            pool,
+            rules: bookingRulesOutput(rules) ?? {},
+          })),
+        };
+      });
+    },
+
+    async setTenantBookingRules(context, input) {
+      const rules = bookingRulesInput(input.rules);
+      return withTenant(store, context, async (tenant) => {
+        try {
+          const stored = await tenant.setBookingRuleDefaults({ tenantRef: tenantOf(context), pool: null, rules });
+          return { rules: bookingRulesOutput(stored ?? undefined) };
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+      }, WRITE);
+    },
+
+    async setPoolBookingRules(context, input) {
+      const rules = bookingRulesInput(input.rules);
+      const pool = input.pool as string;
+      return withTenant(store, context, async (tenant) => {
+        try {
+          const stored = await tenant.setBookingRuleDefaults({ tenantRef: tenantOf(context), pool, rules });
+          return { pool, rules: bookingRulesOutput(stored ?? undefined) };
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+      }, WRITE);
     },
 
     async setTenantAvailability(context, input) {

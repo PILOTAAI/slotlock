@@ -29,6 +29,42 @@ versioning.
   fails no release. The script now also measures free/busy reads and the non-overlapping workload
   with durable commits off, records the PostgreSQL version, CPU count, clients and duration, and
   writes both files with `--out DIR`.
+- Booking rules: a leading buffer (`bufferBeforeMinutes`), the time kept free before each booking,
+  so two bookings stay the earlier one's trailing buffer plus the later one's leading buffer apart.
+  A reservation now occupies from `occupied_starts_at` (its start less `buffer_before_ms`, set by
+  a trigger) and the `slotlock_reservations_no_overlap` constraint keeps that time apart; free/busy,
+  searches, pool availability, holds and their reaping, coverage checks, series rolls and the
+  waitlist all read it.
+- Booking rules: a step offset (`stepOffsetMinutes`, 0 to the step less one): with a 30-minute step
+  and 15, bookings start on :15 and :45, local time in the resource's zone, on writes and searches.
+- Default booking rules for the tenant and for each pool (`setBookingRuleDefaults`,
+  `getBookingRuleDefaults`; `GET`/`PUT /v1/booking-rules`, `PUT /v1/pools/{pool}/booking-rules`):
+  a resource's rules as they apply (`effectiveBookingRules`, `effective_booking_rules`) are the
+  tenant's, overlaid by its pool's, overlaid by its own. A new tenant table under forced row-level
+  security, `booking_rule_defaults`, which erasure deletes. The dashboard's rules form has both new
+  rules and shows each inherited rule and where it comes from; an inherited on-or-off rule
+  (`enforceHours`, `requireCertain`) is a choice of default, on or off, so a resource can turn it
+  off. At most 1,000 pools a tenant have defaults (`pool_rules_limit_reached`). Merged rules are
+  read leniently: an offset under a shorter step applies modulo it, and an invalid field is ignored
+  and logged, never read as refusing every booking.
+- Pool availability counts a member busy over its bookings' occupied time, buffers included, not
+  the buffers a new booking would keep.
+
+### Upgrading
+
+- The migration adds `reservations.buffer_before_ms` and `occupied_starts_at` and
+  `calendar_events.buffer_before_ms` without rewriting a row (existing rows keep no leading buffer,
+  so their occupied time is unchanged), adds their checks NOT VALID and validates them after it
+  commits, and rebuilds `slotlock_reservations_no_overlap` once.
+- The rebuild holds an ACCESS EXCLUSIVE lock on `slotlock.reservations` for the whole index build,
+  about 15 seconds per million rows as measured in review: every read and write of reservations
+  waits until it ends. Schedule it, and for a very large table raise the migration's
+  `statementTimeoutMs` (`SlotlockMigrationOptions`, default 900,000 ms) so the build is not
+  cancelled.
+- `slotlock migrate` applies row-level security to the new table and grants it to the serving role.
+  A library user runs `applyTenantRls`, then `grantApplicationRole` right after `applySchema` and
+  before serving traffic: until then every booking fails with a permission error on
+  `booking_rule_defaults`, which every booking reads.
 
 ## 0.5.2 - 2026-10-28
 

@@ -98,7 +98,7 @@ describe.skipIf(!url)('upgrading a 0.1 database', () => {
   it('creates one overlap constraint over every row, buffer included, and re-applies as a no-op', async () => {
     const constraints = await constraintsOf(sql, 'reservations');
     expect(constraints.slotlock_reservations_no_overlap).toBe(
-      "EXCLUDE USING gist (resource_id WITH =, tstzrange(starts_at, COALESCE(occupied_ends_at, ends_at), '[)'::text) WITH &&)",
+      "EXCLUDE USING gist (resource_id WITH =, tstzrange(COALESCE(occupied_starts_at, starts_at), COALESCE(occupied_ends_at, ends_at), '[)'::text) WITH &&)",
     );
     expect(constraints).not.toHaveProperty('slotlock_reservations_buffered_no_overlap');
     await store.applySchema();

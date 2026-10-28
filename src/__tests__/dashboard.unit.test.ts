@@ -1827,6 +1827,59 @@ describe('resource detail, webhooks and the waitlist', () => {
     expect(store.setPool).toHaveBeenLastCalledWith('github:4242', OWN, null, 'github:4242');
   });
 
+  it('shows which booking rules a resource takes from the pool and tenant defaults, and saves the new ones', async () => {
+    const { target, store } = full();
+    const ruleDefaults = vi.fn(async () => ({
+      tenant: { minNoticeMinutes: 120, bufferBeforeMinutes: 5 },
+      pools: { van: { bufferBeforeMinutes: 15, enforceHours: true } },
+    }));
+    const withDefaults = dashboard({ resources: { ...store, ruleDefaults } });
+    const row = resources.rows.find((candidate) => candidate.id === OWN) as SlotlockResource;
+    row.pool = 'van';
+    row.bookingRules = { turnaroundMinutes: 10 };
+    const { session } = await signIn(withDefaults);
+    const page = await (await get(withDefaults, `/base/dashboard/resources/${OWN}`, session)).text();
+    expect(ruleDefaults).toHaveBeenCalledWith('github:4242');
+    // An empty field shows the value it inherits; the note says from where, the pool's winning.
+    expect(page).toContain('name="min_notice_minutes" value="" placeholder="120"');
+    expect(page).toContain('name="buffer_before_minutes" value="" placeholder="15"');
+    expect(page).toContain('name="turnaround_minutes" value="10">');
+    expect(page).toContain(
+      'Inherited: Minimum notice 120 (every resource); Buffer before 15 (pool van); Only inside bookable hours (pool van).',
+    );
+    // An inherited on-or-off rule is a choice of its default, on or off, so it can be turned off here.
+    expect(page).toContain(
+      '<select name="enforce_hours"><option value="" selected>As its default (on, pool van)</option><option value="1">On</option><option value="0">Off</option></select>',
+    );
+    expect(page).toContain('name="require_certain" value="1"> Only in time');
+    const token0 = await csrf(withDefaults, session);
+    await post(withDefaults, '/base/dashboard/resources/rules', { csrf: token0, id: OWN, enforce_hours: '0' }, session);
+    expect(store.setRules).toHaveBeenLastCalledWith('github:4242', OWN, { enforceHours: false }, 'github:4242');
+    const off = await (await get(withDefaults, `/base/dashboard/resources/${OWN}`, session)).text();
+    expect(off).toContain('<option value="0" selected>Off</option>');
+    row.bookingRules = { turnaroundMinutes: 10 };
+    // Without the defaults, what applies beyond its own is said to come from defaults.
+    delete row.bookingRules;
+    row.effectiveBookingRules = { minNoticeMinutes: 30 };
+    const plain = await (await get(target, `/base/dashboard/resources/${OWN}`, session)).text();
+    expect(plain).toContain('Inherited: Minimum notice 30 (defaults).');
+
+    const token = await csrf(withDefaults, session);
+    const saved = await post(
+      withDefaults,
+      '/base/dashboard/resources/rules',
+      { csrf: token, id: OWN, slot_step_minutes: '30', step_offset_minutes: '15', buffer_before_minutes: '20' },
+      session,
+    );
+    expect(saved.status).toBe(303);
+    expect(store.setRules).toHaveBeenLastCalledWith(
+      'github:4242',
+      OWN,
+      { slotStepMinutes: 30, stepOffsetMinutes: 15, bufferBeforeMinutes: 20 },
+      'github:4242',
+    );
+  });
+
   it('adds a webhook showing its secret once, lists its health, and deletes or enables it', async () => {
     const { target, store, endpoints } = full();
     const { session } = await signIn(target);

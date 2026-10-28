@@ -41,6 +41,9 @@ public sealed partial class SlotlockClient
         ["slotlock_set_resource_booking_rules"] = new("PUT", "/v1/resources/{resource_id}/booking-rules", ["resource_id"], []),
         ["slotlock_set_resource_pool"] = new("PUT", "/v1/resources/{resource_id}/pool", ["resource_id"], []),
         ["slotlock_list_pools"] = new("GET", "/v1/pools", [], []),
+        ["slotlock_get_booking_rule_defaults"] = new("GET", "/v1/booking-rules", [], []),
+        ["slotlock_set_tenant_booking_rules"] = new("PUT", "/v1/booking-rules", [], []),
+        ["slotlock_set_pool_booking_rules"] = new("PUT", "/v1/pools/{pool}/booking-rules", ["pool"], []),
         ["slotlock_get_resource_history"] = new("GET", "/v1/resources/{resource_id}/history", ["resource_id"], ["limit", "before"]),
         ["slotlock_get_reservation_history"] = new("GET", "/v1/reservations/{reservation_ref}/history", ["reservation_ref"], ["limit", "before"]),
         ["slotlock_get_tenant_event_history"] = new("GET", "/v1/tenant/events/{event_id}/history", ["event_id"], ["limit", "before"]),
@@ -837,10 +840,12 @@ public sealed partial class SlotlockClient
     /// <summary>Set a resource's booking rules.</summary>
     /// <remarks>
     /// Set what a booking on one resource must satisfy from now on: minimum notice, how far
-    /// ahead, the step starts fall on (from local midnight in the resource's time zone), the
-    /// turnaround kept free after each booking, and whether bookings must lie inside its hours.
-    /// `null` clears them. Holds, reservations, moves and agents' events are refused with the
-    /// rule they break; searches offer only what they allow.
+    /// ahead, the step starts fall on (from local midnight in the resource's time zone, offset by
+    /// step_offset_minutes), the time kept free before and after each booking, and whether
+    /// bookings must lie inside its hours. `null` clears them. A rule it does not set comes from
+    /// its pool's or the tenant's defaults (slotlock_set_pool_booking_rules,
+    /// slotlock_set_tenant_booking_rules). Holds, reservations, moves and agents' events are
+    /// refused with the rule they break; searches offer only what they allow.
     /// </remarks>
     /// <param name="resourceId">resource_id</param>
     /// <param name="rules">rules</param>
@@ -895,6 +900,64 @@ public sealed partial class SlotlockClient
     {
         var values = new JsonObject();
         return CallAsync("slotlock_list_pools", values, cancellationToken);
+    }
+
+    /// <summary>Get default booking rules.</summary>
+    /// <remarks>
+    /// The tenant's default booking rules, and each pool's that has them. A resource's rules as
+    /// they apply (effective_booking_rules) are the tenant's defaults, overlaid by its pool's,
+    /// overlaid by its own: a rule set at a narrower level wins.
+    /// </remarks>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> GetBookingRuleDefaultsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        return CallAsync("slotlock_get_booking_rule_defaults", values, cancellationToken);
+    }
+
+    /// <summary>Set default booking rules.</summary>
+    /// <remarks>
+    /// Set the booking rules every resource of the tenant has unless its pool or its own rules
+    /// set the same rule, from now on; `null` clears them. They take any resource rule but
+    /// check_in_minutes, which only a resource sets.
+    /// </remarks>
+    /// <param name="rules">rules</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> SetTenantBookingRulesAsync(
+        JsonObject? rules,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["rules"] = Json.ToNode(rules);
+        return CallAsync("slotlock_set_tenant_booking_rules", values, cancellationToken);
+    }
+
+    /// <summary>Set a pool's booking rules.</summary>
+    /// <remarks>
+    /// Set the booking rules every member of one pool has unless its own rules set the same rule,
+    /// over the tenant's defaults, from now on; `null` clears them. They take any resource rule
+    /// but check_in_minutes. At most 1,000 pools have them: one more is 409
+    /// pool_rules_limit_reached.
+    /// </remarks>
+    /// <param name="pool">pool</param>
+    /// <param name="rules">rules</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> SetPoolBookingRulesAsync(
+        string pool,
+        JsonObject? rules,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["pool"] = Json.ToNode(pool);
+        values["rules"] = Json.ToNode(rules);
+        return CallAsync("slotlock_set_pool_booking_rules", values, cancellationToken);
     }
 
     /// <summary>A resource's history.</summary>

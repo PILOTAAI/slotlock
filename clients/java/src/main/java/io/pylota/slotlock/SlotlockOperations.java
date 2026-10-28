@@ -38,6 +38,9 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_set_resource_booking_rules", new Operation("PUT", "/v1/resources/{resource_id}/booking-rules", List.of("resource_id"), List.of())),
           Map.entry("slotlock_set_resource_pool", new Operation("PUT", "/v1/resources/{resource_id}/pool", List.of("resource_id"), List.of())),
           Map.entry("slotlock_list_pools", new Operation("GET", "/v1/pools", List.of(), List.of())),
+          Map.entry("slotlock_get_booking_rule_defaults", new Operation("GET", "/v1/booking-rules", List.of(), List.of())),
+          Map.entry("slotlock_set_tenant_booking_rules", new Operation("PUT", "/v1/booking-rules", List.of(), List.of())),
+          Map.entry("slotlock_set_pool_booking_rules", new Operation("PUT", "/v1/pools/{pool}/booking-rules", List.of("pool"), List.of())),
           Map.entry("slotlock_get_resource_history", new Operation("GET", "/v1/resources/{resource_id}/history", List.of("resource_id"), List.of("limit", "before"))),
           Map.entry("slotlock_get_reservation_history", new Operation("GET", "/v1/reservations/{reservation_ref}/history", List.of("reservation_ref"), List.of("limit", "before"))),
           Map.entry("slotlock_get_tenant_event_history", new Operation("GET", "/v1/tenant/events/{event_id}/history", List.of("event_id"), List.of("limit", "before"))),
@@ -688,9 +691,11 @@ public abstract class SlotlockOperations {
   /**
    * Set a resource's booking rules. Set what a booking on one resource must satisfy from now on:
    * minimum notice, how far ahead, the step starts fall on (from local midnight in the resource's
-   * time zone), the turnaround kept free after each booking, and whether bookings must lie inside
-   * its hours. `null` clears them. Holds, reservations, moves and agents' events are refused with
-   * the rule they break; searches offer only what they allow.
+   * time zone, offset by step_offset_minutes), the time kept free before and after each booking,
+   * and whether bookings must lie inside its hours. `null` clears them. A rule it does not set
+   * comes from its pool's or the tenant's defaults (slotlock_set_pool_booking_rules,
+   * slotlock_set_tenant_booking_rules). Holds, reservations, moves and agents' events are refused
+   * with the rule they break; searches offer only what they allow.
    *
    * @param resourceId {@code resource_id}, string
    * @param rules {@code rules}, object (may be null)
@@ -732,6 +737,51 @@ public abstract class SlotlockOperations {
   public Map<String, Object> listPools() {
     Map<String, Object> values = new LinkedHashMap<>();
     return call("slotlock_list_pools", values);
+  }
+
+  /**
+   * Get default booking rules. The tenant's default booking rules, and each pool's that has them.
+   * A resource's rules as they apply (effective_booking_rules) are the tenant's defaults,
+   * overlaid by its pool's, overlaid by its own: a rule set at a narrower level wins.
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> getBookingRuleDefaults() {
+    Map<String, Object> values = new LinkedHashMap<>();
+    return call("slotlock_get_booking_rule_defaults", values);
+  }
+
+  /**
+   * Set default booking rules. Set the booking rules every resource of the tenant has unless its
+   * pool or its own rules set the same rule, from now on; `null` clears them. They take any
+   * resource rule but check_in_minutes, which only a resource sets.
+   *
+   * @param rules {@code rules}, object (may be null)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> setTenantBookingRules(Map<String, ?> rules) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("rules", rules);
+    return call("slotlock_set_tenant_booking_rules", values);
+  }
+
+  /**
+   * Set a pool's booking rules. Set the booking rules every member of one pool has unless its own
+   * rules set the same rule, over the tenant's defaults, from now on; `null` clears them. They
+   * take any resource rule but check_in_minutes. At most 1,000 pools have them: one more is 409
+   * pool_rules_limit_reached.
+   *
+   * @param pool {@code pool}, string
+   * @param rules {@code rules}, object (may be null)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> setPoolBookingRules(String pool, Map<String, ?> rules) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("pool", pool);
+    values.put("rules", rules);
+    return call("slotlock_set_pool_booking_rules", values);
   }
 
   /**
