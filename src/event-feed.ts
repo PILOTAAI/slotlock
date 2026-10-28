@@ -175,16 +175,21 @@ interface Position {
   txid: string;
   id: string;
   at: number;
+  /** Given by 0.4, before the pruned position was kept: it expires by its date as it did then. */
+  dated?: boolean;
 }
 
 function encodePosition(position: Position): string {
-  return Buffer.from(`1:${position.txid}:${position.id}:${position.at}`).toString('base64url');
+  return Buffer.from(`2:${position.txid}:${position.id}:${position.at}`).toString('base64url');
 }
 
 function decodePosition(value: string): Position | null {
   if (value.length > 200 || !/^[A-Za-z0-9_-]+$/.test(value)) return null;
-  const match = /^1:(\d{1,20}):(\d{1,19}):(\d{1,15})$/.exec(Buffer.from(value, 'base64url').toString());
-  return match ? { txid: match[1] as string, id: match[2] as string, at: Number(match[3]) } : null;
+  const match = /^([12]):(\d{1,20}):(\d{1,19}):(\d{1,15})$/.exec(Buffer.from(value, 'base64url').toString());
+  if (!match) return null;
+  const position: Position = { txid: match[2] as string, id: match[3] as string, at: Number(match[4]) };
+  if (match[1] === '1') position.dated = true;
+  return position;
 }
 
 interface ChangeRow {
@@ -310,6 +315,9 @@ export function slotlockEventFeedMethods(
                AND txid < pg_snapshot_xmin(pg_current_snapshot())
                AND (${after?.txid ?? null}::xid8 IS NULL
                     OR (txid, id) > (${after?.txid ?? null}::xid8, ${after?.id ?? null}::bigint))
+               -- Starting over: from the mark on. A change kept before it (one another server
+               -- left when it pruned past it) would end a page that is expired at once.
+               AND (mark.txid IS NULL OR (txid, id) > (mark.txid, mark.id))
              ORDER BY txid, id
              LIMIT ${limit}
           ) page ON true
@@ -317,12 +325,16 @@ export function slotlockEventFeedMethods(
       const head = rows[0];
       if (!head) throw new Error('slotlock: change page returned no row');
       // Whichever server pruned it, and however long it keeps changes: reading on could skip one.
+      // A 0.4 cursor also by its date, as 0.4 did: 0.4 pruned by age, not in feed order, so the
+      // mark its changes started at does not cover every one it took.
       if (
         after &&
-        head.pruned_txid !== null &&
-        (BigInt(head.pruned_txid) > BigInt(after.txid) ||
-          (BigInt(head.pruned_txid) === BigInt(after.txid) &&
-            BigInt(head.pruned_id ?? 0) > BigInt(after.id)))
+        ((head.pruned_txid !== null &&
+          (BigInt(head.pruned_txid) > BigInt(after.txid) ||
+            (BigInt(head.pruned_txid) === BigInt(after.txid) &&
+              BigInt(head.pruned_id ?? 0) > BigInt(after.id)))) ||
+          (after.dated === true &&
+            after.at < Date.now() - SLOTLOCK_CHANGE_RETENTION_DAYS * 86_400_000))
       ) {
         return { ok: false, code: 'cursor_expired' };
       }
@@ -334,7 +346,7 @@ export function slotlockEventFeedMethods(
       return {
         ok: true,
         changes,
-        next: last?.position ?? encodePosition({ ...here, at: Date.now() }),
+        next: last?.position ?? encodePosition({ txid: here.txid, id: here.id, at: Date.now() }),
       };
     },
 
