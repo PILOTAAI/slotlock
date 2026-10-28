@@ -63,7 +63,10 @@ const RESOURCE = { id: 'resource-1', external_ref: 'vehicle-1', timezone: 'Europ
 function fakeBackend() {
   const seen = new Set<string>();
   return {
-    listResources: vi.fn(async () => ({ resources: [RESOURCE], next_cursor: null })),
+    listResources: vi.fn(async (_context: SlotlockAgentInvocationContext) => ({
+      resources: [RESOURCE],
+      next_cursor: null,
+    })),
     getFreeBusy: vi.fn(async () => ({})),
     findNextAvailable: vi.fn(async () => ({})),
     createEvent: vi.fn(async () => ({})),
@@ -193,7 +196,7 @@ describe.each(['anthropic', 'openai'] as const)('the assistant over %s', (format
     expect((await chat(target, bob, 'What can we book?')).status).toBe(303);
 
     expect(backend.listResources).toHaveBeenCalledTimes(1);
-    const context = backend.listResources.mock.calls[0]?.[0] as unknown as SlotlockAgentInvocationContext;
+    const context = backend.listResources.mock.calls[0]?.[0] as SlotlockAgentInvocationContext;
     expect(context.principal).toMatchObject({ tenantRef: 'github-org:91', subject: 'dashboard-assistant:bob' });
     expect(model.requests).toHaveLength(2);
     const [first, second] = model.requests;

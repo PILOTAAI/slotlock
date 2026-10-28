@@ -94,6 +94,8 @@ const expectedFiles = new Set([
   'api-keys.d.ts',
   'application-api.js',
   'application-api.d.ts',
+  'assistant.js',
+  'assistant.d.ts',
   'booking-rules.js',
   'booking-rules.d.ts',
   'cli.js',

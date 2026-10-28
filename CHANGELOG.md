@@ -14,6 +14,17 @@ versioning.
 
 ### Added
 
+- The dashboard assistant: with `SLOTLOCK_ASSISTANT_SECRET`, an organization's owners connect a
+  model of their own in Settings (the Anthropic Messages API, or OpenAI-compatible chat
+  completions: OpenAI, OpenRouter, vLLM, Ollama, LM Studio), with a connection test, and every
+  member can operate Slotlock by chat on a new Assistant page. The server runs the tool loop (up to
+  8 model calls a message) with a fixed list of agent tools: reads run through the agent operation
+  boundary, and every write is a proposed change the member approves on a form before it runs once,
+  recorded as `dashboard-assistant:<login>`. The API key is sealed with AES-256-GCM, bound to the
+  tenant, and only its last four characters are shown. Two tenant tables under forced row-level
+  security, `assistant_settings` and `assistant_conversations`, which erasure deletes.
+  `createSlotlockRateLimiter` is the per-key token bucket it limits members' messages with, and
+  organization sessions now remember each organization's role (owners are admins).
 - How long history is kept is a setting: `SLOTLOCK_RETENTION_DAYS` (`retentionDays` in
   `createSlotlockStore`), 1 to 3,650 days, 30 by default. It sets how long the change feed is kept
   and how far back a cursor reaches, and ended waitlist entries; above 30 days, retired idempotency

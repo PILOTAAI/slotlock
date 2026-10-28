@@ -485,6 +485,19 @@ describe('slotlock serve configuration', () => {
         expect(message).not.toContain(shared);
       }
     });
+
+    it('turns the assistant on with its own secret, and refuses one shared or weak', () => {
+      expect(readSlotlockServeConfig(dashboardEnv()).dashboard).not.toHaveProperty('assistantSecret');
+      const own = secret();
+      expect(readSlotlockServeConfig(dashboardEnv({ SLOTLOCK_ASSISTANT_SECRET: own })).dashboard?.assistantSecret).toBe(own);
+      const env = dashboardEnv();
+      const shared = refusal({ ...env, SLOTLOCK_ASSISTANT_SECRET: env.SLOTLOCK_SESSION_SECRET }).message;
+      expect(shared).toMatch(/SLOTLOCK_ASSISTANT_SECRET must differ/);
+      expect(shared).not.toContain(env.SLOTLOCK_SESSION_SECRET as string);
+      expect(refusal(dashboardEnv({ SLOTLOCK_ASSISTANT_SECRET: 'z'.repeat(40) })).message).toMatch(
+        /SLOTLOCK_ASSISTANT_SECRET is too weak/,
+      );
+    });
   });
 
   it('reads how many days of history to keep', () => {

@@ -32,6 +32,28 @@ With all four empty, the default, the dashboard is off.
 - Create keys for their agents (read only, read and write, or Full), and rotate or revoke them.
 - See the MCP and A2A addresses to give their agents.
 
+## Assistant
+
+Set `SLOTLOCK_ASSISTANT_SECRET` (32+ random characters) and the dashboard gains an **Assistant**
+page: every member of an organization can ask in plain words ("what's free tomorrow on van-7?",
+"book it for Ana") instead of clicking.
+
+- **Each organization connects its own model** in Settings, Assistant. Only its owners can: the
+  provider (Anthropic Messages API, or OpenAI-compatible for OpenAI, OpenRouter, vLLM, Ollama and
+  LM Studio), the base URL (https, or http on `localhost`), the model name and the API key
+  (optional for a local model). **Test connection** makes one real request and checks for one
+  correct tool call.
+- **The organization's data is sent to the provider it configures**: members' messages, and the
+  resources and bookings the assistant reads for them.
+- The key is stored encrypted (AES-256-GCM) with the deployment's secret, and is never shown again:
+  only that it is set, and its last four characters.
+- **Reads run; writes wait for you.** The assistant looks things up at once. A booking, hold, change
+  or cancellation appears as a card to **Approve** or **Dismiss**, and runs only when approved,
+  once, under the same booking rules and limits as an agent. Activity names it
+  `Assistant for @<login>`.
+- It cannot touch API keys, webhooks, booking rules, pools or erasure.
+- Up to 10 messages a minute per member; a conversation is kept for 2 hours.
+
 ## Before you go live
 
 - Serve the dashboard on an origin of its own, such as `https://slotlock.example.com`, not as a path
