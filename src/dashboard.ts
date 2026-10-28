@@ -16,10 +16,17 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Sql } from 'postgres';
 import type { SlotlockApiKey, SlotlockApiKeyScope, SlotlockApiKeyStore } from './api-keys.js';
+import { SLOTLOCK_DASHBOARD_NAME_PATTERN } from './config.js';
 import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from './ddl.js';
 import { ignoreRejection } from './hooks.js';
+import type { SlotlockChange } from './event-feed.js';
 import type { SlotlockSql, SlotlockStore } from './store.js';
-import type { SlotlockResource, WeeklyAvailabilityRule } from './types.js';
+import type {
+  Interval,
+  SlotlockAgendaEntry,
+  SlotlockResource,
+  WeeklyAvailabilityRule,
+} from './types.js';
 import {
   WEEKDAYS,
   WEEKDAY_NAMES as DAY_NAMES,
@@ -107,6 +114,10 @@ export interface SlotlockDashboardResources {
     target: { id: string } | 'all',
     rules: WeeklyAvailabilityRule[] | null,
   ): Promise<number>;
+  /** What occupies the tenant's resources in `window`, by start: the overview's agenda. */
+  agenda?(tenantRef: string, window: Interval, limit: number): Promise<SlotlockAgendaEntry[]>;
+  /** The tenant's latest changes, newest first: the overview's activity. */
+  recentChanges?(tenantRef: string, limit: number): Promise<SlotlockChange[]>;
 }
 
 /**
@@ -136,6 +147,8 @@ export interface SlotlockDashboardState {
 export interface SlotlockDashboardOptions {
   /** Where people reach the server; the dashboard lives at `<publicUrl>/dashboard`. */
   publicUrl: string;
+  /** What the deployment is called in the dashboard: 1-60 characters. Defaults to `Slotlock`. */
+  name?: string;
   /**
    * Where agents reach the server's MCP and A2A endpoints, which the dashboard shows, when it is
    * served from another origin (on Cloudflare Workers, with the server elsewhere). Defaults to
@@ -224,6 +237,10 @@ export function createSlotlockDashboardResources(store: SlotlockStore): Slotlock
         const updated = await tenant.setResourceAvailability({ tenantRef, id: target.id, rules });
         return updated ? 1 : 0;
       }),
+    agenda: (tenantRef, window, limit) =>
+      store.withTenant(tenantRef, (tenant) => tenant.listAgenda({ tenantRef, window, limit })),
+    recentChanges: (tenantRef, limit) =>
+      store.withTenant(tenantRef, (tenant) => tenant.listRecentChanges({ tenantRef, limit })),
   };
 }
 
@@ -415,6 +432,91 @@ function html(strings: TemplateStringsArray, ...values: unknown[]): Html {
     out += strings[index + 1] ?? '';
   });
   return new Html(out);
+}
+
+/** Days of bookings the overview shows, how many it reads and lists, and its activity's length. */
+const AGENDA_DAYS = 7;
+const AGENDA_LIMIT = 200;
+const AGENDA_SHOWN = 30;
+const ACTIVITY_LIMIT = 20;
+
+const icon = (paths: string) =>
+  new Html(
+    `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${paths}</svg>`,
+  );
+const ICONS = Object.freeze({
+  mark: new Html(
+    '<svg class="mark" viewBox="0 0 64 64" aria-hidden="true" focusable="false"><path d="M8 46 L26 14 L56 44"></path></svg>',
+  ),
+  overview: icon('<path d="M4 13h6V4H4zM14 20h6v-9h-6zM4 20h6v-3H4zM14 7h6V4h-6z"/>'),
+  resources: icon('<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>'),
+  keys: icon('<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/>'),
+  settings: icon(
+    '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
+  ),
+  check: icon('<path d="M5 12l5 5L20 7"/>'),
+  github: new Html(
+    '<svg class="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path class="fill" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>',
+  ),
+});
+
+type Tone = 'good' | 'bad' | 'neutral';
+/** How the overview names each change the feed records. */
+const CHANGE_LABELS: Readonly<Record<string, { text: string; tone: Tone }>> = Object.freeze({
+  'hold.created': { text: 'Hold placed', tone: 'neutral' },
+  'hold.updated': { text: 'Hold changed', tone: 'neutral' },
+  'hold.confirmed': { text: 'Hold booked', tone: 'good' },
+  'hold.released': { text: 'Hold released', tone: 'neutral' },
+  'hold.expired': { text: 'Hold expired', tone: 'neutral' },
+  'reservation.created': { text: 'Booked', tone: 'good' },
+  'reservation.updated': { text: 'Booking moved', tone: 'neutral' },
+  'reservation.cancelled': { text: 'Booking cancelled', tone: 'bad' },
+  'reservation.checked_in': { text: 'Checked in', tone: 'good' },
+  'reservation.no_show': { text: 'No-show released', tone: 'bad' },
+  'event.created': { text: 'Event added', tone: 'good' },
+  'event.updated': { text: 'Event changed', tone: 'neutral' },
+  'event.cancelled': { text: 'Event cancelled', tone: 'bad' },
+  'event.timezone_shifted': { text: 'Event moved by a time zone change', tone: 'neutral' },
+  'event.timezone_conflict': { text: 'Event clashes after a time zone change', tone: 'bad' },
+  'coverage.stale': { text: 'Calendar sync is behind', tone: 'bad' },
+  'waitlist.offered': { text: 'Waitlist offer sent', tone: 'good' },
+  'waitlist.expired': { text: 'Waitlist offer lapsed', tone: 'neutral' },
+  'webhook.disabled': { text: 'Webhook disabled', tone: 'bad' },
+});
+
+const zoned = (zone: string, parts: Intl.DateTimeFormatOptions) => {
+  try {
+    return new Intl.DateTimeFormat('en-GB', { ...parts, timeZone: zone });
+  } catch {
+    return new Intl.DateTimeFormat('en-GB', { ...parts, timeZone: 'UTC' });
+  }
+};
+
+/** `14:30` in the resource's own time zone. */
+function clock(date: Date, zone: string): string {
+  return zoned(zone, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(date);
+}
+
+/** The day a time falls on in a zone: `Today`, `Tomorrow`, or `Thu 30 Oct`, with a key to group by. */
+function dayLabel(date: Date, zone: string, nowMs: number): { key: string; label: string } {
+  const key = (at: Date) =>
+    zoned(zone, { year: 'numeric', month: '2-digit', day: '2-digit' }).format(at);
+  const day = key(date);
+  if (day === key(new Date(nowMs))) return { key: day, label: 'Today' };
+  if (day === key(new Date(nowMs + DAY_MS))) return { key: day, label: 'Tomorrow' };
+  return {
+    key: day,
+    label: zoned(zone, { weekday: 'short', day: 'numeric', month: 'short' }).format(date),
+  };
+}
+
+/** `just now`, `5 min ago`, `3 h ago`, `2 d ago`. */
+function ago(date: Date, nowMs: number): string {
+  const minutes = Math.max(0, Math.floor((nowMs - date.getTime()) / 60_000));
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} min ago`;
+  if (minutes < 1_440) return `${Math.floor(minutes / 60)} h ago`;
+  return `${Math.floor(minutes / 1_440)} d ago`;
 }
 
 function safeEqual(a: string, b: string): boolean {
@@ -635,6 +737,10 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   if (served && (served.size === 0 || [...served].some((id) => !ORGANIZATION_ID.test(id)))) {
     throw new Error('Slotlock dashboard organizations must be GitHub organization ids');
   }
+  const brandName = options.name ?? 'Slotlock';
+  if (!SLOTLOCK_DASHBOARD_NAME_PATTERN.test(brandName) || brandName.trim() !== brandName) {
+    throw new Error('Slotlock dashboard name must be 1-60 characters, without <, > or control or invisible characters');
+  }
   const fetchImpl = options.fetch ?? fetch;
   const now = options.now ?? Date.now;
   if (Buffer.byteLength(options.sessionSecret, 'utf8') < 32) {
@@ -777,46 +883,77 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const redirect = (status: number, location: string, cookies: string[] = []) =>
     respond(status, '', { Location: location }, cookies);
 
-  function layout(title: string, content: Html, session: Session | null): Html {
-    const current = session?.orgs?.find((org) => org.id === session.org);
-    const choices = (session?.orgs ?? []).filter((org) => served?.has(org.id));
-    const organization =
-      session && current
-        ? choices.length > 1
-          ? html`<form class="org" method="post" action="${root}/organization"><input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="organization">Organization</label><select id="organization" name="organization">${choices.map((org) => html`<option value="${org.id}"${org.id === current.id ? html` selected` : html``}>${org.login}</option>`)}</select><button class="link" type="submit">Switch</button></form>`
-          : html`<span class="org">${current.login}</span>`
-        : html``;
-    const account = session
-      ? html`<div class="account">${organization}<span class="login">@${session.login}</span>
-          <form method="post" action="${root}/sign-out"><input type="hidden" name="csrf" value="${csrfToken(session)}"><button class="link" type="submit">Sign out</button></form></div>`
-      : html``;
-    return html`<!doctype html>
+  type Section = 'overview' | 'resources' | 'keys' | 'settings';
+  const NAV: ReadonlyArray<{ section: Section; label: string; path: string; icon: Html }> = [
+    { section: 'overview', label: 'Overview', path: '', icon: ICONS.overview },
+    { section: 'resources', label: 'Resources', path: '/resources', icon: ICONS.resources },
+    { section: 'keys', label: 'API keys', path: '/keys', icon: ICONS.keys },
+    { section: 'settings', label: 'Settings', path: '/settings', icon: ICONS.settings },
+  ];
+
+  /** The workspace the session acts in: its organization, or the person themselves. */
+  function workspace(session: Session): Html {
+    const current = session.orgs?.find((org) => org.id === session.org);
+    const choices = (session.orgs ?? []).filter((org) => served?.has(org.id));
+    const name = current?.login ?? session.login;
+    const badge = html`<span class="avatar" aria-hidden="true">${name.slice(0, 1).toUpperCase()}</span>`;
+    if (current && choices.length > 1) {
+      return html`<form class="workspace" method="post" action="${root}/organization">${badge}<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="organization">Organization</label><select id="organization" name="organization">${choices.map((org) => html`<option value="${org.id}"${org.id === current.id ? html` selected` : html``}>${org.login}</option>`)}</select><button class="quiet" type="submit">Switch</button></form>`;
+    }
+    return html`<div class="workspace">${badge}<span class="workspace-name">${current ? name : `@${name}`}</span></div>`;
+  }
+
+  function layout(title: string, content: Html, session: Session | null, section?: Section): Html {
+    const head = html`<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="${REFERRER_POLICY}">
-<title>${title} · Slotlock</title>
+<title>${title} · ${brandName}</title>
 <link rel="stylesheet" href="${root}/style.css?v=${ASSET_VERSIONS.css}">
 <script src="${root}/app.js?v=${ASSET_VERSIONS.js}" defer></script>
-</head>
+</head>`;
+    const brand = html`<a class="brand" href="${root}">${ICONS.mark}<span class="name">${brandName}</span></a>`;
+    if (!session) {
+      return html`${head}
+<body class="bare">
+<header class="bare-bar">${brand}</header>
+<main class="bare-main">${content}</main>
+</body>
+</html>`;
+    }
+    const links = NAV.map(
+      (item) =>
+        html`<a href="${root}${item.path}"${item.section === section ? html` aria-current="page"` : html``}>${item.icon}<span>${item.label}</span></a>`,
+    );
+    return html`${head}
 <body>
-<header class="bar"><a class="brand" href="${root}"><svg class="mark" viewBox="0 0 64 64" aria-hidden="true" focusable="false"><path d="M8 46 L26 14 L56 44"></path></svg><span class="name">Slotlock</span> <span class="by">by Pylota</span></a>${account}</header>
-<main>${content}</main>
+<div class="app">
+<aside class="side">
+<div class="side-top">${brand}${workspace(session)}</div>
+<nav class="nav" aria-label="Dashboard">${links}</nav>
+<div class="me"><span class="login">@${session.login}</span><form method="post" action="${root}/sign-out"><input type="hidden" name="csrf" value="${csrfToken(session)}"><button class="quiet" type="submit">Sign out</button></form></div>
+</aside>
+<main class="page">${content}</main>
+</div>
 </body>
 </html>`;
   }
 
+  const noticeOf = (notice?: string) =>
+    notice ? html`<p class="notice" role="alert">${notice}</p>` : html``;
+
   function signedOutPage(status: number, notice?: string, cookies: string[] = []): Response {
-    const content = html`<section class="hero">
-<h1>Your agents' calendar keys</h1>
-<p>Sign in with GitHub to create API keys for the Slotlock tools, add the resources your agents book, and connect an MCP or A2A client.</p>
-${notice ? html`<p class="notice" role="alert">${notice}</p>` : html``}
-<a class="button primary" href="${root}/sign-in">Sign in with GitHub</a>
+    const content = html`<section class="sign-in">
+<h1>Sign in to ${brandName}</h1>
+<p>Create keys for your agents, add what they book, and watch what they do.</p>
+${noticeOf(notice)}
+<a class="button primary wide" href="${root}/sign-in">${ICONS.github}Continue with GitHub</a>
 <p class="fine">${
       served
-        ? 'Slotlock reads your GitHub profile and which organizations you belong to, and keeps nothing from GitHub but your user id, login, and the organizations this server serves.'
-        : 'Slotlock reads only your public GitHub profile, to know who you are, and keeps nothing from GitHub but your user id and login.'
+        ? `${brandName} reads your GitHub profile and which organizations you belong to, and keeps only your user id, login and the organizations it serves.`
+        : `${brandName} reads only your public GitHub profile, and keeps only your user id and login.`
     }</p>
 </section>`;
     return respond(status, layout('Sign in', content, null), {}, cookies);
@@ -828,41 +965,156 @@ ${notice ? html`<p class="notice" role="alert">${notice}</p>` : html``}
       const status = key.revokedAt ? 'Revoked' : expired ? 'Expired' : 'Active';
       const actions =
         status === 'Active'
-          ? html`<details class="act"><summary>Rotate</summary><p>A new secret replaces this one at once. The key keeps its name, access and bookings.</p>
-<form method="post" action="${root}/keys/rotate"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${key.id}"><button type="submit">Rotate key</button></form></details>
-<details class="act danger"><summary>Revoke</summary><p>Requests with this key fail at once. What it booked stays on the calendar.</p>
-<form method="post" action="${root}/keys/revoke"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${key.id}"><button class="danger" type="submit">Revoke key</button></form></details>`
+          ? html`<details class="act"><summary>Rotate</summary><div class="pop"><p>A new secret replaces this one at once. The key keeps its name, access and bookings.</p>
+<form method="post" action="${root}/keys/rotate"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${key.id}"><button type="submit">Rotate key</button></form></div></details>
+<details class="act danger"><summary>Revoke</summary><div class="pop"><p>Requests with this key fail at once. What it booked stays on the calendar.</p>
+<form method="post" action="${root}/keys/revoke"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${key.id}"><button class="danger" type="submit">Revoke key</button></form></div></details>`
           : html``;
       return html`<tr>
-<td data-label="Name">${key.name}</td>
+<td data-label="Name" class="strong">${key.name}</td>
 <td data-label="Key"><code>${key.prefix}…</code></td>
 <td data-label="Access">${key.scopes.includes('admin') ? 'Full' : key.scopes.includes('write') ? 'Read and write' : 'Read only'}</td>
 <td data-label="Created">${formatDate(key.createdAt)}</td>
 ${served ? html`<td data-label="Created by">${key.createdBy === personOf(session) ? 'You' : key.createdBy?.startsWith('github:') ? `GitHub user ${key.createdBy.slice(7)}` : 'Unknown'}</td>` : html``}
 <td data-label="Last used">${key.lastUsedAt ? formatDate(key.lastUsedAt) : 'Never'}</td>
 <td data-label="Expires">${key.expiresAt ? formatDate(key.expiresAt) : 'Never'}</td>
-<td data-label="Status"><span class="status ${status.toLowerCase()}">${status}</span></td>
+<td data-label="Status"><span class="pill ${status.toLowerCase()}">${status}</span></td>
 <td class="actions">${actions}</td>
 </tr>`;
     });
   }
 
-  async function dashboardPage(session: Session, status = 200, notice?: string): Promise<Response> {
+  const pageHead = (title: string, action?: Html) =>
+    html`<header class="page-head"><h1>${title}</h1>${action ?? html``}</header>`;
+
+  /** A resource as people name it: its reference, else the start of its id. */
+  const resourceName = (resource: SlotlockResource | undefined, id: string) =>
+    resource?.externalRef ?? `${id.slice(0, 8)}…`;
+
+  function agendaPanel(
+    entries: readonly SlotlockAgendaEntry[],
+    byId: ReadonlyMap<string, SlotlockResource>,
+    more: boolean,
+  ): Html {
+    if (entries.length === 0) {
+      return html`<p class="empty">Nothing booked in the next ${String(AGENDA_DAYS)} days.</p>`;
+    }
+    const zones = new Set(entries.map((entry) => byId.get(entry.resourceId)?.timezone ?? 'UTC'));
+    const groups = new Map<string, { label: string; rows: Html[] }>();
+    for (const entry of entries.slice(0, AGENDA_SHOWN)) {
+      const resource = byId.get(entry.resourceId);
+      const zone = resource?.timezone ?? 'UTC';
+      const day = dayLabel(entry.start, zone, now());
+      const group = groups.get(day.key) ?? { label: day.label, rows: [] };
+      const name = resourceName(resource, entry.resourceId);
+      // An event by its summary; a booking or hold by what it occupies, and a booking's own
+      // reference when it is one a person chose (not the id Slotlock gave it).
+      const title = entry.kind === 'event' ? (entry.summary ?? name) : name;
+      const meta = [
+        entry.kind === 'event' ? name : null,
+        entry.reference && !UUID_PATTERN.test(entry.reference) ? entry.reference : null,
+        zones.size > 1 ? zone : null,
+        entry.source && !entry.source.startsWith('calendar-event:') ? entry.source : null,
+      ].filter((part): part is string => part !== null);
+      const pill =
+        entry.kind === 'hold' && entry.expiresAt
+          ? html`<span class="pill held">Held until ${clock(entry.expiresAt, zone)}</span>`
+          : html`<span class="pill ${entry.kind}">${entry.kind === 'event' ? 'Event' : 'Booked'}</span>`;
+      group.rows.push(html`<li class="slot"><span class="when">${clock(entry.start, zone)}<span class="until">${clock(entry.end, zone)}</span></span><span class="what"><span class="title">${title}</span>${meta.length > 0 ? html`<span class="meta">${meta.join(' · ')}</span>` : html``}</span>${pill}</li>`);
+      groups.set(day.key, group);
+    }
+    return html`${[...groups.values()].map(
+      (group) => html`<h3 class="day">${group.label}</h3><ul class="slots">${group.rows}</ul>`,
+    )}${more ? html`<p class="fine">Showing the first ${String(AGENDA_SHOWN)}.</p>` : html``}`;
+  }
+
+  function activityPanel(
+    changes: readonly SlotlockChange[],
+    byId: ReadonlyMap<string, SlotlockResource>,
+    keys: readonly SlotlockApiKey[],
+  ): Html {
+    if (changes.length === 0) {
+      return html`<p class="empty">No activity yet. What agents book, move and cancel shows here.</p>`;
+    }
+    const keyNames = new Map(keys.map((key) => [`api_key:${key.id}`, key.name]));
+    return html`<ol class="feed">${changes.map((change) => {
+      const label = CHANGE_LABELS[change.type] ?? { text: change.type, tone: 'neutral' };
+      const who =
+        change.actor === null
+          ? brandName
+          : (keyNames.get(change.actor) ??
+            (change.actor.startsWith('api_key:') ? 'A deleted key' : change.actor.slice(0, 60)));
+      const where = change.resourceId
+        ? resourceName(byId.get(change.resourceId), change.resourceId)
+        : null;
+      return html`<li class="event"><span class="dot ${label.tone}" aria-hidden="true"></span><span class="what"><span class="title">${label.text}${where ? html` <span class="on">on</span> ${where}` : html``}</span><span class="meta">${who} · <time datetime="${change.occurredAt.toISOString()}" title="${formatDate(change.occurredAt)}">${ago(change.occurredAt, now())}</time></span></span></li>`;
+    })}</ol>`;
+  }
+
+  async function overviewPage(session: Session, status = 200, notice?: string): Promise<Response> {
     const tenantRef = tenantOf(session);
-    const [keys, resources] = await Promise.all([
+    const start = new Date(now());
+    const window = { start, end: new Date(start.getTime() + AGENDA_DAYS * DAY_MS) };
+    const [keys, resources, agenda, changes] = await Promise.all([
       options.keys.list({ tenantRef }),
       options.resources.list(tenantRef),
+      options.resources.agenda?.(tenantRef, window, AGENDA_LIMIT),
+      options.resources.recentChanges?.(tenantRef, ACTIVITY_LIMIT),
     ]);
+    const byId = new Map(resources.map((resource) => [resource.id, resource]));
+    const active = keys.filter(
+      (key) => !key.revokedAt && (key.expiresAt === null || key.expiresAt.getTime() > now()),
+    );
+    const counted = (count: number) =>
+      agenda && agenda.length >= AGENDA_LIMIT ? `${count}+` : String(count);
+    const booked = agenda?.filter((entry) => entry.kind !== 'hold').length ?? 0;
+    const held = agenda?.filter((entry) => entry.kind === 'hold').length ?? 0;
+    const stat = (label: string, value: string, href: string) =>
+      html`<a class="stat" href="${href}"><span class="stat-label">${label}</span><span class="stat-value">${value}</span></a>`;
+    const steps = [
+      { done: resources.length > 0, text: 'Add what your agents book', href: `${root}/resources` },
+      { done: active.length > 0, text: 'Create a key for an agent', href: `${root}/keys` },
+      { done: (changes?.length ?? 0) > 0, text: 'Connect the agent and book', href: `${root}/keys` },
+    ];
+    const content = html`${noticeOf(notice)}
+${pageHead('Overview')}
+${
+  steps.every((step) => step.done)
+    ? html``
+    : html`<section class="panel setup"><h2>Get started</h2><ol class="steps">${steps.map(
+        (step) =>
+          html`<li class="${step.done ? 'done' : ''}"><span class="check" aria-hidden="true">${step.done ? ICONS.check : html``}</span>${step.done ? html`<span>${step.text}</span>` : html`<a href="${step.href}">${step.text}</a>`}${step.done ? html`<span class="visually-hidden">(done)</span>` : html``}</li>`,
+      )}</ol></section>`
+}
+<div class="stats">
+${agenda ? stat(`Booked, next ${AGENDA_DAYS} days`, counted(booked), `${root}#upcoming`) : html``}
+${agenda ? stat('Live holds', counted(held), `${root}#upcoming`) : html``}
+${stat('Resources', String(resources.length), `${root}/resources`)}
+${stat('Active keys', String(active.length), `${root}/keys`)}
+</div>
+<div class="split">
+${agenda ? html`<section class="panel" id="upcoming"><h2>Upcoming</h2>${agendaPanel(agenda, byId, agenda.length > AGENDA_SHOWN)}</section>` : html``}
+${changes ? html`<section class="panel"><h2>Agent activity</h2>${activityPanel(changes, byId, keys)}</section>` : html``}
+</div>`;
+    return respond(status, layout('Overview', content, session, 'overview'));
+  }
+
+  function endpoints(): Html {
+    return html`<dl class="endpoints"><dt>MCP</dt><dd><code id="mcp-url">${mcpUrl}</code><button class="quiet" type="button" data-copy="mcp-url">Copy</button></dd><dt>A2A</dt><dd><code id="a2a-url">${a2aUrl}</code><button class="quiet" type="button" data-copy="a2a-url">Copy</button></dd></dl>`;
+  }
+
+  async function keysPage(session: Session, status = 200, notice?: string): Promise<Response> {
+    const keys = await options.keys.list({ tenantRef: tenantOf(session) });
     const token = csrfToken(session);
-    const rules = options.availability ?? [];
-    const content = html`${notice ? html`<p class="notice" role="alert">${notice}</p>` : html``}
-<section class="card">
+    const content = html`${noticeOf(notice)}
+${pageHead('API keys')}
+<section class="panel">
 <h2>Connect an agent</h2>
-<p>Agents call Slotlock over MCP or A2A with one of your keys: <code>Authorization: Bearer slk_…</code>.</p>
-<dl class="endpoints"><dt>MCP</dt><dd><code>${mcpUrl}</code></dd><dt>A2A</dt><dd><code>${a2aUrl}</code></dd></dl>
+<p>Agents call ${brandName} over MCP or A2A with a key: <code>Authorization: Bearer slk_…</code></p>
+${endpoints()}
 </section>
-<section>
-<div class="head"><div><h2>API keys</h2><p>${served ? 'Each key acts in this organization only, and every member can rotate or revoke it.' : 'Each key acts in your calendar only.'} Give every agent its own, with the least access it needs.</p></div></div>
+<section class="panel">
+<h2>New key</h2>
 <form class="create" method="post" action="${root}/keys">
 <input type="hidden" name="csrf" value="${token}">
 <input type="hidden" name="once" value="${formNonce(session)}">
@@ -871,45 +1123,83 @@ ${served ? html`<td data-label="Created by">${key.createdBy === personOf(session
 <label>Expires<select name="expires"><option value="90">In 90 days</option><option value="30">In 30 days</option><option value="365">In a year</option><option value="never">Never</option></select></label>
 <button class="primary" type="submit">Create key</button>
 </form>
+</section>
 ${
   keys.length === 0
-    ? html`<p class="empty">No keys yet. Create one to connect an agent.</p>`
-    : html`<div class="table"><table><thead><tr><th>Name</th><th>Key</th><th>Access</th><th>Created</th>${served ? html`<th>Created by</th>` : html``}<th>Last used</th><th>Expires</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
+    ? html`<p class="empty">No keys yet. Give every agent its own, with the least access it needs.</p>`
+    : served
+      ? html`<p class="fine">Each key acts in this organization only, and every member can rotate or revoke it.</p><div class="table"><table><thead><tr><th>Name</th><th>Key</th><th>Access</th><th>Created</th><th>Created by</th><th>Last used</th><th>Expires</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
 <tbody>${keyRows(keys, token, session)}</tbody></table></div>`
-}
-</section>
-<section>
-<div class="head"><div><h2>Resources</h2><p>What your agents book: a car, a room, a person, a machine. Up to ${SLOTLOCK_DASHBOARD_MAX_RESOURCES}.</p></div></div>
+    : html`<div class="table"><table><thead><tr><th>Name</th><th>Key</th><th>Access</th><th>Created</th><th>Last used</th><th>Expires</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
+<tbody>${keyRows(keys, token, session)}</tbody></table></div>`
+}`;
+    return respond(status, layout('API keys', content, session, 'keys'));
+  }
+
+  async function resourcesPage(session: Session, status = 200, notice?: string): Promise<Response> {
+    const resources = await options.resources.list(tenantOf(session));
+    const token = csrfToken(session);
+    const content = html`${noticeOf(notice)}
+${pageHead('Resources', resources.length > 0 ? html`<a class="button" href="${root}/hours">Set hours for every resource</a>` : undefined)}
+<section class="panel">
+<h2>Add a resource</h2>
 <form class="create" method="post" action="${root}/resources">
 <input type="hidden" name="csrf" value="${token}">
 <input type="hidden" name="once" value="${formNonce(session)}">
 <label>Reference<input name="reference" required maxlength="200" placeholder="vehicle-42"></label>
 <label>Time zone<input name="timezone" required maxlength="64" value="UTC" placeholder="Europe/London"></label>
-<button type="submit">Add resource</button>
+<button class="primary" type="submit">Add resource</button>
 </form>
+<p class="fine">${String(resources.length)} of ${String(SLOTLOCK_DASHBOARD_MAX_RESOURCES)}. Adding a reference you have changes its time zone.</p>
+</section>
 ${
   resources.length === 0
     ? html`<p class="empty">No resources yet. Agents can only book what is listed here.</p>`
     : html`<div class="table"><table><thead><tr><th>Reference</th><th>Time zone</th><th>Bookable hours</th><th>Resource id</th></tr></thead><tbody>${resources.map(
         (resource) =>
-          html`<tr><td data-label="Reference">${resource.externalRef ?? ''}</td><td data-label="Time zone">${resource.timezone}</td><td data-label="Bookable hours">${hoursSummary(resource.availabilityRules)} <a href="${root}/hours?resource=${resource.id}">Set hours</a></td><td data-label="Resource id"><code>${resource.id}</code></td></tr>`,
+          html`<tr><td data-label="Reference" class="strong">${resource.externalRef ?? ''}</td><td data-label="Time zone">${resource.timezone}</td><td data-label="Bookable hours">${hoursSummary(resource.availabilityRules)} <a href="${root}/hours?resource=${resource.id}">Set hours</a></td><td data-label="Resource id"><code class="muted">${resource.id}</code></td></tr>`,
       )}</tbody></table></div>`
-}
+}`;
+    return respond(status, layout('Resources', content, session, 'resources'));
+  }
+
+  function settingsPage(session: Session): Response {
+    const rules = options.availability ?? [];
+    const current = session.orgs?.find((org) => org.id === session.org);
+    const content = html`${pageHead('Settings')}
+<section class="panel">
+<h2>Endpoints</h2>
+${endpoints()}
 </section>
-<section>
-<h2>Bookable hours</h2>
+<section class="panel">
+<h2>Server hours</h2>
 ${
   rules.length === 0
-    ? html`<p class="empty">This server offers no bookable hours: agents find a free slot only on resources with hours of their own.</p>`
+    ? html`<p class="empty">None: agents find a free slot only on resources with hours of their own.</p>`
     : html`<ul class="hours">${rules.map(
         (rule) =>
           html`<li>${daysOf(rule.rrule)}: ${hoursOf(rule.startMinutes, rule.durationMinutes)}</li>`,
       )}</ul>`
 }
-<p class="fine">The server's hours, for resources without hours of their own, in each resource's own time zone.</p>
-${resources.length > 0 ? html`<p><a href="${root}/hours">Set hours for every resource</a></p>` : html``}
+<p class="fine">For resources without hours of their own, in each resource's time zone. Set by the server's operator.</p>
+</section>
+<section class="panel">
+<h2>Account</h2>
+<dl class="facts"><dt>Signed in as</dt><dd>@${session.login}</dd>${
+      current
+        ? html`<dt>Organization</dt><dd>${current.login}</dd>${(session.orgs?.length ?? 0) > 1 ? html`<dt>Also a member of</dt><dd>${(session.orgs ?? []).filter((org) => org.id !== current.id).map((org) => org.login).join(', ')}</dd>` : html``}`
+        : html`<dt>Workspace</dt><dd>Personal</dd>`
+    }<dt>Session ends</dt><dd>${formatDate(new Date(session.exp))}</dd></dl>
+${current ? html`<p class="fine">Membership is read from GitHub when you sign in.</p>` : html``}
 </section>`;
-    return respond(status, layout('Dashboard', content, session));
+    return respond(200, layout('Settings', content, session, 'settings'));
+  }
+
+  /** The page a form was sent from, to show what went wrong with it. */
+  function pageFor(route: string) {
+    if (route.startsWith('/keys')) return keysPage;
+    if (route === '/resources' || route === '/hours') return resourcesPage;
+    return overviewPage;
   }
 
   function hoursPage(
@@ -943,7 +1233,7 @@ ${resources.length > 0 ? html`<p><a href="${root}/hours">Set hours for every res
     });
     const content = html`${state.notice ? html`<p class="notice" role="alert">${state.notice}</p>` : html``}
 <section>
-<p><a href="${root}">Back to the dashboard</a></p>
+<p><a class="back" href="${root}/resources">Resources</a></p>
 <h1>${title}</h1>
 <p>${
       target === 'all'
@@ -972,7 +1262,7 @@ ${
 <button class="primary" type="submit">Save hours</button>
 </form>
 </section>`;
-    return respond(state.status ?? 200, layout('Bookable hours', content, session));
+    return respond(state.status ?? 200, layout('Bookable hours', content, session, 'resources'));
   }
 
   /** The tenant's resource with that id, or null for anything else. */
@@ -1055,10 +1345,10 @@ ${
     );
     if (changed === 0) {
       return target === 'all'
-        ? dashboardPage(session, 409, 'Add a resource first, then set its hours.')
+        ? resourcesPage(session, 409, 'Add a resource first, then set its hours.')
         : notFound(session);
     }
-    return redirect(303, root);
+    return redirect(303, `${root}/resources`);
   }
 
   function shownOncePage(
@@ -1077,9 +1367,9 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
 <pre><code id="command">claude mcp add --transport http slotlock ${mcpUrl} \\
   --header "Authorization: Bearer ${key}"</code></pre>
 <p>Keep the key in a secret manager. Rotate it if it leaks; revoke it when the agent is retired.</p>
-<a class="button primary" href="${root}">Done</a>
+<a class="button primary" href="${root}/keys">Done</a>
 </section>`;
-    return respond(200, layout('Your new key', content, session));
+    return respond(200, layout('Your new key', content, session, 'keys'));
   }
 
   /** Act in another of the session's organizations: the same session, sealed again. */
@@ -1357,7 +1647,7 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
     const scopes = KEY_ACCESS[form.get('access') ?? ''];
     const expiry = form.get('expires') ?? '';
     if (!scopes || !Object.hasOwn(KEY_EXPIRY_DAYS, expiry)) {
-      return dashboardPage(session, 400, 'Choose an access level and an expiry from the lists.');
+      return keysPage(session, 400, 'Choose an access level and an expiry from the lists.');
     }
     const days = KEY_EXPIRY_DAYS[expiry];
     try {
@@ -1372,10 +1662,10 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
     } catch (error) {
       const code = (error as { code?: unknown }).code;
       if (code === 'invalid_api_key_name') {
-        return dashboardPage(session, 400, 'Give the key a name of 1 to 100 characters.');
+        return keysPage(session, 400, 'Give the key a name of 1 to 100 characters.');
       }
       if (code === 'api_key_limit_reached') {
-        return dashboardPage(
+        return keysPage(
           session,
           409,
           'You have as many keys as Slotlock allows. Revoke one first.',
@@ -1387,47 +1677,47 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
 
   async function changeKey(session: Session, form: URLSearchParams, change: 'rotate' | 'revoke') {
     const id = form.get('id') ?? '';
-    if (!UUID_PATTERN.test(id)) return dashboardPage(session, 404, 'That key is not one of yours.');
+    if (!UUID_PATTERN.test(id)) return keysPage(session, 404, 'That key is not one of yours.');
     if (change === 'rotate') {
       const rotated = await options.keys.rotate({ tenantRef: tenantOf(session), id });
-      if (!rotated) return dashboardPage(session, 404, 'That key is not an active key of yours.');
+      if (!rotated) return keysPage(session, 404, 'That key is not an active key of yours.');
       return shownOncePage(session, rotated.key, rotated.apiKey, true);
     }
     const revoked = await options.keys.revoke({ tenantRef: tenantOf(session), id });
-    if (!revoked) return dashboardPage(session, 404, 'That key is not one of yours.');
-    return redirect(303, root);
+    if (!revoked) return keysPage(session, 404, 'That key is not one of yours.');
+    return redirect(303, `${root}/keys`);
   }
 
   async function addResource(session: Session, form: URLSearchParams): Promise<Response> {
     const reference = (form.get('reference') ?? '').trim();
     const timezone = (form.get('timezone') ?? '').trim();
     if (reference.length === 0 || reference.length > 200) {
-      return dashboardPage(session, 400, 'Give the resource a reference of 1 to 200 characters.');
+      return resourcesPage(session, 400, 'Give the resource a reference of 1 to 200 characters.');
     }
     try {
       await options.resources.add(tenantOf(session), reference, timezone);
     } catch (error) {
       const code = (error as { code?: unknown }).code;
       if (code === 'resource_limit_reached') {
-        return dashboardPage(
+        return resourcesPage(
           session,
           409,
           `You have ${SLOTLOCK_DASHBOARD_MAX_RESOURCES} resources, as many as the dashboard allows.`,
         );
       }
       if (code === 'invalid_timezone') {
-        return dashboardPage(
+        return resourcesPage(
           session,
           400,
           `${timezone} is not a time zone Slotlock knows, such as Europe/London.`,
         );
       }
       if (code === 'invalid_external_ref') {
-        return dashboardPage(session, 400, 'Give the resource a reference of 1 to 200 characters.');
+        return resourcesPage(session, 400, 'Give the resource a reference of 1 to 200 characters.');
       }
       throw error;
     }
-    return redirect(303, root);
+    return redirect(303, `${root}/resources`);
   }
 
   async function handlePost(request: Request, route: string): Promise<Response> {
@@ -1487,7 +1777,7 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
     if (once !== null) {
       const checked = checkFormNonce(session, once);
       if (checked === 'other_org') {
-        return dashboardPage(
+        return pageFor(route)(
           session,
           409,
           'That page was for another organization. Nothing was changed: check the organization and try again.',
@@ -1500,14 +1790,14 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
           (await options.state.use('form', once, session.exp, session.uid));
       } catch (error) {
         if ((error as { code?: unknown }).code !== 'dashboard_form_limit') throw error;
-        return dashboardPage(
+        return pageFor(route)(
           session,
           429,
           'Too many forms sent from this account in the last 12 hours. Try again later.',
         );
       }
       if (!first) {
-        return dashboardPage(
+        return pageFor(route)(
           session,
           409,
           'That form was already sent. Reload the page to start again.',
@@ -1552,7 +1842,16 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
           switch (route) {
             case '/': {
               const session = await readSession(request);
-              return session ? await dashboardPage(session) : signedOutPage(200);
+              return session ? await overviewPage(session) : signedOutPage(200);
+            }
+            case '/keys':
+            case '/resources':
+            case '/settings': {
+              const session = await readSession(request);
+              if (!session) return redirect(303, root);
+              if (route === '/keys') return await keysPage(session);
+              if (route === '/resources') return await resourcesPage(session);
+              return settingsPage(session);
             }
             case '/style.css':
               return asset(DASHBOARD_CSS, 'text/css; charset=utf-8', url, ASSET_VERSIONS.css);
@@ -1622,85 +1921,172 @@ const DASHBOARD_JS = `document.addEventListener('click', (event) => {
 `;
 
 const DASHBOARD_CSS = `:root {
-  --ink: #0b0d12; --ink-2: #3a3f4b; --ink-3: #6b7180; --line: #e6e8ee; --paper: #ffffff; --wash: #f6f7f9;
-  --accent: #2655ff; --accent-ink: #ffffff; --danger: #c62828; --warn: #8a5a00; --warn-wash: #fff6e0;
+  --ink: #0f1115; --ink-2: #464b57; --ink-3: #7a808d; --line: #e7e8ec; --line-2: #f0f1f4;
+  --paper: #ffffff; --wash: #f7f7f9; --side: #fafafb; --hover: #f1f2f5;
+  --accent: #2655ff; --accent-wash: #eef2ff; --accent-ink: #ffffff;
+  --good: #12805c; --good-wash: #e8f6f0; --bad: #c4321f; --bad-wash: #fdeeec;
+  --warn: #8a5a00; --warn-wash: #fff6e0; --held: #8a5a00; --held-wash: #fff4dc;
+  --shadow: 0 1px 2px rgba(15, 17, 21, 0.04), 0 1px 1px rgba(15, 17, 21, 0.03);
   color-scheme: light dark;
 }
 @media (prefers-color-scheme: dark) {
-  :root { --ink: #eef0f5; --ink-2: #c3c7d1; --ink-3: #8b91a0; --line: #2a2e38; --paper: #0e1016; --wash: #161922;
-    --accent: #6f8cff; --accent-ink: #0b0d12; --danger: #ff6b6b; --warn: #ffcf70; --warn-wash: #2b2410; }
+  :root { --ink: #eceef3; --ink-2: #b9bdc8; --ink-3: #868c99; --line: #262932; --line-2: #1d2027;
+    --paper: #0d0f13; --wash: #14171d; --side: #101217; --hover: #1b1e25;
+    --accent: #7b93ff; --accent-wash: #1a2145; --accent-ink: #0d0f13;
+    --good: #4cc79a; --good-wash: #0f2a20; --bad: #ff7b6b; --bad-wash: #34150f;
+    --warn: #ffcf70; --warn-wash: #2b2410; --held: #ffcf70; --held-wash: #2b2410;
+    --shadow: none; }
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--paper); color: var(--ink); font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-code, pre, input[readonly] { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
-.bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding: 14px 24px; border-bottom: 1px solid var(--line); }
-.brand { display: inline-flex; align-items: center; gap: 8px; color: var(--ink); text-decoration: none; }
-.mark { width: 20px; height: 20px; fill: none; stroke: var(--accent); stroke-width: 7; stroke-linecap: round; stroke-linejoin: round; }
-.name { font-weight: 650; font-size: 16px; }
-.by { color: var(--ink-3); font-size: 12px; }
-.account { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; color: var(--ink-2); min-width: 0; }
-.account form { margin: 0; }
-.org { display: flex; align-items: center; gap: 6px; color: var(--ink); font-weight: 600; }
-.org select { font: inherit; font-weight: 600; padding: 4px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--paper); color: var(--ink); }
-main { max-width: 1040px; margin: 0 auto; padding: 32px 24px 64px; display: grid; gap: 40px; }
-h1 { font-size: 28px; line-height: 1.2; margin: 0 0 12px; letter-spacing: -0.01em; }
-h2 { font-size: 18px; margin: 0 0 6px; }
-p { margin: 0 0 12px; color: var(--ink-2); }
-.fine { font-size: 13px; color: var(--ink-3); }
-.hero { max-width: 560px; margin: 48px auto; text-align: center; }
-.card { border: 1px solid var(--line); border-radius: 12px; padding: 20px; background: var(--wash); }
-.head { display: flex; justify-content: space-between; align-items: end; gap: 16px; margin-bottom: 12px; }
-.endpoints { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; margin: 12px 0 0; }
-.endpoints dt { color: var(--ink-3); }
-.endpoints dd { margin: 0; overflow-wrap: anywhere; }
-.create { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin: 0 0 16px; }
-label { display: grid; gap: 4px; font-size: 13px; color: var(--ink-2); }
-input, select { font: inherit; height: 38px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--ink); min-width: 0; }
-button, .button { font: inherit; font-weight: 600; height: 38px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--paper); color: var(--ink); cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; }
-.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
-button.danger { border-color: var(--danger); color: var(--danger); }
-button.link { border: 0; background: none; padding: 0; height: auto; color: var(--ink-2); font-weight: 500; text-decoration: underline; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, pre, input[readonly] { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+.icon { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+.icon .fill { fill: currentColor; stroke: none; }
+.mark { width: 18px; height: 18px; flex: none; fill: none; stroke: var(--accent); stroke-width: 7; stroke-linecap: round; stroke-linejoin: round; }
+.brand { display: inline-flex; align-items: center; gap: 8px; color: var(--ink); font-weight: 650; font-size: 15px; letter-spacing: -0.01em; }
+.brand:hover { text-decoration: none; }
+.app { display: grid; grid-template-columns: 240px minmax(0, 1fr); min-height: 100vh; background: linear-gradient(to right, var(--side) 239px, var(--line) 239px, var(--line) 240px, var(--paper) 240px); }
+.side { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; gap: 16px; padding: 16px 12px; }
+.side-top { display: grid; gap: 14px; padding: 0 6px; }
+.workspace { display: flex; align-items: center; gap: 8px; margin: 0; padding: 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); min-width: 0; }
+.workspace-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace select { flex: 1; min-width: 0; height: 28px; border: 0; padding: 0 2px; font-weight: 600; background: transparent; }
+.avatar { display: inline-grid; place-items: center; width: 24px; height: 24px; flex: none; border-radius: 6px; background: var(--accent-wash); color: var(--accent); font-size: 12px; font-weight: 700; }
+.nav { display: grid; gap: 2px; }
+.nav a { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 7px; color: var(--ink-2); font-weight: 500; }
+.nav a:hover { background: var(--hover); color: var(--ink); text-decoration: none; }
+.nav a[aria-current="page"] { background: var(--hover); color: var(--ink); font-weight: 600; }
+.nav a[aria-current="page"] .icon { color: var(--accent); }
+.me { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 10px 0; border-top: 1px solid var(--line); color: var(--ink-3); font-size: 13px; }
+.me form { margin: 0; }
+.login { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.page { width: 100%; max-width: 1120px; padding: 28px 40px 64px; display: grid; gap: 20px; align-content: start; }
+.page-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+h1 { font-size: 22px; line-height: 1.25; margin: 0; letter-spacing: -0.015em; font-weight: 650; }
+h2 { font-size: 14px; margin: 0 0 12px; font-weight: 600; }
+h3 { font-size: 12px; margin: 0; font-weight: 600; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.04em; }
+p { margin: 0 0 10px; color: var(--ink-2); }
+.fine { font-size: 12.5px; color: var(--ink-3); margin: 8px 0 0; }
+.muted { color: var(--ink-3); }
+.panel, .card { border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; background: var(--paper); box-shadow: var(--shadow); min-width: 0; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.stat { display: grid; gap: 4px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); box-shadow: var(--shadow); color: var(--ink); }
+.stat:hover { border-color: var(--ink-3); text-decoration: none; }
+.stat-label { font-size: 12.5px; color: var(--ink-3); }
+.stat-value { font-size: 24px; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.split { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 20px; align-items: start; }
+.setup .steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.steps li { display: flex; align-items: center; gap: 10px; color: var(--ink-2); }
+.steps li.done { color: var(--ink-3); text-decoration: line-through; }
+.check { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 999px; border: 1.5px solid var(--line); color: var(--accent-ink); }
+.done .check { background: var(--good); border-color: var(--good); }
+.check .icon { width: 12px; height: 12px; stroke-width: 3; }
+.day { margin: 14px 0 6px; }
+.day:first-of-type { margin-top: 0; }
+.slots, .feed { list-style: none; margin: 0; padding: 0; }
+.slot { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--line-2); }
+.slot:last-child { border-bottom: 0; }
+.when { display: grid; font-weight: 600; font-variant-numeric: tabular-nums; }
+.until { font-weight: 400; font-size: 12px; color: var(--ink-3); }
+.what { display: grid; min-width: 0; }
+.title { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.on { color: var(--ink-3); font-weight: 400; }
+.meta { font-size: 12.5px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.event { display: grid; grid-template-columns: 10px minmax(0, 1fr); gap: 12px; align-items: start; padding: 8px 0; }
+.dot { width: 8px; height: 8px; margin-top: 6px; border-radius: 999px; background: var(--ink-3); }
+.dot.good { background: var(--good); }
+.dot.bad { background: var(--bad); }
+.pill { display: inline-block; font-size: 11.5px; font-weight: 600; line-height: 18px; padding: 1px 8px; border-radius: 999px; background: var(--wash); color: var(--ink-2); white-space: nowrap; }
+.pill.booking, .pill.active { background: var(--good-wash); color: var(--good); }
+.pill.event { background: var(--accent-wash); color: var(--accent); }
+.pill.held { background: var(--held-wash); color: var(--held); }
+.pill.revoked, .pill.expired { color: var(--ink-3); }
+.endpoints { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 16px; margin: 12px 0 0; align-items: center; }
+.endpoints dt { color: var(--ink-3); font-weight: 600; font-size: 12.5px; }
+.endpoints dd { margin: 0; display: flex; align-items: center; gap: 10px; min-width: 0; }
+.endpoints code { overflow-wrap: anywhere; }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 20px; margin: 0; }
+.facts dt { color: var(--ink-3); }
+.facts dd { margin: 0; }
+.create { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin: 0; }
+label { display: grid; gap: 5px; font-size: 12.5px; font-weight: 500; color: var(--ink-2); }
+input, select { font: inherit; height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--ink); min-width: 0; }
+input:focus, select:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--accent-wash); }
+button, .button { font: inherit; font-weight: 600; height: 34px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--paper); color: var(--ink); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 8px; box-shadow: var(--shadow); }
+button:hover, .button:hover { background: var(--hover); text-decoration: none; }
+.primary, .primary:hover { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.primary:hover { filter: brightness(1.06); }
+.wide { width: 100%; height: 40px; }
+button.danger { border-color: var(--bad); color: var(--bad); }
+button.quiet { height: auto; padding: 2px 6px; border: 0; background: none; box-shadow: none; color: var(--ink-3); font-weight: 500; font-size: 12.5px; }
+button.quiet:hover { color: var(--ink); background: var(--hover); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.table { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
-table { width: 100%; border-collapse: collapse; font-size: 14px; }
-th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
-th { font-weight: 600; color: var(--ink-3); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; background: var(--wash); }
+.table { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); box-shadow: var(--shadow); }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line-2); vertical-align: middle; }
+th { font-weight: 600; color: var(--ink-3); font-size: 12px; background: var(--wash); border-bottom-color: var(--line); white-space: nowrap; }
+td { white-space: nowrap; }
+td.strong { font-weight: 600; white-space: normal; min-width: 120px; }
 tr:last-child td { border-bottom: 0; }
-.status { justify-self: start; font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: var(--wash); }
-.status.active { color: var(--accent); }
-.status.revoked, .status.expired { color: var(--ink-3); }
-.actions { white-space: nowrap; }
-.act { display: inline-block; margin-right: 8px; }
-.act summary { cursor: pointer; color: var(--ink-2); }
-.act.danger summary { color: var(--danger); }
-.act[open] { display: block; max-width: 280px; white-space: normal; }
-.act p { font-size: 13px; margin: 8px 0; }
-.notice { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--wash); color: var(--ink); }
+.actions { white-space: nowrap; text-align: right; }
+.act { display: inline-block; position: relative; margin-left: 8px; text-align: left; }
+.act summary { cursor: pointer; color: var(--ink-2); font-weight: 500; list-style: none; }
+.act summary::-webkit-details-marker { display: none; }
+.act.danger summary { color: var(--bad); }
+.pop { position: absolute; right: 0; z-index: 2; width: 260px; margin-top: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper); box-shadow: 0 8px 24px rgba(15, 17, 21, 0.12); white-space: normal; }
+.pop p { font-size: 12.5px; }
+.notice { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; background: var(--wash); color: var(--ink); margin: 0; }
 .notice.warn { background: var(--warn-wash); color: var(--warn); border-color: transparent; }
-.empty { color: var(--ink-3); }
+.empty { color: var(--ink-3); margin: 0; }
 .once { max-width: 720px; }
 .copy { display: flex; gap: 8px; margin: 12px 0 20px; }
 .copy input { flex: 1; }
 pre { background: var(--wash); border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
-.hours { margin: 0 0 8px; padding-left: 20px; color: var(--ink-2); }
+.hours { margin: 0; padding-left: 18px; color: var(--ink-2); }
+.back::before { content: "← "; }
 .modes { border: 0; padding: 0; margin: 0 0 16px; display: grid; gap: 8px; }
 .modes legend { font-weight: 600; color: var(--ink); padding: 0; margin-bottom: 4px; }
-.choice { display: flex; align-items: center; gap: 8px; font-size: 15px; color: var(--ink); }
+.choice { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--ink); }
 .choice input { height: auto; }
 .week input { width: 100%; }
-.week th[scope="row"] { text-transform: none; letter-spacing: 0; font-size: 14px; color: var(--ink); background: none; }
+.week th[scope="row"] { font-size: 13px; color: var(--ink); background: none; }
 form > .table { margin-bottom: 12px; }
+.bare { background: var(--wash); }
+.bare-bar { padding: 20px 24px; }
+.bare-main { display: grid; place-items: start center; padding: 8vh 16px 64px; }
+.sign-in { width: 100%; max-width: 400px; padding: 28px; border: 1px solid var(--line); border-radius: 14px; background: var(--paper); box-shadow: var(--shadow); display: grid; gap: 12px; }
+.sign-in h1 { font-size: 20px; }
+.sign-in p { margin: 0; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-@media (max-width: 720px) {
-  .bar { padding: 12px 16px; }
-  .brand .by { display: none; }
-  main { padding: 24px 16px 48px; }
+@media (max-width: 1000px) {
+  .split { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 760px) {
+  .app { grid-template-columns: minmax(0, 1fr); background: var(--paper); }
+  .side { position: sticky; z-index: 3; height: auto; background: var(--side); border-bottom: 1px solid var(--line); flex-direction: row; flex-wrap: wrap; align-items: center; gap: 10px 12px; padding: 10px 16px 0; border-right: 0; }
+  .side-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0; flex: 1 1 100%; min-width: 0; }
+  .workspace { max-width: 60%; }
+  .nav { display: flex; gap: 2px; overflow-x: auto; flex: 1 1 auto; margin: 0 -4px; padding-bottom: 8px; scrollbar-width: none; }
+  .nav a { flex: none; padding: 6px 10px; }
+  .me { margin: 0 0 8px; padding: 0; border: 0; flex: none; }
+  .me .login { display: none; }
+  .page { padding: 20px 16px 48px; gap: 16px; }
+  .panel, .card { padding: 16px; }
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stat-value { font-size: 20px; }
   thead { display: none; }
   table, tbody, tr, td { display: block; }
   tr { border-bottom: 1px solid var(--line); padding: 8px 0; }
-  td { border: 0; padding: 3px 12px; }
-  td[data-label] { display: grid; grid-template-columns: 88px 1fr; gap: 8px; }
-  td[data-label]::before { content: attr(data-label); font-size: 12px; color: var(--ink-3); padding-top: 2px; }
+  tr:last-child { border-bottom: 0; }
+  td { border: 0; padding: 3px 14px; white-space: normal; }
+  td[data-label] { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 8px; }
+  td[data-label]::before { content: attr(data-label); font-size: 12px; color: var(--ink-3); }
+  .actions { text-align: left; }
+  .act { margin: 4px 12px 0 0; }
+  .pop { left: 0; right: auto; }
 }
 `;
 

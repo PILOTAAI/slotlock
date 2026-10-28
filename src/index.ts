@@ -298,6 +298,7 @@ export type {
   ExternalReservationCommand,
   ExternalReservationResult,
   Interval,
+  SlotlockAgendaEntry,
   SlotlockHold,
   SlotlockCalendarEvent,
   SlotlockReservation,

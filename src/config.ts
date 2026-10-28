@@ -115,6 +115,12 @@ export function readAvailability(env: SlotlockEnv): WeeklyAvailabilityRule[] {
   });
 }
 
+/**
+ * A dashboard name (SLOTLOCK_DASHBOARD_NAME): 1-60 characters, none of them a control, format
+ * (bidi, zero-width) or line separator character, `<` or `>`.
+ */
+export const SLOTLOCK_DASHBOARD_NAME_PATTERN = /^[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}<>]{1,60}$/u;
+
 /** The GitHub sign-in dashboard (dashboard.ts), served at `<publicUrl>/dashboard` when configured. */
 export interface SlotlockServeDashboardConfig {
   githubClientId: string;
@@ -124,6 +130,8 @@ export interface SlotlockServeDashboardConfig {
   allowedUsers: '*' | string[];
   /** GitHub organization ids whose members share a tenant each (SLOTLOCK_DASHBOARD_ORGS). */
   organizations?: string[];
+  /** What the deployment is called in the dashboard (SLOTLOCK_DASHBOARD_NAME). */
+  name?: string;
 }
 
 const DASHBOARD_VARIABLES = [
@@ -172,12 +180,19 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
     );
   }
   const orgs = readDashboardOrganizations(env);
+  const name = optional(env, 'SLOTLOCK_DASHBOARD_NAME')?.trim();
+  if (name !== undefined && name !== '' && !SLOTLOCK_DASHBOARD_NAME_PATTERN.test(name)) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_DASHBOARD_NAME must be 1-60 characters, without <, > or control or invisible characters',
+    );
+  }
   return {
     githubClientId,
     githubClientSecret,
     sessionSecret,
     allowedUsers: users === '*' ? '*' : [...new Set(users.split(','))],
     ...(orgs !== undefined ? { organizations: orgs } : {}),
+    ...(name !== undefined && name !== '' ? { name } : {}),
   };
 }
 
