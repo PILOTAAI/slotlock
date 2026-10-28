@@ -7,17 +7,29 @@ const url = process.env.DATABASE_URL?.trim();
 const pgbench = spawnSync('pgbench', ['--version']).status === 0;
 
 describe.skipIf(!url || !pgbench)('the benchmark (real Postgres, pgbench)', () => {
-  it('measures the four workloads on ranges and slot rows, and leaves no schema behind', () => {
+  it('measures every workload on ranges and slot rows, and leaves no schema behind', () => {
     const output = execFileSync('node', ['scripts/bench.mjs', '--seconds', '1', '--clients', '2', '--json'], {
       encoding: 'utf8',
       env: { ...process.env, DATABASE_URL: url },
     });
-    const { results } = JSON.parse(output) as { results: { workload: string; range: number; slots: number }[] };
+    const report = JSON.parse(output) as {
+      postgres: string;
+      cpus: number;
+      clients: number;
+      seconds: number;
+      results: { workload: string; range: number; slots: number }[];
+    };
+    expect(report).toMatchObject({ clients: 2, seconds: 1 });
+    expect(report.postgres).toMatch(/^\d+\.\d+/);
+    expect(report.cpus).toBeGreaterThan(0);
+    const { results } = report;
     expect(results.map(({ workload }) => workload)).toEqual([
       'nonoverlap-one',
       'nonoverlap-many',
       'saturated-one',
       'contended-many',
+      'nonoverlap-one-async',
+      'freebusy-many',
     ]);
     for (const row of results) {
       expect(row.range).toBeGreaterThan(0);

@@ -1,0 +1,15 @@
+{
+  "format": 1,
+  "source": "RFC 0002",
+  "postgres": "16.15",
+  "cpus": 4,
+  "clients": 8,
+  "seconds": 8,
+  "results": [
+    { "workload": "nonoverlap-one", "range": 6694, "slots": 9718 },
+    { "workload": "nonoverlap-many", "range": 7310, "slots": 8584 },
+    { "workload": "saturated-one", "range": 3237, "slots": 7511 },
+    { "workload": "contended-many", "range": 8780, "slots": 7340 },
+    { "workload": "nonoverlap-one-async", "range": 12113, "slots": 40084 }
+  ]
+}
