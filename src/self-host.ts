@@ -100,6 +100,7 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_TENANT',
   'SLOTLOCK_AVAILABILITY',
   'SLOTLOCK_REST_API',
+  'SLOTLOCK_RETENTION_DAYS',
   'SLOTLOCK_WEBHOOKS',
   'SLOTLOCK_SHARED_LIMITS',
   'SLOTLOCK_LIMITS',
@@ -178,6 +179,11 @@ export interface SlotlockDatabaseConfig {
    */
   migrateDatabaseUrl?: string;
   tenantRef: string;
+  /**
+   * How long history is kept, in days (SLOTLOCK_RETENTION_DAYS); 30 without it. Every command that
+   * prunes or reads the feed takes it, so `maintain` from cron prunes as `serve` reads.
+   */
+  retentionDays?: number;
 }
 
 export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
@@ -294,6 +300,8 @@ export function readSlotlockDatabaseConfig(env: SlotlockEnv): SlotlockDatabaseCo
     );
   }
   const config: SlotlockDatabaseConfig = { databaseUrl, tenantRef: readTenant(env) };
+  const retentionDays = readRetentionDays(env);
+  if (retentionDays !== undefined) config.retentionDays = retentionDays;
   const migrateDatabaseUrl = readDatabaseUrl(env, 'SLOTLOCK_MIGRATE_DATABASE_URL');
   if (migrateDatabaseUrl !== undefined) config.migrateDatabaseUrl = migrateDatabaseUrl;
   return config;
@@ -305,6 +313,16 @@ function readWebhooks(env: SlotlockEnv): 'on' | 'off' | 'private' {
     throw new SlotlockConfigError('SLOTLOCK_WEBHOOKS must be on, off or private');
   }
   return value;
+}
+
+/** SLOTLOCK_RETENTION_DAYS: how long history is kept, in days (createSlotlockStore's `retentionDays`). */
+function readRetentionDays(env: SlotlockEnv): number | undefined {
+  const value = optional(env, 'SLOTLOCK_RETENTION_DAYS');
+  if (value === undefined) return undefined;
+  if (!/^[1-9]\d{0,3}$/.test(value) || Number(value) > 3_650) {
+    throw new SlotlockConfigError('SLOTLOCK_RETENTION_DAYS must be a whole number of days from 1 to 3650');
+  }
+  return Number(value);
 }
 
 function readSharedLimits(env: SlotlockEnv): boolean {
@@ -656,8 +674,10 @@ export function createSlotlockServeStore(
   sql: SlotlockSql,
   caps: SlotlockLimits['caps'],
   availability: readonly WeeklyAvailabilityRule[] = [],
+  retentionDays?: number,
 ): SlotlockStore {
   return createSlotlockStore(sql, {
+    ...(retentionDays !== undefined ? { retentionDays } : {}),
     defaultAvailabilityRules: availability,
     tenantLimits: serveTenantLimits(caps),
     maxTenantTransactions: caps.tenant_transactions,
@@ -674,8 +694,10 @@ export function createSlotlockServeStore(
 export function createSlotlockMaintenanceStore(
   sql: SlotlockSql,
   caps: SlotlockLimits['caps'],
+  options: { retentionDays?: number } = {},
 ): SlotlockStore {
   return createSlotlockStore(sql, {
+    ...options,
     tenantLimits: serveTenantLimits(caps),
     maxHoldsPerHolder: caps.holder_holds,
     maxHeldHoursPerHolder: caps.holder_held_hours,
@@ -769,7 +791,8 @@ export async function startSlotlockServer(
       }
     }
     const { caps } = config.limits;
-    const store = createSlotlockServeStore(sql, caps, config.availability);
+    const store = createSlotlockServeStore(sql, caps, config.availability, config.retentionDays);
+    const retention = config.retentionDays !== undefined ? { retentionDays: config.retentionDays } : {};
     const publicUrl = new URL(config.publicUrl);
     const authenticateKey = createSlotlockApiKeyAuthenticator(createSlotlockApiKeyStore(sql), {
       maxConcurrentLookups: caps.key_lookups,
@@ -958,7 +981,7 @@ export async function startSlotlockServer(
     const address = await listener.listen({ host: config.host, port: config.port });
     maintenance = startSlotlockMaintenance({
       // One tenant at a time, and its long passes may wait on a request's locks for longer.
-      store: createSlotlockMaintenanceStore(sql, caps),
+      store: createSlotlockMaintenanceStore(sql, caps, retention),
       sql,
       tenants: [config.tenantRef],
       intervalMs: SERVE_MAINTENANCE_INTERVAL_MS,
@@ -970,7 +993,7 @@ export async function startSlotlockServer(
       onError: (error) => log.error('maintenance_failed', describeError(error)),
     });
     if (config.webhooks !== 'off') {
-      const deliveryStore = createSlotlockStore(sql);
+      const deliveryStore = createSlotlockStore(sql, retention);
       const send = createSlotlockWebhookSender({ allowPrivateNetworks: config.webhooks === 'private' });
       webhooks = startSlotlockWebhookDelivery({
         // The tenants with a webhook, from the database: a restarted server finds them all.
@@ -1332,7 +1355,11 @@ async function maintainTenant(
 ): Promise<(Omit<SlotlockMaintenanceResult, 'rollPending'> & { passes: number }) | null> {
   const sql = connect(config.databaseUrl, 2);
   try {
-    const store = createSlotlockMaintenanceStore(sql, caps);
+    const store = createSlotlockMaintenanceStore(
+      sql,
+      caps,
+      config.retentionDays !== undefined ? { retentionDays: config.retentionDays } : {},
+    );
     const total = await withSlotlockMaintenanceLock(sql, config.tenantRef, async () => {
       const sum = {
         extended: 0,
@@ -1485,6 +1512,9 @@ Environment:
   SLOTLOCK_REST_API              on (default): also serve the tools as a REST API under /v1, and
                                  the application API for admin keys, described at /openapi.json;
                                  off: MCP and A2A only
+  SLOTLOCK_RETENTION_DAYS        Days of history kept: the change feed, ended waitlist entries,
+                                 and retired answers (never under 30) (1-3650, default 30;
+                                 serve and maintain)
   SLOTLOCK_SHARED_LIMITS         on: tenant request budgets are shared by every server through the
                                  database, so N servers allow a tenant its rate once; off (default):
                                  each server keeps its own

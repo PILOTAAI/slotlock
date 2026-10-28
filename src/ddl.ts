@@ -919,6 +919,10 @@ BEGIN
   DELETE FROM slotlock.outbox WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  erased_table := 'outbox_pruned';
+  DELETE FROM slotlock.outbox_pruned WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'webhook_endpoints';
   DELETE FROM slotlock.webhook_endpoints WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
@@ -1125,6 +1129,51 @@ CREATE INDEX IF NOT EXISTS slotlock_outbox_tenant_position_idx
   ON slotlock.outbox (tenant_ref, txid, id);
 CREATE INDEX IF NOT EXISTS slotlock_outbox_tenant_time_idx
   ON slotlock.outbox (tenant_ref, occurred_at);
+-- How far a tenant's feed has been pruned: no change after (txid, id) was ever deleted, so a cursor
+-- at or past it has missed none, and one before it may have, and is refused. Created once, it starts
+-- every tenant already known at its oldest kept change (or now): what an earlier version pruned is
+-- before it.
+DO $slotlock_outbox_pruned$
+BEGIN
+  IF pg_catalog.to_regclass('slotlock.outbox_pruned') IS NULL THEN
+    CREATE TABLE IF NOT EXISTS slotlock.outbox_pruned (
+      tenant_ref text PRIMARY KEY,
+      txid xid8 NOT NULL,
+      id bigint NOT NULL,
+      CONSTRAINT slotlock_outbox_pruned_tenant_ref_valid CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500)
+    );
+    INSERT INTO slotlock.outbox_pruned (tenant_ref, txid, id)
+    SELECT known.tenant_ref, min(known.txid), 0
+      FROM (
+        SELECT tenant_ref, txid FROM slotlock.outbox
+        UNION ALL
+        SELECT tenant_ref, pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot())
+          FROM slotlock.resources WHERE tenant_ref IS NOT NULL
+      ) known
+     GROUP BY known.tenant_ref;
+  END IF;
+END
+$slotlock_outbox_pruned$;
+-- Whatever deletes changes (maintenance, an older server's, an operator's), the mark follows it.
+CREATE OR REPLACE FUNCTION slotlock.outbox_mark_pruned()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_outbox_mark_pruned$
+BEGIN
+  INSERT INTO slotlock.outbox_pruned AS mark (tenant_ref, txid, id)
+  SELECT DISTINCT ON (pruned.tenant_ref) pruned.tenant_ref, pruned.txid, pruned.id
+    FROM pruned
+   ORDER BY pruned.tenant_ref, pruned.txid DESC, pruned.id DESC
+  ON CONFLICT (tenant_ref) DO UPDATE SET txid = excluded.txid, id = excluded.id
+   WHERE (excluded.txid, excluded.id) > (mark.txid, mark.id);
+  RETURN NULL;
+END
+$slotlock_outbox_mark_pruned$;
+DROP TRIGGER IF EXISTS slotlock_outbox_mark_pruned ON slotlock.outbox;
+CREATE TRIGGER slotlock_outbox_mark_pruned
+  AFTER DELETE ON slotlock.outbox REFERENCING OLD TABLE AS pruned
+  FOR EACH STATEMENT EXECUTE FUNCTION slotlock.outbox_mark_pruned();
 
 CREATE TABLE IF NOT EXISTS slotlock.webhook_endpoints (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -2675,6 +2724,7 @@ export const SLOTLOCK_TENANT_TABLES = Object.freeze([
   'calendar_coverage',
   'hold_commands',
   'outbox',
+  'outbox_pruned',
   'webhook_endpoints',
   'waitlist_entries',
   'assistant_settings',
@@ -2757,6 +2807,8 @@ ALTER TABLE slotlock.hold_commands ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.hold_commands FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.outbox ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.outbox FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.outbox_pruned ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.outbox_pruned FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.webhook_endpoints ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.webhook_endpoints FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.waitlist_entries ENABLE ROW LEVEL SECURITY;
@@ -2791,6 +2843,7 @@ BEGIN
          'calendar_coverage',
          'hold_commands',
          'outbox',
+         'outbox_pruned',
          'webhook_endpoints',
          'waitlist_entries',
          'assistant_settings',
@@ -2978,6 +3031,16 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'outbox_pruned'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.outbox_pruned
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
      WHERE schemaname = 'slotlock' AND tablename = 'webhook_endpoints'
        AND policyname = 'tenant_isolation_v1'
   ) THEN
@@ -3046,6 +3109,8 @@ COMMENT ON POLICY tenant_isolation_v1 ON slotlock.hold_commands
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.outbox
   IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.outbox_pruned
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.webhook_endpoints
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.waitlist_entries
@@ -3091,6 +3156,7 @@ WHERE schemaname = 'slotlock'
     'calendar_coverage',
     'hold_commands',
     'outbox',
+    'outbox_pruned',
     'webhook_endpoints',
     'waitlist_entries',
     'assistant_settings',

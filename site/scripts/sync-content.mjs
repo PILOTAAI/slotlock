@@ -310,13 +310,42 @@ function boundedDefault(source, name) {
 }
 
 async function readFacts() {
-  const [pkg, agentServer, store, ddl, rules] = await Promise.all([
-    read('package.json').then(JSON.parse),
-    read('src/agent-server.ts'),
-    read('src/store.ts'),
-    read('src/ddl.ts'),
-    read('src/rules.ts'),
-  ]);
+  const [pkg, agentServer, store, ddl, rules, config, eventFeed, selfHost, dashboard, clientDirs] =
+    await Promise.all([
+      read('package.json').then(JSON.parse),
+      read('src/agent-server.ts'),
+      read('src/store.ts'),
+      read('src/ddl.ts'),
+      read('src/rules.ts'),
+      read('src/config.ts'),
+      read('src/event-feed.ts'),
+      read('src/self-host.ts'),
+      read('src/dashboard.ts'),
+      readdir(join(ROOT, 'clients'), { withFileTypes: true }),
+    ]);
+  // slotlock_hold_slots' input: how many candidates one call holds, and for how long.
+  const holdInput =
+    /\.max\(([0-9]+)\),\n\s+ttl_seconds: z\.number\(\)\.int\(\)\.min\(([0-9]+)\)\.max\(([0-9]+)\)/.exec(
+      agentServer,
+    );
+  // The server's default per-holder caps (SLOTLOCK_LIMITS holder_holds, holder_held_hours).
+  const holderCap = (name) => {
+    const match = new RegExp(`\\n\\s+${name}: ([0-9_]+),`).exec(config);
+    return match ? Number(match[1].replace(/_/g, '')) : undefined;
+  };
+  // The language clients, in the order clients/README.md lists them.
+  const CLIENT_LABELS = [
+    ['python', 'Python'],
+    ['go', 'Go'],
+    ['rust', 'Rust'],
+    ['java', 'Java'],
+    ['dotnet', '.NET'],
+  ];
+  const dirs = new Set(clientDirs.filter((entry) => entry.isDirectory()).map((entry) => entry.name));
+  for (const dir of dirs) {
+    if (!CLIENT_LABELS.some(([id]) => id === dir)) fail(`clients/${dir} has no label in sync-content.mjs`);
+  }
+  const clients = CLIENT_LABELS.filter(([id]) => dirs.has(id)).map(([, label]) => label);
   const tools = readTools(agentServer);
   const mcpModern = /SLOTLOCK_MCP_PROTOCOL_VERSION = '([0-9-]+)'/.exec(agentServer)?.[1];
   const mcpLegacy = /SLOTLOCK_MCP_LEGACY_PROTOCOL_VERSION = '([0-9-]+)'/.exec(agentServer)?.[1];
@@ -366,6 +395,24 @@ async function readFacts() {
       numberConst(store, 'SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS'),
       'retention days',
     ),
+    // How long the change feed keeps changes, and the setting that changes it once the server has one.
+    changeRetentionDays: must(
+      numberConst(eventFeed, 'SLOTLOCK_CHANGE_RETENTION_DAYS'),
+      'SLOTLOCK_CHANGE_RETENTION_DAYS',
+    ),
+    retentionSetting: selfHost.includes("'SLOTLOCK_RETENTION_DAYS'") ? 'SLOTLOCK_RETENTION_DAYS' : null,
+    holdSlotsMax: must(holdInput && Number(holdInput[1]), 'slotlock_hold_slots slots max'),
+    holdTtlMin: must(holdInput && Number(holdInput[2]), 'slotlock_hold_slots ttl minimum'),
+    holdTtlMax: must(holdInput && Number(holdInput[3]), 'slotlock_hold_slots ttl maximum'),
+    holderHolds: must(holderCap('holder_holds'), 'the holder_holds default'),
+    holderHeldHours: must(holderCap('holder_held_hours'), 'the holder_held_hours default'),
+    holderHeldHoursText: must(holderCap('holder_held_hours'), 'the holder_held_hours default').toLocaleString('en-GB'),
+    dashboardOrgs: selfHost.includes("'SLOTLOCK_DASHBOARD_ORGS'"),
+    metrics: selfHost.includes("'SLOTLOCK_METRICS_TOKEN'"),
+    dashboardWorker: statSync(join(ROOT, 'workers/dashboard'), { throwIfNoEntry: false })?.isDirectory() ?? false,
+    dashboardAgendaDays: must(numberConst(dashboard, 'AGENDA_DAYS'), 'AGENDA_DAYS in src/dashboard.ts'),
+    clients,
+    clientCount: clients.length,
     eventQuota: must(numberConst(store, 'SLOTLOCK_AGENT_OWNER_EVENT_QUOTA'), 'event quota'),
     commandQuota: must(numberConst(store, 'SLOTLOCK_AGENT_OWNER_COMMAND_QUOTA'), 'command quota'),
     maxHoldDays: must(holdTtlMs && holdTtlMs / 86_400_000, 'MAX_HOLD_TTL_MS'),

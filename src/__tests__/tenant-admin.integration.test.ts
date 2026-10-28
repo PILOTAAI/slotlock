@@ -471,6 +471,10 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
         await superuser<{ id: string }[]>`
         SELECT id FROM slotlock.resources WHERE tenant_ref = ${tenantRef}`
       )[0]?.id as string;
+      // How far its feed was pruned, which a delete from the feed records.
+      await superuser`
+        DELETE FROM slotlock.outbox
+         WHERE id = (SELECT min(id) FROM slotlock.outbox WHERE tenant_ref = ${tenantRef})`;
       // A booking an upgrade set aside, which only the deployment DDL writes.
       await superuser`
         INSERT INTO slotlock.reservation_conflict_archive (

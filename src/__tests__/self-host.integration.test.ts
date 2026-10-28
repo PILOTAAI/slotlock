@@ -833,8 +833,11 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         expect.objectContaining({ id: delivered.id, type: 'io.pylota.slotlock.hold.created', subject: held.body.hold.id }),
       );
       expect(await rest('GET', '/v1/changes?cursor=nope')).toMatchObject({ status: 400, body: { code: 'invalid_cursor' } });
-      // A cursor past the 7 days the feed keeps is gone, not a server fault.
-      const old = Buffer.from(`1:1:1:${Date.now() - 31 * 86_400_000}`).toString('base64url');
+      // A cursor a pruned change came after is gone, not a server fault.
+      await admin`
+        INSERT INTO slotlock.outbox_pruned (tenant_ref, txid, id) VALUES (${tenantRef}, '2', 0)
+        ON CONFLICT (tenant_ref) DO NOTHING`;
+      const old = Buffer.from(`1:1:1:${Date.now()}`).toString('base64url');
       expect(await rest('GET', `/v1/changes?cursor=${old}`)).toMatchObject({
         status: 410,
         body: { code: 'cursor_expired', title: 'Gone' },
