@@ -21,10 +21,12 @@ versioning.
 - A feed cursor answers `cursor_expired` exactly when a change after it has been deleted, by this
   server's maintenance or any other (an older server's in a rolling deploy, an operator's): a trigger
   on the feed records how far each tenant's was pruned (`slotlock.outbox_pruned`, created once and
-  started at each tenant's oldest kept change). How old a cursor is no longer matters, so a server
+  started at each tenant's oldest kept change). How old a cursor is no longer matters (except one
+  0.4 gave, which still expires after 30 days: 0.4 pruned by age, not in feed order), so a server
   keeping changes longer than the one that pruned them never reads past a gap unseen, and a reader
   that is up to date stays readable. Maintenance prunes the oldest changes in feed order, never past
-  one it keeps or a transaction still running, so a reader starting over always reads on.
+  one it keeps or a transaction still running, and a reader starting over reads from the mark, so
+  it always reads on.
 - One holder's holds are bounded in time as well as number: `maxHeldHoursPerHolder` in
   `createSlotlockStore` refuses a hold that would bring the holder's live holds past that many
   hours together (`held_time_limit_reached`), and `maxHoldsPerHolder` sets the count that was fixed

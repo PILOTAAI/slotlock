@@ -1128,6 +1128,8 @@ CREATE INDEX IF NOT EXISTS slotlock_outbox_tenant_time_idx
 DO $slotlock_outbox_pruned$
 BEGIN
   IF pg_catalog.to_regclass('slotlock.outbox_pruned') IS NULL THEN
+    -- No change is deleted between reading what is kept and the mark it starts at.
+    LOCK TABLE slotlock.outbox IN SHARE ROW EXCLUSIVE MODE;
     CREATE TABLE IF NOT EXISTS slotlock.outbox_pruned (
       tenant_ref text PRIMARY KEY,
       txid xid8 NOT NULL,
@@ -1162,8 +1164,7 @@ BEGIN
   RETURN NULL;
 END
 $slotlock_outbox_mark_pruned$;
-DROP TRIGGER IF EXISTS slotlock_outbox_mark_pruned ON slotlock.outbox;
-CREATE TRIGGER slotlock_outbox_mark_pruned
+CREATE OR REPLACE TRIGGER slotlock_outbox_mark_pruned
   AFTER DELETE ON slotlock.outbox REFERENCING OLD TABLE AS pruned
   FOR EACH STATEMENT EXECUTE FUNCTION slotlock.outbox_mark_pruned();
 
