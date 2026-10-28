@@ -245,8 +245,14 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
     ).rejects.toMatchObject({ code: 'webhook_private_address' });
     expect(await store.listChanges({ tenantRef, after: 'not-a-cursor!' })).toEqual({ ok: false, code: 'invalid_cursor' });
     // How old a cursor is does not matter, only whether a change after it was pruned.
-    const old = Buffer.from(`1:1:1:${Date.now() - 31 * 86_400_000}`).toString('base64url');
+    const old = Buffer.from(`2:1:1:${Date.now() - 31 * 86_400_000}`).toString('base64url');
     expect(await store.listChanges({ tenantRef, after: old })).toMatchObject({ ok: true });
+    // But one 0.4 gave expires by its date, as there: 0.4 pruned by age, not in feed order, so
+    // what it took is not all before any one position.
+    const given = Buffer.from(`1:1:1:${Date.now() - 31 * 86_400_000}`).toString('base64url');
+    expect(await store.listChanges({ tenantRef, after: given })).toEqual({ ok: false, code: 'cursor_expired' });
+    const recent = Buffer.from(`1:1:1:${Date.now() - 29 * 86_400_000}`).toString('base64url');
+    expect(await store.listChanges({ tenantRef, after: recent })).toMatchObject({ ok: true });
   });
 
   it('keeps what an enabled webhook has not received, and will not skip what one disabled missed', async () => {
@@ -385,15 +391,8 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
     // operator's): the mark follows it all the same.
     await sql`DELETE FROM slotlock.outbox WHERE tenant_ref = ${other} AND subject = 'B'`;
     expect(await store.listChanges({ tenantRef: other, after: page.next })).toEqual({ ok: false, code: 'cursor_expired' });
-    // Starting over reads what is kept, and reads on from there: never expired again.
-    const restart = await store.listChanges({ tenantRef: other, limit: 1 });
-    if (!restart.ok) throw new Error(restart.code);
-    expect(restart.changes.map((change) => change.subject)).toEqual(['A']);
-    // A is before the mark, B gone: following on from A is expired, so a pruner that is not
-    // this version's can still cost a reader a restart. This version prunes only a prefix, which
-    // takes A first; then every change kept is after the mark.
-    await sql`UPDATE slotlock.outbox SET occurred_at = now() - interval '45 days' WHERE tenant_ref = ${other} AND subject = 'A'`;
-    expect(await store.pruneChanges({ tenantRef: other, limit: 100 })).toBe(1);
+    // Starting over reads from the mark: A, kept before it, is passed over (a page ending at it
+    // would be expired at once), and the reader reads on from C, never expired again.
     const again = await store.listChanges({ tenantRef: other, limit: 1 });
     if (!again.ok) throw new Error(again.code);
     expect(again.changes.map((change) => change.subject)).toEqual(['C']);
