@@ -323,6 +323,13 @@ async function readFacts() {
       read('src/dashboard.ts'),
       readdir(join(ROOT, 'clients'), { withFileTypes: true }),
     ]);
+  const assistantSource = await read('src/assistant.ts');
+  const conversationTtl = /conversationTtlMs \?\? ([0-9]+) \* 3_600_000/.exec(dashboard);
+  const messageRate = /rate \?\? \{ perSecond: ([0-9]+) \/ 60,/.exec(dashboard);
+  const assistantProviders = [
+    ...dashboard.matchAll(/<option value="(?:anthropic|openai)"\$\{selected\('(?:anthropic|openai)'\)\}>([^<]+)<\/option>/g),
+  ].map((match) => match[1]);
+  const compatible = /`OpenAI-compatible`, which covers ([A-Za-z ,\n]+?)\),/.exec(await read('README.md'));
   // slotlock_hold_slots' input: how many candidates one call holds, and for how long.
   const holdInput =
     /\.max\(([0-9]+)\),\n\s+ttl_seconds: z\.number\(\)\.int\(\)\.min\(([0-9]+)\)\.max\(([0-9]+)\)/.exec(
@@ -410,6 +417,32 @@ async function readFacts() {
     dashboardOrgs: selfHost.includes("'SLOTLOCK_DASHBOARD_ORGS'"),
     metrics: selfHost.includes("'SLOTLOCK_METRICS_TOKEN'"),
     dashboardWorker: statSync(join(ROOT, 'workers/dashboard'), { throwIfNoEntry: false })?.isDirectory() ?? false,
+    // The dashboard assistant (src/assistant.ts, src/dashboard.ts), offered once the server reads its secret.
+    assistant: selfHost.includes("'SLOTLOCK_ASSISTANT_SECRET'"),
+    assistantMaxSteps: must(
+      numberConst(assistantSource, 'SLOTLOCK_ASSISTANT_MAX_STEPS'),
+      'SLOTLOCK_ASSISTANT_MAX_STEPS',
+    ),
+    assistantMaxPending: must(
+      numberConst(assistantSource, 'SLOTLOCK_ASSISTANT_MAX_PENDING'),
+      'SLOTLOCK_ASSISTANT_MAX_PENDING',
+    ),
+    assistantConversationHours: must(
+      conversationTtl && Number(conversationTtl[1]),
+      'the conversationTtlMs default in src/dashboard.ts',
+    ),
+    assistantMessagesPerMinute: must(
+      messageRate && Number(messageRate[1]),
+      'the assistant rate default in src/dashboard.ts',
+    ),
+    assistantProviders: must(
+      assistantProviders.length === 2 ? assistantProviders : undefined,
+      'the provider options in src/dashboard.ts',
+    ),
+    assistantCompatible: must(
+      compatible?.[1].replace(/\s+/g, ' ').split(/, | and /),
+      'the OpenAI-compatible list in the README',
+    ),
     dashboardAgendaDays: must(numberConst(dashboard, 'AGENDA_DAYS'), 'AGENDA_DAYS in src/dashboard.ts'),
     clients,
     clientCount: clients.length,
