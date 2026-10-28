@@ -36,6 +36,9 @@ var operations = func() map[string]operation {
 		{name: "slotlock_set_resource_booking_rules", method: "PUT", path: "/v1/resources/{resource_id}/booking-rules", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_set_resource_pool", method: "PUT", path: "/v1/resources/{resource_id}/pool", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_list_pools", method: "GET", path: "/v1/pools", pathParams: nil, query: nil},
+		{name: "slotlock_get_booking_rule_defaults", method: "GET", path: "/v1/booking-rules", pathParams: nil, query: nil},
+		{name: "slotlock_set_tenant_booking_rules", method: "PUT", path: "/v1/booking-rules", pathParams: nil, query: nil},
+		{name: "slotlock_set_pool_booking_rules", method: "PUT", path: "/v1/pools/{pool}/booking-rules", pathParams: []string{"pool"}, query: nil},
 		{name: "slotlock_get_resource_history", method: "GET", path: "/v1/resources/{resource_id}/history", pathParams: []string{"resource_id"}, query: []string{"limit", "before"}},
 		{name: "slotlock_get_reservation_history", method: "GET", path: "/v1/reservations/{reservation_ref}/history", pathParams: []string{"reservation_ref"}, query: []string{"limit", "before"}},
 		{name: "slotlock_get_tenant_event_history", method: "GET", path: "/v1/tenant/events/{event_id}/history", pathParams: []string{"event_id"}, query: []string{"limit", "before"}},
@@ -809,9 +812,12 @@ func (in SetResourceBookingRulesInput) values() map[string]any {
 
 // SetResourceBookingRules: Set a resource's booking rules. Set what a booking on one resource
 // must satisfy from now on: minimum notice, how far ahead, the step starts fall on (from local
-// midnight in the resource's time zone), the turnaround kept free after each booking, and whether
-// bookings must lie inside its hours. `null` clears them. Holds, reservations, moves and agents'
-// events are refused with the rule they break; searches offer only what they allow.
+// midnight in the resource's time zone, offset by step_offset_minutes), the time kept free before
+// and after each booking, and whether bookings must lie inside its hours. `null` clears them. A
+// rule it does not set comes from its pool's or the tenant's defaults
+// (slotlock_set_pool_booking_rules, slotlock_set_tenant_booking_rules). Holds, reservations,
+// moves and agents' events are refused with the rule they break; searches offer only what they
+// allow.
 func (c *Client) SetResourceBookingRules(ctx context.Context, in SetResourceBookingRulesInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_set_resource_booking_rules", in.values())
 }
@@ -854,6 +860,66 @@ func (in ListPoolsInput) values() map[string]any {
 // has that are not archived.
 func (c *Client) ListPools(ctx context.Context, in ListPoolsInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_list_pools", in.values())
+}
+
+// GetBookingRuleDefaultsInput holds the arguments of [Client.GetBookingRuleDefaults].
+type GetBookingRuleDefaultsInput struct {
+}
+
+func (in GetBookingRuleDefaultsInput) values() map[string]any {
+	values := map[string]any{}
+	return values
+}
+
+// GetBookingRuleDefaults: Get default booking rules. The tenant's default booking rules, and each
+// pool's that has them. A resource's rules as they apply (effective_booking_rules) are the
+// tenant's defaults, overlaid by its pool's, overlaid by its own: a rule set at a narrower level
+// wins.
+func (c *Client) GetBookingRuleDefaults(ctx context.Context, in GetBookingRuleDefaultsInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_get_booking_rule_defaults", in.values())
+}
+
+// SetTenantBookingRulesInput holds the arguments of [Client.SetTenantBookingRules].
+type SetTenantBookingRulesInput struct {
+	Rules Nullable[map[string]any]
+}
+
+func (in SetTenantBookingRulesInput) values() map[string]any {
+	values := map[string]any{}
+	if value, ok := in.Rules.get(); ok {
+		values["rules"] = value
+	}
+	return values
+}
+
+// SetTenantBookingRules: Set default booking rules. Set the booking rules every resource of the
+// tenant has unless its pool or its own rules set the same rule, from now on; `null` clears them.
+// They take any resource rule but check_in_minutes, which only a resource sets.
+func (c *Client) SetTenantBookingRules(ctx context.Context, in SetTenantBookingRulesInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_set_tenant_booking_rules", in.values())
+}
+
+// SetPoolBookingRulesInput holds the arguments of [Client.SetPoolBookingRules].
+type SetPoolBookingRulesInput struct {
+	Pool string
+
+	Rules Nullable[map[string]any]
+}
+
+func (in SetPoolBookingRulesInput) values() map[string]any {
+	values := map[string]any{}
+	values["pool"] = in.Pool
+	if value, ok := in.Rules.get(); ok {
+		values["rules"] = value
+	}
+	return values
+}
+
+// SetPoolBookingRules: Set a pool's booking rules. Set the booking rules every member of one pool
+// has unless its own rules set the same rule, over the tenant's defaults, from now on; `null`
+// clears them. They take any resource rule but check_in_minutes.
+func (c *Client) SetPoolBookingRules(ctx context.Context, in SetPoolBookingRulesInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_set_pool_booking_rules", in.values())
 }
 
 // GetResourceHistoryInput holds the arguments of [Client.GetResourceHistory].

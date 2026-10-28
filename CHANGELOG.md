@@ -3,6 +3,34 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Added
+
+- Booking rules: a leading buffer (`bufferBeforeMinutes`), the time kept free before each booking,
+  so two bookings stay the earlier one's trailing buffer plus the later one's leading buffer apart.
+  A reservation now occupies from `occupied_starts_at` (its start less `buffer_before_ms`, set by
+  a trigger) and the `slotlock_reservations_no_overlap` constraint keeps that time apart; free/busy,
+  searches, pool availability, holds and their reaping, coverage checks, series rolls and the
+  waitlist all read it.
+- Booking rules: a step offset (`stepOffsetMinutes`, 0 to the step less one): with a 30-minute step
+  and 15, bookings start on :15 and :45, local time in the resource's zone, on writes and searches.
+- Default booking rules for the tenant and for each pool (`setBookingRuleDefaults`,
+  `getBookingRuleDefaults`; `GET`/`PUT /v1/booking-rules`, `PUT /v1/pools/{pool}/booking-rules`):
+  a resource's rules as they apply (`effectiveBookingRules`, `effective_booking_rules`) are the
+  tenant's, overlaid by its pool's, overlaid by its own. A new tenant table under forced row-level
+  security, `booking_rule_defaults`, which erasure deletes. The dashboard's rules form has both new
+  rules and shows each inherited rule and where it comes from.
+
+### Upgrading
+
+- The migration adds `reservations.buffer_before_ms` and `occupied_starts_at` and
+  `calendar_events.buffer_before_ms` without rewriting a row (existing rows keep no leading buffer,
+  so their occupied time is unchanged), adds their checks NOT VALID and validates them after it
+  commits, and rebuilds `slotlock_reservations_no_overlap` once, under the migration's lock.
+  `slotlock migrate` applies row-level security to the new table and grants it to the serving role;
+  a library user runs `applyTenantRls` and `grantApplicationRole` again.
+
 ## 0.5.2 - 2026-10-28
 
 ### Added

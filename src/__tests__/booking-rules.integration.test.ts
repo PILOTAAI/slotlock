@@ -101,6 +101,172 @@ describe.skipIf(!url)('booking rules on writes and searches (real Postgres)', ()
     ).toMatchObject({ ok: false, code: 'booking_rule_violated', rule: 'slot_step' });
   });
 
+  it('refuses, with 15-minute buffers and 2-hour notice, a booking 1 hour out and one that abuts another (RFC 0002 P1-4)', async () => {
+    const id = await ruled({ bufferBeforeMinutes: 15, turnaroundMinutes: 15, minNoticeMinutes: 120 });
+    const soon = new Date(Math.ceil((Date.now() + HOUR) / MINUTE) * MINUTE);
+    expect(await book(id, soon, new Date(soon.getTime() + HOUR))).toMatchObject({
+      ok: false,
+      code: 'booking_rule_violated',
+      rule: 'min_notice',
+    });
+    const first = await book(id, at(10), at(11));
+    if (!first.ok) throw new Error(first.code);
+    // It occupies 09:45 to 11:15 in the database.
+    const [row] = await sql<{ occupied_starts_at: Date; occupied_ends_at: Date; buffer_before_ms: string }[]>`
+      SELECT occupied_starts_at, occupied_ends_at, buffer_before_ms FROM slotlock.reservations
+       WHERE id = ${first.reservation.id}`;
+    expect(row).toMatchObject({ occupied_starts_at: at(9, 45), occupied_ends_at: at(11, 15) });
+    expect(Number(row?.buffer_before_ms)).toBe(15 * MINUTE);
+    // Abutting it either side, or 15 minutes off (one buffer, not both), is refused.
+    for (const [start, end] of [
+      [at(11), at(12)],
+      [at(9), at(10)],
+      [at(11, 15), at(12, 15)],
+      [at(8, 45), at(9, 45)],
+    ] as const) {
+      expect(await book(id, start, end), start.toISOString()).toMatchObject({
+        ok: false,
+        code: 'overlap',
+        conflictingReservationId: first.reservation.id,
+      });
+    }
+    // Both buffers apart: the earlier one's trailing and the later one's leading.
+    expect(await book(id, at(11, 30), at(12, 30))).toMatchObject({ ok: true });
+    expect(await book(id, at(8, 30), at(9, 30))).toMatchObject({ ok: true });
+    // A hold and a move keep it too.
+    expect(
+      await store.acquireHold({ resourceId: id, start: at(12, 30), end: at(13), ttlMs: 60_000 }),
+    ).toMatchObject({ ok: false, code: 'overlap' });
+    expect(
+      await store.rescheduleExternalReservation({
+        tenantRef,
+        externalRef: first.reservation.externalRef as string,
+        resourceId: id,
+        start: at(9, 45),
+        end: at(10, 15),
+        bufferAfterMs: 0,
+        revision: 2,
+      }),
+    ).toMatchObject({ ok: false, code: 'overlap' });
+  });
+
+  it('refuses a leading-buffer overlap in the database itself, whatever wrote the row', async () => {
+    const id = await ruled(null);
+    const insert = (start: Date, end: Date, bufferBeforeMs: number) => sql`
+      INSERT INTO slotlock.reservations (resource_id, starts_at, ends_at, buffer_before_ms)
+      VALUES (${id}, ${start}, ${end}, ${bufferBeforeMs})`;
+    await insert(at(10), at(11), 0);
+    // 11:00-12:00 keeping 1 minute before it reaches into 10:00-11:00.
+    await expect(insert(at(11), at(12), MINUTE)).rejects.toMatchObject({ code: '23P01' });
+    await insert(at(11, 1), at(12), MINUTE);
+    // The occupied start is the trigger's, not the writer's.
+    await expect(sql`
+      UPDATE slotlock.reservations SET occupied_starts_at = starts_at
+       WHERE resource_id = ${id} AND buffer_before_ms > 0`).rejects.toMatchObject({ code: '23514' });
+    await expect(insert(at(13), at(14), 24 * HOUR + 1)).rejects.toMatchObject({ code: '23514' });
+    // Free/busy reads the occupied time: the 11:00-11:01 lead is busy too.
+    expect(await store.getFreeBusy({ tenantRef, resourceId: id, window: { start: at(9), end: at(13) } })).toMatchObject({
+      busy: [{ start: at(10), end: at(12) }],
+    });
+  });
+
+  it('starts bookings on an offset step in the resource’s zone, on writes and searches', async () => {
+    const resource = await store.createResource({ tenantRef, externalRef: `van-${randomUUID()}`, timezone: 'Asia/Kolkata' });
+    await store.setResourceBookingRules({
+      tenantRef,
+      id: resource.id,
+      rules: { slotStepMinutes: 30, stepOffsetMinutes: 15 },
+    });
+    // 15:15 in Kolkata (UTC+05:30) is 09:45 UTC; 15:30 there is 10:00 UTC.
+    expect(await book(resource.id, at(9, 45), at(10, 45))).toMatchObject({ ok: true });
+    expect(await book(resource.id, at(12), at(13))).toMatchObject({ rule: 'slot_step' });
+    const slot = await store.findNextAvailableFor({
+      tenantRef,
+      resourceId: resource.id,
+      searchWindow: { start: at(10, 50), end: at(16) },
+      durationMs: HOUR,
+      rules: [{ rrule: 'FREQ=WEEKLY;BYDAY=MO', startMinutes: 0, durationMinutes: 24 * 60 }],
+    });
+    // 16:20 there is past 16:15, so 16:45 local: 11:15 UTC.
+    expect(slot).toEqual({ start: at(11, 15), end: at(12, 15) });
+  });
+
+  it('offers in a search only slots a write accepts, over several configurations (property)', async () => {
+    const configurations = [
+      { slotStepMinutes: 30, stepOffsetMinutes: 15, bufferBeforeMinutes: 15, turnaroundMinutes: 15 },
+      { bufferBeforeMinutes: 30, enforceHours: true },
+      { slotStepMinutes: 20, stepOffsetMinutes: 10, bufferBeforeMinutes: 25, turnaroundMinutes: 5 },
+      { slotStepMinutes: 60, bufferBeforeMinutes: 45 },
+    ];
+    const backend = createSlotlockStoreAgentBackend(store, { availabilityRules: async () => WEEKDAYS });
+    const context: SlotlockAgentInvocationContext = {
+      principal: { subject: 'rules-agent', tenantRef },
+      operation: 'slotlock_find_next_available' as SlotlockAgentInvocationContext['operation'],
+      signal: new AbortController().signal,
+    };
+    for (const rules of configurations) {
+      const id = await ruled(rules);
+      // Someone else's bookings, written without the rules (an import, say), leave odd gaps.
+      for (const [start, end] of [
+        [at(10, 5), at(10, 50)],
+        [at(12, 40), at(13, 10)],
+        [at(15, 25), at(15, 35)],
+      ] as const) {
+        await sql`INSERT INTO slotlock.reservations (resource_id, starts_at, ends_at) VALUES (${id}, ${start}, ${end})`;
+      }
+      let booked = 0;
+      for (let round = 0; round < 12; round++) {
+        const minutes = [25, 40, 60, 90][round % 4] as number;
+        const label = JSON.stringify({ rules, round });
+        const slot = await store.findNextAvailableFor({
+          tenantRef,
+          resourceId: id,
+          searchWindow: { start: at(9), end: at(17) },
+          durationMs: minutes * MINUTE,
+          rules: WEEKDAYS,
+        });
+        const agent = (await backend.findNextAvailable(context, {
+          resource_ids: [id],
+          start: at(9).toISOString(),
+          end: at(17).toISOString(),
+          duration_minutes: minutes,
+        })) as { start: string | null };
+        expect(agent.start, label).toBe(slot?.start.toISOString() ?? null);
+        if (!slot) break;
+        expect(await book(id, slot.start, slot.end), label).toMatchObject({ ok: true });
+        booked += 1;
+      }
+      expect(booked, JSON.stringify(rules)).toBeGreaterThan(1);
+    }
+  });
+
+  it('keeps the leading buffer on an agent’s event and on the occurrences a roll adds', async () => {
+    const id = await ruled({ bufferBeforeMinutes: 20 });
+    const weekly = await store.putCalendarEvent({
+      tenantRef,
+      externalRef: `w-${randomUUID()}`,
+      idempotencyKey: `k-${randomUUID()}`,
+      expectedRevision: 0,
+      resourceId: id,
+      start: at(9),
+      end: at(10),
+      timezone: 'UTC',
+      summary: 'Weekly',
+      recurrence: { rrule: 'FREQ=WEEKLY;COUNT=3' },
+      materializationWindow: { start: monday, end: new Date(monday.getTime() + 30 * DAY) },
+      enforceBookingRules: true,
+    });
+    if (!weekly.ok) throw new Error(weekly.code);
+    const buffers = await sql<{ buffer_before_ms: number }[]>`
+      SELECT buffer_before_ms FROM slotlock.reservations WHERE calendar_event_id = ${weekly.eventId}`;
+    expect(buffers.map((row) => Number(row.buffer_before_ms))).toEqual([20 * MINUTE, 20 * MINUTE, 20 * MINUTE]);
+    const [stored] = await sql<{ buffer_before_ms: number }[]>`
+      SELECT buffer_before_ms FROM slotlock.calendar_events WHERE id = ${weekly.eventId}`;
+    expect(Number(stored?.buffer_before_ms)).toBe(20 * MINUTE);
+    expect(await book(id, at(8, 30), at(8, 50))).toMatchObject({ ok: false, code: 'overlap' });
+    expect(await book(id, at(8, 20), at(8, 40))).toMatchObject({ ok: true });
+  });
+
   it('refuses a booking inside the minimum notice, by the database clock', async () => {
     const id = await ruled({ minNoticeMinutes: 60 * 24 * 30 });
     expect(await book(id, at(10), at(11))).toMatchObject({ rule: 'min_notice' });

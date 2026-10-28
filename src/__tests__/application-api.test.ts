@@ -33,6 +33,7 @@ const RESOURCE = {
   timezone: 'Europe/London',
   availability: null,
   booking_rules: null,
+  effective_booking_rules: null,
   visibility: 'shared',
   archived_at: null,
   pool: null,
@@ -118,6 +119,9 @@ const backend = {
   listChanges: vi.fn(),
   setResourcePool: vi.fn(),
   listPools: vi.fn(),
+  getBookingRuleDefaults: vi.fn(),
+  setTenantBookingRules: vi.fn(),
+  setPoolBookingRules: vi.fn(),
   getResourceHistory: vi.fn(),
   getCoverage: vi.fn(),
   recordCoverageFailure: vi.fn(),
@@ -326,6 +330,12 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   listWebhooks: { webhooks: [WEBHOOK] },
   setResourcePool: { resource: { ...RESOURCE, pool: 'van' } },
   listPools: { pools: [{ pool: 'van', capacity: 5 }] },
+  getBookingRuleDefaults: {
+    tenant: { min_notice_minutes: 120 },
+    pools: [{ pool: 'van', rules: { buffer_before_minutes: 15, turnaround_minutes: 15 } }],
+  },
+  setTenantBookingRules: { rules: { min_notice_minutes: 120 } },
+  setPoolBookingRules: { pool: 'van', rules: { slot_step_minutes: 30, step_offset_minutes: 15 } },
   getResourceHistory: HISTORY,
   getCoverage: {
     sources: [

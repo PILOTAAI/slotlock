@@ -190,6 +190,27 @@ OPERATIONS: dict[str, Operation] = {
         (),
         (),
     ),
+    "slotlock_get_booking_rule_defaults": Operation(
+        "slotlock_get_booking_rule_defaults",
+        "GET",
+        "/v1/booking-rules",
+        (),
+        (),
+    ),
+    "slotlock_set_tenant_booking_rules": Operation(
+        "slotlock_set_tenant_booking_rules",
+        "PUT",
+        "/v1/booking-rules",
+        (),
+        (),
+    ),
+    "slotlock_set_pool_booking_rules": Operation(
+        "slotlock_set_pool_booking_rules",
+        "PUT",
+        "/v1/pools/{pool}/booking-rules",
+        ("pool",),
+        (),
+    ),
     "slotlock_get_resource_history": Operation(
         "slotlock_get_resource_history",
         "GET",
@@ -891,10 +912,12 @@ class Operations(Transport):
         """Set a resource's booking rules.
 
         Set what a booking on one resource must satisfy from now on: minimum notice, how far
-        ahead, the step starts fall on (from local midnight in the resource's time zone), the
-        turnaround kept free after each booking, and whether bookings must lie inside its hours.
-        `null` clears them. Holds, reservations, moves and agents' events are refused with the
-        rule they break; searches offer only what they allow.
+        ahead, the step starts fall on (from local midnight in the resource's time zone, offset by
+        step_offset_minutes), the time kept free before and after each booking, and whether
+        bookings must lie inside its hours. `null` clears them. A rule it does not set comes from
+        its pool's or the tenant's defaults (slotlock_set_pool_booking_rules,
+        slotlock_set_tenant_booking_rules). Holds, reservations, moves and agents' events are
+        refused with the rule they break; searches offer only what they allow.
         """
         values: dict[str, Any] = {"resource_id": resource_id, "rules": rules}
         return self.call("slotlock_set_resource_booking_rules", values)
@@ -919,6 +942,36 @@ class Operations(Transport):
         """
         values: dict[str, Any] = {}
         return self.call("slotlock_list_pools", values)
+
+    def get_booking_rule_defaults(self) -> dict[str, Any]:
+        """Get default booking rules.
+
+        The tenant's default booking rules, and each pool's that has them. A resource's rules as
+        they apply (effective_booking_rules) are the tenant's defaults, overlaid by its pool's,
+        overlaid by its own: a rule set at a narrower level wins.
+        """
+        values: dict[str, Any] = {}
+        return self.call("slotlock_get_booking_rule_defaults", values)
+
+    def set_tenant_booking_rules(self, *, rules: dict[str, Any] | None) -> dict[str, Any]:
+        """Set default booking rules.
+
+        Set the booking rules every resource of the tenant has unless its pool or its own rules
+        set the same rule, from now on; `null` clears them. They take any resource rule but
+        check_in_minutes, which only a resource sets.
+        """
+        values: dict[str, Any] = {"rules": rules}
+        return self.call("slotlock_set_tenant_booking_rules", values)
+
+    def set_pool_booking_rules(self, pool: str, *, rules: dict[str, Any] | None) -> dict[str, Any]:
+        """Set a pool's booking rules.
+
+        Set the booking rules every member of one pool has unless its own rules set the same rule,
+        over the tenant's defaults, from now on; `null` clears them. They take any resource rule
+        but check_in_minutes.
+        """
+        values: dict[str, Any] = {"pool": pool, "rules": rules}
+        return self.call("slotlock_set_pool_booking_rules", values)
 
     def get_resource_history(
         self,

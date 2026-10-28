@@ -905,6 +905,10 @@ BEGIN
   DELETE FROM slotlock.waitlist_entries WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  erased_table := 'booking_rule_defaults';
+  DELETE FROM slotlock.booking_rule_defaults WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'assistant_conversations';
   DELETE FROM slotlock.assistant_conversations WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
@@ -1355,6 +1359,23 @@ CREATE INDEX IF NOT EXISTS slotlock_waitlist_entries_queue_idx
 CREATE INDEX IF NOT EXISTS slotlock_waitlist_entries_tenant_idx
   ON slotlock.waitlist_entries (tenant_ref, starts_at);
 
+-- Default booking rules (booking-rules.ts), for the tenant (pool_ref '') or for one of its pools:
+-- a resource's rules are the tenant's, overlaid by its pool's, overlaid by its own.
+CREATE TABLE IF NOT EXISTS slotlock.booking_rule_defaults (
+  tenant_ref text NOT NULL,
+  pool_ref text NOT NULL DEFAULT '',
+  rules jsonb NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_booking_rule_defaults_pkey PRIMARY KEY (tenant_ref, pool_ref),
+  CONSTRAINT slotlock_booking_rule_defaults_identity_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND (pool_ref = '' OR pool_ref ~ '^[a-z0-9][a-z0-9._-]{0,99}$')
+  ),
+  CONSTRAINT slotlock_booking_rule_defaults_rules_valid CHECK (
+    jsonb_typeof(rules) = 'object' AND octet_length(rules::text) <= 4096
+  )
+);
+
 -- The model a tenant's dashboard assistant uses (dashboard.ts, assistant.ts), one row a tenant.
 -- The API key is stored only sealed (AES-256-GCM under the deployment's SLOTLOCK_ASSISTANT_SECRET,
 -- bound to the tenant), with its last four characters to show.
@@ -1619,6 +1640,8 @@ CREATE TABLE IF NOT EXISTS slotlock.reservations (
   ends_at timestamptz NOT NULL,
   buffer_after_ms bigint NOT NULL DEFAULT 0,
   occupied_ends_at timestamptz,
+  buffer_before_ms bigint NOT NULL DEFAULT 0,
+  occupied_starts_at timestamptz,
   revision bigint NOT NULL DEFAULT 1,
   status text NOT NULL DEFAULT 'confirmed',
   expires_at timestamptz,
@@ -1639,6 +1662,13 @@ CREATE TABLE IF NOT EXISTS slotlock.reservations (
       AND occupied_ends_at = ends_at + buffer_after_ms * interval '1 millisecond'
     )
   ),
+  CONSTRAINT slotlock_reservations_buffer_before_valid CHECK (
+    buffer_before_ms >= 0 AND buffer_before_ms <= 86400000
+  ),
+  CONSTRAINT slotlock_reservations_occupied_start_valid CHECK (
+    (occupied_starts_at IS NULL AND buffer_before_ms = 0)
+    OR occupied_starts_at = starts_at - buffer_before_ms * interval '1 millisecond'
+  ),
   CONSTRAINT slotlock_reservations_status_valid CHECK (status IN ('held', 'confirmed')),
   -- A hold must carry its expiry; a confirmed reservation must not (expiry is hold-only state).
   CONSTRAINT slotlock_reservations_expiry_shape CHECK (
@@ -1647,7 +1677,7 @@ CREATE TABLE IF NOT EXISTS slotlock.reservations (
   ),
   CONSTRAINT slotlock_reservations_no_overlap EXCLUDE USING gist (
     resource_id WITH =,
-    tstzrange(starts_at, COALESCE(occupied_ends_at, ends_at), '[)') WITH &&
+    tstzrange(COALESCE(occupied_starts_at, starts_at), COALESCE(occupied_ends_at, ends_at), '[)') WITH &&
   )
 );
 
@@ -1679,6 +1709,11 @@ ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS tenant_ref text;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS external_ref text;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS buffer_after_ms bigint NOT NULL DEFAULT 0;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS occupied_ends_at timestamptz;
+-- The leading buffer a booking keeps before its start (its resource's bufferBeforeMinutes when it
+-- was made), and where its occupied time starts: its start less that buffer. A row written before
+-- leading buffers has none, so its occupied time starts at its start (NULL reads as starts_at).
+ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS buffer_before_ms bigint NOT NULL DEFAULT 0;
+ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS occupied_starts_at timestamptz;
 -- A keyed hold's holder (its principal) and the group of alternatives it was taken in: an agent
 -- releases or books only its own holds, and booking one releases the rest of its group.
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS holder_ref text;
@@ -1713,6 +1748,31 @@ BEGIN
     CREATE TRIGGER slotlock_reservations_set_occupied_end
     BEFORE INSERT OR UPDATE OF ends_at, buffer_after_ms ON slotlock.reservations
     FOR EACH ROW EXECUTE FUNCTION slotlock.set_reservation_occupied_end();
+  END IF;
+END $$;
+
+-- The occupied start, materialized for the same reason as the occupied end.
+CREATE OR REPLACE FUNCTION slotlock.set_reservation_occupied_start()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $$
+BEGIN
+  NEW.occupied_starts_at := NEW.starts_at - NEW.buffer_before_ms * interval '1 millisecond';
+  RETURN NEW;
+END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger
+     WHERE tgname = 'slotlock_reservations_set_occupied_start'
+       AND tgrelid = 'slotlock.reservations'::regclass
+       AND NOT tgisinternal
+  ) THEN
+    CREATE TRIGGER slotlock_reservations_set_occupied_start
+    BEFORE INSERT OR UPDATE OF starts_at, buffer_before_ms ON slotlock.reservations
+    FOR EACH ROW EXECUTE FUNCTION slotlock.set_reservation_occupied_start();
   END IF;
 END $$;
 
@@ -2010,6 +2070,29 @@ BEGIN
         buffer_after_ms >= 0 AND buffer_after_ms <= 2592000000
       ) NOT VALID;
   END IF;
+  -- Every existing row has no leading buffer, so both hold of it; added NOT VALID (no scan under
+  -- the lock) and validated after the migration commits.
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'slotlock_reservations_buffer_before_valid'
+       AND conrelid = 'slotlock.reservations'::regclass
+  ) THEN
+    ALTER TABLE slotlock.reservations
+      ADD CONSTRAINT slotlock_reservations_buffer_before_valid CHECK (
+        buffer_before_ms >= 0 AND buffer_before_ms <= 86400000
+      ) NOT VALID;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'slotlock_reservations_occupied_start_valid'
+       AND conrelid = 'slotlock.reservations'::regclass
+  ) THEN
+    ALTER TABLE slotlock.reservations
+      ADD CONSTRAINT slotlock_reservations_occupied_start_valid CHECK (
+        (occupied_starts_at IS NULL AND buffer_before_ms = 0)
+        OR occupied_starts_at = starts_at - buffer_before_ms * interval '1 millisecond'
+      ) NOT VALID;
+  END IF;
 END $$;
 
 -- Every row occupies from its start to its occupied end: its end plus its turnaround buffer. Up to
@@ -2060,12 +2143,34 @@ BEGIN
     ALTER TABLE slotlock.reservations
       ADD CONSTRAINT slotlock_reservations_no_overlap EXCLUDE USING gist (
         resource_id WITH =,
-        tstzrange(starts_at, COALESCE(occupied_ends_at, ends_at), '[)') WITH &&
+        tstzrange(COALESCE(occupied_starts_at, starts_at), COALESCE(occupied_ends_at, ends_at), '[)') WITH &&
       );
   END IF;
   ALTER TABLE slotlock.reservations DROP CONSTRAINT IF EXISTS slotlock_reservations_buffered_no_overlap;
 END
 $slotlock_occupied_overlap$;
+
+-- A row occupies from its occupied start too: its start less its leading buffer. Every row an
+-- upgrade finds was written before leading buffers and keeps none, so its range is the one the old
+-- constraint already kept apart and none can conflict: the constraint is replaced in place, its
+-- index built once under the migration's lock.
+DO $slotlock_occupied_start_overlap$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'slotlock_reservations_no_overlap'
+       AND conrelid = 'slotlock.reservations'::regclass
+       AND pg_catalog.pg_get_constraintdef(oid) LIKE '%occupied_starts_at%'
+  ) THEN
+    ALTER TABLE slotlock.reservations DROP CONSTRAINT IF EXISTS slotlock_reservations_no_overlap;
+    ALTER TABLE slotlock.reservations
+      ADD CONSTRAINT slotlock_reservations_no_overlap EXCLUDE USING gist (
+        resource_id WITH =,
+        tstzrange(COALESCE(occupied_starts_at, starts_at), COALESCE(occupied_ends_at, ends_at), '[)') WITH &&
+      );
+  END IF;
+END
+$slotlock_occupied_start_overlap$;
 
 CREATE INDEX IF NOT EXISTS slotlock_reservations_resource_time_idx
   ON slotlock.reservations (resource_id, starts_at, ends_at);
@@ -2266,6 +2371,10 @@ ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS recurrence_ends_by
 ALTER TABLE slotlock.calendar_events
   ADD COLUMN IF NOT EXISTS buffer_after_ms integer NOT NULL DEFAULT 0
   CONSTRAINT slotlock_calendar_events_buffer_valid CHECK (buffer_after_ms BETWEEN 0 AND 86400000);
+-- The leading buffer a booked event keeps before each occurrence, kept for a later roll alike.
+ALTER TABLE slotlock.calendar_events
+  ADD COLUMN IF NOT EXISTS buffer_before_ms integer NOT NULL DEFAULT 0
+  CONSTRAINT slotlock_calendar_events_buffer_before_valid CHECK (buffer_before_ms BETWEEN 0 AND 86400000);
 ALTER TABLE slotlock.calendar_events
   DROP CONSTRAINT IF EXISTS slotlock_calendar_events_recurrence_cursor_bounded;
 DO $slotlock_calendar_event_recurrence_cursor$
@@ -2835,6 +2944,7 @@ export const SLOTLOCK_TENANT_TABLES = Object.freeze([
   'outbox_pruned',
   'webhook_endpoints',
   'waitlist_entries',
+  'booking_rule_defaults',
   'assistant_settings',
   'assistant_conversations',
 ] as const);
@@ -2921,6 +3031,8 @@ ALTER TABLE slotlock.webhook_endpoints ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.webhook_endpoints FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.waitlist_entries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.waitlist_entries FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.booking_rule_defaults ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.booking_rule_defaults FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.assistant_settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.assistant_settings FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.assistant_conversations ENABLE ROW LEVEL SECURITY;
@@ -2954,6 +3066,7 @@ BEGIN
          'outbox_pruned',
          'webhook_endpoints',
          'waitlist_entries',
+         'booking_rule_defaults',
          'assistant_settings',
          'assistant_conversations'
        )
@@ -3169,6 +3282,16 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'booking_rule_defaults'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.booking_rule_defaults
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
      WHERE schemaname = 'slotlock' AND tablename = 'assistant_settings'
        AND policyname = 'tenant_isolation_v1'
   ) THEN
@@ -3223,6 +3346,8 @@ COMMENT ON POLICY tenant_isolation_v1 ON slotlock.webhook_endpoints
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.waitlist_entries
   IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.booking_rule_defaults
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.assistant_settings
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.assistant_conversations
@@ -3267,6 +3392,7 @@ WHERE schemaname = 'slotlock'
     'outbox_pruned',
     'webhook_endpoints',
     'waitlist_entries',
+    'booking_rule_defaults',
     'assistant_settings',
     'assistant_conversations'
   )

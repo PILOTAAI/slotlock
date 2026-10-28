@@ -155,6 +155,8 @@ slotlock rules clear --resource vehicle-42
 | `minNoticeMinutes` | starts at least this far ahead |
 | `maxAdvanceDays` | starts at most this far ahead |
 | `slotStepMinutes` | starts on a step from local midnight in the resource's time zone |
+| `stepOffsetMinutes` | starts this far past each step (0 to the step less one): with a 30-minute step, 15 starts bookings on :15 and :45 |
+| `bufferBeforeMinutes` | keeps this long free before it: its leading buffer, which the database enforces |
 | `turnaroundMinutes` | keeps this long free after it: its trailing buffer, which the database enforces |
 | `enforceHours` | lies inside the resource's bookable hours |
 | `checkInMinutes` | is claimed (`checkInReservation`) this long after its start, or maintenance releases it |
@@ -169,8 +171,18 @@ slotlock rules clear --resource vehicle-42
   step and hours. Imported calendar events are not checked: they happened elsewhere.
 - Searches (`slotlock_find_next_available`, `slotlock_find_available_slots`, `findNextAvailableFor`)
   offer only slots the rules allow, so an offered slot is one the write accepts.
+- Two bookings stay at least the earlier one's trailing buffer plus the later one's leading buffer
+  apart: each occupies from its start less its leading buffer to its end plus its trailing one, and
+  the exclusion constraint keeps those apart. Free/busy reports that time as busy.
 - The REST application API sets them with `PUT /v1/resources/{resource_id}/booking-rules`, in
   snake_case; the store with `setResourceBookingRules`.
+- Defaults: rules for every resource of the tenant (`PUT /v1/booking-rules`) and for every member
+  of a pool (`PUT /v1/pools/{pool}/booking-rules`), read back with `GET /v1/booking-rules`; the
+  store's `setBookingRuleDefaults` and `getBookingRuleDefaults`. A resource's rules as they apply
+  (`effective_booking_rules`, `effectiveBookingRules`) are the tenant's defaults, overlaid by its
+  pool's, overlaid by its own: a rule set at a narrower level wins. `checkInMinutes` is a resource's
+  own only. The dashboard's resource page shows which rules a resource inherits, and from where.
+- With no rule set anywhere, nothing changes: every rule is opt-in.
 
 ### Without Docker
 

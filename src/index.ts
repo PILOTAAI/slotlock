@@ -7,9 +7,13 @@ export { findNextAvailable, mergeIntervals, subtractBusy } from './engine.js';
 export {
   type SlotlockBookingRule,
   type SlotlockBookingRules,
+  type SlotlockBookingSearch,
   bookingRuleBroken,
   bookingSearch,
+  bookingSearchBlocked,
+  bookingSearchReach,
   nextStepStart,
+  parseBookingRuleDefaults,
   parseBookingRules,
 } from './booking-rules.js';
 export {
@@ -313,6 +317,7 @@ export type {
   SlotlockReservation,
   SlotlockResource,
   SlotlockTenantErasure,
+  SlotlockBookingRuleDefaults,
   PutCalendarEventCommand,
   PutCalendarEventResult,
   ReleaseHoldResult,

@@ -30,6 +30,9 @@ export type SlotlockApplicationOperation =
   | 'slotlock_set_resource_booking_rules'
   | 'slotlock_set_resource_pool'
   | 'slotlock_list_pools'
+  | 'slotlock_get_booking_rule_defaults'
+  | 'slotlock_set_tenant_booking_rules'
+  | 'slotlock_set_pool_booking_rules'
   | 'slotlock_get_resource_history'
   | 'slotlock_get_coverage'
   | 'slotlock_record_coverage_failure'
@@ -98,6 +101,9 @@ export interface SlotlockApplicationBackend {
   setResourceBookingRules: Handler;
   setResourcePool: Handler;
   listPools: Handler;
+  getBookingRuleDefaults: Handler;
+  setTenantBookingRules: Handler;
+  setPoolBookingRules: Handler;
   getResourceHistory: Handler;
   getCoverage: Handler;
   recordCoverageFailure: Handler;
@@ -225,12 +231,17 @@ const BOOKING_RULES = z
     min_notice_minutes: z.number().int().min(0).max(525_600).optional(),
     max_advance_days: z.number().int().min(1).max(3_660).optional(),
     slot_step_minutes: z.number().int().min(1).max(1_440).optional(),
+    step_offset_minutes: z.number().int().min(0).max(1_439).optional(),
+    buffer_before_minutes: z.number().int().min(0).max(1_440).optional(),
     turnaround_minutes: z.number().int().min(0).max(1_440).optional(),
     enforce_hours: z.boolean().optional(),
     check_in_minutes: z.number().int().min(1).max(1_440).optional(),
     require_certain: z.boolean().optional(),
   })
   .strict();
+
+/** Default booking rules for the tenant or a pool: a resource's own rules but check-in. */
+const DEFAULT_BOOKING_RULES = BOOKING_RULES.omit({ check_in_minutes: true }).strict();
 
 const POOL = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,99}$/);
 
@@ -241,8 +252,13 @@ const RESOURCE = z
     timezone: TIMEZONE,
     /** The resource's own weekly hours; `null` when it uses the default. */
     availability: AVAILABILITY_RULES.nullable(),
-    /** What a booking on it must satisfy; `null` when it has no rules. */
+    /** Its own booking rules; `null` when it has none. */
     booking_rules: BOOKING_RULES.nullable(),
+    /**
+     * What a booking on it must satisfy: the tenant's default rules, overlaid by its pool's,
+     * overlaid by its own; `null` when no rule applies.
+     */
+    effective_booking_rules: BOOKING_RULES.nullable(),
     /** `private` resources are never shown to agents; fixed when the resource is created. */
     visibility: VISIBILITY,
     /** When it was archived; `null` while it is in use. */
@@ -516,7 +532,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_set_resource_booking_rules',
       title: "Set a resource's booking rules",
       description:
-        "Set what a booking on one resource must satisfy from now on: minimum notice, how far ahead, the step starts fall on (from local midnight in the resource's time zone), the turnaround kept free after each booking, and whether bookings must lie inside its hours. `null` clears them. Holds, reservations, moves and agents' events are refused with the rule they break; searches offer only what they allow.",
+        "Set what a booking on one resource must satisfy from now on: minimum notice, how far ahead, the step starts fall on (from local midnight in the resource's time zone, offset by step_offset_minutes), the time kept free before and after each booking, and whether bookings must lie inside its hours. `null` clears them. A rule it does not set comes from its pool's or the tenant's defaults (slotlock_set_pool_booking_rules, slotlock_set_tenant_booking_rules). Holds, reservations, moves and agents' events are refused with the rule they break; searches offer only what they allow.",
       method: 'PUT',
       path: '/v1/resources/{resource_id}/booking-rules',
       input: z.object({ resource_id: RESOURCE_ID, rules: BOOKING_RULES.nullable() }).strict(),
@@ -554,6 +570,50 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       risk: { readOnly: true, destructive: false, idempotent: true },
       invoke: 'listPools',
       example: {},
+    },
+    {
+      name: 'slotlock_get_booking_rule_defaults',
+      title: 'Get default booking rules',
+      description:
+        "The tenant's default booking rules, and each pool's that has them. A resource's rules as they apply (effective_booking_rules) are the tenant's defaults, overlaid by its pool's, overlaid by its own: a rule set at a narrower level wins.",
+      method: 'GET',
+      path: '/v1/booking-rules',
+      input: z.object({}).strict(),
+      output: z
+        .object({
+          tenant: DEFAULT_BOOKING_RULES.nullable(),
+          pools: z.array(z.object({ pool: POOL, rules: DEFAULT_BOOKING_RULES }).strict()).max(1000),
+        })
+        .strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'getBookingRuleDefaults',
+      example: {},
+    },
+    {
+      name: 'slotlock_set_tenant_booking_rules',
+      title: 'Set default booking rules',
+      description:
+        "Set the booking rules every resource of the tenant has unless its pool or its own rules set the same rule, from now on; `null` clears them. They take any resource rule but check_in_minutes, which only a resource sets.",
+      method: 'PUT',
+      path: '/v1/booking-rules',
+      input: z.object({ rules: DEFAULT_BOOKING_RULES.nullable() }).strict(),
+      output: z.object({ rules: DEFAULT_BOOKING_RULES.nullable() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'setTenantBookingRules',
+      example: { rules: { min_notice_minutes: 120, buffer_before_minutes: 15, turnaround_minutes: 15 } },
+    },
+    {
+      name: 'slotlock_set_pool_booking_rules',
+      title: "Set a pool's booking rules",
+      description:
+        "Set the booking rules every member of one pool has unless its own rules set the same rule, over the tenant's defaults, from now on; `null` clears them. They take any resource rule but check_in_minutes.",
+      method: 'PUT',
+      path: '/v1/pools/{pool}/booking-rules',
+      input: z.object({ pool: POOL, rules: DEFAULT_BOOKING_RULES.nullable() }).strict(),
+      output: z.object({ pool: POOL, rules: DEFAULT_BOOKING_RULES.nullable() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'setPoolBookingRules',
+      example: { pool: 'van', rules: { slot_step_minutes: 30, step_offset_minutes: 15 } },
     },
     {
       name: 'slotlock_get_resource_history',

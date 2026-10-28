@@ -440,6 +440,7 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
         if (!hook.ok) throw new Error(hook.code);
         const waiting = await tenant.joinWaitlist({ tenantRef, resourceId, ...slot(2), holderRef: 'waiting' });
         if (!waiting.ok) throw new Error(waiting.code);
+        await tenant.setBookingRuleDefaults({ tenantRef, pool: null, rules: { minNoticeMinutes: 0 } });
         await tenant.putAssistantSettings({
           tenantRef,
           provider: 'openai',

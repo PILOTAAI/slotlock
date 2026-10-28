@@ -71,6 +71,7 @@ import type {
   Interval,
   SlotlockAgendaEntry,
   SlotlockResource,
+  SlotlockBookingRuleDefaults,
   WeeklyAvailabilityRule,
 } from './types.js';
 import {
@@ -198,6 +199,8 @@ export interface SlotlockDashboardResources {
     rules: SlotlockBookingRules | null,
     actor?: string,
   ): Promise<SlotlockResource | null>;
+  /** The tenant's default booking rules and its pools', which a resource's own rules overlay. */
+  ruleDefaults?(tenantRef: string): Promise<SlotlockBookingRuleDefaults>;
   /** Put one of the tenant's resources in a pool, or none: as setRules; `code: 'invalid_pool'`. */
   setPool?(
     tenantRef: string,
@@ -419,6 +422,8 @@ export function createSlotlockDashboardResources(store: SlotlockStore): Slotlock
         (tenant) => tenant.setResourceBookingRules({ tenantRef, id, rules }),
         by(actor),
       ),
+    ruleDefaults: (tenantRef) =>
+      store.withTenant(tenantRef, (tenant) => tenant.getBookingRuleDefaults({ tenantRef })),
     setPool: (tenantRef, id, pool, actor) =>
       store.withTenant(tenantRef, (tenant) => tenant.setResourcePool({ tenantRef, id, pool }), by(actor)),
     waitlist: {
@@ -677,6 +682,8 @@ const RULE_NAMES = Object.freeze({
   minNoticeMinutes: 'Minimum notice',
   maxAdvanceDays: 'Book up to',
   slotStepMinutes: 'Start step',
+  stepOffsetMinutes: 'Step offset',
+  bufferBeforeMinutes: 'Buffer before',
   turnaroundMinutes: 'Turnaround',
   checkInMinutes: 'Check-in release',
 } as const);
@@ -685,9 +692,53 @@ const RULE_FIELDS = Object.freeze({
   minNoticeMinutes: 'min_notice_minutes',
   maxAdvanceDays: 'max_advance_days',
   slotStepMinutes: 'slot_step_minutes',
+  stepOffsetMinutes: 'step_offset_minutes',
+  bufferBeforeMinutes: 'buffer_before_minutes',
   turnaroundMinutes: 'turnaround_minutes',
   checkInMinutes: 'check_in_minutes',
 } as const);
+
+/** How the inherited-rules note names each rule, with its unit. */
+const INHERITED_NAMES: Readonly<Record<keyof SlotlockBookingRules, string>> = Object.freeze({
+  ...RULE_NAMES,
+  maxAdvanceDays: 'Book up to (days ahead)',
+  enforceHours: 'Only inside bookable hours',
+  requireCertain: 'Only in time its calendar syncs have read today',
+});
+
+type InheritedRules = Map<keyof SlotlockBookingRules, { value: number | boolean; from: string }>;
+
+/**
+ * The rules a resource takes from defaults, each with where it comes from: a rule its pool's
+ * defaults set, else one the tenant's set, where its own rules do not. Without the defaults, the
+ * rules that apply less its own, from "defaults".
+ */
+function inheritedRules(resource: SlotlockResource, defaults: SlotlockBookingRuleDefaults | undefined): InheritedRules {
+  const own = resource.bookingRules ?? {};
+  const levels: [string, SlotlockBookingRules | null | undefined][] = defaults
+    ? [
+        ['every resource', defaults.tenant],
+        [`pool ${resource.pool ?? ''}`, resource.pool === undefined ? undefined : defaults.pools[resource.pool]],
+      ]
+    : [['defaults', resource.effectiveBookingRules]];
+  const inherited: InheritedRules = new Map();
+  for (const [from, rules] of levels) {
+    for (const [name, value] of Object.entries(rules ?? {}) as [keyof SlotlockBookingRules, number | boolean][]) {
+      if (own[name] === undefined) inherited.set(name, { value, from });
+    }
+  }
+  return inherited;
+}
+
+function inheritedNote(inherited: InheritedRules): Html {
+  if (inherited.size === 0) return html``;
+  const parts = [...inherited].map(([name, { value, from }]) =>
+    typeof value === 'boolean'
+      ? `${INHERITED_NAMES[name]}${value ? '' : ': off'} (${from})`
+      : `${INHERITED_NAMES[name]} ${value.toLocaleString('en')} (${from})`,
+  );
+  return html`<p class="fine">Inherited: ${parts.join('; ')}.</p>`;
+}
 
 const icon = (paths: string) =>
   new Html(
@@ -1484,18 +1535,22 @@ ${current ? html`<p class="fine">Membership is read from GitHub when you sign in
     if (!resource) return notFound(session);
     const start = new Date(now());
     const window = { start, end: new Date(start.getTime() + AGENDA_DAYS * DAY_MS) };
-    const [agenda, changes, keys] = await Promise.all([
+    const [agenda, changes, keys, defaults] = await Promise.all([
       options.resources.agenda?.(tenantRef, window, AGENDA_LIMIT),
       options.resources.recentChanges?.(tenantRef, 100),
       options.keys.list({ tenantRef }),
+      options.resources.ruleDefaults?.(tenantRef),
     ]);
     const byId = new Map([[resource.id, resource]]);
     const mine = agenda?.filter((entry) => entry.resourceId === resource.id);
     const activity = changes?.filter((change) => change.resourceId === resource.id).slice(0, 10);
     const token = csrfToken(session);
     const rules = resource.bookingRules ?? {};
-    const field = (name: keyof typeof RULE_FIELDS, label: string, unit: string) =>
-      html`<label>${label}<span class="unit-input"><input type="number" inputmode="numeric" min="${String(RULE_LIMITS[name][0])}" max="${String(RULE_LIMITS[name][1])}" name="${RULE_FIELDS[name]}" value="${rules[name] === undefined ? '' : String(rules[name])}"><span>${unit}</span></span></label>`;
+    const inherited = inheritedRules(resource, defaults);
+    const field = (name: keyof typeof RULE_FIELDS, label: string, unit: string) => {
+      const from = inherited.get(name);
+      return html`<label>${label}<span class="unit-input"><input type="number" inputmode="numeric" min="${String(RULE_LIMITS[name][0])}" max="${String(RULE_LIMITS[name][1])}" name="${RULE_FIELDS[name]}" value="${rules[name] === undefined ? '' : String(rules[name])}"${from ? html` placeholder="${String(from.value)}"` : html``}><span>${unit}</span></span></label>`;
+    };
     const content = html`${noticeOf(notice)}
 <p><a class="back" href="${root}/resources">Resources</a></p>
 ${pageHead(resourceName(resource, resource.id))}
@@ -1514,12 +1569,15 @@ ${
 ${field('minNoticeMinutes', 'Minimum notice', 'min')}
 ${field('maxAdvanceDays', 'Book up to', 'days ahead')}
 ${field('slotStepMinutes', 'Start on a step of', 'min')}
+${field('stepOffsetMinutes', 'Steps start past each step by', 'min')}
+${field('bufferBeforeMinutes', 'Kept free before each booking', 'min')}
 ${field('turnaroundMinutes', 'Turnaround after each booking', 'min')}
 ${field('checkInMinutes', 'Release if not checked in after', 'min')}
 </div>
 <label class="choice"><input type="checkbox" name="enforce_hours" value="1"${rules.enforceHours ? html` checked` : html``}> Only inside bookable hours</label>
 <label class="choice"><input type="checkbox" name="require_certain" value="1"${rules.requireCertain ? html` checked` : html``}> Only in time its calendar syncs have read today</label>
-<p class="fine">Leave a field empty for no rule.</p>
+${inheritedNote(inherited)}
+<p class="fine">Leave a field empty for no rule${inherited.size > 0 ? ' of its own' : ''}.</p>
 <button class="primary" type="submit">Save rules</button>
 </form>
 </section>`
