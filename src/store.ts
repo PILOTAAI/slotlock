@@ -2152,7 +2152,8 @@ export interface SlotlockStore extends SlotlockEventFeed {
   }): Promise<CancelExternalReservationResult>;
   /**
    * Occupy a window WITHOUT committing: the hold blocks rivals under the same EXCLUDE arbiter
-   * until `expiresAt` (DB clock — now() + ttl, never the app clock), then frees via lazy reap.
+   * until `expiresAt` (DB clock — the statement's time + ttl, never the app clock), then frees via
+   * lazy reap.
    * With `tenantRef`, only a resource of that tenant (`resource_not_found` otherwise, whatever the
    * connection's row-level security).
    */
@@ -2802,7 +2803,7 @@ async function deleteExpiredHolds(
         FROM slotlock.reservations hold
         JOIN slotlock.resources resource ON resource.id = hold.resource_id
        WHERE resource.tenant_ref = ${tenantRef}
-         AND hold.status = 'held' AND hold.expires_at <= now()
+         AND hold.status = 'held' AND hold.expires_at <= statement_timestamp()
        ORDER BY hold.expires_at, hold.id
        LIMIT ${limit}
        FOR UPDATE OF hold SKIP LOCKED
@@ -2810,7 +2811,7 @@ async function deleteExpiredHolds(
       DELETE FROM slotlock.reservations hold
        USING candidates candidate
        WHERE hold.id = candidate.id
-         AND hold.status = 'held' AND hold.expires_at <= now()
+         AND hold.status = 'held' AND hold.expires_at <= statement_timestamp()
       RETURNING 1
     )
     SELECT count(*)::int AS deleted FROM deleted`;
@@ -2830,7 +2831,7 @@ async function forgetExpiredHoldAnswers(
     WITH candidates AS MATERIALIZED (
       SELECT answer.principal_ref, answer.idempotency_key
         FROM slotlock.hold_commands answer
-       WHERE answer.tenant_ref = ${tenantRef} AND answer.expires_at <= now()
+       WHERE answer.tenant_ref = ${tenantRef} AND answer.expires_at <= statement_timestamp()
        ORDER BY answer.expires_at, answer.principal_ref, answer.idempotency_key
        LIMIT ${limit}
        FOR UPDATE OF answer SKIP LOCKED
@@ -2865,7 +2866,7 @@ async function reapExpiredHolds(
        SELECT id FROM slotlock.reservations
         WHERE resource_id = ${resourceId}
           AND status = 'held'
-          AND expires_at <= now()
+          AND expires_at <= statement_timestamp()
           AND starts_at < ${end}
           AND COALESCE(occupied_ends_at, ends_at) > ${start}
         ORDER BY id
@@ -2903,7 +2904,7 @@ async function overlapLoss(
              ${end} + ${bufferAfterMs} * interval '1 millisecond',
              '[)'
            )
-       AND (status <> 'held' OR expires_at > now())
+       AND (status <> 'held' OR expires_at > statement_timestamp())
      ORDER BY starts_at
      LIMIT 1`;
   return { ok: false, code: 'overlap', conflictingReservationId: winners[0]?.id ?? null };
@@ -3681,7 +3682,7 @@ function buildSlotlockStore(
                    SELECT 1 FROM slotlock.reservations
                     WHERE resource_id = ${params.id}
                       AND calendar_event_id IS NULL
-                      AND (CASE WHEN status = 'held' THEN expires_at > now()
+                      AND (CASE WHEN status = 'held' THEN expires_at > statement_timestamp()
                                 ELSE COALESCE(occupied_ends_at, ends_at) > now() END)
                  )
                  OR EXISTS (
@@ -4163,7 +4164,7 @@ function buildSlotlockStore(
                 holder_ref, hold_group_id
               ) VALUES (
                 ${params.resourceId}, ${params.start}, ${params.end}, ${written}, 'held',
-                now() + make_interval(secs => ${ttlSeconds}), ${params.source ?? null},
+                statement_timestamp() + make_interval(secs => ${ttlSeconds}), ${params.source ?? null},
                 ${holderRef ?? null}, ${params.groupId ?? null}
               )
               RETURNING id, resource_id, starts_at, ends_at, buffer_after_ms, expires_at, source,
@@ -4218,7 +4219,7 @@ function buildSlotlockStore(
           FROM slotlock.reservations hold
           JOIN slotlock.resources resource ON resource.id = hold.resource_id
          WHERE hold.id = ${params.holdId} AND resource.tenant_ref = ${params.tenantRef}
-           AND hold.status = 'held' AND hold.expires_at > now()`;
+           AND hold.status = 'held' AND hold.expires_at > statement_timestamp()`;
       return row ? toHold(row) : null;
     },
 
@@ -4237,7 +4238,7 @@ function buildSlotlockStore(
           FROM slotlock.reservations hold
           JOIN slotlock.resources resource ON resource.id = hold.resource_id
          WHERE hold.resource_id = ${params.resourceId} AND resource.tenant_ref = ${params.tenantRef}
-           AND hold.status = 'held' AND hold.expires_at > now()
+           AND hold.status = 'held' AND hold.expires_at > statement_timestamp()
            AND (${after.start}::timestamptz IS NULL
                 OR (hold.starts_at, hold.id) > (${after.start}::timestamptz, ${after.id}::uuid))
          ORDER BY hold.starts_at, hold.id
@@ -4309,7 +4310,7 @@ function buildSlotlockStore(
            FOR SHARE`;
         const [row] = await tx<(ReservationRow & { status: string; live: boolean })[]>`
           SELECT id, resource_id, tenant_ref, external_ref, starts_at, ends_at, buffer_after_ms,
-                 revision, source, status, (status = 'held' AND expires_at > now()) AS live
+                 revision, source, status, (status = 'held' AND expires_at > statement_timestamp()) AS live
             FROM slotlock.reservations
            WHERE id = ${holdId}
            FOR UPDATE`;
@@ -4422,7 +4423,7 @@ function buildSlotlockStore(
          WHERE resource_id = ${resourceId}
            AND starts_at < ${window.end}
            AND COALESCE(occupied_ends_at, ends_at) > ${window.start}
-           AND (status <> 'held' OR expires_at > now())
+           AND (status <> 'held' OR expires_at > statement_timestamp())
          ORDER BY starts_at
          LIMIT ${options.limit ?? null}`;
       return rows.map((r) => ({ start: r.starts_at, end: r.occupied_ends_at }));
@@ -5954,7 +5955,7 @@ function buildSlotlockStore(
          WHERE reservation.resource_id = ${params.resourceId}
            AND reservation.starts_at < ${window.end}
            AND COALESCE(reservation.occupied_ends_at, reservation.ends_at) > ${window.start}
-           AND (reservation.status <> 'held' OR reservation.expires_at > now())
+           AND (reservation.status <> 'held' OR reservation.expires_at > statement_timestamp())
          ORDER BY reservation.starts_at
          LIMIT ${MAX_FREE_BUSY_INTERVALS + 1}`;
       if (busyRows.length > MAX_FREE_BUSY_INTERVALS) {
