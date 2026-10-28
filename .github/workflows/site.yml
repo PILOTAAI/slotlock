@@ -5,7 +5,8 @@
 # The site reads README.md, SPEC.md, SECURITY.md, CHANGELOG.md, the hosted service's documents
 # (PRIVACY.md, TERMS.md, ACCEPTABLE-USE.md, VERSIONING.md, docs/hosted/), the clients' READMEs,
 # examples/, src/, openapi.json and the manifest schema at build time, so changes to those rebuild
-# it too.
+# it too. It also reads the latest GitHub release's benchmark results (bench.json), and release.yml
+# starts it on main once it has attached them.
 #
 # Every action is pinned to a full commit SHA, resolved with
 # `gh api repos/<owner>/<repo>/git/matching-refs/tags/<tag>` on 2026-10-09 (each tag is a
@@ -37,6 +38,8 @@ on:
       - "src/**"
       - ".github/workflows/site.yml"
       - "scripts/check-cloudflare-credentials.sh"
+      - "bench/baseline.json"
+      - "scripts/bench-report.mjs"
   push:
     branches: [main]
     paths:
@@ -58,6 +61,8 @@ on:
       - "src/**"
       - ".github/workflows/site.yml"
       - "scripts/check-cloudflare-credentials.sh"
+      - "bench/baseline.json"
+      - "scripts/bench-report.mjs"
   workflow_dispatch:
 
 permissions:
@@ -86,6 +91,9 @@ jobs:
         run: npm ci --omit=dev --no-audit --no-fund
       - name: Build (syncs docs and facts from the repository, then pins the CSP)
         run: npm run build
+        env:
+          # The benchmarks page reads the latest release's bench.json from the GitHub API.
+          GITHUB_TOKEN: ${{ github.token }}
       - name: Check contrast and copy
         run: npm run check
       - name: Check the output

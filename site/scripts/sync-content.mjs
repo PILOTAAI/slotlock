@@ -4,6 +4,8 @@
 //   ../README.md, SPEC.md, CHANGELOG.md, SECURITY.md   included by heading
 //   ../src/*.ts            tool registry and schemas, protocol versions, limits, the exclusion
 //                          constraint (the tools reference: scripts/tool-schemas.mjs, tools-page.mjs)
+//   GitHub releases        the newest release's bench.json (release.yml attaches it), for the
+//                          benchmarks page; ../bench/baseline.json until a release has one
 //
 // Writes (all git-ignored, rebuilt on every `npm run dev` / `npm run build`):
 //   src/content/docs/docs/*.md        the Starlight pages
@@ -16,6 +18,7 @@ import { statSync } from 'node:fs';
 import { copyFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { renderMarkdown, validateReport } from '../../scripts/bench-report.mjs';
 import { renderApiReference } from './api-reference.mjs';
 import { readOperations } from './tool-schemas.mjs';
 import { renderToolsPage } from './tools-page.mjs';
@@ -260,6 +263,7 @@ async function expand(template, facts, page, toolsPage) {
   // Facts first: the generated tools reference is already final text.
   return clean(codeParts.join(''))
     .replace(/\{\{(\w+)\}\}/g, (_, key) => String(must(facts[key], `fact ${key}`)))
+    .replace(/<!-- benchmark-results -->/g, () => facts.benchmarkResults)
     .replace(/<!-- agent-setup-prompt -->/g, () => `\`\`\`markdown wrap\n${facts.agentSetupPrompt}\`\`\``)
     .replace(/<!-- tools-overview -->/g, () => toolsPage.overview)
     .replace(/<!-- tools-details -->/g, () => toolsPage.details)
@@ -520,8 +524,52 @@ async function readToolsReference(facts) {
   return { page, toolExamples: Object.fromEntries(operations.map((op) => [op.name, op.example])) };
 }
 
+/**
+ * The benchmarks page's results: bench.json from the newest published release that has one, or
+ * RFC 0002's run (bench/baseline.json) until one does. The results are informational, so outside
+ * GitHub Actions an unreachable API falls back to the baseline; in Actions it fails the build, so a
+ * deploy never replaces published results with the baseline over a network error.
+ */
+async function readBenchmark() {
+  const baseline = async () => {
+    const report = validateReport(JSON.parse(await read('bench/baseline.json')));
+    return `No release has attached results yet. RFC 0002's run:\n\n${renderMarkdown(report)}`;
+  };
+  const headers = { accept: 'application/vnd.github+json', 'user-agent': 'slotlock-site' };
+  if (process.env.GITHUB_TOKEN) headers.authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+  const get = async (url) => {
+    const response = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
+    if (!response.ok) throw new Error(`${url} answered ${response.status}`);
+    return response.json();
+  };
+  let releases;
+  try {
+    releases = await get('https://api.github.com/repos/PILOTAAI/slotlock/releases?per_page=30');
+  } catch (error) {
+    if (process.env.GITHUB_ACTIONS === 'true') fail(`could not list the releases: ${error.message}`);
+    console.warn(`sync-content: could not list the releases (${error.message}); the benchmarks page shows the baseline`);
+    return baseline();
+  }
+  for (const release of releases) {
+    if (release.draft || release.prerelease) continue;
+    const asset = release.assets?.find((entry) => entry.name === 'bench.json');
+    if (!asset) continue;
+    // A release whose file is malformed fails the build: fix or delete the asset.
+    let report;
+    try {
+      report = validateReport(await get(asset.browser_download_url));
+    } catch (error) {
+      fail(`${release.tag_name}'s bench.json: ${error.message}`);
+    }
+    const tag = String(release.tag_name).replace(/[^\w.-]/g, '');
+    return `From the [${tag} release](${REPO}/releases/tag/${tag}), which has them as bench.json and bench.md:\n\n${renderMarkdown(report)}`;
+  }
+  return baseline();
+}
+
 async function main() {
   const facts = await readFacts();
+  facts.benchmarkResults = await readBenchmark();
   const { page: toolsPage, toolExamples } = await readToolsReference(facts);
   // The prompt for a coding agent: a docs page shows it and /slotlock-setup-prompt.md serves it.
   facts.agentSetupPrompt = (
