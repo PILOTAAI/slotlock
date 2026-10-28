@@ -1,6 +1,6 @@
 import type { Sql } from 'postgres';
 import type { SlotlockAgentChangeSource } from './change-watch.js';
-import { type SlotlockWebhookEndpoint, slotlockChangeFeedHead } from './event-feed.js';
+import { type SlotlockChangeOrigin, type SlotlockWebhookEndpoint, slotlockChangeFeedHead } from './event-feed.js';
 import { slotlockCloudEvent } from './webhooks.js';
 import { createHash } from 'node:crypto';
 import {
@@ -109,9 +109,15 @@ const WRITE = { isolation: 'read committed' } as const;
 
 /** What tenant scoping needs of an agent or application call. */
 interface TenantCallContext {
-  principal: { tenantRef: string; subject?: string };
+  principal: { tenantRef: string; subject?: string; keyId?: string };
   signal: AbortSignal;
+  /** The surface the call came through, recorded with its changes. */
+  origin?: SlotlockChangeOrigin;
 }
+
+// The UUIDs withTenant takes as a keyId (versions 1-5, as Slotlock's keys are): any other a custom
+// authenticator's principal carries is left out, not refused.
+const KEY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /** Who a call's changes are recorded as in the history: the principal's subject, kept short. */
 function actorOf(context: TenantCallContext): string | undefined {
@@ -135,10 +141,14 @@ async function withTenant<T>(
   let value: T;
   try {
     const actor = actorOf(context);
+    const keyId = context.principal.keyId;
     value = await store.withTenant(context.principal.tenantRef, callback, {
       ...options,
       signal: context.signal,
       ...(actor !== undefined ? { actor } : {}),
+      ...(context.origin !== undefined ? { origin: context.origin } : {}),
+      // An authenticator's own principal may carry something else there: then it is left out.
+      ...(typeof keyId === 'string' && KEY_ID.test(keyId) ? { keyId } : {}),
     });
   } catch (error) {
     const code = (error as { code?: unknown } | null)?.code;
@@ -1246,7 +1256,9 @@ function waitlistOutput(entry: SlotlockWaitlistEntry) {
  */
 async function offerFreedTime(store: SlotlockStore, tenantRef: string): Promise<void> {
   try {
-    await store.withTenant(tenantRef, (tenant) => tenant.offerWaitlist({ tenantRef, limit: 20 }));
+    await store.withTenant(tenantRef, (tenant) => tenant.offerWaitlist({ tenantRef, limit: 20 }), {
+      origin: 'maintenance',
+    });
   } catch {
     // Left to maintenance.
   }
@@ -1443,6 +1455,8 @@ export function createSlotlockStoreApplicationBackend(
           type: entry.type,
           time: entry.occurredAt.toISOString(),
           actor: entry.actor,
+          origin: entry.origin,
+          key_id: entry.keyId,
           data: entry.data,
         })),
         next_before: entries.length === limit ? (entries.at(-1)?.id ?? null) : null,
@@ -1904,6 +1918,7 @@ export function createSlotlockStoreApplicationBackend(
         return {
           sources: sources.map((source) => ({
             source: source.source,
+            source_id: source.sourceId,
             start: source.start.toISOString(),
             end: source.end.toISOString(),
             revision: source.revision,

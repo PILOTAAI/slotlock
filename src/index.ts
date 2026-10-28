@@ -19,16 +19,19 @@ export {
 export {
   type CreateWebhookEndpointResult,
   type ListChangesResult,
+  SLOTLOCK_CHANGE_ORIGINS,
   SLOTLOCK_CHANGE_RETENTION_DAYS,
   SLOTLOCK_CHANGE_TYPES,
   SLOTLOCK_MAX_WEBHOOK_ENDPOINTS,
   SLOTLOCK_WEBHOOK_FAILING_LIMIT_MS,
   slotlockChangeFeedHead,
   type SlotlockChange,
+  type SlotlockChangeOrigin,
   type SlotlockChangeType,
   type SlotlockEventFeed,
   type SlotlockWebhookClaim,
   type SlotlockWebhookEndpoint,
+  slotlockCoverageSourceId,
 } from './event-feed.js';
 export {
   type SlotlockCloudEvent,
@@ -215,6 +218,7 @@ export type {
   CreateSlotlockApiKeyInput,
   SlotlockApiKey,
   SlotlockApiKeyAuthenticatorOptions,
+  SlotlockApiKeyChange,
   SlotlockApiKeyIdentity,
   SlotlockApiKeyScope,
   SlotlockApiKeyStore,

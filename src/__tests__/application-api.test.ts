@@ -231,6 +231,8 @@ const HISTORY = {
         type: 'reservation.updated',
         time: '2027-03-01T09:00:00.000Z',
         actor: 'api_key:1',
+        origin: 'rest',
+        key_id: '1f0e2d4b-6a8c-4e8b-a1c7-9b2f4c1e6d3a',
         data: { reference: 'BK-42', before: { revision: 1 } },
       },
     ],
@@ -341,6 +343,7 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
     sources: [
       {
         source: 'google:fleet@example.com',
+        source_id: 'src_0123456789abcdef01234567',
         start: '2027-03-01T00:00:00.000Z',
         end: '2027-06-01T00:00:00.000Z',
         revision: 7,

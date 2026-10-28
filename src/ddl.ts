@@ -11,6 +11,7 @@
 // the caller's search_path back at the end, so a caller that keeps going in the same transaction
 // resolves its own names as before. Apply it in one transaction: under autocommit every statement
 // is a transaction of its own, and the pin ends with the statement that sets it.
+import { SLOTLOCK_CHANGE_ORIGINS, slotlockCoverageSourceIdSql } from './event-feed.js';
 import { SLOTLOCK_MAX_AVAILABILITY_RULES } from './weekly-hours.js';
 
 const CALLER_SEARCH_PATH_SETTING = 'slotlock.caller_search_path';
@@ -577,6 +578,55 @@ AS $slotlock_erase_api_keys$
   SELECT count(*) FROM erased;
 $slotlock_erase_api_keys$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[5]} FROM PUBLIC;
+
+-- A key created, given a new secret or revoked appends to its tenant's feed (key.created,
+-- key.rotated, key.revoked): its id, scopes and expiry, never its digest, prefix or name. Only the
+-- functions above write keys, as the schema's owner, which forced row-level security on the feed
+-- binds too: the row is appended under the tenant's name in every setting a policy reads, and the
+-- caller's values are put back after. Who did it is the caller's actor, else the key's creator.
+CREATE OR REPLACE FUNCTION slotlock.outbox_api_key_change()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_outbox_api_key$
+DECLARE
+  kind text;
+  setting text;
+  previous jsonb := '{}'::jsonb;
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    kind := 'key.created';
+  ELSIF OLD.revoked_at IS NULL AND NEW.revoked_at IS NOT NULL THEN
+    kind := 'key.revoked';
+  ELSIF OLD.secret_hash IS DISTINCT FROM NEW.secret_hash THEN
+    kind := 'key.rotated';
+  ELSE
+    RETURN NULL;
+  END IF;
+  FOR setting IN
+    SELECT DISTINCT contract.tenant_context_setting FROM slotlock.rls_policy_contracts contract
+  LOOP
+    previous := previous || jsonb_build_object(setting, current_setting(setting, true));
+    PERFORM set_config(setting, NEW.tenant_ref, true);
+  END LOOP;
+  INSERT INTO slotlock.outbox (tenant_ref, type, subject, data, actor)
+  VALUES (
+    NEW.tenant_ref, kind, NEW.id::text,
+    jsonb_build_object(
+      'id', NEW.id, 'scopes', to_jsonb(NEW.scopes), 'expires_at', NEW.expires_at,
+      'revoked_at', NEW.revoked_at),
+    COALESCE(NULLIF(current_setting('slotlock.actor', true), ''),
+             CASE WHEN TG_OP = 'INSERT' THEN NEW.created_by END)
+  );
+  FOR setting IN SELECT jsonb_object_keys(previous) LOOP
+    PERFORM set_config(setting, COALESCE(previous ->> setting, ''), true);
+  END LOOP;
+  RETURN NULL;
+END
+$slotlock_outbox_api_key$;
+CREATE OR REPLACE TRIGGER slotlock_outbox_api_key_change
+  AFTER INSERT OR UPDATE OF revoked_at, secret_hash ON slotlock.api_keys
+  FOR EACH ROW EXECUTE FUNCTION slotlock.outbox_api_key_change();
 `;
 
 // The dashboard's records (dashboard.ts), shared by every server on this database: a finished sign-in
@@ -1232,6 +1282,36 @@ CREATE TABLE IF NOT EXISTS slotlock.outbox (
 );
 -- Who made the change (withTenant's actor: an API key, an agent), for the history.
 ALTER TABLE slotlock.outbox ADD COLUMN IF NOT EXISTS actor text;
+-- Where it came from (withTenant's origin: mcp, a2a, rest, application, dashboard,
+-- dashboard-assistant, maintenance, library) and the API key that made it (withTenant's keyId).
+-- Added bare, so the rows already there keep null (an earlier release) and nothing is scanned under
+-- the lock; the defaults then bind only new rows. A write that names no origin (code calling the
+-- store outside withTenant, or SQL of its own) is \`library\`.
+ALTER TABLE slotlock.outbox ADD COLUMN IF NOT EXISTS origin text;
+ALTER TABLE slotlock.outbox ADD COLUMN IF NOT EXISTS key_id uuid;
+ALTER TABLE slotlock.outbox
+  ALTER COLUMN origin SET DEFAULT COALESCE(NULLIF(current_setting('slotlock.origin', true), ''), 'library'),
+  ALTER COLUMN key_id SET DEFAULT NULLIF(current_setting('slotlock.key_id', true), '')::uuid;
+-- The origins the API reads, and no other. NOT VALID, so adding it scans nothing under the lock;
+-- DEPLOYMENT_VALIDATE_CONSTRAINTS validates it after the migration commits. Its comment is the list
+-- it was built from: a release that changes the list replaces it, so an upgraded database never
+-- keeps refusing an origin the release writes.
+DO $slotlock_outbox_origin$
+BEGIN
+  ALTER TABLE slotlock.outbox DROP CONSTRAINT IF EXISTS slotlock_outbox_origin_valid;
+  IF (
+    SELECT pg_catalog.obj_description(oid, 'pg_constraint') FROM pg_catalog.pg_constraint
+     WHERE conrelid = 'slotlock.outbox'::regclass AND conname = 'slotlock_outbox_origin_known'
+  ) IS DISTINCT FROM '${SLOTLOCK_CHANGE_ORIGINS.join(' ')}' THEN
+    ALTER TABLE slotlock.outbox DROP CONSTRAINT IF EXISTS slotlock_outbox_origin_known;
+    ALTER TABLE slotlock.outbox
+      ADD CONSTRAINT slotlock_outbox_origin_known
+      CHECK (origin IN (${SLOTLOCK_CHANGE_ORIGINS.map((origin) => `'${origin}'`).join(', ')})) NOT VALID;
+    COMMENT ON CONSTRAINT slotlock_outbox_origin_known ON slotlock.outbox
+      IS '${SLOTLOCK_CHANGE_ORIGINS.join(' ')}';
+  END IF;
+END
+$slotlock_outbox_origin$;
 CREATE INDEX IF NOT EXISTS slotlock_outbox_tenant_resource_idx
   ON slotlock.outbox (tenant_ref, resource_id, id) WHERE resource_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS slotlock_outbox_tenant_subject_idx
@@ -1317,14 +1397,31 @@ CREATE TABLE IF NOT EXISTS slotlock.webhook_endpoints (
     AND octet_length(url) BETWEEN 1 AND 2048
     AND secret ~ '^whsec_[A-Za-z0-9+/]{43}=$'
   ),
-  CONSTRAINT slotlock_webhook_endpoints_types_valid CHECK (
-    event_types IS NULL OR cardinality(event_types) BETWEEN 1 AND 20
+  CONSTRAINT slotlock_webhook_endpoints_type_count_valid CHECK (
+    event_types IS NULL OR cardinality(event_types) BETWEEN 1 AND 64
   ),
   CONSTRAINT slotlock_webhook_endpoints_error_valid CHECK (
     last_error IS NULL OR char_length(last_error) <= 500
   )
 );
 ALTER TABLE slotlock.webhook_endpoints ADD COLUMN IF NOT EXISTS changes_pruned boolean NOT NULL DEFAULT false;
+-- 0.5 allowed a filter of at most 20 types, fewer than there are now. The wider CHECK admits every
+-- row the old one did, so it is added NOT VALID (no scan under the lock), and the old one dropped.
+DO $slotlock_webhook_type_count$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint
+     WHERE conrelid = 'slotlock.webhook_endpoints'::regclass
+       AND conname = 'slotlock_webhook_endpoints_type_count_valid'
+  ) THEN
+    ALTER TABLE slotlock.webhook_endpoints
+      ADD CONSTRAINT slotlock_webhook_endpoints_type_count_valid CHECK (
+        event_types IS NULL OR cardinality(event_types) BETWEEN 1 AND 64
+      ) NOT VALID;
+  END IF;
+  ALTER TABLE slotlock.webhook_endpoints DROP CONSTRAINT IF EXISTS slotlock_webhook_endpoints_types_valid;
+END
+$slotlock_webhook_type_count$;
 CREATE INDEX IF NOT EXISTS slotlock_webhook_endpoints_tenant_idx
   ON slotlock.webhook_endpoints (tenant_ref, created_at);
 
@@ -1601,6 +1698,163 @@ UPDATE slotlock.calendar_events
 ALTER TABLE slotlock.calendar_coverage ADD COLUMN IF NOT EXISTS last_error text;
 ALTER TABLE slotlock.calendar_coverage ADD COLUMN IF NOT EXISTS last_error_at timestamptz;
 ALTER TABLE slotlock.calendar_coverage ADD COLUMN IF NOT EXISTS stale_reported_at timestamptz;
+
+-- Configuration changes (RFC 0002 P1-6): a resource's own settings, the sources its coverage is
+-- read from, and the tenant's webhook endpoints. Each change that alters something appends one row,
+-- with what it was before and after for the fields it changed; writing the same value again appends
+-- none. Erasure is not reported, as above.
+CREATE OR REPLACE FUNCTION slotlock.outbox_erasing(owner text)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_outbox_erasing$
+  SELECT owner = current_setting('slotlock.erasing', true)
+     AND current_user = (SELECT pg_catalog.pg_get_userbyid(nspowner) FROM pg_catalog.pg_namespace
+                          WHERE nspname = 'slotlock');
+$slotlock_outbox_erasing$;
+
+CREATE OR REPLACE FUNCTION slotlock.outbox_resource_change()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_outbox_resource$
+DECLARE
+  changed slotlock.resources%ROWTYPE;
+  kind text;
+  before jsonb := '{}'::jsonb;
+  after jsonb := '{}'::jsonb;
+  details jsonb;
+BEGIN
+  changed := CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+  IF changed.tenant_ref IS NULL OR slotlock.outbox_erasing(changed.tenant_ref) THEN RETURN NULL; END IF;
+  IF TG_OP = 'INSERT' THEN
+    kind := 'resource.created';
+    details := jsonb_build_object(
+      'timezone', NEW.timezone, 'visibility', NEW.visibility, 'pool', NEW.pool_ref,
+      'availability', NEW.availability_rules, 'booking_rules', NEW.booking_rules);
+  ELSIF TG_OP = 'DELETE' THEN
+    kind := 'resource.deleted';
+    details := '{}'::jsonb;
+  ELSIF (OLD.archived_at IS NULL) <> (NEW.archived_at IS NULL) THEN
+    kind := CASE WHEN NEW.archived_at IS NULL THEN 'resource.restored' ELSE 'resource.archived' END;
+    details := jsonb_build_object('archived_at', NEW.archived_at);
+  ELSE
+    -- Only what changed, under the names the API gives it; a null is kept (no pool, no rules).
+    IF OLD.external_ref IS DISTINCT FROM NEW.external_ref THEN
+      before := before || jsonb_build_object('reference', OLD.external_ref);
+      after := after || jsonb_build_object('reference', NEW.external_ref);
+    END IF;
+    IF OLD.timezone IS DISTINCT FROM NEW.timezone THEN
+      before := before || jsonb_build_object('timezone', OLD.timezone);
+      after := after || jsonb_build_object('timezone', NEW.timezone);
+    END IF;
+    IF OLD.pool_ref IS DISTINCT FROM NEW.pool_ref THEN
+      before := before || jsonb_build_object('pool', OLD.pool_ref);
+      after := after || jsonb_build_object('pool', NEW.pool_ref);
+    END IF;
+    IF OLD.availability_rules IS DISTINCT FROM NEW.availability_rules THEN
+      before := before || jsonb_build_object('availability', OLD.availability_rules);
+      after := after || jsonb_build_object('availability', NEW.availability_rules);
+    END IF;
+    IF OLD.booking_rules IS DISTINCT FROM NEW.booking_rules THEN
+      before := before || jsonb_build_object('booking_rules', OLD.booking_rules);
+      after := after || jsonb_build_object('booking_rules', NEW.booking_rules);
+    END IF;
+    IF after = '{}'::jsonb THEN RETURN NULL; END IF;
+    kind := 'resource.updated';
+    details := jsonb_build_object('before', before, 'after', after);
+  END IF;
+  INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+  VALUES (
+    changed.tenant_ref, changed.id, kind, changed.id::text,
+    jsonb_build_object('id', changed.id, 'reference', changed.external_ref) || details,
+    NULLIF(current_setting('slotlock.actor', true), '')
+  );
+  RETURN NULL;
+END
+$slotlock_outbox_resource$;
+
+-- A source first recorded, and deleted. Reading it again (a new revision) is progress, not a change
+-- of what the resource is read from, and appends nothing; neither does a resource's deletion, which
+-- takes its coverage with it and is its own change. The source is named by its digest (source_id):
+-- it can be an iCalendar URL with a token in it, or an address.
+CREATE OR REPLACE FUNCTION slotlock.outbox_coverage_change()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_outbox_coverage$
+DECLARE
+  changed slotlock.calendar_coverage%ROWTYPE;
+BEGIN
+  changed := CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+  IF slotlock.outbox_erasing(changed.tenant_ref) THEN RETURN NULL; END IF;
+  IF TG_OP = 'DELETE'
+     AND NOT EXISTS (SELECT 1 FROM slotlock.resources resource WHERE resource.id = OLD.resource_id) THEN
+    RETURN NULL;
+  END IF;
+  INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+  VALUES (
+    changed.tenant_ref, changed.resource_id,
+    CASE WHEN TG_OP = 'DELETE' THEN 'coverage.deleted' ELSE 'coverage.recorded' END,
+    ${slotlockCoverageSourceIdSql('changed.tenant_ref', 'changed.source')},
+    jsonb_strip_nulls(jsonb_build_object(
+      'resource_id', changed.resource_id,
+      'source_id', ${slotlockCoverageSourceIdSql('changed.tenant_ref', 'changed.source')},
+      'start', CASE WHEN TG_OP = 'INSERT' THEN changed.starts_at END,
+      'end', CASE WHEN TG_OP = 'INSERT' THEN changed.ends_at END,
+      'revision', CASE WHEN TG_OP = 'INSERT' THEN changed.revision END)),
+    NULLIF(current_setting('slotlock.actor', true), '')
+  );
+  RETURN NULL;
+END
+$slotlock_outbox_coverage$;
+
+-- An endpoint added, enabled again or deleted (disabling is webhook.disabled, from the delivery that
+-- gave up). Its id and the types it takes, never its URL, which can carry a token, or its secret.
+CREATE OR REPLACE FUNCTION slotlock.outbox_webhook_change()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_outbox_webhook$
+DECLARE
+  changed slotlock.webhook_endpoints%ROWTYPE;
+  kind text;
+BEGIN
+  changed := CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+  IF slotlock.outbox_erasing(changed.tenant_ref) THEN RETURN NULL; END IF;
+  IF TG_OP = 'INSERT' THEN
+    kind := 'webhook.created';
+  ELSIF TG_OP = 'DELETE' THEN
+    kind := 'webhook.deleted';
+  ELSIF OLD.disabled_at IS NOT NULL AND NEW.disabled_at IS NULL THEN
+    kind := 'webhook.enabled';
+  ELSE
+    RETURN NULL;
+  END IF;
+  INSERT INTO slotlock.outbox (tenant_ref, type, subject, data, actor)
+  VALUES (
+    changed.tenant_ref, kind, changed.id::text,
+    jsonb_build_object('id', changed.id, 'event_types', to_jsonb(changed.event_types)),
+    NULLIF(current_setting('slotlock.actor', true), '')
+  );
+  RETURN NULL;
+END
+$slotlock_outbox_webhook$;
+
+CREATE OR REPLACE TRIGGER slotlock_outbox_resource_change
+  AFTER INSERT OR UPDATE OR DELETE ON slotlock.resources
+  FOR EACH ROW EXECUTE FUNCTION slotlock.outbox_resource_change();
+CREATE OR REPLACE TRIGGER slotlock_outbox_coverage_change
+  AFTER INSERT OR DELETE ON slotlock.calendar_coverage
+  FOR EACH ROW EXECUTE FUNCTION slotlock.outbox_coverage_change();
+CREATE OR REPLACE TRIGGER slotlock_outbox_webhook_change
+  AFTER INSERT OR DELETE ON slotlock.webhook_endpoints
+  FOR EACH ROW EXECUTE FUNCTION slotlock.outbox_webhook_change();
+-- Only an update that sets disabled_at: leases and deliveries, which do not, cost nothing here.
+CREATE OR REPLACE TRIGGER slotlock_outbox_webhook_enabled
+  AFTER UPDATE OF disabled_at ON slotlock.webhook_endpoints
+  FOR EACH ROW EXECUTE FUNCTION slotlock.outbox_webhook_change();
 
 DROP TRIGGER IF EXISTS slotlock_outbox_reservation_change ON slotlock.reservations;
 CREATE TRIGGER slotlock_outbox_reservation_change

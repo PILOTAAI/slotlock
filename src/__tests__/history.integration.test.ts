@@ -81,7 +81,8 @@ describe.skipIf(!url)('history (real Postgres)', () => {
       limit: 2,
       before: first.next_before,
     })) as { history: Entry[] };
-    expect(rest.history.map(({ type }) => type)).toEqual(['reservation.created']);
+    // And, oldest, the resource's own creation.
+    expect(rest.history.map(({ type }) => type)).toEqual(['reservation.created', 'resource.created']);
   });
 
   it("records an event's update and cancel by the key that made them", async () => {

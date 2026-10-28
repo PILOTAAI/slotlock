@@ -2,7 +2,7 @@
 // endpoints it is delivered to. Rows are appended by triggers in the same transaction as the change
 // (ddl.ts, SLOTLOCK_OUTBOX_DDL). These are the store's methods for reading them and for keeping each
 // endpoint's delivery state; webhooks.ts signs and sends.
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { Sql, TransactionSql } from 'postgres';
 
 type SlotlockSql = Sql | TransactionSql;
@@ -33,9 +33,66 @@ export const SLOTLOCK_CHANGE_TYPES = Object.freeze([
   'waitlist.offered',
   'waitlist.expired',
   'webhook.disabled',
+  // Configuration: what a resource is and how it books, the sources it is read from, where the
+  // feed is delivered and the keys that reach the tenant. Ids and states, never a secret or a URL.
+  'resource.created',
+  'resource.updated',
+  'resource.archived',
+  'resource.restored',
+  'resource.deleted',
+  'coverage.recorded',
+  'coverage.deleted',
+  'webhook.created',
+  'webhook.enabled',
+  'webhook.deleted',
+  'key.created',
+  'key.rotated',
+  'key.revoked',
 ] as const);
 
 export type SlotlockChangeType = (typeof SLOTLOCK_CHANGE_TYPES)[number];
+
+/**
+ * Where a change came from, as the history and the feed record it (withTenant's `origin`): an agent
+ * protocol (`mcp`, `a2a`), the REST API's agent routes (`rest`) or its application operations
+ * (`application`), the dashboard, a member's dashboard assistant, maintenance, or code calling the
+ * store itself (`library`). Never an address or anything else about a person.
+ */
+export const SLOTLOCK_CHANGE_ORIGINS = Object.freeze([
+  'mcp',
+  'a2a',
+  'rest',
+  'application',
+  'dashboard',
+  'dashboard-assistant',
+  'maintenance',
+  'library',
+] as const);
+
+export type SlotlockChangeOrigin = (typeof SLOTLOCK_CHANGE_ORIGINS)[number];
+
+/** Whether `value` is one of SLOTLOCK_CHANGE_ORIGINS. */
+export function isSlotlockChangeOrigin(value: unknown): value is SlotlockChangeOrigin {
+  return typeof value === 'string' && (SLOTLOCK_CHANGE_ORIGINS as readonly string[]).includes(value);
+}
+
+/**
+ * The SQL that names a coverage source on the feed (`coverage.recorded`, `.deleted`, `.stale`): a
+ * digest of the tenant and the source, stable for both, so the source itself (an iCalendar URL with
+ * a token, an address) never reaches a webhook or the history. `tenant` and `source` are SQL
+ * expressions; slotlockCoverageSourceId works out the same value.
+ */
+export function slotlockCoverageSourceIdSql(tenant: string, source: string): string {
+  return `'src_' || left(encode(sha256(convert_to(${tenant} || E'\\n' || ${source}, 'UTF8')), 'hex'), 24)`;
+}
+
+/**
+ * How the feed names a tenant's coverage source (`subject` and `data.source_id` of `coverage.*`
+ * changes; `source_id` of slotlock_get_coverage): `src_` and 24 hex digits.
+ */
+export function slotlockCoverageSourceId(tenantRef: string, source: string): string {
+  return `src_${createHash('sha256').update(`${tenantRef}\n${source}`, 'utf8').digest('hex').slice(0, 24)}`;
+}
 
 /** How long the feed keeps a change, and so how far back a cursor may reach. */
 export const SLOTLOCK_CHANGE_RETENTION_DAYS = 30;
@@ -55,6 +112,10 @@ export interface SlotlockChange {
   occurredAt: Date;
   /** Who made it (withTenant's `actor`: an API key, an agent), or null when unrecorded. */
   actor: string | null;
+  /** Where it came from (withTenant's `origin`), or null when unrecorded (before 0.6, say). */
+  origin: SlotlockChangeOrigin | null;
+  /** The API key that made it (withTenant's `keyId`), or null when no key did. */
+  keyId: string | null;
   /** Pass as `after` to read what follows this change. */
   position: string;
 }
@@ -155,9 +216,10 @@ export interface SlotlockEventFeed {
     failure?: { status: number | null; error: string; retryInMs: number; gone?: boolean };
   }): Promise<void>;
   /**
-   * History: the changes to one resource (`resourceId`) or one record (`subject`: a booking's
-   * reference, an event's or hold's id), newest first, `limit` (1-100) at a time, each with who
-   * made it and, for a change of an existing record, what it was before. Pass the last one's
+   * History: the changes to one resource (`resourceId`: its bookings and events, and its own
+   * configuration) or one record (`subject`: a booking's reference, an event's, hold's, webhook's or
+   * API key's id), newest first, `limit` (1-100) at a time, each with who made it (`actor`, `keyId`),
+   * where from (`origin`) and, for a change of an existing record, what it was before. Pass the last one's
    * `id` as `before` for the page after. Kept as long as the feed keeps changes.
    */
   listHistory(params: {
@@ -201,6 +263,8 @@ interface ChangeRow {
   data: Record<string, unknown>;
   occurred_at: Date;
   actor: string | null;
+  origin: string | null;
+  key_id: string | null;
 }
 
 function toChange(row: ChangeRow): SlotlockChange {
@@ -212,6 +276,9 @@ function toChange(row: ChangeRow): SlotlockChange {
     data: row.data,
     occurredAt: row.occurred_at,
     actor: row.actor,
+    // One a later release added, read by this one: unknown here, so unrecorded, not a failed page.
+    origin: isSlotlockChangeOrigin(row.origin) ? row.origin : null,
+    keyId: row.key_id,
     position: encodePosition({ txid: row.txid, id: row.id, at: row.occurred_at.getTime() }),
   };
 }
@@ -306,7 +373,7 @@ export function slotlockEventFeedMethods(
         SELECT mark.txid::text AS pruned_txid, mark.id::text AS pruned_id,
                pg_snapshot_xmin(pg_current_snapshot())::text AS horizon,
                page.id::text, page.txid::text, page.type, page.resource_id, page.subject,
-               page.data, page.occurred_at, page.actor
+               page.data, page.occurred_at, page.actor, page.origin, page.key_id::text
           FROM (SELECT 1) here
           LEFT JOIN slotlock.outbox_pruned mark ON mark.tenant_ref = ${params.tenantRef}
           LEFT JOIN LATERAL (
@@ -359,7 +426,8 @@ export function slotlockEventFeedMethods(
         });
       }
       const rows = await sql<ChangeRow[]>`
-        SELECT id::text, txid::text, type, resource_id, subject, data, occurred_at, actor
+        SELECT id::text, txid::text, type, resource_id, subject, data, occurred_at, actor, origin,
+               key_id::text
           FROM slotlock.outbox
          WHERE tenant_ref = ${params.tenantRef}
          ORDER BY txid DESC, id DESC
@@ -374,7 +442,6 @@ export function slotlockEventFeedMethods(
       if (
         types !== null &&
         (types.length === 0 ||
-          types.length > 20 ||
           !types.every((type) => (SLOTLOCK_CHANGE_TYPES as readonly string[]).includes(type)))
       ) {
         return { ok: false, code: 'invalid_event_types' };
@@ -479,7 +546,8 @@ export function slotlockEventFeedMethods(
       const claims: SlotlockWebhookClaim[] = [];
       for (const endpoint of endpoints) {
         const rows = await sql<ChangeRow[]>`
-          SELECT id::text, txid::text, type, resource_id, subject, data, occurred_at, actor
+          SELECT id::text, txid::text, type, resource_id, subject, data, occurred_at, actor, origin,
+               key_id::text
             FROM slotlock.outbox
            WHERE tenant_ref = ${params.tenantRef}
              AND txid < pg_snapshot_xmin(pg_current_snapshot())
@@ -569,7 +637,8 @@ export function slotlockEventFeedMethods(
       const before = params.before === undefined ? null : /^msg_(\d{1,19})$/.exec(params.before)?.[1];
       if (before === undefined) return [];
       const rows = await sql<ChangeRow[]>`
-        SELECT id::text, txid::text, type, resource_id, subject, data, occurred_at, actor
+        SELECT id::text, txid::text, type, resource_id, subject, data, occurred_at, actor, origin,
+               key_id::text
           FROM slotlock.outbox
          WHERE tenant_ref = ${params.tenantRef}
            AND (${params.resourceId ?? null}::uuid IS NULL OR resource_id = ${params.resourceId ?? null}::uuid)

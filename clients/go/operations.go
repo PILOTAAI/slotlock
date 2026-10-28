@@ -945,9 +945,10 @@ func (in GetResourceHistoryInput) values() map[string]any {
 }
 
 // GetResourceHistory: A resource's history. What happened on one of the tenant's resources,
-// newest first: each hold, booking and event made, moved, confirmed, released or cancelled, when,
-// by whom (the API key or agent), and for a change what it was before. Kept 30 days. Pass
-// next_before as before for older entries.
+// newest first: each hold, booking and event made, moved, confirmed, released or cancelled, and
+// each change to the resource itself (created, rules, pool or hours changed, archived, restored,
+// coverage recorded or deleted), when, by whom (the actor and API key), from where (origin), and
+// for a change what it was before. Kept 30 days. Pass next_before as before for older entries.
 func (c *Client) GetResourceHistory(ctx context.Context, in GetResourceHistoryInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_get_resource_history", in.values())
 }
@@ -1459,6 +1460,7 @@ func (in GetCoverageInput) values() map[string]any {
 // coverage of a resource: the window it covers, when it was last read, its last error, and
 // whether it is stale (not read for a day, so the time it covers is unproven, not free). A source
 // that goes stale is also put on the change feed once, as coverage.stale, until it is read again.
+// The feed names a source by its source_id, never the source itself.
 func (c *Client) GetCoverage(ctx context.Context, in GetCoverageInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_get_coverage", in.values())
 }
@@ -1668,11 +1670,14 @@ func (in ListChangesInput) values() map[string]any {
 
 // ListChanges: List changes. What changed in the tenant, oldest first, as CloudEvents: holds
 // made, confirmed, released or expired; bookings made, moved or cancelled; calendar events
-// created, changed or cancelled (ids, times and states, never titles or attendees). Pass
-// next_cursor as cursor to read on; it is returned even when nothing is new, so poll with it.
-// Only changes of transactions that have ended are listed, so following the cursor never skips
-// one. Changes are kept 30 days: an older cursor answers 410 cursor_expired, so start again
-// without one.
+// created, changed or cancelled; resources created, changed (rules, pool, hours), archived,
+// restored or deleted; coverage sources recorded or deleted; webhooks added, enabled or deleted;
+// API keys created, rotated or revoked (ids, times and states, never titles, attendees, URLs or
+// secrets). Each names where it came from (slotlockorigin) and the API key that made it
+// (slotlockkeyid) when recorded. Pass next_cursor as cursor to read on; it is returned even when
+// nothing is new, so poll with it. Only changes of transactions that have ended are listed, so
+// following the cursor never skips one. Changes are kept 30 days: an older cursor answers 410
+// cursor_expired, so start again without one.
 func (c *Client) ListChanges(ctx context.Context, in ListChangesInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_list_changes", in.values())
 }

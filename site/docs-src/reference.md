@@ -37,4 +37,6 @@ kinds.
 
 <!-- include README.md#application-api promote -->
 
+<!-- include README.md#changes-and-webhooks promote -->
+
 <!-- include README.md#supported-versions -->

@@ -175,7 +175,9 @@ export interface SlotlockAssistantStore {
 
 /** The assistant's records in the store, each in a transaction under the tenant's row-level security. */
 export function createSlotlockAssistantStore(store: SlotlockStore): SlotlockAssistantStore {
-  const by = (actor: string | undefined) => (actor === undefined ? {} : { actor });
+  // Every change here is the dashboard's, made by the person signed in (actor) when known.
+  const by = (actor: string | undefined) =>
+    actor === undefined ? { origin: 'dashboard' as const } : { origin: 'dashboard' as const, actor };
   return {
     getSettings: (tenantRef) =>
       store.withTenant(tenantRef, (tenant) => tenant.getAssistantSettings({ tenantRef })),

@@ -1019,7 +1019,9 @@ export async function startSlotlockServer(
               claimWebhookDeliveries: (params) =>
                 deliveryStore.withTenant(tenantRef, (tenant) => tenant.claimWebhookDeliveries(params)),
               settleWebhookDelivery: (params) =>
-                deliveryStore.withTenant(tenantRef, (tenant) => tenant.settleWebhookDelivery(params)),
+                deliveryStore.withTenant(tenantRef, (tenant) => tenant.settleWebhookDelivery(params), {
+                  origin: 'maintenance',
+                }),
             },
           }),
         // Counts only, never the tenant or a URL.
@@ -1863,7 +1865,7 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
       case 'key rotate': {
         const config = readSlotlockDatabaseConfig(io.env);
         const rotated = await withApiKeys(config, (keys) =>
-          keys.rotate({ tenantRef: config.tenantRef, id: operands[1] as string }),
+          keys.rotate({ tenantRef: config.tenantRef, id: operands[1] as string, actor: CLI_KEY_CREATOR }),
         );
         if (!rotated) {
           io.stderr.write('slotlock: no active API key with that id in this tenant\n');
@@ -1878,7 +1880,7 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
       case 'key revoke': {
         const config = readSlotlockDatabaseConfig(io.env);
         const revoked = await withApiKeys(config, (keys) =>
-          keys.revoke({ tenantRef: config.tenantRef, id: operands[1] as string }),
+          keys.revoke({ tenantRef: config.tenantRef, id: operands[1] as string, actor: CLI_KEY_CREATOR }),
         );
         if (!revoked) {
           io.stderr.write('slotlock: no API key with that id in this tenant\n');

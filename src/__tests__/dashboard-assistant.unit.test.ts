@@ -228,6 +228,8 @@ describe.each(['anthropic', 'openai'] as const)('the assistant over %s', (format
     expect(backend.listResources).toHaveBeenCalledTimes(1);
     const context = backend.listResources.mock.calls[0]?.[0] as SlotlockAgentInvocationContext;
     expect(context.principal).toMatchObject({ tenantRef: 'github-org:91', subject: 'dashboard-assistant:github:12' });
+    // Its changes are recorded as the assistant's, beside the member it acts for.
+    expect(context.origin).toBe('dashboard-assistant');
     expect(model.requests).toHaveLength(2);
     const [first, second] = model.requests;
     // The vendor's request format, with the key where the vendor expects it.

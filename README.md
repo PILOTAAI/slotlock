@@ -1241,12 +1241,37 @@ curl -X PUT "http://localhost:8080/v1/reservations/BK-42" \
 
 ### Changes and webhooks
 
-Every committed change to a tenant's holds, bookings and calendar events is recorded in the same
-transaction (by a database trigger, so no write path skips it), and nothing is recorded that did
-not commit. A change carries ids, times and states, never titles, descriptions or attendees.
+Every committed change to a tenant's holds, bookings, calendar events and configuration is recorded
+in the same transaction (by a database trigger, so no write path skips it), and nothing is recorded
+that did not commit. A change carries ids, times and states, never titles, descriptions, attendees,
+webhook URLs or secrets.
+
+- The types: `hold.created`, `.updated`, `.confirmed`, `.released`, `.expired`;
+  `reservation.created`, `.updated`, `.cancelled`, `.checked_in`, `.no_show`; `event.created`,
+  `.updated`, `.cancelled`, `.timezone_shifted`, `.timezone_conflict`; `waitlist.offered`,
+  `.expired`; `coverage.stale`; and configuration: `resource.created`, `resource.updated` (booking
+  and check-in rules, pool, bookable hours, time zone or reference, with `before` and `after` of
+  only the fields that changed), `resource.archived`, `.restored`, `.deleted`; `coverage.recorded`
+  (a source's first read; reading it again is not a change) and `coverage.deleted`. A `coverage.*`
+  change names its source by `source_id` (also its `subject`), a digest of the tenant and the source
+  that `slotlock_get_coverage` and `slotlockCoverageSourceId` give too, never the source itself,
+  which can be an iCalendar URL with a token or an address;
+  `webhook.created`, `.enabled`, `.disabled`, `.deleted` (the id and `event_types`, never the URL);
+  `key.created`, `.rotated`, `.revoked` (the id, scopes and expiry, never the key, its digest,
+  prefix or name). `SLOTLOCK_CHANGE_TYPES` lists them.
+- Each change records who made it (`actor`: the API key or agent), the API key's id (`key_id`) when
+  a key made it, and where it came from (`origin`): `mcp`, `a2a`, `rest` (the REST agent routes),
+  `application` (the application API), `dashboard`, `dashboard-assistant`, `maintenance`, or
+  `library`: code calling the store itself, inside `withTenant` with no `origin` or outside it, and
+  any write that names none. Never an address or anything else about a person. A change an earlier
+  release recorded has neither (`null`).
+- `key_id` is pseudonymous: the key's id, never the key or its name. It stays on the changes the key
+  made after the key is revoked or deleted, for as long as the feed keeps them (the retention below,
+  and longer while an enabled webhook has still to receive them); erasing the tenant removes them.
 
 - `GET /v1/changes?cursor=…` lists them oldest first as [CloudEvents 1.0](https://cloudevents.io)
-  (`io.pylota.slotlock.hold.created`, `.reservation.cancelled`, `.event.updated`, …). Follow
+  (`io.pylota.slotlock.hold.created`, `.reservation.cancelled`, `.event.updated`, …), with the
+  extension attributes `slotlockorigin` and `slotlockkeyid` when the change records them. Follow
   `next_cursor`, which comes back even when nothing is new: it never skips a change, even one whose
   transaction commits after a later one's. Changes are kept 30 days (`SLOTLOCK_RETENTION_DAYS`,
   `retentionDays` in `createSlotlockStore`, 1-3,650, for `serve` and `maintain` alike); a cursor
@@ -1257,7 +1282,7 @@ not commit. A change carries ids, times and states, never titles, descriptions o
 - `POST /v1/webhooks` with an https `url` (and `event_types`, optionally) sends each change from
   then on as a [Standard Webhooks](https://www.standardwebhooks.com) request: `webhook-id` (the
   change's id, the same on every retry), `webhook-timestamp` and `webhook-signature`, keyed by the
-  `whsec_` secret the call returns once. Verify it with any Standard Webhooks library, and use
+  `whsec_` secret the call returns once. `event_types` takes any of the types above. Verify it with any Standard Webhooks library, and use
   `webhook-id` to drop a repeat: delivery is at least once.
 - Changes go to each webhook in order, one at a time, until one fails; that one is retried after
   5 seconds, 5 minutes, 30 minutes, 2, 5, then every 10 hours. After a day of failures, or a `410`,
@@ -1267,11 +1292,14 @@ not commit. A change carries ids, times and states, never titles, descriptions o
   an enabled webhook has still to receive, however old. At most 10 webhooks per tenant.
 - Each request has 15 seconds in all, and a tenant's pass 30 seconds; tenants are delivered 8 at
   a time, so a slow endpoint holds up only its own tenant.
-- History reads the same record backwards, with who made each change (the API key or agent) and,
-  for a change of an existing booking or event, what it was before:
-  `GET /v1/resources/{id}/history`, `GET /v1/reservations/{reference}/history`,
-  `GET /v1/tenant/events/{id}/history`, newest first, paged by `before`. In the library, pass
-  `actor` to `withTenant` and read `listHistory`. It is kept as long as the feed and erased with
+- History reads the same record backwards, with who made each change (`actor`, `key_id`), where
+  from (`origin`) and, for a change of an existing booking, event or resource, what it was before:
+  `GET /v1/resources/{id}/history` (its bookings, events and its own configuration),
+  `GET /v1/reservations/{reference}/history`, `GET /v1/tenant/events/{id}/history`, newest first,
+  paged by `before`. In the library, pass `actor`, `origin` and `keyId` to `withTenant` (`origin`
+  defaults to the enclosing call's, else `library`; `createSlotlockApiKeyAuthenticator` gives the
+  principal its `keyId`), and `actor` and `origin` to the API key store's `create`, `rotate` and
+  `revoke`; read `listHistory`. It is kept as long as the feed and erased with
   the tenant.
 - When time zone rules change (a new tzdata), a booking's instant and the wall time it was made for
   part: Winnipeg's 09:00 is no longer the instant stored. Slotlock keeps both, and maintenance finds
@@ -1280,7 +1308,8 @@ not commit. A change carries ids, times and states, never titles, descriptions o
   to `maintainSlotlockTenant` moves them instead, as a new revision, unless that overlaps another
   booking (`event.timezone_conflict`; it stays, for a person or an agent to decide). `/healthz`
   reports the `tzdata` the server runs.
-- Feed health: `GET /v1/resources/{id}/coverage` shows each source's window, when it was last read,
+- Feed health: `GET /v1/resources/{id}/coverage` shows each source (and its `source_id`, as the feed
+  names it), its window, when it was last read,
   its last error (`POST /v1/resources/{id}/coverage/{source}/failure` records one) and whether it is
   stale (not read for a day, so the time it covers is unproven, never free). A source that goes stale
   is put on the feed once, as `coverage.stale`, until it is read again. Retire a sync you have

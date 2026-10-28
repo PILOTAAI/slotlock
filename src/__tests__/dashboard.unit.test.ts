@@ -481,6 +481,7 @@ describe('API keys in the dashboard', () => {
       name: 'Booking agent',
       scopes: ['read'],
       createdBy: 'github:4242',
+      origin: 'dashboard',
       expiresAt: new Date(now + 30 * 86_400_000),
     });
     const html = await response.text();
@@ -634,7 +635,12 @@ describe('API keys in the dashboard', () => {
       session,
     );
     expect(rotated.status).toBe(200);
-    expect(keys.store.rotate).toHaveBeenCalledWith({ tenantRef: 'github:4242', id: row?.id });
+    expect(keys.store.rotate).toHaveBeenCalledWith({
+      tenantRef: 'github:4242',
+      id: row?.id,
+      actor: 'github:4242',
+      origin: 'dashboard',
+    });
     expect(await rotated.text()).toContain(keys.rows.get(row?.id as string)?.key as string);
 
     const revoked = await post(
@@ -644,7 +650,12 @@ describe('API keys in the dashboard', () => {
       session,
     );
     expect(revoked.status).toBe(303);
-    expect(keys.store.revoke).toHaveBeenCalledWith({ tenantRef: 'github:4242', id: row?.id });
+    expect(keys.store.revoke).toHaveBeenCalledWith({
+      tenantRef: 'github:4242',
+      id: row?.id,
+      actor: 'github:4242',
+      origin: 'dashboard',
+    });
 
     const missing = await post(
       target,
@@ -1571,6 +1582,8 @@ describe('the overview', () => {
           data: {},
           occurredAt: at('2026-10-10T11:55:00Z'),
           actor: `api_key:${created.apiKey.id}`,
+          origin: 'rest',
+          keyId: created.apiKey.id,
           position: 'p2',
         },
         {
@@ -1581,6 +1594,8 @@ describe('the overview', () => {
           data: {},
           occurredAt: at('2026-10-08T12:00:00Z'),
           actor: null,
+          origin: null,
+          keyId: null,
           position: 'p1',
         },
       ],
@@ -1612,6 +1627,8 @@ describe('the overview', () => {
       data: {},
       occurredAt: new Date(now - 60_000),
       actor,
+      origin: 'dashboard' as const,
+      keyId: null,
       position: id,
     });
     const { target } = withFeed([], [change('github:4242', 'msg_2'), change('github:777', 'msg_1')]);
