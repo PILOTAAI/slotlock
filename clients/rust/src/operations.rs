@@ -1036,10 +1036,10 @@ impl Client {
 
     /// Get pool availability.
     ///
-    /// How many members of a pool (a vehicle class, a room type) are free across a window: the
-    /// window split where that number changes, each part with how many are free, and coverage
-    /// certainty. Book one with slotlock_book_pool. 404 pool_not_found when the pool has no
-    /// member you may book.
+    /// How many members of a pool (a vehicle class, a room type) are free across a window, each
+    /// only where its booking rules let a booking start: the window split where that number
+    /// changes, each part with how many are free, and coverage certainty. Book one with
+    /// slotlock_book_pool. 404 pool_not_found when the pool has no member you may book.
     pub fn get_pool_availability(&self, input: &GetPoolAvailabilityInput) -> Result<Value, Error> {
         self.call("slotlock_get_pool_availability", serde_json::to_value(input)?)
     }

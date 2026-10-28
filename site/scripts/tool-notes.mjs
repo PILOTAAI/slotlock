@@ -44,7 +44,7 @@ export const DETAILS = {
   slotlock_book_pool:
     'Members are tried in a fixed order (the order `slotlock_list_resources` with `pool` lists them) and the first that is free and allows the booking is booked, in one transaction: a class of five sells exactly five bookings for a time, however many race. The event names the member. A retry with the same key answers the member it booked, even if an earlier one has since come free.',
   slotlock_get_pool_availability:
-    'The window is split where the number of free members changes; each part says how many are free, counting only the members you may book. The count is certain only when `coverage.certainty` is `certain`. Book one of them with `slotlock_book_pool`.',
+    'The window is split where the number of free members changes; each part says how many are free, counting only the members you may book, and each only where its booking rules let a booking start (after its notice, within how far ahead it books, inside its hours when it enforces them). A member’s slot step is not counted. The count is certain only when `coverage.certainty` is `certain`. Book one of them with `slotlock_book_pool`.',
   slotlock_book_together:
     'One event per resource, in one transaction: if any resource is taken or breaks its booking rules, nothing is booked and the refusal names that `resource_id`. Bundles take their resources in one order, so two racing over the same ones end with one booked and one refused, never stuck. Find the time first with `slotlock_find_available_slots` and `require_free`.',
   slotlock_release_slots:

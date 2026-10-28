@@ -339,10 +339,10 @@ public sealed partial class SlotlockClient
 
     /// <summary>Get pool availability.</summary>
     /// <remarks>
-    /// How many members of a pool (a vehicle class, a room type) are free across a window: the
-    /// window split where that number changes, each part with how many are free, and coverage
-    /// certainty. Book one with slotlock_book_pool. 404 pool_not_found when the pool has no
-    /// member you may book.
+    /// How many members of a pool (a vehicle class, a room type) are free across a window, each
+    /// only where its booking rules let a booking start: the window split where that number
+    /// changes, each part with how many are free, and coverage certainty. Book one with
+    /// slotlock_book_pool. 404 pool_not_found when the pool has no member you may book.
     /// </remarks>
     /// <param name="pool">pool</param>
     /// <param name="start">start</param>

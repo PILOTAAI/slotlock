@@ -1925,7 +1925,7 @@
       "get": {
         "operationId": "slotlock_get_pool_availability",
         "summary": "Get pool availability",
-        "description": "How many members of a pool (a vehicle class, a room type) are free across a window: the window split where that number changes, each part with how many are free, and coverage certainty. Book one with slotlock_book_pool. 404 pool_not_found when the pool has no member you may book.",
+        "description": "How many members of a pool (a vehicle class, a room type) are free across a window, each only where its booking rules let a booking start: the window split where that number changes, each part with how many are free, and coverage certainty. Book one with slotlock_book_pool. 404 pool_not_found when the pool has no member you may book.",
         "tags": [
           "Agent tools"
         ],

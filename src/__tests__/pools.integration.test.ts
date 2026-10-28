@@ -149,4 +149,49 @@ describe.skipIf(!url)('pools (real Postgres)', () => {
       }) as Promise<unknown>,
     ).rejects.toMatchObject({ code: 'pool_not_found', status: 404 });
   });
+
+  it("counts a member free only where its booking rules let one book it, and private ones never", async () => {
+    const pool = `bus-${randomUUID().slice(0, 8)}`;
+    const [open, ahead, nights] = await members(pool, 3);
+    // One books at most a day ahead; one only 09:00-17:00 (its own hours, enforced).
+    await store.setResourceBookingRules({ tenantRef, id: ahead as string, rules: { maxAdvanceDays: 1 } });
+    await store.setResourceAvailability({
+      tenantRef,
+      id: nights as string,
+      rules: [{ rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR,SA,SU', startMinutes: 9 * 60, durationMinutes: 8 * 60 }],
+    });
+    await store.setResourceBookingRules({ tenantRef, id: nights as string, rules: { enforceHours: true } });
+    const hidden = await store.createResource({ tenantRef, externalRef: `${pool}-private`, timezone: 'UTC', visibility: 'private' });
+    await store.setResourcePool({ tenantRef, id: hidden.id, pool });
+    const answer = (await backend.getPoolAvailability?.(context('slotlock_get_pool_availability'), {
+      pool,
+      start: at(6),
+      end: at(20),
+    })) as { members: number; intervals: { start: string; end: string; free: number }[] };
+    // A year ahead: only the open one and, in its hours, the one with hours; never the private one.
+    expect(answer.members).toBe(3);
+    expect(answer.intervals).toEqual([
+      { start: at(6), end: at(9), free: 1 },
+      { start: at(9), end: at(17), free: 2 },
+      { start: at(17), end: at(20), free: 1 },
+    ]);
+    // What it counts, a pool booking takes: at 20:00 only the open one, then the class is full.
+    expect((await book(pool, 18, 19)).event.resource_id).toBe(open);
+    await expect(book(pool, 18, 19)).rejects.toMatchObject({ code: 'pool_full' });
+  });
+
+  it('calls a count uncertain when one member\'s coverage is', async () => {
+    const pool = `cab-${randomUUID().slice(0, 8)}`;
+    await members(pool, 2);
+    const strict = createSlotlockStoreAgentBackend(store, {
+      availabilityRules: async () => [{ rrule: 'FREQ=DAILY', startMinutes: 0, durationMinutes: 1440 }],
+      requiredCoverageSources: async () => ['google:fleet'],
+    });
+    const answer = (await strict.getPoolAvailability?.(context('slotlock_get_pool_availability'), {
+      pool,
+      start: at(6),
+      end: at(8),
+    })) as { coverage: { certainty: string } };
+    expect(answer.coverage.certainty).toBe('uncertain');
+  });
 });

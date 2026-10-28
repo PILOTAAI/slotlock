@@ -11,7 +11,7 @@ import type {
   SlotlockApplicationInvocationContext,
 } from './application-api.js';
 import { type SlotlockBookingRule, type SlotlockBookingRules, bookingSearch } from './booking-rules.js';
-import { findNextAvailable } from './engine.js';
+import { findNextAvailable, mergeIntervals } from './engine.js';
 import { expandRules } from './rules.js';
 import { emitVAvailability, parseVAvailability, toJSCalendarEvent } from './interop.js';
 import {
@@ -589,6 +589,8 @@ export function createSlotlockStoreAgentBackend(
       const window = interval(input as { start: string; end: string });
       const pool = input.pool as string;
       const charge = busyBudget();
+      let windowsLeft = MAX_REQUEST_RULE_WINDOWS;
+      const now = new Date();
       return withTenant(store, context, async (tenantStore) => {
         const tenantRef = context.principal.tenantRef;
         const members = await tenantStore.listPoolMembers({ tenantRef, pool, visibility: 'shared' });
@@ -612,9 +614,39 @@ export function createSlotlockStoreAgentBackend(
           });
           charge(freeBusy.busy.length);
           if (freeBusy.coverage.state !== 'complete') complete = false;
-          for (const busy of freeBusy.busy) {
-            edges.set(busy.start.getTime(), (edges.get(busy.start.getTime()) ?? 0) + 1);
-            edges.set(busy.end.getTime(), (edges.get(busy.end.getTime()) ?? 0) - 1);
+          // Not free either where its booking rules refuse a booking: before its notice, past how
+          // far ahead it books, and, when it enforces them, outside its bookable hours. Its slot
+          // step is not counted: it moves when a booking may start, not whether the member is free.
+          const rules = member.bookingRules;
+          const search = bookingSearch({ rules, timezone: member.timezone, window, now });
+          const latestStart =
+            rules?.maxAdvanceDays !== undefined
+              ? now.getTime() + rules.maxAdvanceDays * 86_400_000
+              : window.end.getTime();
+          let open: Interval[] = search
+            ? [{ start: search.window.start, end: new Date(Math.min(search.window.end.getTime(), latestStart)) }]
+            : [];
+          if (rules?.enforceHours === true && open.length > 0) {
+            const hours = member.availabilityRules ?? (await options.availabilityRules(context, member));
+            const windows = expandRules(hours, window, member.timezone);
+            windowsLeft -= windows.length;
+            if (windowsLeft < 0) throw new SlotlockAgentOperationError('calendar_work_limit', 400);
+            open = windows.flatMap((hoursWindow) => {
+              const start = Math.max(hoursWindow.start.getTime(), (open[0] as Interval).start.getTime());
+              const end = Math.min(hoursWindow.end.getTime(), (open[0] as Interval).end.getTime());
+              return end > start ? [{ start: new Date(start), end: new Date(end) }] : [];
+            });
+          }
+          const closed: Interval[] = [];
+          let from = window.start.getTime();
+          for (const part of mergeIntervals(open.filter((part) => part.end > part.start))) {
+            if (part.start.getTime() > from) closed.push({ start: new Date(from), end: part.start });
+            from = Math.max(from, part.end.getTime());
+          }
+          if (from < window.end.getTime()) closed.push({ start: new Date(from), end: window.end });
+          for (const taken of mergeIntervals([...freeBusy.busy, ...closed])) {
+            edges.set(taken.start.getTime(), (edges.get(taken.start.getTime()) ?? 0) + 1);
+            edges.set(taken.end.getTime(), (edges.get(taken.end.getTime()) ?? 0) - 1);
           }
         }
         const times = [...edges.keys()].sort((a, b) => a - b);
