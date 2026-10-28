@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "io.pylota"
-version = "0.5.0"
+version = "0.5.1"
 description = "A client for Slotlock's REST API: calendars AI agents cannot double-book."
 
 repositories {
