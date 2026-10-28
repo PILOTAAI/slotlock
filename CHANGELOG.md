@@ -7,6 +7,13 @@ versioning.
 
 ### Added
 
+- Benchmarks on every release (RFC 0002, P2-1): once a tag's suite passes, release.yml runs
+  `scripts/bench.mjs` against a PostgreSQL 16 service container, attaches `bench.json` and
+  `bench.md` to the GitHub release and rebuilds the site, whose new Benchmarks page shows the newest
+  results with the method and caveats. The job is informational: nothing waits on it and its failure
+  fails no release. The script now also measures free/busy reads and the non-overlapping workload
+  with durable commits off, records the PostgreSQL version, CPU count, clients and duration, and
+  writes both files with `--out DIR`.
 - Booking rules: a leading buffer (`bufferBeforeMinutes`), the time kept free before each booking,
   so two bookings stay the earlier one's trailing buffer plus the later one's leading buffer apart.
   A reservation now occupies from `occupied_starts_at` (its start less `buffer_before_ms`, set by

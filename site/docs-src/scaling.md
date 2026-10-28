@@ -18,18 +18,10 @@ and against the usual alternative, one row per 15-minute slot with a primary key
 attempts a second. It works in a schema of its own, `slotlock_bench`, and drops it when it ends:
 point it at a scratch database.
 
-On 4 CPUs, PostgreSQL 16 at its defaults, 8 clients and 8 seconds a run (RFC 0002):
-
-| Workload | Range constraint | Slot rows | Slots ÷ range |
-| --- | --- | --- | --- |
-| Non-overlapping, 1 resource | 6,694 | 9,718 | 1.45× |
-| Non-overlapping, 1,000 resources | 7,310 | 8,584 | 1.17× |
-| Saturated single resource (mostly refused) | 3,237 | 7,511 | 2.3× |
-| Contended, 1,000 resources | 8,780 | 7,340 | 0.84× |
-
-Slot rows are not orders of magnitude faster: within 2.3× either way, while they fix the
-granularity, grow with booking length and take about twice the storage. Treat gaps under 15% as
-noise; run it on your own hardware before you size a deployment.
+Slot rows are not orders of magnitude faster: within 2.3× either way in RFC 0002's run, while they
+fix the granularity, grow with booking length and take about twice the storage. Every release
+measures it again: [Benchmarks](/docs/benchmarks/) has the latest results, the method and the
+caveats. Run it on your own hardware before you size a deployment.
 
 ## Partition by resource
 
