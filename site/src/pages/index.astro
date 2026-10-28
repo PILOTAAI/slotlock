@@ -70,6 +70,7 @@ const a2aBody = JSON.stringify(
   null,
   2,
 );
+const assistant = dashboard.assistant;
 const toolPad = Math.max(...facts.tools.map((tool) => tool.name.length)) + 2;
 const apiBase = facts.composeUp ? 'http://localhost:8080' : 'https://calendar.example.com/slotlock';
 const poolScene = capabilities.scenes.pool;
@@ -565,6 +566,58 @@ const canonical = new URL('/', Astro.site).toString();
               ))
             }
           </ul>
+          {
+            assistant && (
+              <div class="assist" id="assistant">
+                <h3 class="assist__title">{assistant.heading}</h3>
+                <div class="security-grid">
+                  <figure class="window assist__window" role="img" aria-label={assistant.aria}>
+                    <div class="window__bar" aria-hidden="true">
+                      <span class="window__dots"><i></i><i></i><i></i></span>
+                      <span class="window__title">{assistant.view.path}</span>
+                    </div>
+                    <div class="assist__body" aria-hidden="true">
+                      <div class="assist__head">
+                        <p class="dash__title">{assistant.view.title}</p>
+                        <span class="assist__button">{assistant.view.reset}</span>
+                      </div>
+                      <ol class="assist__thread">
+                        <li class="assist__msg assist__msg--mine">{assistant.view.question}</li>
+                        <li class="assist__tool">{assistant.view.read}</li>
+                        <li class="assist__msg">{assistant.view.answer}</li>
+                        <li class="assist__card">
+                          <div class="assist__card-head">
+                            <span>{assistant.view.card.title}</span>
+                            <span class="dash__kind dash__kind--hold">{assistant.view.card.state}</span>
+                          </div>
+                          <p class="assist__summary">{assistant.view.card.summary}</p>
+                          <dl class="assist__facts">
+                            {assistant.view.card.fields.map(([name, value]) => (
+                              <>
+                                <dt>{name}</dt>
+                                <dd>{value}</dd>
+                              </>
+                            ))}
+                          </dl>
+                          <div class="assist__actions">
+                            <span class="assist__button assist__button--primary">{assistant.view.card.approve}</span>
+                            <span class="assist__button">{assistant.view.card.dismiss}</span>
+                          </div>
+                        </li>
+                      </ol>
+                      <div class="assist__composer">
+                        <span class="assist__input">{assistant.view.composer}</span>
+                        <span class="assist__button assist__button--primary">{assistant.view.send}</span>
+                      </div>
+                    </div>
+                  </figure>
+                  <ul class="statements">
+                    {assistant.statements.map((statement) => <li><Rich text={statement} /></li>)}
+                  </ul>
+                </div>
+              </div>
+            )
+          }
           <p class="section-link"><a class="arrow-link" href={dashboard.link.href}>{dashboard.link.label} <Icon name="arrow" /></a></p>
         </div>
       </section>
