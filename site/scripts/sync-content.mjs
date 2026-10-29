@@ -136,7 +136,7 @@ const SITE_LINKS = {
 
 /** Repository sections that are docs pages of their own, included without their heading. */
 const SECTION_LINKS = {
-  'README.md#known-issues-in-020': '/docs/known-issues/',
+  'docs/release/0.2.0-known-issues.md#the-known-issues': '/docs/known-issues/',
 };
 
 /** README in-page anchors whose section lives on another docs page (postbuild checks every link). */

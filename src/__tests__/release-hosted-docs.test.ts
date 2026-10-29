@@ -142,7 +142,14 @@ describe('the hosted service page', () => {
     expect(text).toContain('`https://app.slotlock.pylota.io`');
     expect(text).toContain('no service level agreement');
     expect(text).toContain('Writes take effect at once.');
-    expect(text).toContain('**Not open yet.**');
+    expect(text).toContain(
+      'The hosted service is not open; self-hosting is the only supported path today',
+    );
+    // Not the rationale from before 0.3.0 was deployed.
+    expect(text).not.toMatch(/opens once|is released;/);
+    expect(read('site/docs-src/hosted.md')).toContain(
+      'The hosted service is not open; self-hosting is the only supported path today.',
+    );
   });
 
   it('publishes the limits the code enforces', () => {

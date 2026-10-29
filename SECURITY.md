@@ -22,19 +22,12 @@ Do not include real customer, credential, calendar, or booking data. We will ack
 within three business days and coordinate disclosure after a fix is available. Fixed vulnerabilities
 are published as advisories at <https://github.com/PILOTAAI/slotlock/security/advisories>.
 
-## Testing hosted Slotlock
+## Hosted Slotlock
 
-Hosted Slotlock (`slotlock-api.pylota.io` and `app.slotlock.pylota.io`, run by TREFT LTD) is in scope,
-under these rules, which its [Terms of Service](TERMS.md) and
-[Acceptable Use Policy](ACCEPTABLE-USE.md) refer to:
-
-- Test only against an account of your own, signed in with your own GitHub account.
-- Never read, change or keep another account's data. If a test reaches any, stop and report it at
-  once, and delete what you saw.
-- Run no denial of service, load test or automated scanning that sends more than the published
-  limits ([hosted service page](docs/hosted/README.md#limits)); run Slotlock yourself for that.
-- Report through private vulnerability reporting as above, and give us the time to fix it before
-  you disclose anything.
+The hosted service is not open; self-hosting is the only supported path today. Do not test
+`slotlock-api.pylota.io` or `app.slotlock.pylota.io`: they are not in scope until this section
+says the service is open and gives the rules for testing it. Test Slotlock by running it yourself,
+and report what you find as above.
 
 ## Security model
 
@@ -84,7 +77,10 @@ earlier, `PUBLIC` may still hold `CREATE` on `public`; the check then refuses ev
 a lock that blocks other tenants: that is availability, not isolation. `slotlock serve` checks the
 role it connects as before it serves, and refuses to start as a superuser or a `BYPASSRLS` role
 (`unsafe_serving_role`); it does not repeat the rest of this check, so that a single owning role can
-still migrate and serve (`serve --migrate` without `SLOTLOCK_MIGRATE_DATABASE_URL`).
+still migrate and serve (`serve --migrate` without `SLOTLOCK_MIGRATE_DATABASE_URL`). Row-level
+security does not confine the owner on tables that do not force it, and the owner can lift it, so
+`serve` logs a `serving_as_schema_owner` warning at startup when its role owns the `slotlock`
+schema: serve as a role that owns nothing in production.
 
 Schema changes run under a separate deployment role, which must own the `slotlock` schema and every
 object in it (`applySchema` creates the schema when it is missing). The deployment writes rows into

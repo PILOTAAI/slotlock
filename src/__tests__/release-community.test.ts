@@ -34,17 +34,15 @@ describe('support routes', () => {
     expect(support.toLowerCase()).not.toContain('discussion');
   });
 
-  it('says in SECURITY.md how the hosted service may be tested, as the terms promise', () => {
+  it('says in SECURITY.md that the hosted service is not open, and invites no testing of it', () => {
     const security = flat(read('SECURITY.md'));
-    expect(security).toContain('## Testing hosted Slotlock');
-    for (const rule of [
-      'Test only against an account of your own',
-      'Never read, change or keep',
-      'Run no denial of service',
-      'stop and report',
-    ]) {
-      expect(security, rule).toContain(rule);
-    }
+    expect(security).toContain('## Hosted Slotlock');
+    expect(security).toContain(
+      'The hosted service is not open; self-hosting is the only supported path today.',
+    );
+    expect(security).toContain('Do not test `slotlock-api.pylota.io` or `app.slotlock.pylota.io`');
+    expect(security).not.toContain('## Testing hosted Slotlock');
+    expect(security).not.toMatch(/is in scope/);
     // TERMS.md and ACCEPTABLE-USE.md send researchers here.
     for (const file of ['TERMS.md', 'ACCEPTABLE-USE.md']) {
       expect(flat(read(file)), file).toContain('as [SECURITY.md](SECURITY.md) describes');

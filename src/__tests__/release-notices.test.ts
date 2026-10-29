@@ -1,8 +1,9 @@
 // What users of the already-published versions are told (GAP0-2, GAP0-4): 0.2.0 double-books
 // around daylight-saving changes and pins zod 4.6.5 (GHSA-mrhx-c7xc-m3w5), and 0.0.0-stage, 0.1.0
-// and 0.1.1 are older still. The notice must be reachable from the README (npm and GitHub), the
-// site, the v0.2.0 release notes and an advisory, and the maintainer's deprecation runbook must
-// cover every published version with commands that run as written.
+// and 0.1.1 are older still. The notice lives in docs/release/0.2.0-known-issues.md, and must be
+// reachable from the README (npm and GitHub, one line under "Supported versions", no longer its
+// opening), the site, the v0.2.0 release notes and an advisory, and the maintainer's deprecation
+// runbook must cover every published version with commands that run as written.
 import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
@@ -27,8 +28,9 @@ const githubAnchor = (heading: string) =>
     .replace(/[^\p{L}\p{N}\s-]/gu, '')
     .replace(/\s/g, '-');
 
-const HEADING = '## Known issues in 0.2.0';
-const ANCHOR = `https://github.com/PILOTAAI/slotlock#${githubAnchor(HEADING)}`;
+const NOTICE_FILE = 'docs/release/0.2.0-known-issues.md';
+const HEADING = '## The known issues';
+const ANCHOR = `https://github.com/PILOTAAI/slotlock/blob/main/${NOTICE_FILE}#${githubAnchor(HEADING)}`;
 // The workaround is a fixed fact about published versions, not about the zod this repository pins
 // today, so a Dependabot bump of zod leaves these documents alone. GHSA-mrhx-c7xc-m3w5 covers zod
 // below 4.6.6, its first patched version (GitHub's advisory database, read 2026-10-24).
@@ -60,7 +62,7 @@ const CLASSES: [string, RegExp][] = [
 ];
 
 describe('the 0.2.0 known-issues notice', () => {
-  const notice = () => flat(section(read('README.md'), HEADING));
+  const notice = () => flat(section(read(NOTICE_FILE), HEADING));
 
   it('names every double-booking class, the zod pin and its workaround, and 0.3.0', () => {
     const readme = notice();
@@ -70,37 +72,41 @@ describe('the 0.2.0 known-issues notice', () => {
     expect(readme).toContain('zod 4.6.5');
     // The override moves a consumer to a zod past the advisory.
     const override = OVERRIDE.exec(readme);
-    expect(override, 'the README gives the override').not.toBeNull();
+    expect(override, 'the notice gives the override').not.toBeNull();
     expect(patched((override ?? []).slice(1).map(Number))).toBe(true);
     expect(readme).toContain('0.3.0');
   });
 
-  it('stays true in every later package that ships this README: no date, no waiting for 0.3.0', () => {
-    // scripts/prepare-package.mjs packs README.md into every release, 0.3.0 and later included.
-    expect(read('scripts/prepare-package.mjs')).toMatch(/^ {2}'README\.md',$/m);
+  it('stays true after 0.3.0: no audit date, no waiting for 0.3.0, no pin to it', () => {
     const readme = notice();
     expect(readme).not.toMatch(
       /\b\d{1,2} (?:January|February|March|April|May|June|July|August|September|October|November|December) \d{4}\b/,
     );
     expect(readme).not.toMatch(/once it is published|until 0\.3\.0|until then/i);
+    expect(readme).not.toContain('slotlock@0.3.0');
   });
 
-  it('sits ahead of the install instructions, so npm and GitHub readers meet it first', () => {
+  it('is one line under the README\'s "Supported versions", not the README\'s opening', () => {
+    // scripts/prepare-package.mjs packs README.md into every release: npm readers see it.
+    expect(read('scripts/prepare-package.mjs')).toMatch(/^ {2}'README\.md',$/m);
     const text = read('README.md');
-    expect(text.indexOf(HEADING)).toBeGreaterThan(0);
-    expect(text.indexOf(HEADING)).toBeLessThan(text.indexOf('## Install\n'));
+    expect(text).not.toContain('## Known issues');
+    expect(text).not.toContain('slotlock@0.3.0');
+    const supported = section(text, '## Supported versions');
+    const pointers = supported.split('\n').filter((line) => line.includes(ANCHOR));
+    expect(pointers).toHaveLength(1);
   });
 
   it('is a docs page on the site, linked from the landing page while 0.2 is current', () => {
     const page = read('site/docs-src/known-issues.md');
-    expect(page).toContain(`<!-- include README.md#${githubAnchor(HEADING)} body -->`);
+    expect(page).toContain(`<!-- include ${NOTICE_FILE}#${githubAnchor(HEADING)} body -->`);
     expect(read('site/astro.config.mjs')).toContain("'docs/known-issues'");
     expect(read('site/src/data/landing.ts')).toContain('/docs/known-issues/');
   });
 
   it('gives the v0.2.0 release-notes text and the advisory drafts the same facts', () => {
     // The notice is quoted there: read it without the quote markers.
-    const notes = flat(read('docs/release/0.2.0-known-issues.md').replace(/^> ?/gm, ''));
+    const notes = flat(read(NOTICE_FILE).replace(/^> ?/gm, ''));
     for (const [name, words] of CLASSES) expect(notes, name).toMatch(words);
     // The same override as the README's, wherever the notes give it.
     const workaround = OVERRIDE.exec(notice())?.[0] ?? 'the README override';

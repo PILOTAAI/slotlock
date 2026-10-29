@@ -487,7 +487,7 @@ curl "$SLOTLOCK_URL/v1/resources" -H "Authorization: Bearer $SLOTLOCK_API_KEY"
 
 | Scope | Routes |
 | --- | --- |
-| \`read\` | The agent tools that only look: resources, free/busy, next available, events |
+| \`read\` | The agent tools that only look: resources, free/busy, next available, available slots, pool availability, events |
 | \`write\` | The agent tools that create, update and delete events |
 | \`admin\` | The application API: resources, hours, holds, reservations, coverage, the tenant. The server token is never admin. |
 

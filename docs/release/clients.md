@@ -19,11 +19,24 @@ Approving an environment is the human gate for PyPI, crates.io, NuGet and Go: on
 job publishes. Maven Central has a second gate: the job uploads a deployment that waits in the
 Central Portal until a maintainer publishes it there.
 
-None of the registries hold Slotlock yet (checked 2026-10-24: pypi.org/pypi/slotlock/json,
-crates.io/api/v1/crates/slotlock and NuGet's `slotlock.client` index all answered 404, Maven
-search for `io.pylota:slotlock` found nothing, and proxy.golang.org lists no version of the Go
-module). Until the one-time setup below is done for a registry, its job fails at the publish step
-and the other jobs carry on; re-run the failed job once the setup is in place.
+Maven Central holds 0.3.0 only (checked 2026-10-29: `https://repo1.maven.org/maven2/io/pylota/slotlock/maven-metadata.xml`
+lists 0.3.0, and `…/0.4.0/` and `…/0.5.3/` answer 404): the 0.4.x and 0.5.x deployments were
+uploaded but never published in the Central Portal. Until the one-time setup below is done for a
+registry, its job fails at the publish step and the other jobs carry on; re-run the failed job once
+the setup is in place.
+
+## After each release
+
+Do these for every version `<v>`, once its Release run has finished:
+
+1. Approve the `pypi`, `crates-io`, `nuget`, `maven-central` and `go-module` environments in the
+   Release run, and check each job passed.
+2. Publish the Central Portal deployment: central.sonatype.com > Publishing > Deployments, check
+   `slotlock-<v>` validated, and click **Publish**. `scripts/central-bundle.sh` uploads it as
+   `USER_MANAGED`, so nothing reaches Maven Central until you do.
+3. Verify Maven Central serves it: `curl -sI https://repo1.maven.org/maven2/io/pylota/slotlock/<v>/`
+   returns 200. Central can take up to an hour after publishing; until it does, the Java client of
+   `<v>` is pending, not released.
 
 ## One-time setup, by the repository owner
 
@@ -91,8 +104,8 @@ Maven Central has no trusted publishing; the Central Portal takes a user token
    `CENTRAL_PORTAL_TOKEN` (the base64 of `<username>:<password>` of the token),
    `MAVEN_SIGNING_KEY` (`gpg --armor --export-secret-keys <fingerprint>`) and
    `MAVEN_SIGNING_PASSWORD`.
-4. At each release, after the job has run, open central.sonatype.com > Publishing > Deployments,
-   check the deployment `slotlock-<version>` validated, and publish it.
+4. At each release, publish the deployment and verify it, as [After each release](#after-each-release)
+   steps 2 and 3 say.
 
 ### Go
 

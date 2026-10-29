@@ -10,9 +10,9 @@ key, and point an agent at it. Nothing to install and no database to run.
 | Status | [Open `status` issues](https://github.com/PILOTAAI/slotlock/issues?q=is%3Aissue%20label%3Astatus%20is%3Aopen), and [how they are raised](/docs/hosted/status.md) |
 | Price | Free while it is a preview, best effort, with no service level agreement |
 
-**Not open yet.** 0.3.0, which fixes the [0.2.0 known issues](/README.md#known-issues-in-020), is
-released; the service opens once it is deployed here, and this page will say so. Until then the
-addresses above do not answer.
+**Not open.** The hosted service is not open; self-hosting is the only supported path today
+([Self-host with Docker](/README.md#self-host-with-docker)). The addresses above do not answer, and
+the rest of this page describes the service as it will run.
 
 ## Start
 
