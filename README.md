@@ -5,44 +5,6 @@ reservable, answers "when is this free?" from weekly availability rules, and let
 double bookings, however many writers race. Agents call it over MCP or A2A; your code calls it as a
 TypeScript library.
 
-## Known issues in 0.2.0
-
-Slotlock 0.2.0 can occupy less time than an event was written with, so another booking can take the
-rest: around daylight-saving changes, in any time zone that has them, and at the end of some series.
-The library and `slotlock serve` are both affected (the last case below is in the library's
-iCalendar readers only); the 0.1 releases are older still and unsupported. 0.3.0, released on
-2026-10-27, fixes all six cases: upgrade (`npm install slotlock@0.3.0` or
-`ghcr.io/pilotaai/slotlock:0.3.0`, then `slotlock migrate`, as the [changelog](CHANGELOG.md) says).
-While you run 0.2.0, do not rely on it alone to refuse bookings in them.
-
-- A recurring event whose first occurrence spans a daylight-saving change gets that occurrence an
-  hour short: in spring, an hour of the written time is free to book.
-- Recurring events written through the store (the agent tools and the application API) lose the
-  repeated hour of an autumn change: times in it move an hour early, and a series whose first
-  occurrence spans it can store no occurrences, so all of its time is free.
-- A stored recurring series cannot cancel or move an occurrence that falls in the skipped hour of a
-  spring change; the time it was moved to stays free.
-- An occurrence that starts in the skipped hour and lasts longer than the skipped hour is cut short:
-  a 75-minute occurrence occupies 15 minutes.
-- A timed recurring series with a date-only `UNTIL` ends at midnight UTC, so it can lose its last
-  day.
-- An event read from iCalendar (`parseICalendarChanges`, `parseTrustedICalendarEvents` or the
-  worker pool) whose `DURATION` counts hours loses an hour across a spring change, whether it is a
-  single event, a series, an `RDATE` period or a moved occurrence: `DURATION:PT48H` occupies 47
-  hours.
-
-0.1.0, 0.1.1 and 0.2.0 also pin zod 4.6.5 exactly, which has a high advisory
-([GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5): validating an oversized
-array can exhaust memory), which `npm audit` reports. While you run one of them, add this to your
-application's `package.json` and run `npm install`:
-
-```json
-"overrides": {"zod": "4.6.7"}
-```
-
-The full notice, with the versions affected, is in
-[docs/release/0.2.0-known-issues.md](https://github.com/PILOTAAI/slotlock/blob/main/docs/release/0.2.0-known-issues.md).
-
 ## Why it is built for agents
 
 - Resources own calendars, not users, and the tenant comes only from the authenticated caller.
@@ -192,10 +154,11 @@ slotlock rules clear --resource vehicle-42
 
 With Node.js 22.12+ and PostgreSQL 16 or newer, run each command as `npx slotlock` after
 `npm install slotlock postgres`, or from a clone, built once, as `node dist/cli.js` (a clone does not
-put `slotlock` on your `PATH`). Use two roles, as Compose does:
-the server connects as a role that owns nothing and cannot bypass row-level security, and `migrate`
-connects as the database owner and grants that role what it needs. `serve` refuses to start as a
-superuser or a `BYPASSRLS` role, which row-level security does not confine.
+put `slotlock` on your `PATH`). Use two roles, as Compose does, so two URLs: `serve` connects as
+`DATABASE_URL`, a role that owns nothing and cannot bypass row-level security, and `migrate`
+connects as `SLOTLOCK_MIGRATE_DATABASE_URL`, the schema owner, and grants that role what it needs.
+`serve` refuses to start as a superuser or a `BYPASSRLS` role, which row-level security does not
+confine, and warns (`serving_as_schema_owner`) when its role owns the schema.
 
 ```sh
 npm ci && npm run build
@@ -228,7 +191,7 @@ slotlock key revoke <id>
 
 - A key (`slk_…`) is shown once and stored only as a SHA-256. Send it as `Authorization: Bearer`.
 - It acts in the tenant it was created for (`SLOTLOCK_TENANT`), so one server serves many tenants.
-- `read` covers the five tools that only look; `write` covers create, update and delete; `admin`
+- `read` covers the seven tools that only look; `write` covers create, update and delete; `admin`
   covers the [application API](#application-api), which no agent needs. Default: read and write.
 - `rotate` keeps the key's id, scopes and bookings; `revoke` stops it on its next request.
 - A tenant may hold 100 active keys. The last six characters are a checksum secret scanners can
@@ -596,6 +559,9 @@ export async function bookHandover(store: SlotlockStore, tenantRef: string) {
 }
 ```
 
+Run every store method inside `withTenant`. A call outside it is not refused: it runs with no tenant
+context, so as the application role forced row-level security shows it no rows.
+
 `withTenant` validates the tenant, sets the context transaction-locally on the one connection every
 callback call uses, supports nested savepoints, and restores the previous context. Do not issue a
 standalone `set_config(..., true)` through a pool: its transaction ends before the next call.
@@ -647,6 +613,49 @@ Writing rules:
 - Cancelling leaves a tombstone, so a delayed create cannot resurrect the event; use a new external
   reference for a genuinely new event.
 - `listCalendarEvents` and `listResources` return at most 1,000 rows and page with keyset cursors.
+
+### Holds, external bookings and the feed
+
+<!-- example: examples/store.ts#holds -->
+```ts
+export async function holdBookAndFollow(store: SlotlockStore, tenantRef: string, resourceId: string) {
+  // Inside withTenant: outside it the application role's row-level security shows no rows.
+  const booked = await store.withTenant(tenantRef, async (tenant) => {
+    // Hold a window for ten minutes while the customer pays, then turn it into a booking.
+    const held = await tenant.acquireHold({
+      tenantRef,
+      resourceId,
+      start: new Date('2027-04-05T09:00:00Z'),
+      end: new Date('2027-04-05T10:00:00Z'),
+      ttlMs: 10 * 60_000,
+    });
+    if (!held.ok) throw new Error(`not held: ${held.code}`);
+    const confirmed = await tenant.confirmHold(held.hold.id, { tenantRef });
+    if (!confirmed.ok) throw new Error(`hold not confirmed: ${confirmed.code}`);
+
+    // A booking your own system already has, by its reference there: revision 1 creates it.
+    const imported = await tenant.createExternalReservation({
+      tenantRef,
+      externalRef: 'BK-43',
+      resourceId,
+      start: new Date('2027-04-05T11:00:00Z'),
+      end: new Date('2027-04-05T12:00:00Z'),
+      bufferAfterMs: 15 * 60_000,
+      revision: 1,
+    });
+    if (!imported.ok) throw new Error(`BK-43 not booked: ${imported.code}`);
+    return { booking: confirmed.reservation, imported: imported.reservation };
+  });
+
+  // What changed, oldest first, once committed: so in a withTenant of its own. Poll again with
+  // `after: feed.next`.
+  const feed = await store.withTenant(tenantRef, (tenant) =>
+    tenant.listChanges({ tenantRef, limit: 100 }),
+  );
+  if (!feed.ok) throw new Error(`feed not read: ${feed.code}`);
+  return { ...booked, feed };
+}
+```
 
 ### Recurring events
 
@@ -994,7 +1003,7 @@ A refusal is a result the model can act on:
 
 | Code | Meaning |
 | --- | --- |
-| `invalid_arguments` | Input failed the schema, or a window is inverted or longer than 367 days |
+| `invalid_arguments` | Input failed the schema, or a window is inverted or longer than 367 days. A schema failure adds `issues`, up to 20 `{"path":[…],"message":"…"}`, each naming a field by its path in the arguments (`["rules",0,"start_minutes"]`; `[]` is the arguments as a whole): in `error` on MCP and A2A, beside `code` in REST's problem details |
 | `forbidden` | `authorize` refused the call |
 | `rate_limited` | `consumeRateLimit` refused the call |
 | `not_found`, `resource_not_found`, `event_not_found` | Not visible to this caller, or no such id: a resource id is the `id` `slotlock_list_resources` returns, not its `external_ref` |
@@ -1186,8 +1195,8 @@ waits for a confirmation.
 | `POST /v1/resources/{resource_id}/archive` | Take it out of use; `…/restore` puts it back |
 | `DELETE /v1/resources/{resource_id}` | Delete it with its history (`409 resource_in_use` while anything on it is live) |
 | `GET /v1/resources/{resource_id}/busy?start=…&end=…` | Its occupied time, private resources included |
-| `PUT /v1/resources/{resource_id}/availability` | Its own weekly hours; `[]` never bookable, `null` the server's |
-| `PUT /v1/availability` | Every resource's weekly hours at once |
+| `PUT /v1/resources/{resource_id}/availability` | `{"rules":[…]}`: its own weekly hours; `"rules":[]` never bookable, `"rules":null` the server's |
+| `PUT /v1/availability` | `{"rules":[…]}`: every resource's weekly hours at once |
 | `POST /v1/holds` | Hold a window for `ttl_seconds` (up to 7 days) |
 | `GET /v1/holds/{hold_id}` | One live hold; `GET /v1/resources/{resource_id}/holds` lists them |
 | `POST /v1/holds/{hold_id}/confirm` | Turn the hold into a reservation |
@@ -1618,13 +1627,15 @@ export async function maintainTenant(store: SlotlockStore, tenantRef: string) {
 | PostgreSQL | 16, 17 and 18 (CI runs the database suites on each; Compose ships 18) |
 | postgres (peer) | ^3.4.5 |
 
+0.2.0 and older can double-book around daylight-saving changes: [known issues](https://github.com/PILOTAAI/slotlock/blob/main/docs/release/0.2.0-known-issues.md#the-known-issues).
+
 ## Project status and boundaries
 
 Slotlock is availability maths, holds and reservations, events with recurrence, coverage-aware
 free/busy, tenant isolation, iCalendar interchange, MCP and A2A with human confirmation and live
 updates, an MCP Apps view, REST with the application API, scoped API keys, a GitHub sign-in
-dashboard, maintenance, and clients for five languages. [Hosted Slotlock](docs/hosted/README.md),
-not open yet, will run it for you. Provider sync (Google, Microsoft, CalDAV), notifications to people, and a human
+dashboard, maintenance, and clients for five languages. [Hosted Slotlock](docs/hosted/README.md)
+is not open; self-hosting is the only supported path today. Provider sync (Google, Microsoft, CalDAV), notifications to people, and a human
 calendar app are yours to build around it. What each version promises is in
 [VERSIONING.md](VERSIONING.md).
 

@@ -5,6 +5,17 @@ versioning.
 
 ## Unreleased
 
+### Added
+
+- `invalid_arguments` from argument validation names the fields it refused: `issues`, up to 20
+  `{path, message}` (the field's path in the arguments, outermost first; `[]` is the arguments as a
+  whole). REST adds it to the problem details beside `code` (documented in openapi.json's `Error`),
+  MCP and A2A to `error`. Additive: `code` and the status are unchanged.
+  `invokeSlotlockAgentOperation` returns it too (`SlotlockArgumentIssue`).
+- `slotlock serve` logs one `serving_as_schema_owner` warning at startup when its role owns the
+  `slotlock` schema: row-level security does not confine the owner on tables that do not force
+  it. It still serves.
+
 ### Fixed
 
 - Security: a coverage source's `source_id` could be confirmed by guessing. 0.5.3 named a source on the feed
@@ -43,6 +54,13 @@ versioning.
 - **Breaking:** `slotlockCoverageSourceId` throws (`coverage_source_id_unavailable`) instead of
   returning 0.5.3's digest, which nothing carries any more and which would confirm a guessed source:
   read `sourceId` from `listCoverage` (`source_id` of `slotlock_get_coverage`) instead.
+- `slotlock migrate` (and `serve --migrate`) run as a role that does not own the schema, with no
+  `SLOTLOCK_MIGRATE_DATABASE_URL`, now fail with a first line that says to set
+  `SLOTLOCK_MIGRATE_DATABASE_URL` to the schema owner's URL, then the database's refusal.
+- The README no longer opens with the 0.2.0 known issues: they are in
+  `docs/release/0.2.0-known-issues.md`, linked under "Supported versions".
+- The hosted service page, its site page and SECURITY.md say the hosted service is not open and
+  that self-hosting is the only supported path today; SECURITY.md no longer invites testing it.
 
 ### Deprecated
 
@@ -79,6 +97,9 @@ versioning.
   waited past its lock timeout, up to `attempts`, instead of failing.
 
 ## 0.5.3 - 2026-10-28
+
+0.5.3 shipped breaking changes in a patch release, contrary to [VERSIONING.md](VERSIONING.md): the
+two marked "Breaking" under **Changed**. Breaking changes will be minor releases from now on.
 
 ### Added
 
@@ -168,11 +189,11 @@ versioning.
 
 ### Changed
 
-- The feed now also records configuration changes, so a reader or webhook with no `event_types`
-  filter receives them too; filter by type to keep only bookings.
-- `coverage.stale` names its source by `source_id`, as `subject` and in `data`, in place of `source`,
-  and no longer carries `last_error`: a source can be an iCalendar URL with a token or an address,
-  and an error can quote it. `slotlock_get_coverage` still shows both to the tenant, with the
+- Breaking: the feed now also records configuration changes, so a reader or webhook with no
+  `event_types` filter receives them too; filter by type to keep only bookings.
+- Breaking: `coverage.stale` names its source by `source_id`, as `subject` and in `data`, in
+  place of `source`, and no longer carries `last_error`: a source can be an iCalendar URL with a
+  token or an address, and an error can quote it. `slotlock_get_coverage` still shows both to the tenant, with the
   `source_id` to match a change to its source. Changes already on the feed keep the old payload
   until they are pruned.
 

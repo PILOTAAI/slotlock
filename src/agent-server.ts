@@ -884,9 +884,45 @@ export interface SlotlockAgentOperationDispatchOptions {
   onError?: (error: unknown, context: SlotlockAgentErrorContext) => void;
 }
 
+/** One reason `invalid_arguments` refused a call: where in the arguments, and what is wrong there. */
+export interface SlotlockArgumentIssue {
+  /** The field's path in the arguments, outermost first (`["rules", 0, "rrule"]`); `[]` is the arguments as a whole. */
+  path: (string | number)[];
+  message: string;
+}
+
 export type SlotlockAgentOperationDispatchResult =
   | { ok: true; data: Record<string, unknown> }
-  | { ok: false; status: number; code: string; details?: Readonly<Record<string, string>> };
+  | {
+      ok: false;
+      status: number;
+      code: string;
+      details?: Readonly<Record<string, string>>;
+      /** With `invalid_arguments` from argument validation: the fields it refused. */
+      issues?: readonly SlotlockArgumentIssue[];
+    };
+
+/** At most this many issues are returned, each message cut to {@link MAX_ISSUE_MESSAGE} characters. */
+const MAX_ISSUES = 20;
+const MAX_ISSUE_MESSAGE = 200;
+
+/** Argument validation's refusal: 400 `invalid_arguments` with the fields zod refused. */
+function invalidArguments(error: z.ZodError): {
+  ok: false;
+  status: 400;
+  code: 'invalid_arguments';
+  issues: SlotlockArgumentIssue[];
+} {
+  return {
+    ok: false,
+    status: 400,
+    code: 'invalid_arguments',
+    issues: error.issues.slice(0, MAX_ISSUES).map((issue) => ({
+      path: issue.path.map((key) => (typeof key === 'number' ? key : String(key))),
+      message: issue.message.slice(0, MAX_ISSUE_MESSAGE),
+    })),
+  };
+}
 
 interface OperationDefinition {
   name: SlotlockAgentOperation;
@@ -1418,6 +1454,7 @@ export function slotlockMcpToolResult(
         ok: false;
         code: string;
         details?: Readonly<Record<string, string | number | boolean | null>>;
+        issues?: readonly SlotlockArgumentIssue[];
       },
 ): SlotlockMcpToolResult {
   if (outcome.ok) {
@@ -1430,6 +1467,7 @@ export function slotlockMcpToolResult(
   for (const [key, value] of Object.entries(outcome.details ?? {})) {
     if (key !== 'code') error[key] = value;
   }
+  if (outcome.issues) error.issues = outcome.issues;
   return { content: [{ type: 'text', text: JSON.stringify({ error }) }], isError: true };
 }
 
@@ -1792,7 +1830,7 @@ export async function invokeSlotlockAgentOperation(args: {
       return { ok: false, status: 400, code: 'invalid_arguments' };
     }
     const parsed = operation.input.safeParse(args.input ?? {});
-    if (!parsed.success) return { ok: false, status: 400, code: 'invalid_arguments' };
+    if (!parsed.success) return invalidArguments(parsed.error);
     if (
       !(await args.options.authorize({
         principal,
@@ -4162,7 +4200,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
         return { ok: false, status: 403, code: 'forbidden' };
       }
       const parsed = definition.input.safeParse(given);
-      if (!parsed.success) return { ok: false, status: 400, code: 'invalid_arguments' };
+      if (!parsed.success) return invalidArguments(parsed.error);
       if (!(await served.authorize({ principal, operation: definition.name, input: parsed.data }))) {
         return { ok: false, status: 403, code: 'forbidden' };
       }
@@ -4348,6 +4386,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     return refuse(status, outcome.code, {}, {
       ...(outcome.code === 'overlap' ? refusedInterval(given) : {}),
       ...outcome.details,
+      ...(outcome.issues ? { issues: outcome.issues } : {}),
     });
   }
 
@@ -4782,7 +4821,15 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
           return json(200, rpcError(id, -32603, 'Internal error'));
         }
         return reply(
-          outcome.ok ? outcome.data : { error: { ...outcome.details, code: outcome.code } },
+          outcome.ok
+            ? outcome.data
+            : {
+                error: {
+                  ...outcome.details,
+                  code: outcome.code,
+                  ...(outcome.issues ? { issues: outcome.issues } : {}),
+                },
+              },
         );
       } catch {
         return json(200, rpcError(id, -32603, 'Internal error'));

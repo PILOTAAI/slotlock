@@ -92,7 +92,18 @@ describe('Slotlock with the official MCP TypeScript SDK', () => {
       const failed = await connected.callTool({ name, arguments: args });
       expect(failed.isError).toBe(true);
       expect(failed.structuredContent).toBeUndefined();
-      expect(JSON.parse(textOf(failed))).toEqual({ error: { code } });
+      expect(JSON.parse(textOf(failed))).toEqual({
+        error:
+          code === 'invalid_arguments'
+            ? {
+                code,
+                issues: expect.arrayContaining([
+                  { path: ['resource_ids'], message: expect.any(String) },
+                  { path: ['start'], message: 'Invalid ISO datetime' },
+                ]),
+              }
+            : { code },
+      });
     }
   });
 

@@ -7,7 +7,11 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { slot } from '../../examples/availability.js';
 import { oauth } from '../../examples/oauth.js';
-import { createSlotlockAgentServer } from '../agent-server.js';
+import {
+  createSlotlockAgentServer,
+  slotlockAgentOperationScope,
+  slotlockAgentTools,
+} from '../agent-server.js';
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const readme = readFileSync(join(packageRoot, 'README.md'), 'utf8');
@@ -47,6 +51,21 @@ describe('README examples', () => {
         );
       }
     }
+  });
+
+  it('counts the tools the read scope covers as the code scopes them', () => {
+    const reads = slotlockAgentTools().filter(
+      ({ name }) => slotlockAgentOperationScope(name) === 'read',
+    );
+    const words = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
+    expect(reads.length, 'canary: a count the README can spell').toBeLessThan(words.length);
+    expect(readme).toContain(`\`read\` covers the ${words[reads.length]} tools that only look`);
+  });
+
+  it("shows the application API's hours body as the REST schema takes it", () => {
+    expect(readme).toMatch(
+      /^\| `PUT \/v1\/resources\/\{resource_id\}\/availability` \| `\{"rules":\[…\]\}`:/m,
+    );
   });
 
   it('finds the slot the quick start promises', () => {

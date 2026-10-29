@@ -69,3 +69,43 @@ export async function scheduleWeeklyInspection(
   );
 }
 // #endregion recurring
+
+// #region holds
+export async function holdBookAndFollow(store: SlotlockStore, tenantRef: string, resourceId: string) {
+  // Inside withTenant: outside it the application role's row-level security shows no rows.
+  const booked = await store.withTenant(tenantRef, async (tenant) => {
+    // Hold a window for ten minutes while the customer pays, then turn it into a booking.
+    const held = await tenant.acquireHold({
+      tenantRef,
+      resourceId,
+      start: new Date('2027-04-05T09:00:00Z'),
+      end: new Date('2027-04-05T10:00:00Z'),
+      ttlMs: 10 * 60_000,
+    });
+    if (!held.ok) throw new Error(`not held: ${held.code}`);
+    const confirmed = await tenant.confirmHold(held.hold.id, { tenantRef });
+    if (!confirmed.ok) throw new Error(`hold not confirmed: ${confirmed.code}`);
+
+    // A booking your own system already has, by its reference there: revision 1 creates it.
+    const imported = await tenant.createExternalReservation({
+      tenantRef,
+      externalRef: 'BK-43',
+      resourceId,
+      start: new Date('2027-04-05T11:00:00Z'),
+      end: new Date('2027-04-05T12:00:00Z'),
+      bufferAfterMs: 15 * 60_000,
+      revision: 1,
+    });
+    if (!imported.ok) throw new Error(`BK-43 not booked: ${imported.code}`);
+    return { booking: confirmed.reservation, imported: imported.reservation };
+  });
+
+  // What changed, oldest first, once committed: so in a withTenant of its own. Poll again with
+  // `after: feed.next`.
+  const feed = await store.withTenant(tenantRef, (tenant) =>
+    tenant.listChanges({ tenantRef, limit: 100 }),
+  );
+  if (!feed.ok) throw new Error(`feed not read: ${feed.code}`);
+  return { ...booked, feed };
+}
+// #endregion holds

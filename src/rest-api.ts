@@ -478,6 +478,19 @@ export function slotlockOpenApiDocument(args: {
             resource_id: { type: 'string', description: 'An overlap: the resource it refused.' },
             start: { type: 'string', description: 'An overlap: the start it refused.' },
             end: { type: 'string', description: 'An overlap: the end it refused.' },
+            issues: {
+              type: 'array',
+              description:
+                '`invalid_arguments` from argument validation: each field it refused (at most 20), by its path in the arguments, outermost first; `[]` is the arguments as a whole.',
+              items: {
+                type: 'object',
+                required: ['path', 'message'],
+                properties: {
+                  path: { type: 'array', items: { type: ['string', 'integer'] } },
+                  message: { type: 'string' },
+                },
+              },
+            },
             error: {
               type: 'object',
               required: ['code'],

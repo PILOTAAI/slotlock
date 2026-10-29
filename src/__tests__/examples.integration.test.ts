@@ -10,7 +10,12 @@ import { deploySlotlock } from '../../examples/deploy.js';
 import { maintainTenant } from '../../examples/maintenance.js';
 import { findSlotOverMcp } from '../../examples/mcp-client.js';
 import { openLiveCalendar } from '../../examples/mcp-live.js';
-import { bookHandover, openSlotlock, scheduleWeeklyInspection } from '../../examples/store.js';
+import {
+  bookHandover,
+  holdBookAndFollow,
+  openSlotlock,
+  scheduleWeeklyInspection,
+} from '../../examples/store.js';
 import { slotlockCalendarResourceUri } from '../agent-server.js';
 import { SLOTLOCK_CORE_DDL, SLOTLOCK_TENANT_RLS_DDL } from '../ddl.js';
 import { createSlotlockStore } from '../store.js';
@@ -492,6 +497,19 @@ describe.skipIf(!url)('Slotlock README examples (real Postgres)', () => {
       capped: false,
       rollPending: false,
     });
+  });
+
+  it('holds and confirms, books by an external reference, and reads the feed, inside withTenant', async () => {
+    const { booking, imported, feed } = await holdBookAndFollow(app.store, tenantRef, vehicleId);
+    expect(booking).toMatchObject({
+      resourceId: vehicleId,
+      start: new Date('2027-04-05T09:00:00Z'),
+      end: new Date('2027-04-05T10:00:00Z'),
+    });
+    expect(imported).toMatchObject({ externalRef: 'BK-43', revision: 1 });
+    const types = feed.changes.map(({ type }) => type);
+    expect(types).toEqual(expect.arrayContaining(['resource.created', 'reservation.created']));
+    expect(feed.next).toBe(feed.changes.at(-1)?.position);
   });
 
   it('answers the MCP and A2A client examples over HTTP', async () => {

@@ -466,6 +466,8 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       shutdown.abort();
     }
     expect(await serving).toBe(0);
+    // A role that owns nothing serves without the schema owner's warning.
+    expect(stderr.events().map(({ event }) => event)).not.toContain('serving_as_schema_owner');
     expect(stdout.events().map(({ event }) => event)).toEqual([
       'schema_applied',
       'application_role_granted',
@@ -1012,6 +1014,100 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       }
     } finally {
       await admin.unsafe(`DROP ROLE IF EXISTS ${bypassRole}`);
+    }
+  });
+
+  it("refuses migrate as the serving role with the fix first: the schema owner's URL", async () => {
+    const stdout = output();
+    const stderr = output();
+    const code = await runSlotlockCli(['migrate'], {
+      env: { ...env, SLOTLOCK_MIGRATE_DATABASE_URL: undefined },
+      stdout,
+      stderr,
+      signal: new AbortController().signal,
+    });
+    expect(code).toBe(1);
+    // A superuser owns this schema, so the serving role is refused a read, not a schema it controls.
+    const [failure] = stderr.events();
+    expect(failure).toMatchObject({ event: 'migrate_failed', code: '42501' });
+    const [first, ...detail] = String(failure?.error).split('\n');
+    expect(first).toMatch(/^set SLOTLOCK_MIGRATE_DATABASE_URL to the schema owner's URL: /);
+    expect(first).toContain(`migrate connected as ${role}`);
+    expect(first?.length).toBeLessThan(300);
+    // The database's refusal still follows.
+    expect(detail.join('\n')).toContain('permission denied');
+    expect(stderr.text()).not.toContain(password);
+  });
+
+  it('serves as the schema owner, with one warning at startup', async () => {
+    // A database of its own, migrated and served by one NOSUPERUSER role that owns the schema.
+    const suffix = randomBytes(6).toString('hex');
+    const database = `slotlock_owner_serve_${suffix}`;
+    const ownerRole = `slotlock_owner_serve_${suffix}`;
+    const ownerPassword = randomBytes(24).toString('hex');
+    await admin.unsafe(
+      `CREATE ROLE ${ownerRole} LOGIN PASSWORD '${ownerPassword}' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`,
+    );
+    await admin.unsafe(`CREATE DATABASE ${database} OWNER ${ownerRole}`);
+    try {
+      const ownerUrl = new URL(url as string);
+      ownerUrl.username = ownerRole;
+      ownerUrl.password = ownerPassword;
+      ownerUrl.pathname = `/${database}`;
+      const shutdown = new AbortController();
+      const stdout = output();
+      const stderr = output();
+      const serving = runSlotlockCli(['serve', '--migrate'], {
+        env: { ...env, DATABASE_URL: ownerUrl.href, SLOTLOCK_MIGRATE_DATABASE_URL: undefined },
+        stdout,
+        stderr,
+        signal: shutdown.signal,
+      });
+      try {
+        await eventually(() => stdout.events().find(({ event }) => event === 'listening'));
+      } finally {
+        shutdown.abort();
+      }
+      expect(await serving).toBe(0);
+      const warnings = stderr.events().filter(({ event }) => event === 'serving_as_schema_owner');
+      expect(warnings).toEqual([
+        {
+          level: 'warn',
+          time: expect.any(String),
+          event: 'serving_as_schema_owner',
+          role: ownerRole,
+          message: expect.stringContaining('SLOTLOCK_MIGRATE_DATABASE_URL'),
+        },
+      ]);
+      expect(stderr.text() + stdout.text()).not.toContain(ownerPassword);
+
+      // Migrate as another role, with no SLOTLOCK_MIGRATE_DATABASE_URL: the schema's owner is not a
+      // superuser, so the deployment check refuses with a reason per object that role does not
+      // own, thousands of characters of them. The fix comes first, on a line of its own.
+      const appUrl = new URL(ownerUrl.href);
+      appUrl.username = role;
+      appUrl.password = password;
+      const migrateOut = output();
+      const migrateErr = output();
+      const code = await runSlotlockCli(['migrate'], {
+        env: { ...env, DATABASE_URL: appUrl.href, SLOTLOCK_MIGRATE_DATABASE_URL: undefined },
+        stdout: migrateOut,
+        stderr: migrateErr,
+        signal: new AbortController().signal,
+      });
+      expect(code).toBe(1);
+      const [failure] = migrateErr.events();
+      expect(failure).toMatchObject({ event: 'migrate_failed', code: 'unsafe_slotlock_schema' });
+      expect(failure?.reasons).toEqual(expect.arrayContaining([expect.any(String)]));
+      const [first, ...detail] = String(failure?.error).split('\n');
+      expect(first).toBe(
+        `set SLOTLOCK_MIGRATE_DATABASE_URL to the schema owner's URL: migrate connected as ${role} (DATABASE_URL), but ${ownerRole} owns the slotlock schema, and only its owner can migrate it. DATABASE_URL stays the serving role's.`,
+      );
+      expect(detail.join('\n')).toMatch(/^Slotlock will not deploy into schema slotlock/);
+      expect(migrateErr.text()).not.toContain(password);
+    } finally {
+      await admin.unsafe(`DROP DATABASE IF EXISTS ${database} WITH (FORCE)`);
+      await admin.unsafe(`DROP ROLE IF EXISTS ${ownerRole}`);
     }
   });
 

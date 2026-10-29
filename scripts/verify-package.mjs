@@ -464,7 +464,10 @@ try {
   assert.equal(invalidResult.isError, true);
   assert.equal(invalidResult.structuredContent, undefined);
   assert.deepEqual(JSON.parse(invalidResult.content[0].text), {
-    error: { code: 'invalid_arguments' },
+    error: {
+      code: 'invalid_arguments',
+      issues: [{ path: ['event_id'], message: 'Invalid input: expected string, received undefined' }],
+    },
   });
 
   // MCP 2026-07-28: no handshake; every request carries the \`_meta\` envelope and mirrors it in headers.
