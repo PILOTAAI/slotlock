@@ -44,6 +44,10 @@ versioning.
 
 ### Upgrading
 
+- **Breaking:** the schema is version 4. A 0.5 release refuses to migrate it ("Slotlock will not
+  migrate a schema a newer release migrated") and its server refuses to serve it, since its DDL would
+  put back the trigger that names a source by its guessable digest. Rolling back to 0.5.x needs a
+  restore of a backup taken before the upgrade.
 - The migration adds `calendar_coverage.source_id` without rewriting the table (the column bare, its
   random default set apart), gives each existing source an id under the migration's lock
   (`calendar_coverage` is one row per source and resource), and adds its CHECK NOT VALID, validated

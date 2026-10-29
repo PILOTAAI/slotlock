@@ -5,10 +5,16 @@
 // binds; the feed never serves one of them raw meanwhile. A database and roles of their own; skipped
 // without DATABASE_URL; the connecting role must create databases and roles.
 import { randomBytes, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createSlotlockStoreApplicationBackend } from '../agent-store-backend.js';
-import { SLOTLOCK_CORE_DDL, SLOTLOCK_COVERAGE_CHANGE_RENAME_BATCH, SLOTLOCK_TENANT_TABLES } from '../ddl.js';
+import {
+  SLOTLOCK_CORE_DDL,
+  SLOTLOCK_COVERAGE_CHANGE_RENAME_BATCH,
+  SLOTLOCK_SCHEMA_VERSION,
+  SLOTLOCK_TENANT_TABLES,
+} from '../ddl.js';
 import { slotlockCoverageSourceId } from '../event-feed.js';
 import { type SlotlockStore, createSlotlockStore } from '../store.js';
 import { deliverSlotlockWebhooks } from '../webhooks.js';
@@ -319,5 +325,39 @@ describe.skipIf(!url)('coverage source ids (real Postgres)', () => {
       .catch((error: unknown) => {
         if (!(error instanceof Error) || error.message !== 'rollback') throw error;
       });
+  });
+});
+
+describe.skipIf(!url)('rolling back to 0.5.x (real Postgres)', () => {
+  const database = `slotlock_rollback_${randomBytes(6).toString('hex')}`;
+  let admin: postgres.Sql;
+  let sql: postgres.Sql;
+
+  beforeAll(async () => {
+    admin = postgres(url as string, { max: 1, onnotice: () => undefined });
+    await admin.unsafe(`CREATE DATABASE ${database}`);
+    const target = new URL(url as string);
+    target.pathname = `/${database}`;
+    sql = postgres(target.href, { max: 1, onnotice: () => undefined });
+    await createSlotlockStore(sql).applySchema();
+  });
+
+  afterAll(async () => {
+    await sql?.end();
+    await admin?.unsafe(`DROP DATABASE IF EXISTS ${database} WITH (FORCE)`);
+    await admin?.end();
+  });
+
+  it("is refused by 0.5.3's migration, which would put the digest trigger back", async () => {
+    // 0.5.3 records schema version 3 and refuses only a higher one before it changes anything.
+    const preconditions = readFileSync(
+      new URL('./fixtures/slotlock-0.5.3-schema-preconditions.sql', import.meta.url),
+      'utf8',
+    );
+    await expect(sql.unsafe(preconditions)).rejects.toMatchObject({
+      code: '55000',
+      message: expect.stringContaining('Slotlock will not migrate a schema a newer release migrated'),
+    });
+    expect(SLOTLOCK_SCHEMA_VERSION).toBeGreaterThan(3);
   });
 });

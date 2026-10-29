@@ -79,9 +79,11 @@ export const SLOTLOCK_SCHEMA_CONTROL_REFUSAL = 'Slotlock will not deploy into sc
 
 /**
  * The version of the schema this release creates, recorded in `slotlock.schema_version` by every
- * migration. Releases up to 0.2 recorded nothing; 0.1 was version 1 and 0.2 version 2.
+ * migration. Releases up to 0.2 recorded nothing; 0.1 was version 1 and 0.2 version 2; 0.3 to 0.5
+ * recorded 3. 0.6 is 4, so a 0.5 release refuses it before it changes anything: its DDL would put
+ * back the trigger that names a coverage source by its guessable digest.
  */
-export const SLOTLOCK_SCHEMA_VERSION = 3;
+export const SLOTLOCK_SCHEMA_VERSION = 4;
 
 /** The start of the message with which the deployment DDL refuses a schema a newer release migrated. */
 export const SLOTLOCK_SCHEMA_NEWER_REFUSAL =
