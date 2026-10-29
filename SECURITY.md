@@ -111,11 +111,9 @@ source itself, which can be an iCalendar URL with a token or an address. The id 
 until it is deleted, so someone who sees a change and knows the tenant cannot confirm a guessed
 source against it (0.5.3's id was an unkeyed digest of the tenant and the source, and could be).
 The tenant reads the id beside the source from `listCoverage`. Upgrading renames the coverage
-changes earlier releases wrote, which carried the source, its last error or that digest, and the
-migrations after it rename what a 0.5 server still running wrote meanwhile, until one finds
-nothing. A change an earlier release writes after that keeps its source in the outbox, and in
-backups and replicas, until it is pruned; stop every 0.5 server before the migration after the
-upgrade. Every read path serves a `coverage.*` change without `source` and `last_error`, named
+changes earlier releases wrote, which carried the source, its last error or that digest, and a
+trigger on the outbox puts one an earlier release's server (0.3-0.5) still running writes after the
+upgrade in the same shape as it is inserted, so none is stored with its source. Every read path serves a `coverage.*` change without `source` and `last_error`, named
 `src_redacted` when its subject is not such an id, and history by subject never matches a coverage
 change by any other name. What was already sent stays sent: a webhook receiver keeps an earlier
 delivery, so rotate a token that an earlier release delivered in a `coverage.stale` change. A

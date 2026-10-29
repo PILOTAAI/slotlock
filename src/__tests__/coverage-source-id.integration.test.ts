@@ -214,7 +214,9 @@ describe.skipIf(!url)('coverage source ids (real Postgres)', () => {
     });
     expect(hook.ok).toBe(true);
 
-    // More changes than one batch reads, then the rows each earlier release wrote.
+    // More changes than one batch reads, then the rows each earlier release wrote, which had no
+    // trigger putting them in shape.
+    await superuser.unsafe('DROP TRIGGER IF EXISTS slotlock_outbox_coverage_in_shape ON slotlock.outbox');
     await superuser`
       INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, origin)
       SELECT ${tenantRef}, ${resourceId}, 'resource.updated', ${resourceId}, '{}', 'library'
@@ -337,53 +339,71 @@ describe.skipIf(!url)('coverage source ids (real Postgres)', () => {
       });
   });
 
-  it('renames a change an earlier server writes after the upgrade at the next migration, and history never finds it', async () => {
+  it('puts a change an earlier release writes after the upgrade in shape as it is inserted, even once the rename is done', async () => {
     const tenantRef = `late-${randomUUID()}`;
     const app = createSlotlockStoreApplicationBackend(store);
     const resourceId = await vehicle(tenantRef);
     const live = `ical:https://calendar.example.com/late.ics?token=LATE${randomUUID().slice(0, 8)}`;
-    await app.recordCoverage(context(tenantRef), { resource_id: resourceId, source: live, ...window, revision: 1 });
-    const id = (await sourceIds(tenantRef, resourceId))[live] as string;
-    /** What a 0.5.2 server still running writes when it reports the source stale. */
-    const reportedBy052 = () => superuser`
-      INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, origin)
-      VALUES (${tenantRef}, ${resourceId}, 'coverage.stale', ${live},
-              ${superuser.json({ resource_id: resourceId, source: live, observed_at: '2026-10-27T09:00:00Z', last_error: `HTTP 401 from ${live}` })},
-              'maintenance')
-      RETURNING id::text`;
-    const stored = async (row: string) => {
-      const [found] = await superuser<{ subject: string; data: Record<string, unknown> }[]>`
-        SELECT subject, data FROM slotlock.outbox WHERE id = ${row}::bigint`;
-      return found;
+    const address = 'google:alice.smith@example.com';
+    for (const source of [live, address]) {
+      await app.recordCoverage(context(tenantRef), { resource_id: resourceId, source, ...window, revision: 1 });
+    }
+    const ids = await sourceIds(tenantRef, resourceId);
+    /** What a server of an earlier release still running writes, as the application role would. */
+    const written = async (subject: string, data: Record<string, unknown>) => {
+      const target = new URL(url as string);
+      target.pathname = `/${database}`;
+      const served = postgres(Object.assign(target, { username: application, password }).href, {
+        max: 1,
+        onnotice: () => undefined,
+      });
+      try {
+        const [row] = await served.begin(async (tx) => {
+          await tx`SELECT set_config('slotlock.tenant_ref', ${tenantRef}, true)`;
+          return tx<{ id: string }[]>`
+            INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+            VALUES (${tenantRef}, ${resourceId}, 'coverage.stale', ${subject}, ${tx.json(data as never)},
+                    'slotlock:maintenance')
+            RETURNING id::text`;
+        });
+        const [stored] = await superuser<{ subject: string; data: Record<string, unknown> }[]>`
+          SELECT subject, data FROM slotlock.outbox WHERE id = ${row?.id as string}::bigint`;
+        return stored;
+      } finally {
+        await served.end();
+      }
     };
     const renamed = async () =>
       (await superuser<{ done: boolean }[]>`SELECT coverage_changes_renamed AS done FROM slotlock.schema_version`)[0]?.done;
 
     await asBefore06();
     await ownerStore.applySchema(); // the upgrade
-    const [late] = await reportedBy052();
-    expect(await store.listHistory({ tenantRef, subject: live, limit: 10 })).toEqual([]);
-
-    await ownerStore.applySchema(); // the next migration
-    expect(await stored(late?.id as string)).toEqual({
-      subject: id,
-      data: { resource_id: resourceId, source_id: id, observed_at: '2026-10-27T09:00:00Z' },
-    });
-    expect(await renamed()).toBe(false);
-    await ownerStore.applySchema(); // finds nothing: done
+    await ownerStore.applySchema(); // a second instance: finds nothing, so done
     expect(await renamed()).toBe(true);
-    expect(await forcedTables()).toEqual([...SLOTLOCK_TENANT_TABLES].sort());
 
-    // Once done, no migration reads the outbox for it again, even one that changes the structure: a
-    // row an earlier release writes after that is served redacted, and history cannot find it.
-    const [after] = await reportedBy052();
-    await superuser`UPDATE slotlock.schema_version SET ddl_sha256 = NULL, catalog_sha256 = NULL`;
-    await ownerStore.applySchema();
-    expect((await stored(after?.id as string))?.subject).toBe(live);
+    const observed = '2026-10-27T09:00:00Z';
+    // 0.5.2 and earlier: the source itself and its last error.
+    expect(
+      await written(live, { resource_id: resourceId, source: live, observed_at: observed, last_error: `HTTP 401 from ${live}` }),
+    ).toEqual({ subject: ids[live], data: { resource_id: resourceId, source_id: ids[live], observed_at: observed } });
+    // 0.5.3: the guessable digest.
+    const digest = digest053(tenantRef, address);
+    expect(await written(digest, { resource_id: resourceId, source_id: digest, observed_at: observed })).toEqual({
+      subject: ids[address],
+      data: { resource_id: resourceId, source_id: ids[address], observed_at: observed },
+    });
+    // A source this resource does not have.
+    const unknown = 'ical:https://calendar.example.com/other.ics?token=OTHER1';
+    expect(await written(unknown, { resource_id: resourceId, source: unknown, observed_at: observed })).toEqual({
+      subject: 'src_redacted',
+      data: { resource_id: resourceId, source_id: 'src_redacted', observed_at: observed },
+    });
+    const everything = JSON.stringify(await superuser`SELECT * FROM slotlock.outbox WHERE tenant_ref = ${tenantRef}`);
+    for (const secret of ['LATE', 'OTHER1', 'calendar.example.com', 'alice.smith', digest]) {
+      expect(everything).not.toContain(secret);
+    }
     expect(await store.listHistory({ tenantRef, subject: live, limit: 10 })).toEqual([]);
-    const [latest] = await store.listHistory({ tenantRef, resourceId, limit: 1 });
-    expect(latest).toMatchObject({ type: 'coverage.stale', subject: 'src_redacted', data: { source_id: 'src_redacted' } });
-    expect(JSON.stringify(latest)).not.toContain('LATE');
+    expect(await forcedTables()).toEqual([...SLOTLOCK_TENANT_TABLES].sort());
   });
 });
 

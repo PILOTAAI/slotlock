@@ -1879,6 +1879,32 @@ CREATE OR REPLACE TRIGGER slotlock_outbox_resource_change
 CREATE OR REPLACE TRIGGER slotlock_outbox_coverage_change
   AFTER INSERT OR DELETE ON slotlock.calendar_coverage
   FOR EACH ROW EXECUTE FUNCTION slotlock.outbox_coverage_change();
+
+-- A coverage change an earlier release's server (0.3-0.5) still running writes, as it is inserted:
+-- named by its source's source_id (src_redacted for a source it cannot find), without the source or
+-- the error read from it. 0.5.2 and earlier wrote the source itself (an iCalendar URL with a token,
+-- an address) and its last error; 0.5.3 its guessable digest. This release's own rows are in shape
+-- and pass unchanged. It runs as the inserting role, under its tenant's RLS like the insert itself.
+CREATE OR REPLACE FUNCTION slotlock.outbox_coverage_in_shape()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_outbox_coverage_in_shape$
+DECLARE
+  named text;
+BEGIN
+  IF ${coverageChangeInShapeSql('NEW')} THEN RETURN NEW; END IF;
+  named := ${coverageChangeSourceIdSql('NEW')};
+  NEW.subject := named;
+  NEW.data := (NEW.data - 'source' - 'last_error') || pg_catalog.jsonb_build_object('source_id', named);
+  RETURN NEW;
+END
+$slotlock_outbox_coverage_in_shape$;
+CREATE OR REPLACE TRIGGER slotlock_outbox_coverage_in_shape
+  BEFORE INSERT ON slotlock.outbox
+  FOR EACH ROW WHEN (NEW.type LIKE 'coverage.%')
+  EXECUTE FUNCTION slotlock.outbox_coverage_in_shape();
 CREATE OR REPLACE TRIGGER slotlock_outbox_webhook_change
   AFTER INSERT OR DELETE ON slotlock.webhook_endpoints
   FOR EACH ROW EXECUTE FUNCTION slotlock.outbox_webhook_change();
@@ -3206,6 +3232,33 @@ CREATE INDEX IF NOT EXISTS slotlock_reservations_calendar_event_idx
   ON slotlock.reservations (calendar_event_id) WHERE calendar_event_id IS NOT NULL;
 ${SLOTLOCK_OUTBOX_DDL}${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_DASHBOARD_DDL}${SLOTLOCK_TENANT_ADMIN_DDL}${DEPLOYMENT_RECORD_VERSION}`;
 
+/**
+ * Whether the outbox row `row` (a coverage change) is in this release's shape: named by a source_id
+ * or src_redacted, in `subject` and `data.source_id` alike, with no `source` or `last_error`.
+ */
+function coverageChangeInShapeSql(row: string): string {
+  return `(${row}.subject ~ '^src_([0-9a-f]{32}|redacted)$'
+         AND ${row}.data ->> 'source_id' IS NOT DISTINCT FROM ${row}.subject
+         AND NOT ${row}.data ?| ARRAY['source', 'last_error'])`;
+}
+
+/**
+ * The source_id an earlier release's coverage change `row` names its source by: the source with
+ * its tenant and resource whose source (0.5.2 and earlier: the subject, or `data.source`) or 0.5.3
+ * digest (the subject) it carries, else src_redacted.
+ */
+function coverageChangeSourceIdSql(row: string): string {
+  return `COALESCE((
+           SELECT coverage.source_id FROM slotlock.calendar_coverage coverage
+            WHERE coverage.tenant_ref = ${row}.tenant_ref
+              AND coverage.resource_id = ${row}.resource_id
+              AND coverage.source_id IS NOT NULL
+              AND (coverage.source = ${row}.subject
+                   OR coverage.source = ${row}.data ->> 'source'
+                   OR ${legacyCoverageSourceDigestSql('coverage.tenant_ref', 'coverage.source')} = ${row}.subject)
+            LIMIT 1), 'src_redacted')`;
+}
+
 /** Outbox ids one batch of the coverage-change rename reads (by primary key) in one transaction. */
 export const SLOTLOCK_COVERAGE_CHANGE_RENAME_BATCH = 5_000;
 
@@ -3232,21 +3285,10 @@ export function slotlockCoverageChangeRenameSql(after: string, head: string, bat
     FROM slotlock.outbox change
    WHERE change.id IN (SELECT scanned.id FROM scanned)
      AND change.type LIKE 'coverage.%'
-     AND NOT (change.subject ~ '^src_([0-9a-f]{32}|redacted)$'
-              AND change.data ->> 'source_id' IS NOT DISTINCT FROM change.subject
-              AND NOT change.data ?| ARRAY['source', 'last_error'])
+     AND NOT ${coverageChangeInShapeSql('change')}
      FOR UPDATE OF change
 ), named AS (
-  SELECT earlier.id,
-         COALESCE((
-           SELECT coverage.source_id FROM slotlock.calendar_coverage coverage
-            WHERE coverage.tenant_ref = earlier.tenant_ref
-              AND coverage.resource_id = earlier.resource_id
-              AND coverage.source_id IS NOT NULL
-              AND (coverage.source = earlier.subject
-                   OR coverage.source = earlier.data ->> 'source'
-                   OR ${legacyCoverageSourceDigestSql('coverage.tenant_ref', 'coverage.source')} = earlier.subject)
-            LIMIT 1), 'src_redacted') AS source_id
+  SELECT earlier.id, ${coverageChangeSourceIdSql('earlier')} AS source_id
     FROM earlier
 ), renamed AS (
   UPDATE slotlock.outbox change
