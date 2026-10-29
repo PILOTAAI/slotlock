@@ -42,10 +42,13 @@ versioning.
   above; their positions and ids (`webhook-id`) do not change, so a webhook that already received
   one is not sent it again, and one that has not receives the new shape.
 
+- **Breaking:** `slotlockCoverageSourceId` throws (`coverage_source_id_unavailable`) instead of
+  returning 0.5.3's digest, which nothing carries any more and which would confirm a guessed source:
+  read `sourceId` from `listCoverage` (`source_id` of `slotlock_get_coverage`) instead.
+
 ### Deprecated
 
-- `slotlockCoverageSourceId` still returns 0.5.3's digest, which nothing returns any more: read
-  `sourceId` from `listCoverage` instead. It may be removed in 0.7.0.
+- `slotlockCoverageSourceId`, which now only throws. It may be removed in 0.7.0.
 
 ### Upgrading
 

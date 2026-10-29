@@ -2,7 +2,7 @@
 // endpoints it is delivered to. Rows are appended by triggers in the same transaction as the change
 // (ddl.ts, SLOTLOCK_OUTBOX_DDL). These are the store's methods for reading them and for keeping each
 // endpoint's delivery state; webhooks.ts signs and sends.
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import type { Sql, TransactionSql } from 'postgres';
 
 type SlotlockSql = Sql | TransactionSql;
@@ -88,15 +88,21 @@ export function legacyCoverageSourceDigestSql(tenant: string, source: string): s
 }
 
 /**
- * The digest 0.5.3 named a coverage source by (`src_` and 24 hex digits of the tenant and the
- * source). The feed no longer carries it: since 0.6 a source's `source_id` is random, made when it
- * is first recorded, and only `listCoverage` / `slotlock_get_coverage` give it.
+ * 0.5.3 worked out a source's id here: an unkeyed digest of the tenant and the source, which let
+ * anyone who saw a change confirm a guessed source. Since 0.6 a source's `source_id` is random and
+ * only the database knows it, so this throws (`coverage_source_id_unavailable`) rather than give a
+ * digest nothing carries any more.
  *
- * @deprecated It no longer matches anything the feed or the API returns; read `sourceId` from
- * `listCoverage` (`source_id` of `slotlock_get_coverage`). It may be removed in 0.7.0.
+ * @deprecated Read `sourceId` from `listCoverage` (`source_id` of `slotlock_get_coverage`). It may
+ * be removed in 0.7.0.
  */
-export function slotlockCoverageSourceId(tenantRef: string, source: string): string {
-  return `src_${createHash('sha256').update(`${tenantRef}\n${source}`, 'utf8').digest('hex').slice(0, 24)}`;
+export function slotlockCoverageSourceId(_tenantRef: string, _source: string): never {
+  throw Object.assign(
+    new Error(
+      "slotlockCoverageSourceId cannot work out a source's id since 0.6: it is random. Read sourceId from listCoverage (source_id of slotlock_get_coverage)",
+    ),
+    { code: 'coverage_source_id_unavailable' as const },
+  );
 }
 
 /** What a coverage source's `source_id` is: `src_` and 32 random hex digits. */

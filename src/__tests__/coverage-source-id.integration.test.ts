@@ -4,7 +4,7 @@
 // unkeyed digest of it) in batches after the structure commits, as a deployment role forced RLS
 // binds; the feed never serves one of them raw meanwhile. A database and roles of their own; skipped
 // without DATABASE_URL; the connecting role must create databases and roles.
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -15,12 +15,14 @@ import {
   SLOTLOCK_SCHEMA_VERSION,
   SLOTLOCK_TENANT_TABLES,
 } from '../ddl.js';
-import { slotlockCoverageSourceId } from '../event-feed.js';
 import { type SlotlockStore, createSlotlockStore } from '../store.js';
 import { deliverSlotlockWebhooks } from '../webhooks.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
 const SOURCE_ID = /^src_[0-9a-f]{32}$/;
+/** 0.5.3's id for a source: the unkeyed digest anyone could work out. */
+const digest053 = (tenantRef: string, source: string) =>
+  `src_${createHash('sha256').update(`${tenantRef}\n${source}`, 'utf8').digest('hex').slice(0, 24)}`;
 
 describe.skipIf(!url)('coverage source ids (real Postgres)', () => {
   const suffix = randomBytes(6).toString('hex');
@@ -115,12 +117,12 @@ describe.skipIf(!url)('coverage source ids (real Postgres)', () => {
         await app.recordCoverage(context(tenantRef), { resource_id: resourceId, source: guess, ...window, revision: 1 });
         const id = (await sourceIds(tenantRef, resourceId))[guess] as string;
         expect(id).toMatch(SOURCE_ID);
-        expect(id).not.toBe(slotlockCoverageSourceId(tenantRef, guess));
-        expect(id).not.toContain(slotlockCoverageSourceId(tenantRef, guess).slice(4));
+        expect(id).not.toBe(digest053(tenantRef, guess));
+        expect(id).not.toContain(digest053(tenantRef, guess).slice(4));
         ids.push(id);
       }
     }
-    expect(slotlockCoverageSourceId('default', guess)).toBe('src_482ba2bfbabbb8b6a107b3ef');
+    expect(digest053('default', guess)).toBe('src_482ba2bfbabbb8b6a107b3ef');
     expect(new Set(ids).size).toBe(ids.length);
 
     // A source deleted and recorded again is a new source: a new id.
@@ -223,7 +225,7 @@ describe.skipIf(!url)('coverage source ids (real Postgres)', () => {
       observed_at: '2026-10-27T09:00:00Z',
       last_error: `HTTP 401 from ${source.slice(5)}`,
     });
-    const digest53 = slotlockCoverageSourceId(tenantRef, address);
+    const digest53 = digest053(tenantRef, address);
     const legacy = [
       { type: 'coverage.stale', subject: live, data: stale52(live) },
       { type: 'coverage.stale', subject: gone, data: stale52(gone) },
@@ -232,7 +234,7 @@ describe.skipIf(!url)('coverage source ids (real Postgres)', () => {
         subject: digest53,
         data: { resource_id: resourceId, source_id: digest53, start: window.start, end: window.end, revision: 1 },
       },
-      { type: 'coverage.deleted', subject: slotlockCoverageSourceId(tenantRef, gone), data: { resource_id: resourceId, source_id: slotlockCoverageSourceId(tenantRef, gone) } },
+      { type: 'coverage.deleted', subject: digest053(tenantRef, gone), data: { resource_id: resourceId, source_id: digest053(tenantRef, gone) } },
     ];
     for (const row of legacy) {
       await superuser`

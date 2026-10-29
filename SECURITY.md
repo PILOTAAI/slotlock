@@ -118,7 +118,11 @@ backups and replicas, until it is pruned; stop every 0.5 server before the migra
 upgrade. Every read path serves a `coverage.*` change without `source` and `last_error`, named
 `src_redacted` when its subject is not such an id, and history by subject never matches a coverage
 change by any other name. What was already sent stays sent: a webhook receiver keeps an earlier
-delivery, so rotate a token that an earlier release delivered in a `coverage.stale` change.
+delivery, so rotate a token that an earlier release delivered in a `coverage.stale` change. A
+0.5.3 `source_id` already forwarded (a webhook delivery, a feed reader's copy, a log) still reveals
+its source to anyone who guesses the source and knows the tenant, as it did then; the rename changes
+only the copies in the outbox. `slotlockCoverageSourceId`, which worked that digest out, throws
+since 0.6.
 
 The privacy-minimised provider parser cannot return summaries, locations, notes, organizers or
 attendees. Full event parsing is a separate trusted API and must only receive authenticated content.
