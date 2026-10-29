@@ -23,9 +23,9 @@ Then:
 
 ```sh
 npm deprecate slotlock@0.0.0-stage "Placeholder from setting up staged publishing; it contains no code. Install slotlock@latest."
-npm deprecate slotlock@0.1.0 "Unsupported: booking defects fixed later, and pins zod 4.6.5 (GHSA-mrhx-c7xc-m3w5). Install slotlock@latest. https://github.com/PILOTAAI/slotlock#known-issues-in-020"
-npm deprecate slotlock@0.1.1 "Unsupported: booking defects fixed later, and pins zod 4.6.5 (GHSA-mrhx-c7xc-m3w5). Install slotlock@latest. https://github.com/PILOTAAI/slotlock#known-issues-in-020"
-npm deprecate slotlock@0.2.0 "Can double-book around daylight-saving changes, and pins zod 4.6.5 (GHSA-mrhx-c7xc-m3w5). Upgrade to 0.3.0 once published. https://github.com/PILOTAAI/slotlock#known-issues-in-020"
+npm deprecate slotlock@0.1.0 "Unsupported: booking defects fixed later, and pins zod 4.6.5 (GHSA-mrhx-c7xc-m3w5). Install slotlock@latest. https://github.com/PILOTAAI/slotlock/blob/main/docs/release/0.2.0-known-issues.md#the-known-issues"
+npm deprecate slotlock@0.1.1 "Unsupported: booking defects fixed later, and pins zod 4.6.5 (GHSA-mrhx-c7xc-m3w5). Install slotlock@latest. https://github.com/PILOTAAI/slotlock/blob/main/docs/release/0.2.0-known-issues.md#the-known-issues"
+npm deprecate slotlock@0.2.0 "Can double-book around daylight-saving changes, and pins zod 4.6.5 (GHSA-mrhx-c7xc-m3w5). Upgrade to 0.3.0 or later. https://github.com/PILOTAAI/slotlock/blob/main/docs/release/0.2.0-known-issues.md#the-known-issues"
 ```
 
 npm reads the version as a range with prereleases included (`lib/commands/deprecate.js` in npm

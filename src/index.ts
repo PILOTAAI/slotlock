@@ -131,6 +131,7 @@ export type {
   SlotlockAgentServerOptions,
   SlotlockAgentSubscriptionOptions,
   SlotlockAgentWriteOperation,
+  SlotlockArgumentIssue,
   SlotlockMcpToolResult,
   SlotlockTraceContext,
 } from './agent-server.js';

@@ -533,6 +533,15 @@ describe('the application API over REST', () => {
       expect({ url: request.url, status: response.status }).toEqual({ url: request.url, status: 400 });
       expect(await errorCode(response)).toBe('invalid_arguments');
     }
+    // Argument validation names the field it refused, by its path in the body.
+    const outOfDay = await server.fetch(
+      call('PUT', `/v1/resources/${RESOURCE_ID}/availability`, {
+        body: { rules: [{ rrule: 'FREQ=WEEKLY;BYDAY=MO', start_minutes: 1_440, duration_minutes: 60 }] },
+      }),
+    );
+    expect(((await outOfDay.json()) as { issues: unknown }).issues).toEqual([
+      { path: ['rules', 0, 'start_minutes'], message: expect.any(String) },
+    ]);
     const notJson = await server.fetch(call('POST', '/v1/maintenance', { body: '{' }));
     expect(notJson.status).toBe(400);
     expect(await errorCode(notJson)).toBe('invalid_json');

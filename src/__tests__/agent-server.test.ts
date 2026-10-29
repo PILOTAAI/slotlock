@@ -149,7 +149,16 @@ function expectToolError(body: unknown, code: string): void {
   expect(result).not.toHaveProperty('structuredContent');
   const [text] = result.content as Array<{ type: string; text: string }>;
   expect(text?.type).toBe('text');
-  expect(JSON.parse(text?.text ?? 'null')).toEqual({ error: { code } });
+  const { error } = JSON.parse(text?.text ?? 'null') as { error: Record<string, unknown> };
+  // Argument validation's refusal also names the fields it refused; nothing else carries `issues`.
+  const { issues, ...rest } = error;
+  expect(rest).toEqual({ code });
+  if (issues !== undefined) {
+    expect(code).toBe('invalid_arguments');
+    expect(issues).toEqual(
+      expect.arrayContaining([{ path: expect.any(Array), message: expect.any(String) }]),
+    );
+  }
 }
 
 describe('consumer-neutral Slotlock agent server', () => {
@@ -233,7 +242,12 @@ describe('consumer-neutral Slotlock agent server', () => {
       request,
       options: buildDispatchOptions(),
     });
-    expect(oversized).toEqual({ ok: false, status: 400, code: 'invalid_arguments' });
+    expect(oversized).toEqual({
+      ok: false,
+      status: 400,
+      code: 'invalid_arguments',
+      issues: [{ path: [], message: 'Invalid input' }],
+    });
     expect(authorize).not.toHaveBeenCalled();
     expect(getFreeBusy).not.toHaveBeenCalled();
 
@@ -279,7 +293,12 @@ describe('consumer-neutral Slotlock agent server', () => {
         end: plusDays(367),
         duration_minutes: 367 * 24 * 60 + 1,
       }),
-    ).resolves.toEqual({ ok: false, status: 400, code: 'invalid_arguments' });
+    ).resolves.toEqual({
+      ok: false,
+      status: 400,
+      code: 'invalid_arguments',
+      issues: [{ path: ['duration_minutes'], message: 'Too big: expected number to be <=528480' }],
+    });
 
     await dispatch('slotlock_create_event', {
       ...CREATE_EVENT_ARGUMENTS,
@@ -317,6 +336,7 @@ describe('consumer-neutral Slotlock agent server', () => {
         ok: false,
         status: 400,
         code: 'invalid_arguments',
+        issues: [expect.objectContaining({ path: expect.any(Array) })],
       });
     }
     expect(createEvent).toHaveBeenCalledTimes(1);
@@ -1722,7 +1742,14 @@ describe('consumer-neutral Slotlock agent server', () => {
           { id: 'invalid' },
         ),
       );
-      expect(await a2aReplyData(invalid)).toEqual({ error: { code: 'invalid_arguments' } });
+      // Each field validation refused is named by its path.
+      const refused = (await a2aReplyData(invalid)) as {
+        error: { code: string; issues: { path: unknown[]; message: string }[] };
+      };
+      expect(refused.error.code).toBe('invalid_arguments');
+      expect(refused.error.issues.map(({ path }) => path)).toEqual(
+        expect.arrayContaining([['resource_ids'], ['start'], ['end']]),
+      );
 
       authorize.mockResolvedValueOnce(false);
       const forbidden = await server.fetch(

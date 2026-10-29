@@ -9,6 +9,9 @@ description = "A client for Slotlock's REST API: calendars AI agents cannot doub
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
+# A copy of the repository's LICENSE (python -m build makes the wheel from the sdist, which holds
+# only this directory); src/__tests__/release-clients.test.ts keeps the two equal.
+license-files = ["LICENSE"]
 dependencies = []
 classifiers = [
   "Programming Language :: Python :: 3",

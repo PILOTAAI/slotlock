@@ -3,12 +3,15 @@
 A client for [Slotlock](https://slotlock.pylota.io)'s REST API: the agent tools and the application
 API, one method per operation. Java 17+, no dependencies (`java.net.http` and a strict JSON codec of
 its own). It is `io.pylota:slotlock` on
-[Maven Central](https://central.sonatype.com/artifact/io.pylota/slotlock), at the same version as the
+[Maven Central](https://central.sonatype.com/artifact/io.pylota/slotlock), versioned with the
 server:
 
 ```kotlin
 implementation("io.pylota:slotlock:<version>")
 ```
+
+Java: published to Maven Central by hand after each release; if a version 404s there
+(`https://repo1.maven.org/maven2/io/pylota/slotlock/<version>/`), it is pending.
 
 ```java
 SlotlockClient slotlock = SlotlockClient.builder("https://calendar.example.com", apiKey).build();

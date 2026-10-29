@@ -361,6 +361,25 @@ describe('a REST call', () => {
     expect(updateEvent).not.toHaveBeenCalled();
   });
 
+  it('names each field an invalid_arguments refusal found, in the problem details', async () => {
+    const response = await buildServer().fetch(
+      call('POST', '/v1/events', { body: { ...BOOKING, starts_at: 'tomorrow', timezone: 7 } }),
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      type: 'tag:slotlock.pylota.io,2026:problem:invalid_arguments',
+      title: 'The arguments are not valid',
+      status: 400,
+      code: 'invalid_arguments',
+      issues: [
+        { path: ['starts_at'], message: expect.any(String) },
+        { path: ['timezone'], message: expect.any(String) },
+      ],
+      error: { code: 'invalid_arguments' },
+    });
+    expect(createEvent).not.toHaveBeenCalled();
+  });
+
   it('creates from a JSON body', async () => {
     const response = await buildServer().fetch(call('POST', '/v1/events', { body: BOOKING }));
     expect(response.status).toBe(200);

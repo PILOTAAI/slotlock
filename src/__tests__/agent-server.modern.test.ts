@@ -168,7 +168,19 @@ describe('MCP 2026-07-28 on the Slotlock agent server', () => {
     );
     expect(failed.result).toEqual({
       resultType: 'complete',
-      content: [{ type: 'text', text: '{"error":{"code":"invalid_arguments"}}' }],
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            error: {
+              code: 'invalid_arguments',
+              issues: [
+                { path: ['event_id'], message: 'Too small: expected string to have >=1 characters' },
+              ],
+            },
+          }),
+        },
+      ],
       isError: true,
       _meta: { [SERVER_INFO_KEY]: SERVER_INFO },
     });

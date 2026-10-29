@@ -48,7 +48,9 @@ DATABASE_URL=… SLOTLOCK_MIGRATE_DATABASE_URL=… npx slotlock migrate
 DATABASE_URL=… npx slotlock serve
 ```
 
-Node.js 22.12+ and PostgreSQL 16+ with `btree_gist`.
+Two URLs: `SLOTLOCK_MIGRATE_DATABASE_URL` is the schema owner's, for `migrate`; `DATABASE_URL` is
+the serving role's (`NOSUPERUSER NOBYPASSRLS`, owning nothing), for `serve`. Node.js 22.12+ and
+PostgreSQL 16+ with `btree_gist`.
 
 ## Configuration
 

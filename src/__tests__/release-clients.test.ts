@@ -21,6 +21,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const read = (path: string) => readFileSync(join(root, path), 'utf8');
+const flat = (text: string) => text.replace(/\s+/g, ' ');
 const scratch: string[] = [];
 afterAll(() => {
   for (const path of scratch) rmSync(path, { recursive: true, force: true });
@@ -220,6 +221,24 @@ describe('client publishing', () => {
     expect(read('scripts/central-bundle.sh')).toContain('publishingType=USER_MANAGED');
     expect(job('go-module')).toContain('scripts/tag-go-module.sh');
     expect(job('go-module')).toContain('contents: write');
+  });
+
+  it("ships the licence in the Python sdist and wheel: a copy of the repository's, named in pyproject", () => {
+    // python -m build makes the wheel from the sdist, which holds only clients/python.
+    expect(read('clients/python/LICENSE')).toBe(read('LICENSE'));
+    expect(read('clients/python/pyproject.toml')).toMatch(/^license-files = \["LICENSE"\]$/m);
+  });
+
+  it('makes publishing the Central Portal deployment, then checking Maven Central, a numbered step', () => {
+    const steps = read('docs/release/clients.md').split('\n## After each release\n')[1] ?? '';
+    expect(steps, 'canary: an "After each release" section').not.toBe('');
+    expect(steps).toMatch(/^2\. Publish the Central Portal deployment/m);
+    expect(steps).toMatch(
+      /^3\. Verify Maven Central serves it: `curl -sI https:\/\/repo1\.maven\.org\/maven2\/io\/pylota\/slotlock\/<v>\/`\n {3}returns 200/m,
+    );
+    expect(flat(read('clients/java/README.md'))).toContain(
+      'Java: published to Maven Central by hand after each release; if a version 404s there',
+    );
   });
 
   it.skipIf(!hasJq)('gives each registry its own environment, with a reviewer, for v* tags', () => {

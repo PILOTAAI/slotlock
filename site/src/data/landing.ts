@@ -91,7 +91,7 @@ export const hero = {
       id: 'npm',
       label: 'npm',
       command: `npm install slotlock@${facts.version} postgres`,
-      note: `Then \`npx slotlock migrate\` and \`npx slotlock serve\`, with two database roles as the README shows.${knownIssues ? ' Read the [known issues](/docs/known-issues/) first.' : ''}`,
+      note: `Then \`npx slotlock migrate\` with \`SLOTLOCK_MIGRATE_DATABASE_URL\` set to the schema owner's URL, and \`npx slotlock serve\` with \`DATABASE_URL\` set to a role that owns nothing.${knownIssues ? ' Read the [known issues](/docs/known-issues/) first.' : ''}`,
     },
     // Clients for a running server; versions match the release (clients/README.md).
     {
@@ -858,7 +858,7 @@ export const openSource = {
       : []),
     {
       title: 'Hosted',
-      body: 'Not open yet: `slotlock serve` run for you, with the dashboard, free while it is a preview.',
+      body: 'The hosted service is not open; self-hosting is the only supported path today.',
       command: null,
       link: { label: 'Hosted Slotlock', href: '/docs/hosted/' },
     },

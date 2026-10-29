@@ -116,7 +116,12 @@ describe('Slotlock with the official A2A JavaScript SDK', () => {
       invocation('interop-invalid', 'slotlock_list_events', { resource_ids: [] }),
       AUTH,
     );
-    expect(replyData(invalid)).toEqual({ error: { code: 'invalid_arguments' } });
+    expect(replyData(invalid)).toEqual({
+      error: {
+        code: 'invalid_arguments',
+        issues: expect.arrayContaining([{ path: ['resource_ids'], message: expect.any(String) }]),
+      },
+    });
   });
 
   it('still executes a skill addressed by its legacy dotted name', async () => {
