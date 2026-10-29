@@ -72,6 +72,9 @@ versioning.
   only while it reads the head (writes wait, reads do not) and then only the row locks of the rows
   it renames. `SLOTLOCK_CORE_DDL`, applied with psql, renames in its one transaction instead, with
   the outbox under ACCESS EXCLUSIVE for the whole of it: a scan of the whole outbox on the upgrade.
+- A migration step ended as a deadlock's victim (a caller's transaction that took the outbox, then a
+  coverage row, while a rename batch took them in the other order, say) is retried like one that
+  waited past its lock timeout, up to `attempts`, instead of failing.
 
 ## 0.5.3 - 2026-10-28
 

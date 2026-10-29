@@ -448,6 +448,7 @@ export interface SlotlockMigrationOptions {
 
 /** PostgreSQL lock_not_available: a lock wait passed lock_timeout. */
 const LOCK_NOT_AVAILABLE = '55P03';
+
 const DEFAULT_MIGRATION_LOCK_TIMEOUT_MS = 1_000;
 const DEFAULT_MIGRATION_STATEMENT_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_MIGRATION_ATTEMPTS = 5;
@@ -477,8 +478,8 @@ function migrationSettings(options: SlotlockMigrationOptions | undefined) {
 /**
  * Run one migration step: in a transaction (or a savepoint of the caller's), with names resolved
  * in pg_catalog only, serialized with every other migration of this database, and with the lock and
- * statement timeouts set. A step that waits past its lock timeout is rolled back and tried again
- * after a pause, up to `attempts` times. The caller's own timeouts are put back afterwards.
+ * statement timeouts set. A step that waits past its lock timeout, or is ended as a deadlock's
+ * victim, is rolled back and tried again after a pause, up to `attempts` times. The caller's own timeouts are put back afterwards.
  */
 async function inMigration<T>(
   executor: StoreSql,
@@ -506,11 +507,15 @@ async function inMigration<T>(
         }),
       );
     } catch (error) {
-      if (pgCode(error) !== LOCK_NOT_AVAILABLE) throw error;
+      // A deadlock's victim (DEADLOCK_DETECTED: a caller's transaction took the outbox, then a
+      // coverage row, while a rename batch took them in the other order, say) lost its locks with
+      // it, so it is tried again like a step that timed out waiting.
+      const code = pgCode(error);
+      if (code !== LOCK_NOT_AVAILABLE && code !== DEADLOCK_DETECTED) throw error;
       if (attempt >= settings.attempts) {
         throw Object.assign(
           new Error(
-            `Slotlock migration gave up after ${attempt} attempts to take its locks within ${settings.lockTimeoutMs} ms: a long transaction holds a slotlock table. Run it again once that transaction ends`,
+            `Slotlock migration gave up after ${attempt} attempts to take its locks within ${settings.lockTimeoutMs} ms: a long transaction holds a slotlock table, or took them in another order. Run it again once that transaction ends`,
             { cause: error },
           ),
           { code: 'schema_lock_timeout' as const },
