@@ -559,8 +559,12 @@ export async function migrateSlotlock(
   const owner = connect(config.migrateDatabaseUrl ?? config.databaseUrl, 1);
   try {
     const store = createSlotlockStore(owner);
-    await store.applySchema();
-    await store.applyTenantRls();
+    try {
+      await store.applySchema();
+      await store.applyTenantRls();
+    } catch (error) {
+      throw await migrateRefusal(owner, config, error);
+    }
     log.info('schema_applied');
     if (config.migrateDatabaseUrl === undefined) return;
     const application = connect(config.databaseUrl, 1);
@@ -577,6 +581,47 @@ export async function migrateSlotlock(
   } finally {
     await owner.end({ timeout: 5 });
   }
+}
+
+/**
+ * Migrate run as the serving role, with no SLOTLOCK_MIGRATE_DATABASE_URL, is refused: as
+ * `unsafe_slotlock_schema`, with one reason per object the role does not own, when a role that is
+ * not a superuser owns the schema, and with a permission error (42501) when a superuser does. Lead
+ * with the fix, and keep the code, the reasons and the database's message after it.
+ */
+async function migrateRefusal(
+  sql: SlotlockSql,
+  config: SlotlockDatabaseConfig,
+  error: unknown,
+): Promise<unknown> {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (
+    config.migrateDatabaseUrl !== undefined ||
+    !(error instanceof Error) ||
+    (code !== 'unsafe_slotlock_schema' && code !== '42501')
+  ) {
+    return error;
+  }
+  let found: { role: string; owner: string } | undefined;
+  try {
+    [found] = await sql<{ role: string; owner: string }[]>`
+      SELECT current_user AS role, pg_catalog.pg_get_userbyid(ns.nspowner) AS owner
+        FROM pg_catalog.pg_namespace ns
+       WHERE ns.nspname = 'slotlock'`;
+  } catch {
+    return error;
+  }
+  if (!found || found.role === found.owner) return error;
+  return Object.assign(
+    new Error(
+      `set SLOTLOCK_MIGRATE_DATABASE_URL to the schema owner's URL: migrate connected as ${found.role} (DATABASE_URL), but ${found.owner} owns the slotlock schema, and only its owner can migrate it. DATABASE_URL stays the serving role's.\n${error.message}`,
+      { cause: error },
+    ),
+    {
+      code,
+      ...('reasons' in error ? { reasons: error.reasons } : {}),
+    },
+  );
 }
 
 async function databaseReachable(sql: SlotlockSql): Promise<boolean> {
@@ -736,6 +781,20 @@ export async function startSlotlockServer(
         ),
         { code: 'schema_missing' },
       );
+    }
+    // Serving as the schema owner is allowed (one role can migrate and serve), but the owner can
+    // lift forced row-level security, drop the exclusion constraints and read any table that does
+    // not force it: say so once, at startup, rather than refuse.
+    const [owning] = await sql<{ owns: boolean }[]>`
+      SELECT pg_catalog.pg_has_role(current_user, ns.nspowner, 'MEMBER') AS owns
+        FROM pg_catalog.pg_namespace ns
+       WHERE ns.nspname = 'slotlock'`;
+    if (owning?.owns) {
+      log.warn('serving_as_schema_owner', {
+        role: serving?.role,
+        message:
+          "DATABASE_URL connects as the role that owns the slotlock schema. Row-level security does not confine its owner on tables that do not force it, and the owner can lift it: serve as a role that owns nothing (CREATE ROLE slotlock_app LOGIN PASSWORD '…' NOSUPERUSER NOBYPASSRLS) and set SLOTLOCK_MIGRATE_DATABASE_URL to the schema owner's URL so migrate grants it what it needs",
+      });
     }
     // Migrated by another release: an older schema needs this release's migrate first, and a newer
     // one has tables and rules this release's code does not know.
