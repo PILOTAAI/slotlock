@@ -11,7 +11,7 @@
 // the caller's search_path back at the end, so a caller that keeps going in the same transaction
 // resolves its own names as before. Apply it in one transaction: under autocommit every statement
 // is a transaction of its own, and the pin ends with the statement that sets it.
-import { SLOTLOCK_CHANGE_ORIGINS, slotlockCoverageSourceIdSql } from './event-feed.js';
+import { SLOTLOCK_CHANGE_ORIGINS, legacyCoverageSourceDigestSql } from './event-feed.js';
 import { SLOTLOCK_MAX_AVAILABILITY_RULES } from './weekly-hours.js';
 
 const CALLER_SEARCH_PATH_SETTING = 'slotlock.caller_search_path';
@@ -79,9 +79,11 @@ export const SLOTLOCK_SCHEMA_CONTROL_REFUSAL = 'Slotlock will not deploy into sc
 
 /**
  * The version of the schema this release creates, recorded in `slotlock.schema_version` by every
- * migration. Releases up to 0.2 recorded nothing; 0.1 was version 1 and 0.2 version 2.
+ * migration. Releases up to 0.2 recorded nothing; 0.1 was version 1 and 0.2 version 2; 0.3 to 0.5
+ * recorded 3. 0.6 is 4, so a 0.5 release refuses it before it changes anything: its DDL would put
+ * back the trigger that names a coverage source by its guessable digest.
  */
-export const SLOTLOCK_SCHEMA_VERSION = 3;
+export const SLOTLOCK_SCHEMA_VERSION = 4;
 
 /** The start of the message with which the deployment DDL refuses a schema a newer release migrated. */
 export const SLOTLOCK_SCHEMA_NEWER_REFUSAL =
@@ -780,6 +782,12 @@ CREATE TABLE IF NOT EXISTS slotlock.schema_version (
 );
 ALTER TABLE slotlock.schema_version ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON slotlock.schema_version FROM PUBLIC;
+-- The rename of coverage changes earlier releases wrote (0.6, slotlockCoverageChangeRenameSql): the
+-- last outbox id a pass has read (null before the first), and whether it is done. A pass after the
+-- first that finds nothing to rename marks it done, and no migration reads the outbox for it again.
+ALTER TABLE slotlock.schema_version ADD COLUMN IF NOT EXISTS coverage_changes_renamed_through bigint;
+ALTER TABLE slotlock.schema_version
+  ADD COLUMN IF NOT EXISTS coverage_changes_renamed boolean NOT NULL DEFAULT false;
 
 -- NULL when no migration has recorded a version (a schema from 0.2 or earlier).
 CREATE OR REPLACE FUNCTION slotlock.installed_schema_version()
@@ -1698,6 +1706,29 @@ UPDATE slotlock.calendar_events
 ALTER TABLE slotlock.calendar_coverage ADD COLUMN IF NOT EXISTS last_error text;
 ALTER TABLE slotlock.calendar_coverage ADD COLUMN IF NOT EXISTS last_error_at timestamptz;
 ALTER TABLE slotlock.calendar_coverage ADD COLUMN IF NOT EXISTS stale_reported_at timestamptz;
+-- How the feed names a source (0.6): \`src_\` and 32 random hex digits, made when the source is first
+-- recorded for the resource and kept until it is deleted, so nobody can confirm a guessed source
+-- against it (0.5.3 named it by an unkeyed digest of the tenant and the source). Added bare, its
+-- default set apart (a volatile default on ADD COLUMN would rewrite the table under the lock), the
+-- sources already there given one each, and its CHECK NOT VALID, validated after the migration
+-- commits. Only listCoverage gives the source beside it, to the tenant.
+ALTER TABLE slotlock.calendar_coverage ADD COLUMN IF NOT EXISTS source_id text;
+ALTER TABLE slotlock.calendar_coverage
+  ALTER COLUMN source_id SET DEFAULT 'src_' || pg_catalog.replace(pg_catalog.gen_random_uuid()::text, '-', '');
+UPDATE slotlock.calendar_coverage SET source_id = DEFAULT WHERE source_id IS NULL;
+DO $slotlock_coverage_source_id$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint
+     WHERE conrelid = 'slotlock.calendar_coverage'::regclass
+       AND conname = 'slotlock_calendar_coverage_source_id_valid'
+  ) THEN
+    ALTER TABLE slotlock.calendar_coverage
+      ADD CONSTRAINT slotlock_calendar_coverage_source_id_valid
+      CHECK (source_id IS NOT NULL AND source_id ~ '^src_[0-9a-f]{32}$') NOT VALID;
+  END IF;
+END
+$slotlock_coverage_source_id$;
 
 -- Configuration changes (RFC 0002 P1-6): a resource's own settings, the sources its coverage is
 -- read from, and the tenant's webhook endpoints. Each change that alters something appends one row,
@@ -1777,7 +1808,7 @@ $slotlock_outbox_resource$;
 
 -- A source first recorded, and deleted. Reading it again (a new revision) is progress, not a change
 -- of what the resource is read from, and appends nothing; neither does a resource's deletion, which
--- takes its coverage with it and is its own change. The source is named by its digest (source_id):
+-- takes its coverage with it and is its own change. The source is named by its random source_id:
 -- it can be an iCalendar URL with a token in it, or an address.
 CREATE OR REPLACE FUNCTION slotlock.outbox_coverage_change()
 RETURNS trigger
@@ -1797,10 +1828,10 @@ BEGIN
   VALUES (
     changed.tenant_ref, changed.resource_id,
     CASE WHEN TG_OP = 'DELETE' THEN 'coverage.deleted' ELSE 'coverage.recorded' END,
-    ${slotlockCoverageSourceIdSql('changed.tenant_ref', 'changed.source')},
+    changed.source_id,
     jsonb_strip_nulls(jsonb_build_object(
       'resource_id', changed.resource_id,
-      'source_id', ${slotlockCoverageSourceIdSql('changed.tenant_ref', 'changed.source')},
+      'source_id', changed.source_id,
       'start', CASE WHEN TG_OP = 'INSERT' THEN changed.starts_at END,
       'end', CASE WHEN TG_OP = 'INSERT' THEN changed.ends_at END,
       'revision', CASE WHEN TG_OP = 'INSERT' THEN changed.revision END)),
@@ -1848,6 +1879,32 @@ CREATE OR REPLACE TRIGGER slotlock_outbox_resource_change
 CREATE OR REPLACE TRIGGER slotlock_outbox_coverage_change
   AFTER INSERT OR DELETE ON slotlock.calendar_coverage
   FOR EACH ROW EXECUTE FUNCTION slotlock.outbox_coverage_change();
+
+-- A coverage change an earlier release's server (0.3-0.5) still running writes, as it is inserted:
+-- named by its source's source_id (src_redacted for a source it cannot find), without the source or
+-- the error read from it. 0.5.2 and earlier wrote the source itself (an iCalendar URL with a token,
+-- an address) and its last error; 0.5.3 its guessable digest. This release's own rows are in shape
+-- and pass unchanged. It runs as the inserting role, under its tenant's RLS like the insert itself.
+CREATE OR REPLACE FUNCTION slotlock.outbox_coverage_in_shape()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_outbox_coverage_in_shape$
+DECLARE
+  named text;
+BEGIN
+  IF ${coverageChangeInShapeSql('NEW')} THEN RETURN NEW; END IF;
+  named := ${coverageChangeSourceIdSql('NEW')};
+  NEW.subject := named;
+  NEW.data := (NEW.data - 'source' - 'last_error') || pg_catalog.jsonb_build_object('source_id', named);
+  RETURN NEW;
+END
+$slotlock_outbox_coverage_in_shape$;
+CREATE OR REPLACE TRIGGER slotlock_outbox_coverage_in_shape
+  BEFORE INSERT ON slotlock.outbox
+  FOR EACH ROW WHEN (NEW.type LIKE 'coverage.%')
+  EXECUTE FUNCTION slotlock.outbox_coverage_in_shape();
 CREATE OR REPLACE TRIGGER slotlock_outbox_webhook_change
   AFTER INSERT OR DELETE ON slotlock.webhook_endpoints
   FOR EACH ROW EXECUTE FUNCTION slotlock.outbox_webhook_change();
@@ -3175,8 +3232,113 @@ CREATE INDEX IF NOT EXISTS slotlock_reservations_calendar_event_idx
   ON slotlock.reservations (calendar_event_id) WHERE calendar_event_id IS NOT NULL;
 ${SLOTLOCK_OUTBOX_DDL}${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_DASHBOARD_DDL}${SLOTLOCK_TENANT_ADMIN_DDL}${DEPLOYMENT_RECORD_VERSION}`;
 
+/**
+ * Whether the outbox row `row` (a coverage change) is in this release's shape: named by a source_id
+ * or src_redacted, in `subject` and `data.source_id` alike, with no `source` or `last_error`.
+ */
+function coverageChangeInShapeSql(row: string): string {
+  return `(${row}.subject ~ '^src_([0-9a-f]{32}|redacted)$'
+         AND ${row}.data ->> 'source_id' IS NOT DISTINCT FROM ${row}.subject
+         AND NOT ${row}.data ?| ARRAY['source', 'last_error'])`;
+}
+
+/**
+ * The source_id an earlier release's coverage change `row` names its source by: the source with
+ * its tenant and resource whose source (0.5.2 and earlier: the subject, or `data.source`) or 0.5.3
+ * digest (the subject) it carries, else src_redacted.
+ */
+function coverageChangeSourceIdSql(row: string): string {
+  return `COALESCE((
+           SELECT coverage.source_id FROM slotlock.calendar_coverage coverage
+            WHERE coverage.tenant_ref = ${row}.tenant_ref
+              AND coverage.resource_id = ${row}.resource_id
+              AND coverage.source_id IS NOT NULL
+              AND (coverage.source = ${row}.subject
+                   OR coverage.source = ${row}.data ->> 'source'
+                   OR ${legacyCoverageSourceDigestSql('coverage.tenant_ref', 'coverage.source')} = ${row}.subject)
+            LIMIT 1), 'src_redacted')`;
+}
+
+/** Outbox ids one batch of the coverage-change rename reads (by primary key) in one transaction. */
+export const SLOTLOCK_COVERAGE_CHANGE_RENAME_BATCH = 5_000;
+
+/**
+ * One batch of the rename of coverage changes an earlier release wrote: of the outbox rows with ids
+ * after `after` up to `head` (SQL expressions, bigint), the first `batch` by id, each `coverage.*`
+ * one not yet in this release's shape gets its source's source_id as subject and `data.source_id`,
+ * and loses `source` and `last_error`. Before 0.5.3 coverage.stale carried the source itself (an
+ * iCalendar URL with a token, an address) and the error read from it; 0.5.3 named it by an unkeyed
+ * digest anyone could confirm a guess against. A source deleted since is `src_redacted`: nothing
+ * can match it any more, and a made-up id would look like a source the tenant could find. Selects
+ * the last id read (`last`, null when there was none) and how many it renamed (`renamed`), `INTO`
+ * `into` when given (PL/pgSQL). Rows in the new shape are left alone, so a batch run again changes
+ * nothing.
+ */
+export function slotlockCoverageChangeRenameSql(after: string, head: string, batch: string, into = ''): string {
+  return `WITH scanned AS MATERIALIZED (
+  SELECT id FROM slotlock.outbox
+   WHERE id > ${after} AND id <= ${head}
+   ORDER BY id
+   LIMIT ${batch}
+), earlier AS (
+  SELECT change.id, change.tenant_ref, change.resource_id, change.subject, change.data
+    FROM slotlock.outbox change
+   WHERE change.id IN (SELECT scanned.id FROM scanned)
+     AND change.type LIKE 'coverage.%'
+     AND NOT ${coverageChangeInShapeSql('change')}
+     FOR UPDATE OF change
+), named AS (
+  SELECT earlier.id, ${coverageChangeSourceIdSql('earlier')} AS source_id
+    FROM earlier
+), renamed AS (
+  UPDATE slotlock.outbox change
+     SET subject = named.source_id,
+         data = (change.data - 'source' - 'last_error') || jsonb_build_object('source_id', named.source_id)
+    FROM named
+   WHERE change.id = named.id
+  RETURNING change.id
+)
+SELECT (SELECT max(scanned.id) FROM scanned)::text AS last,
+       (SELECT count(*) FROM renamed)::integer AS renamed${into ? `
+  INTO ${into}` : ''}`;
+}
+
+// The rename for SLOTLOCK_CORE_DDL, run whole in its one transaction, while FORCE is lifted (the
+// structure has the outbox under ACCESS EXCLUSIVE for the whole transaction, so no change commits
+// in between). It goes on from where the last pass stopped, and is skipped once done. applySchema
+// runs it in batches after the structure commits instead, each its own short transaction.
+const DEPLOYMENT_RENAME_COVERAGE_CHANGES = `DO $slotlock_rename_coverage_changes$
+DECLARE
+  scan_after bigint;
+  scan_head bigint;
+  scan_last text;
+  scan_renamed integer;
+  renamed_total integer := 0;
+  first_pass boolean;
+BEGIN
+  IF (SELECT coverage_changes_renamed FROM slotlock.schema_version WHERE singleton) THEN
+    RETURN;
+  END IF;
+  SELECT coverage_changes_renamed_through INTO scan_after FROM slotlock.schema_version WHERE singleton;
+  first_pass := scan_after IS NULL;
+  scan_after := COALESCE(scan_after, 0);
+  SELECT COALESCE(max(id), 0) INTO scan_head FROM slotlock.outbox;
+  LOOP
+    ${slotlockCoverageChangeRenameSql('scan_after', 'scan_head', String(SLOTLOCK_COVERAGE_CHANGE_RENAME_BATCH), 'scan_last, scan_renamed')};
+    EXIT WHEN scan_last IS NULL;
+    scan_after := scan_last::bigint;
+    renamed_total := renamed_total + scan_renamed;
+  END LOOP;
+  UPDATE slotlock.schema_version
+     SET coverage_changes_renamed_through = GREATEST(scan_after, scan_head),
+         coverage_changes_renamed = NOT first_pass AND renamed_total = 0
+   WHERE singleton;
+END
+$slotlock_rename_coverage_changes$;
+`;
+
 /** The whole deployment DDL, run in one transaction: the schema, then its constraints validated. */
-export const SLOTLOCK_CORE_DDL: string = `${CORE_DDL_BODY}${DEPLOYMENT_VALIDATE_CONSTRAINTS}${DEPLOYMENT_RESTORE_FORCED_ROW_SECURITY}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
+export const SLOTLOCK_CORE_DDL: string = `${CORE_DDL_BODY}${DEPLOYMENT_RENAME_COVERAGE_CHANGES}${DEPLOYMENT_VALIDATE_CONSTRAINTS}${DEPLOYMENT_RESTORE_FORCED_ROW_SECURITY}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
 
 /**
  * SLOTLOCK_CORE_DDL without the validation, which applySchema runs as a step of its own after this

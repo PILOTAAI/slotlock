@@ -1284,7 +1284,8 @@ public abstract class SlotlockOperations {
    * of a resource: the window it covers, when it was last read, its last error, and whether it is
    * stale (not read for a day, so the time it covers is unproven, not free). A source that goes
    * stale is also put on the change feed once, as coverage.stale, until it is read again. The
-   * feed names a source by its source_id, never the source itself.
+   * feed names a source by its source_id (random, made when the source is first recorded for the
+   * resource and kept until it is deleted), never the source itself.
    *
    * @param resourceId {@code resource_id}, string
    * @return the response body

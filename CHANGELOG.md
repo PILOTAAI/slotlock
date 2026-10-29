@@ -16,8 +16,44 @@ versioning.
   `slotlock` schema: row-level security does not confine the owner on tables that do not force
   it. It still serves.
 
+### Fixed
+
+- Security: a coverage source's `source_id` could be confirmed by guessing. 0.5.3 named a source on the feed
+  by `src_` and 24 hex digits of an unkeyed SHA-256 of the tenant and the source, so anyone who saw
+  a change or a webhook and knew the tenant could test a guessed source offline: an address such as
+  `google:alice.smith@example.com`, say. A source's `source_id` is now random (`src_` and 32 hex
+  digits, 122 bits from `gen_random_uuid()`), stored with the source in
+  `calendar_coverage.source_id` when it is first recorded for the resource and kept until it is
+  deleted. Nothing outside the database can work it out; the tenant reads it beside the source from
+  `listCoverage` and `slotlock_get_coverage`.
+- Security: changes an earlier release wrote still carried the source. Before 0.5.3 `coverage.stale` had the
+  source itself as `subject` and `data.source` (an iCalendar URL with its token) and the error read
+  from it as `data.last_error`, and `listChanges`, the history and webhooks that had not received it
+  served it until it was pruned. The upgrade renames every `coverage.*` change not in this release's
+  shape: `subject` and `data.source_id` become the source's new id, `source` and `last_error` are
+  removed. A change about a source deleted since is named `src_redacted`: nothing can match it any
+  more, and a made-up id would look like a source the tenant could find. A change an earlier
+  release's server (0.3-0.5) still running writes after the upgrade is put in the same shape as it
+  is inserted, by a trigger on the outbox (`slotlock.outbox_coverage_in_shape`), so none is stored
+  with its source. The read path redacts too: `listChanges`, `listRecentChanges`, `listHistory`,
+  webhook deliveries and `slotlockCloudEvent` never serve a `coverage.*` change with `source` or
+  `last_error`, and name one whose subject is not a `source_id` of this release `src_redacted`;
+  history by `subject` never finds a coverage change by any other name, so it cannot confirm a
+  guessed source either.
+
 ### Changed
 
+- **Breaking:** every `source_id` changes, and its shape is `src_` and 32 hex digits (was 24). A
+  reader that stored `source_id`s or `subject`s of `coverage.*` changes matches them again from
+  `listCoverage` / `GET /v1/resources/{id}/coverage`. The same source recorded for two resources,
+  or deleted and recorded again, has a different id each time.
+- **Breaking:** changes already on the feed about coverage are rewritten in place by the upgrade, as
+  above; their positions and ids (`webhook-id`) do not change, so a webhook that already received
+  one is not sent it again, and one that has not receives the new shape.
+
+- **Breaking:** `slotlockCoverageSourceId` throws (`coverage_source_id_unavailable`) instead of
+  returning 0.5.3's digest, which nothing carries any more and which would confirm a guessed source:
+  read `sourceId` from `listCoverage` (`source_id` of `slotlock_get_coverage`) instead.
 - `slotlock migrate` (and `serve --migrate`) run as a role that does not own the schema, with no
   `SLOTLOCK_MIGRATE_DATABASE_URL`, now fail with a first line that says to set
   `SLOTLOCK_MIGRATE_DATABASE_URL` to the schema owner's URL, then the database's refusal.
@@ -25,6 +61,40 @@ versioning.
   `docs/release/0.2.0-known-issues.md`, linked under "Supported versions".
 - The hosted service page, its site page and SECURITY.md say the hosted service is not open and
   that self-hosting is the only supported path today; SECURITY.md no longer invites testing it.
+
+### Deprecated
+
+- `slotlockCoverageSourceId`, which now only throws. It may be removed in 0.7.0.
+
+### Upgrading
+
+- **Breaking:** the schema is version 4. A 0.5 release refuses to migrate it ("Slotlock will not
+  migrate a schema a newer release migrated") and its server refuses to serve it, since its DDL would
+  put back the trigger that names a source by its guessable digest. Rolling back to 0.5.x needs a
+  restore of a backup taken before the upgrade.
+- The migration adds `calendar_coverage.source_id` without rewriting the table (the column bare, its
+  random default set apart), gives each existing source an id under the migration's lock
+  (`calendar_coverage` is one row per source and resource), and adds its CHECK NOT VALID, validated
+  after the migration commits.
+- Changes written from the upgrade on are put in shape as they are inserted. Those written before
+  it: once the structure commits, `applySchema` renames them in batches of 5,000 outbox ids by
+  primary key, each its own transaction, up to the last change when the pass started, read in a
+  short transaction of its own once the outbox writes in flight have ended. Where it got to is saved
+  with each batch (`schema_version.coverage_changes_renamed_through`): an interrupted pass goes on
+  from there, and the next migration reads only what was written since, until a pass after the
+  upgrade's finds nothing to rename and marks it done (`coverage_changes_renamed`). After that no
+  migration reads the outbox for it again.
+- Locks: under a deployment role that forced RLS binds, each batch lifts FORCE from
+  `calendar_coverage` and `outbox` and puts it back before it commits, holding ACCESS EXCLUSIVE on
+  both for that batch (one range of 5,000 ids: milliseconds), so writes to either table wait that
+  long, once per batch, for every batch of the outbox on the upgrade and for the rows written since
+  on the passes after it. A superuser or BYPASSRLS role holds SHARE ROW EXCLUSIVE on the outbox
+  for the short transaction that reads the head (writes wait, reads do not), then only the row
+  locks of the rows it renames. `SLOTLOCK_CORE_DDL`, applied with psql, renames in its one transaction instead, with
+  the outbox under ACCESS EXCLUSIVE for the whole of it: a scan of the whole outbox on the upgrade.
+- A migration step ended as a deadlock's victim (a caller's transaction that took the outbox, then a
+  coverage row, while a rename batch took them in the other order, say) is retried like one that
+  waited past its lock timeout, up to `attempts`, instead of failing.
 
 ## 0.5.3 - 2026-10-28
 

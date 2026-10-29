@@ -1,6 +1,6 @@
 // What the feed must never hold, and how its provenance columns migrate (the feed provenance review):
 // a coverage source (an iCalendar URL with a token, an address) never reaches a feed row, a CloudEvent
-// or the history, only its digest; the origin column is added without a scan under the lock, its CHECK
+// or the history, only its random id; the origin column is added without a scan under the lock, its CHECK
 // is the origins the API reads, and a write that names no origin is `library`; an authenticator's
 // key id that withTenant would refuse is left out. Skipped without DATABASE_URL.
 import { randomUUID } from 'node:crypto';
@@ -24,10 +24,11 @@ describe('the outbox DDL', () => {
     expect(check?.[1]).toBe(SLOTLOCK_CHANGE_ORIGINS.map((origin) => `'${origin}'`).join(', '));
   });
 
-  it('names a coverage source as src_ and 24 hex digits, per tenant', () => {
-    expect(slotlockCoverageSourceId('a', 'google:fleet')).toMatch(/^src_[0-9a-f]{24}$/);
-    expect(slotlockCoverageSourceId('a', 'google:fleet')).toBe(slotlockCoverageSourceId('a', 'google:fleet'));
-    expect(slotlockCoverageSourceId('a', 'google:fleet')).not.toBe(slotlockCoverageSourceId('b', 'google:fleet'));
+  it("no longer works out 0.5.3's guessable digest: slotlockCoverageSourceId throws, naming listCoverage", () => {
+    expect(() => slotlockCoverageSourceId('a', 'google:fleet')).toThrow(/listCoverage/);
+    expect(() => slotlockCoverageSourceId('a', 'google:fleet')).toThrow(
+      expect.objectContaining({ code: 'coverage_source_id_unavailable' }),
+    );
   });
 });
 
@@ -54,7 +55,7 @@ describe.skipIf(!url)('the feed provenance review (real Postgres)', () => {
     await admin.end();
   });
 
-  it('names a coverage source by its digest on the feed, in CloudEvents and in the history', async () => {
+  it('names a coverage source by its random id on the feed, in CloudEvents and in the history', async () => {
     const tenantRef = tenant('coverage-privacy');
     const token = `tok${randomUUID().replaceAll('-', '')}`;
     const ics = `ical:https://calendar.example.com/private/feed.ics?token=${token}`;
@@ -73,8 +74,7 @@ describe.skipIf(!url)('the feed provenance review (real Postgres)', () => {
       sources: { source: string; source_id: string }[];
     };
     const idOf = (source: string) => sources.find((entry) => entry.source === source)?.source_id;
-    expect(idOf(ics)).toBe(slotlockCoverageSourceId(tenantRef, ics));
-    expect(idOf(email)).toBe(slotlockCoverageSourceId(tenantRef, email));
+    for (const source of [ics, email]) expect(idOf(source)).toMatch(/^src_[0-9a-f]{32}$/);
 
     await admin`UPDATE slotlock.calendar_coverage SET observed_at = now() - interval '2 days' WHERE tenant_ref = ${tenantRef}`;
     expect(await store.withTenant(tenantRef, (t) => t.reportStaleCoverage({ tenantRef }))).toBe(2);

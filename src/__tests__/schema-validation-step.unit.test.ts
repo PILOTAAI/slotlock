@@ -65,3 +65,21 @@ describe('applySchema', () => {
     expect(recorded).toBe(validating);
   });
 });
+
+describe('a migration chosen as a deadlock victim', () => {
+  it('is tried again, as one that waited past its lock timeout is', async () => {
+    // A caller's transaction can take the outbox, then a coverage row: the reverse of the order a
+    // rename batch takes them, so PostgreSQL may end the batch with 40P01.
+    let attempts = 0;
+    const client = {
+      begin: async () => {
+        attempts += 1;
+        throw Object.assign(new Error('deadlock detected'), { code: '40P01' });
+      },
+    };
+    await expect(createSlotlockStore(client as never).applySchema({ attempts: 2 })).rejects.toMatchObject({
+      code: 'schema_lock_timeout',
+    });
+    expect(attempts).toBe(2);
+  });
+});

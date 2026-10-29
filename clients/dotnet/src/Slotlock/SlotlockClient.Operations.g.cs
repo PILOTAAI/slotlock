@@ -1475,7 +1475,8 @@ public sealed partial class SlotlockClient
     /// when it was last read, its last error, and whether it is stale (not read for a day, so the
     /// time it covers is unproven, not free). A source that goes stale is also put on the change
     /// feed once, as coverage.stale, until it is read again. The feed names a source by its
-    /// source_id, never the source itself.
+    /// source_id (random, made when the source is first recorded for the resource and kept until
+    /// it is deleted), never the source itself.
     /// </remarks>
     /// <param name="resourceId">resource_id</param>
     /// <param name="cancellationToken">Cancels the request.</param>

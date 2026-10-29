@@ -9,7 +9,12 @@ import { Agent as HttpAgent, request as httpRequest } from 'node:http';
 import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
 import { BlockList, isIP } from 'node:net';
 import { Readable } from 'node:stream';
-import type { SlotlockChange, SlotlockChangeOrigin, SlotlockEventFeed } from './event-feed.js';
+import {
+  type SlotlockChange,
+  type SlotlockChangeOrigin,
+  type SlotlockEventFeed,
+  slotlockServedChange,
+} from './event-feed.js';
 import { ignoreRejection } from './hooks.js';
 
 /** The CloudEvents envelope a change is delivered and listed as. */
@@ -30,20 +35,22 @@ export interface SlotlockCloudEvent {
 
 /**
  * A change as CloudEvents 1.0 (structured mode): `type` is `io.pylota.slotlock.<change type>`, with
- * the extension attributes `slotlockorigin` and `slotlockkeyid` when the change records them.
+ * the extension attributes `slotlockorigin` and `slotlockkeyid` when the change records them. A
+ * `coverage.*` change is redacted as the feed serves it (slotlockServedChange), whoever built it.
  */
 export function slotlockCloudEvent(change: SlotlockChange): SlotlockCloudEvent {
+  const served = slotlockServedChange(change.type, change.subject, change.data);
   return {
     specversion: '1.0',
     id: change.id,
     source: change.resourceId ? `/slotlock/resources/${change.resourceId}` : '/slotlock',
     type: `io.pylota.slotlock.${change.type}`,
-    subject: change.subject,
+    subject: served.subject,
     time: change.occurredAt.toISOString(),
     datacontenttype: 'application/json',
     ...(change.origin ? { slotlockorigin: change.origin } : {}),
     ...(change.keyId ? { slotlockkeyid: change.keyId } : {}),
-    data: change.data,
+    data: served.data,
   };
 }
 

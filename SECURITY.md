@@ -101,6 +101,23 @@ as the deployment role or a superuser, or trust its owner as much. `SLOTLOCK_COR
 caller's `search_path` at their end; apply each in one transaction (`psql --single-transaction`),
 since under autocommit the pin ends with the statement that sets it.
 
+The change feed, the history and webhooks name a coverage source by its `source_id`, never the
+source itself, which can be an iCalendar URL with a token or an address. The id is random (`src_` and
+32 hex digits from `gen_random_uuid()`), stored with the source when it is first recorded and kept
+until it is deleted, so someone who sees a change and knows the tenant cannot confirm a guessed
+source against it (0.5.3's id was an unkeyed digest of the tenant and the source, and could be).
+The tenant reads the id beside the source from `listCoverage`. Upgrading renames the coverage
+changes earlier releases wrote, which carried the source, its last error or that digest, and a
+trigger on the outbox puts one an earlier release's server (0.3-0.5) still running writes after the
+upgrade in the same shape as it is inserted, so none is stored with its source. Every read path serves a `coverage.*` change without `source` and `last_error`, named
+`src_redacted` when its subject is not such an id, and history by subject never matches a coverage
+change by any other name. What was already sent stays sent: a webhook receiver keeps an earlier
+delivery, so rotate a token that an earlier release delivered in a `coverage.stale` change. A
+0.5.3 `source_id` already forwarded (a webhook delivery, a feed reader's copy, a log) still reveals
+its source to anyone who guesses the source and knows the tenant, as it did then; the rename changes
+only the copies in the outbox. `slotlockCoverageSourceId`, which worked that digest out, throws
+since 0.6.
+
 The privacy-minimised provider parser cannot return summaries, locations, notes, organizers or
 attendees. Full event parsing is a separate trusted API and must only receive authenticated content.
 Event command rows retain payload digests and stable results, never duplicate event content. Event

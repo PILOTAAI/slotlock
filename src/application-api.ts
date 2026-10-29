@@ -955,7 +955,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_get_coverage',
       title: "A resource's coverage and its health",
       description:
-        "Each external calendar (source) that records coverage of a resource: the window it covers, when it was last read, its last error, and whether it is stale (not read for a day, so the time it covers is unproven, not free). A source that goes stale is also put on the change feed once, as coverage.stale, until it is read again. The feed names a source by its source_id, never the source itself.",
+        "Each external calendar (source) that records coverage of a resource: the window it covers, when it was last read, its last error, and whether it is stale (not read for a day, so the time it covers is unproven, not free). A source that goes stale is also put on the change feed once, as coverage.stale, until it is read again. The feed names a source by its source_id (random, made when the source is first recorded for the resource and kept until it is deleted), never the source itself.",
       method: 'GET',
       path: '/v1/resources/{resource_id}/coverage',
       input: z.object({ resource_id: RESOURCE_ID }).strict(),
@@ -966,8 +966,11 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
               z
                 .object({
                   source: SOURCE,
-                  /** How the change feed names the source (coverage.recorded, .deleted, .stale). */
-                  source_id: z.string().regex(/^src_[0-9a-f]{24}$/),
+                  /**
+                   * How the change feed names the source (coverage.recorded, .deleted, .stale): random,
+                   * made when it is first recorded for the resource, kept until it is deleted.
+                   */
+                  source_id: z.string().regex(/^src_[0-9a-f]{32}$/),
                   start: DATE_TIME,
                   end: DATE_TIME,
                   revision: REVISION,
