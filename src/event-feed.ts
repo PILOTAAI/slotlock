@@ -77,21 +77,54 @@ export function isSlotlockChangeOrigin(value: unknown): value is SlotlockChangeO
 }
 
 /**
- * The SQL that names a coverage source on the feed (`coverage.recorded`, `.deleted`, `.stale`): a
- * digest of the tenant and the source, stable for both, so the source itself (an iCalendar URL with
- * a token, an address) never reaches a webhook or the history. `tenant` and `source` are SQL
- * expressions; slotlockCoverageSourceId works out the same value.
+ * The digest 0.5.3 named a coverage source by on the feed: `src_` and the first 24 hex digits of
+ * sha256(tenant, newline, source). Unkeyed, so anyone who knows the tenant could confirm a guessed
+ * source against it; 0.6 names a source by a random id instead (`calendar_coverage.source_id`), and
+ * the upgrade uses this only to find the changes 0.5.3 wrote and rename them. `tenant` and `source`
+ * are SQL expressions.
  */
-export function slotlockCoverageSourceIdSql(tenant: string, source: string): string {
-  return `'src_' || left(encode(sha256(convert_to(${tenant} || E'\\n' || ${source}, 'UTF8')), 'hex'), 24)`;
+export function legacyCoverageSourceDigestSql(tenant: string, source: string): string {
+  return `'src_' || pg_catalog.left(pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(${tenant} || E'\\n' || ${source}, 'UTF8')), 'hex'), 24)`;
 }
 
 /**
- * How the feed names a tenant's coverage source (`subject` and `data.source_id` of `coverage.*`
- * changes; `source_id` of slotlock_get_coverage): `src_` and 24 hex digits.
+ * The digest 0.5.3 named a coverage source by (`src_` and 24 hex digits of the tenant and the
+ * source). The feed no longer carries it: since 0.6 a source's `source_id` is random, made when it
+ * is first recorded, and only `listCoverage` / `slotlock_get_coverage` give it.
+ *
+ * @deprecated It no longer matches anything the feed or the API returns; read `sourceId` from
+ * `listCoverage` (`source_id` of `slotlock_get_coverage`). It may be removed in 0.7.0.
  */
 export function slotlockCoverageSourceId(tenantRef: string, source: string): string {
   return `src_${createHash('sha256').update(`${tenantRef}\n${source}`, 'utf8').digest('hex').slice(0, 24)}`;
+}
+
+/** What a coverage source's `source_id` is: `src_` and 32 random hex digits. */
+const SLOTLOCK_COVERAGE_SOURCE_ID = /^src_[0-9a-f]{32}$/;
+
+/**
+ * The `source_id` of a `coverage.*` change whose source could not be named any more: one an
+ * earlier release recorded by the source itself (or by its 0.5.3 digest) after the source was
+ * deleted, or one not yet renamed when it is read.
+ */
+const SLOTLOCK_REDACTED_SOURCE_ID = 'src_redacted';
+
+/**
+ * A change's subject and data as the feed serves them. A `coverage.*` change never carries its
+ * source (`source`) or the error read from it (`last_error`, which can quote it), and is named by a
+ * `source_id` of this release or `src_redacted`: an earlier release wrote both, and the upgrade
+ * renames those rows in batches after it commits, so a row it has not reached yet, or one an
+ * earlier release's server writes during a rolling upgrade, is served redacted.
+ */
+export function slotlockServedChange(
+  type: string,
+  subject: string,
+  data: Record<string, unknown>,
+): { subject: string; data: Record<string, unknown> } {
+  if (!type.startsWith('coverage.')) return { subject, data };
+  const { source: _source, last_error: _lastError, ...rest } = data;
+  const sourceId = SLOTLOCK_COVERAGE_SOURCE_ID.test(subject) ? subject : SLOTLOCK_REDACTED_SOURCE_ID;
+  return { subject: sourceId, data: { ...rest, source_id: sourceId } };
 }
 
 /** How long the feed keeps a change, and so how far back a cursor may reach. */
@@ -272,8 +305,7 @@ function toChange(row: ChangeRow): SlotlockChange {
     id: `msg_${row.id}`,
     type: row.type,
     resourceId: row.resource_id,
-    subject: row.subject,
-    data: row.data,
+    ...slotlockServedChange(row.type, row.subject, row.data),
     occurredAt: row.occurred_at,
     actor: row.actor,
     // One a later release added, read by this one: unknown here, so unrecorded, not a failed page.

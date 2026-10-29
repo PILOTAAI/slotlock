@@ -3,6 +3,60 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Fixed
+
+- Security: a coverage source's `source_id` could be confirmed by guessing. 0.5.3 named a source on the feed
+  by `src_` and 24 hex digits of an unkeyed SHA-256 of the tenant and the source, so anyone who saw
+  a change or a webhook and knew the tenant could test a guessed source offline: an address such as
+  `google:alice.smith@example.com`, say. A source's `source_id` is now random (`src_` and 32 hex
+  digits, 122 bits from `gen_random_uuid()`), stored with the source in
+  `calendar_coverage.source_id` when it is first recorded for the resource and kept until it is
+  deleted. Nothing outside the database can work it out; the tenant reads it beside the source from
+  `listCoverage` and `slotlock_get_coverage`.
+- Security: changes an earlier release wrote still carried the source. Before 0.5.3 `coverage.stale` had the
+  source itself as `subject` and `data.source` (an iCalendar URL with its token) and the error read
+  from it as `data.last_error`, and `listChanges`, the history and webhooks that had not received it
+  served it until it was pruned. The upgrade renames every `coverage.*` change not in this release's
+  shape: `subject` and `data.source_id` become the source's new id, `source` and `last_error` are
+  removed. A change about a source deleted since is named `src_redacted`: nothing can match it any
+  more, and a made-up id would look like a source the tenant could find. The read path redacts too:
+  `listChanges`, `listRecentChanges`, `listHistory`, webhook deliveries and `slotlockCloudEvent`
+  never serve a `coverage.*` change with `source` or `last_error`, and name one whose subject is not
+  a `source_id` of this release `src_redacted`, so a row the upgrade has not reached yet, or one an
+  earlier release's server writes during a rolling upgrade, is never served raw.
+
+### Changed
+
+- **Breaking:** every `source_id` changes, and its shape is `src_` and 32 hex digits (was 24). A
+  reader that stored `source_id`s or `subject`s of `coverage.*` changes matches them again from
+  `listCoverage` / `GET /v1/resources/{id}/coverage`. The same source recorded for two resources,
+  or deleted and recorded again, has a different id each time.
+- **Breaking:** changes already on the feed about coverage are rewritten in place by the upgrade, as
+  above; their positions and ids (`webhook-id`) do not change, so a webhook that already received
+  one is not sent it again, and one that has not receives the new shape.
+
+### Deprecated
+
+- `slotlockCoverageSourceId` still returns 0.5.3's digest, which nothing returns any more: read
+  `sourceId` from `listCoverage` instead. It may be removed in 0.7.0.
+
+### Upgrading
+
+- The migration adds `calendar_coverage.source_id` without rewriting the table (the column bare, its
+  random default set apart), gives each existing source an id under the migration's lock
+  (`calendar_coverage` is one row per source and resource), and adds its CHECK NOT VALID, validated
+  after the migration commits.
+- Once the structure commits, `applySchema` renames the earlier coverage changes in batches of 5,000
+  outbox ids by primary key, each its own transaction, up to the last change when it started. Under
+  a deployment role that forced RLS binds, each batch lifts FORCE from `calendar_coverage` and
+  `outbox` and puts it back before it commits, so it holds ACCESS EXCLUSIVE on both for that one
+  batch (milliseconds), never for the whole outbox; a superuser or BYPASSRLS role takes no table
+  lock. An interrupted rename is run whole again by the next migration. Rows in the new shape are
+  left alone, so running it again changes nothing. `SLOTLOCK_CORE_DDL`, applied with psql in one
+  transaction, renames them all in that transaction.
+
 ## 0.5.3 - 2026-10-28
 
 ### Added

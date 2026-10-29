@@ -7,8 +7,6 @@ import {
   type SlotlockChangeOrigin,
   type SlotlockEventFeed,
   isSlotlockChangeOrigin,
-  slotlockCoverageSourceId,
-  slotlockCoverageSourceIdSql,
   slotlockEventFeedMethods,
 } from './event-feed.js';
 import {
@@ -29,6 +27,7 @@ import ICAL from 'ical.js';
 import type { Sql, TransactionSql } from 'postgres';
 import {
   SLOTLOCK_CORE_DDL,
+  SLOTLOCK_COVERAGE_CHANGE_RENAME_BATCH,
   SLOTLOCK_DEPLOYMENT_CHECKS,
   SLOTLOCK_SCHEMA_CONTROL_REFUSAL,
   SLOTLOCK_SCHEMA_NEWER_REFUSAL,
@@ -39,6 +38,7 @@ import {
   SLOTLOCK_VALIDATION_DDL,
   createSlotlockApplicationRoleGrantsDdl,
   createSlotlockTenantRlsDdl,
+  slotlockCoverageChangeRenameSql,
   slotlockTenantLockKey,
 } from './ddl.js';
 import { findNextAvailable, mergeIntervals } from './engine.js';
@@ -167,8 +167,6 @@ const MAX_CONFIGURED_AGENT_OWNER_COMMAND_QUOTA = 1_000_000;
 const SCHEMA_APPLY_LOCK = 'slotlock:schema-apply:v1';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-// A coverage source as the feed names it (coverage.stale): its digest, never the source itself.
-const COVERAGE_SOURCE_ID = slotlockCoverageSourceIdSql('tenant_ref', 'source');
 const AGENT_EVENT_OWNER_PATTERN = /^agent:[0-9a-f]{64}$/;
 
 /** Store-owned coverage source for bounded, locally materialized recurring events. */
@@ -622,6 +620,54 @@ async function slotlockSchemaUpToDate(tx: TransactionSql): Promise<boolean> {
     return false;
   }
   return recorded.catalog_sha256 === (await slotlockCatalogDigest(tx));
+}
+
+/**
+ * Rename the coverage changes an earlier release wrote (ddl.ts, slotlockCoverageChangeRenameSql),
+ * in batches of SLOTLOCK_COVERAGE_CHANGE_RENAME_BATCH outbox ids, each a transaction of its own, up
+ * to the last change when it starts. Forced RLS would hide every tenant's rows from the deployment
+ * role, so a role it binds lifts FORCE from calendar_coverage and outbox for the batch and puts it
+ * back before the batch commits: each batch holds ACCESS EXCLUSIVE on both, taken in the order
+ * writers take them (a source, then its change), for one primary-key range of the outbox, never the
+ * whole table. A table an operator left unforced stays so. A superuser or BYPASSRLS role reads
+ * every row as it is and takes no lock beyond the rows it renames.
+ */
+async function renameEarlierCoverageChanges(
+  executor: StoreSql,
+  options: SlotlockMigrationOptions | undefined,
+): Promise<void> {
+  const rename = slotlockCoverageChangeRenameSql('$1::bigint', '$2::bigint', '$3::int');
+  let after = '0';
+  let head: string | null = null;
+  for (;;) {
+    const last = await inMigration(executor, options, async (tx) => {
+      const forced = await tx<{ name: string }[]>`
+        SELECT rel.relname::text AS name
+          FROM pg_catalog.pg_class rel
+          JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+         WHERE ns.nspname = 'slotlock' AND rel.relname IN ('calendar_coverage', 'outbox')
+           AND rel.relforcerowsecurity
+           AND NOT EXISTS (
+             SELECT 1 FROM pg_catalog.pg_roles
+              WHERE rolname = current_user AND (rolsuper OR rolbypassrls))
+         ORDER BY rel.relname`;
+      // calendar_coverage, then outbox: the order every writer locks them in.
+      const lifted = forced.map(({ name }) => `slotlock.${name}`);
+      if (lifted.length > 0) {
+        await tx.unsafe(`LOCK TABLE ${lifted.join(', ')} IN ACCESS EXCLUSIVE MODE`);
+        for (const table of lifted) await tx.unsafe(`ALTER TABLE ${table} NO FORCE ROW LEVEL SECURITY`);
+      }
+      if (head === null) {
+        const [top] = await tx<{ head: string }[]>`SELECT COALESCE(max(id), 0)::text AS head FROM slotlock.outbox`;
+        head = top?.head ?? '0';
+      }
+      const [row] = await tx.unsafe<{ last: string | null }[]>(rename, [after, head, SLOTLOCK_COVERAGE_CHANGE_RENAME_BATCH]);
+      for (const table of lifted) await tx.unsafe(`ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`);
+      return row?.last ?? null;
+    });
+    if (last === null) return;
+    after = String(last);
+  }
 }
 
 /** Whether a constraint in the `slotlock` schema is still NOT VALID (old rows broke it). */
@@ -2789,7 +2835,10 @@ export type CheckInReservationResult =
 /** One source's coverage of a resource, with its health (listCoverage). */
 export interface SlotlockCoverageHealth {
   source: string;
-  /** How the change feed names the source (slotlockCoverageSourceId), never the source itself. */
+  /**
+   * How the change feed names the source, never the source itself: `src_` and 32 random hex
+   * digits, made when the source is first recorded for the resource and kept until it is deleted.
+   */
   sourceId: string;
   start: Date;
   end: Date;
@@ -3496,17 +3545,23 @@ function buildSlotlockStore(
       // inMigration serializes bootstrap per database and the transaction releases the lock on
       // crashes. A schema this release already left as it is changes nothing and locks no table,
       // unless old rows kept one of its constraints NOT VALID: then only the validation runs again.
-      const validate = await inMigration(sql, migrationOptions, async (tx) => {
+      const next = await inMigration(sql, migrationOptions, async (tx) => {
         await tx.unsafe(SLOTLOCK_DEPLOYMENT_CHECKS).catch((error: unknown) => {
           throw schemaControlRefusal(error);
         });
-        if (await slotlockSchemaUpToDate(tx)) return slotlockConstraintUnvalidated(tx);
+        if (await slotlockSchemaUpToDate(tx)) {
+          return (await slotlockConstraintUnvalidated(tx)) ? ('validate' as const) : null;
+        }
         await tx.unsafe(SLOTLOCK_STRUCTURE_DDL).catch((error: unknown) => {
           throw schemaControlRefusal(error);
         });
-        return true;
+        return 'structure' as const;
       });
-      if (!validate) return;
+      if (next === null) return;
+      // Changes an earlier release wrote are renamed in short batches once the structure commits,
+      // never under its locks (renameEarlierCoverageChanges); the feed serves any it has not reached
+      // yet redacted (event-feed.ts, slotlockServedChange).
+      if (next === 'structure') await renameEarlierCoverageChanges(sql, migrationOptions);
       // Once the DDL has committed, its ACCESS EXCLUSIVE locks are gone: validating holds none that
       // a serving query waits for (ddl.ts, DEPLOYMENT_VALIDATE_CONSTRAINTS). Inside a caller's
       // transaction both steps share it, and its locks, until it ends. The digests go last, so a
@@ -6064,6 +6119,7 @@ function buildSlotlockStore(
       const maxAgeMs = params.maxAgeMs ?? 24 * 60 * 60 * 1000;
       const rows = await sql<{
         source: string;
+        source_id: string;
         starts_at: Date;
         ends_at: Date;
         revision: string | number;
@@ -6072,14 +6128,14 @@ function buildSlotlockStore(
         last_error_at: Date | null;
         stale: boolean;
       }[]>`
-        SELECT source, starts_at, ends_at, revision, observed_at, last_error, last_error_at,
+        SELECT source, source_id, starts_at, ends_at, revision, observed_at, last_error, last_error_at,
                observed_at < now() - make_interval(secs => ${maxAgeMs / 1_000}) AS stale
           FROM slotlock.calendar_coverage
          WHERE tenant_ref = ${params.tenantRef} AND resource_id = ${params.resourceId}
          ORDER BY source`;
       return rows.map((row) => ({
         source: row.source,
-        sourceId: slotlockCoverageSourceId(params.tenantRef, row.source),
+        sourceId: row.source_id,
         start: row.starts_at,
         end: row.ends_at,
         revision: Number(row.revision),
@@ -6104,15 +6160,15 @@ function buildSlotlockStore(
                 AND observed_at < now() - make_interval(secs => ${maxAgeMs / 1_000})
               ORDER BY observed_at LIMIT ${params.limit ?? 100}
               FOR UPDATE SKIP LOCKED)
-          RETURNING coverage.tenant_ref, coverage.resource_id, coverage.source, coverage.observed_at
+          RETURNING coverage.resource_id, coverage.source_id, coverage.observed_at
         ), reported AS (
           INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
-          SELECT ${params.tenantRef}, named.resource_id, 'coverage.stale', named.source_id,
+          SELECT ${params.tenantRef}, stale.resource_id, 'coverage.stale', stale.source_id,
                  jsonb_build_object(
-                   'resource_id', named.resource_id, 'source_id', named.source_id,
-                   'observed_at', named.observed_at),
+                   'resource_id', stale.resource_id, 'source_id', stale.source_id,
+                   'observed_at', stale.observed_at),
                  'slotlock:maintenance'
-            FROM (SELECT resource_id, observed_at, ${sql.unsafe(COVERAGE_SOURCE_ID)} AS source_id FROM stale) named
+            FROM stale
           RETURNING 1
         )
         SELECT count(*)::int AS count FROM reported`;

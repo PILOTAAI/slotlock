@@ -343,7 +343,7 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
     sources: [
       {
         source: 'google:fleet@example.com',
-        source_id: 'src_0123456789abcdef01234567',
+        source_id: 'src_0123456789abcdef0123456789abcdef',
         start: '2027-03-01T00:00:00.000Z',
         end: '2027-06-01T00:00:00.000Z',
         revision: 7,

@@ -13,7 +13,6 @@ import {
 } from '../agent-store-backend.js';
 import { createSlotlockApiKeyAuthenticator, createSlotlockApiKeyStore } from '../api-keys.js';
 import { createSlotlockDashboardResources } from '../dashboard.js';
-import { slotlockCoverageSourceId } from '../event-feed.js';
 import { maintainSlotlockTenant } from '../maintenance.js';
 import { type SlotlockStore, createSlotlockStore } from '../store.js';
 import { modernRequest } from './helpers/modern-mcp.js';
@@ -171,15 +170,18 @@ describe.skipIf(!url)('configuration changes and provenance on the feed (real Po
       );
     expect(await cover(1)).toMatchObject({ ok: true });
     expect(await cover(2)).toMatchObject({ ok: true });
+    const [covered] = await store.withTenant(tenantRef, (t) => t.listCoverage({ tenantRef, resourceId: id }));
+    const sourceId = covered?.sourceId as string;
+    expect(sourceId).toMatch(/^src_[0-9a-f]{32}$/);
     await store.withTenant(tenantRef, (t) => t.deleteCoverage({ tenantRef, resourceId: id, source: 'google:fleet' }), as);
     expect(await feed.next()).toEqual([
       {
         type: 'coverage.recorded',
-        subject: slotlockCoverageSourceId(tenantRef, 'google:fleet'),
+        subject: sourceId,
         resource_id: id,
         data: {
           resource_id: id,
-          source_id: slotlockCoverageSourceId(tenantRef, 'google:fleet'),
+          source_id: sourceId,
           start: expect.any(String),
           end: expect.any(String),
           revision: 1,
@@ -188,9 +190,9 @@ describe.skipIf(!url)('configuration changes and provenance on the feed (real Po
       },
       {
         type: 'coverage.deleted',
-        subject: slotlockCoverageSourceId(tenantRef, 'google:fleet'),
+        subject: sourceId,
         resource_id: id,
-        data: { resource_id: id, source_id: slotlockCoverageSourceId(tenantRef, 'google:fleet') },
+        data: { resource_id: id, source_id: sourceId },
         ...by,
       },
     ]);

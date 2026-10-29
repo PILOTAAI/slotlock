@@ -48,7 +48,7 @@ describe.skipIf(!url)('feed health (real Postgres)', () => {
     const report = () => store.withTenant(tenantRef, (tenant) => tenant.reportStaleCoverage({ tenantRef }));
     expect(await report()).toBe(1);
     expect(await report()).toBe(0);
-    // Named by its digest, as slotlock_get_coverage gives it; the source and its error stay off the feed.
+    // Named by its source_id, as slotlock_get_coverage gives it; the source and its error stay off the feed.
     const sourceId = (fresh.sources[0] as { source_id: string }).source_id;
     const [stale] = await store.listHistory({ tenantRef, subject: sourceId, limit: 1 });
     expect(stale).toMatchObject({ type: 'coverage.stale', data: { resource_id: resource.id, source_id: sourceId } });

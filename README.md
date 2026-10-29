@@ -1253,9 +1253,12 @@ webhook URLs or secrets.
   and check-in rules, pool, bookable hours, time zone or reference, with `before` and `after` of
   only the fields that changed), `resource.archived`, `.restored`, `.deleted`; `coverage.recorded`
   (a source's first read; reading it again is not a change) and `coverage.deleted`. A `coverage.*`
-  change names its source by `source_id` (also its `subject`), a digest of the tenant and the source
-  that `slotlock_get_coverage` and `slotlockCoverageSourceId` give too, never the source itself,
-  which can be an iCalendar URL with a token or an address;
+  change names its source by `source_id` (also its `subject`), never the source itself, which can
+  be an iCalendar URL with a token or an address: `src_` and 32 random hex digits, made when the
+  source is first recorded for the resource and kept until it is deleted, so it cannot be worked
+  out from the source. `slotlock_get_coverage` (`listCoverage`) gives it beside the source, to
+  match a change to its source. A change about a source deleted before 0.6 named it is
+  `src_redacted`;
   `webhook.created`, `.enabled`, `.disabled`, `.deleted` (the id and `event_types`, never the URL);
   `key.created`, `.rotated`, `.revoked` (the id, scopes and expiry, never the key, its digest,
   prefix or name). `SLOTLOCK_CHANGE_TYPES` lists them.

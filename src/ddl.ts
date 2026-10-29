@@ -11,7 +11,7 @@
 // the caller's search_path back at the end, so a caller that keeps going in the same transaction
 // resolves its own names as before. Apply it in one transaction: under autocommit every statement
 // is a transaction of its own, and the pin ends with the statement that sets it.
-import { SLOTLOCK_CHANGE_ORIGINS, slotlockCoverageSourceIdSql } from './event-feed.js';
+import { SLOTLOCK_CHANGE_ORIGINS, legacyCoverageSourceDigestSql } from './event-feed.js';
 import { SLOTLOCK_MAX_AVAILABILITY_RULES } from './weekly-hours.js';
 
 const CALLER_SEARCH_PATH_SETTING = 'slotlock.caller_search_path';
@@ -1698,6 +1698,29 @@ UPDATE slotlock.calendar_events
 ALTER TABLE slotlock.calendar_coverage ADD COLUMN IF NOT EXISTS last_error text;
 ALTER TABLE slotlock.calendar_coverage ADD COLUMN IF NOT EXISTS last_error_at timestamptz;
 ALTER TABLE slotlock.calendar_coverage ADD COLUMN IF NOT EXISTS stale_reported_at timestamptz;
+-- How the feed names a source (0.6): \`src_\` and 32 random hex digits, made when the source is first
+-- recorded for the resource and kept until it is deleted, so nobody can confirm a guessed source
+-- against it (0.5.3 named it by an unkeyed digest of the tenant and the source). Added bare, its
+-- default set apart (a volatile default on ADD COLUMN would rewrite the table under the lock), the
+-- sources already there given one each, and its CHECK NOT VALID, validated after the migration
+-- commits. Only listCoverage gives the source beside it, to the tenant.
+ALTER TABLE slotlock.calendar_coverage ADD COLUMN IF NOT EXISTS source_id text;
+ALTER TABLE slotlock.calendar_coverage
+  ALTER COLUMN source_id SET DEFAULT 'src_' || pg_catalog.replace(pg_catalog.gen_random_uuid()::text, '-', '');
+UPDATE slotlock.calendar_coverage SET source_id = DEFAULT WHERE source_id IS NULL;
+DO $slotlock_coverage_source_id$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint
+     WHERE conrelid = 'slotlock.calendar_coverage'::regclass
+       AND conname = 'slotlock_calendar_coverage_source_id_valid'
+  ) THEN
+    ALTER TABLE slotlock.calendar_coverage
+      ADD CONSTRAINT slotlock_calendar_coverage_source_id_valid
+      CHECK (source_id IS NOT NULL AND source_id ~ '^src_[0-9a-f]{32}$') NOT VALID;
+  END IF;
+END
+$slotlock_coverage_source_id$;
 
 -- Configuration changes (RFC 0002 P1-6): a resource's own settings, the sources its coverage is
 -- read from, and the tenant's webhook endpoints. Each change that alters something appends one row,
@@ -1777,7 +1800,7 @@ $slotlock_outbox_resource$;
 
 -- A source first recorded, and deleted. Reading it again (a new revision) is progress, not a change
 -- of what the resource is read from, and appends nothing; neither does a resource's deletion, which
--- takes its coverage with it and is its own change. The source is named by its digest (source_id):
+-- takes its coverage with it and is its own change. The source is named by its random source_id:
 -- it can be an iCalendar URL with a token in it, or an address.
 CREATE OR REPLACE FUNCTION slotlock.outbox_coverage_change()
 RETURNS trigger
@@ -1797,10 +1820,10 @@ BEGIN
   VALUES (
     changed.tenant_ref, changed.resource_id,
     CASE WHEN TG_OP = 'DELETE' THEN 'coverage.deleted' ELSE 'coverage.recorded' END,
-    ${slotlockCoverageSourceIdSql('changed.tenant_ref', 'changed.source')},
+    changed.source_id,
     jsonb_strip_nulls(jsonb_build_object(
       'resource_id', changed.resource_id,
-      'source_id', ${slotlockCoverageSourceIdSql('changed.tenant_ref', 'changed.source')},
+      'source_id', changed.source_id,
       'start', CASE WHEN TG_OP = 'INSERT' THEN changed.starts_at END,
       'end', CASE WHEN TG_OP = 'INSERT' THEN changed.ends_at END,
       'revision', CASE WHEN TG_OP = 'INSERT' THEN changed.revision END)),
@@ -3175,8 +3198,79 @@ CREATE INDEX IF NOT EXISTS slotlock_reservations_calendar_event_idx
   ON slotlock.reservations (calendar_event_id) WHERE calendar_event_id IS NOT NULL;
 ${SLOTLOCK_OUTBOX_DDL}${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_DASHBOARD_DDL}${SLOTLOCK_TENANT_ADMIN_DDL}${DEPLOYMENT_RECORD_VERSION}`;
 
+/** Outbox ids one batch of the coverage-change rename reads (by primary key) in one transaction. */
+export const SLOTLOCK_COVERAGE_CHANGE_RENAME_BATCH = 5_000;
+
+/**
+ * One batch of the rename of coverage changes an earlier release wrote: of the outbox rows with ids
+ * after `after` up to `head` (SQL expressions, bigint), the first `batch` by id, each `coverage.*`
+ * one not yet in this release's shape gets its source's source_id as subject and `data.source_id`,
+ * and loses `source` and `last_error`. Before 0.5.3 coverage.stale carried the source itself (an
+ * iCalendar URL with a token, an address) and the error read from it; 0.5.3 named it by an unkeyed
+ * digest anyone could confirm a guess against. A source deleted since is `src_redacted`: nothing
+ * can match it any more, and a made-up id would look like a source the tenant could find. Selects
+ * the last id read (null when there was none), `INTO` `into` when given (PL/pgSQL). Rows in the new
+ * shape are left alone, so a batch run again changes nothing.
+ */
+export function slotlockCoverageChangeRenameSql(after: string, head: string, batch: string, into = ''): string {
+  return `WITH scanned AS MATERIALIZED (
+  SELECT id FROM slotlock.outbox
+   WHERE id > ${after} AND id <= ${head}
+   ORDER BY id
+   LIMIT ${batch}
+), earlier AS (
+  SELECT change.id, change.tenant_ref, change.resource_id, change.subject, change.data
+    FROM slotlock.outbox change
+   WHERE change.id IN (SELECT scanned.id FROM scanned)
+     AND change.type LIKE 'coverage.%'
+     AND NOT (change.subject ~ '^src_([0-9a-f]{32}|redacted)$'
+              AND change.data ->> 'source_id' IS NOT DISTINCT FROM change.subject
+              AND NOT change.data ?| ARRAY['source', 'last_error'])
+     FOR UPDATE OF change
+), named AS (
+  SELECT earlier.id,
+         COALESCE((
+           SELECT coverage.source_id FROM slotlock.calendar_coverage coverage
+            WHERE coverage.tenant_ref = earlier.tenant_ref
+              AND coverage.resource_id = earlier.resource_id
+              AND coverage.source_id IS NOT NULL
+              AND (coverage.source = earlier.subject
+                   OR coverage.source = earlier.data ->> 'source'
+                   OR ${legacyCoverageSourceDigestSql('coverage.tenant_ref', 'coverage.source')} = earlier.subject)
+            LIMIT 1), 'src_redacted') AS source_id
+    FROM earlier
+), renamed AS (
+  UPDATE slotlock.outbox change
+     SET subject = named.source_id,
+         data = (change.data - 'source' - 'last_error') || jsonb_build_object('source_id', named.source_id)
+    FROM named
+   WHERE change.id = named.id
+  RETURNING change.id
+)
+SELECT (SELECT max(scanned.id) FROM scanned) AS last${into ? ` INTO ${into}` : ''}
+  FROM (SELECT count(*) FROM renamed) done`;
+}
+
+// The rename for SLOTLOCK_CORE_DDL, run whole in its one transaction, while FORCE is lifted. applySchema
+// runs it in batches after the structure commits instead, each its own short transaction.
+const DEPLOYMENT_RENAME_COVERAGE_CHANGES = `DO $slotlock_rename_coverage_changes$
+DECLARE
+  scan_after bigint := 0;
+  scan_head bigint;
+  scan_last bigint;
+BEGIN
+  SELECT COALESCE(max(id), 0) INTO scan_head FROM slotlock.outbox;
+  LOOP
+    ${slotlockCoverageChangeRenameSql('scan_after', 'scan_head', String(SLOTLOCK_COVERAGE_CHANGE_RENAME_BATCH), 'scan_last')};
+    EXIT WHEN scan_last IS NULL;
+    scan_after := scan_last;
+  END LOOP;
+END
+$slotlock_rename_coverage_changes$;
+`;
+
 /** The whole deployment DDL, run in one transaction: the schema, then its constraints validated. */
-export const SLOTLOCK_CORE_DDL: string = `${CORE_DDL_BODY}${DEPLOYMENT_VALIDATE_CONSTRAINTS}${DEPLOYMENT_RESTORE_FORCED_ROW_SECURITY}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
+export const SLOTLOCK_CORE_DDL: string = `${CORE_DDL_BODY}${DEPLOYMENT_RENAME_COVERAGE_CHANGES}${DEPLOYMENT_VALIDATE_CONSTRAINTS}${DEPLOYMENT_RESTORE_FORCED_ROW_SECURITY}${DEPLOYMENT_SEARCH_PATH_RESTORE}`;
 
 /**
  * SLOTLOCK_CORE_DDL without the validation, which applySchema runs as a step of its own after this
