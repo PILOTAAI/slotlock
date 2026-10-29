@@ -643,56 +643,71 @@ async function slotlockSchemaUpToDate(tx: TransactionSql): Promise<boolean> {
  * EXCLUSIVE on both, taken in the order writers take them (a source, then its change), for one
  * primary-key range of the outbox. A table an operator left unforced stays so. A superuser or
  * BYPASSRLS role reads every row as it is: it holds SHARE ROW EXCLUSIVE on the outbox (which waits
- * for the writes in flight and holds off new ones, but no read) only while it reads the head.
+ * for the writes in flight and holds off new ones, but no read) only for the short transaction that
+ * reads the head. Changes an earlier release's server writes after the upgrade are put in shape as
+ * they are inserted (ddl.ts, slotlock.outbox_coverage_in_shape); the passes are for those before.
  */
 async function renameEarlierCoverageChanges(
   executor: StoreSql,
   options: SlotlockMigrationOptions | undefined,
 ): Promise<void> {
+  /**
+   * Run `work` able to read every tenant's outbox and coverage rows: as it is for a superuser or a
+   * BYPASSRLS role, else with FORCE lifted from the tables that have it, under ACCESS EXCLUSIVE
+   * (calendar_coverage, then outbox: the order every writer locks them in), and put back after.
+   */
+  const everyTenant = async <T>(tx: TransactionSql, bypass: boolean, work: () => Promise<T>) => {
+    const forced = bypass
+      ? []
+      : await tx<{ name: string }[]>`
+          SELECT rel.relname::text AS name
+            FROM pg_catalog.pg_class rel
+            JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+           WHERE ns.nspname = 'slotlock' AND rel.relname IN ('calendar_coverage', 'outbox')
+             AND rel.relforcerowsecurity
+           ORDER BY rel.relname`;
+    const lifted = forced.map(({ name }) => `slotlock.${name}`);
+    if (lifted.length > 0) {
+      await tx.unsafe(`LOCK TABLE ${lifted.join(', ')} IN ACCESS EXCLUSIVE MODE`);
+      for (const table of lifted) await tx.unsafe(`ALTER TABLE ${table} NO FORCE ROW LEVEL SECURITY`);
+    }
+    const result = await work();
+    for (const table of lifted) await tx.unsafe(`ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`);
+    return result;
+  };
+
+  // The pass's head, in a short transaction of its own: once the writes in flight have ended (each
+  // holds ROW EXCLUSIVE from before it took its id), none at or below it can commit later.
+  const start = await inMigration(executor, options, async (tx) => {
+    const [state] = await tx<{ renamed: boolean; through: string | null; bypass: boolean }[]>`
+      SELECT version.coverage_changes_renamed AS renamed,
+             version.coverage_changes_renamed_through::text AS through,
+             EXISTS (SELECT 1 FROM pg_catalog.pg_roles
+                      WHERE rolname = current_user AND (rolsuper OR rolbypassrls)) AS bypass
+        FROM slotlock.schema_version version
+       WHERE version.singleton`;
+    if (state === undefined || state.renamed) return null;
+    if (state.bypass) await tx.unsafe('LOCK TABLE slotlock.outbox IN SHARE ROW EXCLUSIVE MODE');
+    const [top] = await everyTenant(tx, state.bypass, () =>
+      tx<{ head: string }[]>`SELECT COALESCE(max(id), 0)::text AS head FROM slotlock.outbox`,
+    );
+    return { head: top?.head ?? '0', through: state.through, bypass: state.bypass };
+  });
+  if (start === null) return;
+  const { head, bypass } = start;
+  const firstPass = start.through === null;
   const rename = slotlockCoverageChangeRenameSql('$1::bigint', '$2::bigint', '$3::int');
-  let after: string | null = null;
-  let head: string | null = null;
-  let firstPass = false;
+  let after = start.through ?? '0';
   let renamedTotal = 0;
   for (;;) {
     const last = await inMigration(executor, options, async (tx) => {
-      const [state] = await tx<{ renamed: boolean; through: string | null; bypass: boolean }[]>`
-        SELECT version.coverage_changes_renamed AS renamed,
-               version.coverage_changes_renamed_through::text AS through,
-               EXISTS (SELECT 1 FROM pg_catalog.pg_roles
-                        WHERE rolname = current_user AND (rolsuper OR rolbypassrls)) AS bypass
-          FROM slotlock.schema_version version
-         WHERE version.singleton`;
-      if (state === undefined || state.renamed) return null;
-      const forced = state.bypass
-        ? []
-        : await tx<{ name: string }[]>`
-            SELECT rel.relname::text AS name
-              FROM pg_catalog.pg_class rel
-              JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
-             WHERE ns.nspname = 'slotlock' AND rel.relname IN ('calendar_coverage', 'outbox')
-               AND rel.relforcerowsecurity
-             ORDER BY rel.relname`;
-      // calendar_coverage, then outbox: the order every writer locks them in.
-      const lifted = forced.map(({ name }) => `slotlock.${name}`);
-      if (lifted.length > 0) {
-        await tx.unsafe(`LOCK TABLE ${lifted.join(', ')} IN ACCESS EXCLUSIVE MODE`);
-        for (const table of lifted) await tx.unsafe(`ALTER TABLE ${table} NO FORCE ROW LEVEL SECURITY`);
-      }
-      if (head === null) {
-        // Wait for the writes in flight: each holds ROW EXCLUSIVE from before it took its id.
-        if (lifted.length === 0) await tx.unsafe('LOCK TABLE slotlock.outbox IN SHARE ROW EXCLUSIVE MODE');
-        const [top] = await tx<{ head: string }[]>`SELECT COALESCE(max(id), 0)::text AS head FROM slotlock.outbox`;
-        head = top?.head ?? '0';
-        firstPass = state.through === null;
-        after = state.through ?? '0';
-      }
-      const [row] = await tx.unsafe<{ last: string | null; renamed: number }[]>(rename, [
-        after,
-        head,
-        SLOTLOCK_COVERAGE_CHANGE_RENAME_BATCH,
-      ]);
-      for (const table of lifted) await tx.unsafe(`ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`);
+      const [row] = await everyTenant(tx, bypass, () =>
+        tx.unsafe<{ last: string | null; renamed: number }[]>(rename, [
+          after,
+          head,
+          SLOTLOCK_COVERAGE_CHANGE_RENAME_BATCH,
+        ]),
+      );
       const read = row?.last ?? null;
       renamedTotal += row?.renamed ?? 0;
       // Saved with the batch, so a pass stopped part way goes on from here.
