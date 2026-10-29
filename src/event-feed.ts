@@ -674,7 +674,11 @@ export function slotlockEventFeedMethods(
           FROM slotlock.outbox
          WHERE tenant_ref = ${params.tenantRef}
            AND (${params.resourceId ?? null}::uuid IS NULL OR resource_id = ${params.resourceId ?? null}::uuid)
-           AND (${params.subject ?? null}::text IS NULL OR subject = ${params.subject ?? null})
+           AND (${params.subject ?? null}::text IS NULL OR (
+                 subject = ${params.subject ?? null}
+                 -- A coverage change matches only by the name it is served under: one not renamed
+                 -- yet may still hold its source, and a guess must not find it.
+                 AND (type NOT LIKE 'coverage.%' OR subject ~ '^src_([0-9a-f]{32}|redacted)$')))
            AND (${before}::bigint IS NULL OR id < ${before}::bigint)
          ORDER BY id DESC
          LIMIT ${limit}`;

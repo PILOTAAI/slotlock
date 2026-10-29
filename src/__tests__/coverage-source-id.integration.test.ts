@@ -55,6 +55,13 @@ describe.skipIf(!url)('coverage source ids (real Postgres)', () => {
     return Object.fromEntries(sources.map(({ source, source_id }) => [source, source_id]));
   }
 
+  /** The schema_version 0.5.3 left: no rename recorded, and digests this release does not match. */
+  async function asBefore06() {
+    await superuser.unsafe(`ALTER TABLE slotlock.schema_version
+      DROP COLUMN IF EXISTS coverage_changes_renamed_through, DROP COLUMN IF EXISTS coverage_changes_renamed`);
+    await superuser`UPDATE slotlock.schema_version SET ddl_sha256 = NULL, catalog_sha256 = NULL`;
+  }
+
   async function forcedTables() {
     const rows = await superuser<{ name: string }[]>`
       SELECT rel.relname AS name FROM pg_catalog.pg_class rel
@@ -270,7 +277,7 @@ describe.skipIf(!url)('coverage source ids (real Postgres)', () => {
     // The upgrade, as the owning role forced RLS binds, from the schema 0.5.3 left (no stored id, so
     // the sources are given new ones; its digests do not match).
     await superuser.unsafe('ALTER TABLE slotlock.calendar_coverage DROP COLUMN source_id');
-    await superuser`UPDATE slotlock.schema_version SET ddl_sha256 = NULL, catalog_sha256 = NULL`;
+    await asBefore06();
     await ownerStore.applySchema();
     expect(await forcedTables()).toEqual([...SLOTLOCK_TENANT_TABLES].sort());
     const ids = await sourceIds(tenantRef, resourceId);
@@ -314,6 +321,7 @@ describe.skipIf(!url)('coverage source ids (real Postgres)', () => {
         await tx`
           INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, origin)
           VALUES (${tenantRef}, ${resourceId}, 'coverage.stale', ${live}, ${tx.json(stale52(live))}, 'maintenance')`;
+        await tx`UPDATE slotlock.schema_version SET coverage_changes_renamed = false`;
         await tx.unsafe(`SET LOCAL ROLE ${owner}`);
         await tx.unsafe(SLOTLOCK_CORE_DDL);
         await tx.unsafe('RESET ROLE');
@@ -325,6 +333,55 @@ describe.skipIf(!url)('coverage source ids (real Postgres)', () => {
       .catch((error: unknown) => {
         if (!(error instanceof Error) || error.message !== 'rollback') throw error;
       });
+  });
+
+  it('renames a change an earlier server writes after the upgrade at the next migration, and history never finds it', async () => {
+    const tenantRef = `late-${randomUUID()}`;
+    const app = createSlotlockStoreApplicationBackend(store);
+    const resourceId = await vehicle(tenantRef);
+    const live = `ical:https://calendar.example.com/late.ics?token=LATE${randomUUID().slice(0, 8)}`;
+    await app.recordCoverage(context(tenantRef), { resource_id: resourceId, source: live, ...window, revision: 1 });
+    const id = (await sourceIds(tenantRef, resourceId))[live] as string;
+    /** What a 0.5.2 server still running writes when it reports the source stale. */
+    const reportedBy052 = () => superuser`
+      INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, origin)
+      VALUES (${tenantRef}, ${resourceId}, 'coverage.stale', ${live},
+              ${superuser.json({ resource_id: resourceId, source: live, observed_at: '2026-10-27T09:00:00Z', last_error: `HTTP 401 from ${live}` })},
+              'maintenance')
+      RETURNING id::text`;
+    const stored = async (row: string) => {
+      const [found] = await superuser<{ subject: string; data: Record<string, unknown> }[]>`
+        SELECT subject, data FROM slotlock.outbox WHERE id = ${row}::bigint`;
+      return found;
+    };
+    const renamed = async () =>
+      (await superuser<{ done: boolean }[]>`SELECT coverage_changes_renamed AS done FROM slotlock.schema_version`)[0]?.done;
+
+    await asBefore06();
+    await ownerStore.applySchema(); // the upgrade
+    const [late] = await reportedBy052();
+    expect(await store.listHistory({ tenantRef, subject: live, limit: 10 })).toEqual([]);
+
+    await ownerStore.applySchema(); // the next migration
+    expect(await stored(late?.id as string)).toEqual({
+      subject: id,
+      data: { resource_id: resourceId, source_id: id, observed_at: '2026-10-27T09:00:00Z' },
+    });
+    expect(await renamed()).toBe(false);
+    await ownerStore.applySchema(); // finds nothing: done
+    expect(await renamed()).toBe(true);
+    expect(await forcedTables()).toEqual([...SLOTLOCK_TENANT_TABLES].sort());
+
+    // Once done, no migration reads the outbox for it again, even one that changes the structure: a
+    // row an earlier release writes after that is served redacted, and history cannot find it.
+    const [after] = await reportedBy052();
+    await superuser`UPDATE slotlock.schema_version SET ddl_sha256 = NULL, catalog_sha256 = NULL`;
+    await ownerStore.applySchema();
+    expect((await stored(after?.id as string))?.subject).toBe(live);
+    expect(await store.listHistory({ tenantRef, subject: live, limit: 10 })).toEqual([]);
+    const [latest] = await store.listHistory({ tenantRef, resourceId, limit: 1 });
+    expect(latest).toMatchObject({ type: 'coverage.stale', subject: 'src_redacted', data: { source_id: 'src_redacted' } });
+    expect(JSON.stringify(latest)).not.toContain('LATE');
   });
 });
 

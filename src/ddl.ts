@@ -782,6 +782,12 @@ CREATE TABLE IF NOT EXISTS slotlock.schema_version (
 );
 ALTER TABLE slotlock.schema_version ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON slotlock.schema_version FROM PUBLIC;
+-- The rename of coverage changes earlier releases wrote (0.6, slotlockCoverageChangeRenameSql): the
+-- last outbox id a pass has read (null before the first), and whether it is done. A pass after the
+-- first that finds nothing to rename marks it done, and no migration reads the outbox for it again.
+ALTER TABLE slotlock.schema_version ADD COLUMN IF NOT EXISTS coverage_changes_renamed_through bigint;
+ALTER TABLE slotlock.schema_version
+  ADD COLUMN IF NOT EXISTS coverage_changes_renamed boolean NOT NULL DEFAULT false;
 
 -- NULL when no migration has recorded a version (a schema from 0.2 or earlier).
 CREATE OR REPLACE FUNCTION slotlock.installed_schema_version()
@@ -3211,8 +3217,9 @@ export const SLOTLOCK_COVERAGE_CHANGE_RENAME_BATCH = 5_000;
  * iCalendar URL with a token, an address) and the error read from it; 0.5.3 named it by an unkeyed
  * digest anyone could confirm a guess against. A source deleted since is `src_redacted`: nothing
  * can match it any more, and a made-up id would look like a source the tenant could find. Selects
- * the last id read (null when there was none), `INTO` `into` when given (PL/pgSQL). Rows in the new
- * shape are left alone, so a batch run again changes nothing.
+ * the last id read (`last`, null when there was none) and how many it renamed (`renamed`), `INTO`
+ * `into` when given (PL/pgSQL). Rows in the new shape are left alone, so a batch run again changes
+ * nothing.
  */
 export function slotlockCoverageChangeRenameSql(after: string, head: string, batch: string, into = ''): string {
   return `WITH scanned AS MATERIALIZED (
@@ -3249,24 +3256,41 @@ export function slotlockCoverageChangeRenameSql(after: string, head: string, bat
    WHERE change.id = named.id
   RETURNING change.id
 )
-SELECT (SELECT max(scanned.id) FROM scanned) AS last${into ? ` INTO ${into}` : ''}
-  FROM (SELECT count(*) FROM renamed) done`;
+SELECT (SELECT max(scanned.id) FROM scanned)::text AS last,
+       (SELECT count(*) FROM renamed)::integer AS renamed${into ? `
+  INTO ${into}` : ''}`;
 }
 
-// The rename for SLOTLOCK_CORE_DDL, run whole in its one transaction, while FORCE is lifted. applySchema
+// The rename for SLOTLOCK_CORE_DDL, run whole in its one transaction, while FORCE is lifted (the
+// structure has the outbox under ACCESS EXCLUSIVE for the whole transaction, so no change commits
+// in between). It goes on from where the last pass stopped, and is skipped once done. applySchema
 // runs it in batches after the structure commits instead, each its own short transaction.
 const DEPLOYMENT_RENAME_COVERAGE_CHANGES = `DO $slotlock_rename_coverage_changes$
 DECLARE
-  scan_after bigint := 0;
+  scan_after bigint;
   scan_head bigint;
-  scan_last bigint;
+  scan_last text;
+  scan_renamed integer;
+  renamed_total integer := 0;
+  first_pass boolean;
 BEGIN
+  IF (SELECT coverage_changes_renamed FROM slotlock.schema_version WHERE singleton) THEN
+    RETURN;
+  END IF;
+  SELECT coverage_changes_renamed_through INTO scan_after FROM slotlock.schema_version WHERE singleton;
+  first_pass := scan_after IS NULL;
+  scan_after := COALESCE(scan_after, 0);
   SELECT COALESCE(max(id), 0) INTO scan_head FROM slotlock.outbox;
   LOOP
-    ${slotlockCoverageChangeRenameSql('scan_after', 'scan_head', String(SLOTLOCK_COVERAGE_CHANGE_RENAME_BATCH), 'scan_last')};
+    ${slotlockCoverageChangeRenameSql('scan_after', 'scan_head', String(SLOTLOCK_COVERAGE_CHANGE_RENAME_BATCH), 'scan_last, scan_renamed')};
     EXIT WHEN scan_last IS NULL;
-    scan_after := scan_last;
+    scan_after := scan_last::bigint;
+    renamed_total := renamed_total + scan_renamed;
   END LOOP;
+  UPDATE slotlock.schema_version
+     SET coverage_changes_renamed_through = GREATEST(scan_after, scan_head),
+         coverage_changes_renamed = NOT first_pass AND renamed_total = 0
+   WHERE singleton;
 END
 $slotlock_rename_coverage_changes$;
 `;

@@ -624,33 +624,50 @@ async function slotlockSchemaUpToDate(tx: TransactionSql): Promise<boolean> {
 
 /**
  * Rename the coverage changes an earlier release wrote (ddl.ts, slotlockCoverageChangeRenameSql),
- * in batches of SLOTLOCK_COVERAGE_CHANGE_RENAME_BATCH outbox ids, each a transaction of its own, up
- * to the last change when it starts. Forced RLS would hide every tenant's rows from the deployment
- * role, so a role it binds lifts FORCE from calendar_coverage and outbox for the batch and puts it
- * back before the batch commits: each batch holds ACCESS EXCLUSIVE on both, taken in the order
- * writers take them (a source, then its change), for one primary-key range of the outbox, never the
- * whole table. A table an operator left unforced stays so. A superuser or BYPASSRLS role reads
- * every row as it is and takes no lock beyond the rows it renames.
+ * in batches of SLOTLOCK_COVERAGE_CHANGE_RENAME_BATCH outbox ids, each a transaction of its own,
+ * from where the last pass stopped (`schema_version.coverage_changes_renamed_through`, saved with
+ * each batch) up to the last change when this pass starts. The first pass is the 0.6 upgrade's; an
+ * earlier release's server still running then can write more, so every later migration runs a pass
+ * too, until one finds nothing to rename: that marks the rename done and no migration reads the
+ * outbox for it again.
+ *
+ * The head is read only once every transaction already writing to the outbox has ended, so no
+ * change at or below it can commit after the pass has read past it. Forced RLS would hide every
+ * tenant's rows from the deployment role, so a role it binds lifts FORCE from calendar_coverage and
+ * outbox for each batch and puts it back before the batch commits: each batch holds ACCESS
+ * EXCLUSIVE on both, taken in the order writers take them (a source, then its change), for one
+ * primary-key range of the outbox. A table an operator left unforced stays so. A superuser or
+ * BYPASSRLS role reads every row as it is: it holds SHARE ROW EXCLUSIVE on the outbox (which waits
+ * for the writes in flight and holds off new ones, but no read) only while it reads the head.
  */
 async function renameEarlierCoverageChanges(
   executor: StoreSql,
   options: SlotlockMigrationOptions | undefined,
 ): Promise<void> {
   const rename = slotlockCoverageChangeRenameSql('$1::bigint', '$2::bigint', '$3::int');
-  let after = '0';
+  let after: string | null = null;
   let head: string | null = null;
+  let firstPass = false;
+  let renamedTotal = 0;
   for (;;) {
     const last = await inMigration(executor, options, async (tx) => {
-      const forced = await tx<{ name: string }[]>`
-        SELECT rel.relname::text AS name
-          FROM pg_catalog.pg_class rel
-          JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
-         WHERE ns.nspname = 'slotlock' AND rel.relname IN ('calendar_coverage', 'outbox')
-           AND rel.relforcerowsecurity
-           AND NOT EXISTS (
-             SELECT 1 FROM pg_catalog.pg_roles
-              WHERE rolname = current_user AND (rolsuper OR rolbypassrls))
-         ORDER BY rel.relname`;
+      const [state] = await tx<{ renamed: boolean; through: string | null; bypass: boolean }[]>`
+        SELECT version.coverage_changes_renamed AS renamed,
+               version.coverage_changes_renamed_through::text AS through,
+               EXISTS (SELECT 1 FROM pg_catalog.pg_roles
+                        WHERE rolname = current_user AND (rolsuper OR rolbypassrls)) AS bypass
+          FROM slotlock.schema_version version
+         WHERE version.singleton`;
+      if (state === undefined || state.renamed) return null;
+      const forced = state.bypass
+        ? []
+        : await tx<{ name: string }[]>`
+            SELECT rel.relname::text AS name
+              FROM pg_catalog.pg_class rel
+              JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+             WHERE ns.nspname = 'slotlock' AND rel.relname IN ('calendar_coverage', 'outbox')
+               AND rel.relforcerowsecurity
+             ORDER BY rel.relname`;
       // calendar_coverage, then outbox: the order every writer locks them in.
       const lifted = forced.map(({ name }) => `slotlock.${name}`);
       if (lifted.length > 0) {
@@ -658,16 +675,39 @@ async function renameEarlierCoverageChanges(
         for (const table of lifted) await tx.unsafe(`ALTER TABLE ${table} NO FORCE ROW LEVEL SECURITY`);
       }
       if (head === null) {
+        // Wait for the writes in flight: each holds ROW EXCLUSIVE from before it took its id.
+        if (lifted.length === 0) await tx.unsafe('LOCK TABLE slotlock.outbox IN SHARE ROW EXCLUSIVE MODE');
         const [top] = await tx<{ head: string }[]>`SELECT COALESCE(max(id), 0)::text AS head FROM slotlock.outbox`;
         head = top?.head ?? '0';
+        firstPass = state.through === null;
+        after = state.through ?? '0';
       }
-      const [row] = await tx.unsafe<{ last: string | null }[]>(rename, [after, head, SLOTLOCK_COVERAGE_CHANGE_RENAME_BATCH]);
+      const [row] = await tx.unsafe<{ last: string | null; renamed: number }[]>(rename, [
+        after,
+        head,
+        SLOTLOCK_COVERAGE_CHANGE_RENAME_BATCH,
+      ]);
       for (const table of lifted) await tx.unsafe(`ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`);
-      return row?.last ?? null;
+      const read = row?.last ?? null;
+      renamedTotal += row?.renamed ?? 0;
+      // Saved with the batch, so a pass stopped part way goes on from here.
+      await tx`
+        UPDATE slotlock.schema_version
+           SET coverage_changes_renamed_through = ${read ?? head}::bigint,
+               coverage_changes_renamed = ${read === null && !firstPass && renamedTotal === 0}
+         WHERE singleton`;
+      return read;
     });
     if (last === null) return;
     after = String(last);
   }
+}
+
+/** Whether the rename of coverage changes earlier releases wrote still has a pass to run. */
+async function coverageChangesRenamePending(tx: TransactionSql): Promise<boolean> {
+  const [row] = await tx<{ renamed: boolean }[]>`
+    SELECT coverage_changes_renamed AS renamed FROM slotlock.schema_version WHERE singleton`;
+  return row !== undefined && !row.renamed;
 }
 
 /** Whether a constraint in the `slotlock` schema is still NOT VALID (old rows broke it). */
@@ -3544,24 +3584,29 @@ function buildSlotlockStore(
       // application instances can still collide on pg_namespace/pg_extension unique indexes.
       // inMigration serializes bootstrap per database and the transaction releases the lock on
       // crashes. A schema this release already left as it is changes nothing and locks no table,
-      // unless old rows kept one of its constraints NOT VALID: then only the validation runs again.
+      // unless old rows kept one of its constraints NOT VALID (then only the validation runs again)
+      // or the rename of earlier coverage changes is not done (then only a pass of it runs).
       const next = await inMigration(sql, migrationOptions, async (tx) => {
         await tx.unsafe(SLOTLOCK_DEPLOYMENT_CHECKS).catch((error: unknown) => {
           throw schemaControlRefusal(error);
         });
         if (await slotlockSchemaUpToDate(tx)) {
-          return (await slotlockConstraintUnvalidated(tx)) ? ('validate' as const) : null;
+          return {
+            validate: await slotlockConstraintUnvalidated(tx),
+            rename: await coverageChangesRenamePending(tx),
+          };
         }
         await tx.unsafe(SLOTLOCK_STRUCTURE_DDL).catch((error: unknown) => {
           throw schemaControlRefusal(error);
         });
-        return 'structure' as const;
+        return { validate: true, rename: await coverageChangesRenamePending(tx) };
       });
-      if (next === null) return;
       // Changes an earlier release wrote are renamed in short batches once the structure commits,
-      // never under its locks (renameEarlierCoverageChanges); the feed serves any it has not reached
-      // yet redacted (event-feed.ts, slotlockServedChange).
-      if (next === 'structure') await renameEarlierCoverageChanges(sql, migrationOptions);
+      // never under its locks, by this migration and the next ones until a pass finds none
+      // (renameEarlierCoverageChanges); the feed serves any not renamed yet redacted (event-feed.ts,
+      // slotlockServedChange).
+      if (next.rename) await renameEarlierCoverageChanges(sql, migrationOptions);
+      if (!next.validate) return;
       // Once the DDL has committed, its ACCESS EXCLUSIVE locks are gone: validating holds none that
       // a serving query waits for (ddl.ts, DEPLOYMENT_VALIDATE_CONSTRAINTS). Inside a caller's
       // transaction both steps share it, and its locks, until it ends. The digests go last, so a

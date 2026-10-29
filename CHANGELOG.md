@@ -21,11 +21,16 @@ versioning.
   served it until it was pruned. The upgrade renames every `coverage.*` change not in this release's
   shape: `subject` and `data.source_id` become the source's new id, `source` and `last_error` are
   removed. A change about a source deleted since is named `src_redacted`: nothing can match it any
-  more, and a made-up id would look like a source the tenant could find. The read path redacts too:
+  more, and a made-up id would look like a source the tenant could find. A 0.5 server still running
+  during the upgrade can write more such changes, so each later migration renames what was written
+  since the last one, until one finds nothing; from then on the outbox is not read for it again. A
+  change an earlier release writes after that keeps its source in the table (and in backups and
+  replicas) until it is pruned, but is never served with it: the read path redacts too.
   `listChanges`, `listRecentChanges`, `listHistory`, webhook deliveries and `slotlockCloudEvent`
   never serve a `coverage.*` change with `source` or `last_error`, and name one whose subject is not
-  a `source_id` of this release `src_redacted`, so a row the upgrade has not reached yet, or one an
-  earlier release's server writes during a rolling upgrade, is never served raw.
+  a `source_id` of this release `src_redacted`; history by `subject` never finds a coverage change
+  by any other name, so it cannot confirm a guessed source either. Stop every 0.5 server before the
+  migration after the upgrade (a 0.5 server that restarts refuses the new schema anyway).
 
 ### Changed
 
@@ -53,13 +58,20 @@ versioning.
   (`calendar_coverage` is one row per source and resource), and adds its CHECK NOT VALID, validated
   after the migration commits.
 - Once the structure commits, `applySchema` renames the earlier coverage changes in batches of 5,000
-  outbox ids by primary key, each its own transaction, up to the last change when it started. Under
-  a deployment role that forced RLS binds, each batch lifts FORCE from `calendar_coverage` and
-  `outbox` and puts it back before it commits, so it holds ACCESS EXCLUSIVE on both for that one
-  batch (milliseconds), never for the whole outbox; a superuser or BYPASSRLS role takes no table
-  lock. An interrupted rename is run whole again by the next migration. Rows in the new shape are
-  left alone, so running it again changes nothing. `SLOTLOCK_CORE_DDL`, applied with psql in one
-  transaction, renames them all in that transaction.
+  outbox ids by primary key, each its own transaction, up to the last change when the pass started,
+  first waiting for the outbox writes in flight so none below that commits behind it. Where it got
+  to is saved with each batch (`schema_version.coverage_changes_renamed_through`): an interrupted
+  pass goes on from there, and the next migrations, even ones with nothing else to change, read
+  only what was written since, until a pass after the upgrade's finds nothing to rename and marks
+  it done (`coverage_changes_renamed`). After that no migration reads the outbox for it again.
+- Locks: under a deployment role that forced RLS binds, each batch lifts FORCE from
+  `calendar_coverage` and `outbox` and puts it back before it commits, holding ACCESS EXCLUSIVE on
+  both for that batch (one range of 5,000 ids: milliseconds), so writes to either table wait that
+  long, once per batch, for every batch of the outbox on the upgrade and for the rows written since
+  on the passes after it. A superuser or BYPASSRLS role holds SHARE ROW EXCLUSIVE on the outbox
+  only while it reads the head (writes wait, reads do not) and then only the row locks of the rows
+  it renames. `SLOTLOCK_CORE_DDL`, applied with psql, renames in its one transaction instead, with
+  the outbox under ACCESS EXCLUSIVE for the whole of it: a scan of the whole outbox on the upgrade.
 
 ## 0.5.3 - 2026-10-28
 
