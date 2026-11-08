@@ -1497,8 +1497,8 @@ describe('organizations', () => {
     const [row] = [...keys.rows.values()];
     keys.rows.set('other', { ...(row as NonNullable<typeof row>), id: randomUUID(), createdBy: 'github:777' });
     const page = await (await get(target, '/base/dashboard/keys', session)).text();
-    expect(page).toContain('<td data-label="Created by">You</td>');
-    expect(page).toContain('<td data-label="Created by">GitHub user 777</td>');
+    expect(page).toContain('<span class="meta">Created by you</span>');
+    expect(page).toContain('<span class="meta">Created by GitHub user 777</span>');
   });
 
   it('offers only organizations the server still serves', async () => {
@@ -1936,7 +1936,7 @@ describe('resource detail, webhooks and the waitlist', () => {
     const { session } = await signIn(target);
     const page = await (await get(target, '/base/dashboard/waitlist', session)).text();
     expect(page).toContain('customer-&lt;9&gt;');
-    expect(page).toMatch(/Today 13:00–14:00<\/td>\s*<td data-label="For">van-1/);
+    expect(page).toMatch(/Today 13:00–14:00<\/td>\s*<td data-label="For"><span class="truncate" title="van-1">van-1/);
     const id = entries[0]?.id as string;
     const removed = await post(target, '/base/dashboard/waitlist/leave', { csrf: await csrf(target, session), id }, session);
     expect(removed.status).toBe(303);
@@ -1956,5 +1956,112 @@ describe('resource detail, webhooks and the waitlist', () => {
     const nav = await (await get(target, '/base/dashboard', second.session)).text();
     expect(nav).toContain('<span>Webhooks</span>');
     expect(nav).toContain('<span>Waitlist</span>');
+  });
+});
+
+describe('the dashboard design', () => {
+  /** A tenant with nothing yet, on an adapter that offers every page. */
+  function emptyEverything() {
+    return dashboard({
+      resources: {
+        ...resources.store,
+        agenda: vi.fn(async () => []),
+        recentChanges: vi.fn(async () => []),
+        waitlist: { list: vi.fn(async () => []), leave: vi.fn(async () => false) },
+        webhooks: {
+          list: vi.fn(async () => []),
+          create: vi.fn(async () => ({ ok: false as const, code: 'invalid_webhook_url' as const })),
+          remove: vi.fn(async () => false),
+          enable: vi.fn(async () => null),
+        },
+      },
+    });
+  }
+
+  it('renders every page for a brand-new tenant, with landmarks and nothing inline or external', async () => {
+    const target = emptyEverything();
+    const { session } = await signIn(target);
+    const pages = ['', '/resources', '/keys', '/webhooks', '/waitlist', '/settings', '/hours'];
+    for (const path of pages) {
+      const response = await get(target, `/base/dashboard${path}`, session);
+      expect(response.status, path).toBe(200);
+      expect(response.headers.get('content-security-policy'), path).toBe(
+        "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+      );
+      const html = await response.text();
+      expect(html, path).toContain('<a class="skip" href="#main">Skip to content</a>');
+      expect(html, path).toContain('<main class="page" id="main">');
+      expect(html, path).toContain('<nav class="nav" aria-label="Dashboard">');
+      expect(html, path).toContain('<p class="visually-hidden" id="live" aria-live="polite"></p>');
+      expect(html, path).toMatch(/<h1>[^<]+<\/h1>/);
+      expect(html, path).not.toMatch(/<script(?![^>]*\bsrc=)/);
+      expect(html, path).not.toMatch(/\sstyle=|\son[a-z]+=/i);
+      // Everything the page loads is the dashboard's own: no font, image or script from elsewhere.
+      for (const [, url] of html.matchAll(/\s(?:src|href)="([^"#]*)"/g)) {
+        expect(url, `${path}: ${url}`).toMatch(/^\/base\/dashboard(?:[/?]|$)/);
+      }
+    }
+    for (const [path, text] of [
+      ['/resources', 'No resources yet.'],
+      ['/keys', 'No keys yet.'],
+      ['/webhooks', 'No webhooks.'],
+      ['/waitlist', 'Nobody is waiting.'],
+    ] as const) {
+      const html = await (await get(target, `/base/dashboard${path}`, session)).text();
+      expect(html, path).toMatch(new RegExp(`<div class="empty-state"><span class="empty-icon"><svg[^]*?</svg></span><p class="empty">${text}`));
+    }
+    // The empty states point at the one thing to do next: the form on the same page.
+    const keysPage = await (await get(target, '/base/dashboard/keys', session)).text();
+    expect(keysPage).toContain('<a class="button" href="#key-name">');
+    expect(keysPage).toContain('id="key-name" name="name"');
+  });
+
+  it('serves a stylesheet with light and dark themes, reduced motion, and no outside requests', async () => {
+    const target = dashboard();
+    const html = await (await get(target, '/base/dashboard')).text();
+    const cssPath = /href="(\/base\/dashboard\/style\.css\?v=[^"]+)"/.exec(html)?.[1] as string;
+    const jsPath = /src="(\/base\/dashboard\/app\.js\?v=[^"]+)"/.exec(html)?.[1] as string;
+    const css = await (await get(target, cssPath)).text();
+    const js = await (await get(target, jsPath)).text();
+    expect(css).toMatch(/:root \{[^}]*--canvas:/);
+    expect(css).toMatch(/@media \(prefers-color-scheme: dark\) \{\s*:root \{[^}]*--canvas:/);
+    expect(css).toContain('@media (prefers-reduced-motion: reduce)');
+    expect(css).toContain(':focus-visible');
+    // No web fonts, images or imports: the policy would refuse them, and the dashboard asks for none.
+    expect(css).not.toMatch(/url\(|@import|@font-face|https?:/i);
+    expect(js).not.toMatch(/https?:|fetch\(|XMLHttpRequest|innerHTML|eval\(/);
+  });
+
+  it('keeps long names on one line with the whole value at hand, and dates with their full time', async () => {
+    const name = 'Read-only reporting agent for the finance team quarterly reconciliation job';
+    await keys.store.create({ tenantRef: 'github:4242', name, scopes: ['read'] });
+    const reference = 'phase-b-exit-20261108T142642Z-3444';
+    resources.rows.push({
+      id: '22222222-2222-4222-8222-222222222222',
+      externalRef: reference,
+      tenantRef: 'github:4242',
+      timezone: 'America/New_York',
+    });
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const keysPage = await (await get(target, '/base/dashboard/keys', session)).text();
+    expect(keysPage).toContain(`<span class="truncate" title="${name}">${name}</span>`);
+    expect(keysPage).toMatch(
+      /<time datetime="\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z" title="\d{4}-\d\d-\d\d \d\d:\d\d UTC">\d{1,2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4}<\/time>/,
+    );
+    const resourcesPage = await (await get(target, '/base/dashboard/resources', session)).text();
+    expect(resourcesPage).toContain(`title="${reference}">${reference}</a>`);
+    expect(resourcesPage).toContain(
+      '<code class="muted truncate id" title="22222222-2222-4222-8222-222222222222">',
+    );
+  });
+
+  it('escapes what it puts in tooltips, as everywhere else', async () => {
+    await keys.store.create({ tenantRef: 'github:4242', name: '"><img src=x onerror=alert(1)>', scopes: ['read'] });
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const html = await (await get(target, '/base/dashboard/keys', session)).text();
+    expect(html).toContain('title="&quot;&gt;&lt;img src=x onerror=alert(1)&gt;"');
+    expect(html).not.toContain('<img src=x');
   });
 });
