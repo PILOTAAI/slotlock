@@ -1,8 +1,6 @@
-// A dry run of "Release a version" (REL-12): the release-app path had never run, and its first real
-// use would be a release. With dry_run the workflow mints the app's token, prepares the release and
-// checks that token can read the repository and push the release branch, then stops: no pull
-// request, merge, tag or site deploy. scripts/release-dry-run.sh is that check; gh is a stand-in
-// and origin a local bare repository.
+// scripts/release-dry-run.sh: with dry_run the release workflow mints the app's token, prepares the
+// release and checks the token can read the repository and push the release branch, then stops. gh
+// is a stand-in and origin a local bare repository.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';

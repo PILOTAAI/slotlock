@@ -1,8 +1,5 @@
-// The assistant's records against real Postgres, as a LOGIN role without BYPASSRLS that
-// grantApplicationRole granted: both tables are under forced row-level security, a tenant reads and
-// writes only its own settings and conversations, an approval is claimed once however many race,
-// a conversation lapses and maintenance deletes it, a long conversation in any script stays under
-// the tables' CHECKs, and erase_tenant deletes both. Skipped without DATABASE_URL.
+// The assistant's records under forced RLS, as the LOGIN role grantApplicationRole grants. Skipped
+// without DATABASE_URL.
 import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';

@@ -1,8 +1,6 @@
-// Upgrading as the deployment role itself, after applyTenantRls has forced row-level security: FORCE
-// binds the table owner too, and applySchema sets no tenant, yet every data step of the upgrade must
-// see every row. The role is NOSUPERUSER NOBYPASSRLS, owns what it deploys and is reached through
-// SET ROLE, as README's deployment role is. A database and a role of their own; skipped without
-// DATABASE_URL; the connecting role must create databases and roles.
+// Upgrading as the deployment role after applyTenantRls forced RLS, which binds the owner too:
+// every data step must still see every row. The role is NOSUPERUSER NOBYPASSRLS, reached through
+// SET ROLE. Needs a role that creates databases and roles; skipped without DATABASE_URL.
 import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -195,8 +193,8 @@ describe.skipIf(!url)('upgrading as the owning role under forced RLS', () => {
         return { resourceId: resource.id, eventId: put.eventId };
       }),
     );
-    // As a release before the normalized children, and before archives carried their tenant, left them
-    // (and before schemas recorded their version).
+    // As a release before the normalized children, tenant-carrying archives and schema versions
+    // left them.
     await superuser`DROP TABLE slotlock.schema_version`;
     await superuser`DELETE FROM slotlock.calendar_event_attendees WHERE event_id = ${eventId}`;
     await superuser`DELETE FROM slotlock.calendar_event_reminders WHERE event_id = ${eventId}`;

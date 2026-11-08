@@ -1,7 +1,5 @@
-// RFC 5545 §3.6.5: a calendar holds a VTIMEZONE for every TZID it names. Slotlock's exports write
-// one from Intl's reading of the zone, and a reader that knows the zone only by that VTIMEZONE
-// reads every occurrence as Intl does: in the years around the event, and years later, where the
-// VTIMEZONE's yearly rules carry the zone on (ENG-15).
+// RFC 5545 §3.6.5: exports write a VTIMEZONE from Intl for every TZID, and a reader that knows the
+// zone only by it reads every occurrence as Intl does, years later too.
 import ICAL from 'ical.js';
 import { describe, expect, it } from 'vitest';
 import { emitITipCalendar, parseICalendarChanges } from '../sync.js';

@@ -1,6 +1,3 @@
-// Properties of the time-zone conversions, over zones with odd offsets and daylight-saving rules:
-// an instant read as wall time converts back to an instant that reads the same (the earliest, in a
-// fold), and a wall time no instant reads (a gap) moves forward by exactly the gap.
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import {

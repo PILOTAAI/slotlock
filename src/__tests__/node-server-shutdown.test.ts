@@ -1,5 +1,5 @@
-// Shutdown while a refused body is still arriving: the keep-alive connection a 413 left open must
-// close once the client finishes the body, or close() waits out its grace and forces every one.
+// The keep-alive connection a 413 left open must close once the client finishes the body, or
+// close() waits out its grace.
 import { connect } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { type SlotlockAgentCalendarBackend, createSlotlockAgentServer } from '../agent-server.js';

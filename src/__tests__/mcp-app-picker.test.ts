@@ -1,6 +1,5 @@
-// The calendar view lets a person pick a certain slot and confirm it: it sends the host one fixed
-// ui/message naming it and never calls a tool, so the agent books through the normal, confirmable
-// path. It takes the host's look and the person's locale, clock and time zone.
+// The calendar view sends the host one fixed ui/message and never calls a tool, so the agent books
+// through the normal, confirmable path.
 import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 import { SLOTLOCK_MCP_APP_HTML } from '../mcp-app.js';

@@ -1,7 +1,6 @@
-// Live updates from the change feed against real Postgres (RFC 0002 P1-5): no NOTIFY anywhere (it
-// would serialize every outbox commit on the cluster-wide notify lock); the tenant's reader polls its
-// own feed, at most once a second when idle; and an MCP subscriber hears of a booking within 1.5 s,
-// with no 10-second re-read. Skipped without DATABASE_URL.
+// Live updates from the change feed: no NOTIFY anywhere (it serializes every outbox commit on the
+// cluster-wide notify lock); the reader polls at most once a second when idle. Skipped without
+// DATABASE_URL.
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';

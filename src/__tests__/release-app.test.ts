@@ -1,6 +1,5 @@
-// scripts/create-release-app.mjs, driven as a browser would drive it, against a stand-in for the
-// GitHub API that checks the app's JWTs with a real key pair, and a stand-in for gh that records what
-// it is asked to store.
+// scripts/create-release-app.mjs, driven as a browser would, against stand-ins for the GitHub API
+// (checking JWTs with a real key pair) and gh.
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
 import { createVerify, generateKeyPairSync } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -169,7 +168,6 @@ interface Run {
   log: string;
   api: Awaited<ReturnType<typeof githubApi>>;
   output: () => string;
-  /** The local page's address, once the script prints it. */
   base: () => Promise<string>;
   exit: Promise<number | null>;
 }
@@ -395,7 +393,6 @@ describe('release app setup', () => {
       });
     expect(await status('GET', 'evil.test')).toBe(421);
     expect(await status('POST', `127.0.0.1:${port}`)).toBe(405);
-    // The real redirect still works, once.
     expect((await created(base, page.state)).status).toBe(302);
     expect((await created(base, page.state)).status).toBe(409);
     expect(await run.exit).toBe(0);

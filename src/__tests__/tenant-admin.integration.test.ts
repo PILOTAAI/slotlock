@@ -1,10 +1,7 @@
-// Suspending and erasing a tenant, deployed as README's deployment role (NOSUPERUSER NOBYPASSRLS,
-// reached through SET ROLE) under forced row-level security, and served by a LOGIN role that
-// grantApplicationRole granted. A suspended tenant may read, and write nothing; its writes in
-// flight are waited for, and only the deployment role suspends. Erasure deletes every row the
-// tenant owns in every table with a tenant column (the catalog is enumerated, so a table added
-// later must be covered), retires its keys, leaves another tenant as it was, and deletes nothing
-// the second time. A database and roles of their own; skipped without DATABASE_URL.
+// Suspending and erasing a tenant, deployed as the README's deployment role under forced RLS and
+// served by the LOGIN role grantApplicationRole grants. Erasure covers every table with a tenant
+// column, read from the catalog, so a later table must be covered. Needs a role that creates
+// databases and roles; skipped without DATABASE_URL.
 import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -30,7 +27,6 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
   /** A superuser on the test database: it inspects past row-level security. */
   let superuser: postgres.Sql;
   let application: postgres.Sql;
-  /** The store as the serving role. */
   let app: SlotlockStore;
 
   /** Run `work` as the deployment role, through SET ROLE, in one transaction. */
@@ -107,7 +103,6 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
     return { committed, inFlight, release };
   }
 
-  /** Whether `pending` is still unsettled after `ms`. */
   async function stillWaiting(pending: Promise<unknown>, ms = 300): Promise<boolean> {
     let settled = false;
     pending.then(
@@ -534,7 +529,6 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
       await expect(keys.authenticate(canaryKey)).resolves.toMatchObject({ tenantRef: canary });
       await expect(app.isTenantSuspended({ tenantRef })).resolves.toBe(true);
 
-      // Again: nothing left, nothing deleted.
       const again = await app.eraseTenant({ tenantRef });
       expect(again.total).toBe(0);
       expect(Object.keys(again.rows).sort()).toEqual(Object.keys(erased.rows).sort());

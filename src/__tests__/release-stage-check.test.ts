@@ -1,8 +1,6 @@
-// scripts/check-stage.sh, which a maintainer runs before approving a staged npm version (GAP0-10):
-// 0.2.0 went public with zod 4.6.5 (GHSA-mrhx-c7xc-m3w5) 17 hours after main had moved past it,
-// because nothing looked at the stage again at approval. npm and gh are stand-ins here; the audit
-// reports they answer with are npm 11.17.0's real output for a project that installs the published
-// slotlock@0.2.0, without and with "overrides": {"zod": "4.6.7"}.
+// scripts/check-stage.sh, run before approving a staged npm version. npm and gh are stand-ins; the
+// audit reports are npm 11.17.0's real output for a project installing slotlock@0.2.0, without and
+// with "overrides": {"zod": "4.6.7"}.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';

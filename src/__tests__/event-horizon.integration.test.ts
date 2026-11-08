@@ -1,7 +1,5 @@
-// Recurring events against the rolling horizon: a write's refusal names the row that blocks it, a
-// write never lands where a series on the same resource is not stored, the roll never lets stuck
-// series starve a healthy one, and a full 367-day window can be proven complete. Each test uses a
-// tenant of its own, so a roll or maintenance pass sees only its rows. Skipped without DATABASE_URL.
+// Recurring events against the rolling horizon; each test has its own tenant, so a roll sees only
+// its rows. Skipped without DATABASE_URL.
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { maintainSlotlockTenant } from '../maintenance.js';
@@ -98,9 +96,7 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
   });
 
   it('replays a recurring create retried after UTC midnight, when the horizon has moved a day', async () => {
-    // The agent backend writes a series over calendarEventRollingHorizon(), which starts at the
-    // current UTC midnight. The window was in the command's hash, so a retry with the same key and
-    // arguments the next day was refused as idempotency_conflict instead of replayed.
+    // The horizon starts at the current UTC midnight, so it must not be part of the command's hash.
     const { tenantRef, resourceId } = await freshTenant();
     const today = calendarEventRollingHorizon(new Date('2027-05-03T23:59:00Z'));
     const tomorrow = calendarEventRollingHorizon(new Date('2027-05-04T00:01:00Z'));
@@ -123,7 +119,6 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
     expect(retried).toMatchObject({ ok: true, idempotent: true, revision: first.revision });
     if (!retried.ok) throw new Error(retried.code);
     expect(retried.eventId).toBe(first.eventId);
-    // A different request under the same key is still refused.
     const changed = await store.putCalendarEvent({
       ...command,
       summary: 'Another service',
@@ -182,8 +177,7 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
     });
     expect(put.ok).toBe(true);
     await maintainSlotlockTenant(store, tenantRef);
-    // The audit's repro: [now, now + 367 days) was partial, so a search of the advertised maximum
-    // found no certain slot.
+    // A search of the advertised maximum, [now, now + 367 days), must be complete.
     const now = new Date();
     const freeBusy = await store.getFreeBusy({
       tenantRef,
@@ -191,7 +185,6 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
       window: { start: now, end: new Date(now.getTime() + 367 * DAY) },
     });
     expect(freeBusy.coverage).toEqual({ state: 'complete', missingSources: [] });
-    // At the latest moment of the UTC day too.
     const lastMoment = new Date(horizon.start.getTime() + 2 * DAY - 1);
     const atDayEnd = await store.getFreeBusy({
       tenantRef,
@@ -233,7 +226,7 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
       const { tenantRef, resourceId } = await freshTenant();
       const horizon = calendarEventRollingHorizon();
       await dailySeries(tenantRef, resourceId, horizon);
-      // The audit's repro: the series' 09:00 occurrence three days past where it is stored.
+      // The series' 09:00 occurrence, three days past where it is stored.
       const past = new Date(horizon.end.getTime() + 3 * DAY + 9 * HOUR);
       const window = { start: past, end: new Date(past.getTime() + HOUR) };
       await expect(
@@ -372,8 +365,7 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
           recurrence: { rrule, ...(exceptions ? { exceptions } : {}) },
           materializationWindow: horizon,
         });
-      // Before, one series that ended long ago refused every write ending past the horizon on its
-      // resource, a lease included.
+      // A series that ended long ago does not refuse writes past the horizon on its resource.
       expect((await series('FREQ=DAILY;COUNT=3', earlier)).ok).toBe(true);
       expect(
         (
@@ -502,7 +494,6 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
            WHERE id = ${put.eventId}`;
         return { lease, endsBy: row?.ends_by ?? null };
       };
-      // Before, it counted as going on until its next roll, and refused the lease.
       const ended = await stored('FREQ=DAILY;COUNT=3');
       expect(ended.lease).toMatchObject({ ok: true });
       expect(ended.endsBy).not.toBeNull();
@@ -544,8 +535,7 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
           });
         return { eventId: put.eventId, lastEnd, lease };
       };
-      // Stored to the horizon. Before, a lease starting within three days of UNTIL was refused,
-      // though nothing of the series is left to store.
+      // Stored to the horizon: a lease within three days of UNTIL is not refused.
       const rolled = await twoDays(horizon);
       await expect(rolled.lease(new Date(rolled.lastEnd.getTime() + HOUR))).resolves.toMatchObject({
         ok: true,
@@ -738,7 +728,7 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
       });
       expect(hold.ok).toBe(true);
       await new Promise((resolve) => setTimeout(resolve, 150));
-      // Before, the second 07:00Z hit the occurrences' primary key and every pass threw.
+      // Both 07:00Z occurrences must not hit the occurrences' primary key.
       const pass = await maintainSlotlockTenant(store, tenantRef);
       expect(pass).toMatchObject({ extended: 2, conflicts: 0, refused: 0 });
       expect(await storedWindow(put.eventId)).toEqual(horizon);
@@ -802,7 +792,6 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
       // One batch of 100 per pass: the first meets 100 stuck series.
       const first = await maintainSlotlockTenant(store, tenantRef, { batches: 1 });
       expect(first).toMatchObject({ extended: 0, conflicts: 100, capped: true });
-      // Before, every pass met the same 100 again and the healthy series never rolled.
       const second = await maintainSlotlockTenant(store, tenantRef, { batches: 1 });
       expect(second).toMatchObject({ extended: 1, conflicts: 1 });
       expect(await storedWindow(healthy)).toEqual(horizon);
@@ -828,8 +817,7 @@ describe.skipIf(!url)('recurring events and the rolling horizon (real Postgres)'
         UPDATE slotlock.calendar_events
            SET roll_retry_at = roll_retry_at - interval '1 hour 1 second'
          WHERE tenant_ref = ${tenantRef} AND roll_retry_at IS NOT NULL`;
-      // Before, they were first in the roll's order again, and the next two passes met only them:
-      // with more stuck series than two passes cover, the healthy one never rolled.
+      // Put-back series come after the rest, so the healthy one still rolls.
       const third = await roll({ limit: 2 });
       expect(third).toMatchObject({ examined: 2, extended: 1, conflicts: 1 });
       expect(putBack).not.toContain(third.conflictEventIds[0]);

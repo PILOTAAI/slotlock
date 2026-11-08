@@ -117,7 +117,6 @@ function a2aSendMessage(
   );
 }
 
-/** The data part of an A2A `SendMessage` reply. */
 async function a2aReplyData(response: Response): Promise<unknown> {
   const body = (await response.json()) as {
     result?: { message?: { parts?: Array<{ data?: unknown }> } };
@@ -125,7 +124,6 @@ async function a2aReplyData(response: Response): Promise<unknown> {
   return body.result?.message?.parts?.[0]?.data;
 }
 
-/** The same request with a body that is not JSON. */
 function withUnparseableBody(template: Request): Request {
   return new Request(template.url, {
     method: 'POST',
@@ -1072,8 +1070,7 @@ describe('consumer-neutral Slotlock agent server', () => {
     expect(listResources).not.toHaveBeenCalled();
   });
 
-  // `tenant` has no presence in a2a.proto, so a proto3 JSON emitter may send its default, '', which
-  // means "not set": the caller's own tenant, as when the field is absent.
+  // a2a.proto gives `tenant` no presence, so a proto3 emitter may send '' for "not set".
   it('reads an empty A2A tenant as unset, the proto3 default', async () => {
     const response = await buildServer().fetch(
       rpcRequest(
@@ -1446,8 +1443,7 @@ describe('consumer-neutral Slotlock agent server', () => {
         '2025-06-18',
       ]);
       const server = buildServer();
-      // `initialize` is the 2025 lifecycle: it negotiates a 2025 revision, never 2026-07-28, which
-      // has no handshake (agent-server.modern.test.ts).
+      // `initialize` negotiates a 2025 revision, never 2026-07-28, which has no handshake.
       for (const [requested, negotiated] of [
         ['2025-11-25', '2025-11-25'],
         ['2025-06-18', '2025-06-18'],
@@ -1591,8 +1587,8 @@ describe('consumer-neutral Slotlock agent server', () => {
       expect(listResources).not.toHaveBeenCalled();
     });
 
-    // GetTask, ListTasks and CancelTask are core A2A operations. Every reply here is a message, so
-    // no task id can exist: the answer is TaskNotFoundError and an empty list, not "unsupported".
+    // Every reply is a message, so no task id exists: TaskNotFoundError and an empty list, not
+    // "unsupported".
     it('answers the core task methods as an agent that keeps no tasks', async () => {
       const server = buildServer();
       const call = async (method: string, params: Record<string, unknown>) => {
@@ -1742,7 +1738,6 @@ describe('consumer-neutral Slotlock agent server', () => {
           { id: 'invalid' },
         ),
       );
-      // Each field validation refused is named by its path.
       const refused = (await a2aReplyData(invalid)) as {
         error: { code: string; issues: { path: unknown[]; message: string }[] };
       };
@@ -2096,8 +2091,8 @@ describe('consumer-neutral Slotlock agent server', () => {
   });
 });
 
-// A2A carries a google.protobuf.Timestamp as RFC 3339 in UTC. Both A2A bindings in this repository
-// (this package's server and a host application's own route) read it with this one parser.
+// A2A carries a google.protobuf.Timestamp as RFC 3339 in UTC; both A2A bindings read it with this
+// parser.
 describe('parseSlotlockA2ATimestamp', () => {
   it.each([
     ['2027-03-29T09:00:00Z', '2027-03-29T09:00:00.000Z'],
@@ -2248,7 +2243,6 @@ describe('principal scopes', () => {
     const holding = buildServer({ backend: { ...backend, holdSlots, releaseSlots } });
     const held = await (await holding.fetch(call('slotlock_hold_slots', holdArgs))).json();
     expect(held).toMatchObject({ result: { structuredContent: { refused: [] } } });
-    // The default ttl reaches the backend.
     expect(holdSlots).toHaveBeenCalledWith(expect.anything(), { ...holdArgs, ttl_seconds: 300 });
     const released = await (await holding.fetch(call('slotlock_release_slots', releaseArgs))).json();
     expect(released).toMatchObject({ result: { structuredContent: { released: true } } });

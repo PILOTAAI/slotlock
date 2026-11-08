@@ -1,7 +1,5 @@
-// Holds on tenant resources, from acquisition to the booking they become. A confirmed hold is a
-// booking like any other: it carries its tenant and a reference (its own id), so it can be cancelled
-// and moved by that reference, and rows that earlier releases confirmed without one are given one
-// by the next migration. Skipped without DATABASE_URL.
+// Holds to the bookings they become: a confirmed hold's reference is its own id. Skipped without
+// DATABASE_URL.
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { SlotlockApplicationInvocationContext } from '../application-api.js';
@@ -49,9 +47,8 @@ describe.skipIf(!url)('holds and the bookings they become (real Postgres)', () =
   }
 
   describe("a hold's expiry inside a caller's transaction", () => {
-    // A store made from the caller's transaction runs in savepoints of it, where now() is the
-    // transaction's start: a hold that expired while the transaction ran still looked live, and
-    // was confirmed after its expiry.
+    // A store from the caller's transaction runs in savepoints, where now() is the transaction's
+    // start.
     it('is judged at the statement, not at the start of the transaction', async () => {
       const { tenantRef, resourceId } = await freshTenant();
       const hold = await store.acquireHold({
@@ -110,7 +107,6 @@ describe.skipIf(!url)('holds and the bookings they become (real Postgres)', () =
           source: null,
         },
       });
-      // Confirming again (a retried request) answers the same booking.
       await expect(store.confirmHold(hold.id, { tenantRef })).resolves.toEqual(confirmed);
       await expect(store.confirmHold(hold.id)).resolves.toEqual(confirmed);
     });
@@ -121,7 +117,6 @@ describe.skipIf(!url)('holds and the bookings they become (real Postgres)', () =
       const end = d('2027-06-02T10:00:00Z');
       const hold = await held(resourceId, start, end);
       expect((await store.confirmHold(hold.id, { tenantRef })).ok).toBe(true);
-      // The audit's repro: before, cancelled:false, a stray tombstone, and the window stayed busy.
       await expect(
         store.cancelExternalReservation({ tenantRef, externalRef: hold.id, revision: 2 }),
       ).resolves.toEqual({ ok: true, cancelled: true, revision: 2 });
@@ -135,7 +130,6 @@ describe.skipIf(!url)('holds and the bookings they become (real Postgres)', () =
         revision: 1,
       });
       expect(rebooked.ok).toBe(true);
-      // A confirm retried after the cancel finds no hold.
       await expect(store.confirmHold(hold.id, { tenantRef })).resolves.toEqual({
         ok: false,
         code: 'hold_not_found',
@@ -178,7 +172,6 @@ describe.skipIf(!url)('holds and the bookings they become (real Postgres)', () =
         ok: false,
         code: 'reservation_cancelled',
       });
-      // The hold is still a hold, and can be released.
       await expect(store.releaseHold(hold.id, { tenantRef })).resolves.toEqual({
         ok: true,
         released: true,
@@ -272,7 +265,7 @@ describe.skipIf(!url)('holds and the bookings they become (real Postgres)', () =
       const a = await freshTenant();
       const b = await freshTenant();
       const window = { start: d('2027-08-01T09:00:00Z'), end: d('2027-08-01T10:00:00Z') };
-      // The audit's repro ran as a superuser without RLS: a hold on another tenant's resource.
+      // As a superuser, which RLS never filters: the store's own check refuses.
       await expect(
         store.acquireHold({ ...window, resourceId: b.resourceId, ttlMs: 60_000, tenantRef: a.tenantRef }),
       ).resolves.toEqual({ ok: false, code: 'resource_not_found' });
@@ -323,7 +316,6 @@ describe.skipIf(!url)('holds and the bookings they become (real Postgres)', () =
       });
       expect(hold).toMatchObject({ ok: true, hold: { bufferAfterMs: HOUR } });
       if (!hold.ok) return;
-      // The audit's repro: a booking in the buffer hour, refused, naming the hold.
       const inBuffer = await store.createExternalReservation({
         tenantRef,
         externalRef: `booking-${crypto.randomUUID()}`,
@@ -414,7 +406,7 @@ describe.skipIf(!url)('holds and the bookings they become (real Postgres)', () =
       const first = await store.acquireHold(request);
       expect(first).toMatchObject({ ok: true, idempotent: false });
       if (!first.ok) return;
-      // The audit's repro: the retry of a lost response was 409 overlap against its own hold.
+      // The retry of a lost response replays, not 409 overlap against its own hold.
       await expect(store.acquireHold(request)).resolves.toEqual({ ...first, idempotent: true });
       await expect(
         store.acquireHold({ ...request, end: d('2027-08-05T11:00:00Z') }),
@@ -498,7 +490,6 @@ describe.skipIf(!url)('holds and the bookings they become (real Postgres)', () =
       ).resolves.toEqual(moved.reservation);
       await expect(store.getReservation({ tenantRef: b.tenantRef, externalRef: ref })).resolves.toBeNull();
 
-      // The confirmed hold is a booking now, and no longer a hold.
       const confirmed = await store.confirmHold(hold.hold.id);
       if (!confirmed.ok) throw new Error(confirmed.code);
       await expect(store.getHold({ tenantRef: a.tenantRef, holdId: hold.hold.id })).resolves.toBeNull();

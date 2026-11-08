@@ -1,9 +1,5 @@
-// The schema records which release migrated it, a server refuses a database migrated by an older or
-// a newer release, and a migration never makes serving queries queue behind it for long: one with
-// nothing to change takes no table lock, and one that must wait for a lock gives up after its lock
-// timeout and tries again. Each test works in a database of its own, since it rewrites the schema
-// and holds locks other files would wait on. Skipped without DATABASE_URL; the role must create
-// databases.
+// Schema version records and lock-timeout retries; each test has its own database since it rewrites
+// the schema and holds locks. Needs a role that creates databases; skipped without DATABASE_URL.
 import { randomBytes } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -208,8 +204,7 @@ describe.skipIf(!url)('schema version and migration locks (real Postgres)', () =
       (await constraints()).find(({ name }) => name === 'slotlock_reservations_revision_valid');
     expect((await revision())?.validated).toBe(false);
     await expect(readSlotlockSchemaVersion(sql)).resolves.toBe(SLOTLOCK_SCHEMA_VERSION);
-    // Once the row is fixed, the next migration validates it. Before, the schema counted as up to
-    // date and the constraint stayed NOT VALID for good.
+    // Once the row is fixed, the next migration validates it rather than counting as up to date.
     await sql`
       UPDATE slotlock.reservations SET revision = 1 WHERE resource_id = ${resource?.id ?? null}`;
     await store.applySchema();
@@ -237,7 +232,7 @@ describe.skipIf(!url)('schema version and migration locks (real Postgres)', () =
       externalRef: 'van-1',
       timezone: 'UTC',
     });
-    // Before, the three counted as made at the upgrade: the tenant could book nothing for 30 days.
+    // The three must not count as made at the upgrade, which would block the tenant for 30 days.
     await expect(
       limited.createExternalReservation({
         tenantRef,

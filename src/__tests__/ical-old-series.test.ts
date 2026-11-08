@@ -1,7 +1,5 @@
-// A feed series that began years ago (a daily standup since 2014) was searched from its DTSTART,
-// past every occurrence before the window, so one such series refused the whole feed (D13). Now a
-// series that repeats every so many days is searched from a whole number of periods after its
-// DTSTART, and one Slotlock still cannot read is refused on its own, with the rest of the feed read.
+// A feed series begun years ago is searched from a whole number of periods after its DTSTART, not
+// from DTSTART; one Slotlock cannot read is refused on its own, with the rest of the feed read.
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import {

@@ -1,6 +1,4 @@
-// The application API: what an application does over REST that the store does in process. It is
-// served only with `rest`, needs the admin scope, is never an MCP tool or A2A skill, and the OpenAPI
-// document describes it from the same schemas the server validates with.
+// The application API: REST only, admin scope, never an MCP tool or A2A skill.
 import { Validator } from '@seriousme/openapi-schema-validator';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -383,7 +381,6 @@ describe('the application operations', () => {
       const parsed = definition.input.safeParse(definition.example);
       expect(parsed.error?.issues ?? []).toEqual([]);
       expect(definition.output.safeParse(OUTPUTS[definition.invoke]).success).toBe(true);
-      // Every path parameter is an input of the same name.
       for (const [, name] of definition.path.matchAll(/\{(\w+)\}/g)) {
         expect(definition.example).toHaveProperty(name as string);
       }

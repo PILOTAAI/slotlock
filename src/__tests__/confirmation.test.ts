@@ -1,7 +1,5 @@
-// Confirm-before-write on MCP 2026-07-28: a configured write returns `input_required` with a form
-// elicitation, and runs only when the retry carries the sealed `requestState` and an explicit
-// acceptance (basic/patterns/mrtr; client/elicitation). Everything that is not an acceptance of
-// exactly this call by exactly this principal must leave the calendar untouched.
+// Confirm-before-write on MCP 2026-07-28: anything but an acceptance of exactly this call by
+// exactly this principal leaves the calendar untouched.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   SLOTLOCK_A2A_PROTOCOL_VERSION,
@@ -736,8 +734,7 @@ describe('a confirmation question a person can trust', () => {
   });
 
   it('states no dates for a series it could not read when the update names no zone', async () => {
-    // The store expands the series in the event's own zone, which an unread event does not show:
-    // the question said "so it books 10 times ... (UTC)" where New York booked six an hour earlier.
+    // The store expands the series in the event's own zone, which an unread event does not show.
     const writeOnly = buildServer({
       backend: { ...backend, describeResource } as SlotlockAgentCalendarBackend,
       authenticate: async () => ({ subject, tenantRef: 'tenant-a', scopes: ['write'] }),
@@ -1021,7 +1018,6 @@ describe('a confirmation question a person can trust', () => {
     });
 
     it('names only the occurrences the store actually moves, all of them up to ten', async () => {
-      // An exception for an occurrence the rule never makes is refused by the store.
       expect(
         await asked({
           ...BOOKING,

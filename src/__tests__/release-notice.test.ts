@@ -1,7 +1,6 @@
-// NOTICE follows package.json and package-lock.json. A runtime dependency bump, such as the zod
-// 4.6.5 to 4.6.7 bump that left main red (the packaged NOTICE still named 4.6.5), must build a
-// packed NOTICE that names the new version with no hand edit, while a packed NOTICE that names the
-// wrong version still fails scripts/verify-package.mjs.
+// NOTICE follows package.json and package-lock.json: a runtime dependency bump builds a packed
+// NOTICE naming the new version with no hand edit, and a wrong one fails
+// scripts/verify-package.mjs.
 import { spawnSync } from 'node:child_process';
 import {
   cpSync,

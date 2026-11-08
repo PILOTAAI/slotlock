@@ -1,5 +1,3 @@
-// The REST API on the real store backend and PostgreSQL: a tenant reads and writes its own calendar
-// and gets 404 for another tenant's, as over MCP and A2A.
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';

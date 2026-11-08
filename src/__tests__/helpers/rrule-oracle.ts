@@ -1,9 +1,6 @@
-// A brute-force reading of RFC 5545 §3.3.10 for the tests to hold ical.js's expansion to. For each
-// period of the rule's frequency it lists every candidate date-time, keeps those every BYxxx part
-// allows (the "expand" parts of the §3.3.10 table become filters over a period's candidates, which
-// lists the same set), takes BYSETPOS over what remains, and applies DTSTART, COUNT and UNTIL. It
-// works on wall-clock fields framed as UTC (no zones) and leaves out BYWEEKNO, which Slotlock
-// refuses. Every RFC 5545 §3.8.5.3 example it can read is checked against it in the tests.
+// A brute-force reading of RFC 5545 §3.3.10: per period, every candidate filtered by the BYxxx
+// parts, then BYSETPOS, DTSTART, COUNT and UNTIL. Wall-clock fields framed as UTC; no BYWEEKNO,
+// which Slotlock refuses.
 
 const DAY = 86_400_000;
 const WEEKDAYS = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];

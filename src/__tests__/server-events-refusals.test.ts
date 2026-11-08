@@ -1,6 +1,5 @@
-// What `onEvent` hears about calls refused before they run, and in what order a confirmation and
-// the call it decided are reported; that a hook which rejects changes nothing; and which A2A errors
-// carry a google.rpc.ErrorInfo (A2A's own, not JSON-RPC's), as SPEC.md says.
+// What `onEvent` hears about calls refused before they run, and which A2A errors carry a
+// google.rpc.ErrorInfo (A2A's own, not JSON-RPC's).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   SLOTLOCK_A2A_PROTOCOL_VERSION,

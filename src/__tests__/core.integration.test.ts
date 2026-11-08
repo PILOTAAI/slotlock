@@ -1,10 +1,5 @@
-// Slotlock core against real Postgres (RFC-0001 spike criteria a + c).
-//
-// The EXCLUDE constraint — not application code — is the final double-booking arbiter, proven
-// here with a genuine concurrent race. Slotlock owns its DDL in a dedicated `slotlock` schema on the
-// target DB, applied by `applySchema` rather than by an embedding application's migrations.
-//
-// Skipped without DATABASE_URL; runs in CI's DB lane and locally against a throwaway DB.
+// Slotlock core against real Postgres: the EXCLUDE constraint, not application code, arbitrates
+// double-booking, under a real concurrent race. Skipped without DATABASE_URL.
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { findNextAvailable } from '../engine.js';
@@ -55,9 +50,8 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
   it('upgrades the legacy schema with legacy rows and reruns without lock-heavy trigger churn', async () => {
     await sql`DROP SCHEMA slotlock CASCADE`;
     await sql`CREATE SCHEMA slotlock`;
-    // The legacy schema kept btree_gist in its own schema, and dropping the schema dropped it. The
-    // GiST exclusion below needs its uuid operator class; without this line the fixture only built on
-    // a database that happened to have btree_gist installed elsewhere.
+    // The GiST exclusion below needs btree_gist's uuid operator class in this schema, wherever else
+    // it is installed.
     await sql`CREATE EXTENSION IF NOT EXISTS btree_gist SCHEMA slotlock`;
     await sql`
       CREATE TABLE slotlock.resources (
@@ -831,9 +825,8 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
   });
 
   it('rejects an accidental tenant-context rebind but permits an explicit migration', async () => {
-    // The policies are the whole database's: every other test file reads through them at the same
-    // time. Rebinding them for real hid every row from those files until this test bound them back,
-    // so the rebind runs in a transaction that rolls back, and no other session ever sees it.
+    // The policies are the whole database's and other test files read through them concurrently, so
+    // the rebind runs in a transaction that rolls back.
     const committedBindings = async () =>
       (
         await sql<{ binding: string }[]>`
@@ -1050,8 +1043,8 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
       { rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR', startMinutes: 8 * 60, durationMinutes: 10 * 60 },
     ];
 
-    // 1h fits the 10:00-11:00 gap; 3h must roll past it to 16:00 (only 2h left Monday? 16-18 is
-    // 2h — so 3h rolls to Tuesday 08:00).
+    // 1h fits the 10:00-11:00 gap; 3h needs more than Monday's 16:00-18:00, so it rolls to Tuesday
+    // 08:00.
     const busy = await store.listBusy(res.id, searchWindow);
     const windows = expandRules(rules, searchWindow);
 
@@ -1064,7 +1057,6 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
       end: d('2027-01-05T11:00:00Z'),
     });
 
-    // The convenience wrapper agrees with the composed pure calls.
     const viaStore = await store.findNextAvailableFor({
       tenantRef: null,
       resourceId: res.id,
@@ -1089,10 +1081,8 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
     expect(viaStore).toBeNull();
   });
 
-  // ── Atomic holds with intrinsic expiry (Phase 1, slice 2) ─────────────────────
-  // A hold OCCUPIES under the same EXCLUDE arbiter until its DB-clock expiry; expired holds are
-  // lazily reaped inside the very transaction that wants their space — no cron, and an
-  // expired-but-unpurged hold can never block (the P1·5 lesson, made intrinsic).
+  // A hold occupies under the same EXCLUDE until its DB-clock expiry; an expired hold is reaped in
+  // the transaction that wants its space, so it never blocks.
 
   describe('atomic holds', () => {
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -1345,9 +1335,8 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
   });
 
   it("findNextAvailableFor expands rules in the RESOURCE'S stored timezone", async () => {
-    // Auckland winter = NZST (UTC+12): local Monday 09:00 is Sunday 21:00Z. A search window
-    // ending at UTC Monday 00:00 contains NO UTC-frame Monday — only the zone-aware expansion
-    // finds the slot.
+    // Auckland winter is UTC+12: local Monday 09:00 is Sunday 21:00Z, so only the zone-aware
+    // expansion finds the slot.
     const resource = await store.createResource({ timezone: 'Pacific/Auckland' });
     const slot = await store.findNextAvailableFor({
       tenantRef: null,

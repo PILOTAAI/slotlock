@@ -1,7 +1,5 @@
-// The store's next-available search answers only from what it can prove: a resource of the
-// caller's tenant (another tenant's, or one that does not exist, is not found), time whose coverage
-// is complete (a series not stored that far, or a provider calendar not read that far, gives no
-// slot), and a slot whose turnaround buffer is free as well. Skipped without DATABASE_URL.
+// The store's next-available search answers only from what it can prove. Skipped without
+// DATABASE_URL.
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type SlotlockStore, createSlotlockStore } from '../store.js';
@@ -63,7 +61,6 @@ describe.skipIf(!url)('store next-available search (real Postgres)', () => {
   it("answers resource_not_found for another tenant's resource, an unknown id and a malformed one", async () => {
     const a = await freshTenant();
     const b = await freshTenant();
-    // B's resource booked solid for the week.
     await book(b.tenantRef, b.resourceId, '2027-06-07T00:00:00Z', '2027-06-12T00:00:00Z');
     await expect(
       store.findNextAvailableFor({
@@ -74,7 +71,7 @@ describe.skipIf(!url)('store next-available search (real Postgres)', () => {
         durationMs: HOUR,
       }),
     ).resolves.toBeNull();
-    // The audit's repro: A was offered a slot on B's fully booked resource, and on a random id.
+    // Another tenant's fully booked resource, a random id, or no id: never offered.
     for (const resourceId of [b.resourceId, crypto.randomUUID(), 'not-a-uuid']) {
       await expect(
         store.findNextAvailableFor({
@@ -107,7 +104,7 @@ describe.skipIf(!url)('store next-available search (real Postgres)', () => {
     expect(put.ok).toBe(true);
     const freeBusy = await store.getFreeBusy({ tenantRef, resourceId, window: week });
     expect(freeBusy.coverage.state).toBe('partial');
-    // Before: Tuesday 09:00, time the series' unstored occurrence occupies.
+    // Not Tuesday 09:00, which the series' unstored occurrence occupies.
     await expect(
       store.findNextAvailableFor({
         tenantRef,
@@ -175,7 +172,7 @@ describe.skipIf(!url)('store next-available search (real Postgres)', () => {
       start: d('2027-08-02T10:00:00Z'),
       end: d('2027-08-02T11:00:00Z'),
     });
-    // The audit's repro: that slot booked with an hour's buffer overlaps the 11:00 booking.
+    // That slot with an hour's buffer would overlap the 11:00 booking.
     await expect(store.findNextAvailableFor({ ...search, bufferAfterMs: HOUR })).resolves.toEqual({
       start: d('2027-08-02T12:00:00Z'),
       end: d('2027-08-02T13:00:00Z'),

@@ -1,7 +1,4 @@
-// Configuration changes on the feed, and where every change came from (RFC 0002 P1-5, P1-6), against
-// real Postgres: a resource's rules, pool, hours and life, its coverage sources, webhook endpoints and
-// API keys each append one row in the change's own transaction, with what changed before and after,
-// who made it (actor, key id) and through which surface. No row carries a secret. Skipped without
+// Configuration changes on the feed, with who made each and through which surface. Skipped without
 // DATABASE_URL.
 import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
@@ -420,8 +417,7 @@ describe.skipIf(!url)('configuration changes and provenance on the feed (real Po
       `/v1/events/${event.id}?expected_revision=${moved.revision}&idempotency_key=rest-${randomUUID()}`,
     );
 
-    // RFC 0002 P1-6: update then cancel an event, read its history: the entries name the key, and
-    // now also where each came from.
+    // Update then cancel an event: its history names the key and where each change came from.
     const { history } = await rest('GET', `/v1/tenant/events/${stored?.id}/history`);
     expect(history.map(({ type, actor, origin, key_id }: Record<string, unknown>) => [type, actor, origin, key_id])).toEqual([
       ['event.cancelled', `api_key:${apiKey.id}`, 'rest', apiKey.id],

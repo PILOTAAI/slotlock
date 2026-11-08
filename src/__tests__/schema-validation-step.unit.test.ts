@@ -1,9 +1,6 @@
-// applySchema validates the constraints an upgrade added NOT VALID in a transaction of its own,
-// after the DDL's commits. Inside the DDL's transaction every slotlock table it altered stays under
-// ACCESS EXCLUSIVE until commit (PostgreSQL holds a lock to the end of its transaction), so a scan
-// there blocks every serving query; on its own, each VALIDATE holds only SHARE UPDATE EXCLUSIVE,
-// which no read or row write waits for. A stand-in client records which statements ran in which
-// transaction; schema-version.integration runs the validation itself on a real database.
+// applySchema validates NOT VALID constraints in a transaction of its own: inside the DDL's, every
+// altered table stays under ACCESS EXCLUSIVE until commit, while a lone VALIDATE holds only SHARE
+// UPDATE EXCLUSIVE, which no read or row write waits for.
 import type { TransactionSql } from 'postgres';
 import { describe, expect, it } from 'vitest';
 import { createSlotlockStore } from '../store.js';

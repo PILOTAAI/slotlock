@@ -1,6 +1,5 @@
-// The tool list is the contract every agent reads, so it changes only on purpose: a dependency bump
-// that changes what the schemas say fails here. (Zod 4 through zod-to-json-schema turned every
-// schema into `{}`, and the official MCP SDKs then refused the whole list.)
+// The tool list is the contract every agent reads, so a dependency bump that changes the schemas
+// fails here (zod 4 through zod-to-json-schema once made every schema `{}`).
 import { describe, expect, it } from 'vitest';
 import { slotlockAgentTools } from '../agent-server.js';
 

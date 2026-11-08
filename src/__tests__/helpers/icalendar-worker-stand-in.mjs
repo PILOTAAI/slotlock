@@ -1,6 +1,5 @@
-// A stand-in for ical-worker-thread.js, which only the built package can start: it speaks the same
-// protocol, and the input names what it does, so the pool can be tested against a worker that hangs
-// as ical.js might, runs out of its heap, or replies as the parsers do.
+// A stand-in for ical-worker-thread.js, which only the built package can start: the input names
+// whether it hangs, runs out of heap or replies.
 import { parentPort } from 'node:worker_threads';
 
 parentPort.on('message', (request) => {

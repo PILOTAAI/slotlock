@@ -1,5 +1,4 @@
-// Slotlock gap-search engine — pure math, no DB. Half-open `[)` throughout (the Phase-0 canon:
-// back-to-back never conflicts).
+// Half-open `[)` throughout: back-to-back never conflicts.
 import { describe, expect, it } from 'vitest';
 import { findNextAvailable, mergeIntervals, subtractBusy } from '../engine.js';
 

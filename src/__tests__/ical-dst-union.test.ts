@@ -1,9 +1,5 @@
-// What a timed recurring event occupies across daylight-saving changes (SPEC.md, "Daylight-saving
-// time"): each occurrence starts at its wall time read per RFC 5545 §3.3.5, and ends at the later of
-// its exact end (§3.8.5.3: DTEND − DTSTART as instants; §3.3.6: DURATION hours exact, days nominal)
-// and its wall-clock end (DTEND's wall time carried to the occurrence's date, the later instant of
-// a repeated hour). The first instance starts at DTSTART. A one-off, an override or a PERIOD RDATE
-// occupies exactly what it says. The feed and the store give the same answer.
+// What a timed recurring event occupies across daylight-saving changes: SPEC.md, "Daylight-saving
+// time".
 import { describe, expect, it } from 'vitest';
 import {
   CalendarContractError,
@@ -293,10 +289,8 @@ describe('hours are exact, days nominal (ENG-6)', () => {
 });
 
 describe('a DTEND written in the hour the clocks skip (ENG-18)', () => {
-  // New York, daily 01:00-02:30 from 14 March 2027, the night 02:00 becomes 03:00: the first
-  // instance ends at 03:30 EDT (RFC 5545 §3.3.5 moves 02:30 forward by the gap), 1.5 exact hours.
-  // Later days end at the written 02:30 on the wall clock, also 1.5 hours: carrying the moved 03:30
-  // instead held an extra hour every day for the life of the series.
+  // New York, daily 01:00-02:30 from 14 March 2027: the first instance ends at 03:30 EDT (§3.3.5
+  // moves 02:30 forward), later days at the written 02:30, 1.5 hours each.
   const text = series(
     'America/New_York',
     '20270314T010000',
@@ -423,7 +417,6 @@ describe('a DTSTART inside the gap or the fold (ENG-14)', () => {
         ),
       );
       const window = w('2027-01-01T00:00:00Z', '2027-12-01T00:00:00Z');
-      // Its later days start at midnight.
       expect(
         parseICalendarChanges(text, zone, window).map((change) => iso(change.start as Date))[1],
       ).toBe(secondDay);
@@ -488,7 +481,6 @@ describe('DTSTART is always the first instance (RFC 5545 §3.8.5.3)', () => {
 });
 
 describe("a series' occurrences never overlap each other (ENG-18)", () => {
-  /** Each pair of consecutive spans that overlap. */
   const overlaps = (spans: Spans) =>
     spans.slice(1).flatMap((span, i) => {
       const before = spans[i] as [string, string];

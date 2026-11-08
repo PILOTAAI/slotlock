@@ -1,5 +1,3 @@
-// The per-tenant line `maxTenantTransactions` puts withTenant calls in: each tenant runs at most its
-// share at once, in order, without holding up another tenant, and an aborted request leaves the line.
 import { describe, expect, it } from 'vitest';
 import { createSlotlockStore, createTenantSlots } from '../store.js';
 
@@ -24,7 +22,6 @@ describe('createTenantSlots', () => {
     (await a2)();
     await tick();
     expect(started).toEqual(['a1', 'a2', 'b1', 'a3']);
-    // A second call of the same release frees nothing more.
     (await a2)();
     await tick();
     expect(started).toHaveLength(4);

@@ -1,6 +1,4 @@
-// Properties of the pure engine, checked on generated input against brute-force oracles: interval
-// arithmetic, the next free slot, weekly-rule expansion (UTC and zoned), and bookable hours. Each
-// oracle answers "is this instant inside?" the slow, obvious way, at every instant that matters.
+// Engine properties against brute-force oracles that test membership at every instant that matters.
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { findNextAvailable, mergeIntervals, subtractBusy } from '../engine.js';
@@ -57,7 +55,6 @@ function expectCanonical(set: readonly Interval[]) {
 
 describe('the next free slot, walked once', () => {
   it('finds what carving each window out of the busy list found', () => {
-    // The search before it filtered the whole busy list for every window.
     const carved = (busy: Interval[], windows: Interval[], durationMs: number) => {
       for (const window of mergeIntervals(windows)) {
         for (const free of subtractBusy(window, busy)) {

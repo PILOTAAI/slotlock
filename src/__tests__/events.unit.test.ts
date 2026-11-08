@@ -208,7 +208,7 @@ END:VCALENDAR\r
       organizer: { email: 'fleet@example.com', name: 'Fleet Desk' },
       attendees: [{ email: 'agent@example.com', name: 'Booking Agent' }],
     };
-    // The audit's probe: a reader that ends lines at CR saw METHOD:CANCEL and X-CN-INJ:1.
+    // A reader that ends lines at CR must not see METHOD:CANCEL or X-CN-INJ:1.
     for (const hostile of [
       { ...event, summary: 'Handover\rMETHOD:CANCEL' },
       { ...event, description: 'Keys\rMETHOD:CANCEL' },
@@ -231,8 +231,8 @@ END:VCALENDAR\r
   });
 
   it('returns every participant address the store keeps', () => {
-    // The store keeps any address with one @ and no space; the output once wanted a stricter one,
-    // so one imported event made every listing of its window answer 500.
+    // The store keeps any address with one @ and no space, so the output schema must accept the
+    // same.
     const organizer = SLOTLOCK_EVENT_OUTPUT.shape.organizer.unwrap();
     const attendee = SLOTLOCK_EVENT_OUTPUT.shape.attendees.element;
     const kept = (email: string) =>

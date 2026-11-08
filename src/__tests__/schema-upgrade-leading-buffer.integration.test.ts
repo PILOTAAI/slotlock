@@ -1,7 +1,5 @@
-// Upgrading a database the release before leading buffers migrated, in a database of its own: the
-// columns, trigger, checks, overlap constraint and defaults table this release adds are put in place
-// and every booking keeps exactly the time it held. Skipped without DATABASE_URL; the role must
-// create databases.
+// Upgrading from the release before leading buffers, in a database of its own: every booking keeps
+// exactly its time. Needs a role that creates databases; skipped without DATABASE_URL.
 import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -105,7 +103,6 @@ describe.skipIf(!url)('upgrading a database from before leading buffers', () => 
       { start: at(0), end: at(2.5) },
       { start: at(4), end: at(5) },
     ]);
-    // A second migration changes nothing.
     const constraints = await sql`
       SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint
        WHERE conrelid = 'slotlock.reservations'::regclass ORDER BY conname`;

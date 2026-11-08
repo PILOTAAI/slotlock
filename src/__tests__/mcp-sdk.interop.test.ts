@@ -1,8 +1,6 @@
 import { discoverOAuthProtectedResourceMetadata } from '@modelcontextprotocol/sdk/client/auth.js';
-// Slotlock against the OFFICIAL MCP TypeScript SDK (@modelcontextprotocol/sdk, pinned in
-// devDependencies) over real Streamable HTTP. A mock can only confirm what its author believed; this
-// file is the contract that a stock MCP client can connect, list portable tool names, read tool
-// failures and discover OAuth metadata.
+// Against the official MCP TypeScript SDK (1.x) over real Streamable HTTP: a mock only confirms
+// what its author believed.
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';

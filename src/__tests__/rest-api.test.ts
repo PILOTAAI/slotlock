@@ -1,5 +1,3 @@
-// The REST API: each route is one operation of the registry MCP and A2A serve, behind the same
-// authentication, scopes, `authorize`, confirmation and rate limits. /openapi.json describes it.
 import { Validator } from '@seriousme/openapi-schema-validator';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {

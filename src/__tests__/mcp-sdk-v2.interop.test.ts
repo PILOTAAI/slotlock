@@ -1,9 +1,5 @@
-// Slotlock against the OFFICIAL MCP TypeScript SDK v2 client (@modelcontextprotocol/client, pinned in
-// devDependencies) over real Streamable HTTP. v2 implements MCP 2026-07-28: it probes with
-// `server/discover`, then sends every request with the `_meta` envelope and the mirrored headers.
-// A mock can only confirm what its author believed; this file is the contract that a stock
-// 2026-07-28 client negotiates the modern era, calls tools, reads resources, confirms a booking
-// through its elicitation handler and receives live resource updates.
+// Against the official MCP TypeScript SDK v2 client (MCP 2026-07-28) over real Streamable HTTP: a
+// mock only confirms what its author believed.
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { afterEach, describe, expect, it } from 'vitest';
 import {

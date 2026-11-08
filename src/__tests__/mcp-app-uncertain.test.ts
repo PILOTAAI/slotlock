@@ -127,8 +127,8 @@ it('does not present incomplete coverage as a next available interval', async ()
   });
 });
 
-// A refused call carries no structuredContent (MCP clients validate it against the tool's
-// outputSchema), so the App reads the refusal from the text content.
+// A refused call has no structuredContent (clients validate it against outputSchema), so the App
+// reads the text content.
 it('shows the error code of a refused call', async () => {
   const server = calendarServer({}, { authorize: async () => false });
   const result = await callTool(server, 'slotlock_get_free_busy', {

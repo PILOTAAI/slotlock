@@ -1,4 +1,3 @@
-// The benchmark's result format and the Markdown table the release assets and the docs show.
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';

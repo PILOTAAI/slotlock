@@ -1,6 +1,5 @@
-// A tenant reaches every event on its resources, whichever key booked it: an event an agent key
-// created is listed and read by id across owners, and the tenant cancels it by id without that key
-// (revoked, say) and without charging the key's quota. Skipped without DATABASE_URL.
+// A tenant reaches every event on its resources, whichever key booked it. Skipped without
+// DATABASE_URL.
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type SlotlockStore, createSlotlockStore } from '../store.js';
@@ -73,7 +72,7 @@ describe.skipIf(!url)("a tenant's events across owners (real Postgres)", () => {
     const other = await freshTenant();
     await bookEvent(store, other.tenantRef, other.resourceId, AGENT, 3);
 
-    // Before: the tenant's own (internal) listing never shows what the agent key booked.
+    // The tenant's internal listing shows only its own events.
     const internalOnly = await store.listCalendarEvents({ tenantRef, resourceId, window });
     expect(internalOnly.map((event) => event.id)).toEqual([internal.eventId]);
 

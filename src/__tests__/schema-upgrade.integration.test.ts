@@ -1,6 +1,6 @@
-// Upgrading a database the previous release migrated: the schema changes this release makes are
-// applied to a database of its own, shaped as 0.1 left it, so rewriting constraints never touches
-// what other test files are reading. Skipped without DATABASE_URL; the role must create databases.
+// Upgrading a database shaped as 0.1 left it, in a database of its own so rewriting constraints
+// never touches other test files. Needs a role that creates databases; skipped without
+// DATABASE_URL.
 import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';

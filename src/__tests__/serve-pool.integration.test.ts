@@ -1,8 +1,5 @@
-// `slotlock serve`'s one pool of 10 connections, which every tenant shares: one tenant's creates
-// waiting on its own tenant-limit lock behind a 2,000-occurrence series held every connection, and
-// another tenant's trivial transaction waited about a second for one (2026-10-26 security audit,
-// serve-pool). The store is built as serve builds it, and driven as the agent backend drives it.
-// Skipped without DATABASE_URL.
+// `slotlock serve`'s one pool of 10 connections, shared by every tenant: one tenant's writes
+// waiting on its own locks must not hold every connection. Skipped without DATABASE_URL.
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';

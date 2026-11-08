@@ -1,6 +1,5 @@
-// The README's examples, executed as written: deploy as the schema owner, serve traffic as a LOGIN
-// role without BYPASSRLS, and drive the agent server with the official MCP and A2A SDKs. The README
-// quotes these files verbatim (readme-examples.test.ts), so a snippet that stops working fails here.
+// The README's examples, executed as written; the README quotes these files verbatim
+// (readme-examples.test.ts).
 import { createServer } from 'node:net';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -315,12 +314,9 @@ describe.skipIf(!url)('Slotlock README examples (real Postgres)', () => {
   });
 
   it('refuses to deploy into a slotlock schema that another role controls', async () => {
-    // A role that can create schemas can create `slotlock` before the first deployment, with the one
-    // table the deployment writes rows into and a trigger on it. IF NOT EXISTS keeps both, and the
-    // next applyTenantRls ran that trigger as the owner of every table. Owning the schema, creating
-    // in it, owning an object in it, or owning what a trigger on its tables runs is the same power.
-    // Each probe runs in a savepoint that is rolled back; the first renames the deployed schema away
-    // so that `slotlock` is missing, as on a fresh database.
+    // A role that can create schemas can create `slotlock` before the first deployment, with a
+    // trigger IF NOT EXISTS keeps. Each probe runs in a rolled-back savepoint; the first renames
+    // the deployed schema away, as on a fresh database.
     const [self] = await admin<{ database: string }[]>`SELECT current_database() AS database`;
     const other = `${role}_other`;
     const probes: Record<string, { setup: string[]; reason: string }> = {

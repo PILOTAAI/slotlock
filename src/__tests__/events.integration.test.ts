@@ -390,8 +390,8 @@ describe.skipIf(!url)('Slotlock calendar events (real Postgres)', () => {
       materializationWindow: initialWindow,
     });
     if (!created.ok) throw new Error('rolling conflict fixture failed');
-    // A booking where the series is not stored, as releases before 0.3 accepted one: a write there
-    // now extends the series first (and here would be refused as an overlap).
+    // A booking where the series is not stored, as releases before 0.3 accepted: a write there
+    // extends the series first.
     await sql`
       INSERT INTO slotlock.reservations (resource_id, tenant_ref, external_ref, starts_at, ends_at)
       VALUES (${rollingResource.id}, ${rollingTenant}, ${`rolling-blocker-${crypto.randomUUID()}`},

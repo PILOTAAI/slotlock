@@ -1,12 +1,10 @@
-// An independent statement of the occupation rule for timed recurring events, for the tests to hold
-// the engine to. It reads offsets from Intl only and shares no code with src/: a bug in the engine's
-// own time-zone converter cannot hide here.
+// An independent statement of the occupation rule, from Intl offsets only, sharing no code with
+// src/.
 //
-// The rule (SPEC.md, "Daylight-saving time"): an occurrence starts at its wall time read per RFC
-// 5545 §3.3.5 (a time in a gap moves forward by the gap, a time in a fold is its first instant), and
-// ends at the later of its exact end (start + DTEND − DTSTART as instants, §3.8.5.3) and its
-// wall-clock end (DTEND's wall time carried to the occurrence's date, a time in a fold being its
-// later instant). The first instance starts at DTSTART's own instant.
+// The rule (SPEC.md, "Daylight-saving time"): an occurrence starts at its wall time per RFC 5545
+// §3.3.5 (a gap moves forward, a fold is its first instant) and ends at the later of its exact end
+// (§3.8.5.3) and its wall-clock end (a fold being its later instant). The first instance starts at
+// DTSTART's own instant.
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -80,7 +78,6 @@ export function resolve(
   return wall - offsetOf(before, zone);
 }
 
-/** `yyyymmddThhmmss` as a UTC frame. */
 export function wallFrame(text: string): number {
   const [, y, mo, d, h, mi, s] = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})$/.exec(text) ?? [];
   const frame = new Date(0);
@@ -89,7 +86,6 @@ export function wallFrame(text: string): number {
   return frame.getTime();
 }
 
-/** A UTC frame as `yyyymmddThhmmss`. */
 export function wallText(frame: number): string {
   return new Date(frame).toISOString().replace(/[-:]/g, '').slice(0, 15);
 }

@@ -1,5 +1,3 @@
-// Booking rules: what a write must satisfy, and the same rules applied to a search, so a slot a
-// search offers is one a write accepts.
 import { describe, expect, it } from 'vitest';
 import {
   bookingBufferAfterMs,

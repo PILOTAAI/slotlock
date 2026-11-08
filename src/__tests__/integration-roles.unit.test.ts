@@ -1,6 +1,5 @@
-// Several runs of the database suites can share one PostgreSQL cluster (one container serving many
-// checkouts). Roles are cluster-wide, so a suite that creates a role under a fixed name drops and
-// recreates the role another run is using. Every role a suite creates must carry a random part.
+// Database suites may share one PostgreSQL cluster, and roles are cluster-wide: a fixed role name
+// would collide with another run's.
 import { readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 

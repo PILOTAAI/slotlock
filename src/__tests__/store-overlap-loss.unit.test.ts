@@ -1,7 +1,6 @@
-// A write that loses to the exclusion arbiter is always answered as an overlap. After the loss the
-// store rolls the resource's series in a transaction of its own, as upkeep; when that fails (here a
-// stand-in client drops it), the answer must still be the structured loss, not the upkeep's error.
-// The real database runs the losing writes in event-horizon.integration.
+// After losing to the exclusion arbiter the store rolls the resource's series as upkeep; when that
+// fails, the answer must still be the structured overlap. The real database runs this in
+// event-horizon.integration.
 import type { TransactionSql } from 'postgres';
 import { describe, expect, it } from 'vitest';
 import { createSlotlockStore } from '../store.js';

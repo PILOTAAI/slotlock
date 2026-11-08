@@ -1,6 +1,5 @@
-// The application API on the real store and PostgreSQL, over REST. The connection is a superuser,
-// which row-level security never filters, so every cross-tenant refusal here comes from the
-// backend's own tenant checks, not from RLS; the self-host test serves it as a role RLS does filter.
+// A superuser connection, which RLS never filters: every cross-tenant refusal here is the backend's
+// own.
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -120,7 +119,6 @@ describe.skipIf(!url)('the application API on the real store', () => {
       },
     });
     const id = created.body.resource.id as string;
-    // Again, with another zone: the same resource, updated.
     const again = await call('a', 'POST', '/v1/resources', { external_ref: 'van-1', timezone: 'Europe/Paris' });
     expect(again.body.resource).toMatchObject({ id, timezone: 'Europe/Paris' });
     expect((await call('a', 'POST', '/v1/resources', { external_ref: 'van-1' })).body.resource).toMatchObject({
@@ -152,11 +150,9 @@ describe.skipIf(!url)('the application API on the real store', () => {
     expect(await call('b', 'GET', '/v1/resources/not-a-uuid')).toEqual(refused(404, 'resource_not_found'));
     expect((await call('b', 'PUT', '/v1/availability', { rules })).body).toEqual({ resources_updated: 0 });
     expect((await call('a', 'GET', `/v1/resources/${id}`)).body.resource.availability).toBeNull();
-    // B's resource with A's reference is B's own.
     const theirs = await call('b', 'POST', '/v1/resources', { external_ref: 'van-1' });
     expect(theirs.body.resource.id).not.toBe(id);
 
-    // The agent key of tenant A has no admin scope.
     expect(await call('agent', 'GET', `/v1/resources/${id}`)).toEqual(refused(403, 'forbidden'));
     expect(await call('agent', 'POST', '/v1/resources', { external_ref: 'van-9' })).toEqual(refused(403, 'forbidden'));
   });
@@ -193,7 +189,6 @@ describe.skipIf(!url)('the application API on the real store', () => {
     expect(expiresIn).toBeLessThan(610_000);
     const holdId = held.body.hold.id as string;
 
-    // The window is taken, for another hold and for a reservation.
     expect(await call('a', 'POST', '/v1/holds', { ...window, ttl_seconds: 60 })).toEqual(refused(409, 'overlap'));
     expect(
       await call('a', 'PUT', '/v1/reservations/booking-over-hold', { ...window, revision: 1 }),
@@ -276,7 +271,6 @@ describe.skipIf(!url)('the application API on the real store', () => {
       (await call('a', 'POST', '/v1/holds', { ...window, start: day(13, '10:30:00'), end: day(13, '11:00:00'), ttl_seconds: 60 }))
         .status,
     ).toBe(200);
-    // Confirmed, the hold is a booking with the same buffer.
     expect((await call('a', 'POST', `/v1/holds/${held.body.hold.id}/confirm`, {})).body.reservation).toMatchObject({
       end: window.end,
       buffer_after_minutes: 30,
@@ -321,7 +315,6 @@ describe.skipIf(!url)('the application API on the real store', () => {
     const reservationId = created.body.reservation.id as string;
     expect(await call('a', 'POST', `/v1/holds/${reservationId}/confirm`, {})).toEqual(refused(404, 'hold_not_found'));
     expect(await call('a', 'DELETE', `/v1/holds/${reservationId}`)).toEqual({ status: 200, body: { released: false } });
-    // The buffer keeps the hour after it busy.
     expect(
       await call('a', 'POST', '/v1/holds', {
         resource_id: resource.id,
@@ -343,7 +336,6 @@ describe.skipIf(!url)('the application API on the real store', () => {
     expect(moved.body).toMatchObject({ reservation: { start: day(24, '09:00:00'), revision: 2 }, replayed: false });
     expect(await call('a', 'PUT', path, { ...booking, revision: 2 })).toEqual(refused(422, 'idempotency_conflict'));
     expect(await call('a', 'PUT', path, { ...booking, revision: 9 })).toMatchObject({ status: 409 });
-    // The old window is free again.
     expect(
       (await call('a', 'POST', '/v1/holds', { resource_id: resource.id, start: booking.start, end: booking.end, ttl_seconds: 60 }))
         .status,
@@ -520,14 +512,11 @@ describe.skipIf(!url)('the application API on the real store', () => {
       refused(404, 'resource_not_found'),
     );
 
-    // Cancelled, a reservation is no longer read.
     expect((await call('a', 'DELETE', `/v1/reservations/${holdId}?revision=2`)).body).toEqual({ cancelled: true, revision: 2 });
     expect(await call('a', 'GET', `/v1/reservations/${holdId}`)).toEqual(refused(404, 'reservation_not_found'));
   });
 
   it('lists an event whose participants have addresses an imported feed may carry', async () => {
-    // The audit's probe: an invitation whose ORGANIZER was mailto:ops@localhost made every listing
-    // of its window answer 500, and the event itself unreadable.
     const resource = (await call('a', 'POST', '/v1/resources', { external_ref: `feed-van-${randomUUID()}` })).body.resource;
     const put = await store.putCalendarEvent({
       tenantRef: tenantA,
@@ -569,7 +558,6 @@ describe.skipIf(!url)('the application API on the real store', () => {
     expect(exported.status).toBe(200);
     expect(exported.body.icalendar).toContain('DTSTART;TZID=Europe/London:20240108T090000');
 
-    // Cleared, then imported from the export: the same rules.
     await call('a', 'PUT', `/v1/resources/${resource.id}/availability`, { rules: [] });
     const imported = await call('a', 'PUT', path, { icalendar: exported.body.icalendar });
     expect(imported.status).toBe(200);
@@ -626,7 +614,6 @@ describe.skipIf(!url)('the application API on the real store', () => {
   });
 
   it('stops reading busy time at the first interval past what one read may return', async () => {
-    // The audit's probe: 24,000 rows were all read into the process before the request was refused.
     const resource = (await call('a', 'POST', '/v1/resources', { external_ref: `busy-van-${randomUUID()}` })).body.resource;
     const from = new Date(day(30));
     await sql`
@@ -775,7 +762,6 @@ describe.skipIf(!url)('the application API on the real store', () => {
     expect(erased.body.total).toBeGreaterThanOrEqual(2);
     expect(await call('erased', 'GET', `/v1/resources/${resource.id}`)).toEqual(refused(404, 'resource_not_found'));
     expect((await call('erased', 'POST', '/v1/tenant/erase', confirm, { tenantErasure: true })).body.total).toBe(0);
-    // Another tenant's resources are as they were.
     expect((await call('a', 'GET', '/v1/tenant')).status).toBe(200);
     const [row] = await sql<{ count: string }[]>`
       SELECT count(*)::text AS count FROM slotlock.resources WHERE tenant_ref = ${tenantA}`;

@@ -1,9 +1,5 @@
-// Randomised series around every clock change from October 2026 to October 2028 in seven zones,
-// held to an Intl-only statement of the occupation rule (helpers/dst-oracle.ts): each occurrence
-// occupies the union of its exact and its wall-clock reading, and a series' occurrences never
-// overlap each other. The feed path, the trusted importer with the store's expansion, and the
-// store's export read back as a feed must all give it. An all-day series reads as whole local days,
-// and stored (as a timed series from midnight to midnight) never frees one.
+// Random series around every clock change from October 2026 to October 2028 in seven zones, held to
+// the Intl-only oracle (helpers/dst-oracle.ts) on the feed, import and export paths.
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import {
@@ -77,7 +73,6 @@ const seriesNear = (length: fc.Arbitrary<number>) =>
         count: r.before + 1 + r.after,
       };
     });
-/** From a quarter hour to five hours. */
 const seriesNearAChange = seriesNear(fc.integer({ min: 1, max: 20 }));
 /** From 23 hours to a week: as long as a day the clocks shorten, or as the series' period. */
 const longSeriesNearAChange = seriesNear(fc.integer({ min: 92, max: 672 }));

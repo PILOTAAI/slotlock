@@ -1,8 +1,5 @@
-// The dashboard as a Cloudflare Worker (workers/dashboard/worker.ts), run as its fetch handler
-// against real Postgres, connected as a LOGIN role without BYPASSRLS, as Hyperdrive would connect.
-// GitHub is a fake `fetch`. Each request opens its own client and hands its closing to waitUntil,
-// one dashboard serves every request (so its sign-in limit holds across them), and the page points
-// agents at the server's own origin. Skipped without DATABASE_URL.
+// The dashboard Worker's fetch handler against real Postgres, as the LOGIN role Hyperdrive connects
+// as. Skipped without DATABASE_URL.
 import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -76,8 +73,8 @@ describe.skipIf(!url)('the dashboard Worker (real Postgres)', () => {
     await admin.end();
   });
 
-  // GitHub, behind fetch as Cloudflare Workers implement it: they refuse `redirect: 'error'` with a
-  // TypeError (workerd, wrangler 4.149.0, checked 2026-10-17).
+  // Workers refuse `redirect: 'error'` with a TypeError (workerd, wrangler 4.149.0, checked
+  // 2026-10-17).
   const github: typeof fetch = async (input, init) => {
     if (init?.redirect === 'error') {
       throw new TypeError('Invalid redirect value, must be one of "follow" or "manual"');
@@ -235,7 +232,6 @@ describe.skipIf(!url)('the dashboard Worker (real Postgres)', () => {
     expect(refused.status).toBe(429);
     expect(refused.headers.get('retry-after')).toBe('60');
     expect(asked).toEqual([]);
-    // Another address has its own count.
     expect((await from('198.51.100.4', '/dashboard/sign-in')).status).toBe(302);
     expect(client.asked).toEqual([
       'client:203.0.113.7',
@@ -259,7 +255,6 @@ describe.skipIf(!url)('the dashboard Worker (real Postgres)', () => {
       statuses.push(response.status);
     }
     expect(statuses).toEqual([302, 302, 429]);
-    // The dashboard's other pages are not sign-ins.
     const page = await worker.fetch(new Request(`${APP}/dashboard`), limited, ctx);
     expect(page.status).toBe(200);
     expect(signIn.asked).toEqual(['sign-in', 'sign-in', 'sign-in']);

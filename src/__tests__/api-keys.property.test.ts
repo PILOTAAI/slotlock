@@ -1,6 +1,5 @@
-// Properties of API key strings: every generated key verifies offline, one changed character makes
-// it fail (always in the checksum; but for a 1 in 2^32 chance in the random part), and nothing
-// thrown at the check makes it throw.
+// A changed character always fails in the checksum, and in the random part but for a 1 in 2^32
+// chance.
 import { createHash } from 'node:crypto';
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';

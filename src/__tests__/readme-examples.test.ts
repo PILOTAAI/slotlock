@@ -1,6 +1,5 @@
-// The README's TypeScript is quoted from examples/*.ts, which `tsc -p tsconfig.examples.json`
-// typechecks and examples.integration.test.ts runs against PostgreSQL. This keeps the quotes exact:
-// every ```ts block follows an `<!-- example: <file>#<region> -->` marker and equals that region.
+// Every README ```ts block follows an `<!-- example: <file>#<region> -->` marker and equals that
+// region of examples/*.ts.
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';

@@ -1,14 +1,11 @@
-// What the documentation promises about the hosted service's safety must match the code: the
-// request limits serve applies (SEC-1/SURF-1: the README's production checklist and SECURITY.md name
-// them), and what write confirmation is (SEC-17: the client asks its person, so a key holder's own
-// client can say yes; it is not an authorization boundary).
+// What the docs promise about the hosted service's safety must match the code: serve's request
+// limits, and that write confirmation is not an authorization boundary.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const read = (path: string) => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
 const flat = (text: string) => text.replace(/\s+/g, ' ');
 
-/** A section of a Markdown document: from its heading to the next heading of its level or above. */
 function section(markdown: string, heading: string): string {
   const start = markdown.indexOf(`${heading}\n`);
   expect(start, `canary: ${heading} exists`).toBeGreaterThanOrEqual(0);

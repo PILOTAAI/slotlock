@@ -1,5 +1,3 @@
-// The REST reference and Postman collection on slotlock.pylota.io (site/scripts/api-reference.mjs)
-// are generated from openapi.json: every route has a page and a request, and nothing else.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';

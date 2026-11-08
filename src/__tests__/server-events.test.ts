@@ -1,6 +1,5 @@
-// What the agent server tells `onEvent` about an MCP or A2A call: the operation, how it ended, how
-// long it ran and the W3C trace id it carried. Never its arguments, its caller, its parent span or
-// the rest of its trace context.
+// `onEvent` hears the operation, outcome, duration and W3C trace id; never the arguments, the
+// caller, the parent span or the rest of the trace context.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   SLOTLOCK_A2A_PROTOCOL_VERSION,
@@ -53,7 +52,6 @@ function buildServer() {
   });
 }
 
-/** A 2025-11-25 JSON-RPC request to `/mcp` or `/a2a`. */
 function legacyRequest(
   path: '/mcp' | '/a2a',
   body: Record<string, unknown>,

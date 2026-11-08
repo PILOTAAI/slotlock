@@ -1,7 +1,5 @@
-// The daylight-saving corpus (helpers/dst-corpus.ts) in PostgreSQL: each stored series, and each
-// feed series the trusted importer stores, is written with putCalendarEvent and occupies exactly the
-// corpus's answer, and a booking into the first or last minute of any of it is refused. A case the
-// engine refuses is refused by the write too, and leaves nothing behind.
+// The daylight-saving corpus in PostgreSQL: each series occupies exactly the corpus's answer, and a
+// booking into its first or last minute is refused.
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';

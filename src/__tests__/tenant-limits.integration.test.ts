@@ -1,9 +1,6 @@
-// Per-tenant limits bound what one tenant can store on a shared database: holds, bookings and
-// calendar events still to come or added in the last 30 days (cancellations included), references
-// a cancel retired with no booking and agent cancellations until maintenance prunes them, provider
-// coverage and resources. Older history leaves the limit. A write that would pass a limit is
-// refused with the limit, racing writers included; what the tenant already has can still be
-// revised, cancelled and released; and other tenants are unaffected. Skipped without DATABASE_URL.
+// Per-tenant limits on a shared database: what was added in the last 30 days counts, older history
+// leaves the limit, and what the tenant has can still be revised, cancelled and released. Skipped
+// without DATABASE_URL.
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { maintainSlotlockTenant } from '../maintenance.js';
@@ -104,7 +101,6 @@ describe.skipIf(!url)('per-tenant limits (real Postgres)', () => {
     await expect(hold(2)).resolves.toEqual({ ok: false, code: 'hold_limit_reached', limit: 2 });
     // A retried request answers its hold at the limit too.
     await expect(hold(0, { key: 'first' })).resolves.toMatchObject({ ok: true, idempotent: true });
-    // Another tenant has its own limit.
     const other = await freshTenant(store);
     await expect(
       store.acquireHold({
@@ -133,7 +129,7 @@ describe.skipIf(!url)('per-tenant limits (real Postgres)', () => {
         SELECT count(*)::int AS count FROM slotlock.hold_commands WHERE tenant_ref = ${tenantRef}`;
       return row?.count ?? 0;
     };
-    // Before, each kept its answer for 30 days uncounted: 40 of them under a limit of 5.
+    // Answers of expired holds must count: 40 of them under a limit of 5.
     for (let n = 0; n < 40; n++) {
       const hold = await store.acquireHold({
         tenantRef,
@@ -161,8 +157,8 @@ describe.skipIf(!url)('per-tenant limits (real Postgres)', () => {
          WHERE resource_id = ${resourceId} AND status = 'held'`;
       return row?.count ?? 0;
     };
-    // Before, an expired hold no rival wrote over stayed until maintenance, uncounted: 40 held
-    // rows under a limit of 5. Each hold here takes its own hour, so none reaps another.
+    // Expired holds no rival wrote over must count until reaped: 40 under a limit of 5. Each takes
+    // its own hour, so none reaps another.
     for (let n = 0; n < 40; n++) {
       const hold = await store.acquireHold({
         tenantRef,
@@ -233,7 +229,7 @@ describe.skipIf(!url)('per-tenant limits (real Postgres)', () => {
     await expect(keyed(0, 'released')).resolves.toEqual({ ...released, idempotent: true });
     const live = await unkeyed(1);
     if (!live.ok) throw new Error(live.code);
-    // Before, a released keyed hold left its answer behind uncounted.
+    // A released keyed hold's answer counts too.
     await expect(unkeyed(2)).resolves.toEqual({ ok: false, code: 'hold_limit_reached', limit: 2 });
     await expire('released');
     expect((await unkeyed(2)).ok).toBe(true);
@@ -366,7 +362,7 @@ describe.skipIf(!url)('per-tenant limits (real Postgres)', () => {
       code: 'reservation_limit_reached',
       limit: 2,
     });
-    // Before, a tenant whose bookings had all ended could never book again.
+    // A tenant whose bookings have all ended can book again.
     await age(tenantRef);
     await expect(book(slot(0).start)).resolves.toMatchObject({ ok: true });
     const ending = await book(slot(1).start);
@@ -458,7 +454,6 @@ describe.skipIf(!url)('per-tenant limits (real Postgres)', () => {
       limit: 2,
     });
     await expect(put(2)).resolves.toEqual({ ok: false, code: 'event_limit_reached', limit: 2 });
-    // A revision adds no event.
     await expect(
       store.putCalendarEvent({
         tenantRef,
@@ -533,7 +528,6 @@ describe.skipIf(!url)('per-tenant limits (real Postgres)', () => {
       code: 'resource_limit_reached',
       limit: 2,
     });
-    // The caller's own lower cap still holds.
     await expect(
       store.createResource({ tenantRef, externalRef: 'third', maxTenantResources: 1 }),
     ).rejects.toMatchObject({ code: 'resource_limit_reached', limit: 1 });

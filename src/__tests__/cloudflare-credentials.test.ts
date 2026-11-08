@@ -1,8 +1,5 @@
-// scripts/check-cloudflare-credentials.sh, the check site.yml runs before every deploy and
-// configure-github.sh runs before it stores the Cloudflare secrets, against a local stand-in for the
-// Cloudflare API. The stand-in answers the way api.cloudflare.com answered made-up values on
-// 2026-10-10: 6003 with a 6111 chain for anything shorter than 40 characters or containing a space or
-// a quote, and 1000 "Invalid API Token" for a well-formed value that is not a live token.
+// The stand-in answers as api.cloudflare.com did on 2026-10-10: 6003 (6111 chain) for values under
+// 40 characters or with a space or quote, 1000 for a well-formed dead token.
 import { execFile } from 'node:child_process';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { type IncomingMessage, type ServerResponse, createServer } from 'node:http';
@@ -118,7 +115,6 @@ describe('check-cloudflare-credentials.sh', () => {
     const result = await check(ACCOUNT_TOKEN);
     expect(result.code).toBe(0);
     expect(result.output).toContain('an active account API token');
-    // The token travels only in the Authorization header.
     expect(requests.map((r) => r.authorization)).toEqual(
       requests.map(() => `Bearer ${ACCOUNT_TOKEN}`),
     );
@@ -252,7 +248,6 @@ describe('site.yml', () => {
     const step = deploy.slice(deploy.lastIndexOf('- name:', check), check);
     expect(step).toContain('CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}');
     expect(step).toContain('CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}');
-    // A change to the checker runs the site workflow too.
     expect(site.match(/- "scripts\/check-cloudflare-credentials\.sh"/g)).toHaveLength(2);
   });
 });

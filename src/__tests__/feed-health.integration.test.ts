@@ -1,6 +1,4 @@
-// Feed health against real Postgres: a source's last error is kept beside its coverage, a source
-// that goes stale is shown stale and put on the change feed once until it is read again, and a
-// source that never recorded coverage cannot record a failure. Skipped without DATABASE_URL.
+// Feed health against real Postgres. Skipped without DATABASE_URL.
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -54,7 +52,6 @@ describe.skipIf(!url)('feed health (real Postgres)', () => {
     expect(stale).toMatchObject({ type: 'coverage.stale', data: { resource_id: resource.id, source_id: sourceId } });
     expect(JSON.stringify(stale)).not.toMatch(/google:fleet|token expired/);
 
-    // Read again, then stale again: reported again.
     await app.recordCoverage(as, { resource_id: resource.id, source: 'google:fleet', ...window, revision: 2 });
     expect(((await app.getCoverage(as, { resource_id: resource.id })) as { sources: { stale: boolean }[] }).sources[0]?.stale).toBe(false);
     await sql`UPDATE slotlock.calendar_coverage SET observed_at = now() - interval '2 days' WHERE tenant_ref = ${tenantRef}`;

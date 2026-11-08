@@ -1,6 +1,3 @@
-// Recurrence edges a second review found after undefined zones were given to ical.js: floating
-// UNTIL, hostile pre-pass input, daylight-saving gaps, cursors kept before the change, all-day
-// EXDATEs in the trusted parser, exceptions named in other zones, RDATE instances, odd TZIDs.
 import { describe, expect, it } from 'vitest';
 import {
   expandCalendarEventOccurrences,
@@ -111,11 +108,9 @@ describe('recurrence edges', () => {
   );
 
   it('an occurrence starting in a DST gap is reported, for its exact length', () => {
-    // RFC 5545 3.3.5: 02:00 in the gap is read with the offset before it (01:00Z), and lasts the
-    // series' exact length (3.8.5.3), 1h: on the wall clock it would end as it starts. Every
-    // occurrence ends at the later of its exact end and its wall-clock end (SPEC.md, "Daylight-saving
-    // time"): 01:00-04:00 the night the clocks go forward is three hours, as on any other night,
-    // although the wall clock shows two.
+    // RFC 5545 3.3.5: 02:00 in the gap is read with the offset before it (01:00Z) and lasts the
+    // series' exact 1h (3.8.5.3). Each occurrence ends at the later of its exact and wall-clock
+    // ends (SPEC.md), so 01:00-04:00 that night is three hours.
     const W = w('2027-03-01T00:00:00Z', '2027-05-01T00:00:00Z');
     const gap = cal(
       ...ev(
@@ -266,8 +261,8 @@ describe('recurrence edges', () => {
   });
 
   it('every EXDATE excludes its occurrence, however many it passed first (RFC 5545 3.8.5.1)', () => {
-    // Two EXDATEs at 10:00 name no occurrence of this 09:00 series; the third names 18 January's.
-    // ical.js passed one EXDATE per occurrence, so the third was still waiting when the 18th came.
+    // Two EXDATEs at 10:00 name no occurrence of this 09:00 series; the third names 18 January's,
+    // and must still apply.
     const feed = cal(
       ...ev(
         'x',
@@ -400,8 +395,8 @@ describe('recurrence edges', () => {
   });
 
   it('a CalDAV-expanded series keeps every instance, its first without a RECURRENCE-ID', () => {
-    // RFC 4791 §9.6.5: every instance but the first must carry a RECURRENCE-ID, and none carries
-    // RRULE. Each later instance was read as an exception of a one-off, and dropped.
+    // RFC 4791 §9.6.5: every instance but the first carries a RECURRENCE-ID, and none carries
+    // RRULE.
     const W = w('2027-01-01T00:00:00Z', '2027-02-01T00:00:00Z');
     const expanded = cal(
       ...ev('x', 'DTSTART:20270104T090000Z', 'DTEND:20270104T100000Z'),
@@ -426,8 +421,6 @@ describe('recurrence edges', () => {
   });
 });
 
-// A third review: a feed's own VTIMEZONE for an IANA name, the cap on zones, a DATE EXDATE on a
-// timed series, a DURATION in a gap, and two RRULEs.
 describe('recurrence edges, third review', () => {
   const stored = (feed: string, window: { start: Date; end: Date }, timezone?: string) => {
     const [series] = parseTrustedICalendarEvents(feed, timezone);
@@ -557,7 +550,7 @@ describe('recurrence edges, third review', () => {
   });
 
   it('expands every RRULE of a series, after one of them ends (RFC 5545 3.8.5.3)', () => {
-    // ical.js skipped the rule after one that had finished, so 11 January was never reached.
+    // ical.js skips a rule after one that has finished, so 11 January must still be reached.
     const feed = cal(
       ...ev(
         'm',

@@ -1,6 +1,5 @@
-// The `slotlock` commands against real Postgres, through the entry point the executable calls: the
-// schema owner migrates and grants a LOGIN role without BYPASSRLS, which then adds a resource and
-// serves MCP on a real socket until its signal aborts. Skipped without DATABASE_URL.
+// The `slotlock` commands against real Postgres, through the executable's entry point. Skipped
+// without DATABASE_URL.
 import { randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -34,7 +33,6 @@ function output() {
   };
 }
 
-/** The JSON-RPC `result` of an MCP response. */
 async function rpcResult<T>(response: Response): Promise<T> {
   return ((await response.json()) as { result: T }).result;
 }
@@ -242,7 +240,6 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         archived_at: expect.any(String),
       });
       expect((await runIn(['resource', 'list'])).stdout.text()).toBe('');
-      // By id as well as by reference, archived ones included.
       const restored = await runIn(['resource', 'restore', archived.line().id as string]);
       expect(restored.line()).toMatchObject({ external_ref: 'retired-van', archived_at: null });
       expect((await runIn(['resource', 'list'])).stdout.text()).toContain('retired-van');
@@ -298,7 +295,6 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       expect(erased.line()).toMatchObject({ tenant: lifecycle, rows: expect.objectContaining({ resources: 1 }) });
       expect((await runIn(['resource', 'list'])).stdout.text()).toBe('');
       expect((await runIn(['tenant', 'erase', '--confirm', lifecycle])).line()).toMatchObject({ total: 0 });
-      // The command line's own tenant is as it was.
       expect((await run(['resource', 'list'])).stdout.text()).toContain('vehicle-42');
     } finally {
       await admin`DELETE FROM slotlock.tenant_suspensions WHERE tenant_ref = ${lifecycle}`;
@@ -872,8 +868,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     const shutdown = new AbortController();
     const stdout = output();
     const stderr = output();
-    // Before, the server gave its store no tenant limits: an admin key could add holds,
-    // reservations and coverage rows without end, and SLOTLOCK_LIMITS had no setting for them.
+    // serve gives its store tenant limits, and SLOTLOCK_LIMITS has settings for them.
     const serving = runSlotlockCli(['serve'], {
       env: {
         ...env,
@@ -1034,7 +1029,6 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     expect(first).toMatch(/^set SLOTLOCK_MIGRATE_DATABASE_URL to the schema owner's URL: /);
     expect(first).toContain(`migrate connected as ${role}`);
     expect(first?.length).toBeLessThan(300);
-    // The database's refusal still follows.
     expect(detail.join('\n')).toContain('permission denied');
     expect(stderr.text()).not.toContain(password);
   });
@@ -1081,9 +1075,8 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       ]);
       expect(stderr.text() + stdout.text()).not.toContain(ownerPassword);
 
-      // Migrate as another role, with no SLOTLOCK_MIGRATE_DATABASE_URL: the schema's owner is not a
-      // superuser, so the deployment check refuses with a reason per object that role does not
-      // own, thousands of characters of them. The fix comes first, on a line of its own.
+      // Migrating as a role that owns nothing refuses with a reason per object, thousands of
+      // characters: the fix must come first, on a line of its own.
       const appUrl = new URL(ownerUrl.href);
       appUrl.username = role;
       appUrl.password = password;
@@ -1313,7 +1306,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       expect(signIn.headers.get('set-cookie')).toMatch(/^__Host-slotlock-oauth=/);
 
       // Sign-ins, which write a record and ask GitHub, have a budget per client address of their
-      // own (SEC-12); the dashboard's other pages do not count against it.
+      // own; other dashboard pages do not count against it.
       const more = [];
       for (const path of ['/dashboard/sign-in', '/dashboard/callback/', '/dashboard/sign-in']) {
         more.push(await fetch(`${origin}${path}`, { redirect: 'manual' }));

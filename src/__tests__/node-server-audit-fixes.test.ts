@@ -1,6 +1,5 @@
-// Defects an audit reproduced on the Node HTTP adapter: a chunked request body over
-// `maxRequestBytes` answered only after the client finished sending it, and a `close()` during
-// startup that left `listen()` pending forever.
+// The Node HTTP adapter: a chunked body over `maxRequestBytes` is answered while the client still
+// sends it, and `close()` during startup ends a pending `listen()`.
 import { once } from 'node:events';
 import { request as requestHttp } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -60,7 +59,6 @@ async function startAgentServer(maxRequestBytes: number) {
 interface ChunkedOutcome {
   status: number | null;
   body: string;
-  /** Whether the response's head arrived while the client was still sending the body. */
   answeredWhileSending: boolean;
   sentBytes: number;
   error?: string;

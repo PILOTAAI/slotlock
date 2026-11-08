@@ -1,9 +1,5 @@
-// `slotlock serve` as the hosted service runs it, against real Postgres on a real socket: the
-// request limits that are its only rate limit (the edge is Cloudflare Free), the key-lookup queue
-// under a flood of made-up keys, one tenant's recurring writes beside another tenant's reads, and
-// the log line that counts refusals. Each case reproduces a flood from the 2026-10-24 readiness
-// audit (SEC-1/SURF-1/PROD-8/HOST-3/GAP4-2, SEC-2/SURF-2, SEC-3/GAP4-4, SEC-4) that every request
-// answered without a limit before this. Skipped without DATABASE_URL.
+// `slotlock serve` as the hosted service runs it (edge on Cloudflare Free, so these are its only
+// rate limits), against real Postgres on a real socket. Skipped without DATABASE_URL.
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Agent, request as httpRequest } from 'node:http';
 import { readFileSync } from 'node:fs';
@@ -18,7 +14,7 @@ const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?
 const openApi = JSON.parse(readFileSync(new URL('../../openapi.json', import.meta.url), 'utf8')) as {
   components: { schemas: { Error: unknown } };
 };
-/** The audit's crafted rule: never an occurrence, so expansion runs to its step and time budget. */
+/** Never an occurrence, so expansion runs to its step and time budget. */
 const COSTLY_RULE = 'FREQ=DAILY;INTERVAL=9999;BYMONTH=2;BYMONTHDAY=29';
 const HOUR_MS = 3_600_000;
 
@@ -71,7 +67,6 @@ interface Answer {
   ms: number;
 }
 
-/** One request with fetch, read whole. */
 async function call(
   origin: string,
   method: string,
@@ -142,7 +137,7 @@ function tally(statuses: number[]): Record<string, number> {
   return counts;
 }
 
-/** A made-up key that passes the format and checksum check, as anyone can mint (SEC-2). */
+/** A made-up key that passes the format and checksum check, as anyone can mint. */
 async function madeUpKey(): Promise<string> {
   const { generateSlotlockApiKey } = await import('../api-keys.js');
   return generateSlotlockApiKey().key;
@@ -265,7 +260,6 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
       expect(Object.keys(counts).sort()).toEqual(['200', '429']);
 
       expect(refused?.body).toEqual(expect.objectContaining({ status: 429, code: 'rate_limited', error: { code: 'rate_limited' } }));
-      // The body is openapi.json's Error.
       expect(openApi.components.schemas.Error).toMatchObject({
         required: expect.arrayContaining(['type', 'status', 'code', 'error']),
         properties: { error: { required: ['code'], properties: { code: { type: 'string' } } } },
@@ -342,7 +336,6 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
       expect(await get(keys['a-admin'] as string)).toBe('429 key_read');
       expect(await get(keys['a-second'] as string)).toBe('200');
       expect(await get(keys['a-second'] as string)).toBe('429 tenant_read');
-      // Another tenant has its own budget.
       expect(await get(keys['b-admin'] as string)).toBe('200');
     } finally {
       await server.stop();
@@ -458,7 +451,7 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
     } finally {
       await server.stop();
     }
-    // The refusals were counted, with each client as a pseudonym rather than its address (SEC-4).
+    // Refusals are counted with each client as a pseudonym, not its address.
     const counted = server.stdout.events().filter(({ event }) => event === 'refusals');
     expect(counted.length).toBeGreaterThan(0);
     const totals = counted.reduce<Record<string, number>>((sum, line) => {
@@ -508,8 +501,8 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
       const validAnswers = await Promise.all(asked);
       const floodAnswers = await Promise.all(flood);
       const floodStatuses = tally(floodAnswers.map(({ status }) => status));
-      // Before: 401 authentication_required for nearly every call, as if the key were revoked. A
-      // key that authenticated waits ahead of the made-up ones, and an overloaded server says busy.
+      // A key that authenticated waits ahead of the made-up ones, never 401; an overloaded server
+      // says busy.
       expect(validAnswers.map(({ status }) => status)).not.toContain(401);
       expect(validAnswers.filter(({ status }) => status === 200).length).toBeGreaterThanOrEqual(18);
       expect(
@@ -526,7 +519,7 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
       validAgent.destroy();
       await server.stop();
     }
-    // The overflow was counted (SEC-4), apart from the made-up keys' 401s.
+    // The overflow is counted apart from the made-up keys' 401s.
     const counted = server.stdout.events().filter(({ event }) => event === 'refusals');
     const sum = (reason: string) => counted.reduce((total, line) => total + Number(line[reason] ?? 0), 0);
     expect(sum('lookup_overflow')).toBeGreaterThan(0);
@@ -583,8 +576,7 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
 
       const worst = Math.max(...reads);
       const outcomes = tally(writes.map(({ status }) => status));
-      // One expansion may hold the event loop while a read waits; fifty in a row may not. Before
-      // the limits the worst read waited for every write: 23 s on the audit's 1-CPU container.
+      // One expansion may hold the event loop while a read waits; fifty in a row may not.
       expect(worst, `worst read ${worst.toFixed(0)} ms, one write ${single.toFixed(0)} ms, ${JSON.stringify(outcomes)}`).toBeLessThan(
         Math.max(1_000, 3 * single),
       );
@@ -653,12 +645,9 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
       });
       const outcomes = tally((await burst).map(({ status }) => status));
       const detail = `one costly write ${single.toFixed(0)} ms, create ${recurring.ms.toFixed(0)} ms, update ${updated.ms.toFixed(0)} ms, A ${JSON.stringify(outcomes)}`;
-      // Before slots were shared fairly, B queued behind every one of A's waiting writes and was
-      // answered 503 server_busy once it had waited two seconds.
       expect([recurring.status, updated.status], detail).toEqual([200, 200]);
-      // A write of A's may be expanding when B's arrives, and B's own expansion follows it. Queued
-      // behind A's writes instead, B waited the two seconds and was refused; a floor of a second
-      // keeps a loaded runner's slower expansions (a 110 ms write took 416 ms) from failing it.
+      // A write of A's may be expanding when B's arrives; a floor of a second keeps a loaded
+      // runner's slower expansions (a 110 ms write took 416 ms) from failing it.
       expect(Math.max(recurring.ms, updated.ms), detail).toBeLessThan(Math.max(1_000, 3 * single));
       expect(outcomes['429'] ?? 0, detail).toBeGreaterThan(40);
     } finally {
@@ -667,10 +656,8 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
   }, 120_000);
 
   it("answers another tenant's update and reads within a few expansions while six tenants keep firing costly writes (P11, SEC-3)", async () => {
-    // The verifier's cross-process probe: with a freed slot handed straight to the next waiter, one
-    // of the bursting tenants' expansions ran on each turn of the event loop another tenant's request
-    // needed. With six tenants and 500 ms expansions, that tenant's update took 3.3 s and its reads
-    // up to 2.8 s; tenants are free on the hosted service.
+    // With a freed slot handed straight to the next waiter, a bursting tenant's expansion ran on
+    // each turn another tenant needed: six tenants of 500 ms expansions made an update take 3.3 s.
     const bursting: Array<{ key: string; resource: string }> = [];
     for (let index = 0; index < 6; index += 1) {
       const tenantRef = `hosted-burst-${index}-${randomUUID()}`;
@@ -768,17 +755,14 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
       const detail = `one costly write ${single.toFixed(0)} ms, updates ${updates.map(({ status, ms }) => `${status} in ${ms.toFixed(0)}`).join(', ')} ms, reads ${reads.map((ms) => ms.toFixed(0)).join(', ')} ms, bursts ${JSON.stringify(tally(outcomes))}`;
       expect(updates.map(({ status }) => status), detail).toEqual([200, 200, 200]);
       for (const updated of updates) {
-        // The expansion running when the update arrives, its slot's rest, and the update itself.
-        // The floor of a second, as above, is for one stall of a loaded runner; starved, the
-        // update waited 3.3 s.
+        // The expansion running when the update arrives, its slot's rest, and the update itself;
+        // the floor is for one stall of a loaded runner.
         expect(updated.ms, detail).toBeLessThan(Math.max(1_000, 4 * single));
       }
       // A read waits for at most the expansion running when it arrives.
       expect(Math.max(...reads), detail).toBeLessThan(Math.max(1_000, 2 * single));
-      // And most reads wait for none: a freed slot rests before the next expansion starts. Handed
-      // straight to the next waiter instead, every read waited for one (medians of 100 to 150 ms
-      // with 150 to 240 ms writes, against 8 to 9 ms resting), where the bounds above, measured
-      // against a whole expansion, still passed.
+      // Most reads wait for none: a freed slot rests before the next expansion starts (8-9 ms
+      // medians resting, 100-150 ms without).
       expect(median(reads), detail).toBeLessThan(Math.max(25, single / 4));
     } finally {
       firing = false;
@@ -841,7 +825,6 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
       expect(await second.json()).toMatchObject({
         error: { code: -31029, message: 'Too many subscriptions' },
       });
-      // Another tenant is not.
       const other = await listen(keys['b-second'], resources.b);
       expect(other.status).toBe(200);
       open.push(new SseReader(other));
@@ -884,8 +867,7 @@ describe.skipIf(!url)('hosted serve limits (real Postgres, real socket)', () => 
   });
 
   it("keeps one key below its tenant's live-update streams, so it cannot lock the tenant's other keys out", async () => {
-    // The audit's confirmed medium: each key could hold four streams whatever the tenant's cap, so
-    // with tenant_subscriptions at four or fewer one key (or one agent) took every one of them.
+    // Each key's streams are capped below the tenant's, so one key cannot take them all.
     const server = await serve({ SLOTLOCK_LIMITS: 'tenant_subscriptions=3' });
     const listen = async (key: string | undefined) => {
       const request = modernRequest(

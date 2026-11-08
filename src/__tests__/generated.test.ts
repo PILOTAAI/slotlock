@@ -1,6 +1,5 @@
-// Files generated from the code, committed so tools and other languages can read them: openapi.json
-// (the REST API, application API included) and each language client's operations. Each must equal
-// what the code generates now. SLOTLOCK_WRITE_GENERATED=1 writes them instead of comparing.
+// Committed generated files must equal what the code generates now; SLOTLOCK_WRITE_GENERATED=1
+// writes them instead.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { Validator } from '@seriousme/openapi-schema-validator';
 import { describe, expect, it } from 'vitest';

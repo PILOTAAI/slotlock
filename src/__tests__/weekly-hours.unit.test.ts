@@ -1,5 +1,3 @@
-// Bookable hours as people edit them (a week of windows) and as Slotlock stores them (weekly
-// rules), and the one validator every writer of rules goes through.
 import { describe, expect, it } from 'vitest';
 import { expandRules } from '../rules.js';
 import {
@@ -148,7 +146,7 @@ describe('availability rule validation', () => {
     expect(availabilityRuleProblem({ rrule, startMinutes: 0, durationMinutes: 60 })).toBe(
       'unsupported',
     );
-    // Expanding it took 714 ms (security review of #26); refusing it takes microseconds.
+    // Expanding it takes 714 ms; refusing it takes microseconds.
     expect(performance.now() - started).toBeLessThan(100);
   });
 

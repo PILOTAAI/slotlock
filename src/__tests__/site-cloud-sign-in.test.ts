@@ -1,6 +1,3 @@
-// The site's Slotlock Cloud claims (site/src/data/landing.ts, the docs header): every sign-in button
-// goes to the hosted dashboard, the policies named beside it are pages the site builds, and the
-// endpoints the landing page lists are the ones docs/hosted/README.md publishes.
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 

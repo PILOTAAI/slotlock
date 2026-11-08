@@ -1,8 +1,5 @@
-// Maintenance deletes what a tenant no longer needs: holds past their expiry (which nothing else
-// removes unless a rival writes over their time) and the answers kept for keyed ones, and
-// references retired by a cancel no booking held, older than the retention window. A cancelled
-// booking's tombstone is kept, so its reference is never booked again. It deletes only that
-// tenant's, and nothing live. Skipped without DATABASE_URL.
+// Maintenance purge against real Postgres: a cancelled booking's tombstone is kept, so its
+// reference is never booked again. Skipped without DATABASE_URL.
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { maintainSlotlockTenant } from '../maintenance.js';
@@ -78,7 +75,6 @@ describe.skipIf(!url)('maintenance purge and booking retention (real Postgres)',
       ttlMs: 50,
     });
     await new Promise((resolve) => setTimeout(resolve, 150));
-    // Before: the audit's repro, every expired hold still stored.
     expect(await heldRows(a.resourceId)).toBe(31);
 
     const result = await maintainSlotlockTenant(store, a.tenantRef);
@@ -146,7 +142,7 @@ describe.skipIf(!url)('maintenance purge and booking retention (real Postgres)',
       SELECT cancelled_at FROM slotlock.reservation_tombstones
        WHERE tenant_ref = ${tenantRef} AND external_ref = 'new-ref'`;
     expect(Date.now() - (tombstone?.cancelled_at.getTime() ?? 0)).toBeLessThan(60_000);
-    // The first hold expired a minute ago. Before, its answer was kept 30 days after it was made.
+    // The first hold expired a minute ago.
     await sql`
       UPDATE slotlock.reservations SET expires_at = now() - interval '1 minute'
        WHERE id = ${expired.hold.id}`;
@@ -181,7 +177,6 @@ describe.skipIf(!url)('maintenance purge and booking retention (real Postgres)',
       ok: false,
       code: 'reservation_cancelled',
     });
-    // The live hold still answers its retry.
     await expect(keyedHold(1, 'live-key')).resolves.toEqual({ ...live, idempotent: true });
   });
 
@@ -201,7 +196,7 @@ describe.skipIf(!url)('maintenance purge and booking retention (real Postgres)',
     await expect(
       store.cancelExternalReservation({ tenantRef, externalRef, revision: 2 }),
     ).resolves.toEqual({ ok: true, cancelled: true, revision: 2 });
-    // Before, aged past the window and pruned, the reference booked again.
+    // Aged past the window, the tombstone still keeps the reference from booking again.
     await sql`
       UPDATE slotlock.reservation_tombstones SET cancelled_at = now() - interval '400 days'
        WHERE tenant_ref = ${tenantRef}`;

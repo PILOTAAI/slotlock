@@ -1,6 +1,5 @@
-// A resource's own bookable hours, as the serving role (LOGIN, NOBYPASSRLS, granted by
-// grantApplicationRole) stores and reads them under each tenant's row-level security, and as the
-// agent backend answers slotlock_find_next_available with them. Skipped without DATABASE_URL.
+// A resource's own bookable hours under each tenant's RLS, as the serving role grantApplicationRole
+// grants. Skipped without DATABASE_URL.
 import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';

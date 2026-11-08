@@ -1,6 +1,4 @@
-// The dashboard overview's reads against real Postgres, through the adapter the server uses: a
-// tenant's agenda across its resources (bookings, events' occurrences, live holds; no other
-// tenant's, no expired hold) and its latest changes, newest first. Skipped without DATABASE_URL.
+// The dashboard overview's reads through the server's adapter. Skipped without DATABASE_URL.
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
