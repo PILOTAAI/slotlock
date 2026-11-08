@@ -1902,6 +1902,12 @@ ${
       (await dnsLookup(hostname, { all: true })).map(({ address }) => address));
   const PRIVATE_URL_REFUSAL =
     'That URL is, or resolves to, a local or private network address (loopback, private, link-local, shared, unique-local or cloud metadata), which this server does not reach. For a model on its own machine or network, the server’s operator can allow them with SLOTLOCK_ASSISTANT_PRIVATE_URLS=on.';
+  // The dashboard's own host and the server's: a model there would be sent the organization's key
+  // and the conversation by this deployment itself, on a public name the private-address check passes.
+  const ownHosts = new Set([publicUrl.hostname, service.hostname]);
+  const namesOwnHost = (baseUrl: string) => ownHosts.has(new URL(baseUrl).hostname);
+  const OWN_HOST_REFUSAL =
+    'That URL is this Slotlock deployment’s own address. Give the address of the model’s API.';
   const assistantTimeout = assistantOptions?.timeoutMs ?? 30_000;
   const assistantTurnTimeout = assistantOptions?.turnTimeoutMs ?? 90_000;
   const conversationTtl = assistantOptions?.conversationTtlMs ?? 2 * 3_600_000;
@@ -2049,6 +2055,7 @@ ${
     const store = assistantStore();
     const settings = store ? await store.getSettings(tenantOf(session)) : null;
     if (!settings || !assistantOptions) return null;
+    if (namesOwnHost(settings.baseUrl)) return { problem: OWN_HOST_REFUSAL };
     if (
       !slotlockAssistantUrlAllowed(settings.baseUrl, privateUrls) ||
       !(await checkSlotlockAssistantHost(settings.baseUrl, { privateUrls, resolve: resolveHost }))
@@ -2244,6 +2251,7 @@ ${
       );
     }
     const baseUrl = checkedUrl.url;
+    if (namesOwnHost(baseUrl)) return settingsPage(session, 400, OWN_HOST_REFUSAL);
     if (!(await checkSlotlockAssistantHost(baseUrl, { privateUrls, resolve: resolveHost }))) {
       return settingsPage(session, 400, PRIVATE_URL_REFUSAL);
     }
