@@ -52,7 +52,7 @@ rate limit, while too busy, too large, or with a credential it did not accept) a
 clients refused most, each named only by a pseudonym: a hash of its IP address, keyed by a secret
 held only in the running server's memory and replaced when it restarts. The server keeps a rotating
 copy of these logs of at most 100 MB, and sends them to a log store we run on the same server, which
-keeps them for up to 10 years (3,650 days).
+keeps them for 30 days and then deletes them.
 
 Expired holds, finished waitlist entries and the records kept for 30 days are deleted by a
 maintenance job that runs every hour for each account whose API keys the server has used since it
