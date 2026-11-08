@@ -3540,6 +3540,10 @@ form > .table { margin-bottom: var(--space-3); }
 .pop p { font-size: var(--text-md); color: var(--ink); margin-bottom: var(--space-3); }
 .pop button { width: 100%; }
 .row-actions .pop { left: 0; right: auto; transform-origin: top left; }
+/* In a table the confirmation opens in place, growing its row. .table scrolls (overflow-x: auto,
+   which makes it clip both ways), so a floating .pop past its last row was cut off: Revoke on a
+   one-key account opened nothing anyone could click. */
+.table .pop { position: static; width: 280px; max-width: 100%; margin: var(--space-2) 0 var(--space-1) auto; box-shadow: none; text-align: left; }
 @keyframes pop-in { from { opacity: 0; transform: translateY(-4px) scale(0.98); } to { opacity: 1; transform: none; } }
 
 /* Notices and empty states */
@@ -3652,6 +3656,7 @@ pre { background: var(--surface-2); border: 1px solid var(--line); border-radius
   .act summary { border: 1px solid var(--line-strong); height: 32px; }
   .act.danger summary { border-color: var(--bad-line); }
   .pop { left: 0; right: auto; width: min(300px, calc(100vw - 48px)); transform-origin: top left; }
+  .table .pop { margin-left: 0; }
   .msg { max-width: 92%; }
   .composer { grid-template-columns: minmax(0, 1fr); }
   .empty-state { padding: var(--space-8) var(--space-4); }

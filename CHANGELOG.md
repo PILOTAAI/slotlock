@@ -19,6 +19,13 @@ versioning.
   Content-Security-Policy are unchanged; the dashboard still loads only its own stylesheet and
   script, and works without script.
 
+### Fixed
+
+- Dashboard: Rotate and Revoke on API keys, Delete on webhooks and Remove on the waitlist open
+  their confirmation in place, growing the row. It floated below the row inside the table's
+  scrolling box, which clipped it: on an account with one key, Revoke opened a button that could
+  not be pressed.
+
 ## 0.6.0 - 2026-10-29
 
 ### Added
