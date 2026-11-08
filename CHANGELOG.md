@@ -3,6 +3,19 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Changed
+
+- Hosted Slotlock's privacy notice, Terms of Service and Acceptable Use Policy are published: no
+  longer drafts, each dated, and each statement checked against what the service does. The privacy
+  notice now names everything the service keeps (webhooks, activity history, waitlist entries,
+  calendar coverage, assistant settings, cancelled booking references, the proxy's request log, the
+  log store and encrypted backups in Cloudflare R2's EU jurisdiction), when maintenance deletes it,
+  and what stays after erasure; it no longer says the server's logs are capped at 150 MB. The terms
+  cover webhooks, backups and the dashboard assistant's provider; the acceptable-use policy adds
+  webhooks. A test fails if any of the three says "draft".
+
 ## 0.6.2 - 2026-11-08
 
 ### Changed
