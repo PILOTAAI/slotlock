@@ -16,16 +16,14 @@ export function clientSupportsSlotlockMcpApp(capabilities: unknown): boolean {
 }
 
 /**
- * A static, network-dark calendar view. Dynamic calendar data arrives only through the host's
- * `ui/notifications/tool-result` channel; the template contains no tenant or event data and uses
- * textContent for every untrusted value. Keeping this as reviewed source instead of generated UI
- * also lets MCP hosts inspect and cache the exact resource before rendering it.
+ * A static, network-dark calendar view. Data arrives only through the host's
+ * `ui/notifications/tool-result` channel; the template holds no tenant data and renders untrusted
+ * values with textContent. Reviewed source rather than generated UI, so hosts can inspect and cache
+ * it.
  *
- * A certain slot (from `slotlock_find_available_slots` or `slotlock_find_next_available`) can be
- * picked: the view sends the host one `ui/message` naming it, in a fixed sentence holding only the
- * resource id and the two instants it checked, so the agent books it through the normal path,
- * where Slotlock asks a person to confirm the write if it is set to. The view itself never calls a
- * tool, and every write tool is visible to the model only.
+ * A certain slot can be picked: the view sends one `ui/message` naming only the resource id and its
+ * two instants, so the agent books it through the normal path (with confirmation if configured).
+ * The view never calls a tool.
  */
 export const SLOTLOCK_MCP_APP_HTML = `<!doctype html>
 <html lang="en">

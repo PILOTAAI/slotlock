@@ -3,9 +3,8 @@ import { zonedOffsetMinutes } from './timezone.js';
 import type { Interval, WeeklyAvailabilityRule } from './types.js';
 
 /**
- * A resource's booking rules: what a booking made through Slotlock (a hold, a reservation, an
- * agent's event) must satisfy, and what a search offers. Each is optional; none set is no rule.
- * Imported calendar events are what happened elsewhere and are not checked.
+ * A resource's booking rules: what a booking made through Slotlock (hold, reservation, agent event)
+ * must satisfy, and what a search offers. All optional. Imported calendar events are not checked.
  */
 export interface SlotlockBookingRules {
   /** A booking starts at least this many minutes after it is made: 0-525,600 (a year). */
@@ -18,35 +17,32 @@ export interface SlotlockBookingRules {
    */
   slotStepMinutes?: number;
   /**
-   * Where the steps fall: this many minutes past each step from local midnight (with a 30-minute
-   * step, 15 starts bookings on :15 and :45): 0 to one less than the step. Without a step it is
-   * kept and does nothing.
+   * Offset of the steps from local midnight (with a 30-minute step, 15 starts bookings on :15 and
+   * :45): 0 to one less than the step. Ignored without a step.
    */
   stepOffsetMinutes?: number;
   /**
-   * Minutes kept free before each booking made under the rule (preparation, travel), as its
-   * leading buffer: the database refuses a booking whose time, or trailing buffer, reaches into
-   * it. 0-1,440. A booking made before the rule, or imported, keeps none.
+   * Minutes kept free before each booking made under the rule, as its leading buffer: 0-1,440.
+   * Bookings made before the rule, or imported, keep none.
    */
   bufferBeforeMinutes?: number;
   /**
-   * Minutes kept free after each booking made under the rule (cleaning, handover, travel), as its
-   * trailing buffer, so the database refuses a booking that would start inside it: 0-1,440. A
-   * booking made before the rule, or imported, keeps the buffer it has.
+   * Minutes kept free after each booking made under the rule, as its trailing buffer: 0-1,440.
+   * Bookings made before the rule, or imported, keep what they have.
    */
   turnaroundMinutes?: number;
   /** A booking lies inside the resource's bookable hours. */
   enforceHours?: boolean;
   /**
-   * A booking is claimed (checked in) within this many minutes of its start, or maintenance
-   * releases it for others (and offers it to the waitlist): 1-1,440. Only bookings made once the
-   * rule is set are released.
+   * A booking must be checked in within this many minutes of its start, or maintenance releases it
+   * (and offers it to the waitlist): 1-1,440. Only bookings made after the rule is set are
+   * released.
    */
   checkInMinutes?: number;
   /**
-   * A booking lies in time every calendar sync recording coverage for the resource has read within
-   * the last day (`recordCalendarCoverage`): time a stale or failing sync leaves unproven is
-   * refused (`uncertain`), not booked over what it may hide. A resource no sync covers is certain.
+   * A booking must lie in time every sync covering the resource read within the last day
+   * (`recordCalendarCoverage`): time a stale or failing sync leaves unproven is refused
+   * (`uncertain`). A resource no sync covers is certain.
    */
   requireCertain?: boolean;
 }
@@ -117,11 +113,10 @@ export function parseBookingRules(value: unknown): SlotlockBookingRules {
 }
 
 /**
- * The rules that apply to a resource, merged from its own and its pool's and tenant's defaults
- * (each validated when it was set), read leniently: each field is kept when it is valid on its own
- * and dropped (named in `dropped`) when not. No cross-field check: a merge may join a pool's offset
- * to a resource's own shorter step, and the offset then applies modulo the step. A merge never
- * reads as refusing every booking.
+ * The effective rules merged from the resource's own, its pool's and the tenant's (each validated
+ * when set), read leniently: each field is kept if valid alone, else named in `dropped`. A pool's
+ * offset over a resource's shorter step applies modulo the step. A merge never refuses every
+ * booking.
  */
 export function parseEffectiveBookingRules(value: unknown): { rules: SlotlockBookingRules; dropped: string[] } {
   const rules: SlotlockBookingRules = {};
@@ -152,9 +147,8 @@ export function parseEffectiveBookingRules(value: unknown): { rules: SlotlockBoo
 }
 
 /**
- * Default booking rules for a tenant or a pool from untrusted input: booking rules without
- * `checkInMinutes`, which only a resource's own rules set (it releases the bookings made after it
- * was set, and that moment is the resource's).
+ * Tenant or pool default rules from untrusted input: no `checkInMinutes`, which only a resource's
+ * own rules set (it applies from the moment it was set on the resource).
  */
 export function parseBookingRuleDefaults(value: unknown): SlotlockBookingRules {
   const rules = parseBookingRules(value);
@@ -193,10 +187,9 @@ function onStep(instant: Date, stepMinutes: number, timezone: string, offset = 0
 }
 
 /**
- * The first instant at or after `from` that starts on a step in `timezone`, `offsetMinutes` past
- * each multiple of the step from local midnight (0 to the step less one). A step that does not
- * divide the day starts again at local midnight. Across a clock change it moves forward until the
- * local time is on a step.
+ * The first instant at or after `from` on a step in `timezone`, `offsetMinutes` past each multiple
+ * of the step from local midnight. A step that does not divide the day restarts at local midnight;
+ * across a clock change it moves forward to the next local step.
  */
 export function nextStepStart(from: Date, stepMinutes: number, timezone: string, offsetMinutes = 0): Date {
   const offset = offsetMinutes % stepMinutes;
@@ -215,8 +208,8 @@ export function nextStepStart(from: Date, stepMinutes: number, timezone: string,
 }
 
 /**
- * The rule a booking of `interval` made at `now` breaks, or null. `hours` are the resource's
- * bookable hours (its own, or the default), read only when the rules enforce them.
+ * The rule a booking of `interval` made at `now` breaks, or null. `hours` (the resource's own, or
+ * the default) are read only when enforced.
  */
 export function bookingRuleBroken(params: {
   rules: SlotlockBookingRules | undefined;
@@ -270,8 +263,7 @@ export interface SlotlockBookingSearch {
 
 /**
  * How a search honours the rules: the part of `window` a booking made at `now` may start in, the
- * buffers each slot keeps, and how a candidate start moves to a step. `null` when no start in the
- * window is allowed.
+ * buffers each slot keeps, and how a candidate moves to a step. `null` when no start is allowed.
  */
 export function bookingSearch(params: {
   rules: SlotlockBookingRules | undefined;
@@ -294,7 +286,6 @@ export function bookingSearch(params: {
     step === undefined ? undefined : (from: Date) => nextStepStart(from, step, params.timezone, offset);
   const searched = { start: new Date(start), end: new Date(end) };
   if (rules?.maxAdvanceDays !== undefined) {
-    // The latest allowed start bounds where a slot may start; it may still end after it.
     const latestStart = now.getTime() + rules.maxAdvanceDays * DAY_MINUTES * MINUTE_MS;
     if (latestStart < start || end <= start) return null;
     return {
@@ -303,7 +294,7 @@ export function bookingSearch(params: {
       bufferBeforeMs,
       align: (from: Date) => {
         const aligned = toStep ? toStep(from) : from;
-        // Past the latest start, no slot: move it beyond the window so it cannot fit.
+        // Past the latest start: move it beyond the window so it cannot fit.
         return aligned.getTime() > latestStart ? new Date(end + 1) : aligned;
       },
     };
@@ -314,10 +305,7 @@ export function bookingSearch(params: {
     : { window: searched, bufferAfterMs, bufferBeforeMs, align: toStep };
 }
 
-/**
- * The time a search must read as free or busy: its window, widened by the buffers a slot in it
- * keeps (before its first start and after its last end).
- */
+/** The time a search must read as free or busy: its window widened by a slot's buffers. */
 export function bookingSearchReach(search: SlotlockBookingSearch): Interval {
   return {
     start: new Date(search.window.start.getTime() - search.bufferBeforeMs),
@@ -326,9 +314,9 @@ export function bookingSearchReach(search: SlotlockBookingSearch): Interval {
 }
 
 /**
- * Busy time as the slot times it rules out. A slot [s, s + d) keeping buffers occupies
- * [s - before, s + d + after), so it meets busy [b, e) exactly when [s, s + d) meets
- * [b - after, e + before): the database refuses the same booking.
+ * Busy time as the slot times it rules out: a slot [s, s + d) with buffers occupies [s - before, s
+ * + d + after), so it meets busy [b, e) exactly when [s, s + d) meets [b - after, e + before), as
+ * the database decides.
  */
 export function bookingSearchBlocked(busy: readonly Interval[], search: SlotlockBookingSearch): Interval[] {
   return busy.map((interval) => ({

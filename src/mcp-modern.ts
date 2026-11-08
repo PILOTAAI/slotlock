@@ -1,10 +1,9 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 
 /*
- * MCP 2026-07-28 wire mechanics for the Slotlock agent server: the per-request `_meta` envelope, the
- * Streamable HTTP request headers, the sealed multi-round-trip `requestState`, SSE framing and W3C
- * trace context. Which method does what — authorization, dispatch, results — stays in
- * agent-server.ts, the orchestration owner.
+ * MCP 2026-07-28 wire mechanics: the per-request `_meta` envelope, Streamable HTTP headers, sealed
+ * `requestState`, SSE framing and W3C trace context. Authorization, dispatch and results stay in
+ * agent-server.ts.
  */
 
 export const MCP_META_PROTOCOL_VERSION = 'io.modelcontextprotocol/protocolVersion';
@@ -29,17 +28,16 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-// RFC 9110 field value: visible ASCII, space and horizontal tab. Anything else must arrive in the
-// `=?base64?…?=` sentinel (Streamable HTTP §Value Encoding).
+// RFC 9110 field value: visible ASCII, space and tab; anything else must use the `=?base64?…?=`
+// sentinel (Streamable HTTP §Value Encoding).
 const PLAIN_HEADER_VALUE = /^[\x20-\x7E\t]*$/;
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const BASE64_SENTINEL_PREFIX = '=?base64?';
 const BASE64_SENTINEL_SUFFIX = '?=';
 
 /**
- * The value an `Mcp-Name` (or `Mcp-Param-*`) header stands for, decoded from the Base64 sentinel when
- * used; `null` when it is malformed: bad Base64, invalid UTF-8, or raw characters outside the
- * header-safe set.
+ * The value an `Mcp-Name` or `Mcp-Param-*` header stands for, Base64-sentinel decoded when used;
+ * `null` when malformed.
  */
 function decodeMcpHeaderValue(value: string): string | null {
   if (
@@ -73,11 +71,10 @@ export interface ModernMcpRefusal {
 }
 
 /**
- * Validate a 2026-07-28 request's `_meta` envelope and the HTTP headers that mirror its body, in the
- * specification's order: the required `_meta` fields (-32602, basic §_meta), `MCP-Protocol-Version`
- * against the body (-32020), a revision the server implements (-32022, basic/versioning), then
- * `Mcp-Method` and `Mcp-Name` against the body, the latter after Base64-sentinel decoding (-32020,
- * streamable-http §Server Validation). Every refusal is HTTP 400.
+ * Validate a 2026-07-28 request's `_meta` envelope and the headers mirroring its body, in the
+ * specification's order: required `_meta` fields (-32602), `MCP-Protocol-Version` against the body
+ * (-32020), a supported revision (-32022), then `Mcp-Method` and `Mcp-Name` against the body
+ * (-32020). Every refusal is HTTP 400.
  */
 export function checkModernMcpRequest(args: {
   headers: Headers;
@@ -180,8 +177,8 @@ export function stateSecrets(secrets: readonly (string | Uint8Array)[]): Buffer[
 }
 
 /**
- * Seal a JSON payload for a client to carry and echo: `v1.<payload>.<HMAC-SHA256>`, both base64url.
- * It is integrity-protected, not encrypted, so it must never hold anything the client may not see.
+ * Seal a JSON payload for a client to echo: `v1.<payload>.<HMAC-SHA256>`, base64url.
+ * Integrity-protected, not encrypted: never put anything the client may not see in it.
  */
 export function sealRequestState(key: Buffer, payload: Record<string, unknown>): string {
   const body = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
@@ -190,8 +187,8 @@ export function sealRequestState(key: Buffer, payload: Record<string, unknown>):
 }
 
 /**
- * The payload of a state this server sealed with any of `keys`, and the key that verified it; `null`
- * for anything else. The MAC is checked in constant time before the payload is parsed.
+ * The payload of a state this server sealed with any of `keys`, and the verifying key; `null`
+ * otherwise. The MAC is checked in constant time before parsing.
  */
 export function openRequestState(
   keys: readonly Buffer[],
@@ -209,8 +206,8 @@ export function openRequestState(
   ) {
     return null;
   }
-  // Compared as text: decoding drops the two spare bits of the last character, so three other
-  // spellings of the same MAC would pass.
+  // Compared as text: decoding drops the last character's spare bits, so other spellings of the
+  // same MAC would pass.
   const given = Buffer.from(mac);
   for (const key of keys) {
     const expected = Buffer.from(
@@ -264,9 +261,9 @@ export interface McpEventStream {
 }
 
 /**
- * An SSE response (streamable-http §Receiving Messages): never cached, not buffered by a reverse
- * proxy (`X-Accel-Buffering: no`). `onCancel` runs once when the reader goes away first — the client
- * closed the stream, which on HTTP is how it cancels the request.
+ * An SSE response (streamable-http §Receiving Messages): uncached and unbuffered by proxies
+ * (`X-Accel-Buffering: no`). `onCancel` runs once if the reader leaves first, which is how an HTTP
+ * client cancels.
  */
 export function openMcpEventStream(onCancel: () => void): McpEventStream {
   let open = true;
@@ -340,10 +337,9 @@ function validTraceparent(value: string): boolean {
 }
 
 /**
- * Trace context from the request's `_meta` (MCP reserves `traceparent`, `tracestate` and `baggage`
- * there) or, when `_meta` has none, from the HTTP headers of the same names. One source only, never
- * a mix; an invalid `traceparent` discards the context, and an invalid `tracestate` or `baggage` is
- * dropped on its own (W3C Trace Context §3.3, Baggage §3.3).
+ * Trace context from `_meta` (MCP reserves `traceparent`, `tracestate` and `baggage` there) or, if
+ * absent, the HTTP headers; never a mix. An invalid `traceparent` discards it all; an invalid
+ * `tracestate` or `baggage` is dropped alone (W3C Trace Context §3.3, Baggage §3.3).
  */
 export function traceContextFrom(
   meta: Record<string, unknown> | undefined,

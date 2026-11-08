@@ -1,14 +1,13 @@
-// The application API: what an application, rather than an agent, does over HTTP that the TypeScript
-// store does in process. It creates resources and sets their bookable hours, holds and reserves time,
-// records how much of an external calendar it has read, reaches any of the tenant's events whichever
-// key wrote them, erases the tenant when allowed, and runs maintenance. Any language can call it.
+// The application API: what an application, rather than an agent, does over HTTP that the
+// TypeScript store does in process (resources and hours, holds and reservations, coverage, any of
+// the tenant's events, erasure when allowed, maintenance), for any language.
 //
-// The agent server serves these operations as REST under /v1, beside the agent tools, when it is
-// given an `application` backend and `rest` is on, and describes them in the same OpenAPI document.
-// They need the `admin` scope. They are never MCP tools or A2A skills: no agent is offered them.
+// Served as REST under /v1 beside the agent tools when the agent server has an `application`
+// backend and `rest` is on, in the same OpenAPI document. Needs the `admin` scope; never MCP tools
+// or A2A skills, so no agent is offered them.
 //
-// This module holds only the contract (names, schemas, routes); it imports nothing from the agent
-// server at runtime. The store-backed implementation is createSlotlockStoreApplicationBackend.
+// Contract only (names, schemas, routes); nothing from the agent server at runtime. The
+// store-backed implementation is createSlotlockStoreApplicationBackend.
 import { SLOTLOCK_CHANGE_ORIGINS, SLOTLOCK_CHANGE_TYPES, type SlotlockChangeOrigin } from './event-feed.js';
 import { z } from 'zod';
 import type { SlotlockAgentPrincipal } from './agent-server.js';
@@ -85,9 +84,9 @@ type Handler = (
 ) => Promise<Record<string, unknown>>;
 
 /**
- * What serves the application operations. Every method receives the input its operation's schema
- * accepted, and returns what its output schema describes; a refusal is a thrown
- * `SlotlockAgentOperationError`. The tenant is the principal's, never an argument.
+ * What serves the application operations: each method gets schema-valid input and returns what its
+ * output schema describes; refusals throw `SlotlockAgentOperationError`. The tenant is the
+ * principal's, never an argument.
  */
 export interface SlotlockApplicationBackend {
   createResource: Handler;
@@ -203,9 +202,8 @@ const CURSOR = z.string().min(1).max(500);
 const NEXT_CURSOR = z.string().max(500).nullable();
 const VISIBILITY = z.enum(['shared', 'private']);
 /**
- * A retry identity, as the `Idempotency-Key` request header or this field (the same value, if both
- * are sent): the same key with the same request answers what the first did, and with another
- * request is 422 idempotency_conflict.
+ * A retry identity, as the `Idempotency-Key` header or this field (the same value if both): the
+ * same key and request answer what the first did; another request is 422 idempotency_conflict.
  */
 const IDEMPOTENCY_KEY = IDENTITY.describe(
   'A retry identity, also accepted as the Idempotency-Key header: the same key with the same request answers what the first did; with another request, 422 idempotency_conflict.',
@@ -257,8 +255,7 @@ const RESOURCE = z
     /** Its own booking rules; `null` when it has none. */
     booking_rules: BOOKING_RULES.nullable(),
     /**
-     * What a booking on it must satisfy: the tenant's default rules, overlaid by its pool's,
-     * overlaid by its own; `null` when no rule applies.
+     * Tenant defaults, overlaid by its pool's, overlaid by its own; `null` when no rule applies.
      */
     effective_booking_rules: BOOKING_RULES.nullable(),
     /** `private` resources are never shown to agents; fixed when the resource is created. */
@@ -370,11 +367,6 @@ const RESERVATION = z
   })
   .strict();
 
-/**
- * Any of the tenant's events, whichever key wrote it: `id` is the store's id for it, which the
- * tenant-event routes take, `event_ref` the id its owner reads it by, and `owner_ref` who that is
- * (`internal` for the tenant's own code, `agent:<digest>` for an API key).
- */
 /** A JSCalendar Event (RFC 8984 §5.1); interop.ts's JSCalendarEvent names every property. */
 const JSCALENDAR_EVENT = z
   .object({
@@ -696,7 +688,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
             .max(7 * 24 * 60 * 60),
           source: SOURCE.optional(),
           idempotency_key: IDEMPOTENCY_KEY.optional(),
-          // Last: a generated client's 0.2.0 positional arguments keep their places.
+          // Last, so a generated 0.2.0 client's positional arguments keep their places.
           buffer_after_minutes: BUFFER_AFTER_MINUTES.optional(),
         })
         .strict()
@@ -967,8 +959,8 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
                 .object({
                   source: SOURCE,
                   /**
-                   * How the change feed names the source (coverage.recorded, .deleted, .stale): random,
-                   * made when it is first recorded for the resource, kept until it is deleted.
+                   * How the change feed names the source: random, made when first recorded for the
+                   * resource, kept until deleted.
                    */
                   source_id: z.string().regex(/^src_[0-9a-f]{32}$/),
                   start: DATE_TIME,
@@ -1075,8 +1067,8 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           event_id: EVENT_ID,
           expected_revision: REVISION,
           expected_resource_id: RESOURCE_ID.optional(),
-          // Required, so a client always sends it; the Idempotency-Key header may stand in for
-          // it, since the server reads the header into it before the schema checks the request.
+          // Required, so clients always send it; the Idempotency-Key header may stand in, since the
+          // server copies it in before validation.
           idempotency_key: IDEMPOTENCY_KEY,
         })
         .strict(),

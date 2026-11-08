@@ -25,8 +25,8 @@ export type SlotlockNodeServerErrorPhase = 'client' | 'listen' | 'request' | 'se
 /** What the listener knows about a request's connection, beside the Request itself. */
 export interface SlotlockNodeServerConnection {
   /**
-   * The peer's address as the socket reports it (an IPv4 client of a dual-stack listener reads
-   * `::ffff:a.b.c.d`). Behind a proxy it is the proxy's; never taken from a request field.
+   * The peer's address as the socket reports it (`::ffff:a.b.c.d` for IPv4 on a dual-stack
+   * listener). Behind a proxy it is the proxy's; never taken from a request field.
    */
   remoteAddress?: string;
 }
@@ -35,16 +35,16 @@ export interface SlotlockNodeServerConnection {
 export interface SlotlockNodeServerFetchTarget {
   fetch(request: Request, connection?: SlotlockNodeServerConnection): Promise<Response>;
   /**
-   * Called once when `close()` begins, after the listener stops accepting connections, to end
-   * long-lived responses (MCP subscription streams) so they drain within the grace period.
+   * Called once when `close()` begins, after the listener stops accepting, to end long-lived
+   * responses (MCP subscription streams) within the grace period.
    */
   shutdown?(): Promise<void> | void;
 }
 
 export interface SlotlockNodeServerOptions {
   /**
-   * Canonical origin used to construct the Request passed to authentication and policy callbacks.
-   * It is explicit so an untrusted Host or forwarding header can never choose security context.
+   * Canonical origin for the Request passed to authentication and policy callbacks, explicit so an
+   * untrusted Host or forwarding header can never choose security context.
    */
   requestOrigin: string;
   handlerTimeoutMs?: number;
@@ -164,16 +164,13 @@ interface RequestBody {
 }
 
 /**
- * The request body as a web stream that a target may cancel, as it does a body over its size limit.
- * Cancelling a `Readable.toWeb` stream destroys the IncomingMessage: Node emits 'aborted', read
- * here as the client leaving, and the unread rest stays on the connection, which then holds
- * `close()` until it is forced. Cancelling this one only stops delivery; once the response is
- * written the rest is discarded as it arrives, as Node discards a body no handler reads, within
- * `requestTimeout`.
+ * The request body as a cancellable web stream. Cancelling a `Readable.toWeb` stream destroys the
+ * IncomingMessage (Node emits 'aborted') and leaves the unread rest on the connection, holding
+ * `close()` until forced. Cancelling this one only stops delivery; once the response is written the
+ * rest is discarded as it arrives, within `requestTimeout`.
  */
 function requestBody(request: IncomingMessage): RequestBody {
   let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
-  // Once the stream is closed, errored or cancelled, what arrives is dropped.
   let settled = false;
   const stream = new ReadableStream<Uint8Array>(
     {
@@ -196,7 +193,7 @@ function requestBody(request: IncomingMessage): RequestBody {
         if (!settled) request.resume();
       },
       cancel() {
-        // Held until the response is written, so the client is not read from while it waits.
+        // Held until the response is written, so the client is not read from meanwhile.
         settled = true;
         request.pause();
       },
@@ -206,8 +203,7 @@ function requestBody(request: IncomingMessage): RequestBody {
   return {
     stream,
     discard() {
-      // A target still reading a body it has already answered gets an error, not a read that
-      // never settles.
+      // A target still reading an answered body gets an error, not a read that never settles.
       if (!settled) {
         settled = true;
         controller?.error(abortReason('request_body_discarded'));
@@ -226,9 +222,9 @@ function toWebRequest(
   if (!target.startsWith('/') || target.startsWith('//')) {
     throw new Error('invalid_request_target');
   }
-  // URL parsing resolves dot segments, `%2E` spellings included: `/v1/resources/%2E%2E/availability`
-  // would reach the target as `/v1/availability`, a path parameter of `..` naming another route.
-  // It also takes a backslash for a slash, so a segment ends at either.
+  // URL parsing resolves dot segments, `%2E` spellings included
+  // (`/v1/resources/%2E%2E/availability` would become `/v1/availability`), and treats a backslash
+  // as a slash.
   const path = target.split(/[?#]/, 1)[0] ?? '';
   if (path.split(/[\\/]/).some((segment) => /^(?:\.|%2e){1,2}$/i.test(segment))) {
     throw new Error('invalid_request_target');
@@ -236,9 +232,8 @@ function toWebRequest(
   const url = new URL(target, requestOrigin);
   if (url.origin !== requestOrigin) throw new Error('invalid_request_target');
 
-  // Node's fetch implementation requires `duplex: 'half'` for streamed request bodies, but the
-  // DOM RequestInit visible to workspace consumers does not declare that Node-only extension.
-  // Keep the cast at this adapter boundary; real-socket tests exercise the actual undici contract.
+  // Node's fetch needs `duplex: 'half'` for streamed bodies, which the DOM RequestInit does not
+  // declare; the cast stays at this boundary and real-socket tests cover undici's contract.
   const init: RequestInit & { duplex?: 'half' } = {
     method: request.method ?? 'GET',
     headers: appendIncomingHeaders(request),
@@ -253,7 +248,7 @@ function toWebRequest(
   try {
     return { request: new Request(url, init), ...(body ? { body } : {}) };
   } catch (error) {
-    // A method the Fetch API forbids, say: nothing will read the body, so drop it as it arrives.
+    // A method the Fetch API forbids: nothing will read the body, so drop it.
     body?.discard();
     throw error;
   }
@@ -309,9 +304,9 @@ function formatListenerOrigin(host: string, port: number): string {
 }
 
 /**
- * Adapt the Fetch boundary returned by `createSlotlockAgentServer` to a hardened Node HTTP listener.
- * The listener is intentionally HTTP-only; public HTTPS termination and trusted proxy policy remain
- * deployment concerns, while Request identity always uses the explicit canonical `requestOrigin`.
+ * Adapt the Fetch boundary from `createSlotlockAgentServer` to a hardened Node HTTP listener.
+ * HTTP-only by design: TLS termination and proxy trust are deployment concerns, and Request
+ * identity always uses the explicit `requestOrigin`.
  */
 export function createSlotlockNodeServer(
   target: SlotlockNodeServerFetchTarget,
@@ -351,8 +346,8 @@ export function createSlotlockNodeServer(
 
   const activeRequests = new Set<AbortController>();
   let state: 'new' | 'starting' | 'listening' | 'closing' | 'closed' = 'new';
-  // Read through a function: inside a request handler TypeScript would keep the narrowing of its
-  // opening check, but `close()` can change the state while the handler awaits.
+  // A function, so TypeScript does not keep the narrowing across awaits: `close()` can change the
+  // state meanwhile.
   const closing = (): boolean => state === 'closing';
   let removeLifecycleAbort: (() => void) | undefined;
   /** Rejects a listen() still starting with `listen_aborted`; set while one is. */
@@ -363,8 +358,8 @@ export function createSlotlockNodeServer(
     {
       headersTimeout: headersTimeoutMs,
       requestTimeout: requestTimeoutMs,
-      // Node enforces both only when it checks its connections (every 30 s by default), so a body
-      // trickled after its answer could outlast requestTimeout by that much.
+      // Node enforces both only when it checks connections (every 30 s by default), so a trickled
+      // body could outlast requestTimeout by that much.
       connectionsCheckingInterval: Math.min(
         DEFAULT_CONNECTIONS_CHECKING_INTERVAL_MS,
         headersTimeoutMs,
@@ -444,19 +439,17 @@ export function createSlotlockNodeServer(
       } finally {
         if (timeout) clearTimeout(timeout);
         activeRequests.delete(controller);
-        // The answer is written: what is left of a body the target did not read (one it refused as
-        // too large, say) is discarded as it arrives rather than held.
+        // The answer is written: discard what is left of an unread body as it arrives.
         if (!request.complete) {
           body?.discard();
-          // The connection is idle only once that rest has arrived: close it then if shutting down.
           request.once('end', () => {
             setImmediate(() => {
               if (closing()) server.closeIdleConnections();
             });
           });
         }
-        // A keep-alive connection whose response finished during shutdown would otherwise hold
-        // `server.close()` open until its idle timeout; Node closed only the idle ones at the start.
+        // Otherwise a keep-alive connection finishing during shutdown holds `server.close()` until
+        // its idle timeout.
         if (closing()) server.closeIdleConnections();
       }
     },
@@ -487,9 +480,8 @@ export function createSlotlockNodeServer(
       removeLifecycleAbort?.();
       removeLifecycleAbort = undefined;
       if (state === 'starting') {
-        // Closed before it was listening. Node abandons a listen whose server closes first, with
-        // neither 'listening' nor 'error', so the pending listen() is rejected here, as an aborted
-        // signal rejects it.
+        // Closed before listening: Node abandons such a listen with neither 'listening' nor
+        // 'error', so reject the pending listen() here.
         state = 'closing';
         cancelStartup?.();
         await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -509,7 +501,7 @@ export function createSlotlockNodeServer(
         });
         server.closeIdleConnections();
       });
-      // Not awaited: a slow or failing hook must not hold shutdown past its grace period.
+      // Not awaited: a slow hook must not hold shutdown past its grace period.
       void (async () => {
         try {
           await target.shutdown?.();
@@ -577,7 +569,6 @@ export function createSlotlockNodeServer(
         const onListening = () => {
           cleanupStartup();
           if (cancelled) {
-            // close() came first; a listener that bound all the same goes with it.
             server.close();
             return;
           }

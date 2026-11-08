@@ -1,6 +1,5 @@
 #!/usr/bin/env node
-// The `slotlock` executable: process wiring only (arguments, environment, output streams, signals
-// and the exit code). The commands and their configuration live in self-host.ts.
+// The `slotlock` executable: process wiring only; the commands live in self-host.ts.
 import { runSlotlockCli } from './self-host.js';
 
 const shutdown = new AbortController();
@@ -18,6 +17,6 @@ process.exitCode = await runSlotlockCli(process.argv.slice(2), {
   stderr: process.stderr,
   signal: shutdown.signal,
 });
-// Everything is closed by now, so the process ends on its own. Should a stray handle (a socket or
-// timer something else left open) keep it alive, exit anyway rather than hang a container stop.
+// Everything is closed, so the process should end on its own; exit anyway if a stray handle would
+// hang a container stop.
 setTimeout(() => process.exit(), 5_000).unref();

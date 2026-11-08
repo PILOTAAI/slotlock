@@ -1,7 +1,6 @@
-// The event feed (RFC 0002 P1-5): what changed for a tenant, read by position, and the webhook
-// endpoints it is delivered to. Rows are appended by triggers in the same transaction as the change
-// (ddl.ts, SLOTLOCK_OUTBOX_DDL). These are the store's methods for reading them and for keeping each
-// endpoint's delivery state; webhooks.ts signs and sends.
+// The event feed: what changed for a tenant, read by position, and the webhook endpoints it is
+// delivered to. Rows are appended by triggers in the changing transaction (ddl.ts,
+// SLOTLOCK_OUTBOX_DDL); webhooks.ts signs and sends.
 import { randomBytes } from 'node:crypto';
 import type { Sql, TransactionSql } from 'postgres';
 
@@ -33,8 +32,7 @@ export const SLOTLOCK_CHANGE_TYPES = Object.freeze([
   'waitlist.offered',
   'waitlist.expired',
   'webhook.disabled',
-  // Configuration: what a resource is and how it books, the sources it is read from, where the
-  // feed is delivered and the keys that reach the tenant. Ids and states, never a secret or a URL.
+  // Configuration changes: ids and states, never a secret or a URL.
   'resource.created',
   'resource.updated',
   'resource.archived',
@@ -53,10 +51,9 @@ export const SLOTLOCK_CHANGE_TYPES = Object.freeze([
 export type SlotlockChangeType = (typeof SLOTLOCK_CHANGE_TYPES)[number];
 
 /**
- * Where a change came from, as the history and the feed record it (withTenant's `origin`): an agent
- * protocol (`mcp`, `a2a`), the REST API's agent routes (`rest`) or its application operations
- * (`application`), the dashboard, a member's dashboard assistant, maintenance, or code calling the
- * store itself (`library`). Never an address or anything else about a person.
+ * Where a change came from (withTenant's `origin`): an agent protocol (`mcp`, `a2a`), the REST
+ * API's agent routes (`rest`) or application operations (`application`), the dashboard, its
+ * assistant, maintenance, or direct store calls (`library`). Never anything about a person.
  */
 export const SLOTLOCK_CHANGE_ORIGINS = Object.freeze([
   'mcp',
@@ -77,21 +74,17 @@ export function isSlotlockChangeOrigin(value: unknown): value is SlotlockChangeO
 }
 
 /**
- * The digest 0.5.3 named a coverage source by on the feed: `src_` and the first 24 hex digits of
- * sha256(tenant, newline, source). Unkeyed, so anyone who knows the tenant could confirm a guessed
- * source against it; 0.6 names a source by a random id instead (`calendar_coverage.source_id`), and
- * the upgrade uses this only to find the changes 0.5.3 wrote and rename them. `tenant` and `source`
- * are SQL expressions.
+ * The unkeyed digest 0.5.3 named a coverage source by (`src_` + 24 hex of sha256(tenant, newline,
+ * source)); anyone knowing the tenant could confirm a guess. Used only by the upgrade to find and
+ * rename those changes. `tenant` and `source` are SQL expressions.
  */
 export function legacyCoverageSourceDigestSql(tenant: string, source: string): string {
   return `'src_' || pg_catalog.left(pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(${tenant} || E'\\n' || ${source}, 'UTF8')), 'hex'), 24)`;
 }
 
 /**
- * 0.5.3 worked out a source's id here: an unkeyed digest of the tenant and the source, which let
- * anyone who saw a change confirm a guessed source. Since 0.6 a source's `source_id` is random and
- * only the database knows it, so this throws (`coverage_source_id_unavailable`) rather than give a
- * digest nothing carries any more.
+ * Throws `coverage_source_id_unavailable`: since 0.6 a source's `source_id` is random and only the
+ * database knows it (0.5.3's unkeyed digest let anyone confirm a guessed source).
  *
  * @deprecated Read `sourceId` from `listCoverage` (`source_id` of `slotlock_get_coverage`). It may
  * be removed in 0.7.0.
@@ -109,18 +102,16 @@ export function slotlockCoverageSourceId(_tenantRef: string, _source: string): n
 const SLOTLOCK_COVERAGE_SOURCE_ID = /^src_[0-9a-f]{32}$/;
 
 /**
- * The `source_id` of a `coverage.*` change whose source could not be named any more: one an
- * earlier release recorded by the source itself (or by its 0.5.3 digest) after the source was
- * deleted, or one not yet renamed when it is read.
+ * The `source_id` of a `coverage.*` change whose source can no longer be named: an earlier
+ * release's change whose source was deleted, or one not yet renamed.
  */
 const SLOTLOCK_REDACTED_SOURCE_ID = 'src_redacted';
 
 /**
- * A change's subject and data as the feed serves them. A `coverage.*` change never carries its
- * source (`source`) or the error read from it (`last_error`, which can quote it), and is named by a
- * `source_id` of this release or `src_redacted`: an earlier release wrote both, and the upgrade
- * renames those rows in batches after it commits, so a row it has not reached yet, or one an
- * earlier release's server writes during a rolling upgrade, is served redacted.
+ * A change's subject and data as the feed serves them. A `coverage.*` change never carries `source`
+ * or `last_error` (which can quote it), and is named by a current `source_id` or `src_redacted`:
+ * rows an earlier release wrote are renamed in batches after upgrade, so one not reached yet is
+ * served redacted.
  */
 export function slotlockServedChange(
   type: string,
@@ -194,11 +185,10 @@ export type ListChangesResult =
 
 export interface SlotlockEventFeed {
   /**
-   * The tenant's changes after `after` (a `position`, or the oldest kept without it), oldest
-   * first, up to `limit` (1-500, default 100). Only changes of transactions that have ended are
-   * read, so a reader that follows `next` never skips one that commits late. `next` is the last
-   * change's position, or `after` when there is none yet: poll with it. A position before a change
-   * any store has pruned is `cursor_expired`: read from the start again.
+   * The tenant's changes after `after` (or from the oldest kept), oldest first, up to `limit`
+   * (1-500, default 100). Only ended transactions are read, so a reader following `next` never
+   * skips a late commit. `next` is the last position, or `after` when there is none: poll with it.
+   * A position before a pruned change is `cursor_expired`.
    */
   listChanges(params: {
     tenantRef: string;
@@ -232,9 +222,9 @@ export interface SlotlockEventFeed {
     id: string;
   }): Promise<SlotlockWebhookEndpoint | null | { code: 'changes_pruned' }>;
   /**
-   * Lease the tenant's endpoints that have changes due, each with its next `batch` (1-100)
-   * changes, for `leaseMs` (1,000-300,000). A lease that runs out is claimed again by any worker,
-   * so a worker that dies mid-batch costs a redelivery, never a lost change.
+   * Lease the tenant's endpoints with changes due, each with its next `batch` (1-100) changes, for
+   * `leaseMs` (1,000-300,000). An expired lease is claimed again by any worker, so a crash costs a
+   * redelivery, never a lost change.
    */
   claimWebhookDeliveries(params: {
     tenantRef: string;
@@ -255,11 +245,10 @@ export interface SlotlockEventFeed {
     failure?: { status: number | null; error: string; retryInMs: number; gone?: boolean };
   }): Promise<void>;
   /**
-   * History: the changes to one resource (`resourceId`: its bookings and events, and its own
-   * configuration) or one record (`subject`: a booking's reference, an event's, hold's, webhook's or
-   * API key's id), newest first, `limit` (1-100) at a time, each with who made it (`actor`, `keyId`),
-   * where from (`origin`) and, for a change of an existing record, what it was before. Pass the last one's
-   * `id` as `before` for the page after. Kept as long as the feed keeps changes.
+   * History of one resource (`resourceId`: its bookings, events and configuration) or one record
+   * (`subject`), newest first, `limit` (1-100) at a time, each with `actor`, `keyId`, `origin` and
+   * the prior state where there was one. Pass the last `id` as `before` for the next page. Kept as
+   * long as the feed.
    */
   listHistory(params: {
     tenantRef: string;
@@ -276,7 +265,7 @@ interface Position {
   txid: string;
   id: string;
   at: number;
-  /** Given by 0.4, before the pruned position was kept: it expires by its date as it did then. */
+  /** Given by 0.4, before the pruned position was kept: it also expires by its date. */
   dated?: boolean;
 }
 
@@ -314,7 +303,7 @@ function toChange(row: ChangeRow): SlotlockChange {
     ...slotlockServedChange(row.type, row.subject, row.data),
     occurredAt: row.occurred_at,
     actor: row.actor,
-    // One a later release added, read by this one: unknown here, so unrecorded, not a failed page.
+    // An origin a later release added: unrecorded here, not a failed page.
     origin: isSlotlockChangeOrigin(row.origin) ? row.origin : null,
     keyId: row.key_id,
     position: encodePosition({ txid: row.txid, id: row.id, at: row.occurred_at.getTime() }),
@@ -398,8 +387,7 @@ export function slotlockEventFeedMethods(
       }
       const after = params.after === undefined ? null : decodePosition(params.after);
       if (params.after !== undefined && !after) return { ok: false, code: 'invalid_cursor' };
-      // One statement, so the pruned position and the page are read from one snapshot: a prune
-      // that commits meanwhile is either wholly seen or not at all.
+      // One statement, so the pruned position and the page share a snapshot.
       const rows = await sql<
         (Omit<ChangeRow, 'id'> & {
           id: string | null;
@@ -429,9 +417,8 @@ export function slotlockEventFeedMethods(
          ORDER BY page.txid, page.id`;
       const head = rows[0];
       if (!head) throw new Error('slotlock: change page returned no row');
-      // Whichever server pruned it, and however long it keeps changes: reading on could skip one.
-      // A 0.4 cursor also by its date, as 0.4 did: 0.4 pruned by age, not in feed order, so the
-      // mark its changes started at does not cover every one it took.
+      // Pruned by any server: reading on could skip a change. A 0.4 cursor also expires by date,
+      // since 0.4 pruned by age, not feed order.
       if (
         after &&
         ((head.pruned_txid !== null &&
@@ -445,8 +432,8 @@ export function slotlockEventFeedMethods(
       }
       const changes = rows.flatMap((row) => (row.id === null ? [] : [toChange(row as ChangeRow)]));
       const last = changes.at(-1);
-      // With nothing new the position stays, dated now: a reader that is up to date stays current.
-      // Before any change, every one still to come is after the oldest transaction still running.
+      // Nothing new: the position stays, dated now. Before any change, every one to come is after
+      // the oldest running transaction.
       const here = after ?? { txid: head.horizon, id: '0', at: 0 };
       return {
         ok: true,
@@ -486,7 +473,6 @@ export function slotlockEventFeedMethods(
       }
       const secret = `whsec_${randomBytes(32).toString('base64')}`;
       return inTransaction(sql, async (tx): Promise<CreateWebhookEndpointResult> => {
-        // One at a time per tenant, so racing creates stop at the limit.
         await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`slotlock:webhooks:${params.tenantRef}`}, 0))`;
         const [count] = await tx<{ count: number }[]>`
           SELECT count(*)::int AS count FROM slotlock.webhook_endpoints
@@ -494,7 +480,7 @@ export function slotlockEventFeedMethods(
         if ((count?.count ?? 0) >= SLOTLOCK_MAX_WEBHOOK_ENDPOINTS) {
           return { ok: false, code: 'webhook_limit_reached', limit: SLOTLOCK_MAX_WEBHOOK_ENDPOINTS };
         }
-        // From now on: every transaction that has not ended yet is at or after this position.
+        // From now on: every transaction not yet ended is at or after this position.
         const [row] = await tx<EndpointRow[]>`
           INSERT INTO slotlock.webhook_endpoints (tenant_ref, url, secret, event_types, cursor_txid)
           VALUES (${params.tenantRef}, ${params.url}, ${secret}, ${types}::text[],
@@ -526,7 +512,6 @@ export function slotlockEventFeedMethods(
         const [left] = await tx<{ count: number }[]>`
           SELECT count(*)::int AS count FROM slotlock.webhook_endpoints
            WHERE tenant_ref = ${params.tenantRef}`;
-        // The tenant's last endpoint takes it off the list servers deliver for.
         if ((left?.count ?? 0) === 0) {
           await tx`SELECT slotlock.unregister_webhook_tenant(${params.tenantRef}::text)`;
         }
@@ -646,13 +631,12 @@ export function slotlockEventFeedMethods(
              AND lease_token = ${params.leaseToken}::uuid
            RETURNING disabled_at IS NOT NULL AS disabled`;
         if (settled?.disabled) {
-          // The tenant hears of it on the feed, which every reader and other endpoint sees.
           await tx`
             INSERT INTO slotlock.outbox (tenant_ref, type, subject, data)
             VALUES (${params.tenantRef}, 'webhook.disabled', ${params.endpointId},
                     ${tx.json({
-                      // The id alone: the feed goes to the tenant's other endpoints, and a URL can
-                      // carry a token.
+                      // The id alone: the feed reaches other endpoints, and a URL can carry a
+                      // token.
                       id: params.endpointId,
                       reason: failure?.gone === true ? 'gone' : 'failing',
                       last_status: failure?.status ?? null,
@@ -693,10 +677,9 @@ export function slotlockEventFeedMethods(
 
     async pruneChanges(params) {
       if (!isIdentity(params.tenantRef)) throw identityError();
-      // Oldest first in feed order, and only up to the first change kept: a change still within the
-      // retention, one an enabled webhook has still to receive, or one of a transaction later than
-      // the oldest still running. So every change kept is after every change pruned (the trigger
-      // on the feed records how far), and a reader starting over reads on past the gap.
+      // Oldest first in feed order, and only up to the first change kept (within retention, still
+      // owed to an enabled webhook, or later than the oldest running transaction), so every kept
+      // change is after every pruned one and a reader starting over reads past the gap.
       const rows = await sql<{ deleted: number }[]>`
         WITH head AS MATERIALIZED (
           SELECT outbox.id, outbox.txid,
