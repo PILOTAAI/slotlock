@@ -24,10 +24,21 @@ are published as advisories at <https://github.com/PILOTAAI/slotlock/security/ad
 
 ## Hosted Slotlock
 
-The hosted service is not open; self-hosting is the only supported path today. Do not test
-`slotlock-api.pylota.io` or `app.slotlock.pylota.io`: they are not in scope until this section
-says the service is open and gives the rules for testing it. Test Slotlock by running it yourself,
-and report what you find as above.
+The hosted service is open: any GitHub account can sign in at
+<https://app.slotlock.pylota.io/dashboard> and use `https://slotlock-api.pylota.io` with its own
+keys. Self-hosting stays fully supported. Security research on the hosted service is welcome within
+these rules:
+
+- Test only against an account you signed in with yourself, and only with its own keys. Stop as
+  soon as you reach another account's data, keep none of it, and report it.
+- No traffic meant to slow or stop the service: no floods, load tests, or recurrence rules written
+  to expand without end. A request over a limit gets `429`; do not try to get around the limits.
+  Run Slotlock yourself to load test it.
+- No social engineering, and no attacks on Pylota's people, offices, GitHub, Cloudflare, or other
+  providers.
+- Report privately as above, never in a public issue, and give us time to fix it before disclosure.
+
+The [Acceptable Use Policy](ACCEPTABLE-USE.md) permits research within these rules. Abuse of the service by others goes to [abuse@pylota.io](mailto:abuse@pylota.io).
 
 ## Security model
 

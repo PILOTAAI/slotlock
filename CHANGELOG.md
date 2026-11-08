@@ -3,6 +3,15 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Changed
+
+- Dashboard: pages use the width of a wide screen, up to 1600px, and centre past it, instead of
+  stopping at 1200px against the sidebar with empty space to their right.
+- SECURITY.md: the hosted service is open, and security research on it is welcome against your own
+  account, within the rules it gives (no load testing, no other accounts' data).
+
 ## 0.6.1 - 2026-11-08
 
 ### Changed
