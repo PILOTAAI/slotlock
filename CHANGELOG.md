@@ -3,6 +3,13 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Changed
+
+- Site: the landing page's Slotlock Cloud endpoints list only what an agent connects to (MCP, A2A,
+  REST, OpenAPI, the agent card). The dashboard row is gone: people reach it through Sign in.
+
 ## 0.6.2 - 2026-11-08
 
 ### Changed
