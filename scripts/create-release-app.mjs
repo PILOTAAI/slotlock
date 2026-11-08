@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Creates the GitHub App that "Release a version" (.github/workflows/release-version.yml) opens and
-// merges release pull requests with. GitHub holds the checks of a pull request github-actions[bot]
-// opens until a person approves them; the checks of a pull request an app opens run at once.
+// merges release pull requests with: checks on a pull request github-actions[bot] opens wait for a
+// person's approval, an app's run at once.
 //
 // An owner of the PILOTAAI organization runs it once, from a checkout of main:
 //   node scripts/create-release-app.mjs             create the app, install it, store it
@@ -10,19 +10,19 @@
 // Options: --name <app name> (default "PILOTAAI Slotlock release"; GitHub app names are unique),
 // --no-open (print the page's address instead of opening a browser).
 //
-// It serves a page on 127.0.0.1 that hands GitHub the app's manifest. You click "Create GitHub
-// App", then install it on PILOTAAI/slotlock only. The app is private, has no webhook, and asks for
-// contents: write and pull_requests: write and nothing else: it cannot change workflows, push past
-// the "Protect main" ruleset or create release tags. Before storing anything, the script checks with
-// a token of the new installation, revoked straight after, that the installation reaches exactly
-// PILOTAAI/slotlock with exactly those permissions. Then it stores the private key as the release-app
-// environment secret RELEASE_APP_PRIVATE_KEY (on gh's stdin: never on disk, in an argument or on the
-// screen), and the client ID as the environment variable RELEASE_APP_CLIENT_ID. Only main can deploy
-// to release-app (scripts/configure-github.sh), so only release-version.yml's job on main reads them.
+// It serves a page on 127.0.0.1 that hands GitHub the manifest; you click "Create GitHub App", then
+// install it on PILOTAAI/slotlock only. The app is private, has no webhook, and asks only for
+// contents: write and pull_requests: write: it cannot change workflows, push past the "Protect
+// main" ruleset or create release tags. Before storing anything, a short-lived installation token
+// (revoked straight after) checks the installation reaches exactly PILOTAAI/slotlock with exactly
+// those permissions. The private key goes to the release-app environment secret
+// RELEASE_APP_PRIVATE_KEY via gh's stdin (never on disk, in an argument or on screen), and the
+// client ID to the variable RELEASE_APP_CLIENT_ID. Only main can deploy to release-app
+// (scripts/configure-github.sh).
 //
-// Needs Node.js 22.12 or newer, and gh logged in as an owner of the organization.
-// Environment (for tests): SLOTLOCK_GITHUB_URL, SLOTLOCK_GITHUB_API_URL, SLOTLOCK_POLL_SECONDS (3),
-// SLOTLOCK_WAIT_MINUTES (30), SLOTLOCK_CONFIGURE_GITHUB (the configure script to run).
+// Needs Node.js 22.12+ and gh logged in as an organization owner. Environment (for tests):
+// SLOTLOCK_GITHUB_URL, SLOTLOCK_GITHUB_API_URL, SLOTLOCK_POLL_SECONDS (3), SLOTLOCK_WAIT_MINUTES
+// (30), SLOTLOCK_CONFIGURE_GITHUB (the configure script to run).
 //
 // Endpoints and fields read from the GitHub docs on 2026-10-23:
 //   https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest
@@ -329,7 +329,7 @@ async function checkInstallation(app, installationId) {
       problem: `The installation reaches ${reach}. Limit it to ${REPO}: ${web}/organizations/${OWNER}/settings/installations/${installationId} > Only select repositories > ${REPO} > Save.`,
     };
   } finally {
-    // The check's token is not needed again: revoke it now rather than let it live for an hour.
+    // Revoke the check's token now rather than let it live for an hour.
     await githubApi('/installation/token', { method: 'DELETE', token });
   }
 }

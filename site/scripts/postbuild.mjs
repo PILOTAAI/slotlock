@@ -109,12 +109,10 @@ if (broken.length > 0) {
   process.exit(1);
 }
 
-// Lightning CSS, Vite's CSS minifier, keeps only the last of a property's prefixed and unprefixed
-// declarations. The header once declared backdrop-filter before -webkit-backdrop-filter, shipped
-// only the prefixed one, and lost its blur in Chrome and Firefox (the live page computed
-// backdrop-filter: none in Chrome, 2026-10-10). Listed here: properties whose -webkit- form only
-// Safari reads, so it must ship beside the unprefixed one. (Chrome reads -webkit-user-select, so a
-// lone one in a dependency's stylesheet is not this defect.)
+// Lightning CSS (Vite's minifier) keeps only the last of a property's prefixed and unprefixed
+// declarations, so an unprefixed declaration before its -webkit- form is lost (the header's blur
+// once vanished in Chrome and Firefox this way). Listed: properties whose -webkit- form only Safari
+// reads, so it must ship beside the unprefixed one.
 const STANDARD_PROPERTIES = ['backdrop-filter'];
 const unpaired = [];
 let rules = 0;

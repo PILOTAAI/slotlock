@@ -1,10 +1,9 @@
-// What /docs/tools/ says about each tool beyond its schema. scripts/tool-schemas.mjs reads names,
-// types, bounds, defaults and examples from src/agent-server.ts; this file adds the words a schema
-// cannot carry. scripts/sync-content.mjs fails the build when a note names a tool or field that no
-// longer exists, when a tool has no summary, or when an error code is not a code in the source.
+// What /docs/tools/ says about each tool beyond its schema (scripts/tool-schemas.mjs reads the
+// schema facts). scripts/sync-content.mjs fails the build when a note names a missing tool or
+// field, a tool has no summary, or an error code is unknown.
 //
-// Behaviour described here is the store backend's (src/agent-store-backend.ts), the one the
-// `slotlock serve` command and the README's server example use.
+// Behaviour described is the store backend's (src/agent-store-backend.ts), as `slotlock serve`
+// uses.
 
 /** One line per tool for the overview table, and the opening sentence of its section. */
 export const SUMMARIES = {

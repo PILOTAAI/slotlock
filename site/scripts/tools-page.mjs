@@ -35,7 +35,7 @@ function objectInfo(ref, fail) {
 
 /**
  * The Type cell: one code span per alternative, joined by `|` outside the code, so a long union
- * wraps between alternatives and never inside `date-time`. Named objects link to their section.
+ * wraps between alternatives. Named objects link to their section.
  */
 function typeCell(schema, fail) {
   const alternatives = typeAlternatives(schema, fail);

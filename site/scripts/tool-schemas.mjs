@@ -1,11 +1,10 @@
 // Reads the agent tools' Zod schemas and examples out of src/agent-server.ts as text, without
-// running it: the site is its own npm project and has neither the package's dependencies nor its
-// build. scripts/sync-content.mjs renders what this returns as /docs/tools/.
+// running it (the site has neither the package's dependencies nor its build).
+// scripts/sync-content.mjs renders the result as /docs/tools/.
 //
-// It parses only the subset of TypeScript the registry uses: identifiers, numbers, strings, object
-// and array literals, spreads, member calls and `*`. A `.refine(…)` keeps its source text and is
-// not parsed. Anything else, and any Zod method this file does not know, fails the build, so a new
-// construct in the registry is looked at rather than rendered wrong.
+// It parses only the subset of TypeScript the registry uses; a `.refine(…)` keeps its source text.
+// Anything else, and any unknown Zod method, fails the build, so a new construct is looked at
+// rather than rendered wrong.
 
 class Lexer {
   constructor(source, position) {
@@ -159,7 +158,6 @@ function parsePostfix(lexer) {
     } else if (token.v === '(') {
       const open = lexer.next();
       if (node.type === 'member' && node.name === 'refine') {
-        // Keep the predicate's source; it is a function, not data.
         let depth = 1;
         let close = open;
         while (depth > 0) {

@@ -1,7 +1,6 @@
-// The benchmark's result format and its Markdown table, shared by scripts/bench.mjs (which writes
-// bench.json and bench.md, the assets release.yml attaches to each GitHub release) and the site
-// (site/scripts/sync-content.mjs, which reads the latest release's bench.json into
-// /docs/benchmarks/). bench/baseline.json is RFC 0002's run in the same format.
+// The benchmark's result format and Markdown table, shared by scripts/bench.mjs (writes bench.json
+// and bench.md for each release) and site/scripts/sync-content.mjs (reads the latest release's
+// bench.json). bench/baseline.json is RFC 0002's run in the same format.
 
 /** Every workload, in table order: its bench/<id>-{range,slots}.sql pair and how it runs. */
 export const WORKLOADS = [
@@ -9,8 +8,7 @@ export const WORKLOADS = [
   { id: 'nonoverlap-many', label: 'Non-overlapping, 1,000 resources', durable: true },
   { id: 'saturated-one', label: 'Saturated single resource (mostly refused)', durable: true },
   { id: 'contended-many', label: 'Contended, 1,000 resources', durable: true },
-  // The same files as nonoverlap-one, with synchronous_commit off: what the design costs without
-  // the wait for the WAL flush.
+  // nonoverlap-one with synchronous_commit off: the design's cost without the WAL flush wait.
   { id: 'nonoverlap-one-async', files: 'nonoverlap-one', label: 'Non-overlapping, 1 resource', durable: false },
   // Reads, not writes: one resource's busy times over a day, from 50,000 bookings (bench/freebusy-seed.sql).
   { id: 'freebusy-many', label: 'Free/busy reads, 1,000 resources', durable: true, seed: 'freebusy-seed.sql' },

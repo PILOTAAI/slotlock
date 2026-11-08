@@ -1,9 +1,9 @@
-// Colour tokens for slotlock.pylota.io, taken from Pylota's design tokens after PR #505
-// (packages/ui/tokens/tokens.json on PILOTAAI/pylota main at 4808094c8: `color` and `colorDark`).
-// scripts/sync-content.mjs writes them to src/generated/tokens.css, and scripts/contrast.mjs checks
-// every text/background pair from this same object, so what is checked is what ships.
+// Colour tokens for slotlock.pylota.io, from Pylota's design tokens (packages/ui/tokens/tokens.json
+// on PILOTAAI/pylota main at 4808094c8: `color` and `colorDark`). scripts/sync-content.mjs writes
+// them to src/generated/tokens.css, and scripts/contrast.mjs checks every pair from this same
+// object, so what is checked is what ships.
 //
-// Names are semantic. The Pylota token each one comes from is noted where it is not obvious.
+// Names are semantic; the Pylota source token is noted where not obvious.
 
 export const light = {
   canvas: '#F6F4EE', // bg-0

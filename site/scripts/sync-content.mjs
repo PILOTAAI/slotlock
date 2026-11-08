@@ -83,7 +83,6 @@ function sections(markdown) {
       lead: text(heading.index + 1, leadEnd),
     });
   });
-  // `_intro`: the text between the document title and its first section.
   const first = headings[0]?.level === 1 ? headings[1] : headings[0];
   const titleLine = headings[0]?.level === 1 ? headings[0].index + 1 : 0;
   out.set('_intro', { heading: '', body: text(titleLine, first ? first.index : lines.length) });
@@ -154,7 +153,7 @@ function rewriteLinks(markdown) {
   );
   return anchored.replace(/\]\((?:\.\/)?([A-Za-z0-9_./-]+?)(#[^)]*)?\)/g, (match, target, hash) => {
     if (/^(https?:|mailto:|#)/.test(target)) return match;
-    // A file path from the repository root (GitHub reads /PRIVACY.md so); any other /path, such as
+    // A repository-root file path (as GitHub reads /PRIVACY.md); any other /path, such as
     // /docs/hosted/, is the site's.
     if (target.startsWith('/')) {
       if (!statSync(join(ROOT, target), { throwIfNoEntry: false })?.isFile()) return match;
@@ -200,7 +199,6 @@ async function sourceSections(file) {
 
 /** Expand the include markers of one docs-src page. */
 async function expand(template, facts, page, toolsPage) {
-  // Optional includes keep their fallback when the README section does not exist yet.
   const optional =
     /<!-- include\? ([^#\s]+)#([a-z0-9_-]+)((?: (?:body|lead|promote))*) -->\n([\s\S]*?)<!-- end include -->/g;
   let out = '';
@@ -224,8 +222,8 @@ async function expand(template, facts, page, toolsPage) {
     const [, file, anchor, modifiers] = match;
     const source = await sourceSections(file);
     if (!anchor) {
-      // Whole file without its title. `snippet` also drops its opening paragraph and a closing
-      // pointer back to the overview, for a page that already says both once (a client's README).
+      // Whole file without its title. `snippet` also drops the opening paragraph and a closing
+      // pointer back to the overview, for a page that already says both (a client's README).
       let whole = source.text.replace(/^# .*\n+/, '').trim();
       if (/\bsnippet\b/.test(modifiers)) {
         whole = whole
@@ -243,8 +241,8 @@ async function expand(template, facts, page, toolsPage) {
     last = match.index + match[0].length;
   }
   parts.push(out.slice(last));
-  // `<!-- code examples/store.ts#book -->`: a region of an example file, which the repository's
-  // tests type-check and run, as a TypeScript block.
+  // `<!-- code examples/store.ts#book -->`: a region of an example file (type-checked and run by
+  // the tests), as a TypeScript block.
   const joined = parts.join('');
   const codeParts = [];
   last = 0;
@@ -260,7 +258,6 @@ async function expand(template, facts, page, toolsPage) {
     last = match.index + match[0].length;
   }
   codeParts.push(joined.slice(last));
-  // Facts first: the generated tools reference is already final text.
   return clean(codeParts.join(''))
     .replace(/\{\{(\w+)\}\}/g, (_, key) => String(must(facts[key], `fact ${key}`)))
     .replace(/<!-- benchmark-results -->/g, () => facts.benchmarkResults)
@@ -344,7 +341,6 @@ async function readFacts() {
     const match = new RegExp(`\\n\\s+${name}: ([0-9_]+),`).exec(config);
     return match ? Number(match[1].replace(/_/g, '')) : undefined;
   };
-  // The language clients, in the order clients/README.md lists them.
   const CLIENT_LABELS = [
     ['python', 'Python'],
     ['go', 'Go'],
@@ -498,8 +494,8 @@ async function readToolsReference(facts) {
     read('src/types.ts'),
     read('src/rules.ts'),
   ]);
-  // The event output lives in src/event-schema.ts, which the agent server imports as EVENT. Its
-  // declarations come after the agent server's own, so a name both declare reads the agent server's.
+  // The event output lives in src/event-schema.ts, imported by the agent server as EVENT;
+  // declarations come after the agent server's, so a shared name reads the agent server's.
   const eventOutput = eventSchema.replace(
     /^export const SLOTLOCK_EVENT_OUTPUT\b/m,
     'const EVENT',
@@ -530,10 +526,9 @@ async function readToolsReference(facts) {
 }
 
 /**
- * The benchmarks page's results: bench.json from the newest published release that has one, or
- * RFC 0002's run (bench/baseline.json) until one does. The results are informational, so outside
- * GitHub Actions an unreachable API falls back to the baseline; in Actions it fails the build, so a
- * deploy never replaces published results with the baseline over a network error.
+ * The benchmarks page's results: bench.json from the newest release that has one, else
+ * bench/baseline.json. Outside GitHub Actions an unreachable API falls back to the baseline; in
+ * Actions it fails, so a deploy never replaces published results over a network error.
  */
 async function readBenchmark() {
   const baseline = async () => {
@@ -608,7 +603,6 @@ async function main() {
   }
   await copyFile(join(ROOT, 'openapi.json'), join(SITE, 'public/openapi.json'));
 
-  // The REST reference and the Postman collection, both from openapi.json.
   const api = renderApiReference({ openApi, version: facts.version, toolExamples, fail });
   await mkdir(join(DOCS_OUT, 'api'), { recursive: true });
   await writeFile(join(DOCS_OUT, 'api', 'index.md'), api.overview);

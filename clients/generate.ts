@@ -1,8 +1,7 @@
-// The language clients' operations, generated from openapi.json: one method per REST operation in
-// Python, Go, Rust, Java and C#, with the operation's route and its arguments typed as the schema
-// says. Each client's transport (HTTP, the key, JSON, errors) is written by hand beside it.
-// src/__tests__/generated.test.ts compares these files with the committed ones, and writes them
-// when SLOTLOCK_WRITE_GENERATED=1.
+// The language clients' operations, generated from openapi.json: one typed method per REST
+// operation in Python, Go, Rust, Java and C#; each client's transport is hand-written beside it.
+// src/__tests__/generated.test.ts compares these with the committed files, and writes them when
+// SLOTLOCK_WRITE_GENERATED=1.
 
 import { readFileSync } from 'node:fs';
 
@@ -388,8 +387,8 @@ function goOperations(operations: ClientOperation[]): string {
     fields.forEach((p, index) => {
       if (index > 0) out.push('');
       if (p.description) out.push(...wrap(p.description, '\t// '));
-      // An argument that may be null, required or not, is a Nullable: a nil slice cannot tell null
-      // from an empty list, which can mean opposite things (`rules`).
+      // A nullable argument is a Nullable: a nil slice cannot tell null from an empty list, which
+      // can mean opposite things (`rules`).
       let fieldType: string;
       if (p.nullable) fieldType = `Nullable[${goType(p.kind)}]`;
       else if (p.required) fieldType = goType(p.kind);
@@ -644,7 +643,6 @@ function javaOperations(operations: ClientOperation[]): string {
       const about = p.description ? javaDoc(p.description) : `{@code ${p.name}}, ${kindName(p.kind)}`;
       doc.push(...wrap(`@param ${camel(p.name)} ${about}${p.nullable ? ' (may be null)' : ''}`, '   * '));
     }
-    // The overload without optional arguments: the same, less the optional parameter.
     const shortDoc = [
       ...doc,
       '   * @return the response body',
@@ -730,9 +728,9 @@ const csharpDoc = (text: string) =>
 
 /**
  * Each operation's C# parameter list as Slotlock.Client 0.2.0 shipped it, defaults left out
- * (`clients/dotnet/compat-0.2.0.json`, taken once from 0.2.0's generated file). A parameter added
- * since sits before the cancellation token, so a 0.2.0 call passing the token by position would
- * bind it to the new parameter; csharpCompatOverload keeps the 0.2.0 list compiling.
+ * (`clients/dotnet/compat-0.2.0.json`). Parameters added since sit before the cancellation token,
+ * so a 0.2.0 call passing the token by position would bind it wrongly; csharpCompatOverload keeps
+ * those calls compiling.
  */
 const CSHARP_0_2_0 = (
   JSON.parse(readFileSync(new URL('./dotnet/compat-0.2.0.json', import.meta.url), 'utf8')) as {
@@ -741,11 +739,10 @@ const CSHARP_0_2_0 = (
 ).methods;
 
 /**
- * An overload with `old`, the 0.2.0 parameter list, that calls the method `current` declares (both
- * without defaults), or nothing when the two are the same. It has no defaults, so a call that
- * leaves arguments out still picks the current method, and a call naming all of 0.2.0's picks it.
- * The forwarding call passes each parameter added since as `default` (no value), which only the
- * current method takes. A list the generator cannot forward this way fails generation.
+ * An overload with `old` (the 0.2.0 list, no defaults) forwarding to the method `current` declares,
+ * or nothing when they match. Without defaults, a call leaving arguments out still picks the
+ * current method. New parameters are passed as `default`; a list that cannot be forwarded this way
+ * fails generation.
  */
 function csharpCompatOverload(method: string, old: string[], current: string[]): string[] {
   if (old.join() === current.join()) return [];

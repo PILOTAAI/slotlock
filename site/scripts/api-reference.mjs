@@ -1,10 +1,9 @@
-// Renders the REST API reference (/docs/api/) and the Postman collection from openapi.json, so
-// both describe exactly the routes the server serves. One page per operation, grouped by what it
-// works on; the overview lists every route. scripts/sync-content.mjs calls it and fails the build
-// when an operation has no group here, or a group names an operation that no longer exists.
+// Renders the REST API reference (/docs/api/) and the Postman collection from openapi.json, so both
+// describe exactly the routes the server serves. scripts/sync-content.mjs fails the build when an
+// operation has no group here, or a group names a missing operation.
 //
-// Example values: the eight agent-tool operations use the tool's own example arguments (read from
-// src/agent-server.ts by scripts/tool-schemas.mjs); the rest are built from the schema.
+// Examples: the eight agent-tool operations use the tool's own example arguments
+// (scripts/tool-schemas.mjs); the rest are built from the schema.
 
 /** What each operation works on: the sidebar groups, in order, and their operations in order. */
 export const GROUPS = [
@@ -174,7 +173,6 @@ function notesOf(schema) {
   if (schema.type === 'string') range(schema.minLength, schema.maxLength, 'characters');
   if (schema.type === 'array') range(schema.minItems, schema.maxItems, 'items');
   if (schema.type === 'integer' || schema.type === 'number') {
-    // The safe-integer bound only says "a JSON number"; leave it out.
     const max = schema.maximum >= Number.MAX_SAFE_INTEGER ? undefined : schema.maximum;
     if (max !== undefined || schema.minimum > 0) range(schema.minimum, max, '');
   }
@@ -283,7 +281,6 @@ function exampleArguments(operation, toolExample) {
   if (operation.operationId === 'slotlock_list_tenant_events' && operation.eventWindow) {
     Object.assign(args, operation.eventWindow);
   }
-  // Cancelling is a new revision: the one booked plus 1.
   if (operation.operationId === 'slotlock_cancel_reservation') args.revision = 2;
   // Reservations a day after the hold example, so running every example in order books both.
   if (/reservation/.test(operation.operationId)) {
@@ -380,7 +377,6 @@ function curlExample(operation, parts) {
 const methodBadge = (method) =>
   `<span class="api-method api-method-${method}">${method.toUpperCase()}</span>`;
 
-/** One operation's page. */
 function renderPage(operation, { order, group, toolNames }) {
   const isTool = toolNames.has(operation.operationId);
   const params = operation.parameters ?? [];

@@ -1,16 +1,14 @@
 // NOTICE, written from package.json and package-lock.json so a dependency bump never needs a hand
-// edit. The repository's NOTICE names each direct runtime dependency and its licence: a bump that
-// moves a version, a repository URL or what a dependency pulls in leaves it as it is, and only a
-// dependency that changes its licence asks for --write. The NOTICE packed into each release
-// (scripts/prepare-package.mjs) also names the exact version it was built with, where each comes from
-// and the packages each pulls in, and scripts/verify-package.mjs checks that one with checkNotice.
+// edit. The repository's NOTICE names each direct runtime dependency and its licence, so only a
+// licence change asks for --write. The NOTICE packed into each release
+// (scripts/prepare-package.mjs) also names exact versions, sources and transitive packages;
+// scripts/verify-package.mjs checks it with checkNotice.
 //
 //   node scripts/notice.mjs --write     rewrite the repository's NOTICE
 //   node scripts/notice.mjs --check     exit 1 when the repository's NOTICE is not what --write writes
 //
-// A licence is printed by name only once it is in LICENSE_NAMES below, so a dependency that arrives
-// under a licence nobody has read, however deep, stops the build and --check instead of shipping
-// quietly.
+// A licence is printed only once it is in LICENSE_NAMES, so a dependency under an unread licence,
+// however deep, stops the build instead of shipping quietly.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
