@@ -43,6 +43,15 @@ describe('the site signs people in to Slotlock Cloud', () => {
     }
   });
 
+  it('promises Slotlock Cloud no organization tenants, which it does not configure', () => {
+    // The hosted dashboard sets no SLOTLOCK_DASHBOARD_ORGS: each account is its own tenant.
+    const cloud = landing.slice(landing.indexOf('export const cloud = {'), landing.indexOf('export const proof = {'));
+    expect(cloud, 'canary: the cloud section').toContain("eyebrow: 'Slotlock Cloud'");
+    expect(cloud).not.toMatch(/organi[sz]ation/i);
+    expect(read('docs/hosted/README.md')).not.toMatch(/organi[sz]ation/i);
+    expect(read('site/src/data/llms.mjs')).not.toMatch(/organi[sz]ation/i);
+  });
+
   it('lists the endpoints the hosted service page publishes', () => {
     const hosted = read('docs/hosted/README.md');
     for (const [suffix, published] of [

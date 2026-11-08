@@ -357,7 +357,7 @@ export const cloud = {
     steps: [
       {
         title: 'Sign in with GitHub',
-        body: 'You get a tenant of your own, or one your GitHub organization shares. Slotlock keeps only your GitHub user id and login.',
+        body: 'You get a tenant of your own: only your keys reach its data. Slotlock keeps only your GitHub user id and login.',
       },
       {
         title: 'Create a resource and a key',
