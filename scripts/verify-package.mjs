@@ -619,16 +619,24 @@ try {
   parseICalendarChanges(ordinary, 'Europe/London', window);
   const inlineMs = performance.now() - inlineStarted;
 
+  // Responsive means this thread kept ticking for the whole parse: at least half the 10 ms ticks the
+  // parse's own duration allows (a fixed count fails on a runner that parses the feed quickly).
   let ticks = 0;
   const timer = setInterval(() => {
     ticks += 1;
   }, 10);
+  const slowStarted = performance.now();
   const refused = await pool.parseICalendarChanges(slow, 'UTC').catch((error) => error);
+  const slowMs = performance.now() - slowStarted;
   clearInterval(timer);
   assert.ok(refused instanceof CalendarExpansionLimitError, String(refused));
-  assert.ok(ticks >= 30, 'this thread ran ' + ticks + ' timer ticks while the worker read the slow feed');
+  const expected = Math.max(5, Math.floor(slowMs / 20));
+  assert.ok(
+    ticks >= expected,
+    'this thread ran ' + ticks + ' timer ticks in the ' + Math.round(slowMs) + ' ms the worker read the slow feed, not ' + expected,
+  );
   process.stdout.write(
-    JSON.stringify({ coldMs: Math.round(coldMs), warmMs: Math.round(warmMs), inlineMs: Math.round(inlineMs), ticks }),
+    JSON.stringify({ coldMs: Math.round(coldMs), warmMs: Math.round(warmMs), inlineMs: Math.round(inlineMs), slowMs: Math.round(slowMs), ticks }),
   );
 } finally {
   await pool.close();
