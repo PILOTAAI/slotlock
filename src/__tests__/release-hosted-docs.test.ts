@@ -77,7 +77,8 @@ describe('the published policies', () => {
     // Backups and the log store are named; the old 150 MB cap was never hosted practice.
     expect(privacy).toContain('Backups of the whole database, encrypted');
     expect(privacy).toContain('stores our encrypted backups (R2)');
-    expect(privacy).toContain('keeps them for up to 10 years (3,650 days)');
+    expect(privacy).toContain('keeps them for 30 days and then deletes them.');
+    expect(privacy).not.toMatch(/10 years|3,650 days/);
     expect(privacy).not.toContain('150 MB');
     // Outbox rows hold no event content, as the history row says.
     expect(read('src/ddl.ts')).toContain('never titles,\n// descriptions or attendees');
