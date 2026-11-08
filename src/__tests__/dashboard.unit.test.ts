@@ -2032,6 +2032,18 @@ describe('the dashboard design', () => {
     expect(js).not.toMatch(/https?:|fetch\(|XMLHttpRequest|innerHTML|eval\(/);
   });
 
+  it('opens a row’s confirmation in place, never floating where the table would clip it', async () => {
+    // .table scrolls sideways (overflow-x: auto), which clips both ways: a floating .pop below the
+    // last row was cut off, so Revoke on a one-key account opened a button nobody could press.
+    const target = dashboard();
+    const html = await (await get(target, '/base/dashboard')).text();
+    const cssPath = /href="(\/base\/dashboard\/style\.css\?v=[^"]+)"/.exec(html)?.[1] as string;
+    const css = await (await get(target, cssPath)).text();
+    expect(css).toMatch(/\.table \{[^}]*overflow-x: auto/);
+    expect(css).toMatch(/\.table \.pop \{[^}]*position: static/);
+    expect(css).not.toMatch(/\.table \.pop \{[^}]*position: (absolute|fixed)/);
+  });
+
   it('keeps long names on one line with the whole value at hand, and dates with their full time', async () => {
     const name = 'Read-only reporting agent for the finance team quarterly reconciliation job';
     await keys.store.create({ tenantRef: 'github:4242', name, scopes: ['read'] });
