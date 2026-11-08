@@ -191,6 +191,17 @@ describe('the security policy', () => {
   });
 });
 
+describe('the published policies', () => {
+  it('leave nothing for the owner to fill in, and name who holds email sent to us', () => {
+    for (const file of ['PRIVACY.md', 'TERMS.md', 'ACCEPTABLE-USE.md']) {
+      expect(read(file), file).not.toMatch(/TODO|TBD/);
+    }
+    const privacy = flat(read('PRIVACY.md'));
+    expect(privacy).toContain('hosted by Google Workspace, for two years and then delete them');
+    expect(privacy).toContain('| Google LLC (Google Workspace) |');
+  });
+});
+
 describe('the hosted service page', () => {
   const page = () => flat(read('docs/hosted/README.md'));
 

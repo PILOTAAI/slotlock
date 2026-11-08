@@ -64,8 +64,8 @@ sign-in to work: `__Host-slotlock-oauth` for the ten minutes a sign-in takes, an
 `__Host-slotlock-session` for your session. Both are secure, HTTP-only and limited to the dashboard's
 own site. We use no analytics or advertising cookies, so there is nothing to consent to or turn off.
 
-If you write to us, we keep what you send and our reply.
-TODO(owner): name the provider that hosts the pylota.io mailboxes, and how long support, abuse and privacy email is kept.
+If you write to us at support@, abuse@ or privacy@pylota.io, we keep what you send and our reply in
+our mailboxes, hosted by Google Workspace, for two years and then delete them.
 
 ## Why we use it, and our lawful basis
 
@@ -88,6 +88,7 @@ not use your data for marketing, and we do not use your calendar content to trai
 | OVHcloud | The server and database that hold all of the data above, and our log store | Its London (UK1) region, United Kingdom |
 | Cloudflare, Inc. | DNS, TLS and the network path to the API, including the tunnel to our server; it runs the dashboard and keeps its request logs, connects the dashboard to the database (Hyperdrive), and stores our encrypted backups (R2) | Its global network; the dashboard is placed near the London server; backups in its European Union jurisdiction |
 | GitHub, Inc. | Signs you in. GitHub is a separate controller of your GitHub account and learns that you signed in to Slotlock | United States |
+| Google LLC (Google Workspace) | Hosts the support, abuse and privacy mailboxes, so it holds the email you send us | Its global data centres, including the United States |
 
 Our uptime monitor, healthchecks.io, receives only whether the service is up, how many errors it
 served, and how much space the database and its disk use: no personal data.
@@ -105,7 +106,9 @@ The database and our logs are in the United Kingdom. Our backups are in the Euro
 UK law allows personal data to be transferred without further safeguards. Cloudflare's network can
 process connection details and dashboard requests outside the United Kingdom, including in the
 United States; Cloudflare's data processing agreement relies on its certification under the Data
-Privacy Framework for transfers to the United States. Write to us for a copy of the safeguards.
+Privacy Framework for transfers to the United States. Google Workspace, which holds the email you
+send us, can also process it outside the United Kingdom; Google's data processing terms provide the
+safeguards for those transfers. Write to us for a copy of the safeguards.
 
 ## Security
 

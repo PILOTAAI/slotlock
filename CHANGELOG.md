@@ -3,6 +3,13 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Changed
+
+- Privacy notice: email sent to support@, abuse@ or privacy@pylota.io is held in Google Workspace for
+  two years; Google is listed as a recipient, with its transfers. The notice has no owner TODO left.
+
 ## 0.6.3 - 2026-11-08
 
 ### Added
