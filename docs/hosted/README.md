@@ -42,7 +42,9 @@ account can sign in. Self-hosting stays fully supported: see
 - It runs one released version: `https://slotlock-api.pylota.io/healthz` and the agent card
   (`/.well-known/agent-card.json`) say which. Changes to the API follow
   [VERSIONING.md](/VERSIONING.md), with 90 days' notice before anything under `/v1` changes.
-- Your data is stored in the United Kingdom, on OVHcloud's London servers, behind Cloudflare.
+- Your data is stored in the United Kingdom, on OVHcloud's London servers, behind Cloudflare, with
+  encrypted backups in Cloudflare R2's European Union jurisdiction. The
+  [privacy notice](/PRIVACY.md) says what is kept and for how long.
 
 ## Limits
 

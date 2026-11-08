@@ -5,6 +5,11 @@ versioning.
 
 ## Unreleased
 
+### Changed
+
+- Site: the landing page's Slotlock Cloud endpoints list only what an agent connects to (MCP, A2A,
+  REST, OpenAPI, the agent card). The dashboard row is gone: people reach it through Sign in.
+
 ### Fixed
 
 - `slotlock serve` reads `SLOTLOCK_DASHBOARD_USERS` without the GitHub settings, as it reads

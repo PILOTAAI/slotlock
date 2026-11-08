@@ -1,6 +1,6 @@
 # Acceptable Use Policy for hosted Slotlock
 
-> **Draft — requires owner and legal review before the hosted service opens.**
+Last updated: 8 November 2026.
 
 This policy is part of the [Terms of Service](TERMS.md) for hosted Slotlock, run by TREFT LTD
 (trading as Pylota). It says what you may not do with the service, so that it stays safe and
@@ -15,15 +15,16 @@ available for everyone who shares it.
   name, not a diagnosis.
 - Try to read, change or infer another account's data, or get around tenant isolation, API key
   scopes or authentication.
-- Get around the published limits: by opening more than one account for one person or
-  organisation, by spreading requests across addresses or keys to escape a limit, or in any other
-  way.
+- Get around the [published limits](docs/hosted/README.md#limits): by opening more than one
+  account for one person or organisation, by spreading requests across addresses or keys to escape
+  a limit, or in any other way.
 - Send traffic meant to slow or stop the service: floods, deliberately expensive requests such as
   recurrence rules written to expand without end, or load tests. Run Slotlock yourself to load test
   it.
 - Probe or test the service's security except against your own account and as
   [SECURITY.md](SECURITY.md) describes.
 - Upload malware, or content meant to exploit the people or software that read it.
+- Point a webhook at a system you have no right to send to, or use webhooks to flood anyone.
 - Use the service to harass, track or monitor people without their knowledge.
 - Resell or rent access to the service, or present it as your own service, without our written
   permission.

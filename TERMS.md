@@ -1,10 +1,11 @@
 # Terms of Service for hosted Slotlock
 
-> **Draft — requires owner and legal review before the hosted service opens.**
+Last updated: 8 November 2026.
 
 These terms are an agreement between you and TREFT LTD, trading as Pylota (company number 16211391,
 registered office 20 Wenlock Road, London, England, N1 7GU), for hosted Slotlock: the API at
-`https://slotlock-api.pylota.io` and the dashboard at `https://app.slotlock.pylota.io`. By signing
+`https://slotlock-api.pylota.io` (MCP, A2A and REST) and the dashboard at
+`https://app.slotlock.pylota.io`. By signing
 in or calling the API, you accept them. If you use the service for an organisation, you accept them
 for it and confirm you may.
 
@@ -26,7 +27,8 @@ it yourself, and nothing here limits your rights under that licence.
 
 ## Your account
 
-- You sign in with GitHub. Your account is your GitHub user; keep that account secure.
+- Any GitHub account can sign in. Your account is your GitHub user, and it holds one Slotlock
+  account; keep that GitHub account secure.
 - You are responsible for the API keys you create and for everything done with them. Give each
   agent its own key with the narrowest scope it needs, and revoke a key you no longer trust.
 - You must follow the [Acceptable Use Policy](ACCEPTABLE-USE.md), which is part of these terms.
@@ -46,9 +48,11 @@ are the contract UK GDPR Article 28(3) requires.
 - **Subject matter and duration:** hosting your content in hosted Slotlock, for as long as your
   account exists.
 - **Nature and purpose:** storing, reading, expanding and checking calendar data so the service can
-  answer your requests, and nothing else.
+  answer your requests, sending your changes to the webhooks you set up, keeping the history and
+  backups the [privacy notice](PRIVACY.md#what-we-hold) describes, and nothing else.
 - **Types of personal data:** whatever you put in your content, typically names, email addresses,
-  and the times, places and descriptions of bookings and events.
+  and the times, places and descriptions of bookings and events, the holder names and references
+  your agents give, and the addresses of the calendars and webhooks you set up.
 - **Categories of data subjects:** the people your content is about, such as your staff,
   customers and event attendees.
 
@@ -61,8 +65,8 @@ We will:
    it;
 2. make sure everyone who can access it is bound to confidentiality;
 3. keep it secure, as described in [SECURITY.md](SECURITY.md): every tenant's data is kept apart by
-   PostgreSQL row-level security, API keys are stored only as digests, and traffic is encrypted in
-   transit;
+   PostgreSQL row-level security, API keys are stored only as digests, backups are encrypted, and
+   traffic is encrypted in transit;
 4. use only the subprocessors named in the [privacy notice](PRIVACY.md#who-else-processes-it),
    bind each to data protection terms that match these, and remain responsible for them. We will
    post any new subprocessor on the privacy notice at least 30 days before it starts; if you object,
@@ -73,10 +77,14 @@ We will:
 6. help you meet your security, breach notification and impact assessment duties, and tell you
    without undue delay after we become aware of a personal data breach affecting your content;
 7. erase your content when your account ends, or when you ask, unless the law requires us to keep
-   it; and
+   it; copies in our backups are replaced within about five weeks; and
 8. give you the information you need to show these terms are met, allow for and contribute to
    audits, including inspections, by you or an auditor you mandate, and tell you at once if we think
    an instruction of yours breaks data protection law.
+
+If you set up the dashboard assistant with your own AI provider key, what you send it, and the
+calendar data it reads to answer you, go to that provider under your own agreement with it. That
+provider is not our subprocessor.
 
 ## Security research
 
