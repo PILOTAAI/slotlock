@@ -44,7 +44,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isMinuteOfDay = (value: unknown): value is number =>
   Number.isInteger(value) && (value as number) >= 0 && (value as number) < DAY_MINUTES;
 
-function invalidAvailability(message: string): Error & { code: 'invalid_availability' } {
+export function invalidAvailability(message: string): Error & { code: 'invalid_availability' } {
   return Object.assign(new Error(message), { code: 'invalid_availability' as const });
 }
 

@@ -9,11 +9,7 @@
 // key.
 import { createHash, randomBytes } from 'node:crypto';
 import type { Sql } from 'postgres';
-import {
-  SlotlockAgentOperationError,
-  type SlotlockAgentPrincipal,
-  slotlockAgentOperationScope,
-} from './agent-server.js';
+import { SlotlockAgentOperationError, type SlotlockAgentPrincipal } from './agent-server.js';
 import { SLOTLOCK_API_KEY_ACTIVE_LIMIT, SLOTLOCK_API_KEY_RETAINED_LIMIT } from './ddl.js';
 import { type SlotlockChangeOrigin, isSlotlockChangeOrigin } from './event-feed.js';
 import type { SlotlockSql } from './store.js';
