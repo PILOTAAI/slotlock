@@ -152,7 +152,7 @@ describe.skipIf(!url)('dashboard (real Postgres)', () => {
       (await post('/dashboard/hours', { csrf, resource: 'all', mode: 'closed' }, session)).status,
     ).toBe(303);
     expect((await read())?.availabilityRules).toEqual([]);
-    expect(await (await get('/dashboard/resources', session)).text()).toContain('Closed <a href');
+    expect(await (await get('/dashboard/resources', session)).text()).toContain('<span>Closed</span><a class="meta-link" href');
     expect(
       (await post('/dashboard/hours', { csrf, resource: van, mode: 'server' }, session)).status,
     ).toBe(303);

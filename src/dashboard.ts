@@ -763,6 +763,8 @@ const ICONS = Object.freeze({
     '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
   ),
   check: icon('<path d="M5 12l5 5L20 7"/>'),
+  signOut: icon('<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l-5-5 5-5M5 12h11"/>'),
+  plus: icon('<path d="M12 5v14M5 12h14"/>'),
   github: new Html(
     '<svg class="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path class="fill" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>',
   ),
@@ -893,6 +895,12 @@ function asset(body: string, type: string, url: URL, version: string): Response 
 function formatDate(date: Date | null): string {
   if (!date) return '—';
   return `${date.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const;
+/** A table's date: the day (`19 Oct 2026`), with the full UTC time on hover and for machines. */
+function dateCell(date: Date): Html {
+  return html`<time datetime="${date.toISOString()}" title="${formatDate(date)}">${date.getUTCDate()} ${MONTHS[date.getUTCMonth()]} ${date.getUTCFullYear()}</time>`;
 }
 
 const WEEKDAY_NAMES: Readonly<Record<string, string>> = Object.freeze({
@@ -1217,9 +1225,10 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     const name = current?.login ?? session.login;
     const badge = html`<span class="avatar" aria-hidden="true">${name.slice(0, 1).toUpperCase()}</span>`;
     if (current && choices.length > 1) {
-      return html`<form class="workspace" method="post" action="${root}/organization">${badge}<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="organization">Organization</label><select id="organization" name="organization">${choices.map((org) => html`<option value="${org.id}"${org.id === current.id ? html` selected` : html``}>${org.login}</option>`)}</select><button class="quiet" type="submit">Switch</button></form>`;
+      return html`<form class="workspace" method="post" action="${root}/organization">${badge}<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="organization">Organization</label><select id="organization" name="organization" title="${current.login}">${choices.map((org) => html`<option value="${org.id}"${org.id === current.id ? html` selected` : html``}>${org.login}</option>`)}</select><button class="quiet" type="submit">Switch</button></form>`;
     }
-    return html`<div class="workspace">${badge}<span class="workspace-name">${current ? name : `@${name}`}</span></div>`;
+    const shown = current ? name : `@${name}`;
+    return html`<div class="workspace">${badge}<span class="workspace-name" title="${shown}">${shown}</span></div>`;
   }
 
   function layout(title: string, content: Html, session: Session | null, section?: Section): Html {
@@ -1234,11 +1243,16 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
 <script src="${root}/app.js?v=${ASSET_VERSIONS.js}" defer></script>
 </head>`;
     const brand = html`<a class="brand" href="${root}">${ICONS.mark}<span class="name">${brandName}</span></a>`;
+    const skip = html`<a class="skip" href="#main">Skip to content</a>`;
+    // Copy buttons say what they did here, for screen readers (app.js).
+    const live = html`<p class="visually-hidden" id="live" aria-live="polite"></p>`;
     if (!session) {
       return html`${head}
 <body class="bare">
+${skip}
 <header class="bare-bar">${brand}</header>
-<main class="bare-main">${content}</main>
+<main class="bare-main" id="main">${content}</main>
+${live}
 </body>
 </html>`;
     }
@@ -1248,14 +1262,16 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     );
     return html`${head}
 <body>
+${skip}
 <div class="app">
-<aside class="side">
+<header class="side">
 <div class="side-top">${brand}${workspace(session)}</div>
 <nav class="nav" aria-label="Dashboard">${links}</nav>
-<div class="me"><span class="login">@${session.login}</span><form method="post" action="${root}/sign-out"><input type="hidden" name="csrf" value="${csrfToken(session)}"><button class="quiet" type="submit">Sign out</button></form></div>
-</aside>
-<main class="page">${content}</main>
+<div class="me"><span class="avatar me-avatar" aria-hidden="true">${session.login.slice(0, 1).toUpperCase()}</span><span class="login" title="@${session.login}">@${session.login}</span><form method="post" action="${root}/sign-out"><input type="hidden" name="csrf" value="${csrfToken(session)}"><button class="quiet sign-out" type="submit" title="Sign out">${ICONS.signOut}<span class="sign-out-label">Sign out</span></button></form></div>
+</header>
+<main class="page" id="main">${content}</main>
 </div>
+${live}
 </body>
 </html>`;
   }
@@ -1265,6 +1281,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
 
   function signedOutPage(status: number, notice?: string, cookies: string[] = []): Response {
     const content = html`<section class="sign-in">
+<span class="sign-in-mark">${ICONS.mark}</span>
 <h1>Sign in to ${brandName}</h1>
 <p>Create keys for your agents, add what they book, and watch what they do.</p>
 ${noticeOf(notice)}
@@ -1290,13 +1307,12 @@ ${noticeOf(notice)}
 <form method="post" action="${root}/keys/revoke"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${key.id}"><button class="danger" type="submit">Revoke key</button></form></div></details>`
           : html``;
       return html`<tr>
-<td data-label="Name" class="strong">${key.name}</td>
-<td data-label="Key"><code>${key.prefix}…</code></td>
+<td data-label="Name" class="strong"><span class="cell"><span class="truncate" title="${key.name}">${key.name}</span>${served ? html`<span class="meta">Created by ${key.createdBy === personOf(session) ? 'you' : key.createdBy?.startsWith('github:') ? `GitHub user ${key.createdBy.slice(7)}` : 'someone unknown'}</span>` : html``}</span></td>
+<td data-label="Key"><code class="chip">${key.prefix}…</code></td>
 <td data-label="Access">${key.scopes.includes('admin') ? 'Full' : key.scopes.includes('write') ? 'Read and write' : 'Read only'}</td>
-<td data-label="Created">${formatDate(key.createdAt)}</td>
-${served ? html`<td data-label="Created by">${key.createdBy === personOf(session) ? 'You' : key.createdBy?.startsWith('github:') ? `GitHub user ${key.createdBy.slice(7)}` : 'Unknown'}</td>` : html``}
-<td data-label="Last used">${key.lastUsedAt ? formatDate(key.lastUsedAt) : 'Never'}</td>
-<td data-label="Expires">${key.expiresAt ? formatDate(key.expiresAt) : 'Never'}</td>
+<td data-label="Created">${dateCell(key.createdAt)}</td>
+<td data-label="Last used">${key.lastUsedAt ? dateCell(key.lastUsedAt) : html`<span class="muted">Never</span>`}</td>
+<td data-label="Expires">${key.expiresAt ? dateCell(key.expiresAt) : html`<span class="muted">Never</span>`}</td>
 <td data-label="Status"><span class="pill ${status.toLowerCase()}">${status}</span></td>
 <td class="actions">${actions}</td>
 </tr>`;
@@ -1305,6 +1321,12 @@ ${served ? html`<td data-label="Created by">${key.createdBy === personOf(session
 
   const pageHead = (title: string, action?: Html) =>
     html`<header class="page-head"><h1>${title}</h1>${action ?? html``}</header>`;
+
+  /** A list with nothing in it yet: what goes here, and the one thing to do next. */
+  const emptyState = (glyph: Html, text: string, action?: { href: string; label: string }) =>
+    html`<div class="empty-state"><span class="empty-icon">${glyph}</span><p class="empty">${text}</p>${
+      action ? html`<a class="button" href="${action.href}">${ICONS.plus}${action.label}</a>` : html``
+    }</div>`;
 
   /** A resource as people name it: its reference, else the start of its id. */
   const resourceName = (resource: SlotlockResource | undefined, id: string) =>
@@ -1339,7 +1361,7 @@ ${served ? html`<td data-label="Created by">${key.createdBy === personOf(session
         entry.kind === 'hold' && entry.expiresAt
           ? html`<span class="pill held">Held until ${clock(entry.expiresAt, zone)}</span>`
           : html`<span class="pill ${entry.kind}">${entry.kind === 'event' ? 'Event' : 'Booked'}</span>`;
-      group.rows.push(html`<li class="slot"><span class="when">${clock(entry.start, zone)}<span class="until">${clock(entry.end, zone)}</span></span><span class="what"><span class="title">${title}</span>${meta.length > 0 ? html`<span class="meta">${meta.join(' · ')}</span>` : html``}</span>${pill}</li>`);
+      group.rows.push(html`<li class="slot"><span class="when">${clock(entry.start, zone)}<span class="until">${clock(entry.end, zone)}</span></span><span class="what" title="${[title, ...meta].join(' · ')}"><span class="title">${title}</span>${meta.length > 0 ? html`<span class="meta">${meta.join(' · ')}</span>` : html``}</span>${pill}</li>`);
       groups.set(day.key, group);
     }
     return html`${[...groups.values()].map(
@@ -1377,7 +1399,7 @@ ${served ? html`<td data-label="Created by">${key.createdBy === personOf(session
       const where = change.resourceId
         ? resourceName(byId.get(change.resourceId), change.resourceId)
         : null;
-      return html`<li class="event"><span class="dot ${label.tone}" aria-hidden="true"></span><span class="what"><span class="title">${label.text}${where ? html` <span class="on">on</span> ${where}` : html``}</span><span class="meta">${who} · <time datetime="${change.occurredAt.toISOString()}" title="${formatDate(change.occurredAt)}">${ago(change.occurredAt, now())}</time></span></span></li>`;
+      return html`<li class="event"><span class="dot ${label.tone}" aria-hidden="true"></span><span class="what" title="${where ? `${label.text} on ${where}` : label.text}"><span class="title">${label.text}${where ? html` <span class="on">on</span> ${where}` : html``}</span><span class="meta">${who} · <time datetime="${change.occurredAt.toISOString()}" title="${formatDate(change.occurredAt)}">${ago(change.occurredAt, now())}</time></span></span></li>`;
     })}</ol>`;
   }
 
@@ -1443,12 +1465,12 @@ ${pageHead('API keys')}
 <p>Agents call ${brandName} over MCP or A2A with a key: <code>Authorization: Bearer slk_…</code></p>
 ${endpoints()}
 </section>
-<section class="panel">
+<section class="panel" id="new-key">
 <h2>New key</h2>
 <form class="create" method="post" action="${root}/keys">
 <input type="hidden" name="csrf" value="${token}">
 <input type="hidden" name="once" value="${formNonce(session)}">
-<label>Name<input name="name" required maxlength="100" placeholder="Booking agent"></label>
+<label class="grow">Name<input id="key-name" name="name" required maxlength="100" placeholder="Booking agent"></label>
 <label>Access<select name="access"><option value="read_write">Read and write</option><option value="read">Read only</option><option value="full">Full, with the application API</option></select></label>
 <label>Expires<select name="expires"><option value="90">In 90 days</option><option value="30">In 30 days</option><option value="365">In a year</option><option value="never">Never</option></select></label>
 <button class="primary" type="submit">Create key</button>
@@ -1456,11 +1478,8 @@ ${endpoints()}
 </section>
 ${
   keys.length === 0
-    ? html`<p class="empty">No keys yet. Give every agent its own, with the least access it needs.</p>`
-    : served
-      ? html`<p class="fine">Each key acts in this organization only, and every member can rotate or revoke it.</p><div class="table"><table><thead><tr><th>Name</th><th>Key</th><th>Access</th><th>Created</th><th>Created by</th><th>Last used</th><th>Expires</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
-<tbody>${keyRows(keys, token, session)}</tbody></table></div>`
-    : html`<div class="table"><table><thead><tr><th>Name</th><th>Key</th><th>Access</th><th>Created</th><th>Last used</th><th>Expires</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
+    ? emptyState(ICONS.keys, 'No keys yet. Give every agent its own, with the least access it needs.', { href: '#key-name', label: 'Create a key' })
+    : html`${served ? html`<p class="fine">Each key acts in this organization only, and every member can rotate or revoke it.</p>` : html``}<div class="table"><table><thead><tr><th>Name</th><th>Key</th><th>Access</th><th>Created</th><th>Last used</th><th>Expires</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
 <tbody>${keyRows(keys, token, session)}</tbody></table></div>`
 }`;
     return respond(status, layout('API keys', content, session, 'keys'));
@@ -1471,12 +1490,12 @@ ${
     const token = csrfToken(session);
     const content = html`${noticeOf(notice)}
 ${pageHead('Resources', resources.length > 0 ? html`<a class="button" href="${root}/hours">Set hours for every resource</a>` : undefined)}
-<section class="panel">
+<section class="panel" id="add-resource">
 <h2>Add a resource</h2>
 <form class="create" method="post" action="${root}/resources">
 <input type="hidden" name="csrf" value="${token}">
 <input type="hidden" name="once" value="${formNonce(session)}">
-<label>Reference<input name="reference" required maxlength="200" placeholder="vehicle-42"></label>
+<label class="grow">Reference<input id="reference" name="reference" required maxlength="200" placeholder="vehicle-42"></label>
 <label>Time zone<input name="timezone" required maxlength="64" value="UTC" placeholder="Europe/London"></label>
 <button class="primary" type="submit">Add resource</button>
 </form>
@@ -1484,10 +1503,10 @@ ${pageHead('Resources', resources.length > 0 ? html`<a class="button" href="${ro
 </section>
 ${
   resources.length === 0
-    ? html`<p class="empty">No resources yet. Agents can only book what is listed here.</p>`
+    ? emptyState(ICONS.resources, 'No resources yet. Agents can only book what is listed here.', { href: '#reference', label: 'Add a resource' })
     : html`<div class="table"><table><thead><tr><th>Reference</th><th>Time zone</th><th>Bookable hours</th><th>Resource id</th></tr></thead><tbody>${resources.map(
         (resource) =>
-          html`<tr><td data-label="Reference" class="strong"><span class="cell"><a href="${root}/resources/${resource.id}">${resourceName(resource, resource.id)}</a>${resource.pool ? html`<span class="meta">Pool ${resource.pool}</span>` : html``}</span></td><td data-label="Time zone">${resource.timezone}</td><td data-label="Bookable hours">${hoursSummary(resource.availabilityRules)} <a href="${root}/hours?resource=${resource.id}">Set hours</a></td><td data-label="Resource id"><code class="muted">${resource.id}</code></td></tr>`,
+          html`<tr><td data-label="Reference" class="strong"><span class="cell"><a class="truncate" href="${root}/resources/${resource.id}" title="${resourceName(resource, resource.id)}">${resourceName(resource, resource.id)}</a>${resource.pool ? html`<span class="meta" title="Pool ${resource.pool}">Pool ${resource.pool}</span>` : html``}</span></td><td data-label="Time zone">${resource.timezone}</td><td data-label="Bookable hours"><span class="cell"><span>${hoursSummary(resource.availabilityRules)}</span><a class="meta-link" href="${root}/hours?resource=${resource.id}">Set hours</a></span></td><td data-label="Resource id"><code class="muted truncate id" title="${resource.id}">${resource.id}</code></td></tr>`,
       )}</tbody></table></div>`
 }`;
     return respond(status, layout('Resources', content, session, 'resources'));
@@ -1709,10 +1728,10 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
           ? `Since ${formatDate(endpoint.failingSince)}, ${String(endpoint.attempts)} attempts${endpoint.lastStatus ? `, last HTTP ${endpoint.lastStatus}` : ''}${endpoint.lastError ? `: ${endpoint.lastError.slice(0, 120)}` : ''}`
           : '';
       return html`<tr>
-<td data-label="URL" class="strong wrap"><code>${endpoint.url}</code></td>
-<td data-label="Events">${endpoint.eventTypes ? endpoint.eventTypes.join(', ') : 'All'}</td>
+<td data-label="URL" class="strong"><code class="truncate url" title="${endpoint.url}">${endpoint.url}</code></td>
+<td data-label="Events" class="wrap">${endpoint.eventTypes ? endpoint.eventTypes.join(', ') : 'All'}</td>
 <td data-label="Status"><span class="cell"><span class="pill ${state.tone}">${state.text}</span>${problem ? html`<span class="meta wrap">${problem}</span>` : html``}</span></td>
-<td data-label="Added">${formatDate(endpoint.createdAt)}</td>
+<td data-label="Added">${dateCell(endpoint.createdAt)}</td>
 <td class="actions">${
         endpoint.disabledAt
           ? html`<form class="inline" method="post" action="${root}/webhooks/enable"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${endpoint.id}"><button type="submit">Enable</button></form>`
@@ -1728,12 +1747,12 @@ ${pageHead('Webhooks')}
 <div class="stat"><span class="stat-label">Failing</span><span class="stat-value">${String(failing.length)}</span></div>
 <div class="stat"><span class="stat-label">Disabled</span><span class="stat-value">${String(disabled.length)}</span></div>
 </div>
-<section class="panel">
+<section class="panel" id="add-endpoint">
 <h2>Add an endpoint</h2>
 <form method="post" action="${root}/webhooks">
 <input type="hidden" name="csrf" value="${token}">
 <input type="hidden" name="once" value="${formNonce(session)}">
-<label>URL<input name="url" type="url" required maxlength="2048" placeholder="https://example.com/slotlock"></label>
+<label>URL<input id="webhook-url" name="url" type="url" required maxlength="2048" placeholder="https://example.com/slotlock"></label>
 <details class="types"><summary>Events: all, or choose</summary><div class="checks">${SLOTLOCK_CHANGE_TYPES.map(
       (type) =>
         html`<label class="choice"><input type="checkbox" name="event_type" value="${type}"> <code>${type}</code></label>`,
@@ -1744,7 +1763,7 @@ ${pageHead('Webhooks')}
 </section>
 ${
   endpoints.length === 0
-    ? html`<p class="empty">No webhooks. Add one to hear about bookings as they change.</p>`
+    ? emptyState(ICONS.webhooks, 'No webhooks. Add one to hear about bookings as they change.', { href: '#webhook-url', label: 'Add an endpoint' })
     : html`<div class="table"><table><thead><tr><th>URL</th><th>Events</th><th>Status</th><th>Added</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>`
 }`;
     return respond(status, layout('Webhooks', content, session, 'webhooks'));
@@ -1829,9 +1848,9 @@ ${
       const tone = entry.status === 'offered' ? 'active' : entry.status === 'expired' ? 'revoked' : 'held';
       return html`<tr>
 <td data-label="When" class="strong">${day.label} ${clock(entry.start, zone)}–${clock(entry.end, zone)}</td>
-<td data-label="For">${what}</td>
-<td data-label="Holder"><code>${entry.holderRef}</code></td>
-<td data-label="Status"><span class="cell"><span class="pill ${tone}">${entry.status === 'offered' ? 'Offered' : entry.status === 'expired' ? 'Expired' : 'Waiting'}</span>${offered && entry.offeredAt ? html`<span class="meta">${offered}, ${ago(entry.offeredAt, now())}</span>` : html``}</span></td>
+<td data-label="For"><span class="truncate" title="${what}">${what}</span></td>
+<td data-label="Holder"><code class="truncate" title="${entry.holderRef}">${entry.holderRef}</code></td>
+<td data-label="Status"><span class="cell"><span class="pill ${tone}">${entry.status === 'offered' ? 'Offered' : entry.status === 'expired' ? 'Expired' : 'Waiting'}</span>${offered && entry.offeredAt ? html`<span class="meta" title="${offered}">${offered}, ${ago(entry.offeredAt, now())}</span>` : html``}</span></td>
 <td data-label="Joined">${ago(entry.createdAt, now())}</td>
 <td class="actions"><details class="act danger"><summary>Remove</summary><div class="pop"><p>${entry.status === 'offered' ? 'Its offered hold is released and offered to the next.' : 'It stops waiting.'}</p>
 <form method="post" action="${root}/waitlist/leave"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${entry.id}"><button class="danger" type="submit">Remove entry</button></form></div></details></td>
@@ -1847,7 +1866,7 @@ ${pageHead('Waitlist')}
 </div>
 ${
   entries.length === 0
-    ? html`<p class="empty">Nobody is waiting. Agents add entries when the time they want is taken.</p>`
+    ? emptyState(ICONS.waitlist, 'Nobody is waiting. Agents add entries when the time they want is taken.')
     : html`<div class="table"><table><thead><tr><th>When</th><th>For</th><th>Holder</th><th>Status</th><th>Joined</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>${entries.length >= WAITLIST_SHOWN ? html`<p class="fine">Showing the first ${String(WAITLIST_SHOWN)}.</p>` : html``}`
 }`;
     return respond(status, layout('Waitlist', content, session, 'waitlist'));
@@ -3237,21 +3256,55 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
   };
 }
 
-// Copies the value of the element a button names. Loaded as a file, so the policy needs no inline code.
-const DASHBOARD_JS = `document.addEventListener('click', (event) => {
-  const button = event.target instanceof Element ? event.target.closest('[data-copy]') : null;
+// Progressive enhancement only, loaded as a file so the policy needs no inline code: copy buttons
+// (announced in the page's live region), confirmations that close with Escape or a click outside
+// and put focus on their button, and, on a phone, the current page scrolled into the tab strip.
+const DASHBOARD_JS = `const live = document.getElementById('live');
+const say = (text) => {
+  if (!live) return;
+  live.textContent = '';
+  setTimeout(() => { live.textContent = text; }, 50);
+};
+document.addEventListener('click', (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  for (const open of document.querySelectorAll('details.act[open]')) {
+    if (!target || !open.contains(target)) open.removeAttribute('open');
+  }
+  const button = target ? target.closest('[data-copy]') : null;
   if (!button) return;
   const field = document.getElementById(button.getAttribute('data-copy'));
   if (!field) return;
+  const label = button.textContent;
+  const done = (text) => {
+    button.textContent = text;
+    say(text);
+    setTimeout(() => { button.textContent = label; }, 2000);
+  };
   const selectIt = () => {
     if (typeof field.select === 'function') field.select();
-    button.textContent = 'Selected: press Ctrl+C or Cmd+C';
+    done('Selected: press Ctrl+C or Cmd+C');
   };
   if (!navigator.clipboard) return selectIt();
-  navigator.clipboard.writeText(field.value ?? field.textContent ?? '').then(() => {
-    button.textContent = 'Copied';
-  }, selectIt);
+  navigator.clipboard.writeText(field.value ?? field.textContent ?? '').then(() => done('Copied'), selectIt);
 });
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  for (const open of document.querySelectorAll('details.act[open]')) {
+    open.removeAttribute('open');
+    const summary = open.querySelector('summary');
+    if (summary) summary.focus();
+  }
+});
+document.addEventListener('toggle', (event) => {
+  const details = event.target;
+  if (!(details instanceof HTMLDetailsElement) || !details.classList.contains('act') || !details.open) return;
+  const confirm = details.querySelector('.pop button[type=submit]');
+  if (confirm) confirm.focus();
+}, true);
+const current = document.querySelector('.nav a[aria-current="page"]');
+if (current && window.matchMedia('(max-width: 760px)').matches) {
+  current.scrollIntoView({ block: 'nearest', inline: 'center' });
+}
 `;
 
 const DASHBOARD_CSS = `:root {

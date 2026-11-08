@@ -1497,8 +1497,8 @@ describe('organizations', () => {
     const [row] = [...keys.rows.values()];
     keys.rows.set('other', { ...(row as NonNullable<typeof row>), id: randomUUID(), createdBy: 'github:777' });
     const page = await (await get(target, '/base/dashboard/keys', session)).text();
-    expect(page).toContain('<td data-label="Created by">You</td>');
-    expect(page).toContain('<td data-label="Created by">GitHub user 777</td>');
+    expect(page).toContain('<span class="meta">Created by you</span>');
+    expect(page).toContain('<span class="meta">Created by GitHub user 777</span>');
   });
 
   it('offers only organizations the server still serves', async () => {
@@ -1936,7 +1936,7 @@ describe('resource detail, webhooks and the waitlist', () => {
     const { session } = await signIn(target);
     const page = await (await get(target, '/base/dashboard/waitlist', session)).text();
     expect(page).toContain('customer-&lt;9&gt;');
-    expect(page).toMatch(/Today 13:00–14:00<\/td>\s*<td data-label="For">van-1/);
+    expect(page).toMatch(/Today 13:00–14:00<\/td>\s*<td data-label="For"><span class="truncate" title="van-1">van-1/);
     const id = entries[0]?.id as string;
     const removed = await post(target, '/base/dashboard/waitlist/leave', { csrf: await csrf(target, session), id }, session);
     expect(removed.status).toBe(303);
