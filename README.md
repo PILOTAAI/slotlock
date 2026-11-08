@@ -86,7 +86,11 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
   when such a field arrives without the setting. Behind two proxies, such as Cloudflare and then
   kamal-proxy, name the first one's field: the server reads the last address of a list field such
   as `X-Forwarded-For`, which the second proxy writes as Cloudflare's. A client can send that field
-  itself, so let nothing reach the server except through the proxy.
+  itself, so let nothing reach the server except through the proxy. Where something else can reach
+  it (another container on kamal-proxy's network), also set `SLOTLOCK_TRUSTED_PROXY_SECRET` and have
+  the proxy set `X-Slotlock-Proxy-Proof` to it on every request (a Cloudflare request header
+  transform rule): the field is then believed only beside that exact value, and any other request
+  is counted by its connection's address.
 - The server also bounds what one tenant may store, whichever key, agent or application writes
   it: 10,000 holds, and 100,000 each of bookings, calendar events and coverage rows, counted as
   the store's `tenantLimits` count them, besides 10,000 resources. A write past one answers 409
@@ -1528,8 +1532,10 @@ a 12h/24h switch.
 Every tenant needs maintenance at least daily: it extends recurring events to the rolling horizon
 and prunes what the retention window no longer needs, which is what returns agent quota.
 
-- `slotlock serve` maintains `SLOTLOCK_TENANT` when it starts and every tenant whose key it serves,
-  then each hourly, one tenant at a time. It logs a `maintenance` line with counts.
+- `slotlock serve` maintains `SLOTLOCK_TENANT` and every tenant with data when it starts (whether
+  or not its keys call), then each hourly, one tenant at a time. It logs a `maintenance` line with
+  counts. It finds the tenants through `slotlock.maintenance_tenants(text)`, which lists names
+  only; each pass runs in its own tenant's context, under row-level security.
 - `slotlock maintain` runs one tenant's maintenance now, for cron or after a bulk import. An admin
   key can call `POST /v1/maintenance`.
 - Each pass holds a per-tenant PostgreSQL advisory lock, so servers and cron jobs never repeat each

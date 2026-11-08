@@ -478,3 +478,25 @@ export function readTrustedProxyHeader(env: SlotlockEnv): string | undefined {
   }
   return value.toLowerCase();
 }
+
+/** The request field that carries SLOTLOCK_TRUSTED_PROXY_SECRET; not cf-…, which Cloudflare's rules may not set. */
+export const SLOTLOCK_TRUSTED_PROXY_PROOF_FIELD = 'x-slotlock-proxy-proof';
+
+/**
+ * SLOTLOCK_TRUSTED_PROXY_SECRET: a value the proxy in front adds to every request in
+ * SLOTLOCK_TRUSTED_PROXY_PROOF_FIELD, such as a Cloudflare transform rule. With it, the trusted
+ * proxy field is believed only beside that value, so a process that reaches the server without
+ * passing the proxy (another container on its network) cannot choose its own client address.
+ */
+export function readTrustedProxySecret(
+  env: SlotlockEnv,
+  trustedProxyHeader: string | undefined,
+): string | undefined {
+  const value = readSecret(env, 'SLOTLOCK_TRUSTED_PROXY_SECRET');
+  if (value !== undefined && trustedProxyHeader === undefined) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_TRUSTED_PROXY_SECRET proves SLOTLOCK_TRUSTED_PROXY_HEADER: set both, or neither',
+    );
+  }
+  return value;
+}

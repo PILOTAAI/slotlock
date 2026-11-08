@@ -384,6 +384,38 @@ describe('startSlotlockMaintenance', () => {
     await scheduler.close();
   });
 
+  it('maintains every tenant the database lists once an interval, skipping one just maintained, and reports a failed read', async () => {
+    const fake = fakeStore();
+    const onError = vi.fn();
+    const discover = vi
+      .fn<() => Promise<readonly string[]>>()
+      .mockResolvedValueOnce(['quiet-a', 'served', 'quiet-b'])
+      .mockRejectedValueOnce(new Error('list unavailable'))
+      .mockResolvedValue(['quiet-a']);
+    const scheduler = startSlotlockMaintenance({
+      store: fake.store,
+      sql: fakeSql().sql,
+      tenants: ['served'],
+      discover,
+      intervalMs: HOUR,
+      onError,
+    });
+    await settle();
+    expect(discover).toHaveBeenCalledTimes(1);
+    expect(tenantsMaintained(fake)).toEqual(['served', 'quiet-a', 'quiet-b']);
+    await vi.advanceTimersByTimeAsync(HOUR - 60_000);
+    expect(discover).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await settle();
+    expect(discover).toHaveBeenCalledTimes(2);
+    expect(onError).toHaveBeenCalledWith(new Error('list unavailable'));
+    expect(tenantsMaintained(fake)).toEqual(['served', 'quiet-a', 'quiet-b', 'served']);
+    await vi.advanceTimersByTimeAsync(HOUR);
+    await settle();
+    expect(tenantsMaintained(fake).slice(4)).toEqual(['served', 'quiet-a']);
+    await scheduler.close();
+  });
+
   it('goes round again at once while a capped pass gets somewhere, and waits when it does not', async () => {
     const fake = fakeStore();
     // Ten batches of one extended series, then the rest: two passes back to back.

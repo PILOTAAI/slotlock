@@ -41,7 +41,12 @@ function clock() {
 
 function setup(
   limits: SlotlockLimits,
-  options: { trustedProxyHeader?: string; now?: () => number; signInPaths?: string[] } = {},
+  options: {
+    trustedProxyHeader?: string;
+    trustedProxySecret?: string;
+    now?: () => number;
+    signInPaths?: string[];
+  } = {},
 ) {
   const lookups: string[] = [];
   const refusals: SlotlockRefusalCounts[] = [];
@@ -121,6 +126,72 @@ describe('client addresses', () => {
     // Without the field, the connection's address; another field is not the configured one.
     expect(await from({ 'cf-connecting-ip': '192.0.2.1' })).toBe(200);
     expect(await from({ 'cf-connecting-ip': '192.0.2.2' })).toBe(429);
+  });
+
+  describe('with SLOTLOCK_TRUSTED_PROXY_SECRET', () => {
+    // Kamal puts every app on one Docker network beside kamal-proxy, which passes CF-Connecting-IP
+    // through: a container on that network can send any address. Only the edge knows the secret.
+    const SECRET = 'f3a9c1d07b2e48a6915c3e7d0b4a8f62';
+    const limited = (trustedProxySecret: string | undefined) => {
+      const { target, limiter, refusals } = setup(
+        limitsWith({ rates: { address: { perSecond: 1, burst: 1 } } }),
+        {
+          trustedProxyHeader: 'cf-connecting-ip',
+          ...(trustedProxySecret !== undefined ? { trustedProxySecret } : {}),
+          now: clock().now,
+        },
+      );
+      const from = async (headers: Record<string, string>) =>
+        (
+          await target.fetch(get('/v1/resources', { authorization: 'Bearer good', ...headers }), {
+            remoteAddress: '172.18.0.5',
+          })
+        ).status;
+      return { from, limiter, refusals };
+    };
+
+    it('counts a forged address without the proof as the connection', async () => {
+      const { from } = limited(SECRET);
+      expect(await from({ 'cf-connecting-ip': '198.51.100.1' })).toBe(200);
+      // Another forged address is the same connection, so the same spent bucket.
+      expect(await from({ 'cf-connecting-ip': '198.51.100.2' })).toBe(429);
+    });
+
+    it('believes the address beside the exact proof', async () => {
+      const { from } = limited(SECRET);
+      const proven = { 'x-slotlock-proxy-proof': SECRET };
+      expect(await from({ ...proven, 'cf-connecting-ip': '198.51.100.1' })).toBe(200);
+      expect(await from({ ...proven, 'cf-connecting-ip': '198.51.100.2' })).toBe(200);
+      expect(await from({ ...proven, 'cf-connecting-ip': '198.51.100.1' })).toBe(429);
+    });
+
+    it.each([
+      ['a wrong value', 'f3a9c1d07b2e48a6915c3e7d0b4a8f63'],
+      ['a prefix', SECRET.slice(0, 31)],
+      ['a repeated field', `${SECRET}, ${SECRET}`],
+      ['an empty value', ''],
+    ])('counts %s as the connection', async (_case, value) => {
+      const { from } = limited(SECRET);
+      const wrong = { 'x-slotlock-proxy-proof': value };
+      expect(await from({ ...wrong, 'cf-connecting-ip': '198.51.100.1' })).toBe(200);
+      expect(await from({ ...wrong, 'cf-connecting-ip': '198.51.100.2' })).toBe(429);
+    });
+
+    it('believes the field without any proof when no secret is set, as before', async () => {
+      const { from } = limited(undefined);
+      expect(await from({ 'cf-connecting-ip': '198.51.100.1' })).toBe(200);
+      expect(await from({ 'cf-connecting-ip': '198.51.100.2' })).toBe(200);
+    });
+
+    it('never reports the proof', async () => {
+      const { from, limiter, refusals } = limited(SECRET);
+      for (const proof of [SECRET, 'wrong', SECRET, 'wrong']) {
+        await from({ 'x-slotlock-proxy-proof': proof, 'cf-connecting-ip': '198.51.100.1' });
+      }
+      limiter.close();
+      expect(refusals.length).toBeGreaterThan(0);
+      expect(JSON.stringify(refusals)).not.toContain(SECRET);
+    });
   });
 
   it("says once when a proxy's client-address field arrives while none is trusted (HOST-3)", async () => {

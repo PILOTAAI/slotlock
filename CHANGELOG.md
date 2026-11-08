@@ -5,6 +5,15 @@ versioning.
 
 ## Unreleased
 
+### Added
+
+- `SLOTLOCK_TRUSTED_PROXY_SECRET`: with it set, `slotlock serve` believes
+  `SLOTLOCK_TRUSTED_PROXY_HEADER` only on a request whose `X-Slotlock-Proxy-Proof` carries that
+  exact value (compared in constant time), and counts any other by its connection's address. A
+  process that reaches the server without passing the proxy, such as another container on
+  kamal-proxy's network, can then no longer pick its own rate-limit bucket. Unset, nothing changes.
+  The `listening` line says `client_address_proof`.
+
 ### Changed
 
 - Site: the landing page's Slotlock Cloud endpoints list only what an agent connects to (MCP, A2A,
@@ -12,10 +21,12 @@ versioning.
 
 ### Fixed
 
-- Dashboard assistant: a model base URL on the dashboard's own host or the server's
-  (`SLOTLOCK_PUBLIC_URL`, `SLOTLOCK_SERVICE_URL`) is refused when saved, and a stored one is
-  refused before any call. The private-address check let these through as public names, so the
-  deployment could send the organization's model key and conversation to its own services.
+- `slotlock serve` maintains every tenant with data every hour, not only the ones whose keys it has
+  served since it started: a tenant gone quiet has its expired holds, ended waitlist entries and
+  feed past retention deleted too. Tenants are listed by name in `slotlock.maintenance_tenants`
+  (owner only, filled by triggers as a tenant first writes, and from existing rows when `migrate`
+  creates it); the serving role reads the names through `slotlock.maintenance_tenants(text)` and
+  maintains each in its own tenant context. Run `slotlock migrate`.
 
 ## 0.6.2 - 2026-11-08
 
