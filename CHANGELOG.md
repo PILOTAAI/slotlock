@@ -10,6 +10,15 @@ versioning.
 - Site: the landing page's Slotlock Cloud endpoints list only what an agent connects to (MCP, A2A,
   REST, OpenAPI, the agent card). The dashboard row is gone: people reach it through Sign in.
 
+### Fixed
+
+- `slotlock serve` maintains every tenant with data every hour, not only the ones whose keys it has
+  served since it started: a tenant gone quiet has its expired holds, ended waitlist entries and
+  feed past retention deleted too. Tenants are listed by name in `slotlock.maintenance_tenants`
+  (owner only, filled by triggers as a tenant first writes, and from existing rows when `migrate`
+  creates it); the serving role reads the names through `slotlock.maintenance_tenants(text)` and
+  maintains each in its own tenant context. Run `slotlock migrate`.
+
 ## 0.6.2 - 2026-11-08
 
 ### Changed

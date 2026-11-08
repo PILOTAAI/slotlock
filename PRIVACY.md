@@ -55,9 +55,8 @@ copy of these logs of at most 100 MB, and sends them to a log store we run on th
 keeps them for up to 10 years (3,650 days).
 
 Expired holds, finished waitlist entries and the records kept for 30 days are deleted by a
-maintenance job that runs every hour for each account whose API keys the server has used since it
-last started. An account whose keys have not been used since then keeps them until one of its keys
-is next used.
+maintenance job that runs every hour for every account that has data, whether or not its keys are
+in use.
 
 Sign-in asks GitHub for no permissions beyond your public profile. GitHub's token is used once, to
 read your user id and login, and is then dropped. The dashboard sets two cookies, both needed for

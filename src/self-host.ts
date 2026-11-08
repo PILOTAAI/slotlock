@@ -132,7 +132,7 @@ const DAY_MS = 86_400_000;
  * every GitHub user gives each a tenant, so the cap keeps one from filling the database.
  */
 const SERVE_MAX_TENANT_RESOURCES = 10_000;
-/** How often `serve` maintains each tenant it serves (README, Operations: at least daily). */
+/** How often `serve` maintains each tenant with data (README, Operations: at least daily). */
 const SERVE_MAINTENANCE_INTERVAL_MS = 60 * 60 * 1_000;
 /** Passes `slotlock maintain` runs at most, each as big as `serve`'s, until nothing is left. */
 const MAINTAIN_MAX_PASSES = 100;
@@ -762,6 +762,18 @@ export function createSlotlockMaintenanceStore(
   });
 }
 
+/** Every tenant a paged SECURITY DEFINER list (1,000 names a page, after the last) returns. */
+async function pageTenants(
+  page: (after: string | null) => Promise<readonly { tenant: string }[]>,
+): Promise<string[]> {
+  const tenants: string[] = [];
+  for (;;) {
+    const rows = await page(tenants.at(-1) ?? null);
+    tenants.push(...rows.map(({ tenant }) => tenant));
+    if (rows.length < 1_000) return tenants;
+  }
+}
+
 /** Serve MCP and A2A over HTTP from the Postgres store, as one token-authenticated tenant. */
 export async function startSlotlockServer(
   config: SlotlockServeConfig,
@@ -1059,6 +1071,11 @@ export async function startSlotlockServer(
       store: createSlotlockMaintenanceStore(sql, caps, retention),
       sql,
       tenants: [config.tenantRef],
+      // Every tenant with data, from the database: one whose keys have not called since this server
+      // started is maintained too. Names only; each pass runs in its tenant's own context.
+      discover: () =>
+        pageTenants((after) => sql<{ tenant: string }[]>`
+          SELECT slotlock.maintenance_tenants(${after}::text) AS tenant`),
       intervalMs: SERVE_MAINTENANCE_INTERVAL_MS,
       // Counts only, never the tenant.
       onPass: (result) => {
@@ -1072,15 +1089,9 @@ export async function startSlotlockServer(
       const send = createSlotlockWebhookSender({ allowPrivateNetworks: config.webhooks === 'private' });
       webhooks = startSlotlockWebhookDelivery({
         // The tenants with a webhook, from the database: a restarted server finds them all.
-        tenants: async () => {
-          const tenants: string[] = [];
-          for (;;) {
-            const page = await sql<{ tenant: string }[]>`
-              SELECT slotlock.webhook_tenants(${tenants.at(-1) ?? null}::text) AS tenant`;
-            tenants.push(...page.map(({ tenant }) => tenant));
-            if (page.length < 1_000) return tenants;
-          }
-        },
+        tenants: () =>
+          pageTenants((after) => sql<{ tenant: string }[]>`
+            SELECT slotlock.webhook_tenants(${after}::text) AS tenant`),
         deliver: (tenantRef) =>
           deliverSlotlockWebhooks({
             tenantRef,
@@ -1527,7 +1538,7 @@ Commands:
   migrate                  Apply the schema and row-level security, then grant the serving
                            role when SLOTLOCK_MIGRATE_DATABASE_URL names another role
   serve [--migrate]        Serve MCP, A2A and REST over HTTP (--migrate runs migrate first);
-                           maintains each tenant it serves every hour
+                           maintains every tenant with data every hour
   maintain                 Run maintenance for the tenant now: extend recurring events to the
                            rolling horizon and prune past the retention window (for cron)
   resource add <ref> [--timezone <IANA zone>]

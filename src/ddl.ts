@@ -248,6 +248,7 @@ export const SLOTLOCK_TENANT_ADMIN_TABLES = Object.freeze([
   'webhook_tenants',
   'rate_buckets',
   'assistant_tenants',
+  'maintenance_tenants',
 ] as const);
 
 /**
@@ -263,6 +264,8 @@ export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.take_rate_token(text, double precision, double precision)',
   'slotlock.register_assistant_tenant(text, timestamptz)',
   'slotlock.sweep_assistant_conversations(integer)',
+  'slotlock.list_maintenance_tenant()',
+  'slotlock.maintenance_tenants(text)',
 ] as const);
 
 /**
@@ -976,6 +979,10 @@ BEGIN
   DELETE FROM slotlock.webhook_tenants WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  erased_table := 'maintenance_tenants';
+  DELETE FROM slotlock.maintenance_tenants WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'api_keys';
   WITH erased AS (
     DELETE FROM slotlock.api_keys WHERE tenant_ref = requested_tenant_ref RETURNING secret_hash
@@ -1198,6 +1205,94 @@ BEGIN
 END
 $slotlock_sweep_assistant_conversations$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[7]} FROM PUBLIC;
+
+-- The tenants with data, which \`serve\` maintains every hour whether or not their keys call: what
+-- retention ends is deleted for a tenant gone quiet too. Forced row-level security hides every
+-- tenant's rows from the owner as well, so this list (names only) is how a server finds them. A
+-- tenant is listed by the first row it writes to a table maintenance prunes (each change on its
+-- feed is one, so every booking, event, resource and endpoint counts), and erasure takes it off.
+-- While it is empty (first created), it starts from every tenant already in a tenant table: the
+-- deployment has lifted FORCE by now. No role but its owner reads it.
+CREATE TABLE IF NOT EXISTS slotlock.maintenance_tenants (
+  tenant_ref text PRIMARY KEY,
+  CONSTRAINT slotlock_maintenance_tenants_tenant_ref_valid
+    CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500)
+);
+DO $slotlock_maintenance_tenants_known$
+DECLARE
+  tenant_table text;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM slotlock.maintenance_tenants) THEN
+    FOR tenant_table IN
+      SELECT rel.relname::text
+        FROM pg_catalog.pg_class rel
+        JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+        JOIN pg_catalog.pg_attribute att ON att.attrelid = rel.oid
+       WHERE ns.nspname = 'slotlock' AND rel.relkind IN ('r', 'p')
+         AND att.attname = 'tenant_ref' AND NOT att.attisdropped
+         AND rel.relname <> 'maintenance_tenants'
+       ORDER BY rel.relname
+    LOOP
+      EXECUTE pg_catalog.format(
+        'INSERT INTO slotlock.maintenance_tenants (tenant_ref)
+         SELECT DISTINCT tenant_ref FROM slotlock.%I
+          WHERE octet_length(tenant_ref) BETWEEN 1 AND 500
+         ON CONFLICT (tenant_ref) DO NOTHING', tenant_table);
+    END LOOP;
+  END IF;
+END
+$slotlock_maintenance_tenants_known$;
+ALTER TABLE slotlock.maintenance_tenants ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.maintenance_tenants FROM PUBLIC;
+
+-- Lists the tenants of the rows a statement appended (only the writer's own: RLS checks each row).
+-- Once listed, a tenant costs each later statement one index probe.
+CREATE OR REPLACE FUNCTION slotlock.list_maintenance_tenant()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_list_maintenance_tenant$
+BEGIN
+  INSERT INTO slotlock.maintenance_tenants (tenant_ref)
+  SELECT DISTINCT appended.tenant_ref FROM appended
+   WHERE appended.tenant_ref IS NOT NULL
+  ON CONFLICT (tenant_ref) DO NOTHING;
+  RETURN NULL;
+END
+$slotlock_list_maintenance_tenant$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[8]} FROM PUBLIC;
+-- The feed, and what can be written without a change on it: a reference retired with no booking,
+-- an event's cancellation and idempotency answers, a hold's answer, a waitlist entry.
+DO $slotlock_maintenance_tenants_triggers$
+DECLARE
+  tenant_table text;
+BEGIN
+  FOREACH tenant_table IN ARRAY ARRAY[
+    'outbox', 'reservation_tombstones', 'calendar_event_tombstones', 'calendar_event_commands',
+    'hold_commands', 'waitlist_entries'
+  ] LOOP
+    EXECUTE pg_catalog.format(
+      'CREATE OR REPLACE TRIGGER slotlock_list_maintenance_tenant
+         AFTER INSERT ON slotlock.%I REFERENCING NEW TABLE AS appended
+         FOR EACH STATEMENT EXECUTE FUNCTION slotlock.list_maintenance_tenant()', tenant_table);
+  END LOOP;
+END
+$slotlock_maintenance_tenants_triggers$;
+
+-- A page of 1,000 tenant names after \`after\` (NULL: from the start); a caller pages to the end.
+CREATE OR REPLACE FUNCTION slotlock.maintenance_tenants(after text)
+RETURNS SETOF text
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_maintenance_tenants$
+  SELECT tenant_ref FROM slotlock.maintenance_tenants
+   WHERE after IS NULL OR tenant_ref > after
+   ORDER BY tenant_ref LIMIT 1000;
+$slotlock_maintenance_tenants$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[9]} FROM PUBLIC;
 `;
 
 // Validate constraints an upgrade added NOT VALID. applySchema runs this in its own transaction
