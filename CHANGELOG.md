@@ -10,6 +10,13 @@ versioning.
 - Site: the landing page's Slotlock Cloud endpoints list only what an agent connects to (MCP, A2A,
   REST, OpenAPI, the agent card). The dashboard row is gone: people reach it through Sign in.
 
+### Fixed
+
+- Dashboard assistant: a model base URL on the dashboard's own host or the server's
+  (`SLOTLOCK_PUBLIC_URL`, `SLOTLOCK_SERVICE_URL`) is refused when saved, and a stored one is
+  refused before any call. The private-address check let these through as public names, so the
+  deployment could send the organization's model key and conversation to its own services.
+
 ## 0.6.2 - 2026-11-08
 
 ### Changed

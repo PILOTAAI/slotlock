@@ -121,9 +121,11 @@ let reported: unknown[];
 function dashboard(
   overrides: Partial<SlotlockDashboardOptions['assistant']> = {},
   resourceOverrides: Partial<SlotlockDashboardResources> = {},
+  serviceUrl?: string,
 ) {
   return createSlotlockDashboard({
     publicUrl: ORIGIN,
+    ...(serviceUrl !== undefined ? { serviceUrl } : {}),
     github: { clientId: 'Ov23liAssistant', clientSecret: 'f'.repeat(20) + '0123456789abcdef0123' },
     sessionSecret: '7f3c9a1e5b2d8f604a9c1e7b3d5f2a8c6e0b4d9f1a3c5e7b9d2f4a6c8e0b1d3f',
     allowedUsers: '*',
@@ -626,6 +628,26 @@ describe('private model addresses (SLOTLOCK_ASSISTANT_PRIVATE_URLS)', () => {
     expect(reached.status).toBe(200);
     expect(JSON.stringify(await reached.json())).toContain('Hello from the box.');
     expect(model.requests).toHaveLength(1);
+  });
+
+  it("refuses the dashboard's own host or the server's as the model URL, when saved and when called", async () => {
+    const target = dashboard({}, {}, 'https://slotlock-api.example.com');
+    const alice = await signIn(target, 'alice');
+    for (const url of ['https://slotlock.example.com/v1', 'https://SLOTLOCK.example.com:8443/v1', 'https://slotlock-api.example.com']) {
+      const refused = await post(target, '/dashboard/settings/assistant', { provider: 'openai', base_url: url, model: 'your-model', api_key: API_KEY }, alice);
+      expect(refused.status, url).toBe(400);
+      expect(await refused.text(), url).toContain('this Slotlock deployment’s own address');
+    }
+    expect(await assistantStore.getSettings('github-org:91')).toBeNull();
+    // Saved where the API was elsewhere, then served from there: refused before any request.
+    const before = dashboard({}, {}, 'https://elsewhere.example.com');
+    const saved = await post(before, '/dashboard/settings/assistant', { provider: 'openai', base_url: 'https://slotlock-api.example.com/v1', model: 'your-model', api_key: API_KEY }, await signIn(before, 'alice'));
+    expect(saved.status).toBe(303);
+    const bob = await signIn(target, 'bob');
+    const refused = await chat(target, bob, 'hello');
+    expect(refused.status).toBe(409);
+    expect(await refused.text()).toContain('this Slotlock deployment’s own address');
+    expect(model.requests).toHaveLength(0);
   });
 
   it('refuses a stored private URL at call time once the switch is off', async () => {
