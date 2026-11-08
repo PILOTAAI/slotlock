@@ -3380,7 +3380,7 @@ code, pre, kbd, input[readonly] { font-family: var(--mono); font-size: 12.5px; }
 .me form { margin: 0 0 0 auto; }
 .login { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .sign-out .icon { width: 15px; height: 15px; }
-.page { width: 100%; max-width: 1200px; padding: var(--space-8) var(--space-8) 72px; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-5); align-content: start; min-width: 0; }
+.page { width: 100%; max-width: 1600px; margin-inline: auto; padding: var(--space-8) var(--space-8) 72px; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-5); align-content: start; min-width: 0; }
 .page-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; min-height: 36px; margin-bottom: var(--space-1); }
 
 /* Type */

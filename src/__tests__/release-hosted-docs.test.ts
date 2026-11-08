@@ -133,6 +133,18 @@ describe('the legal drafts', () => {
   });
 });
 
+describe('the security policy', () => {
+  it('says the hosted service is open and gives the rules for testing it', () => {
+    const hosted = flat(read('SECURITY.md').split('## Hosted Slotlock')[1]?.split('\n## ')[0] ?? '');
+    expect(hosted).toContain('The hosted service is open');
+    expect(hosted).toContain('`https://slotlock-api.pylota.io`');
+    expect(hosted).toContain('Test only against an account you signed in with yourself');
+    expect(hosted).toContain('Run Slotlock yourself to load test it.');
+    expect(hosted).toContain('[Acceptable Use Policy](ACCEPTABLE-USE.md)');
+    expect(hosted).not.toMatch(/not in scope|not open/);
+  });
+});
+
 describe('the hosted service page', () => {
   const page = () => flat(read('docs/hosted/README.md'));
 
@@ -145,7 +157,7 @@ describe('the hosted service page', () => {
     // Sign-up is open to any GitHub account, and self-hosting stays a supported path.
     expect(text).toContain('Any GitHub account can sign in.');
     expect(text).toContain('Self-hosting stays fully supported');
-    for (const file of ['docs/hosted/README.md', 'site/docs-src/hosted.md', 'README.md']) {
+    for (const file of ['docs/hosted/README.md', 'site/docs-src/hosted.md', 'README.md', 'SECURITY.md']) {
       expect(flat(read(file)), file).not.toMatch(/is not open|do not answer|only supported path/);
     }
     // Not the rationale from before 0.3.0 was deployed.
