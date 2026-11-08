@@ -66,6 +66,10 @@ describe('the site signs people in to Slotlock Cloud', () => {
     }
     expect(hosted).toContain(`\`${DASHBOARD}\``);
     expect(read('site/src/data/llms.mjs')).toContain(DASHBOARD);
+    // The list is what an agent connects to; people reach the dashboard through Sign in.
+    const endpoints = landing.slice(landing.indexOf('  endpoints: {'), landing.indexOf('commandCaption'));
+    expect(endpoints).not.toContain('SIGN_IN_URL');
+    expect(endpoints).not.toMatch(/label: 'Dashboard'/);
   });
 
   // After `npm run build` in site/: what a visitor gets, on the landing page and every docs page.
