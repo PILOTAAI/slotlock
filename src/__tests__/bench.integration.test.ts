@@ -1,4 +1,3 @@
-// The benchmark script runs every workload against both designs and cleans up after itself.
 // Skipped without DATABASE_URL or pgbench.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';

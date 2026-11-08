@@ -1,6 +1,5 @@
-// The store expands a recurring event when it is written and again each time maintenance rolls its
-// horizon. A rule that never occurs held the whole process at either point; now the write is refused
-// and the roll skips that series, keeping its old coverage, and rolls the rest.
+// A rule that never occurs is refused when written, and skipped by the horizon roll, which keeps
+// its old coverage and rolls the rest.
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type SlotlockStore, createSlotlockStore } from '../store.js';

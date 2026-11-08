@@ -1,7 +1,4 @@
-// The release and self-host files agree with each other and with the code: every GitHub Action is
-// pinned to a commit with its version beside it, every base image to a digest, server.json names
-// what the Dockerfile labels and what the CLI reads, and the DCO, release-tag, release-planning and
-// bootstrap scripts accept and refuse what their workflows rely on.
+// The release and self-host files agree with each other and with the code.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
@@ -119,9 +116,8 @@ describe('MCP Registry entry', () => {
     expect(serverPackage?.identifier).toBe(`ghcr.io/pilotaai/slotlock:${packageVersion}`);
   });
 
-  // Kamal pulls an image it did not build only when its `service` label names the service it deploys
-  // (`docker inspect -f '{{ .Config.Labels.service }}' | grep -x <service>`), so without it the
-  // published image cannot be deployed with Kamal.
+  // Kamal pulls an image it did not build only when its `service` label names the service it
+  // deploys.
   it('labels the image with the service Kamal deploys it as', () => {
     expect(/^\s*service="([^"]+)"/m.exec(read('Dockerfile'))?.[1]).toBe('slotlock');
   });
@@ -241,11 +237,8 @@ function repository() {
 }
 
 describe('database suite credentials', () => {
-  // The suites and the CLI both see who they connect as. A role named slotlock is the package's own
-  // schema, which "$user" puts first on the default search path, so names resolve as they never do
-  // for a deployment role. And the CLI redacts the database password from everything it prints, so
-  // a password that is a word in that output rewrites it. With slotlock:slotlock, both turned four
-  // integration tests red on the first CI run while they passed locally as another role.
+  // A role named slotlock is the package's own schema, which "$user" puts first on the search path,
+  // and the CLI redacts the password from its output, so slotlock:slotlock would hide failures.
   it('runs them as a role that is not the schema, with a password its output never contains', () => {
     const sources = [...workflows, { file: 'CONTRIBUTING.md', text: read('CONTRIBUTING.md') }];
     const roles: { file: string; value: string }[] = [];
@@ -769,11 +762,10 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
     }
   });
 
-  // A stand-in for gh that answers every request configure-github.sh sends, logs each one, and
-  // keeps the deploy key it is sent, each ruleset it writes and the secret value it receives on
-  // stdin. With STUB_WORKFLOW_PERMISSIONS set, it refuses the Actions workflow permissions with that
-  // message, as GitHub does (409) when the organization holds the setting. STUB_CHECK_RUNS is what
-  // GitHub lists for main's "CI passed".
+  // A stand-in for gh that answers configure-github.sh, logs each request, and keeps the deploy
+  // key, rulesets and secret it is sent. STUB_WORKFLOW_PERMISSIONS refuses the Actions workflow
+  // permissions as GitHub does (409) for an organization setting; STUB_CHECK_RUNS is main's "CI
+  // passed" list.
   const gh = `#!/bin/sh
 printf '%s\\n' "$*" >> "$STUB_LOG/gh.log"
 case "$1 $2" in
@@ -863,8 +855,7 @@ esac
   };
 
   // With no bypass, a required check that cannot pass blocks every pull request, its own fix
-  // included, so the ruleset waits for a green run of every CI job (PostgreSQL 17 and 18 and the
-  // Compose quickstart among them) on main.
+  // included.
   it.each([
     ['failed', ciPassed('failure')],
     ['not run', ciPassed()],
@@ -920,7 +911,6 @@ esac
       expect(held.status, held.stderr).toBe(0);
       expect(held.stderr).toContain('refused to let Actions open pull requests: gh: Conflict');
       expect(held.stdout).toContain(page);
-      // The steps after it still ran.
       expect(held.stdout).toContain('6. Left for you to do by hand');
     },
   );
@@ -1412,7 +1402,6 @@ describe.skipIf(!hasJq)('release preparation', () => {
     expect(contents(repo, 'CHANGELOG.md')).toBe(
       before.changelog.replace('## Unreleased', `## 1.2.4 - ${today}`),
     );
-    // And the result is a release check-release-tag.sh accepts.
     repo.git('add', '.');
     const released = repo.commit('Release 1.2.4');
     repo.git('update-ref', 'refs/remotes/origin/main', released);
@@ -1560,8 +1549,8 @@ describe('release button', () => {
   });
 
   it('leaves CI and DCO to the pull request, whose own runs are the checks its merge needs', () => {
-    // On the first real release (0.1.1, 2026-10-22), CI and DCO started with workflow_dispatch passed
-    // at the release commit, and the pull request still had none of its required checks.
+    // CI and DCO started by workflow_dispatch at the release commit leave the pull request without
+    // its required checks.
     const text = workflow('release-version.yml');
     expect(text).not.toMatch(/gh workflow run (?:ci|dco)\.yml/);
     for (const file of ['ci.yml', 'dco.yml']) {
@@ -1584,8 +1573,8 @@ describe('release pull request', () => {
     'CHANGELOG.md',
     'clients/go/client.go',
   ];
-  // A stand-in for gh: pr list answers with the open pull request's number, or nothing; pr create
-  // opens #52, or fails with STUB_CREATE_ERROR.
+  // A stand-in for gh: pr list answers the open pull request's number or nothing; pr create opens
+  // #52 or fails with STUB_CREATE_ERROR.
   const gh = `#!/bin/sh
 printf '%s\\n' "$*" >> "$STUB_LOG/gh.log"
 case "$1 $2" in
@@ -1764,7 +1753,7 @@ esac
 
   it('names the setting when Actions may not open pull requests, and the next run uses its branch', () => {
     const repo = checkout();
-    // The message the first real run got, on 2026-10-22.
+    // GitHub's refusal, as of 2026-10-22.
     const refusal =
       'pull request create failed: GraphQL: GitHub Actions is not permitted to create or approve pull requests (createPullRequest)';
     const refused = repo.run({ createError: refusal });
@@ -1860,8 +1849,8 @@ if [ -s "$queue" ]; then
 fi
 printf '%s' "$answer" | jq -r "$filter"
 `;
-  // Runs as gh run list --json databaseId,status,conclusion shows them. A run waiting for approval
-  // reads completed / action_required, as GitHub showed the 0.1.1 release's on 2026-10-22.
+  // A run waiting for approval reads completed / action_required in gh run list (GitHub,
+  // 2026-10-22).
   const run = (id: number, status: string, conclusion = '') =>
     JSON.stringify([{ databaseId: id, status, conclusion }]);
   const held = (id: number) => run(id, 'completed', 'action_required');
@@ -1953,7 +1942,7 @@ printf '%s' "$answer" | jq -r "$filter"
 describe('release version and merge', () => {
   it('refuses a version that is more than one line', () => {
     const repo = repository();
-    // grep matches a line at a time, so `1.2.3` on the first line once passed the pattern.
+    // grep matches a line at a time, so a pattern alone would pass `1.2.3` on the first line.
     for (const version of ['1.2.3\nfoo', '1.2.3\n', '1.2.3 ', '1.2.3/x']) {
       const result = repo.script('prepare-release.sh', version);
       expect(result.status).toBe(1);

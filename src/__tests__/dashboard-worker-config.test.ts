@@ -1,9 +1,6 @@
-// The dashboard Worker's example configuration (workers/dashboard/wrangler.jsonc), which operators
-// copy: it declares every rate limiting binding the Worker uses, keeps sign-ins per client under a
-// higher ceiling for all, and keeps OAuth codes out of the Workers Logs it turns on. Wrangler's
-// settings are those of wrangler 4.149.0's config-schema.json (read 2026-10-24):
-// a binding's `simple.period` is 10 or 60 seconds, and `observability.redact_query_string` removes
-// query strings from request URLs in logs and traces (default false).
+// workers/dashboard/wrangler.jsonc, which operators copy. Per wrangler 4.149.0's config-schema.json
+// (read 2026-10-24): `simple.period` is 10 or 60 seconds; `observability.redact_query_string`
+// defaults to false.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 

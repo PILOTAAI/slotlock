@@ -1,6 +1,5 @@
-// A resource's booking rules on every write path that books it, and on search, against real
-// Postgres: a refused write names the rule; the turnaround is kept by the exclusion constraint; a
-// slot a search offers is one a write accepts. Skipped without DATABASE_URL.
+// Booking rules on every write path and on search, against real Postgres. Skipped without
+// DATABASE_URL.
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -133,7 +132,6 @@ describe.skipIf(!url)('booking rules on writes and searches (real Postgres)', ()
     // Both buffers apart: the earlier one's trailing and the later one's leading.
     expect(await book(id, at(11, 30), at(12, 30))).toMatchObject({ ok: true });
     expect(await book(id, at(8, 30), at(9, 30))).toMatchObject({ ok: true });
-    // A hold and a move keep it too.
     expect(
       await store.acquireHold({ resourceId: id, start: at(12, 30), end: at(13), ttlMs: 60_000 }),
     ).toMatchObject({ ok: false, code: 'overlap' });

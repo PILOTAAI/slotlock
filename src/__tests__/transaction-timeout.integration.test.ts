@@ -1,7 +1,5 @@
-// The README's production checklist advises a `transaction_timeout` on the serving role (PostgreSQL
-// 17+): a caller's transaction that a store call runs inside cannot hold its locks and snapshot for
-// longer. This pins that the setting ends such a transaction, and that a store call inside one that
-// is still in time works. On PostgreSQL 16 the setting does not exist. Skipped without DATABASE_URL.
+// The README advises `transaction_timeout` on the serving role (PostgreSQL 17+; absent on 16): it
+// ends a caller's transaction, and a store call within it works. Skipped without DATABASE_URL.
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import postgres from 'postgres';

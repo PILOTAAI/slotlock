@@ -1,7 +1,5 @@
-// Series an earlier Slotlock stored that this one refuses as maintenance rolls them (a rule shape
-// it no longer expands, COUNT with a yearly day some years lack, an exception that names no
-// occurrence) are counted as refused on every roll and keep their old coverage. The check names
-// each one and why, without writing anything, so an operator can fix them before upgrading.
+// Series an earlier Slotlock stored that this one refuses are counted as refused on every roll and
+// keep their old coverage; the check names each one without writing anything.
 import { describe, expect, it } from 'vitest';
 import {
   CalendarContractError,
@@ -64,9 +62,8 @@ describe('storedCalendarEventProblem', () => {
 
   it('lets the roll refuse what an earlier Slotlock stored, and fail on what none could have', () => {
     // Slotlock 0.2.0 stored any rule ical.js reads that starts with FREQ=, in any zone Intl knows,
-    // with exceptions it never checked. This release refuses some of those, and the roll counts
-    // each as refused (CalendarExpansionLimitError) and rolls the rest. A rule ical.js cannot read
-    // at all, or a zone Intl does not know, no Slotlock stored: the roll fails on it, as before.
+    // with unchecked exceptions. A rule ical.js cannot read, or a zone Intl does not know, no
+    // Slotlock stored: the roll fails on it.
     const unmatched = series('FREQ=WEEKLY;COUNT=4', {
       recurrence: {
         rrule: 'FREQ=WEEKLY;COUNT=4',

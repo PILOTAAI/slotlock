@@ -1,7 +1,5 @@
-// Bookings across resources against real Postgres: a bundle books every resource or none, names the
-// one that refused it, replays, and two racing over the same resources in opposite orders end with
-// one booked and one refused, never a deadlock. Collective search finds when n resources are free
-// together, judging each as a single search does. Skipped without DATABASE_URL.
+// Bookings across resources and collective search, against real Postgres. Skipped without
+// DATABASE_URL.
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';

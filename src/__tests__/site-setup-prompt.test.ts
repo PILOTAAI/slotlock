@@ -1,5 +1,5 @@
-// The coding-agent prompt (site/src/data/agent-setup-prompt.md) is copied into people's repositories
-// and outlives the release it was published with, so it installs the latest release, never a pinned one.
+// The coding-agent prompt is copied into people's repositories and outlives its release, so it
+// installs the latest release, never a pinned one.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';

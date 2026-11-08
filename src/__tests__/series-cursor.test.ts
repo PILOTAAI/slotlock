@@ -1,8 +1,6 @@
-// A stored series is expanded again each time maintenance rolls its window forward. From its start,
-// that search grows with the series' age until the limits refuse it (a daily series after about 11
-// years). Each expansion now leaves a cursor where ical.js stopped, and the next one resumes there.
-// A cursor is only a shortcut: whatever it resumes must be exactly what a search from the start
-// finds, and anything it cannot vouch for is searched from the start.
+// Each expansion leaves a cursor where ical.js stopped, and the next resumes there. A cursor is
+// only a shortcut: what it resumes must equal a search from the start, and anything it cannot vouch
+// for is searched from the start.
 import { readFileSync } from 'node:fs';
 import ICAL from 'ical.js';
 import { describe, expect, it, vi } from 'vitest';
@@ -327,7 +325,7 @@ describe('expanding a stored series from where the last expansion left off', () 
           iterator: { ...(c.iterator as object), last: [2013, 13, 1, 9, 0, 0, false] },
         }),
       ],
-      // Shapes no expansion of this rule leaves (round 1 of this PR's review).
+      // Shapes no expansion of this rule leaves.
       [
         'it holds an hour no rule gives',
         (c) => ({ ...c, iterator: withByData(c, { BYHOUR: [7_300_000_000] }) }),

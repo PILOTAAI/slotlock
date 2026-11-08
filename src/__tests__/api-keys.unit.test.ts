@@ -1,5 +1,3 @@
-// API keys without a database: the key format a secret scanner can verify offline, the scope each
-// operation needs, and that the authenticator and the store refuse bad input before any query runs.
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { SlotlockAgentOperationError, createSlotlockAgentServer } from '../agent-server.js';
@@ -128,7 +126,6 @@ describe('API key authentication', () => {
     await Promise.all(outcomes);
     expect(settled.sort()).toEqual(['0:null', '1:null', '2:null', '3:server_busy']);
 
-    // The slots are free again.
     authenticateKey.mockResolvedValue(null);
     await authenticate(key());
     expect(authenticateKey).toHaveBeenCalledTimes(4);
@@ -148,9 +145,8 @@ describe('API key authentication', () => {
   });
 
   it('serves a key that recently authenticated ahead of a flood of unknown keys (SEC-2)', async () => {
-    // The audit's flood: 1,500 checksum-valid made-up keys in flight while a valid key asked 20
-    // times, and 59 of the 60 answers were 401. Here the queue holds two, a made-up key takes the
-    // one slot each time, and the valid key never waits behind the flood or is refused.
+    // A flood of checksum-valid made-up keys: the queue holds two, a fake takes the one slot each
+    // time, and the valid key never waits behind them.
     const valid = generateSlotlockApiKey().key;
     const identity = {
       id: '6f1c2f9e-0a51-4f1c-9a43-2b8e1f0c7d11',
@@ -171,7 +167,6 @@ describe('API key authentication', () => {
       { maxConcurrentLookups: 1, maxWaitingLookups: 2 },
     );
     const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
-    // The valid key authenticates once with nothing else in flight.
     const first = authenticate(request(`Bearer ${valid}`));
     await tick();
     pending.shift()?.();
@@ -205,8 +200,6 @@ describe('API key authentication', () => {
 
   it("answers a full lookup queue 503 with Retry-After on an embedder's REST, MCP and A2A, never 500 or 401 (SEC-2)", async () => {
     // Wired straight into createSlotlockAgentServer, as an embedder does without `slotlock serve`.
-    // Before the agent server mapped the authenticator's busy error, every call past the queue
-    // rejected `fetch` (a Node listener's 500 internal_error); before that, it was a false 401.
     const authenticate = createSlotlockApiKeyAuthenticator(
       { authenticate: () => new Promise<null>(() => {}) },
       { maxConcurrentLookups: 1, maxWaitingLookups: 0 },

@@ -1,16 +1,12 @@
-// What users of the already-published versions are told (GAP0-2, GAP0-4): 0.2.0 double-books
-// around daylight-saving changes and pins zod 4.6.5 (GHSA-mrhx-c7xc-m3w5), and 0.0.0-stage, 0.1.0
-// and 0.1.1 are older still. The notice lives in docs/release/0.2.0-known-issues.md, and must be
-// reachable from the README (npm and GitHub, one line under "Supported versions", no longer its
-// opening), the site, the v0.2.0 release notes and an advisory, and the maintainer's deprecation
-// runbook must cover every published version with commands that run as written.
+// What users of the already-published versions are told: docs/release/0.2.0-known-issues.md must be
+// reachable from the README, the site, the v0.2.0 release notes and an advisory, and the
+// deprecation runbook must cover every published version.
 import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const read = (path: string) => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
 const flat = (text: string) => text.replace(/\s+/g, ' ');
 
-/** A section of a Markdown document: from its heading to the next heading of its level or above. */
 function section(markdown: string, heading: string): string {
   const start = markdown.indexOf(`${heading}\n`);
   expect(start, `canary: ${heading} exists`).toBeGreaterThanOrEqual(0);
@@ -31,9 +27,8 @@ const githubAnchor = (heading: string) =>
 const NOTICE_FILE = 'docs/release/0.2.0-known-issues.md';
 const HEADING = '## The known issues';
 const ANCHOR = `https://github.com/PILOTAAI/slotlock/blob/main/${NOTICE_FILE}#${githubAnchor(HEADING)}`;
-// The workaround is a fixed fact about published versions, not about the zod this repository pins
-// today, so a Dependabot bump of zod leaves these documents alone. GHSA-mrhx-c7xc-m3w5 covers zod
-// below 4.6.6, its first patched version (GitHub's advisory database, read 2026-10-24).
+// A fixed fact about published versions, not about the zod pinned today. GHSA-mrhx-c7xc-m3w5 covers
+// zod below 4.6.6 (GitHub's advisory database, read 2026-10-24).
 const OVERRIDE = /"overrides": \{"zod": "(\d+)\.(\d+)\.(\d+)"\}/;
 const FIRST_PATCHED_ZOD = [4, 6, 6];
 const patched = (version: number[]) => {

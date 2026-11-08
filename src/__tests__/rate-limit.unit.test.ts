@@ -1,7 +1,4 @@
-// The request limits of `slotlock serve` without a database or a socket: client addresses as
-// bucket keys, the order of the checks (the address before any lookup), the token arithmetic behind
-// Retry-After and the RateLimit fields, the series-write and maintenance slots, and the refusal
-// counts.
+// The request limits of `slotlock serve` without a database or a socket.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   SLOTLOCK_A2A_PROTOCOL_VERSION,
@@ -37,7 +34,6 @@ function limitsWith(overrides: {
   };
 }
 
-/** A clock the test moves. */
 function clock() {
   let ms = 0;
   return { now: () => ms, advance: (by: number) => (ms += by) };
@@ -165,8 +161,8 @@ describe('client addresses', () => {
 
 describe('sign-ins', () => {
   it("counts an IPv6 client's sign-ins by its /48, so rotating /64s inside one site buys none (SEC-12)", async () => {
-    // The verifier's probe against the dashboard Worker, here against serve: each /64 of a /48 had
-    // a sign-in budget of its own, so one site could keep every sign-in in flight with /64s to spare.
+    // A /48 is one site: each /64 of it with its own sign-in budget would let one site keep every
+    // sign-in in flight.
     const limiter = createSlotlockRequestLimits({
       limits: limitsWith({ rates: { address: null, sign_in: { perSecond: 1 / 60, burst: 2 } } }),
       basePath: '',
@@ -179,10 +175,8 @@ describe('sign-ins', () => {
       (await target.fetch(get('/dashboard/sign-in'), { remoteAddress })).status;
     const statuses: number[] = [];
     for (let index = 0; index < 4; index += 1) statuses.push(await from(`2001:db8:1:${index}::1`));
-    // Another site, and an IPv4 client, keep their own budgets.
     statuses.push(await from('2001:db8:2:0::1'), await from('203.0.113.7'));
     expect(statuses).toEqual([302, 302, 429, 429, 302, 302]);
-    // Every other request is still counted per /64.
     expect(slotlockClientNetwork('2001:db8:1:2::/64')).toBe('2001:db8:1::/48');
     expect(slotlockClientNetwork('203.0.113.7')).toBe('203.0.113.7');
     expect(slotlockClientNetwork('unknown')).toBe('unknown');
@@ -374,7 +368,6 @@ describe('token buckets', () => {
     await record('POST', '/v1/holds');
     await record('POST', '/v1/holds');
     await record('POST', '/v1/holds');
-    // An agent's write and reads still have all of theirs.
     await record('POST', '/v1/events');
     await record('GET', '/v1/resources');
     await record('GET', '/v1/resources');
@@ -392,8 +385,7 @@ describe('token buckets', () => {
   });
 
   it("charges a key that may not use the application API its own buckets, not the application's", async () => {
-    // The audit's probe: 20 refused POST /v1/holds from a read-only key emptied the tenant's
-    // app_write, and 40 refused GET /v1/tenant its app_read, so the admin's next call answered 429.
+    // A read-only key's refused application calls must not empty the tenant's app budgets.
     const { target } = setup(limitsWith({ rates: { address: null } }), { now: clock().now });
     const ask = (method: string, path: string, key: string) =>
       target.fetch(
@@ -433,9 +425,8 @@ describe('token buckets', () => {
       }
       return (performance.now() - started) / (to - from + 1);
     };
-    // Up to 100,000 keys each new address adds a bucket. Past them, room is made a tenth at a time,
-    // so a new address costs about as much, not the sweep of every bucket a scan per request would.
-    // A ratio, so a loaded machine slows both floods alike.
+    // Up to 100,000 keys each new address adds a bucket; past them, room is made a tenth at a time,
+    // so a new address costs about as much. A ratio, so a loaded machine slows both floods alike.
     const filling = await flood(1, 99_999);
     const past = await flood(100_000, 120_000);
     expect(past, `${past.toFixed(4)} ms a request past the cap, ${filling.toFixed(4)} before`).toBeLessThan(
@@ -553,9 +544,8 @@ describe('series writes', () => {
   });
 
   it("makes room in a full queue for a tenant with fewer writes in flight, however many tenants fill it (P11)", async () => {
-    // The verifier's point that the fairness held against one tenant only: thirteen tenants with
-    // five writes each in flight filled the server's 64 places, and every other tenant's write was
-    // answered 503 at once, however few it had in flight.
+    // Thirteen tenants with five writes each in flight would fill the server's 64 places and refuse
+    // every other tenant at once.
     const limiter = createSlotlockRequestLimits({
       limits: limitsWith({ caps: { tenant_series_writes: 1, series_writes: 1 } }),
       basePath: '',
@@ -597,8 +587,7 @@ describe('series writes', () => {
 
   it("serves another tenant's write after the running expansion and its slot's rest while a tenant bursts (P11)", async () => {
     // serve's order for a REST write: the protocol charge, the series slot, then an expansion that
-    // holds the event loop. The verifier's probe: with first-come slots, tenant B's one update
-    // waited behind every queued write of tenant A, 2.25 s and then 503 with 450 ms expansions.
+    // holds the event loop.
     const expansionMs = 150;
     const limiter = createSlotlockRequestLimits({
       limits: limitsWith({ rates: { address: null } }),
@@ -710,10 +699,9 @@ describe('series writes', () => {
   }
 
   it("keeps another tenant's update and reads within a few expansions while six tenants burst (P11, SEC-3)", async () => {
-    // The verifier's cross-process probe: a request takes several turns of the event loop before it
-    // reaches a slot (its key lookup, then the query behind it), and with a freed slot handed over
-    // at once, one of the bursting tenants' expansions ran on every turn. With six tenants bursting,
-    // another tenant's update took 6.7 expansions and its reads up to 5.6.
+    // A request takes several turns of the event loop before it reaches a slot (its key lookup,
+    // then the query behind it), so a freed slot handed over at once lets a bursting tenant expand
+    // on every turn.
     const expansionMs = 100;
     const { limiter, send, timed } = expandingServer(() => expansionMs);
     let bursting = true;
@@ -740,8 +728,7 @@ describe('series writes', () => {
     for (const update of updates) {
       expect(update.status, detail).toBe(200);
       // The expansion running when the update arrives and its slot's rest, one more of each when
-      // the update's lookup spans a hand-over, and the update's own. Taking turns, it waited 14 or
-      // more.
+      // the update's lookup spans a hand-over, and the update's own.
       expect(update.ms, detail).toBeLessThan(6 * expansionMs);
     }
     // A read waits for at most the expansion running when it arrives.
@@ -749,9 +736,8 @@ describe('series writes', () => {
   }, 60_000);
 
   it('serves a tenant whose writes are cheap ahead of tenants that each keep one costly write in flight (P11)', async () => {
-    // Six tenants with as many writes in flight as B (one each) cannot put six expansions ahead of
-    // B's every write: theirs kept the server busy, B's did not. Taking turns, first come among
-    // equals, B's second and third updates waited for each of the six.
+    // Six tenants with one write in flight each, as B, cannot put six expansions ahead of B's every
+    // write: theirs kept the server busy, B's did not.
     const expansionMs = 100;
     const { limiter, send, timed } = expandingServer((tenant) => (tenant === 'b' ? 0 : expansionMs));
     let bursting = true;
@@ -772,15 +758,14 @@ describe('series writes', () => {
     for (const update of updates) {
       expect(update.status, detail).toBe(200);
       // The expansion running when the update arrives and its slot's rest, and one more of each
-      // when the update's lookup spans a hand-over. Taking turns, it waited 12 or more.
+      // when the update's lookup spans a hand-over.
       expect(update.ms, detail).toBeLessThan(5 * expansionMs);
     }
   }, 60_000);
 
   it('charges an MCP or A2A write before it waits for a series slot, so one over budget is refused at once (P11)', async () => {
-    // The verifier's probe: on /mcp and /a2a the protocol charge takes a read token only, so tenant
-    // A's recurring create over its key_write budget waited two seconds behind tenant B's slot and
-    // was then answered server_busy, and counted as a busy series write rather than a rate limit.
+    // On /mcp and /a2a a recurring create over its key_write budget is a rate limit, not a wait
+    // behind another tenant's slot.
     let releaseB: () => void = () => {};
     const bHolds = new Promise<void>((resolve) => (releaseB = resolve));
     const counted: SlotlockRefusalCounts[] = [];
@@ -905,9 +890,7 @@ describe('series writes', () => {
   }, 15_000);
 
   it("runs the application API's maintenance in a slot of its own, never holding another tenant's update (P11)", async () => {
-    // The verifier's probe: tenant A's maintenance run held the server's only series slot for the
-    // whole run, up to ten batches of series, and tenant B's update waited two seconds for it and
-    // was answered 503.
+    // One tenant's maintenance run must not hold the server's only series slot for the whole run.
     const limiter = createSlotlockRequestLimits({
       limits: SLOTLOCK_DEFAULT_LIMITS,
       basePath: '',

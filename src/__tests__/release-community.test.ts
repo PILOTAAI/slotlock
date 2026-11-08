@@ -1,6 +1,5 @@
-// Where people go for help (PROD-4, W18): Discussions are off, so nothing may send questions there;
-// support, abuse, privacy and security each have a published route, and GitHub's issue form offers
-// the private ones before a public issue.
+// Discussions are off, so nothing may send questions there; support, abuse, privacy and security
+// each have a published route.
 import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 

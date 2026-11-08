@@ -1,6 +1,4 @@
-// An agent's holds against real Postgres: candidates held as one group, booked by hold_id (which
-// frees the alternatives in the same transaction), released together, kept to their holder, and
-// capped per holder. Skipped without DATABASE_URL.
+// An agent's holds against real Postgres. Skipped without DATABASE_URL.
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -192,7 +190,6 @@ describe.skipIf(!url)('agent holds (real Postgres)', () => {
     }
     const over = await hold([{ resource_id: id, start: at(20, 9), end: at(20, 10) }], subject);
     expect(over.refused).toEqual([{ index: 0, code: 'hold_limit_reached' }]);
-    // Another agent is not counted against this one.
     expect((await hold([{ resource_id: id, start: at(20, 9), end: at(20, 10) }])).holds).toHaveLength(1);
 
     // A hold without a holder, as the application API takes, has no cap.
@@ -228,7 +225,6 @@ describe.skipIf(!url)('agent holds (real Postgres)', () => {
     expect((await holdFor(at(40, 0), at(40, 8))).ok).toBe(true);
     expect((await holdFor(at(41, 0), at(41, 2))).ok).toBe(true);
     expect(await holdFor(at(42, 0), at(42, 1))).toEqual({ ok: false, code: 'held_time_limit_reached', limit: 10 });
-    // Another holder has its own.
     expect((await holdFor(at(42, 0), at(42, 1), 'other')).ok).toBe(true);
     // The count: three short holds, then a fourth refused by number.
     for (const hour of [1, 3, 5]) expect((await holdFor(at(43, hour), at(43, hour + 1), 'counted')).ok).toBe(true);

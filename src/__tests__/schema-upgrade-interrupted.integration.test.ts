@@ -1,8 +1,6 @@
-// An upgrade run statement by statement (psql without --single-transaction) commits its lift of
-// forced row-level security on its own. When a later data step refuses (a live conflict), the
-// restore never runs. Whatever session runs the next upgrade must still put FORCE back on exactly
-// the tables that had it: a list kept in a session setting died with the session, and FORCE stayed
-// off for good, letting the owning role read every tenant's rows. Skipped without DATABASE_URL.
+// An upgrade run statement by statement commits its lift of forced RLS on its own; when a later
+// step refuses, the next upgrade from any session must restore FORCE on exactly those tables.
+// Skipped without DATABASE_URL.
 import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';

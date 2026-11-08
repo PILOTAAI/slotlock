@@ -1,7 +1,5 @@
-// A stored event is instants and a zone. Its expansion starts from those instants, never from wall
-// times read back out of them (an instant in a repeated hour has no wall time of its own), keys its
-// exceptions by instant, and refuses an exception that names no occurrence; its export reads back as
-// the same occupation.
+// A stored event is instants and a zone: expansion starts from the instants, never from wall times
+// read back out of them (an instant in a repeated hour has none).
 import { describe, expect, it } from 'vitest';
 import {
   CalendarContractError,

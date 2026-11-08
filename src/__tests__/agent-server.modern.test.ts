@@ -1,8 +1,4 @@
-// MCP 2026-07-28 (stateless, per-request `_meta`) on the Slotlock agent server, beside the 2025
-// revisions. Every expectation below is quoted from the 2026-07-28 specification (basic §Messages,
-// §Error Codes, §_meta; transports/streamable-http §Request Metadata, §Server Validation;
-// server/discover; server/utilities/caching), read from the modelcontextprotocol repository on
-// 2026-09-28.
+// MCP 2026-07-28 on the agent server; expectations quote that specification, read 2026-09-28.
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -105,7 +101,6 @@ describe('MCP 2026-07-28 on the Slotlock agent server', () => {
         _meta: { [SERVER_INFO_KEY]: SERVER_INFO },
       },
     });
-    // Discovery never touches tenant data.
     expect(authorize).not.toHaveBeenCalled();
     expect(listResources).not.toHaveBeenCalled();
   });

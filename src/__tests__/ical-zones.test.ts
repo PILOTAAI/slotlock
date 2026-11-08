@@ -1,6 +1,4 @@
-// Calendars that name a time zone without defining it (RFC 5545 wants a VTIMEZONE for each TZID;
-// real feeds, and Slotlock's own stored series, name IANA zones bare), and the other shapes of a
-// legal feed the parser must read: PERIOD RDATEs, events without an end, old series, odd roots.
+// Real feeds, and Slotlock's stored series, name IANA zones without the VTIMEZONE RFC 5545 wants.
 import { describe, expect, it } from 'vitest';
 import {
   CalendarContractError,

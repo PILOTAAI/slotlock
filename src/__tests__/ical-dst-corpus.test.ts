@@ -1,7 +1,5 @@
-// The audit's 66-case daylight-saving corpus (helpers/dst-corpus.ts), as a regression suite. Every
-// case occupies Slotlock's answer exactly, never less than RFC 5545's exact reading, and the two
-// paths agree: a feed imported with the trusted parser and stored occupies what the feed reports,
-// and a stored event exported and read back as a feed occupies what the store holds.
+// The daylight-saving corpus (helpers/dst-corpus.ts): every case occupies Slotlock's answer
+// exactly, never less than RFC 5545's exact reading, and the feed and store paths agree.
 import ICAL from 'ical.js';
 import { describe, expect, it } from 'vitest';
 import {
@@ -82,7 +80,6 @@ function answer(c: Case): Answer {
   return refused(() => occupied(storeContent(c), STORE_WINDOW));
 }
 
-/** Minutes `a` occupies that `b` does not. */
 function freedMinutes(a: Span[], b: Span[]): number {
   const covered = new Set<number>();
   for (const [start, end] of b) {

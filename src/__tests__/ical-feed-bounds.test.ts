@@ -1,10 +1,7 @@
-// Round 2 of #32's review: a feed could still hold the process outside the recurrence budget.
-// - Its own time zone with tens of thousands of RDATE values, re-expanded by ical.js for every later
-//   year it reads (and appended again each time), ran for 34 seconds and then ran out of memory.
-// - An exception for "this and every later occurrence" (RANGE=THISANDFUTURE) made ical.js read a
-//   slow zone while the event was built, where only steps were counted, not time: 150 seconds.
-// - A TZID no VTIMEZONE defines made ical.js scan every VTIMEZONE for every date value: 31 seconds.
-// And ical.js gave every series in a feed the exceptions of every other series (by local time).
+// Feeds that held the process outside the recurrence budget (timings without these bounds): tens of
+// thousands of RDATEs in a zone, re-expanded for every later year (34 s, then out of memory);
+// RANGE=THISANDFUTURE reading a slow zone (150 s); a TZID no VTIMEZONE defines (31 s). And ical.js
+// gave every series in a feed the other series' exceptions.
 import ICAL from 'ical.js';
 import { describe, expect, it } from 'vitest';
 import {
@@ -34,7 +31,6 @@ const event = (...properties: string[]) => [
   'END:VEVENT',
 ];
 
-/** How long `work` ran, and what it threw. */
 function timed(work: () => unknown): { ms: number; error: unknown } {
   const started = performance.now();
   try {
@@ -279,8 +275,8 @@ describe('a feed that would hold the process outside the recurrence budget', () 
   );
 
   it.each(parsers)('refuses %s thousands of RRULEs on one event at once', (_name, parse) => {
-    // Every step of the expansion compared each rule's next time, uncharged: 16,000 rules took
-    // 64 million comparisons and a second and a half to refuse.
+    // Each expansion step compared every rule's next time, uncharged: 16,000 rules took 64 million
+    // comparisons.
     const rules = Array.from({ length: 16_000 }, () => 'RRULE:FREQ=DAILY');
     const text = calendar(
       ...event('UID:fan-out', 'DTSTART:20261101T090000Z', 'DTEND:20261101T100000Z', ...rules),
@@ -366,9 +362,8 @@ describe('converting a wall-clock time in a zone', () => {
 
 describe('a feed that would hold the process inside one call (round 3)', () => {
   // One zone at every cap: 2,000 RDATE values in one observance and 999 more observances. ical.js
-  // expands all of them again for each later year it reads, appending them each time, and sorting
-  // 1,000 EXDATE values in years six apart read 1,000 later years inside one call: 26 to 35 seconds
-  // and 650 MB from a 181 KB feed.
+  // re-expands them for each later year it reads, appending each time: 26 to 35 s and 650 MB from a
+  // 181 KB feed unbounded.
   const crowdedZone = [
     'BEGIN:VTIMEZONE',
     'TZID:Custom/Crowded',
@@ -708,9 +703,8 @@ function randomLine(random: (below: number) => number): string {
 }
 
 describe('a property whose parameters ical.js reads differently from a simple scan (round 4)', () => {
-  // ical.js opens a quoted parameter value only straight after `=`; any other `"` is a character.
-  // A scan that turned every `"` into an open or close quote read the quoted `:` below as the end of
-  // the parameters, while ical.js read all 490,000 of them: 7.9 to 9.1 seconds.
+  // ical.js opens a quoted parameter value only straight after `=`; any other `"` is a character,
+  // so a scan treating every `"` as a quote would miss the 490,000 parameters below.
   const flood = ';R=b'.repeat(490_000);
   it.each(parsers)(
     'refuses %s parameters behind a quote inside a value',
@@ -912,9 +906,8 @@ describe('a property whose parameters ical.js reads differently from a simple sc
     expect(vcards).toBeGreaterThan(50);
   });
 
-  // Round 6: a VCARD anywhere in a feed moves ical.js to vCard 3's parameters for the rest of it,
-  // where TYPE takes several quoted values. `TYPE="a",":"` then hid 490,000 parameters behind a
-  // quoted `:` from a count made with iCalendar's: 7.7 to 24.7 seconds.
+  // A VCARD anywhere in a feed moves ical.js to vCard 3's parameters for the rest of it, where TYPE
+  // takes several quoted values: `TYPE="a",":"` hides parameters behind a quoted `:`.
   const vcardFeeds = [
     [
       'nested in the calendar',

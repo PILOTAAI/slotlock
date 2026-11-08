@@ -1,6 +1,5 @@
-// A real Slotlock agent server on a loopback port, for tests that drive it with official client SDKs.
-// The backend is in-memory and deterministic: reads succeed, writes and lookups fail with the
-// bounded domain errors an agent must be able to read.
+// A real agent server on loopback with a deterministic in-memory backend, for tests that use
+// official client SDKs.
 import { vi } from 'vitest';
 import {
   type SlotlockAgentCalendarBackend,

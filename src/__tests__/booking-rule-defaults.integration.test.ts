@@ -1,8 +1,5 @@
-// Default booking rules for a tenant and its pools, against real Postgres as a LOGIN role without
-// BYPASSRLS that grantApplicationRole granted: a resource's rules are the tenant's defaults,
-// overlaid by its pool's, overlaid by its own, on writes, searches and what the API returns; the
-// defaults table is under forced row-level security; erase_tenant deletes it. Skipped without
-// DATABASE_URL.
+// Tenant and pool default booking rules, as the LOGIN role grantApplicationRole grants. Skipped
+// without DATABASE_URL.
 import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -25,7 +22,6 @@ describe.skipIf(!url)('default booking rules (real Postgres, application role)',
   let admin: ReturnType<typeof postgres>;
   let application: ReturnType<typeof postgres>;
   let store: SlotlockStore;
-  // Two weeks ahead, on the hour.
   const base = new Date(Math.ceil((Date.now() + 14 * DAY) / HOUR) * HOUR);
   const at = (hours: number, minutes = 0) => new Date(base.getTime() + hours * HOUR + minutes * MINUTE);
 
@@ -223,8 +219,8 @@ describe.skipIf(!url)('default booking rules (real Postgres, application role)',
   });
 
   it('caps pool defaults only under read committed, where its count sees every committed row', async () => {
-    // A tenant's own writes already refuse anything else (their suspension check); the root store
-    // in a caller's REPEATABLE READ transaction, whose snapshot predates the lock, is refused too.
+    // A tenant's writes already refuse other transactions; the root store refuses a caller's
+    // REPEATABLE READ one, whose snapshot predates the lock.
     await expect(
       admin.begin('isolation level repeatable read', (tx) =>
         createSlotlockStore(tx).setBookingRuleDefaults({

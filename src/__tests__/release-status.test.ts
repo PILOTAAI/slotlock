@@ -1,7 +1,5 @@
-// Hosted Slotlock's public status (PROD-4): scripts/status-probe.sh checks the API's /healthz and the
-// dashboard from GitHub's runners and keeps one `status` issue open per part that is down.
-// curl and gh are stand-ins: curl answers each URL from STUB_<API|DASHBOARD>_CODE and _BODY, gh
-// keeps its issues in a JSON file.
+// scripts/status-probe.sh keeps one `status` issue open per part that is down. curl answers from
+// STUB_<API|DASHBOARD>_CODE and _BODY; gh keeps its issues in a JSON file.
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -117,7 +115,6 @@ describe.skipIf(!hasJq)('scripts/status-probe.sh', () => {
     expect(down.log('gh.log')).toMatch(
       /issue create --repo PILOTAAI\/slotlock --label status --title Hosted Slotlock API is down --body .*HTTP 503/,
     );
-    // Still down at the next run: the open issue stands, nothing new.
     const again = probe({ api: ['000', ''] }, down.issues);
     expect(again.issues).toEqual(down.issues);
     expect(again.stdout).toContain(

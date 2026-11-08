@@ -1,7 +1,5 @@
-// Where the clocks change, a wall time names two instants (a fold) or none (a gap). The engine reads
-// an occurrence's start and exact end per RFC 5545 §3.3.5 (a fold's first instant, a gap's time
-// moved forward), its wall-clock end at a fold's later instant, and an availability window up to
-// where a gap ends. Each choice is held to an Intl-only oracle in every zone the audit used.
+// Where the clocks change, a wall time names two instants (a fold) or none (a gap); each choice the
+// engine makes is held to an Intl-only oracle.
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import {
@@ -34,7 +32,6 @@ describe('a wall time where the clocks change', () => {
     expect(iso(london.wallFrameToUtc(frame('2026-10-25T01:30:00'), { fold: 'later' }))).toBe(
       '2026-10-25T01:30:00.000Z',
     );
-    // An unambiguous time is the same either way.
     expect(iso(london.wallFrameToUtc(frame('2026-10-25T02:30:00'), { fold: 'later' }))).toBe(
       '2026-10-25T02:30:00.000Z',
     );

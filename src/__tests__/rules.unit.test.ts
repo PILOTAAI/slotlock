@@ -1,6 +1,4 @@
-// VAVAILABILITY-style rule expansion (RFC-0001 spike criterion b) — weekly bookable windows
-// expanded to concrete UTC intervals via rrule, in UTC or in a resource's IANA timezone (the
-// `timezone:` cases below cover DST gaps and local weekdays).
+// Weekly bookable windows expanded to UTC intervals via rrule, in UTC or a resource's IANA zone.
 import { describe, expect, it } from 'vitest';
 import { expandRules } from '../rules.js';
 
@@ -13,7 +11,6 @@ describe('expandRules', () => {
   ];
 
   it('expands a weekday rule to one window per matching day, clipped to the search window', () => {
-    // Mon 2027-01-04 .. Sun 2027-01-10 — expect Mon-Fri windows.
     const windows = expandRules(weekdays, {
       start: d('2027-01-04T00:00:00Z'),
       end: d('2027-01-11T00:00:00Z'),
@@ -66,8 +63,7 @@ describe('expandRules', () => {
     ).toEqual([]);
   });
 
-  // ── Determinism gate (adversarial findings 1/2/4, PR #200): unsupported input is REFUSED
-  // (fails closed), never answered wrong — and the refusal is query-date-independent.
+  // Unsupported input is refused, never answered wrong, whatever the query date.
 
   it('INTERVAL=2 is refused identically regardless of the query date (no parity flapping)', () => {
     const biweekly = [
@@ -114,8 +110,7 @@ describe('expandRules', () => {
       'FREQ=WEEKLY;BYWEEKDAY=MO',
       'FREQ=WEEKLY;BYDAY=MO;BYHOUR=9',
       `FREQ=WEEKLY;BYDAY=MO;BYHOUR=${list(24)};BYMINUTE=${list(60)};BYSECOND=${list(60)}`,
-      // These never occur, and rrule 2.8.1 searches for them as far as the year 9999: 0.65 to
-      // 1.06 s each, on every availability query, before the subset refused them.
+      // These never occur, and rrule 2.8.1 searches for them to the year 9999: 0.65 to 1.06 s each.
       'FREQ=WEEKLY;BYDAY=MO;BYMONTH=2;BYMONTHDAY=30',
       'FREQ=WEEKLY;BYDAY=MO;BYSETPOS=9',
       'FREQ=WEEKLY;BYDAY=MO;BYYEARDAY=400',
@@ -168,8 +163,8 @@ describe('expandRules', () => {
   });
 
   it('refuses an UNTIL that is not a real date, which rrule would read as a later one', () => {
-    // rrule reads UNTIL with Date.UTC, which carries an overflowing field into the next unit:
-    // 31 February 2027 became 3 March, and Monday 1 March stayed bookable.
+    // rrule reads UNTIL with Date.UTC, which carries an overflowing field into the next unit: 31
+    // February 2027 would become 3 March.
     const rule = [
       {
         rrule: 'FREQ=WEEKLY;BYDAY=MO;UNTIL=20270231T000000Z',
@@ -203,8 +198,6 @@ describe('expandRules', () => {
   });
 
   it('a multi-day window is found from a search window entirely INSIDE it', () => {
-    // "Available Mon 00:00 for 3 days" queried on Wednesday only — the fixed one-day back-scan
-    // silently lost this class entirely.
     const multiDay = [
       { rrule: 'FREQ=WEEKLY;BYDAY=MO', startMinutes: 0, durationMinutes: 3 * 24 * 60 },
     ];
@@ -266,9 +259,8 @@ describe('expandRules', () => {
     const rule = { rrule: 'FREQ=WEEKLY;BYDAY=MO', startMinutes: 9 * 60, durationMinutes: 60 };
     const windows = expandRules(
       [rule],
-      // Ends BEFORE UTC Monday — the local-Monday stamp (Jul 5) lies past the window end and
-      // is only scanned because of the one-day widen (rrule.between would include a stamp
-      // exactly ON the end, so 23:00 makes the widen load-bearing — review-proven gap).
+      // Ends before UTC Monday: the local-Monday stamp (Jul 5) is past the window end, found only
+      // by the one-day widen (rrule.between would include a stamp exactly on the end, hence 23:00).
       { start: d('2027-07-04T00:00:00Z'), end: d('2027-07-04T23:00:00Z') },
       'Pacific/Auckland',
     );
@@ -319,9 +311,8 @@ describe('expandRules', () => {
   });
 
   it('timezone: fall-back ambiguity is the FIRST occurrence (RFC 5545) — a 1h rule stays 1 real hour', () => {
-    // Europe/London falls back 2027-10-31 02:00 BST → 01:00 GMT. Wall [00:30, 01:30) reads
-    // twice; the pre-transition reading is [2027-10-30T23:30Z, 2027-10-31T00:30Z). The
-    // accidental later-occurrence pick spanned 2 real hours for a 1-hour rule.
+    // Europe/London falls back 2027-10-31 02:00 BST → 01:00 GMT. Wall [00:30, 01:30) reads twice;
+    // the earlier reading is [2027-10-30T23:30Z, 2027-10-31T00:30Z).
     const rule = { rrule: 'FREQ=WEEKLY;BYDAY=SU', startMinutes: 30, durationMinutes: 60 };
     const windows = expandRules(
       [rule],
@@ -334,10 +325,9 @@ describe('expandRules', () => {
   });
 
   it('timezone: a rule wholly inside a spring-forward gap yields NOTHING — negative-offset zones included', () => {
-    // America/New_York springs forward 2027-03-14 02:00 EST → 03:00 EDT. A [02:00, 03:00)
-    // local rule names only skipped wall time: both endpoints stand where the gap ends, 07:00Z,
-    // and the degenerate window is dropped. (The naive probe manufactured [06:00Z, 07:00Z) — wall
-    // 01:00–02:00 EST, an hour the rule excludes.)
+    // America/New_York springs forward 2027-03-14 02:00 EST → 03:00 EDT. A [02:00, 03:00) rule
+    // names only skipped time: both edges stand where the gap ends, 07:00Z, and the empty window is
+    // dropped.
     const rule = { rrule: 'FREQ=WEEKLY;BYDAY=SU', startMinutes: 2 * 60, durationMinutes: 60 };
     const windows = expandRules(
       [rule],
@@ -356,9 +346,8 @@ describe('expandRules', () => {
   ] as const)(
     'timezone: a window with an edge in a spring-forward gap is clipped to it: [%s +%i min) in New York',
     (start, minutes, expected) => {
-      // America/New_York skips 02:00-03:00 on 2027-03-14 (07:00Z). A window holds only the wall
-      // times it names that exist: an edge in the gap stands where the gap ends, never moved an
-      // hour on into time the rule does not name (D15).
+      // A window holds only the wall times it names that exist: an edge in the gap (02:00-03:00 on
+      // 2027-03-14, 07:00Z in New York) stands where the gap ends.
       const [hours = 0, mins = 0] = start.split(':').map(Number);
       const rule = {
         rrule: 'FREQ=WEEKLY;BYDAY=SU',

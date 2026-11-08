@@ -1,10 +1,4 @@
-// Defects an audit reproduced in the store, each pinned by the scenario that showed it:
-// - an event's own occupation could be freed or moved through the external-reservation API;
-// - the maintenance roll moved a series' end back to the horizon, deleting what lay past it;
-// - a next-available search had no bound on its window;
-// - a delayed duplicate of a create was answered as payload drift, not as stale;
-// - free/busy called a window complete that began before where a series is stored.
-// Skipped without DATABASE_URL.
+// Store defects, each pinned by the scenario that showed it. Skipped without DATABASE_URL.
 import { createHash } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -78,7 +72,7 @@ describe.skipIf(!url)('store audit fixes (real Postgres)', () => {
       const [row] = await sql<{ id: string; external_ref: string; source: string }[]>`
         SELECT id, external_ref, source FROM slotlock.reservations
          WHERE calendar_event_id = ${put.eventId}`;
-      // The audit computed the reference this way; the store must still derive it so.
+      // The store must still derive the reference this way.
       expect(row?.external_ref).toBe(ref);
       return {
         tenantRef,
@@ -122,7 +116,7 @@ describe.skipIf(!url)('store audit fixes (real Postgres)', () => {
         revision: 2,
       });
       // Nothing cancelled, and nothing retired: the reference is the event's, not a booking's, so
-      // no tombstone is written for it (one was, and nothing ever pruned it).
+      // no tombstone is written.
       expect(cancelled).toEqual({ ok: true, cancelled: false, revision: 2 });
       const [tombstones] = await sql<{ count: number }[]>`
         SELECT count(*)::int AS count FROM slotlock.reservation_tombstones

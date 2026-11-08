@@ -1,7 +1,5 @@
-// Time zone rules that change after a booking, against real Postgres. A new tzdata is simulated by
-// moving the stored wall time, as if the rules now put the same wall time an hour later. The shift
-// is reported once; with move, the event goes to its new instant, and stays where it was, reported,
-// when that would overlap another booking. Skipped without DATABASE_URL.
+// A tzdata change is simulated by moving the stored wall time an hour later. Skipped without
+// DATABASE_URL.
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';

@@ -1,19 +1,12 @@
-// The 66-case corpus of the 2026-10-24 readiness audit (its GAP1 lens), kept as a regression suite:
-// every input that made Slotlock 0.2.0 or Pylota's own engine leave written busy time free, around
-// the daylight-saving changes of 2026-10-25 (EU), 2026-11-01 (US) and 2027-03-28 / 2027-03-14.
-// `feed` cases are what a provider sends (parseICalendarChanges); `store` cases are what an agent
-// writes (putCalendarEvent, through expandCalendarEventOccurrences).
+// Daylight-saving cases that once left written busy time free, around the changes of 2026-10-25
+// (EU), 2026-11-01 (US) and 2027-03-28 / 2027-03-14. `feed` cases are what a provider sends
+// (parseICalendarChanges); `store` cases are what an agent writes (putCalendarEvent).
 //
-// Each case carries two answers, written by hand from RFC 5545 (§3.3.5 a fold's first instant and a
-// gap's time moved forward; §3.3.6 exact hours; §3.8.5.3 one exact length for every member; §3.6.1
-// DTEND and DURATION never together):
-// - `rfc`: the exact-duration reading alone, which is the least an occurrence may occupy;
+// Each case carries two answers, written by hand from RFC 5545:
+// - `rfc`: the exact-duration reading alone, the least an occurrence may occupy;
 // - `expected`: Slotlock's rule (SPEC.md, "Daylight-saving time"): the union of that reading and
-//   the wall-clock one (DTEND's wall time carried to each occurrence's date, the later instant of a
-//   repeated hour), or 'refuse' where Slotlock refuses the input. It differs from `rfc` only where
-//   the wall-clock reading occupies more.
-// The audit's notes recorded where its fixtures came from; the VTIMEZONE fixtures are checked
-// against Intl by the corpus test itself.
+//   the wall-clock one, or 'refuse'.
+// The VTIMEZONE fixtures are checked against Intl by the corpus test itself.
 
 const DAY = 86_400_000;
 const anchor = Date.UTC(2026, 9, 24);
@@ -153,7 +146,7 @@ export type Answer = Span[] | 'refuse';
 
 interface CaseBase {
   id: string;
-  /** The audit finding (and its earlier id) the case reproduces. */
+  /** The finding id the case reproduces. */
   defect: string;
   rfc: Answer;
   expected: Answer;
@@ -189,8 +182,8 @@ const span = (startMs: number, minutes: number): Span => [
   minuteIso(startMs + minutes * 60_000),
 ];
 
-// D1 / ENG-1: a first instance spanning the spring change. Its later instances run 01:00-04:00
-// local: three real hours by the wall clock, two by the exact length; the union is three.
+// A first instance spanning the spring change; later instances run 01:00-04:00 local: three hours
+// by the wall clock, two exact; the union is three.
 const d1Spring: Span[] = [
   ['2027-03-28T00:00Z', '2027-03-28T02:00Z'],
   ['2027-04-03T23:00Z', '2027-04-04T01:00Z'],
@@ -205,7 +198,7 @@ const d1Autumn: Span[] = [
   ['2026-10-24T23:30Z', '2026-10-25T04:30Z'],
   ['2026-11-01T00:30Z', '2026-11-01T05:30Z'],
 ];
-// D4 / ENG-5: 02:30 on the gap night moves to 01:30Z and lasts its 75 exact minutes.
+// 02:30 on the gap night moves to 01:30Z and lasts its 75 exact minutes.
 const d4: Span[] = [
   ['2027-03-26T01:30Z', '2027-03-26T02:45Z'],
   ['2027-03-27T01:30Z', '2027-03-27T02:45Z'],
@@ -213,14 +206,14 @@ const d4: Span[] = [
   ['2027-03-29T00:30Z', '2027-03-29T01:45Z'],
   ['2027-03-30T00:30Z', '2027-03-30T01:45Z'],
 ];
-// D6 / ENG-7: a DATE UNTIL includes its whole local day, so 2027-01-06 is the third occurrence.
+// A DATE UNTIL includes its whole local day, so 2027-01-06 is the third occurrence.
 const d6: Span[] = [
   ['2027-01-04T08:00Z', '2027-01-04T09:00Z'],
   ['2027-01-05T08:00Z', '2027-01-05T09:00Z'],
   ['2027-01-06T08:00Z', '2027-01-06T09:00Z'],
 ];
-// ENG-12: an override matching no occurrence, or one whose instance an EXDATE removes, still
-// occupies its own interval, as the provider shows it.
+// An override matching no occurrence, or whose instance an EXDATE removes, still occupies its own
+// interval.
 const orphan: Span[] = [
   ['2027-01-04T09:00Z', '2027-01-04T10:00Z'],
   ['2027-01-05T09:00Z', '2027-01-05T10:00Z'],
@@ -295,7 +288,7 @@ export const CASES: Case[] = [
     note: 'the first instance is the stored instants',
   },
 
-  // ENG-2: the store path must expand from instants, never from re-read wall times.
+  // The store path must expand from instants, never from re-read wall times.
   {
     kind: 'store',
     id: 'ENG-2(1) London daily 01:15Z-01:45Z 2026-10-25 (the second 01:15) store',
@@ -559,7 +552,7 @@ export const CASES: Case[] = [
     note: 'a one-off occupies exactly its interval: 01:00 BST (00:00Z) to 02:00 GMT',
   })),
 
-  // D3 / ENG-3: a stored series addresses its skipped-hour occurrence by its UTC instant.
+  // A stored series addresses its skipped-hour occurrence by its UTC instant.
   ...(
     [
       ['1h', '2027-03-26T02:30:00Z', '2027-03-28T11:00:00Z', 60],
@@ -667,7 +660,7 @@ export const CASES: Case[] = [
     note: 'RECURRENCE-ID 02:30 names the 01:30Z instance; the override replaces it',
   })),
 
-  // D4 / ENG-5: an occurrence starting in the gap lasts its exact length, however long.
+  // An occurrence starting in the gap lasts its exact length, however long.
   ...both((v) => ({
     id: 'D4 feed Berlin daily 02:30-03:45 from 2027-03-26',
     defect: 'ENG-5 (D4)',
@@ -699,7 +692,7 @@ export const CASES: Case[] = [
     note: '75 exact minutes',
   },
 
-  // D9 / ENG-6: hours are exact durations.
+  // Hours are exact durations.
   ...both((v) => ({
     id: 'D9 feed Berlin one-off 12:00 + PT48H from 2027-03-27',
     defect: 'ENG-6 (D9)',
@@ -712,7 +705,7 @@ export const CASES: Case[] = [
     note: '§3.3.6: PT48H is 48 exact hours',
   })),
 
-  // D6 / ENG-7: a DATE UNTIL on a timed series includes its whole local day.
+  // A DATE UNTIL on a timed series includes its whole local day.
   ...both((v) => ({
     id: 'D6 feed Berlin daily 09:00 UNTIL=20270106 (DATE)',
     defect: 'ENG-7 (D6)',
@@ -744,7 +737,7 @@ export const CASES: Case[] = [
     note: 'the stored rule names the end of 2027-01-06 in Berlin, in UTC',
   },
 
-  // ENG-4: shapes ical.js 2.2.1 expands wrongly are refused (UTC, so only the iterator is tested).
+  // Shapes ical.js 2.2.1 expands wrongly are refused (UTC, so only the iterator is tested).
   ...(
     [
       [
@@ -837,8 +830,8 @@ export const CASES: Case[] = [
     ];
   }),
 
-  // ENG-8: a zone defined only by a VTIMEZONE (a Windows name) reads fold and gap times as an IANA
-  // zone does.
+  // A zone defined only by a VTIMEZONE (a Windows name) reads fold and gap times as an IANA zone
+  // does.
   {
     kind: 'feed',
     variant: 'windows',
@@ -936,7 +929,7 @@ export const CASES: Case[] = [
     note: 'a gap end takes the offset before the gap',
   },
 
-  // ENG-9: transparency is per component.
+  // Transparency is per component.
   {
     kind: 'feed',
     variant: 'utc',
@@ -964,7 +957,7 @@ export const CASES: Case[] = [
     note: '§3.8.2.7 TRANSP per component: only the opaque override occupies',
   },
 
-  // ENG-10: an override that keeps its time.
+  // An override that keeps its time.
   ...(
     [
       ['rename', ['SUMMARY:renamed'], 3],
@@ -1004,9 +997,8 @@ export const CASES: Case[] = [
     };
   }),
 
-  // ENG-12: overrides Slotlock 0.2.0 dropped. Written policy (SPEC.md): an override without an end
-  // lasts its series' length; one matching no occurrence, or one whose instance an EXDATE removes,
-  // still occupies its own interval.
+  // Overrides (SPEC.md): one without an end lasts its series' length; one matching no occurrence,
+  // or whose instance an EXDATE removes, still occupies its own interval.
   {
     kind: 'feed',
     variant: 'utc',
@@ -1073,7 +1065,7 @@ export const CASES: Case[] = [
     note: 'RFC 5545 is silent; the provider shows the override busy',
   },
 
-  // ENG-19: DTEND and DURATION together.
+  // DTEND and DURATION together.
   {
     kind: 'feed',
     variant: 'utc',

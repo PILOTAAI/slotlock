@@ -1,6 +1,4 @@
-// History against real Postgres: each change to a booking or event is recorded with who made it
-// (the API key or agent) and what it was before, and read per resource or per record, newest
-// first. Skipped without DATABASE_URL.
+// History against real Postgres. Skipped without DATABASE_URL.
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';

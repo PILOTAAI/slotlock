@@ -1,7 +1,5 @@
-// The dashboard against real Postgres, as a LOGIN role without BYPASSRLS that grantApplicationRole
-// granted: a person signs in (GitHub is a fake `fetch`), and the key the page shows authenticates as
-// their tenant, the resource they add lands in their tenant only, and revoking the key ends it.
-// Skipped without DATABASE_URL.
+// The dashboard as the LOGIN role grantApplicationRole grants; GitHub is a fake `fetch`. Skipped
+// without DATABASE_URL.
 import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';

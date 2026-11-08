@@ -1,5 +1,3 @@
-// slotlock_find_available_slots lists the slots a person can choose from, built from the backend's
-// own next-available search, and writes are never callable from an MCP Apps view.
 import { expect, it } from 'vitest';
 import {
   type SlotlockAgentCalendarBackend,

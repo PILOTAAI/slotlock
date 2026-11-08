@@ -1,7 +1,5 @@
-// The event feed against real Postgres: every change to holds, bookings and events is appended in
-// its own transaction, read in an order no late commit can skip, and delivered to webhooks signed
-// as Standard Webhooks (checked with its reference library), at least once per webhook-id and in
-// order, through a worker that stops mid-batch. Skipped without DATABASE_URL.
+// The event feed against real Postgres; webhooks checked with the Standard Webhooks reference
+// library. Skipped without DATABASE_URL.
 import { randomUUID } from 'node:crypto';
 import { type Server, createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -128,7 +126,6 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
       type: 'io.pylota.slotlock.hold.created',
       source: `/slotlock/resources/${id}`,
     });
-    // Following the cursor from the last one finds nothing new.
     expect((await changes(page.next)).changes).toEqual([]);
   });
 
@@ -222,7 +219,6 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
     // The id alone: the feed goes to the tenant's other endpoints, and a URL can carry a token.
     expect(tail.changes.at(-1)?.data).not.toHaveProperty('url');
 
-    // Enabled again, it carries on from where it stopped.
     answer = () => 200;
     await store.enableWebhookEndpoint({ tenantRef, id: gone?.id as string });
     expect(await deliverSlotlockWebhooks({ feed: store, tenantRef, send })).toEqual({ delivered: 1, failed: 0 });
@@ -248,8 +244,7 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
     // How old a cursor is does not matter, only whether a change after it was pruned.
     const old = Buffer.from(`2:1:1:${Date.now() - 31 * 86_400_000}`).toString('base64url');
     expect(await store.listChanges({ tenantRef, after: old })).toMatchObject({ ok: true });
-    // But one 0.4 gave expires by its date, as there: 0.4 pruned by age, not in feed order, so
-    // what it took is not all before any one position.
+    // A 0.4 cursor expires by its date: 0.4 pruned by age, not in feed order.
     const given = Buffer.from(`1:1:1:${Date.now() - 31 * 86_400_000}`).toString('base64url');
     expect(await store.listChanges({ tenantRef, after: given })).toEqual({ ok: false, code: 'cursor_expired' });
     const recent = Buffer.from(`1:1:1:${Date.now() - 29 * 86_400_000}`).toString('base64url');
@@ -346,7 +341,6 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
     }
     const page = await store.listChanges({ tenantRef: other });
     if (!page.ok) throw new Error(page.code);
-    // After the resource's own creation.
     const [first, second] = page.changes.filter((change) => change.type === 'reservation.created');
     if (!first || !second) throw new Error('two changes expected');
     // The later change is the older: a transaction that began first and wrote last. Only a prefix
@@ -369,7 +363,6 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
     expect(current).toEqual({ ok: true, changes: [], next: expect.any(String) });
     if (!current.ok) throw new Error(current.code);
     expect(await store.listChanges({ tenantRef: other, after: current.next })).toMatchObject({ ok: true });
-    // And it reads what comes next, as does a reader starting over.
     await store.createExternalReservation({
       tenantRef: other, externalRef: 'R-3', resourceId: resource.id, start: at(84), end: at(85), bufferAfterMs: 0, revision: 1,
     });
@@ -426,7 +419,6 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
         const seeded = await tx<{ tenant_ref: string; txid: string; id: string }[]>`
           SELECT tenant_ref, txid::text, id::text FROM slotlock.outbox_pruned
            WHERE tenant_ref IN (${kept}, ${quiet}) ORDER BY tenant_ref`;
-        // Applied again, it seeds nothing more.
         await tx`DELETE FROM slotlock.outbox_pruned WHERE tenant_ref = ${quiet}`;
         await tx.unsafe(SLOTLOCK_STRUCTURE_DDL);
         const again = await tx`SELECT 1 FROM slotlock.outbox_pruned WHERE tenant_ref = ${quiet}`;

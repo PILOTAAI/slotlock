@@ -1,7 +1,5 @@
-// MCP 2026-07-28 resources and live calendar updates on the Slotlock agent server. Expectations are
-// quoted from the 2026-07-28 specification (server/resources; basic/patterns/subscriptions;
-// transports/streamable-http §Receiving Messages; server/utilities/caching), read from the
-// modelcontextprotocol repository on 2026-09-28.
+// MCP 2026-07-28 resources and live updates; expectations quote that specification, read
+// 2026-09-28.
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -681,9 +679,8 @@ describe('live calendar updates (MCP 2026-07-28 subscriptions/listen)', () => {
   });
 
   it('caps open subscriptions per tenant, so one tenant with many keys cannot take them all (SURF-3)', async () => {
-    // The audit's probe: one tenant minted 64 keys and opened all 256 slots, and another tenant's
-    // first subscriptions/listen then answered 429. Here the tenant has six keys and the server six
-    // slots; the tenant's share is two.
+    // Six keys and six slots: the tenant's share is two, so its keys cannot lock another tenant
+    // out.
     authenticate.mockImplementation(async (request) => {
       const token = request.headers.get('authorization') ?? '';
       const key = /^Bearer key-(\d)$/.exec(token)?.[1];
@@ -711,14 +708,12 @@ describe('live calendar updates (MCP 2026-07-28 subscriptions/listen)', () => {
       }
     }
     expect(statuses).toEqual([200, 200, 429, 429, 429, 429]);
-    // Another tenant still gets a slot.
     const other = await server.fetch(listen({ resourceSubscriptions: [URI_A] }, 'Bearer third'));
     expect(other.status).toBe(200);
     const otherReader = new SseReader(other);
     expect(await otherReader.message()).toMatchObject({
       method: 'notifications/subscriptions/acknowledged',
     });
-    // A closed subscription gives the tenant its slot back.
     await opened[0]?.cancel();
     const again = await server.fetch(listen({ resourceSubscriptions: [URI_A] }, 'Bearer key-3'));
     expect(again.status).toBe(200);
@@ -728,8 +723,7 @@ describe('live calendar updates (MCP 2026-07-28 subscriptions/listen)', () => {
   });
 
   it('ends the oldest subscription of the tenant holding most for a tenant holding fewer when the server is full', async () => {
-    // The audit's probe: 16 sign-up tenants held all 256 slots, each within its share, and every
-    // other tenant's first subscriptions/listen answered 429 for as long as they held them.
+    // Tenants each within their share must not hold every slot from a newcomer.
     authenticate.mockImplementation(async (request) => {
       const token = request.headers.get('authorization') ?? '';
       const match = /^Bearer t(\d)-k(\d)$/.exec(token);
@@ -747,7 +741,6 @@ describe('live calendar updates (MCP 2026-07-28 subscriptions/listen)', () => {
     };
     const oldest = await open('t1-k1');
     const held = [await open('t1-k2'), await open('t2-k1'), await open('t2-k2')];
-    // Before, the third tenant's first listen answered 429.
     const third = await open('t3-k1');
     // The first tenant's oldest is ended gracefully, with the listen request's result.
     expect(await oldest.message()).toMatchObject({ result: { resultType: 'complete' } });

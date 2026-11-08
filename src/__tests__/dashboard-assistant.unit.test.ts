@@ -1,9 +1,5 @@
-// The dashboard assistant without a database: an organization's owner connects a model, and its
-// members chat with it. The model is a real HTTP server on a loopback port speaking the Anthropic
-// Messages API or OpenAI-compatible chat completions; GitHub is a fake `fetch`; the agent backend
-// records what runs. Reads run, writes wait for the member's approval and run once, a tool outside
-// the list is refused, the key is never rendered, a member cannot change the settings, one
-// organization never sees another's, provider failures read plainly, and a message is bounded.
+// The dashboard assistant without a database: the model is a real HTTP server on loopback, GitHub a
+// fake `fetch`.
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   SlotlockAgentCalendarBackend,
@@ -534,7 +530,6 @@ describe('the assistant across organizations', () => {
     expect((await chat(target, bob, 'two')).status).toBe(303);
     const limited = await chat(target, bob, 'three');
     expect(limited.status).toBe(429);
-    // Another member has a budget of their own.
     expect((await chat(target, await signIn(target, 'alice'), 'mine')).status).toBe(303);
   });
 });
@@ -659,7 +654,6 @@ describe('security review fixes', () => {
     return page(target, bob);
   };
 
-  // M1: the card is the whole action; ids are resolved; what cannot be shown is not proposed.
   it('M1: shows every one of 100 attendees on the card it asks the member to approve', async () => {
     const target = dashboard();
     await connect(target, await signIn(target, 'alice'), model, 'openai');
@@ -681,7 +675,6 @@ describe('security review fixes', () => {
     expect(html).toContain('Waiting for you');
     for (const { address } of attendees) expect(html, address).toContain(address);
     expect(html).toContain('END-OF-DESCRIPTION');
-    // The resource by name, from the confirmation question.
     expect(html).toContain('vehicle-1');
     expect(html).not.toContain('…</');
   });
@@ -723,7 +716,6 @@ describe('security review fixes', () => {
     expect(toolResultsSent('openai', model.requests[1])).toEqual([JSON.stringify({ error: { code: 'change_too_large_to_show' } })]);
   });
 
-  // M2: a proposal holds no series-write slot: another tenant's series write runs meanwhile.
   it("M2: lets another tenant's update_event through while a proposed one waits in a running turn", async () => {
     const limits = createSlotlockRequestLimits({
       limits: SLOTLOCK_DEFAULT_LIMITS,
@@ -793,7 +785,6 @@ describe('security review fixes', () => {
     }
   });
 
-  // L1: the principal and actor are the member's GitHub user id; the login is only shown.
   it('L1: acts as dashboard-assistant:github:<uid> and shows it as the assistant for @login', async () => {
     const changes = [
       { id: 'seq:2', type: 'event.created', actor: 'dashboard-assistant:github:12', resourceId: null, occurredAt: new Date() },
@@ -812,7 +803,6 @@ describe('security review fixes', () => {
     expect(overview).toContain('Assistant for GitHub user 11');
   });
 
-  // L2: bounded in UTF-8 bytes, whatever the script; actions pruned with their messages.
   it('L2: keeps a conversation of long CJK messages under the stored byte bound', () => {
     const cjk = '予約可能な時間帯を確認してください。'.repeat(220);
     let entries: SlotlockAssistantEntry[] = [];
@@ -871,7 +861,7 @@ describe('security review fixes', () => {
     expect(Buffer.byteLength(JSON.stringify(stored?.messages), 'utf8')).toBeLessThanOrEqual(SLOTLOCK_ASSISTANT_MAX_STORED_BYTES);
   });
 
-  // L4: reads share one budget a turn; the Worker caps agent calls a request and per tenant.
+  // The Worker caps agent calls per request and per tenant.
   it("L4: refuses a turn's reads past its budget of resource-days, on every path", async () => {
     const target = dashboard();
     await connect(target, await signIn(target, 'alice'), model, 'openai');
@@ -888,7 +878,6 @@ describe('security review fixes', () => {
     model.requests.length = 0;
     model.script({ calls: Array.from({ length: 8 }, () => ({ name: 'slotlock_list_resources', input: {} })) });
     await chat(target, bob, 'Loop');
-    // 16 reads run, then the turn's budget is spent.
     expect(backend.listResources).toHaveBeenCalledTimes(16);
   });
 
@@ -905,7 +894,6 @@ describe('security review fixes', () => {
     expect(limiter(calls, read)).toBe(false);
   });
 
-  // L5: a new provider or origin takes the key again.
   it('L5: makes the owner enter the key again when the provider or origin changes', async () => {
     const target = dashboard();
     const alice = await signIn(target, 'alice');

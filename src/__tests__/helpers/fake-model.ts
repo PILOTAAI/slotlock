@@ -1,7 +1,5 @@
-// A model provider on a loopback port that speaks either the Anthropic Messages API or OpenAI-
-// compatible chat completions, answering from a script: each request takes the next answer (the
-// last one repeats). It records what the dashboard sent, headers included, so a test can check the
-// format, the key and what the model was shown.
+// A scripted Anthropic Messages or OpenAI-compatible model on loopback (the last answer repeats),
+// recording every request.
 import { type IncomingHttpHeaders, createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -153,7 +151,6 @@ export function toolResultsSent(format: FakeModelFormat, request: FakeModelReque
   );
 }
 
-/** The tool names offered in a request. */
 export function toolsOffered(format: FakeModelFormat, request: FakeModelRequest | undefined): string[] {
   const tools = (request?.body.tools ?? []) as Array<Record<string, unknown>>;
   return tools.map((tool) =>

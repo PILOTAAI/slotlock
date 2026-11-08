@@ -93,9 +93,8 @@ describe('tenant RLS DDL', () => {
   });
 });
 
-// The deployment role owns every table, so a function it resolves through a schema another role
-// can write runs with that ownership. Its DDL resolves names in pg_catalog first and last, and only
-// while it runs: a caller that keeps going in the same transaction gets its search_path back.
+// The deployment role owns every table, so its DDL resolves names in pg_catalog only while it runs,
+// and gives the caller its search_path back.
 describe('deployment DDL name resolution', () => {
   const SAVE =
     "SELECT pg_catalog.set_config('slotlock.caller_search_path', pg_catalog.current_setting('search_path'), true);";
@@ -127,8 +126,7 @@ describe('deployment DDL name resolution', () => {
     expect(SLOTLOCK_CORE_DDL).not.toContain('pgcrypto');
   });
 
-  // pg_input_is_valid (PostgreSQL 16) is the newest function the DDL calls: on an older server it
-  // must stop with a message naming the version, before anything is created or changed.
+  // pg_input_is_valid (PostgreSQL 16) is the newest function the DDL calls.
   it('refuses a server older than PostgreSQL 16, and a newer schema, before it changes anything', () => {
     expect(SLOTLOCK_CORE_DDL).toContain('pg_input_is_valid(');
     expect(SLOTLOCK_DEPLOYMENT_CHECKS).toContain(
@@ -190,8 +188,8 @@ describe('deployment DDL name resolution', () => {
     }
   });
 
-  // Suspending runs as the deployment role only: the functions run as their caller, and no role is
-  // granted them, so a serving role cannot lift a suspension.
+  // Suspend functions run as their caller and are granted to no role, so a serving role cannot lift
+  // a suspension.
   it('defines suspend and unsuspend as functions only the deployment role runs', () => {
     for (const signature of SLOTLOCK_OPERATOR_FUNCTIONS) {
       const name = signature.slice(0, signature.indexOf('('));
@@ -263,7 +261,6 @@ describe('deployment DDL name resolution', () => {
     expect(use).toContain('ON CONFLICT (kind, token_hash) DO NOTHING');
     expect(use).not.toContain('DO UPDATE');
     expect(use).toContain('RETURN coalesce(recorded, false);');
-    // Pruning is bounded per call and never waits on a row another call holds.
     expect(use).toMatch(/LIMIT 100\s+FOR UPDATE SKIP LOCKED/);
     // One person's live forms are counted under a lock on that person, in READ COMMITTED.
     const isolation = use.indexOf("current_setting('transaction_isolation') <> 'read committed'");

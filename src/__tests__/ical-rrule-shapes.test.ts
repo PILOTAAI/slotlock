@@ -1,8 +1,5 @@
-// Recurrence rules ical.js 2.2.1 expands wrongly are refused (ENG-4), on every path: the agent's
-// validator, a stored event, the trusted importer, and per series in a feed. Every rule Slotlock
-// still accepts expands as RFC 5545 §3.3.10 says: the RFC's own §3.8.5.3 examples, and random rules
-// of every accepted shape against a brute-force oracle (helpers/rrule-oracle.ts) that the same
-// examples check first.
+// Rules ical.js 2.2.1 expands wrongly are refused on every path; every accepted rule expands as RFC
+// 5545 §3.3.10 says, against the RFC's examples and a brute-force oracle (helpers/rrule-oracle.ts).
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import {

@@ -1,8 +1,6 @@
-// The dashboard Worker's sign-in limits count every request the dashboard routes to a sign-in or its
-// callback: per client network (SLOTLOCK_SIGN_IN_RATE_LIMIT), and for every client together under a
-// higher ceiling (SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT). The dashboard routes a path with one
-// trailing slash as the path without it, so `/dashboard/sign-in/` and `/dashboard/callback/` are
-// sign-ins too. No database is needed: a refused request never opens a client.
+// The dashboard routes a path with one trailing slash as the path without it, so
+// `/dashboard/sign-in/` and `/dashboard/callback/` count as sign-ins. No database: a refused
+// request never opens a client.
 import { randomBytes } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -89,8 +87,8 @@ describe('SEC-12: sign-ins are limited per client, under a higher ceiling for al
     new Request(`${APP}/dashboard/sign-in`, { headers: { 'cf-connecting-ip': address } });
 
   it("does not refuse another client's sign-in once one client has used its own", async () => {
-    // The audit: one global bucket of 120 a minute against a per-client limit of 60, so two clients
-    // at their limit refused every visitor at that Cloudflare location.
+    // One global bucket of 120 a minute against a per-client 60 would let two clients at their
+    // limit refuse everyone.
     const signIn = limiter(2);
     const worker = createSlotlockDashboardWorker();
     const env = environment(signIn);
@@ -108,8 +106,7 @@ describe('SEC-12: sign-ins are limited per client, under a higher ceiling for al
   });
 
   it('counts an IPv6 client as its /64, so addresses rotated inside it buy no new budget (SEC-12)', async () => {
-    // The verifier's probe: 600 sign-ins from 2001:db8:1:2::1 up to ::258 were each answered 302,
-    // used up the ceiling every client shares, and the next visitor was refused.
+    // 600 sign-ins across one /64 must not use up the ceiling every client shares.
     const signIn = limiter(2);
     const ceiling = limiter(5);
     const client = limiter();
@@ -131,9 +128,8 @@ describe('SEC-12: sign-ins are limited per client, under a higher ceiling for al
   });
 
   it("counts an IPv6 client's sign-ins by its /48, so rotating /64s cannot use up the ceiling (SEC-12)", async () => {
-    // The verifier's probe after the /64 fix: sign-ins from 2001:db8:1:0::1, 2001:db8:1:1::1 and
-    // on, each /64 within its own limit, used up the ceiling every client shares, and the next
-    // visitor was refused. A /48 is one site's allocation, as one IPv4 address is a site behind NAT.
+    // Each /64 within its own limit, across one /48, must not use up the shared ceiling: a /48 is
+    // one site's allocation.
     const signIn = limiter(2);
     const ceiling = limiter(5);
     const client = limiter();
@@ -150,7 +146,6 @@ describe('SEC-12: sign-ins are limited per client, under a higher ceiling for al
     expect(new Set(signIn.asked)).toEqual(
       new Set(['sign-in:2001:db8:1::/48', 'sign-in:198.51.100.4', 'sign-in:2001:db8:2::/48']),
     );
-    // Every other dashboard request is still counted per /64.
     expect(client.asked[1]).toBe('client:2001:db8:1:1::/64');
   });
 

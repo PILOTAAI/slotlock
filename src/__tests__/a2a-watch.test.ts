@@ -1,6 +1,4 @@
-// The A2A watch skill (SendStreamingMessage) on the agent server: refusals before the stream opens,
-// the caps it shares with MCP subscriptions, and how the task ends. The happy path against the
-// official SDK client is in a2a-sdk.interop.test.ts.
+// The A2A watch skill on the agent server; the SDK happy path is in a2a-sdk.interop.test.ts.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   SLOTLOCK_A2A_PROTOCOL_VERSION,
@@ -76,7 +74,6 @@ function watch(args: unknown, token = 'Bearer valid', method = 'SendStreamingMes
   });
 }
 
-/** The data of a one-message reply streamed for a refusal. */
 async function streamedReply(response: Response): Promise<unknown> {
   const stream = new SseReader(response);
   const event = (await stream.message()) as { result: { message: { parts: [{ data: unknown }] } } };

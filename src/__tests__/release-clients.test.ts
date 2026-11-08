@@ -1,8 +1,5 @@
-// The five language clients go out with each release: versioned with the package by the release
-// scripts, published from release.yml once its suite has passed, each from its own environment a
-// maintainer approves (PyPI, crates.io and NuGet by trusted publishing, Maven Central as a deployment
-// a maintainer publishes in the Central Portal, Go as a module tag), and refused when a client's
-// version disagrees with the release.
+// The five language clients are versioned and published with each release, and refused when a
+// version disagrees.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
@@ -29,7 +26,6 @@ afterAll(() => {
 const hasJq = spawnSync('jq', ['--version']).status === 0;
 const packageVersion = (JSON.parse(read('package.json')) as { version: string }).version;
 
-/** Each client file and the line in it that names its version. */
 const CLIENT_VERSION_LINES: [string, (version: string) => string][] = [
   ['clients/python/pyproject.toml', (v) => `version = "${v}"`],
   ['clients/python/src/slotlock/_transport.py', (v) => `__version__ = "${v}"`],
@@ -316,7 +312,6 @@ describe('Go module tag', () => {
     expect(first.status).toBe(0);
     expect(r.remoteTag('clients/go/v1.2.3')).toBe(r.commit);
     expect(git(r.cwd, 'cat-file', '-t', 'refs/tags/clients/go/v1.2.3')).toBe('tag');
-    // A re-run of the job after a later failure changes nothing.
     const again = r.run('1.2.3');
     expect(again.status, again.stderr).toBe(0);
     expect(again.stdout).toContain('already names');

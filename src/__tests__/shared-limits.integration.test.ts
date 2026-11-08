@@ -1,7 +1,4 @@
-// Request budgets shared by every server through PostgreSQL (SLOTLOCK_SHARED_LIMITS): the bucket
-// function never gives out more tokens than it has, however many servers race for them; two
-// servers' limiters allow a tenant its budget once between them, not once each; and a database
-// that cannot be reached leaves each server's own budget in charge. Skipped without DATABASE_URL.
+// Request budgets shared through PostgreSQL (SLOTLOCK_SHARED_LIMITS). Skipped without DATABASE_URL.
 import { createHash, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';

@@ -1,7 +1,5 @@
-// What a resource is to agents and to its tenant over its life: a private resource (a tax-deadline
-// calendar, say) is invisible to agents on every read and write while its tenant's own code uses it;
-// an archived one is listed nowhere and takes no new booking but keeps its history; and one is
-// deleted only once nothing live is on it. Skipped without DATABASE_URL.
+// A resource over its life: private ones are invisible to agents, archived ones take no booking,
+// and one is deleted only once nothing live is on it. Skipped without DATABASE_URL.
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { SlotlockAgentInvocationContext } from '../agent-server.js';
@@ -84,7 +82,7 @@ describe.skipIf(!url)('resource visibility, archive and delete (real Postgres)',
       const agent = createSlotlockStoreAgentBackend(store, {
         availabilityRules: async () => ALWAYS,
       });
-      // The audit's repro: the agent listed ["vehicle-1", "finance:hmrc-vat:abc"].
+      // Never the private one.
       const listed = (await agent.listResources(agentContext(tenantRef), { limit: 10 })) as {
         resources: { external_ref: string }[];
       };
@@ -149,8 +147,7 @@ describe.skipIf(!url)('resource visibility, archive and delete (real Postgres)',
         timezone: 'UTC',
         visibility: 'private',
       });
-      // Created again with no visibility named, it is returned as it is. Before, that was refused,
-      // and the application API answered it 500.
+      // Created again with no visibility named, it is returned as it is.
       await expect(
         store.createResource({ tenantRef, externalRef: 'finance:deadlines', timezone: 'UTC' }),
       ).resolves.toEqual(deadlines);
@@ -277,7 +274,6 @@ describe.skipIf(!url)('resource visibility, archive and delete (real Postgres)',
 
       const archived = await store.archiveResource({ tenantRef, id: van.id });
       expect(archived?.archivedAt).toBeInstanceOf(Date);
-      // Archiving again keeps the first time.
       await expect(store.archiveResource({ tenantRef, id: van.id })).resolves.toEqual(archived);
       await expect(
         store.archiveResource({ tenantRef: freshTenant(), id: van.id }),
@@ -422,7 +418,7 @@ describe.skipIf(!url)('resource visibility, archive and delete (real Postgres)',
       await new Promise((resolve) => setTimeout(resolve, 200));
       release();
       await archive;
-      // Without the resource's share lock the confirm read it before the archive committed, and booked.
+      // The resource's share lock keeps the confirm from reading it before the archive commits.
       await expect(confirm).resolves.toEqual({ ok: false, code: 'resource_archived' });
       const [row] = await sql<{ status: string }[]>`
         SELECT status FROM slotlock.reservations WHERE id = ${hold.hold.id}`;
@@ -516,7 +512,6 @@ describe.skipIf(!url)('resource visibility, archive and delete (real Postgres)',
         deleted: false,
       });
       await expect(store.getResource({ tenantRef, id: van.id })).resolves.toBeNull();
-      // The cap of one has room again.
       await expect(
         store.createResource({
           tenantRef,

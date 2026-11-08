@@ -1,5 +1,3 @@
-// The confirmation question against the real store backend and PostgreSQL: what it says is what an
-// accepted write books, and it shows one tenant nothing of another's.
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';

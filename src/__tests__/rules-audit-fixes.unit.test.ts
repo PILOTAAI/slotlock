@@ -1,5 +1,5 @@
-// Defects an audit reproduced in expandRules: UNTIL read differently with and without a time zone,
-// and no bound on the search window (50 daily rules over a century took a minute of CPU).
+// expandRules: UNTIL read the same with and without a zone, and a bounded search (50 daily rules
+// over a century once took a minute of CPU).
 import { describe, expect, it } from 'vitest';
 import { expandRules } from '../rules.js';
 

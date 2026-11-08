@@ -1,9 +1,6 @@
-// Slotlock reads a zone's offsets from Intl a UTC month at a time and keeps them, rather than
-// asking Intl for four to six offsets at every conversion: every occurrence of a series converts a
-// time, and forty daily London series held a feed for 35 seconds that way (SEC-3). A month is read
-// from its offsets at each UTC midnight, each change narrowed to the second, so it must give what
-// Intl gives at every instant, a change and its reversal a few days apart included (Gaza's in 2040,
-// which a search a week at a time missed, ENG-15).
+// Slotlock reads a zone's offsets from Intl a UTC month at a time rather than at every conversion.
+// A month must give what Intl gives at every instant, a change and its reversal a few days apart
+// included (Gaza's in 2040, which a weekly search misses).
 import { describe, expect, it } from 'vitest';
 import { zoneTransitions, zonedDateTimeFields, zonedDateTimeToUtc } from '../timezone.js';
 

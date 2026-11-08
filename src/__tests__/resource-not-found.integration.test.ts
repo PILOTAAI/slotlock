@@ -1,8 +1,6 @@
-// A resource id that names no resource of the caller's tenant answers `resource_not_found` on every
-// surface (MCP 2025 and 2026-07-28, REST, A2A), on the real store and PostgreSQL, and never a server
-// error. Ids the store never issues (an external reference such as the quickstart's `vehicle-42`,
-// the nil UUID, a version 7 UUID) are not found, exactly like a version 4 UUID that names nothing or
-// another tenant's resource: refusing them as not found widens nothing. Skipped without DATABASE_URL.
+// An id that names no resource of the caller's tenant answers `resource_not_found` on every
+// surface, never a server error: ids the store never issues are refused like another tenant's.
+// Skipped without DATABASE_URL.
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';

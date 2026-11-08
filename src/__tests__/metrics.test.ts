@@ -1,5 +1,3 @@
-// Metrics in the Prometheus text format: what the server's hooks report, counted by labels from
-// closed sets, never a tenant or an argument.
 import { describe, expect, it } from 'vitest';
 import { createSlotlockMetrics } from '../metrics.js';
 

@@ -1,8 +1,5 @@
-// What the feed must never hold, and how its provenance columns migrate (the feed provenance review):
-// a coverage source (an iCalendar URL with a token, an address) never reaches a feed row, a CloudEvent
-// or the history, only its random id; the origin column is added without a scan under the lock, its CHECK
-// is the origins the API reads, and a write that names no origin is `library`; an authenticator's
-// key id that withTenant would refuse is left out. Skipped without DATABASE_URL.
+// No coverage source (an iCalendar URL with a token, an address) reaches a feed row, a CloudEvent
+// or the history, only its random id. Skipped without DATABASE_URL.
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';

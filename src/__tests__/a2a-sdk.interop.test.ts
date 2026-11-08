@@ -1,6 +1,5 @@
-// Slotlock against the OFFICIAL A2A JavaScript SDK (@a2a-js/sdk, pinned in devDependencies), whose
-// types are generated from a2a.proto. Parsing the card with the SDK's own AgentCard.fromJSON is how
-// this file proves the card has the protocol's shape rather than one Slotlock invented.
+// Against the official A2A SDK (@a2a-js/sdk), whose AgentCard.fromJSON proves the card has the
+// protocol's shape.
 import {
   A2A_PROTOCOL_VERSION,
   AgentCard,
@@ -52,7 +51,6 @@ function invocation(messageId: string, skill: string, args: Record<string, unkno
   });
 }
 
-/** The single data part of a synchronous Slotlock reply. */
 function replyData(reply: unknown): unknown {
   const parts = (reply as { parts?: Array<{ content?: { $case?: string; value?: unknown } }> })
     .parts;
@@ -216,7 +214,6 @@ describe('Slotlock with the official A2A JavaScript SDK', () => {
       uri: 'slotlock://resources/resource-1',
     });
 
-    // Closing the stream ends the watch and its reader.
     abort.abort();
     await stream.return(undefined).catch(() => {});
     await vi.waitFor(() => expect(feed.stopped).toEqual(['fixture-tenant']));

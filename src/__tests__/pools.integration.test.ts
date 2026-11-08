@@ -1,6 +1,4 @@
-// Pools against real Postgres: a class of interchangeable resources sells out exactly at its number
-// of members, whatever the race; a booking takes the first member free and allowed, names it, and
-// replays to the same one; agents list a pool's members in that order. Skipped without DATABASE_URL.
+// Pools against real Postgres. Skipped without DATABASE_URL.
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -135,7 +133,6 @@ describe.skipIf(!url)('pools (real Postgres)', () => {
       ],
       coverage: { start: at(8), end: at(18), certainty: 'certain', reason: null },
     });
-    // Booked out where every member is taken.
     await book(pool, 12, 13);
     expect((await availability(12, 14)).intervals).toEqual([
       { start: at(12), end: at(13), free: 0 },

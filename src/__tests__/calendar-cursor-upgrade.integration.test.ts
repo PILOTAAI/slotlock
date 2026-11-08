@@ -1,7 +1,5 @@
-// A stored series rolled from a cursor Slotlock 0.1 kept beside it. 0.1 read a zoned occurrence as
-// UTC beside the series' UTC UNTIL, so the cursor it kept for this Berlin series had already ended
-// at the occurrence UNTIL names (1 February, 09:00 Berlin); resumed, that hour was never
-// materialized and a booking took it. Skipped without DATABASE_URL.
+// A series rolled from the cursor Slotlock 0.1 kept, which read zoned occurrences as UTC and so
+// ended early. Skipped without DATABASE_URL.
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';

@@ -1,9 +1,6 @@
-// A coverage source's id on the feed (0.6): random, stored with the source, never derivable from the
-// tenant and the source, and the same on every change about it. Upgrading renames the coverage
-// changes earlier releases wrote (0.5.2's carried the source itself and its last error; 0.5.3's an
-// unkeyed digest of it) in batches after the structure commits, as a deployment role forced RLS
-// binds; the feed never serves one of them raw meanwhile. A database and roles of their own; skipped
-// without DATABASE_URL; the connecting role must create databases and roles.
+// Coverage source ids: random, never derivable from tenant and source; the upgrade renames earlier
+// releases' coverage changes. Needs a role that creates databases and roles; skipped without
+// DATABASE_URL.
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import postgres from 'postgres';
@@ -106,7 +103,7 @@ describe.skipIf(!url)('coverage source ids (real Postgres)', () => {
   });
 
   it('is random per source, not the digest of the tenant and the source', async () => {
-    // The audit's guess: confirmed offline against 0.5.3's digest, src_482ba2bfbabbb8b6a107b3ef.
+    // Confirmed offline against 0.5.3's digest, src_482ba2bfbabbb8b6a107b3ef.
     const guess = 'google:alice.smith@example.com';
     const app = createSlotlockStoreApplicationBackend(store);
     const tenants = [`default-${randomUUID()}`, `other-${randomUUID()}`];
@@ -311,7 +308,6 @@ describe.skipIf(!url)('coverage source ids (real Postgres)', () => {
       'src_redacted',
     ]);
 
-    // Again, whole, and as a no-op: nothing changes.
     await superuser`UPDATE slotlock.schema_version SET ddl_sha256 = NULL, catalog_sha256 = NULL`;
     await ownerStore.applySchema();
     await ownerStore.applySchema();

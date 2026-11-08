@@ -1,8 +1,4 @@
-// Defects an audit reproduced on the agent server's protocol surface, each pinned by the request
-// that showed it: a chunked body read whole past `maxRequestBytes`, a confirmation question that
-// left out what changes a booking, arguments of the wrong type run as `{}`, an A2A rate limit
-// answered in MCP's shape, a media type compared case-sensitively, and calls that named an
-// operation but were never reported to `onEvent`.
+// Defects on the agent server's protocol surface, each pinned by the request that showed it.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   SLOTLOCK_A2A_PROTOCOL_VERSION,
@@ -317,7 +313,6 @@ describe('P5: arguments of the wrong type are refused, not run as {}', () => {
       });
     }
     expect(listResources).not.toHaveBeenCalled();
-    // Omitted arguments are still `{}`.
     const omitted = await server.fetch(legacyToolCall({ name: 'slotlock_list_resources' }));
     expect(await rpc(omitted)).toMatchObject({ result: { structuredContent: {} } });
     expect(listResources).toHaveBeenCalledWith(expect.anything(), { limit: 50 });

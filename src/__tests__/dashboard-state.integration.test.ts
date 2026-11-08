@@ -1,7 +1,5 @@
-// Two dashboard instances sharing one real Postgres, as two servers behind a load balancer would:
-// a sign-in, a sent form and a signed-out session are each honoured by both, and racing resource
-// adds on both stop at the cap. The serving role is a LOGIN role without BYPASSRLS granted by
-// grantApplicationRole. Skipped without DATABASE_URL.
+// Two dashboard instances sharing one Postgres, as behind a load balancer, as the LOGIN role
+// grantApplicationRole grants. Skipped without DATABASE_URL.
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -307,7 +305,6 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
     expect(await formRows()).toBe(before);
     const keys = await createSlotlockApiKeyStore(admin).list({ tenantRef });
     expect(keys.filter(({ name }) => name === 'Forged')).toHaveLength(0);
-    // The real value still works once.
     const sent = await post(target, '/dashboard/keys', { csrf: mine.csrf, once: mine.once, name: 'Real', access: 'read', expires: 'never' }, session);
     expect(sent.status).toBe(200);
   });
@@ -357,7 +354,6 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
       const refused = await post(second, '/dashboard/keys', { csrf, once, name: 'Over', access: 'read', expires: 'never' }, session);
       expect(refused.status).toBe(429);
       expect(await refused.text()).toContain('Too many forms');
-      // Signing out is never refused.
       const out = await post(first, '/dashboard/sign-out', { csrf }, session);
       expect(out.status).toBe(303);
       expect(await (await get(second, '/dashboard/keys', session)).text()).not.toContain('@two-servers');
@@ -483,9 +479,8 @@ describe.skipIf(!url)('capped resource creation in the store (real Postgres)', (
     for (const outcome of racing.filter(({ status }) => status === 'rejected')) {
       expect((outcome as PromiseRejectedResult).reason).toMatchObject({ code: 'resource_limit_reached' });
     }
-    // withTenant opens its own transaction READ COMMITTED whatever the role's default, so a capped
-    // create counts exactly there. Inside a caller's REPEATABLE READ transaction it cannot, and its
-    // writes are refused.
+    // withTenant counts a capped create exactly only in its own READ COMMITTED transaction; inside
+    // a caller's REPEATABLE READ one, writes are refused.
     await expect(
       store.withTenant(tenantRef, (tenant) =>
         tenant.createResource({ tenantRef, externalRef: 'x', timezone: 'UTC', maxTenantResources: 50 }),

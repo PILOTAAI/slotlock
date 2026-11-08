@@ -1,5 +1,5 @@
-// The landing hero's install card (site/src/data/landing.ts) switches targets with radio buttons and
-// CSS alone, so each target needs its own selectors in landing.css or its tab never shows anything.
+// The install card switches targets with radio buttons and CSS alone, so each target needs its own
+// selectors in landing.css.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';

@@ -1,5 +1,5 @@
-// A stored series in a zone east of UTC keeps the occurrence its UTC UNTIL names, so that time stays
-// booked: read floating, ical.js ended the series a day early and the store let a booking in.
+// A stored series east of UTC keeps the occurrence its UTC UNTIL names: read floating, ical.js
+// would end it a day early.
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';

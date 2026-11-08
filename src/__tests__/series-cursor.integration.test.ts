@@ -1,6 +1,6 @@
-// The store keeps, beside each recurring series, a cursor where its last expansion stopped, and the
-// roll and later writes resume from it. A daily series written fifteen years ago keeps rolling (from
-// its start, the search outgrew the limits after about eleven), and a write to it still works.
+// The store keeps a cursor beside each recurring series where its last expansion stopped: a daily
+// series written fifteen years ago keeps rolling (from its start, the search outgrows the limits
+// after about eleven).
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type SlotlockStore, createSlotlockStore } from '../store.js';

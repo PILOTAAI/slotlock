@@ -1,12 +1,6 @@
-// The dashboard assistant end to end, in a real browser: the dashboard on a loopback port over real
-// Postgres (as a LOGIN role without BYPASSRLS), GitHub faked behind its own authorize page, and a
-// model server speaking OpenAI-compatible chat completions or the Anthropic Messages API. An owner
-// connects the model in Settings and tests it; a member (not an owner) asks what is free, then asks
-// for a booking, approves the proposed change, and finds it on the overview and in agent activity
-// as the assistant's; a member of another organization sees none of it; the key is in no page.
-// The OpenAI-compatible run has JavaScript off (the dashboard works as plain forms); the Anthropic
-// run has it on. Skipped without DATABASE_URL or Playwright (`require('playwright')`), whose
-// screenshots go to SLOTLOCK_E2E_SCREENSHOTS when it is set.
+// The dashboard assistant end to end in a real browser, against an OpenAI-compatible model with
+// JavaScript off and an Anthropic one with it on. Skipped without DATABASE_URL or Playwright;
+// screenshots go to SLOTLOCK_E2E_SCREENSHOTS when set.
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';

@@ -1,7 +1,6 @@
-// A suspended tenant's withTenant store refuses every write and answers every read. Each store method
-// is named here as a write, a read, upkeep or administration, so a method added later without a place
-// in SLOTLOCK_TENANT_WRITE_METHODS fails this test instead of writing for a suspended tenant. A stand-
-// in transaction answers the store's own queries; the real database runs in tenant-admin.integration.
+// Each store method is named as a write, a read, upkeep or administration, so a method added
+// without a place in SLOTLOCK_TENANT_WRITE_METHODS fails here instead of writing for a suspended
+// tenant.
 import type { TransactionSql } from 'postgres';
 import { describe, expect, it } from 'vitest';
 import {

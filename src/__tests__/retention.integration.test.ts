@@ -1,5 +1,4 @@
-// The public retention API against real Postgres: the agent quota it returns, what it never deletes,
-// and that forced tenant RLS confines it to the tenant in context under a non-bypass role.
+// The public retention API against real Postgres, under forced tenant RLS as a non-bypass role.
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -110,7 +109,6 @@ describe.skipIf(!url)('Slotlock event retention (real Postgres)', () => {
     });
   }
 
-  /** Backdate a tenant's commands (all, or one idempotency key) by `days`. */
   async function ageCommands(tenantRef: string, days: number, idempotencyKey?: string) {
     await sql`
       UPDATE slotlock.calendar_event_commands

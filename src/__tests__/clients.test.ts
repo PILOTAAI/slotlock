@@ -1,5 +1,3 @@
-// The language clients as a set: one version, one scenario every suite runs against a server, and a
-// CI job that runs all five against the image and cannot pass by skipping them.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 

@@ -1,5 +1,4 @@
-// Webhook signing, retry schedule, address checks and the delivery pass, without a database. The
-// signature is checked with Standard Webhooks' reference library, not only against itself.
+// The signature is checked with Standard Webhooks' reference library, not only against itself.
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { Webhook } from 'standardwebhooks';

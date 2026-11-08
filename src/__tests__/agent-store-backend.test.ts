@@ -131,8 +131,8 @@ describe('Slotlock store-backed agent server adapter', () => {
     expect(getResource).not.toHaveBeenCalled();
   });
 
-  // A resource cursor is a resource id. The store refuses anything else with a plain error, which
-  // the dispatcher reports as internal_error (HTTP 500) unless the backend refuses it first.
+  // The store refuses a non-id cursor with a plain error, which would surface as internal_error
+  // (500).
   it('refuses a resource cursor that is not a resource id as invalid_cursor, without a query', async () => {
     const backend = createSlotlockStoreAgentBackend(store, { availabilityRules });
     listResources.mockRejectedValue(
@@ -157,7 +157,6 @@ describe('Slotlock store-backed agent server adapter', () => {
       },
     });
     expect(outcome).toEqual({ ok: false, status: 400, code: 'invalid_cursor' });
-    // Refused before a tenant transaction is opened.
     expect(withTenant).not.toHaveBeenCalled();
 
     listResources.mockResolvedValue([resource]);
@@ -234,8 +233,8 @@ describe('Slotlock store-backed agent server adapter', () => {
   });
 
   it('exports, from the package entry point, the projection the event tools return', async () => {
-    // An embedding application that writes an event through the store (not the agent tools) shows
-    // it to agents in this shape, so it must be the very function the tools use.
+    // An application writing through the store shows agents this shape, so it must be the tools'
+    // own function.
     const { projectSlotlockCalendarEvent } = await import('../index.js');
     const backend = createSlotlockStoreAgentBackend(store, { availabilityRules });
     const result = await backend.createEvent(context, {
@@ -596,7 +595,6 @@ describe('Slotlock store-backed agent server adapter', () => {
   });
 
   it('lists the events of a resource named more than once once', async () => {
-    // The audit's probe: one id 100 times read its events 100 times, and the page held 100 copies.
     const backend = createSlotlockStoreAgentBackend(store, { availabilityRules });
     const listed = await backend.listEvents(
       { ...context, operation: 'slotlock_list_events' },
@@ -612,8 +610,6 @@ describe('Slotlock store-backed agent server adapter', () => {
   });
 
   it('refuses a search whose resources expand to more bookable windows in all than one request may', async () => {
-    // The audit's probe: 100 resources of 50 one-minute daily rules each, searched over a year, held
-    // the process for 7 seconds with no busy interval charged.
     const ids = Array.from(
       { length: 100 },
       (_, index) => `${String(index).padStart(8, '0')}-4444-4444-8444-444444444444`,
@@ -827,7 +823,6 @@ describe('Slotlock store-backed agent server adapter', () => {
       rows: { resources: 1 },
     });
     expect(eraseTenant).toHaveBeenCalledWith({ tenantRef });
-    // In the tenant's READ COMMITTED transaction, as the other writes are.
     expect(withTenant).toHaveBeenLastCalledWith(tenantRef, expect.any(Function), {
       isolation: 'read committed',
       signal: admin.signal,

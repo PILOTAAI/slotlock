@@ -1,7 +1,4 @@
-// Waitlists and check-in against real Postgres: freed time is offered to waiting entries in the order
-// they joined, on a resource or the first free member of a pool, as a hold for the waiter; bookings
-// left unclaimed past their check-in window are released, and only those made once the rule was set.
-// Skipped without DATABASE_URL.
+// Waitlists and check-in against real Postgres. Skipped without DATABASE_URL.
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -89,7 +86,6 @@ describe.skipIf(!url)('waitlists and check-in (real Postgres)', () => {
     const first = await join({ resourceId: van, start: at(10), end: at(12), holderRef: 'first' });
     const second = await join({ resourceId: van, start: at(10), end: at(12), holderRef: 'second' });
     expect(first.ok && second.ok).toBe(true);
-    // Nothing free yet: nothing offered.
     expect(await offer()).toMatchObject({ offered: 0, expired: 0 });
 
     // The cancel offers at once, without waiting for maintenance.
@@ -264,7 +260,6 @@ describe.skipIf(!url)('waitlists and check-in (real Postgres)', () => {
     // Free, but the holder holds all it may: not offered, and still waiting.
     await maintenance.withTenant(tenantRef, (tenant) => tenant.offerWaitlist({ tenantRef }));
     expect(await entries({ resourceId: van })).toEqual([expect.objectContaining({ holderRef: 'capped', status: 'waiting' })]);
-    // Under the default limit it is.
     await offer();
     expect(await entries({ resourceId: van })).toEqual([expect.objectContaining({ holderRef: 'capped', status: 'offered' })]);
   });
@@ -350,7 +345,6 @@ describe.skipIf(!url)('waitlists and check-in (real Postgres)', () => {
     ).rejects.toMatchObject({ code: 'reservation_not_found', status: 404 });
   });
 
-  // What the independent review reproduced, each kept as a test.
   describe('under load and races', () => {
     const fullPool = async (pool: string, members: number) => {
       const ids: string[] = [];
@@ -374,7 +368,6 @@ describe.skipIf(!url)('waitlists and check-in (real Postgres)', () => {
         return { result, locks: held?.count ?? 0 };
       });
       expect(result.offered).toBe(0);
-      // Before: two per refused hold, 2,000 for this pass.
       expect(locks).toBeLessThan(20);
     }, 120_000);
 

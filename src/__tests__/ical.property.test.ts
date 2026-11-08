@@ -1,7 +1,5 @@
-// Fuzzing the iCalendar boundary, where untrusted feeds arrive. Generated feeds (lines from the
-// grammar, mutated real feeds, and noise) must parse into well-formed changes or be refused as a
-// CalendarContractError: never another exception, never a malformed change. And what Slotlock
-// emits, the trusted parser must read back with the same text and times.
+// Fuzzing untrusted feeds: they parse into well-formed changes or are refused as
+// CalendarContractError, never anything else; Slotlock's own output reads back the same.
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import {

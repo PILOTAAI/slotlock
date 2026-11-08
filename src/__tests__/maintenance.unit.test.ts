@@ -1,6 +1,5 @@
-// Maintenance: one pass per tenant (roll the horizon, then prune), a per-tenant lock so servers
-// never repeat each other's work, and the scheduler `slotlock serve` runs. Stand-ins for the store
-// and the connection record every call; the real ones run in self-host.integration.test.ts.
+// Maintenance with stand-ins that record every call; the real store runs in
+// self-host.integration.test.ts.
 import type { Sql } from 'postgres';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -288,7 +287,6 @@ describe('withSlotlockMaintenanceLock', () => {
     expect(held.has('slotlock.maintenance:fleet')).toBe(true);
     expect(log).toEqual(['release']);
     expect(reserved()).toBe(0);
-    // Another tenant's lock is its own.
     expect(await withSlotlockMaintenanceLock(sql, 'other', async () => 'done')).toBe('done');
   });
 
@@ -314,7 +312,6 @@ describe('startSlotlockMaintenance', () => {
     vi.useRealTimers();
   });
 
-  /** Let queued passes run to the end. */
   const settle = async () => {
     for (let i = 0; i < 20; i++) await Promise.resolve();
     await vi.advanceTimersByTimeAsync(0);
@@ -433,8 +430,6 @@ describe('startSlotlockMaintenance', () => {
       onPass,
     });
     for (let i = 0; i < 4; i++) await settle();
-    // Before, it went round once more after a blocked pass and then waited an interval, by which
-    // time the first ones were due again: more than two passes' worth starved the healthy one.
     expect(onPass.mock.calls.map(([pass]) => pass)).toEqual([
       result({ conflicts: 10, capped: true, rollPending: true }),
       result({ conflicts: 10, capped: true, rollPending: true }),
@@ -500,7 +495,6 @@ describe('startSlotlockMaintenance', () => {
       });
       await settle();
       await new Promise((resolve) => realSetTimeout(resolve, 20));
-      // Only the pass that failed is reported as failed.
       expect({
         passes: onPass.mock.calls.length,
         failures: onError.mock.calls.length,

@@ -1,7 +1,5 @@
-// API keys against real Postgres, as a LOGIN role without BYPASSRLS that `grantApplicationRole`
-// granted: the role the server runs as. It reaches keys only through the schema's functions, so a
-// key belongs to one tenant, a revoked or expired key stays dead, and the table itself is out of
-// reach. Skipped without DATABASE_URL.
+// API keys against real Postgres, as the LOGIN role without BYPASSRLS the server runs as. Skipped
+// without DATABASE_URL.
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -100,7 +98,6 @@ describe.skipIf(!url)('API keys (real Postgres)', () => {
     const revoked = await keys.revoke({ tenantRef: tenantA, id: a.apiKey.id });
     expect(revoked?.revokedAt).toBeInstanceOf(Date);
     await expect(keys.authenticate(a.key)).resolves.toBeNull();
-    // Revoking again is idempotent and keeps the first revocation time.
     await expect(keys.revoke({ tenantRef: tenantA, id: a.apiKey.id })).resolves.toEqual(revoked);
     await expect(keys.revoke({ tenantRef: tenantA, id: randomUUID() })).resolves.toBeNull();
   });
@@ -237,7 +234,6 @@ describe.skipIf(!url)('API keys (real Postgres)', () => {
           code: 'api_key_limit_reached',
         });
       }
-      // A revoked key stops counting.
       const [first] = await keys.list({ tenantRef: tenant });
       await keys.revoke({ tenantRef: tenant, id: first?.id as string });
       await expect(
@@ -248,9 +244,8 @@ describe.skipIf(!url)('API keys (real Postgres)', () => {
     }
   });
 
-  // Under REPEATABLE READ a statement's snapshot predates the lock it waits for, so the count would
-  // miss the keys created while it waited. The store creates in a READ COMMITTED transaction of its
-  // own whatever the role's default; a caller's own REPEATABLE READ transaction is refused.
+  // Under REPEATABLE READ the count's snapshot predates the lock it waits for, missing keys created
+  // meanwhile.
   it('holds the limit when the role defaults to REPEATABLE READ, and refuses such a transaction', async () => {
     const tenant = `keys-isolation-${randomUUID()}`;
     await admin.unsafe(`ALTER ROLE ${role} SET default_transaction_isolation = 'repeatable read'`);

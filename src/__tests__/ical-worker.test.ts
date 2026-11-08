@@ -1,7 +1,5 @@
-// createICalendarWorkerPool reads untrusted iCalendar on worker threads, so a feed that holds
-// ical.js holds a worker, never the thread that asked. These tests run the pool against a stand-in
-// worker (the real one is built JavaScript; verify-package runs it against real feeds): one that
-// hangs as ical.js would, runs out of its heap, sleeps, or replies as the parsers do.
+// The pool against a stand-in worker (the real one is built JavaScript; verify-package runs it
+// against real feeds).
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   type ICalendarWorkerPool,
@@ -27,7 +25,6 @@ afterEach(async () => {
   await Promise.all(open.splice(0).map((created) => created.close()));
 });
 
-/** Run `work`, counting how often a 10 ms timer on this thread fires meanwhile. */
 async function ticking<T>(
   work: () => Promise<T> | T,
 ): Promise<{ ticks: number; ms: number; outcome: unknown }> {

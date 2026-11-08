@@ -1,9 +1,6 @@
 // ical.js looks for a SECONDLY to WEEKLY rule's next occurrence one step at a time with no limit
-// (RecurIterator.next; MONTHLY and YEARLY give up only when whole months or years fail), so a rule
-// that never occurs held the whole process. Every expansion now has a budget of steps, a count of
-// ical.js's work that reads no clock: a rule that needs more is refused as invalid_icalendar,
-// quickly and the same way however loaded the machine, whether it came from a feed, a library call
-// or the store.
+// (RecurIterator.next). Every expansion has a budget of steps that reads no clock, so a rule that
+// needs more is refused as invalid_icalendar the same way however loaded the machine.
 import ICAL from 'ical.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -38,7 +35,6 @@ function feed(...events: { uid: string; start: string; rule: string }[]): string
   ].join('\r\n');
 }
 
-/** How long `work` ran, and what it threw. */
 function timed(work: () => unknown): { ms: number; error: unknown } {
   const started = performance.now();
   try {
@@ -73,7 +69,7 @@ describe('the step budget on recurrence expansion', () => {
     expect(error).toEqual(refused);
   });
 
-  // Each of these never occurs; ical.js searched for it forever.
+  // Each of these never occurs.
   it.each([
     ['30 February, daily', '20261020T090000Z', 'FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30'],
     ['31 April, hourly', '20261020T090000Z', 'FREQ=HOURLY;BYMONTH=4;BYMONTHDAY=31'],
@@ -141,8 +137,8 @@ describe('the step budget on recurrence expansion', () => {
   });
 
   // ical.js moves a MINUTELY to WEEKLY rule a day at a time within one step, so a step may move at
-  // most a century: FREQ=DAILY;INTERVAL=1000000000 spent 97 seconds in one step. (FREQ=SECONDLY is
-  // refused whatever its interval: ical-rrule-shapes.test.ts.)
+  // most a century (FREQ=DAILY;INTERVAL=1000000000 took 97 s in one step). FREQ=SECONDLY is refused
+  // whatever its interval.
   it.each([
     ['MINUTELY', 52_704_000],
     ['HOURLY', 878_400],
@@ -202,7 +198,7 @@ describe('the step budget on recurrence expansion', () => {
   });
 
   it('refuses any weekday on 30 February, yearly, by its shape, at once', () => {
-    // ical.js scanned every day of every year for it, to the year 20000.
+    // Unbounded, ical.js scans every day of every year for it, to the year 20000.
     const rule = 'FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30;BYDAY=MO,TU,WE,TH,FR,SA,SU';
     const { ms, error } = timed(() =>
       parseICalendarChanges(feed({ uid: 'slow', start: '20261020T090000Z', rule }), 'UTC', WINDOW),
@@ -601,8 +597,8 @@ describe('the step budget on recurrence expansion', () => {
       summary: 'Busy',
       recurrence: { rrule },
     });
-    // Each write of this rule walked 9,999 days a step, charged once, until the half-second limit
-    // stopped it: fifty of them from one tenant held a hosted server for 23 seconds (SEC-3).
+    // This rule walks 9,999 days a step; uncharged, fifty writes from one tenant held a hosted
+    // server for 23 seconds.
     const walker = 'FREQ=DAILY;INTERVAL=9999;BYMONTH=2;BYMONTHDAY=29';
 
     it('reads or refuses the same calendar however slow the clock runs (D21)', () => {
@@ -655,10 +651,8 @@ describe('the step budget on recurrence expansion', () => {
   });
 
   describe('a series in a named time zone (SEC-3)', () => {
-    // Every occurrence of a series in an IANA zone is read through the zone's offsets. Each read
-    // built an Intl formatter to check the zone's name and asked Intl for four to six offsets, and
-    // none of it was charged: forty daily London series from 2016 held a feed for 35 seconds and
-    // were read, and one written as a single event took half a second to be refused.
+    // Every occurrence in an IANA zone is read through the zone's offsets; uncharged, forty daily
+    // London series from 2016 held a feed for 35 seconds.
     const daily = (zone: string, series: number) =>
       [
         'BEGIN:VCALENDAR',
@@ -678,8 +672,8 @@ describe('the step budget on recurrence expansion', () => {
         }).flat(),
         'END:VCALENDAR',
       ].join('\r\n');
-    // The verifier's window: 46 occurrences of each series fall in it, 1,840 in all, fewer than a
-    // feed may hold, so only the budget can refuse the feed.
+    // 46 occurrences of each series fall in the window, 1,840 in all, fewer than a feed may hold,
+    // so only the budget can refuse the feed.
     const feedWindow = {
       start: new Date('2026-10-23T00:00:00Z'),
       end: new Date('2027-10-23T00:00:00Z'),
@@ -746,9 +740,8 @@ describe('the step budget on recurrence expansion', () => {
     }, 120_000);
 
     it('refuses a feed of yearly series in 100 zones from 1700 having read Intl at most 80,000 times', () => {
-      // Each instant Intl reads takes about five microseconds and its parts as long again on a CI
-      // runner. Charged two and a half steps, a feed read 107,000 of them, 1.6 to 1.9 seconds there,
-      // before the budget refused it: twice what the same budget allows a feed in UTC.
+      // Each instant Intl reads takes about five microseconds, and its parts as long again, on a CI
+      // runner; charged two and a half steps each, a feed is refused in 1.6 to 1.9 seconds there.
       const zones = Intl.supportedValuesOf('timeZone').filter((zone) => !zone.startsWith('Etc/'));
       const text = [
         'BEGIN:VCALENDAR',
