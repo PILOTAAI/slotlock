@@ -212,6 +212,25 @@ describe('slotlock serve configuration', () => {
     },
   );
 
+  it('reads the proxy secret only beside the trusted client-address field', () => {
+    const proof = secret();
+    expect(
+      readSlotlockServeConfig(
+        serveEnv({ SLOTLOCK_TRUSTED_PROXY_HEADER: 'CF-Connecting-IP', SLOTLOCK_TRUSTED_PROXY_SECRET: proof }),
+      ).trustedProxySecret,
+    ).toBe(proof);
+    expect(readSlotlockServeConfig(serveEnv({})).trustedProxySecret).toBeUndefined();
+    expect(refusal(serveEnv({ SLOTLOCK_TRUSTED_PROXY_SECRET: proof })).message).toMatch(
+      /SLOTLOCK_TRUSTED_PROXY_SECRET proves SLOTLOCK_TRUSTED_PROXY_HEADER: set both, or neither/,
+    );
+    const weak = 'aaaaaaaabbbbbbbbccccccccdddddddd';
+    const message = refusal(
+      serveEnv({ SLOTLOCK_TRUSTED_PROXY_HEADER: 'CF-Connecting-IP', SLOTLOCK_TRUSTED_PROXY_SECRET: weak }),
+    ).message;
+    expect(message).toMatch(/SLOTLOCK_TRUSTED_PROXY_SECRET is too weak/);
+    expect(message).not.toContain(weak);
+  });
+
   it('serves without a confirmation secret unless writes are guarded (SURF-4, PROD-16)', () => {
     // The owner's hosted policy: every authenticated write takes effect at once. The confirmation
     // round is a setting a self-hoster opts into.
@@ -723,6 +742,26 @@ describe('slotlock command line', () => {
       stderr:
         'slotlock: DATABASE_URL is required: the postgres:// URL of the role Slotlock serves as\n',
     });
+  });
+
+  it('keeps the proxy secret out of the log', async () => {
+    // 32 hex characters fit in one DNS label, so the failure to resolve this host names the secret.
+    const proof = randomBytes(16).toString('hex');
+    const logged: string[] = [];
+    const result = await runSlotlockCli(['serve'], {
+      env: serveEnv({
+        DATABASE_URL: `postgresql://slotlock_app:pass@${proof}.invalid:5432/slotlock`,
+        SLOTLOCK_TRUSTED_PROXY_HEADER: 'CF-Connecting-IP',
+        SLOTLOCK_TRUSTED_PROXY_SECRET: proof,
+        PORT: '0',
+      }),
+      stdout: { write: () => {} },
+      stderr: { write: (chunk: string) => logged.push(chunk) },
+      signal: new AbortController().signal,
+    });
+    expect(result).toBe(1);
+    expect(logged.join('')).toContain('[redacted].invalid');
+    expect(logged.join('')).not.toContain(proof);
   });
 
   it('refuses a weak token without printing it', async () => {

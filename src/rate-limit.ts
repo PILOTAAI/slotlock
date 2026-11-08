@@ -11,7 +11,7 @@
 // t=<seconds>` and `"<policy>";q=<quota>;w=<window seconds>`, or `qu="concurrent-requests"` for a
 // cap on requests at once. Retry-After is never earlier than the end of the effective window (§6).
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { createHmac, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
 import {
   SLOTLOCK_MCP_PROTOCOL_VERSION,
@@ -23,7 +23,12 @@ import {
 } from './agent-server.js';
 import { slotlockBearerCredential } from './api-keys.js';
 import { SLOTLOCK_APPLICATION_SCOPE, type SlotlockApplicationOperation } from './application-api.js';
-import type { SlotlockLimits, SlotlockRate, SlotlockRateName } from './config.js';
+import {
+  SLOTLOCK_TRUSTED_PROXY_PROOF_FIELD,
+  type SlotlockLimits,
+  type SlotlockRate,
+  type SlotlockRateName,
+} from './config.js';
 import type { SlotlockNodeServerConnection, SlotlockNodeServerFetchTarget } from './node-server.js';
 import { SLOTLOCK_APPLICATION_REST_ROUTES, matchSlotlockRestRoute } from './rest-api.js';
 
@@ -76,6 +81,11 @@ export interface SlotlockRequestLimitsOptions {
   limits: SlotlockLimits;
   /** A lower-case request field a trusted proxy sets to the client address (config.ts). */
   trustedProxyHeader?: string;
+  /**
+   * With `trustedProxyHeader`, the value the proxy also sets in x-slotlock-proxy-proof
+   * (SLOTLOCK_TRUSTED_PROXY_SECRET). A request without it exactly is counted by its connection.
+   */
+  trustedProxySecret?: string;
   /** The public URL's path, without a trailing slash (`''` at the origin root). */
   basePath: string;
   /** Paths, under the base path, of the dashboard's sign-in and its callback, when it is served. */
@@ -206,13 +216,30 @@ export function slotlockClientNetwork(key: string): string {
   return prefix ? `${prefix[1]}::/48` : key;
 }
 
-/** The client a request is counted as: the trusted field's last address, else the connection's. */
+const sha256 = (value: string) => createHash('sha256').update(value, 'utf8').digest();
+
+/**
+ * Whether the request carries the proxy's secret. Compared as SHA-256 digests in constant time, so
+ * neither the time taken nor a length tells how much of a guess matched. A repeated field arrives
+ * joined with a comma and so never matches.
+ */
+function provenByProxy(request: Request, secretDigest: Buffer): boolean {
+  const presented = request.headers.get(SLOTLOCK_TRUSTED_PROXY_PROOF_FIELD);
+  return presented !== null && timingSafeEqual(sha256(presented), secretDigest);
+}
+
+/**
+ * The client a request is counted as: the trusted field's last address, else the connection's.
+ * With a proxy secret, the field is believed only beside the proof.
+ */
 function clientOf(
   request: Request,
   connection: SlotlockNodeServerConnection | undefined,
   trustedField: string | undefined,
+  secretDigest: Buffer | undefined,
 ): string {
-  if (trustedField !== undefined) {
+  const believed = secretDigest === undefined || provenByProxy(request, secretDigest);
+  if (trustedField !== undefined && believed) {
     // A proxy appends to a list field (X-Forwarded-For), so the last entry is the one it wrote.
     const claimed = request.headers.get(trustedField)?.split(',').at(-1);
     const key = claimed === undefined ? null : slotlockClientKey(claimed);
@@ -554,6 +581,8 @@ export function createSlotlockRequestLimits(
   const states = new AsyncLocalStorage<RequestState>();
   const looked = new WeakMap<Request, SlotlockAgentPrincipal | null>();
   const addresses = new WeakMap<Request, string>();
+  const proxySecretDigest =
+    options.trustedProxySecret === undefined ? undefined : sha256(options.trustedProxySecret);
   const gates = {
     series: {
       gate: seriesGate(caps.tenant_series_writes, caps.series_writes),
@@ -795,7 +824,7 @@ export function createSlotlockRequestLimits(
       const limited: SlotlockNodeServerFetchTarget = {
         async fetch(request, connection) {
           const route = routeOf(request);
-          const address = clientOf(request, connection, options.trustedProxyHeader);
+          const address = clientOf(request, connection, options.trustedProxyHeader, proxySecretDigest);
           addresses.set(request, address);
           if (options.trustedProxyHeader === undefined && !fieldIgnored) {
             const field = PROXY_CLIENT_FIELDS.find((name) => request.headers.has(name));

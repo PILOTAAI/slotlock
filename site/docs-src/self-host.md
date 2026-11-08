@@ -68,6 +68,7 @@ PostgreSQL 16+ with `btree_gist`.
 | `SLOTLOCK_REST_API` | `on` | `off` serves MCP and A2A only |
 | `SLOTLOCK_LIMITS` | see `--help` | Rate limits and per-tenant storage limits, as `name=value` pairs |
 | `SLOTLOCK_TRUSTED_PROXY_HEADER` | | The field your proxy puts the client address in, such as `CF-Connecting-IP` |
+| `SLOTLOCK_TRUSTED_PROXY_SECRET` | | A secret your proxy also sets in `X-Slotlock-Proxy-Proof`; without it, the field above is ignored |
 | `SLOTLOCK_GITHUB_*`, `SLOTLOCK_SESSION_SECRET`, `SLOTLOCK_DASHBOARD_USERS` | | The [dashboard](/docs/dashboard/) |
 
 `slotlock --help` lists every command and variable, with each limit's default.
