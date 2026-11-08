@@ -1,9 +1,8 @@
-// Maintenance: extend recurring events to the rolling horizon and prune what the retention window no
-// longer needs (README, Operations). Every tenant needs it at least daily. One pass is
-// maintainSlotlockTenant; startSlotlockMaintenance runs passes for the tenants a server serves, one
-// tenant at a time, with a PostgreSQL advisory lock per tenant so several servers never repeat each
-// other's work. Row-level security hides other tenants from the role a server runs as, so a server
-// maintains the tenants it is configured with and the ones whose keys it has served.
+// Maintenance: extend recurring events to the rolling horizon and prune what retention no longer
+// needs (README, Operations); every tenant needs it at least daily. startSlotlockMaintenance runs
+// passes one tenant at a time with a per-tenant advisory lock, so servers never repeat each other's
+// work. RLS hides other tenants from a server's role, so it maintains the tenants it is configured
+// with and those whose keys it has served.
 import type { Sql } from 'postgres';
 import { ignoreRejection } from './hooks.js';
 import {
@@ -22,10 +21,9 @@ export interface SlotlockMaintenanceResult {
   /** Series over the expansion budget, or whose roll failed otherwise; they keep their old coverage. */
   refused: number;
   /**
-   * Expired holds and the answers kept for keyed ones, and past the retention window event
-   * idempotency answers, agents' event cancellations, booking references retired with no
-   * booking and feed changes, deleted, and dashboard assistant conversations past their expiry.
-   * A cancelled booking's tombstone stays.
+   * Rows deleted: expired holds and their keyed answers; past retention, event idempotency answers,
+   * agent event cancellations, stray booking retirements and feed changes; and expired assistant
+   * conversations. A cancelled booking's tombstone stays.
    */
   pruned: number;
   /**
@@ -42,17 +40,16 @@ export interface SlotlockMaintenanceResult {
   /** More was left than one pass does: run another. */
   capped: boolean;
   /**
-   * The roll stopped before the series it had put back: series it has not tried since may still
-   * extend, so another pass should follow at once.
+   * The roll stopped before the series it had deferred: others may still extend, so run another
+   * pass at once.
    */
   rollPending: boolean;
 }
 
 /**
- * One maintenance pass for a tenant: roll its recurring events to the rolling horizon, then purge
- * its expired holds with their answers and prune its events' and bookings' bookkeeping past the
- * retention window, each in at most `batches` batches (1-100, default 10), every batch its own
- * transaction. Aborting `signal` stops it between batches with the signal's reason.
+ * One maintenance pass for a tenant: roll its recurring events to the horizon, then purge expired
+ * holds and prune bookkeeping past retention, each in at most `batches` batches (1-100, default
+ * 10), each its own transaction. Aborting `signal` stops it between batches.
  */
 export async function maintainSlotlockTenant(
   store: SlotlockStore,
@@ -63,7 +60,6 @@ export async function maintainSlotlockTenant(
   if (!(Number.isSafeInteger(batches) && batches >= 1 && batches <= 100)) {
     throw new RangeError('batches must be a whole number from 1 to 100');
   }
-  // What a pass changes (a no-show released, a waitlist offer) is recorded as maintenance's.
   const withTenant = <T>(callback: (tenant: SlotlockTenantStore) => Promise<T>) =>
     store.withTenant(tenantRef, callback, { origin: 'maintenance' });
   const window = calendarEventRollingHorizon();
@@ -72,8 +68,7 @@ export async function maintainSlotlockTenant(
   let refused = 0;
   let rollCapped = true;
   let after: CalendarHorizonRollCursor | null = null;
-  // A roll that fails does not stop the pruning: expired holds are purged all the same, and the
-  // roll's error is thrown after.
+  // A failed roll does not stop the pruning; its error is thrown after.
   let rollFailure: { error: unknown } | null = null;
   try {
     for (let batch = 0; batch < batches; batch++) {
@@ -124,8 +119,7 @@ export async function maintainSlotlockTenant(
     }
   }
   options.signal?.throwIfAborted();
-  // Conversations last 2 hours after their last message (dashboard.ts): an expired one is
-  // unreadable already, and deleted here.
+  // Conversations expire 2 hours after their last message (dashboard.ts).
   pruned += await withTenant((tenant) =>
     tenant.pruneAssistantConversations({ tenantRef }),
   );
@@ -135,8 +129,8 @@ export async function maintainSlotlockTenant(
   const staleSources = await withTenant((tenant) => tenant.reportStaleCoverage({ tenantRef }));
   // No-shows first: the time they free is offered to the waitlist in the same pass.
   const noShows = await withTenant((tenant) => tenant.releaseNoShows({ tenantRef }));
-  // The whole waitlist, in join order, a page at a time and each page its own transaction, so a
-  // later entry whose window is free is offered however many wait before it.
+  // The whole waitlist in join order, a page per transaction, so a later free entry is offered
+  // however many wait before it.
   let waitlistOffers = 0;
   let page: WaitlistPage | null = null;
   for (let pages = 0; pages < WAITLIST_PAGES; pages++) {
@@ -284,12 +278,10 @@ export function startSlotlockMaintenance(
             } catch {
               // Reporting must never stop maintenance, or make a pass that ran look failed.
             }
-            // A capped pass that got somewhere goes round again at once, as does one whose roll
-            // stopped before the series it had put back: each series it could not extend is now
-            // behind every one it has not tried (the store puts it there), so the next pass meets
-            // new ones, and however many are stuck, each is met once before a healthy one is
-            // reached. A pass that reached the series put back waits for the next interval: they
-            // take turns there, and the next pass reaches anything new before them.
+            // A capped pass that progressed, or whose roll stopped before its deferred series, goes
+            // again at once: deferred series sit behind untried ones, so each stuck one is met once
+            // before a healthy one is reached. A pass that reached the deferred series waits for
+            // the next interval.
             const progressed = result.extended + result.pruned > 0;
             again = result.capped && (progressed || result.rollPending);
           }
@@ -310,8 +302,8 @@ export function startSlotlockMaintenance(
       working = null;
     }
   };
-  // Expired assistant conversations of every tenant, the ones whose keys never call included (a
-  // tenant only the dashboard serves): one bounded sweep at most every quarter hour.
+  // Expired conversations of every tenant, including those no key calls (dashboard-only): one
+  // bounded sweep at most every quarter hour.
   let lastSweep = 0;
   const sweep = () => {
     if (controller.signal.aborted || Date.now() - lastSweep < Math.min(intervalMs, SWEEP_INTERVAL_MS)) return;

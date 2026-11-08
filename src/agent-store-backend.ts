@@ -101,13 +101,11 @@ interface AgentEventInput {
 }
 
 /**
- * A write runs under READ COMMITTED whatever the role's default: a store given tenant limits (as
- * `slotlock serve`'s is) counts it against them under the tenant's lock, which needs that level,
- * and refuses it otherwise.
+ * Writes run under READ COMMITTED whatever the role's default: tenant limits are counted under a
+ * lock that needs that level.
  */
 const WRITE = { isolation: 'read committed' } as const;
 
-/** What tenant scoping needs of an agent or application call. */
 interface TenantCallContext {
   principal: { tenantRef: string; subject?: string; keyId?: string };
   signal: AbortSignal;
@@ -115,8 +113,8 @@ interface TenantCallContext {
   origin?: SlotlockChangeOrigin;
 }
 
-// The UUIDs withTenant takes as a keyId (versions 1-5, as Slotlock's keys are): any other a custom
-// authenticator's principal carries is left out, not refused.
+// The UUIDs withTenant takes as a keyId (versions 1-5); any other from a custom authenticator is
+// left out, not refused.
 const KEY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /** Who a call's changes are recorded as in the history: the principal's subject, kept short. */
@@ -147,7 +145,6 @@ async function withTenant<T>(
       signal: context.signal,
       ...(actor !== undefined ? { actor } : {}),
       ...(context.origin !== undefined ? { origin: context.origin } : {}),
-      // An authenticator's own principal may carry something else there: then it is left out.
       ...(typeof keyId === 'string' && KEY_ID.test(keyId) ? { keyId } : {}),
     });
   } catch (error) {
@@ -164,25 +161,21 @@ async function withTenant<T>(
 }
 
 /**
- * Busy intervals one free/busy read or search may gather across all the resources it names: as many
- * as the store reads for one resource. Without it, a request naming 100 resources at that limit, or
- * one resource 100 times, did 100 times the work of one.
+ * Busy intervals one free/busy read or search may gather across all its resources: as many as the
+ * store reads for one, so naming many resources cannot multiply the work.
  */
 const MAX_REQUEST_BUSY_INTERVALS = 10_000;
 
 /**
- * Bookable windows one search may expand from its resources' availability rules in all: five
- * resources of 50 daily rules over a year, or a hundred of two. Without it, a search of 100 such
- * resources over a year expanded 1.8 million windows and held the process for seven seconds.
+ * Bookable windows one search may expand from its resources' rules in all (five resources of 50
+ * daily rules over a year, or a hundred of two), so a broad search cannot hold the process.
  */
 const MAX_REQUEST_RULE_WINDOWS = 100_000;
 
-/** The resources a request names, each once, in the order first named. */
 function distinctResourceIds(input: Record<string, unknown>): string[] {
   return [...new Set(input.resource_ids as string[])];
 }
 
-/** Counts a request's busy intervals against MAX_REQUEST_BUSY_INTERVALS, refusing past it. */
 function busyBudget(): (intervals: number) => void {
   let left = MAX_REQUEST_BUSY_INTERVALS;
   return (intervals) => {
@@ -303,7 +296,7 @@ function agentOwnerRef(context: SlotlockAgentInvocationContext): string {
 }
 
 function agentExternalRef(context: SlotlockAgentInvocationContext, idempotencyKey: string): string {
-  // This format is already a stable client-visible identity; keep it unchanged.
+  // Already a stable client-visible identity; keep it unchanged.
   return `agent:${agentPrincipalDigest(context, idempotencyKey)}`;
 }
 
@@ -311,8 +304,8 @@ function agentCommandIdempotencyKey(
   context: SlotlockAgentInvocationContext,
   idempotencyKey: string,
 ): string {
-  // Keep the principal in the digest too so this remains safe with older tenant-only stores.
-  // Hashing keeps the authenticated subject and caller's raw retry key out of durable command rows.
+  // The principal stays in the digest so this remains safe with older tenant-only stores; hashing
+  // keeps the subject and raw retry key out of durable rows.
   return `agent-command:${agentPrincipalDigest(context, idempotencyKey)}`;
 }
 
@@ -332,8 +325,8 @@ function attendeeProjection(attendee: CalendarAttendee) {
  */
 export function projectSlotlockCalendarEvent(event: SlotlockCalendarEvent): Record<string, unknown> {
   return {
-    // External references are the stable tenant-visible identity. Internal UUIDs never become an
-    // unscoped lookup capability at the protocol boundary.
+    // External references are the tenant-visible identity: internal UUIDs never become an unscoped
+    // lookup at the protocol boundary.
     id: event.externalRef,
     resource_id: event.resourceId,
     starts_at: event.start.toISOString(),
@@ -389,7 +382,6 @@ const BOOKING_RULE_CODES: Readonly<Record<SlotlockBookingRule, string>> = Object
 function operationError(
   refusal: string | { code: string; rule?: string },
 ): SlotlockAgentOperationError {
-  // A broken booking rule is named in the code, which is all an agent's error carries.
   const code =
     typeof refusal === 'string'
       ? refusal
@@ -397,7 +389,7 @@ function operationError(
         ? (BOOKING_RULE_CODES[refusal.rule as SlotlockBookingRule] ?? refusal.code)
         : refusal.code;
   const status = slotlockAgentErrorStatus(code);
-  // A gone hold is named, so the agent holds again; it covers expired and another holder's alike.
+  // A gone hold (expired or another holder's) is named, so the agent holds again.
   return new SlotlockAgentOperationError(
     status === 404 && code !== 'hold_not_found' ? 'not_found' : code,
     status,
@@ -407,7 +399,6 @@ function operationError(
 /** Resource and event ids: the UUIDs the store issues and validates. */
 const STORE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-/** A resource page's cursor is the last resource id of the previous page. */
 function parseResourceCursor(value: unknown): string | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== 'string' || !STORE_ID_PATTERN.test(value)) {
@@ -456,12 +447,10 @@ function page<T extends { start: Date; id: string }>(rows: T[], limit: number) {
 }
 
 /**
- * The caller's resource with this id, or `resource_not_found`. The tools accept any id an agent may
- * send (an external reference such as `vehicle-42`, the nil UUID, a version 7 UUID). The store
- * issues version 4 UUIDs (gen_random_uuid) and refuses an id that is not a version 1 to 5 UUID as an
- * invalid identity, so such an id names no resource: it is not found, like a well-formed id that
- * names nothing or another tenant's resource. With `visibility`, a resource of the other is not
- * found either: agents ask for `shared`, so a private resource is invisible to them.
+ * The caller's resource with this id, or `resource_not_found`. Agents may send any id; one that is
+ * not a store-issued (v1-5) UUID names no resource and is not found, like another tenant's. With
+ * `visibility`, a resource of the other visibility is not found either, so private ones are
+ * invisible to agents.
  */
 async function requireResource(
   tenantStore: SlotlockTenantStore,
@@ -492,9 +481,8 @@ function requireAgentResource(
 
 /**
  * The store's change feed for live updates (`subscriptions.changes`): each tenant's changes read
- * under its row-level security, one indexed query per read. Readers poll it (change-watch.ts:
- * every `SLOTLOCK_FEED_BUSY_MS` after a read that found changes, backing off to
- * `SLOTLOCK_FEED_IDLE_MS`); `sql` is the store's client, used for the feed's head.
+ * under its RLS, one indexed query per read. Readers poll it (change-watch.ts); `sql` is the
+ * store's client, used for the feed's head.
  */
 export function createSlotlockStoreChangeSource(
   store: SlotlockStore,
@@ -610,8 +598,8 @@ export function createSlotlockStoreAgentBackend(
         }
         const members = await tenantStore.listPoolMembers({ tenantRef, pool: input.pool, visibility: 'shared' });
         if (members.length === 0) throw new SlotlockAgentOperationError('pool_not_found', 404);
-        // Each member in turn, each try its own savepoint: a member that is taken or that the
-        // booking's rules refuse is passed over; the exclusion constraint still decides each one.
+        // Each member in turn, each in its own savepoint: one taken or refused by its rules is
+        // passed over; the exclusion constraint still decides.
         for (const member of members) {
           const result = await put(member.id);
           if (result.ok) return answer(result);
@@ -633,7 +621,7 @@ export function createSlotlockStoreAgentBackend(
         const tenantRef = context.principal.tenantRef;
         const members = await tenantStore.listPoolMembers({ tenantRef, pool, visibility: 'shared' });
         if (members.length === 0) throw new SlotlockAgentOperationError('pool_not_found', 404);
-        // Each member's busy time, as edges: a count of busy members that rises and falls.
+        // Busy time as edges: a count of busy members that rises and falls.
         const edges = new Map<number, number>([
           [window.start.getTime(), 0],
           [window.end.getTime(), 0],
@@ -652,9 +640,9 @@ export function createSlotlockStoreAgentBackend(
           });
           charge(freeBusy.busy.length);
           if (freeBusy.coverage.state !== 'complete') complete = false;
-          // Not free either where its booking rules refuse a booking: before its notice, past how
-          // far ahead it books, and, when it enforces them, outside its bookable hours. Its slot
-          // step is not counted: it moves when a booking may start, not whether the member is free.
+          // Also not free where its booking rules refuse a booking (notice, advance, enforced
+          // hours). Its slot step is not counted: it moves when a booking may start, not whether
+          // the member is free.
           const rules = member.effectiveBookingRules;
           const search = bookingSearch({ rules, timezone: member.timezone, window, now });
           const latestStart =
@@ -696,7 +684,6 @@ export function createSlotlockStoreAgentBackend(
           if (next === undefined || at >= window.end.getTime()) break;
           const free = members.length - busy;
           const last = intervals.at(-1);
-          // Parts with the same count are one.
           if (last && last.free === free) last.end = new Date(next).toISOString();
           else intervals.push({ start: new Date(at).toISOString(), end: new Date(next).toISOString(), free });
         }
@@ -718,8 +705,7 @@ export function createSlotlockStoreAgentBackend(
         title?: string;
         idempotency_key: string;
       };
-      // In one order for every bundle, so two over the same resources wait on each other in turn
-      // and never deadlock.
+      // Sorted, so bundles over the same resources lock in one order and never deadlock.
       const resourceIds = [...new Set(input.resource_ids)].sort();
       if (resourceIds.length < 2) throw new SlotlockAgentOperationError('invalid_arguments', 400);
       const content: CalendarEventContent = {
@@ -757,7 +743,7 @@ export function createSlotlockStoreAgentBackend(
             materializationWindow: materializationWindow(content),
             enforceBookingRules: true,
           });
-          // Thrown, so the whole transaction rolls back: the events already put go with it.
+          // Thrown, so the whole transaction rolls back with the events already put.
           if (!result.ok) {
             const refusal = operationError(result);
             throw new SlotlockAgentOperationError(refusal.code, refusal.status, { resource_id: resourceId });
@@ -811,7 +797,6 @@ export function createSlotlockStoreAgentBackend(
         ...(resource.pool !== undefined ? { pool: resource.pool } : {}),
       });
       if (typeof input.pool === 'string') {
-        // A pool's members, in the order a pool booking tries them; at most 100, one page.
         return withTenant(store, context, async (tenantStore) => ({
           resources: (
             await tenantStore.listPoolMembers({
@@ -890,8 +875,7 @@ export function createSlotlockStoreAgentBackend(
             context.principal.tenantRef,
             resourceId,
           );
-          // Only what a booking made now may take: the resource's booking rules bound the search,
-          // as they bound the write that follows it.
+          // The resource's booking rules bound the search, as they bound the write that follows.
           const search = bookingSearch({
             rules: resource.effectiveBookingRules,
             timezone: resource.timezone,
@@ -936,8 +920,8 @@ export function createSlotlockStoreAgentBackend(
             best = { resourceId, interval: candidate };
           }
         }
-        // A cross-resource answer is only certain when every requested resource is certain. A slot
-        // from one healthy calendar must not mask a stale provider or recurrence horizon on another.
+        // A cross-resource answer is only certain when every resource is: one healthy calendar must
+        // not mask a stale one.
         const complete = !incomplete;
         const certainBest = complete ? best : null;
         return {
@@ -1054,7 +1038,6 @@ export function createSlotlockStoreAgentBackend(
         expected_revision: number;
         expected_resource_id?: string;
       };
-      // No event is on a resource the store never issued (an external reference, say).
       if (
         input.expected_resource_id !== undefined &&
         !STORE_ID_PATTERN.test(input.expected_resource_id)
@@ -1132,8 +1115,8 @@ export function createSlotlockStoreAgentBackend(
           tenantRef: context.principal.tenantRef,
           ownerRef: agentOwnerRef(context),
           externalRef: current.externalRef,
-          // The caller's fence when it sent one, checked under the event's lock; otherwise the
-          // resource just read, so a move between that read and the write is not overwritten.
+          // The caller's fence when sent, checked under the event's lock; otherwise the resource
+          // just read, so a move in between is not overwritten.
           expectedResourceId: input.expected_resource_id ?? current.resourceId,
           resourceId,
           expectedRevision: input.expected_revision,
@@ -1153,7 +1136,6 @@ export function createSlotlockStoreAgentBackend(
         if (!updated) throw new SlotlockAgentOperationError('store_inconsistent', 503);
         return { event: projectSlotlockCalendarEvent(updated), replayed: result.idempotent };
       }, WRITE);
-      // A moved or shortened event may have freed the time it held.
       if (!moved.replayed) await offerFreedTime(store, context.principal.tenantRef);
       return moved;
     },
@@ -1205,7 +1187,6 @@ export interface SlotlockStoreApplicationBackendOptions {
   tenantErasure?: boolean;
 }
 
-/** A store failure thrown with a `code` the caller may see, or the error itself to report. */
 function storeRefusal(error: unknown): unknown {
   const code = (error as { code?: unknown } | null)?.code;
   if (typeof code !== 'string') return error;
@@ -1222,7 +1203,6 @@ function storeRefusal(error: unknown): unknown {
   return error;
 }
 
-/** The status an application refusal answers with; the resource of another tenant is not found. */
 function applicationRefusal(code: string): SlotlockAgentOperationError {
   if (code === 'resource_tenant_mismatch') {
     return new SlotlockAgentOperationError('resource_not_found', 404);
@@ -1250,9 +1230,8 @@ function waitlistOutput(entry: SlotlockWaitlistEntry) {
 }
 
 /**
- * Offer what a cancel or release just freed to the tenant's waitlist now, rather than at the next
- * maintenance pass. Best effort, after the freeing transaction committed: maintenance offers
- * whatever this misses.
+ * Offer what a cancel or release just freed to the waitlist now. Best effort, after commit:
+ * maintenance offers whatever this misses.
  */
 async function offerFreedTime(store: SlotlockStore, tenantRef: string): Promise<void> {
   try {
@@ -1304,7 +1283,6 @@ function rulesInput(value: unknown): WeeklyAvailabilityRule[] | null {
   }
 }
 
-/** Booking rules as the application API writes them, snake_case; `null` for none. */
 function bookingRulesOutput(rules: SlotlockBookingRules | undefined) {
   if (!rules) return null;
   return {
@@ -1380,7 +1358,7 @@ function reservationOutput(reservation: SlotlockReservation) {
     reservation_ref: reservation.externalRef,
     start: reservation.start.toISOString(),
     end: reservation.end.toISOString(),
-    // The store keeps milliseconds; a buffer set in seconds through the library still shows as busy.
+    // The store keeps milliseconds; round up so a sub-minute buffer still shows as busy.
     buffer_after_minutes: Math.ceil(reservation.bufferAfterMs / 60_000),
     revision: reservation.revision,
     source: reservation.source,
@@ -1414,9 +1392,9 @@ function applicationCommandKey(
 const MAX_LISTED_BUSY = MAX_REQUEST_BUSY_INTERVALS;
 
 /**
- * Serve the application API (application-api.ts) from the production store, in the principal's
- * tenant. Every resource an operation names must be the tenant's, or it is not found; holds are
- * reservations under the tenant's row-level security, so another tenant's hold is not found either.
+ * Serve the application API (application-api.ts) from the store in the principal's tenant. Every
+ * resource named must be the tenant's, or it is not found; holds are under the tenant's RLS, so
+ * another tenant's is not found either.
  */
 export function createSlotlockStoreApplicationBackend(
   store: SlotlockStore,
@@ -1520,7 +1498,6 @@ export function createSlotlockStoreApplicationBackend(
 
     async deleteResource(context, input) {
       const id = input.resource_id as string;
-      // An id the store never issues names no resource: there is nothing to delete.
       if (!STORE_ID_PATTERN.test(id)) return { deleted: false };
       return withTenant(store, context, async (tenant) => {
         const result = await tenant.deleteResource({ tenantRef: tenantOf(context), id });
@@ -1781,7 +1758,6 @@ export function createSlotlockStoreApplicationBackend(
 
     async releaseHold(context, input) {
       const id = input.hold_id as string;
-      // An id that is not one the store issues names no hold: there is nothing to release.
       if (!STORE_ID_PATTERN.test(id)) return { released: false };
       const released = await withTenant(store, context, async (tenant) => ({
         released: (await tenant.releaseHold(id, { tenantRef: tenantOf(context) })).released,
@@ -1840,7 +1816,6 @@ export function createSlotlockStoreApplicationBackend(
         if (!result.ok) throw applicationRefusal(result.code);
         return { reservation: reservationOutput(result.reservation), replayed: result.idempotent };
       }, WRITE);
-      // A move frees the time the booking held.
       if ((input.revision as number) > 1 && !put.replayed) {
         await offerFreedTime(store, tenantOf(context));
       }
@@ -2016,7 +1991,6 @@ export function createSlotlockStoreApplicationBackend(
     async cancelTenantEvent(context, input) {
       const id = input.event_id as string;
       const expectedResourceId = input.expected_resource_id as string | undefined;
-      // An id the store never issues names no event, and no event is on a resource it never issued.
       if (
         !STORE_ID_PATTERN.test(id) ||
         (expectedResourceId !== undefined && !STORE_ID_PATTERN.test(expectedResourceId))
@@ -2059,8 +2033,8 @@ export function createSlotlockStoreApplicationBackend(
         throw new SlotlockAgentOperationError('invalid_confirmation', 400);
       }
       return withTenant(store, context, async (tenant) => {
-        // Read under the tenant's lock, which a suspension waits for: a suspended tenant's data is
-        // kept for its operator, who erases it (slotlock tenant erase) when they decide to.
+        // Read under the tenant's lock: a suspended tenant's data is kept for its operator to
+        // erase.
         if (await tenant.isTenantSuspended({ tenantRef: tenantOf(context) })) {
           throw new SlotlockAgentOperationError('tenant_suspended', 403);
         }
@@ -2127,7 +2101,6 @@ export function createSlotlockStoreApplicationBackend(
     async runMaintenance(context) {
       assertActive(context);
       try {
-        // A caller goes round again while `capped`; when to do so at once is the scheduler's.
         const { rollPending: _, zoneShifts, staleSources, noShows, waitlistOffers, ...result } = await maintainSlotlockTenant(store, tenantOf(context), {
           batches,
           signal: context.signal,

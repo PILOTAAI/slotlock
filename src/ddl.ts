@@ -1,16 +1,13 @@
-// Slotlock owns its schema. This DDL lives in the dedicated `slotlock` Postgres schema and is applied
-// by the package itself (store.applySchema). It is idempotent for fresh and evolved deployments.
+// Slotlock owns its schema: this DDL lives in the `slotlock` Postgres schema, is applied by
+// store.applySchema, and is idempotent.
 //
-// The EXCLUDE constraint is the load-bearing piece (RFC-0001 spike criterion a): the DATABASE —
-// not application code — arbitrates double-booking, per resource, on the half-open `[)` range.
-// The same pattern scales from an integration's booking tables to a first-class reservation store.
+// The EXCLUDE constraint is the load-bearing piece: the database, not application code, arbitrates
+// double-booking per resource on the half-open `[)` range.
 //
-// The deployment role owns every table, so any function or operator it resolves through a schema
-// another role can create objects in ("$user", public) runs with that ownership. The DDL therefore
-// resolves names only in pg_catalog, then the session's temporary schema, while it runs, and hands
-// the caller's search_path back at the end, so a caller that keeps going in the same transaction
-// resolves its own names as before. Apply it in one transaction: under autocommit every statement
-// is a transaction of its own, and the pin ends with the statement that sets it.
+// The deployment role owns every table, so a function or operator resolved through a schema another
+// role can write to ("$user", public) would run with that ownership. The DDL pins search_path to
+// pg_catalog and pg_temp while it runs and restores the caller's at the end. Apply it in one
+// transaction: under autocommit the pin ends with its own statement.
 import { SLOTLOCK_CHANGE_ORIGINS, legacyCoverageSourceDigestSql } from './event-feed.js';
 import { SLOTLOCK_MAX_AVAILABILITY_RULES } from './weekly-hours.js';
 
@@ -21,17 +18,11 @@ SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true);
 const DEPLOYMENT_SEARCH_PATH_RESTORE = `SELECT pg_catalog.set_config('search_path', pg_catalog.current_setting('${CALLER_SEARCH_PATH_SETTING}'), true);
 `;
 
-// applyTenantRls forces row-level security, which binds the table owner too, and the deployment
-// sets no tenant: its data steps (reaping holds and listing conflicts before the overlap
-// constraint, merging duplicate resources, binding archives, backfilling event children) would see
-// no rows, skip what they repair and leave a constraint to meet rows its own check never saw. The
-// deployment lifts FORCE from the tables that have it before its first data step and puts it back
-// after its last, on those tables only. applySchema runs both in one transaction, which holds the
-// tables locked in between; a failure rolls the lift back with everything else. Run statement by
-// statement, the lift commits on its own and a refused data step stops the run before the restore,
-// so the tables lifted are recorded in a table, not the session: the next deployment, from any
-// session or connection, puts FORCE back on every table recorded, and `slotlock serve` refuses to
-// start while a tenant table is left without it.
+// applyTenantRls forces RLS, which binds the owner too, and the deployment sets no tenant, so its
+// data steps would see no rows. FORCE is lifted from the tables that have it before the first data
+// step and restored after the last. The lifted tables are recorded in a table, not the session, so
+// if a statement-by-statement run stops before the restore, the next deployment from any session
+// restores them, and `slotlock serve` refuses to start meanwhile.
 const DEPLOYMENT_LIFT_FORCED_ROW_SECURITY = `CREATE TABLE IF NOT EXISTS slotlock.deployment_lifted_row_security (
   table_name text PRIMARY KEY
 );
@@ -78,10 +69,10 @@ $slotlock_restore_forced_row_security$;
 export const SLOTLOCK_SCHEMA_CONTROL_REFUSAL = 'Slotlock will not deploy into schema slotlock';
 
 /**
- * The version of the schema this release creates, recorded in `slotlock.schema_version` by every
- * migration. Releases up to 0.2 recorded nothing; 0.1 was version 1 and 0.2 version 2; 0.3 to 0.5
- * recorded 3. 0.6 is 4, so a 0.5 release refuses it before it changes anything: its DDL would put
- * back the trigger that names a coverage source by its guessable digest.
+ * The schema version this release creates, recorded in `slotlock.schema_version`. Up to 0.2
+ * recorded nothing (0.1 was 1, 0.2 was 2); 0.3 to 0.5 recorded 3. 0.6 is 4, so a 0.5 release
+ * refuses it rather than restoring the trigger that names a coverage source by its guessable
+ * digest.
  */
 export const SLOTLOCK_SCHEMA_VERSION = 4;
 
@@ -92,9 +83,8 @@ export const SLOTLOCK_SCHEMA_NEWER_REFUSAL =
 /** The oldest PostgreSQL the DDL runs on (`server_version_num`): it uses pg_input_is_valid. */
 const MIN_SERVER_VERSION_NUM = 160000;
 
-// Before anything changes: a server too old for the DDL fails here, with a message that names the
-// version, rather than part way through on a function it lacks; and a schema a newer release
-// migrated is refused, since this release's DDL would put back what that release replaced.
+// Before anything changes: an old server fails here with a message naming the version rather than
+// midway, and a schema a newer release migrated is refused.
 const SLOTLOCK_SCHEMA_PRECONDITIONS = `DO $slotlock_schema_preconditions$
 DECLARE
   installed integer;
@@ -116,14 +106,11 @@ END
 $slotlock_schema_preconditions$;
 `;
 
-// Every slotlock.<name> the deployment uses resolves in that schema, and the deployment writes rows
-// into its tables, firing their triggers, as the owner of every table. A role that owns the schema,
-// can create objects in it, owns an object in it, owns the function a trigger on its tables runs, or
-// may create such a trigger (after this check, before the first write) can therefore run code as the
-// deployment role (IF NOT EXISTS keeps whatever it made first); one that owns an extension installed
-// there can DROP EXTENSION ... CASCADE and take the exclusion constraints with it. The deployment
-// refuses before it touches anything there, listing each finding as a JSON array in the error's
-// DETAIL. Superusers are trusted: they can do all of this anyway.
+// The deployment writes rows as the owner of every table, firing their triggers. A role that owns
+// or can create objects in the schema, owns an object or trigger function there, or may create a
+// trigger could therefore run code as the deployment role; one owning an extension there could DROP
+// EXTENSION ... CASCADE and take the exclusion constraints. The deployment refuses before touching
+// anything, with findings as a JSON array in DETAIL. Superusers are trusted.
 const SLOTLOCK_SCHEMA_CONTROL_CHECK = `DO $slotlock_schema_control$
 DECLARE
   refusals text[];
@@ -200,9 +187,8 @@ $slotlock_schema_control$;
 `;
 
 /**
- * What every migration checks before it changes anything, applySchema and applyTenantRls included
- * when they find nothing to change: that no other role controls the schema, then the server version
- * and the schema version. Run with search_path pinned, as the DDL pins it.
+ * What every migration checks before changing anything, even when it finds nothing to change: no
+ * other role controls the schema, then server and schema version. Run with search_path pinned.
  */
 export const SLOTLOCK_DEPLOYMENT_CHECKS = `${SLOTLOCK_SCHEMA_CONTROL_CHECK}${SLOTLOCK_SCHEMA_PRECONDITIONS}`;
 
@@ -328,15 +314,13 @@ const apiKeySelect = (alias: string) =>
     .map((column) => `${alias}.${column}`)
     .join(', ');
 
-// API keys (api-keys.ts). The tables hold a SHA-256 digest per key, never the key. Row-level security
-// is enabled with no policy and no role is granted anything on them, so only their owner reads or
-// writes them, through the functions below; the serving role may execute those and nothing else here.
+// API keys (api-keys.ts): SHA-256 digests only, never the key. RLS is enabled with no policy and no
+// grants, so only the owner reaches the tables, through the functions below, which the serving role
+// may execute.
 //
-// Each function takes its tenant as an argument, as every store method does: the serving role
-// already names the tenant of every query it makes. Within a call it cannot reach another tenant's
-// keys, read a digest, or use a digest again once its key was rotated out or erased: those digests
-// stay in api_key_retired_digests (digests only, nothing about the tenant), and a revoked key's row
-// stays in api_keys until erasure, so the unique digest refuses it too.
+// Each function takes its tenant as an argument. A call cannot reach another tenant's keys, read a
+// digest, or reuse a digest rotated out or erased: those stay in api_key_retired_digests (digests
+// only), and a revoked key's row stays until erasure.
 const SLOTLOCK_API_KEYS_DDL = `
 CREATE TABLE IF NOT EXISTS slotlock.api_keys (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -631,19 +615,14 @@ CREATE OR REPLACE TRIGGER slotlock_outbox_api_key_change
   FOR EACH ROW EXECUTE FUNCTION slotlock.outbox_api_key_change();
 `;
 
-// The dashboard's records (dashboard.ts), shared by every server on this database: a finished sign-in
-// (its callback works once), a sent form (it runs once) and a signed-out session (a copied cookie
-// stays out). Each is a SHA-256 digest of a value only the dashboard's sealed cookies and pages
-// carry. Form records also carry a digest of the person who sent them, so the database can cap them;
-// nothing here names a tenant. Row-level security is enabled with no policy and no role is granted
-// anything, so the serving role reaches the table only through the two functions below.
+// The dashboard's shared records (dashboard.ts): finished sign-ins (a callback works once), sent
+// forms (run once) and signed-out sessions (a copied cookie stays out), each a SHA-256 digest; form
+// records also carry the sender's digest so the database can cap them. RLS with no policy and no
+// grants: reached only through the two functions below.
 //
-// The database's clock decides. Servers seal an expiry into each cookie and form by their own
-// clocks, which may run apart from each other and from the database's; a record judged by the
-// database while its token was judged by a server could lapse while some server still took the
-// token. So the functions refuse a token whose expiry the database's clock has passed, or that
-// claims to outlive a day (no dashboard token lives longer than 12 hours), and keep each record
-// until exactly that expiry: while the database would accept the token, its record is there.
+// The database's clock decides: server clocks may drift, so the functions refuse a token the
+// database's clock says has expired, or one claiming to outlive a day, and keep each record until
+// exactly that expiry.
 const SLOTLOCK_DASHBOARD_DDL = `
 CREATE TABLE IF NOT EXISTS slotlock.dashboard_tokens (
   kind text NOT NULL,
@@ -765,11 +744,10 @@ $slotlock_dashboard_session_ended$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[1]} FROM PUBLIC;
 `;
 
-// The schema's version. One row, written by the DDL itself at its end, so a schema migrated by
-// running SLOTLOCK_CORE_DDL directly is versioned too. applySchema adds digests of the DDL and of the
-// catalog it left, so that a later migration with nothing to change can tell, and take no lock on
-// any table. Nothing here names a tenant; RLS is enabled with no policy and no role is granted
-// anything, so a server reads the version only through installed_schema_version().
+// The schema's version: one row, written by the DDL itself, so running SLOTLOCK_CORE_DDL directly
+// is versioned too. applySchema adds digests of the DDL and catalog so a later no-op migration can
+// skip without locking. RLS with no policy and no grants: read only through
+// installed_schema_version().
 const SLOTLOCK_SCHEMA_VERSION_DDL = `
 CREATE TABLE IF NOT EXISTS slotlock.schema_version (
   singleton boolean PRIMARY KEY DEFAULT true,
@@ -802,16 +780,14 @@ $slotlock_installed_schema_version$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_SCHEMA_FUNCTIONS[0]} FROM PUBLIC;
 `;
 
-// Tenant suspension and erasure. A suspended tenant's server transactions (withTenant) may read,
-// and write nothing; its keys still authenticate, but it gets no new key or secret. The table names
-// tenants and why they were suspended, so RLS is enabled with no policy and no role is granted
-// anything: a server reads it only through tenant_suspended(), and only the deployment role, which
-// owns it, suspends or lifts a suspension. Erasure keeps the suspension, so an erased abuser stays
-// suspended.
+// Tenant suspension and erasure. A suspended tenant may read and write nothing; its keys still
+// authenticate but it gets no new key. The table names tenants and reasons, so RLS with no policy
+// and no grants: servers read it only through tenant_suspended(), and only the deployment role
+// (owner) suspends. Erasure keeps the suspension.
 //
-// Every server transaction for a tenant holds the tenant's lock shared, from before it reads the
-// suspension; suspension and erasure take it exclusively. So a suspension waits for the tenant's
-// transactions in flight, and every one that starts after it sees it.
+// Every server transaction for a tenant holds its lock shared before reading the suspension;
+// suspension and erasure take it exclusively, so a suspension waits for transactions in flight and
+// every later one sees it.
 const SLOTLOCK_TENANT_ADMIN_DDL = `
 CREATE TABLE IF NOT EXISTS slotlock.tenant_suspensions (
   tenant_ref text PRIMARY KEY,
@@ -1224,16 +1200,11 @@ $slotlock_sweep_assistant_conversations$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[7]} FROM PUBLIC;
 `;
 
-// A constraint an upgrade added NOT VALID (no table scan under its ACCESS EXCLUSIVE lock) is checked
-// here. applySchema runs this in a transaction of its own once the DDL has committed: inside the
-// DDL's transaction every table it altered stays under ACCESS EXCLUSIVE until commit, so the scan
-// would hold up every serving query. On its own, each VALIDATE takes SHARE UPDATE EXCLUSIVE (and
-// ROW SHARE on a foreign key's referenced table), which no read or row write conflicts with
-// (PostgreSQL 17, ALTER TABLE and Explicit Locking). It sees every row whatever row-level security
-// the table forces: the check scans the table itself, and referential checks bypass row security.
-// One that old rows still break stays NOT VALID, with a notice, rather than stopping the migration:
-// it binds every new row either way, and applySchema tries it again at each later migration. Once
-// valid, a constraint is never checked again.
+// Validate constraints an upgrade added NOT VALID. applySchema runs this in its own transaction
+// after the DDL commits: inside the DDL's, altered tables stay ACCESS EXCLUSIVE and the scan would
+// block serving queries. Alone, VALIDATE takes SHARE UPDATE EXCLUSIVE, which no read or row write
+// conflicts with (PostgreSQL 17 docs), and it sees every row regardless of RLS. One old rows still
+// break stays NOT VALID with a notice (it still binds new rows) and is retried at each migration.
 const DEPLOYMENT_VALIDATE_CONSTRAINTS = `DO $slotlock_validate_constraints$
 DECLARE
   unchecked record;
@@ -1261,7 +1232,6 @@ $slotlock_validate_constraints$;
 /** The constraint validation applySchema runs after the rest of SLOTLOCK_CORE_DDL has committed. */
 export const SLOTLOCK_VALIDATION_DDL: string = DEPLOYMENT_VALIDATE_CONSTRAINTS;
 
-// The digests that let the next migration skip are recorded by applySchema once it has validated.
 const DEPLOYMENT_RECORD_VERSION = `INSERT INTO slotlock.schema_version (singleton, version, applied_at)
 VALUES (true, ${SLOTLOCK_SCHEMA_VERSION}, now())
 ON CONFLICT (singleton) DO UPDATE
@@ -3243,9 +3213,9 @@ function coverageChangeInShapeSql(row: string): string {
 }
 
 /**
- * The source_id an earlier release's coverage change `row` names its source by: the source with
- * its tenant and resource whose source (0.5.2 and earlier: the subject, or `data.source`) or 0.5.3
- * digest (the subject) it carries, else src_redacted.
+ * The source_id an earlier release's coverage change `row` names: the source matching its tenant,
+ * resource and source (0.5.2 and earlier: the subject or `data.source`) or 0.5.3 digest, else
+ * src_redacted.
  */
 function coverageChangeSourceIdSql(row: string): string {
   return `COALESCE((
@@ -3263,16 +3233,12 @@ function coverageChangeSourceIdSql(row: string): string {
 export const SLOTLOCK_COVERAGE_CHANGE_RENAME_BATCH = 5_000;
 
 /**
- * One batch of the rename of coverage changes an earlier release wrote: of the outbox rows with ids
- * after `after` up to `head` (SQL expressions, bigint), the first `batch` by id, each `coverage.*`
- * one not yet in this release's shape gets its source's source_id as subject and `data.source_id`,
- * and loses `source` and `last_error`. Before 0.5.3 coverage.stale carried the source itself (an
- * iCalendar URL with a token, an address) and the error read from it; 0.5.3 named it by an unkeyed
- * digest anyone could confirm a guess against. A source deleted since is `src_redacted`: nothing
- * can match it any more, and a made-up id would look like a source the tenant could find. Selects
- * the last id read (`last`, null when there was none) and how many it renamed (`renamed`), `INTO`
- * `into` when given (PL/pgSQL). Rows in the new shape are left alone, so a batch run again changes
- * nothing.
+ * One batch of the rename of coverage changes an earlier release wrote: of the outbox rows after
+ * `after` up to `head` (bigint SQL expressions), the first `batch` by id; each `coverage.*` row not
+ * yet in shape gets its source_id as subject and `data.source_id`, and loses `source` and
+ * `last_error` (before 0.5.3 these carried the source itself, a URL with a token; 0.5.3's unkeyed
+ * digest could confirm a guess). A deleted source becomes `src_redacted`. Selects `last` (null when
+ * none) and `renamed`, `INTO` `into` when given. Idempotent.
  */
 export function slotlockCoverageChangeRenameSql(after: string, head: string, batch: string, into = ''): string {
   return `WITH scanned AS MATERIALIZED (
@@ -3303,10 +3269,9 @@ SELECT (SELECT max(scanned.id) FROM scanned)::text AS last,
   INTO ${into}` : ''}`;
 }
 
-// The rename for SLOTLOCK_CORE_DDL, run whole in its one transaction, while FORCE is lifted (the
-// structure has the outbox under ACCESS EXCLUSIVE for the whole transaction, so no change commits
-// in between). It goes on from where the last pass stopped, and is skipped once done. applySchema
-// runs it in batches after the structure commits instead, each its own short transaction.
+// The rename for SLOTLOCK_CORE_DDL, run whole in its one transaction while FORCE is lifted (the
+// outbox is under ACCESS EXCLUSIVE throughout). Resumes where the last pass stopped and is skipped
+// once done; applySchema instead runs it in batches after the structure commits.
 const DEPLOYMENT_RENAME_COVERAGE_CHANGES = `DO $slotlock_rename_coverage_changes$
 DECLARE
   scan_after bigint;
@@ -3382,12 +3347,10 @@ const POSTGRES_ROLE_NAME = /^[a-z_][a-z0-9_]{0,62}$/;
 const RESERVED_ROLE_NAMES = new Set(['public', 'current_role', 'current_user', 'session_user']);
 
 /**
- * Build the grants for the application role: USAGE on the `slotlock` schema, DML on the store's
- * tables and EXECUTE on the API key and dashboard functions. Nothing else: no ownership, DDL,
- * sequence, RLS-contract, API key or dashboard table access. The role must not be
- * able to leave forced RLS, itself or through a role it belongs to (`grantApplicationRole` refuses
- * the known ways out; these statements check nothing). Rerun after every `applySchema()`, since a
- * release may add a table.
+ * Build the grants for the application role: USAGE on the schema, DML on the store's tables and
+ * EXECUTE on the API key and dashboard functions, nothing else. The role must not be able to leave
+ * forced RLS (`grantApplicationRole` checks; these statements do not). Rerun after every
+ * `applySchema()`, since a release may add a table.
  */
 export function createSlotlockApplicationRoleGrantsDdl(role: string): string {
   if (!POSTGRES_ROLE_NAME.test(role) || RESERVED_ROLE_NAMES.has(role) || role.startsWith('pg_')) {

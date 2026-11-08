@@ -1,6 +1,4 @@
-// DB mechanics for the Slotlock core — explicit `postgres` client in, structured results out.
-// Domain policy (who may reserve, pricing, holds) belongs to future callers; this layer owns the
-// reliable how: idempotent schema apply, EXCLUDE-arbitrated inserts with a structured conflict.
+// DB mechanics for the Slotlock core: explicit `postgres` client in, structured results out.
 import {
   SLOTLOCK_CHANGE_ORIGINS,
   SLOTLOCK_CHANGE_RETENTION_DAYS,
@@ -93,44 +91,36 @@ import type {
 } from './types.js';
 import { parseAvailabilityRules } from './weekly-hours.js';
 
-/** Postgres exclusion_violation — the EXCLUDE constraint fired. */
 const EXCLUSION_VIOLATION = '23P01';
 /**
- * Concurrent inserts checking the same EXCLUDE range can deadlock inside the constraint check
- * itself (probed at ~30-40% under two-way contention — intrinsic to Postgres EXCLUDE, present
- * for raw inserts too). A 40P01 victim's transaction is fully rolled back, so one retry either
- * wins cleanly or loses with a proper 23P01 — both structured. Never surfaced raw.
+ * Concurrent inserts on the same EXCLUDE range can deadlock inside the constraint check itself
+ * (intrinsic to Postgres EXCLUDE). The victim is fully rolled back, so one retry either wins or
+ * loses with a structured 23P01.
  */
 const DEADLOCK_DETECTED = '40P01';
 const SERIALIZATION_FAILURE = '40001';
-/** Holds are negotiation-scoped; a week is already generous. Beyond it is a caller bug. */
+/** Holds are negotiation-scoped; a week is already generous. */
 const MAX_HOLD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-/** Turnaround cannot occupy a resource indefinitely because of a caller/unit error. */
+/** Guards against a caller unit error occupying a resource indefinitely. */
 const MAX_BUFFER_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
-/**
- * The longest leading buffer a row keeps (a day, as bufferBeforeMinutes allows): a row's occupied
- * time starts at most this long before its start, so a read by start can still use the index.
- */
+/** A day, as bufferBeforeMinutes allows: a read by start can then still use the index. */
 const MAX_BUFFER_BEFORE_MS = 24 * 60 * 60 * 1000;
 export { SLOTLOCK_CALENDAR_HORIZON_DAYS };
 /**
- * Longest one-off event the store accepts (ten years and some leap days): long enough for any lease
- * or long-term rental, short enough that a unit error cannot occupy a resource for ever. A recurring
- * series is bounded by its 367-day materialization window instead.
+ * Longest one-off event (ten years and some leap days); a recurring series is bounded by its
+ * materialization window instead.
  */
 export const SLOTLOCK_MAX_EVENT_DURATION_DAYS = 3_660;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_CALENDAR_WINDOW_MS = SLOTLOCK_CALENDAR_HORIZON_DAYS * DAY_MS;
 /**
- * Longest window a recurring series is stored (materialized) for: the 367-day search window plus
- * two days. The rolling horizon starts a day before the current UTC day and must reach 367 days
- * past its end, so that a search of the full 367 days from any moment of the day is complete.
+ * The 367-day search window plus two days: the rolling horizon starts a day before the current UTC
+ * day and must reach 367 days past its end.
  */
 export const SLOTLOCK_MATERIALIZATION_WINDOW_DAYS = SLOTLOCK_CALENDAR_HORIZON_DAYS + 2;
 const MAX_MATERIALIZATION_WINDOW_MS = SLOTLOCK_MATERIALIZATION_WINDOW_DAYS * DAY_MS;
 const MAX_EVENT_DURATION_MS = SLOTLOCK_MAX_EVENT_DURATION_DAYS * DAY_MS;
 const MAX_RESOURCE_LIST_LIMIT = 1_000;
-/** Highest per-tenant resource cap `createResource` accepts. */
 const MAX_TENANT_RESOURCE_LIMIT = 100_000;
 const MAX_CALENDAR_LIST_LIMIT = 1_000;
 const MAX_FREE_BUSY_INTERVALS = 10_000;
@@ -150,7 +140,7 @@ const MAX_WAITLIST_WINDOW_MS = 31 * 24 * 60 * 60 * 1000;
 const DEFAULT_OFFER_TTL_MS = 15 * 60 * 1000;
 /** How long before its start a booking may be checked in. */
 export const SLOTLOCK_CHECK_IN_OPENS_MINUTES = 60;
-/** Free-looking resources one entry tries before the next entry: a race can take one first. */
+/** Free-looking resources one entry tries before the next: a race can take one first. */
 const OFFER_CANDIDATES = 3;
 /** Default hard ceiling for retained active + tombstoned identities per agent principal. */
 export const SLOTLOCK_AGENT_OWNER_EVENT_QUOTA = 1_000;
@@ -173,8 +163,8 @@ const AGENT_EVENT_OWNER_PATTERN = /^agent:[0-9a-f]{64}$/;
 export const SLOTLOCK_LOCAL_RECURRENCE_COVERAGE_SOURCE = 'slotlock:local-recurrence-materialization';
 
 /**
- * Stable daily target shared by the event writer, maintenance worker, and readiness proof: from a
- * day before the current UTC day to 367 days past its end (SLOTLOCK_MATERIALIZATION_WINDOW_DAYS).
+ * From a day before the current UTC day to SLOTLOCK_MATERIALIZATION_WINDOW_DAYS past its end;
+ * shared by the writer, maintenance and readiness.
  */
 export function calendarEventRollingHorizon(now = new Date()): Interval {
   if (!Number.isFinite(now.getTime())) throw invalidWindowError();
@@ -184,8 +174,8 @@ export function calendarEventRollingHorizon(now = new Date()): Interval {
 }
 
 /**
- * A stored series expanded from the cursor its last expansion left, or `null` when there is none it
- * can use or the expansion from it is refused: the write's own search from the start was refused.
+ * A stored series expanded from its last cursor, or `null` when there is no usable cursor or the
+ * expansion is refused.
  */
 function resumeStoredSeries(
   event: CalendarEventContent,
@@ -205,16 +195,14 @@ function resumeStoredSeries(
   }
 }
 
-/** A series cursor as the jsonb column takes it. */
 function seriesCursorJson(tx: TransactionSql, cursor: CalendarSeriesCursor | null) {
   return cursor === null ? null : tx.json(cursor as unknown as Parameters<TransactionSql['json']>[0]);
 }
 
 /**
- * The window a roll to `horizon` gives a series stored for `stored`: from the horizon's start to
- * the later of the two ends, so its end never moves back. `null` keeps the stored window: it covers
- * the horizon already, or it ends so far past it that no window from the horizon's start to its end
- * fits the 367-day cap (it rolls once the horizon is close enough).
+ * From the horizon's start to the later of the two ends, so the end never moves back. `null` keeps
+ * the stored window: it already covers the horizon, or no window from the horizon's start fits the
+ * 367-day cap yet.
  */
 function rolledWindow(stored: Interval, horizon: Interval): Interval | null {
   if (stored.start <= horizon.start && stored.end >= horizon.end) return null;
@@ -223,22 +211,19 @@ function rolledWindow(stored: Interval, horizon: Interval): Interval | null {
 }
 
 /**
- * How far past a rule's UNTIL, read as UTC, an occurrence can still end, beyond the series' own
- * length. UNTIL bounds an occurrence's start (RFC 5545 §3.3.10), but a floating or date-only UNTIL
- * is a wall time in a zone from UTC-12 to UTC+14, or a whole day; a start in an hour the clocks skip
- * moves forward; and an occurrence's wall-clock end can pass its exact length by a clock change, a
- * whole day where a zone moved across the date line. Three days covers them together.
+ * How far past a rule's UNTIL, read as UTC, an occurrence can still end. UNTIL bounds starts (RFC
+ * 5545 §3.3.10), but a floating or date-only UNTIL is a wall time in any zone (UTC-12 to UTC+14),
+ * skipped hours move starts forward, and clock changes stretch ends: three days covers them
+ * together.
  */
 const SERIES_UNTIL_SLACK_MS = 3 * DAY_MS;
 /** Stored-series windows a COUNT rule is followed through, from its start, to find its end. */
 const SERIES_COUNT_SEARCH_WINDOWS = 30;
 
 /**
- * A time by which every occurrence of a recurring series ends, moved ones included, or `null` when
- * it may go on: its rule has neither UNTIL nor COUNT as ical.js reads it (as the expansion does),
- * or its COUNT occurrences are not all found within SERIES_COUNT_SEARCH_WINDOWS windows from its
- * start, or that search is over its budget. A COUNT series ends a day after its last occurrence as
- * the expansion reads it today, so a later reading of its end may be longer.
+ * A time by which every occurrence of a series ends, or `null` when it may go on: no UNTIL or COUNT
+ * as ical.js reads it, or the COUNT occurrences are not all found within
+ * SERIES_COUNT_SEARCH_WINDOWS windows or the search budget.
  */
 function seriesEndsBy(event: CalendarEventContent): Date | null {
   const recurrence = event.recurrence;
@@ -271,10 +256,8 @@ function seriesEndsBy(event: CalendarEventContent): Date | null {
 }
 
 /**
- * The latest end among a COUNT series' occurrences, expanded window by window from its start with
- * exceptions left out (so a cancelled or moved one is still found in its own place), or `null` when
- * fewer than `count` turn up. ical.js yields at most COUNT occurrences, so once `count` are found
- * there are no more. An occurrence is counted in the window its start falls in.
+ * The latest end among a COUNT series' occurrences, expanded window by window with exceptions left
+ * out (so a moved one is found in its own place), or `null` when fewer than `count` turn up.
  */
 function lastCountedOccurrenceEnd(event: CalendarEventContent, count: number): number | null {
   const rrule = event.recurrence?.rrule;
@@ -311,16 +294,15 @@ function lastCountedOccurrenceEnd(event: CalendarEventContent, count: number): n
 }
 
 /**
- * The recurrence_ends_by column for an event, as text: NULL for a one-off, 'infinity' for no known
- * end. Bind it as text (`::text::timestamptz`): postgres.js serializes a timestamptz parameter
- * through Date, which cannot hold 'infinity'.
+ * recurrence_ends_by as text: NULL for a one-off, 'infinity' for no known end. Bind it as text
+ * (`::text::timestamptz`): postgres.js serializes timestamptz through Date, which cannot hold
+ * 'infinity'.
  */
 function recurrenceEndsByColumn(event: CalendarEventContent): string | null {
   if (!event.recurrence) return null;
   return seriesEndsBy(event)?.toISOString() ?? 'infinity';
 }
 
-/** The roll's `after`, checked, or `undefined` for a pass's first batch. */
 function rollCursor(after: CalendarHorizonRollCursor | undefined): CalendarHorizonRollCursor | undefined {
   if (after === undefined) return undefined;
   const retryAt = after.rollRetryAt ?? null;
@@ -342,8 +324,8 @@ export type SlotlockSql = Sql | TransactionSql;
 type StoreSql = SlotlockSql;
 
 /**
- * Run `callback` in a transaction: a new one on a client (READ COMMITTED when asked, else the role's
- * default), or a savepoint inside the caller's, whose isolation cannot change.
+ * A new transaction on a client (READ COMMITTED when asked), or a savepoint inside the caller's,
+ * whose isolation cannot change.
  */
 async function inTransaction<T>(
   executor: StoreSql,
@@ -375,12 +357,9 @@ async function assertReadCommitted(tx: TransactionSql): Promise<void> {
 }
 
 /**
- * Run deployment SQL resolving names only in pg_catalog, then the session's temporary schema. The
- * deployment role owns every table, so a function or operator it found through a schema another
- * role can create objects in ("$user", public) would run with that ownership. The DDL strings pin
- * themselves as well; this covers the statements the store sends around them. Every name read
- * before the pin is schema-qualified. The caller's search_path is restored afterwards; a failure
- * aborts the transaction, which reverts the pin as well.
+ * Run deployment SQL with names resolved only in pg_catalog and pg_temp. The deployment role owns
+ * every table, so a function found in a schema another role can write to ("$user", public) would
+ * run with that ownership. The caller's search_path is restored afterwards.
  */
 async function withPinnedSearchPath<T>(
   tx: TransactionSql,
@@ -395,10 +374,8 @@ async function withPinnedSearchPath<T>(
 }
 
 /**
- * The deployment DDL refuses a `slotlock` schema that another role controls with SQLSTATE 42501 and
- * its findings as a JSON array in DETAIL. Surface that as `unsafe_slotlock_schema` with `reasons`,
- * keeping the database's error (and its HINT) as `cause`. It refuses a schema a newer release
- * migrated with SQLSTATE 55000: surface that as `schema_newer`. Any other failure passes through.
+ * Map the DDL's refusals: SQLSTATE 42501 (another role controls the schema; findings as JSON in
+ * DETAIL) to `unsafe_slotlock_schema`, and 55000 to `schema_newer`. Anything else passes through.
  */
 function schemaControlRefusal(error: unknown): unknown {
   const failure = error as { code?: unknown; message?: unknown; detail?: unknown } | null;
@@ -435,9 +412,9 @@ function schemaControlRefusal(error: unknown): unknown {
 /** How a migration (applySchema, applyTenantRls, grantApplicationRole) waits and how long it runs. */
 export interface SlotlockMigrationOptions {
   /**
-   * The longest it waits for any one lock, in milliseconds (1-600,000; default 1,000). While a
-   * migration waits for a lock on a table, every query that comes after it on that table waits
-   * behind it; past this it gives up, lets them through, and tries again.
+   * The longest it waits for any one lock, in milliseconds (1-600,000; default 1,000). Queries on a
+   * table queue behind a migration waiting for its lock, so past this it gives up, lets them
+   * through, and retries.
    */
   lockTimeoutMs?: number;
   /** The longest any one of its statements runs, in milliseconds (1-86,400,000; default 900,000). */
@@ -446,7 +423,6 @@ export interface SlotlockMigrationOptions {
   attempts?: number;
 }
 
-/** PostgreSQL lock_not_available: a lock wait passed lock_timeout. */
 const LOCK_NOT_AVAILABLE = '55P03';
 
 const DEFAULT_MIGRATION_LOCK_TIMEOUT_MS = 1_000;
@@ -476,10 +452,10 @@ function migrationSettings(options: SlotlockMigrationOptions | undefined) {
 }
 
 /**
- * Run one migration step: in a transaction (or a savepoint of the caller's), with names resolved
- * in pg_catalog only, serialized with every other migration of this database, and with the lock and
- * statement timeouts set. A step that waits past its lock timeout, or is ended as a deadlock's
- * victim, is rolled back and tried again after a pause, up to `attempts` times. The caller's own timeouts are put back afterwards.
+ * One migration step: in a transaction (or savepoint), names pinned to pg_catalog, serialized with
+ * every other migration, under the lock and statement timeouts. A lock timeout or deadlock is
+ * rolled back and retried up to `attempts` times. The caller's own timeouts are restored
+ * afterwards.
  */
 async function inMigration<T>(
   executor: StoreSql,
@@ -507,9 +483,8 @@ async function inMigration<T>(
         }),
       );
     } catch (error) {
-      // A deadlock's victim (DEADLOCK_DETECTED: a caller's transaction took the outbox, then a
-      // coverage row, while a rename batch took them in the other order, say) lost its locks with
-      // it, so it is tried again like a step that timed out waiting.
+      // A deadlock victim (a writer took outbox then coverage, a rename batch the other order) lost
+      // its locks, so it retries like a lock timeout.
       const code = pgCode(error);
       if (code !== LOCK_NOT_AVAILABLE && code !== DEADLOCK_DETECTED) throw error;
       if (attempt >= settings.attempts) {
@@ -529,12 +504,10 @@ async function inMigration<T>(
 }
 
 /**
- * A digest of what the migration defines in the `slotlock` schema: its tables and columns,
- * constraints (and whether each is validated), indexes, triggers and functions, and whether PUBLIC
- * holds any right on them. Grants to other roles, ownership and row-level security are left out:
- * applyTenantRls and grantApplicationRole change those after applySchema has recorded the digest.
- * Objects of an extension are left out too. Deparsed definitions depend on search_path, so this runs
- * with it pinned, as the migration does.
+ * A digest of what the migration defines in the `slotlock` schema: tables, columns, constraints
+ * (and whether validated), indexes, triggers, functions and PUBLIC grants. Grants to other roles,
+ * ownership and RLS are left out: applyTenantRls and grantApplicationRole change those later. Runs
+ * with search_path pinned, as deparsed definitions depend on it.
  */
 async function slotlockCatalogDigest(tx: TransactionSql): Promise<string> {
   const [row] = await tx<{ digest: string }[]>`
@@ -595,10 +568,9 @@ async function slotlockCatalogDigest(tx: TransactionSql): Promise<string> {
 }
 
 /**
- * Whether the schema is exactly what this release's applySchema last left: the same version, DDL
- * and catalog digest, and no table left without FORCE by an interrupted migration. Reading needs
- * the right to (the deployment role owns the table); without it the full migration runs and refuses
- * what it must.
+ * Whether the schema is exactly what this release's applySchema last left: same version, DDL and
+ * catalog digest, and no table left unforced by an interrupted migration. Without the right to read
+ * it, the full migration runs instead.
  */
 async function slotlockSchemaUpToDate(tx: TransactionSql): Promise<boolean> {
   const [present] = await tx<{ versioned: boolean; lifted: boolean }[]>`
@@ -629,32 +601,24 @@ async function slotlockSchemaUpToDate(tx: TransactionSql): Promise<boolean> {
 
 /**
  * Rename the coverage changes an earlier release wrote (ddl.ts, slotlockCoverageChangeRenameSql),
- * in batches of SLOTLOCK_COVERAGE_CHANGE_RENAME_BATCH outbox ids, each a transaction of its own,
- * from where the last pass stopped (`schema_version.coverage_changes_renamed_through`, saved with
- * each batch) up to the last change when this pass starts. The first pass is the 0.6 upgrade's; an
- * earlier release's server still running then can write more, so every later migration runs a pass
- * too, until one finds nothing to rename: that marks the rename done and no migration reads the
- * outbox for it again.
+ * in batches of SLOTLOCK_COVERAGE_CHANGE_RENAME_BATCH outbox ids, resuming from
+ * `schema_version.coverage_changes_renamed_through`. An older server still running can write more,
+ * so every migration runs a pass until one finds nothing.
  *
- * The head is read only once every transaction already writing to the outbox has ended, so no
- * change at or below it can commit after the pass has read past it. Forced RLS would hide every
- * tenant's rows from the deployment role, so a role it binds lifts FORCE from calendar_coverage and
- * outbox for each batch and puts it back before the batch commits: each batch holds ACCESS
- * EXCLUSIVE on both, taken in the order writers take them (a source, then its change), for one
- * primary-key range of the outbox. A table an operator left unforced stays so. A superuser or
- * BYPASSRLS role reads every row as it is: it holds SHARE ROW EXCLUSIVE on the outbox (which waits
- * for the writes in flight and holds off new ones, but no read) only for the short transaction that
- * reads the head. Changes an earlier release's server writes after the upgrade are put in shape as
- * they are inserted (ddl.ts, slotlock.outbox_coverage_in_shape); the passes are for those before.
+ * The head is read once every transaction already writing to the outbox has ended, so nothing at or
+ * below it commits later. Forced RLS would hide other tenants' rows, so each batch lifts FORCE from
+ * calendar_coverage and outbox under ACCESS EXCLUSIVE (in writer lock order) and restores it before
+ * committing. A superuser or BYPASSRLS role instead holds SHARE ROW EXCLUSIVE on the outbox only
+ * while reading the head.
  */
 async function renameEarlierCoverageChanges(
   executor: StoreSql,
   options: SlotlockMigrationOptions | undefined,
 ): Promise<void> {
   /**
-   * Run `work` able to read every tenant's outbox and coverage rows: as it is for a superuser or a
-   * BYPASSRLS role, else with FORCE lifted from the tables that have it, under ACCESS EXCLUSIVE
-   * (calendar_coverage, then outbox: the order every writer locks them in), and put back after.
+   * Run `work` able to read every tenant's rows: as is for a superuser or BYPASSRLS role, else with
+   * FORCE lifted under ACCESS EXCLUSIVE (calendar_coverage, then outbox: writer lock order) and put
+   * back after.
    */
   const everyTenant = async <T>(tx: TransactionSql, bypass: boolean, work: () => Promise<T>) => {
     const forced = bypass
@@ -676,8 +640,8 @@ async function renameEarlierCoverageChanges(
     return result;
   };
 
-  // The pass's head, in a short transaction of its own: once the writes in flight have ended (each
-  // holds ROW EXCLUSIVE from before it took its id), none at or below it can commit later.
+  // The head, in its own short transaction: writes in flight hold ROW EXCLUSIVE from before they
+  // took their id, so none at or below it commits later.
   const start = await inMigration(executor, options, async (tx) => {
     const [state] = await tx<{ renamed: boolean; through: string | null; bypass: boolean }[]>`
       SELECT version.coverage_changes_renamed AS renamed,
@@ -710,7 +674,6 @@ async function renameEarlierCoverageChanges(
       );
       const read = row?.last ?? null;
       renamedTotal += row?.renamed ?? 0;
-      // Saved with the batch, so a pass stopped part way goes on from here.
       await tx`
         UPDATE slotlock.schema_version
            SET coverage_changes_renamed_through = ${read ?? head}::bigint,
@@ -723,7 +686,6 @@ async function renameEarlierCoverageChanges(
   }
 }
 
-/** Whether the rename of coverage changes earlier releases wrote still has a pass to run. */
 async function coverageChangesRenamePending(tx: TransactionSql): Promise<boolean> {
   const [row] = await tx<{ renamed: boolean }[]>`
     SELECT coverage_changes_renamed AS renamed FROM slotlock.schema_version WHERE singleton`;
@@ -744,8 +706,8 @@ async function slotlockConstraintUnvalidated(tx: TransactionSql): Promise<boolea
 }
 
 /**
- * Whether every tenant table has forced RLS and only its tenant policy, bound to `setting`, whose
- * live fingerprint (computed as the RLS DDL computes it) matches the contract the DDL recorded.
+ * Whether every tenant table has forced RLS and only its tenant policy bound to `setting`, matching
+ * the fingerprint the DDL recorded.
  */
 async function tenantRlsUpToDate(tx: TransactionSql, setting: string): Promise<boolean> {
   const [present] = await tx<{ readable: boolean }[]>`
@@ -780,9 +742,8 @@ async function tenantRlsUpToDate(tx: TransactionSql, setting: string): Promise<b
 }
 
 /**
- * The schema version recorded by the last migration, or `null` when there is none this role can
- * read: no schema, a schema from 0.2 or earlier, or a role not yet granted the function (run
- * `slotlock migrate`, which grants it).
+ * The recorded schema version, or `null` when this role cannot read one: no schema, 0.2 or earlier,
+ * or the function not yet granted (`slotlock migrate` grants it).
  */
 export async function readSlotlockSchemaVersion(sql: SlotlockSql): Promise<number | null> {
   const [readable] = await sql<{ readable: boolean }[]>`
@@ -796,9 +757,8 @@ export async function readSlotlockSchemaVersion(sql: SlotlockSql): Promise<numbe
 }
 
 /**
- * Refuse to serve a schema another release migrated: `schema_outdated` when it is older than this
- * release (or unversioned), so `slotlock migrate` must run first; `schema_newer` when a newer release
- * migrated it, whose schema this release's code does not know. Both carry `installed` and `expected`.
+ * Refuse a schema another release migrated: `schema_outdated` (older or unversioned: run `slotlock
+ * migrate`) or `schema_newer`. Both carry `installed` and `expected`.
  */
 export async function assertSlotlockSchemaCurrent(sql: SlotlockSql): Promise<void> {
   const installed = await readSlotlockSchemaVersion(sql);
@@ -1038,7 +998,6 @@ function toHold(row: HoldRow): SlotlockHold {
   };
 }
 
-/** A keyset cursor `{ start, id }` from the last row of a previous page, checked. */
 function pageCursor(after: { start: Date; id: string } | undefined) {
   if (
     after !== undefined &&
@@ -1283,9 +1242,7 @@ async function replaceCalendarEventOccurrences(
     event: CalendarEventContent;
     occurrences: CalendarEventOccurrence[];
     revision: number;
-    /** The event's turnaround, kept after each occurrence. */
     bufferAfterMs?: number;
-    /** The event's leading buffer, kept before each occurrence. */
     bufferBeforeMs?: number;
   },
 ): Promise<void> {
@@ -1335,7 +1292,6 @@ async function replaceCalendarEventOccurrences(
   }
 }
 
-/** A recurring series' materialization window: finite, forward, and at most 369 days. */
 function seriesWindow(window: Interval): Interval {
   if (
     !isFiniteWindow(window) ||
@@ -1357,9 +1313,9 @@ function calendarWindow(window: Interval): Interval {
 }
 
 /**
- * A one-off event's materialization window must contain the event. It defaults to the event's own
- * interval and may exceed the 367-day recurrence cap only by being exactly that interval, which is
- * what the `slotlock_calendar_events_materialization_window_bounded` CHECK admits.
+ * A one-off event's window must contain the event. It may exceed the 367-day cap only by being
+ * exactly the event's interval, as the `slotlock_calendar_events_materialization_window_bounded`
+ * CHECK admits.
  */
 function oneOffEventWindow(event: Interval, requested: Interval | undefined): Interval {
   const duration = event.end.getTime() - event.start.getTime();
@@ -1381,9 +1337,8 @@ function calendarCommandHash(value: unknown): string {
 }
 
 /**
- * What makes a put the same request: its identity and the event it asks for. Not the window its
- * occurrences are stored over, which for a series is the rolling horizon from the current UTC
- * midnight: with it in the hash, a retry after midnight was refused as a different request.
+ * A put's identity and the event it asks for, not its storage window: a series' window moves with
+ * the UTC day, so a retry after midnight must still match.
  */
 function putCommandHash(params: {
   command: PutCalendarEventCommand;
@@ -1394,9 +1349,8 @@ function putCommandHash(params: {
 }
 
 /**
- * The hash 0.3.0 and earlier stored, with the window in it, so a command stored before the upgrade
- * still replays: always for a one-off event, whose window is its own span, and on the same UTC day
- * for a series. Remove once no stored command can be that old (commands are pruned after 30 days).
+ * The hash 0.3.0 and earlier stored (window included), so an older stored command still replays.
+ * Remove once no stored command can be that old (pruned after 30 days).
  */
 export function legacyPutCommandHash(
   params: Parameters<typeof putCommandHash>[0] & { window: Interval },
@@ -1419,7 +1373,7 @@ function putCommandValue(params: Parameters<typeof putCommandHash>[0]) {
     expectedRevision: params.command.expectedRevision,
     resourceId: params.command.resourceId,
     source: params.command.source ?? null,
-    // Only when present, so a create without a hold keeps the hash it always had.
+    // Only when present, so a create without a hold keeps its hash.
     ...(params.command.fromHold ? { fromHold: params.command.fromHold.holdId } : {}),
     event: {
       ...params.event,
@@ -1511,8 +1465,7 @@ async function calendarOwnerCommandCount(
 
 /**
  * The end of every event cancellation, under the event's identity and row locks: remove the event
- * (when there is one) and its occupation, leave the identity's tombstone at `revision`, and record
- * the command in `commandOwnerRef`'s namespace for replay.
+ * and its occupation, leave the tombstone at `revision`, and record the command for replay.
  */
 async function finishCalendarCancel(
   tx: TransactionSql,
@@ -1565,8 +1518,8 @@ async function finishCalendarCancel(
 }
 
 /**
- * The row an event write lost to. The write was rolled back, so the event's own rows from before
- * it are still there and are left out: they were to be replaced, and never block the event.
+ * The row an event write lost to. The write was rolled back, so the event's own previous rows are
+ * excluded: they were to be replaced.
  */
 async function findCalendarOverlap(
   sql: StoreSql,
@@ -1592,10 +1545,9 @@ async function findCalendarOverlap(
 }
 
 /**
- * What the resource's booking rules (as they apply: its own over its pool's and tenant's defaults)
- * say about a booking of `interval` made now (by the database's clock, at this statement): the rule
- * it breaks, if any, and the buffers it must keep before and after it. A resource without its own
- * hours is judged against `defaultHours`.
+ * What the resource's effective booking rules say about booking `interval` now (database clock):
+ * the rule broken, if any, and the buffers to keep. A resource without its own hours is judged
+ * against `defaultHours`.
  */
 async function bookingRuling(
   tx: TransactionSql,
@@ -1615,8 +1567,8 @@ async function bookingRuling(
 const CERTAIN_COVERAGE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 /**
- * The resource's booking rules as they apply, read once, as a check of any interval booked now (by
- * the database's clock at this statement) and the buffers a booking keeps.
+ * The resource's effective booking rules, read once, as a check of any interval booked now
+ * (database clock) and the buffers to keep.
  */
 async function bookingJudge(
   tx: TransactionSql,
@@ -1649,7 +1601,6 @@ async function bookingJudge(
     effective_booking_rules: row.effective_booking_rules,
   });
   const hours = availabilityRules ?? defaultHours;
-  // Every sync covering the resource, and whether it was read within a day, by the same clock.
   const coverage =
     rules?.requireCertain === true
       ? await tx<{ starts_at: Date; ends_at: Date; fresh: boolean }[]>`
@@ -1660,7 +1611,6 @@ async function bookingJudge(
       : [];
   const turnaroundMs = bookingBufferAfterMs(rules);
   const bufferBeforeMs = bookingBufferBeforeMs(rules);
-  // The booking and the buffers it keeps, as a search judges the slot.
   const uncertain = (interval: Interval) =>
     coverage.some(
       (source) =>
@@ -1668,8 +1618,8 @@ async function bookingJudge(
         source.starts_at.getTime() > interval.start.getTime() - bufferBeforeMs ||
         source.ends_at.getTime() < interval.end.getTime() + turnaroundMs,
     );
-  // A later occurrence of a series is judged on its step and hours only: notice and advance are
-  // about when the booking was made, which its first occurrence answers.
+  // Later occurrences are judged on step and hours only: notice and advance concern when the
+  // booking was made.
   const later =
     rules === undefined
       ? undefined
@@ -1702,7 +1652,6 @@ function sameExternalPayload(
     row.resource_id === params.resourceId &&
     row.starts_at.getTime() === params.start.getTime() &&
     row.ends_at.getTime() === params.end.getTime() &&
-    // As asked, or raised to the resource's turnaround when it was stored.
     (buffer === params.bufferAfterMs || buffer === Math.max(params.bufferAfterMs, turnaroundMs)) &&
     Number(row.revision) === params.revision &&
     row.source === (params.source ?? null)
@@ -1714,14 +1663,13 @@ async function lockExternalIdentity(
   tenantRef: string,
   externalRef: string,
 ): Promise<void> {
-  // JSON encoding is unambiguous for this pair and contains no NUL byte (Postgres text rejects
-  // U+0000). The database hashes it to one transaction-scoped lock key.
+  // JSON is unambiguous for this pair and has no NUL byte (Postgres text rejects U+0000).
   await tx`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify([tenantRef, externalRef])}, 0))`;
 }
 
 /**
- * Whether the resource is the tenant's (`missing` when not), and whether it is archived. The row is
- * share-locked to the end of the transaction, so it is neither archived nor deleted meanwhile.
+ * Whether the resource is the tenant's (`missing` when not), and whether it is archived.
+ * Share-locked to the end of the transaction, so it is neither archived nor deleted meanwhile.
  */
 async function tenantResourceState(
   tx: TransactionSql,
@@ -1811,9 +1759,9 @@ type ResourceRow = {
 };
 
 /**
- * A resource row's booking rules as they apply (jsonb; NULL for none): the tenant's defaults,
- * overlaid by its pool's, overlaid by its own, field by field, so one set at a narrower level wins.
- * Read from a row of slotlock.resources named `resources` (no alias).
+ * A resource row's effective booking rules (jsonb; NULL for none): tenant defaults, overlaid by its
+ * pool's, overlaid by its own, field by field. Reads from a row of slotlock.resources named
+ * `resources` (no alias).
  */
 const EFFECTIVE_BOOKING_RULES = `NULLIF(
   COALESCE((SELECT defaults.rules FROM slotlock.booking_rule_defaults defaults
@@ -1827,7 +1775,7 @@ const EFFECTIVE_BOOKING_RULES = `NULLIF(
 /** What rules Slotlock did not write read as: no booking passes them. */
 const REFUSE_EVERY_BOOKING: SlotlockBookingRules = Object.freeze({ maxAdvanceDays: 1, minNoticeMinutes: 525_600 });
 
-/** Rules read back from storage: written validated, so anything else refuses every booking. */
+/** Rules written validated, so anything else read back refuses every booking. */
 function storedBookingRules(value: unknown): SlotlockBookingRules {
   try {
     return parseBookingRules(value);
@@ -1847,7 +1795,7 @@ function toResource(row: ResourceRow): SlotlockResource {
   if (row.archived_at !== null) resource.archivedAt = row.archived_at;
   if (row.pool_ref !== null && row.pool_ref !== undefined) resource.pool = row.pool_ref;
   if (row.availability_rules !== null && row.availability_rules !== undefined) {
-    // Written through setResourceAvailability, which validates; anything else reads as closed.
+    // Written validated; anything else reads as closed.
     try {
       resource.availabilityRules = parseAvailabilityRules(row.availability_rules);
     } catch {
@@ -1855,14 +1803,12 @@ function toResource(row: ResourceRow): SlotlockResource {
     }
   }
   if (row.booking_rules !== null && row.booking_rules !== undefined) {
-    // Written through setResourceBookingRules, which validates; anything else reads as refusing
-    // every booking, never as no rule.
+    // Written validated; anything else refuses every booking, never as no rule.
     resource.bookingRules = storedBookingRules(row.booking_rules);
   }
   if (row.effective_booking_rules !== null && row.effective_booking_rules !== undefined) {
-    // Merged from levels each validated alone, so only their combination can disagree (an offset
-    // from one level over a shorter step from another): that one is read modulo the step. A field
-    // invalid in itself was not written by Slotlock, and refuses every booking, as stored rules do.
+    // Levels are validated alone, so only their combination can disagree (an offset over a shorter
+    // step): that one is read modulo the step. A field invalid in itself refuses every booking.
     const { rules, dropped } = parseEffectiveBookingRules(row.effective_booking_rules);
     if (dropped.length > 0) {
       console.warn(
@@ -1876,7 +1822,6 @@ function toResource(row: ResourceRow): SlotlockResource {
   return resource;
 }
 
-/** Validated rules as a jsonb parameter, or null for "use the default". */
 function availabilityParameter(sql: StoreSql, rules: readonly WeeklyAvailabilityRule[] | null) {
   // sql.json, not JSON.stringify: a string bound to jsonb is stored as a JSON string.
   if (rules === null) return null;
@@ -1902,8 +1847,8 @@ async function upsertResource(
   const visibility = params.visibility ?? 'shared';
   const asked = params.visibility ?? null;
   let rows: ResourceIdentityRow[];
-  // An existing identity keeps the visibility it has: creating it again with none named returns it
-  // as it is, and with another one is refused, so a private one is never made shared that way.
+  // An existing identity keeps its visibility: re-creating with another is refused, so a private
+  // one is never made shared.
   if (params.tenantRef !== undefined && params.externalRef !== undefined) {
     rows = await executor<ResourceIdentityRow[]>`
       INSERT INTO slotlock.resources (external_ref, tenant_ref, timezone, visibility)
@@ -1938,11 +1883,9 @@ async function upsertResource(
 }
 
 /**
- * Rematerialize one stored recurring master over the window a roll to `horizon` gives it
- * (rolledWindow): from where its last expansion stopped when that can be trusted, else its start.
- * False when there is no such master or nothing to roll. A collision throws the database's 23P01,
- * and a rule over the expansion budget CalendarExpansionLimitError; run it in a savepoint, which
- * either rolls back whole.
+ * Rematerialize one stored recurring master over rolledWindow: from its last expansion's cursor
+ * when trustworthy, else its start. False when there is nothing to roll. A collision throws 23P01
+ * and an over-budget rule CalendarExpansionLimitError; run it in a savepoint.
  */
 async function rollStoredSeries(
   tx: TransactionSql,
@@ -1997,8 +1940,8 @@ async function rollStoredSeries(
 }
 
 /**
- * Work out and store when a series stored before 0.3 ends (recurrence_ends_by), as its next roll
- * would; its stored occurrences are left as they are.
+ * Work out and store when a series stored before 0.3 ends, as its next roll would; its occurrences
+ * are left as they are.
  */
 async function learnSeriesEnd(tx: TransactionSql, tenantRef: string, eventId: string): Promise<void> {
   const [row] = await tx<CalendarEventRow[]>`
@@ -2020,7 +1963,6 @@ async function learnSeriesEnd(tx: TransactionSql, tenantRef: string, eventId: st
      WHERE id = ${row.id} AND tenant_ref = ${tenantRef} AND recurrence_ends_by IS NULL`;
 }
 
-/** Put a master the roll could not extend behind the others for an hour. */
 async function deferRoll(executor: StoreSql, tenantRef: string, eventId: string): Promise<void> {
   await executor`
     UPDATE slotlock.calendar_events
@@ -2030,16 +1972,11 @@ async function deferRoll(executor: StoreSql, tenantRef: string, eventId: string)
 
 /**
  * Whether every opaque recurring series on the resource (but `exceptEventId`) is stored over the
- * part of [start, end) that a roll can ever reach: from the later of `start` and the rolling
- * horizon's start. A write there must not land where such a series is not stored, or the series'
- * next roll would collide with it and stop. A series known to end before that part
- * (recurrence_ends_by) cannot meet the write and is left out, as is one stored through its end. A
- * series behind is first rolled to the horizon, in a savepoint of the write's transaction, so the
- * write meets its occurrences under the exclusion arbiter; false when one cannot be (it goes on
- * past the horizon and so does the write, it collides, or its rule is over the budget). Series are
- * rolled in id order; an event's update holds its own row while it rolls the others, so it and a
- * write rolling the same series in that order can deadlock, which the database breaks (the writer
- * retries once, then answers an overlap).
+ * part of [start, end) a roll can reach. A write must not land where a series is not stored yet, or
+ * the series' next roll would collide with it. A series behind is first rolled to the horizon in a
+ * savepoint, so the write meets its occurrences under the exclusion arbiter; false when one cannot
+ * be. Series roll in id order; a deadlock with a concurrent writer is broken by the database
+ * (retried once, then an overlap).
  */
 async function recurrenceCoversWrite(
   tx: TransactionSql,
@@ -2054,8 +1991,8 @@ async function recurrenceCoversWrite(
   const horizon = calendarEventRollingHorizon();
   if (params.end <= horizon.start) return true;
   const from = params.start > horizon.start ? params.start : horizon.start;
-  // LEAST and GREATEST ignore a NULL argument (PostgreSQL 16, Conditional Expressions): a series
-  // with no known end is behind wherever it is stored short of the write's end.
+  // LEAST and GREATEST ignore NULL arguments (PostgreSQL 16): a series with no known end is behind
+  // wherever it is stored short of the write's end.
   const behind = () => tx<{ id: string; ends_by_unknown: boolean; ends_in_horizon: boolean }[]>`
     SELECT event.id, event.recurrence_ends_by IS NULL AS ends_by_unknown,
            COALESCE(event.recurrence_ends_by <= ${horizon.end}::timestamptz, false)
@@ -2084,8 +2021,8 @@ async function recurrenceCoversWrite(
   let due = await behind();
   if (due.length === 0) return true;
   if (params.end > horizon.end) {
-    // A series stored before 0.3 has not worked out when it ends; it does so now, and is left out
-    // if it ends before the write or is stored through its end.
+    // A series stored before 0.3 works out its end now, and is left out if it ends before the write
+    // or is stored through its end.
     if (due.some((row) => row.ends_by_unknown)) {
       for (const { id, ends_by_unknown } of due) {
         if (ends_by_unknown) await learnSeriesEnd(tx, params.tenantRef, id);
@@ -2093,7 +2030,6 @@ async function recurrenceCoversWrite(
       due = await behind();
       if (due.length === 0) return true;
     }
-    // No roll stores a series past the horizon: one going on past it stays behind such a write.
     if (due.some((row) => !row.ends_in_horizon)) return false;
   }
   for (const { id } of due) {
@@ -2110,9 +2046,8 @@ async function recurrenceCoversWrite(
 }
 
 /**
- * Whether an event already occupies, on the resource, all the time `occurrences` would: such a
- * write (a rename, a new description) takes no time a series could later need, so it is not held
- * to where the series on the resource are stored.
+ * Whether an event already occupies all the time `occurrences` would: such a write (a rename) takes
+ * no time a series could later need.
  */
 async function holdsEveryOccurrence(
   tx: TransactionSql,
@@ -2131,7 +2066,6 @@ async function holdsEveryOccurrence(
   );
 }
 
-/** From the earliest start to the latest end of an event's occurrences, or null for none. */
 function occurrenceSpan(occurrences: readonly CalendarEventOccurrence[]): Interval | null {
   const [first] = occurrences;
   if (!first) return null;
@@ -2145,10 +2079,9 @@ function occurrenceSpan(occurrences: readonly CalendarEventOccurrence[]): Interv
 }
 
 /**
- * After a write lost to the exclusion arbiter: roll, in a transaction of its own, the series on the
- * resource the write's transaction rolled with it (and lost), so they stay extended and the loss
- * can name the occurrence that blocked it. A resource with no tenant has no series. Upkeep only: if
- * it fails, the series are left to maintenance and the write is still answered as a loss.
+ * After a write lost to the exclusion arbiter: roll, in a transaction of its own, the series the
+ * write's transaction rolled and lost, so the loss can name the blocking occurrence. Upkeep only:
+ * on failure, maintenance rolls them later.
  */
 async function rollSeriesBehind(
   executor: StoreSql,
@@ -2177,50 +2110,36 @@ async function rollSeriesBehind(
 
 export interface SlotlockStore extends SlotlockEventFeed {
   /**
-   * Apply the Slotlock DDL (idempotent). Owns the `slotlock` schema on the connected DB. Refuses
-   * (`unsafe_slotlock_schema`, with the `reasons` found) a `slotlock` schema that a role other than the
-   * connected one (superusers aside) owns or can create objects in, that holds an object such a
-   * role owns (an extension included), or whose tables such a role may add triggers to or have a
-   * trigger running a function such a role owns. Ownership through a group role counts as another
-   * role's: deploy as the owning role itself (`SET ROLE`). Refuses (`schema_newer`) a schema a newer
-   * release migrated, changing nothing. Records SLOTLOCK_SCHEMA_VERSION. A schema this release
-   * already migrated, unchanged since, is left as it is without a lock on any table. Constraints an
-   * upgrade adds NOT VALID are validated in a second transaction, whose locks no serving read or
-   * write waits for (one inside a caller's transaction shares its locks until it ends); one that old
-   * rows still break stays NOT VALID, and each later migration validates it again. Each lock it
-   * waits for is bounded by `lockTimeoutMs`, after which it tries again (`schema_lock_timeout` once
+   * Apply the Slotlock DDL (idempotent). Refuses (`unsafe_slotlock_schema`, with `reasons`) a
+   * `slotlock` schema that another role (superusers aside) owns, can create objects in, owns an
+   * object in, or can add triggers to; ownership through a group role counts, so deploy as the
+   * owning role itself (`SET ROLE`). Refuses (`schema_newer`) a schema a newer release migrated. An
+   * unchanged schema is left without locking any table. Constraints added NOT VALID are validated
+   * in a second transaction; one old rows still break stays NOT VALID and is retried on each
+   * migration. Each lock wait is bounded by `lockTimeoutMs` and retried (`schema_lock_timeout` once
    * out of attempts).
    */
   applySchema(options?: SlotlockMigrationOptions): Promise<void>;
   /**
-   * Atomically enable forced tenant RLS using this store's configured context setting. Refuses the
-   * same `slotlock` schemas as `applySchema()`. Tables already forced under exactly the policies it
-   * installs, bound to this setting, are left as they are without a lock on any table.
+   * Atomically enable forced tenant RLS using the store's context setting. Refuses the same schemas
+   * as `applySchema()`. Tables already set up exactly so are left without a lock.
    */
   applyTenantRls(options?: { allowRebind?: boolean } & SlotlockMigrationOptions): Promise<void>;
   /**
    * Grant an existing application role exactly what the store needs at runtime: USAGE on the
-   * `slotlock` schema and DML on its tables. Run as the deployment role after every `applySchema()`.
-   * Refuses (`unsafe_application_role`, with the `reasons` found) a role that has one of the known
-   * ways around forced tenant RLS or the exclusion arbiter, itself, through a role it belongs to or
-   * through PUBLIC: superuser, BYPASSRLS, REPLICATION or CREATEROLE, a server file or program role,
-   * ownership of the database, of anything in it (its temporary objects and its own default
-   * privileges aside) or of `btree_gist`, CREATE on the database or on any schema, TRUNCATE,
-   * REFERENCES or TRIGGER on a Slotlock table (or by default on new ones), or a right on a server
-   * setting. The check runs when the grant is made, so a right added later is not
-   * detected until it runs again, and it is not exhaustive (SECURITY.md lists what it does not read).
+   * `slotlock` schema and DML on its tables. Run as the deployment role after every
+   * `applySchema()`. Refuses (`unsafe_application_role`, with `reasons`) a role with a known way
+   * around forced RLS or the exclusion arbiter, directly, by membership or through PUBLIC
+   * (SECURITY.md lists the checks and what they do not cover). The check runs only at grant time.
    */
   grantApplicationRole(role: string, options?: SlotlockMigrationOptions): Promise<void>;
   /**
    * Run store operations with one transaction-local tenant context on the same connection. On a
-   * client it opens a READ COMMITTED transaction, whatever the role's default. Inside a caller's
-   * transaction of another level its writes are refused (`invalid_transaction_isolation`), since
-   * that snapshot can miss a suspension, and its reads go on; with `isolation: 'read committed'`
-   * such a transaction is refused outright. The serving role needs EXECUTE on
-   * slotlock.tenant_suspended(text): without it this refuses with `application_role_not_granted`
-   * (grantApplicationRole grants it), and on a schema without it with `schema_outdated`. With the
-   * store's `maxTenantTransactions`, an aborted `signal` takes a call still waiting for its turn out
-   * of the line, refused with the signal's reason.
+   * client it opens a READ COMMITTED transaction. Inside a caller's transaction of another level,
+   * writes are refused (`invalid_transaction_isolation`), since that snapshot can miss a
+   * suspension. Needs EXECUTE on slotlock.tenant_suspended(text) (`application_role_not_granted`
+   * without it; grantApplicationRole grants it). With `maxTenantTransactions`, an aborted `signal`
+   * removes a waiting call from the line.
    */
   withTenant<T>(
     tenantRef: string,
@@ -2246,14 +2165,11 @@ export interface SlotlockStore extends SlotlockEventFeed {
    * INVARIANT (erasure completeness): a tenant integration must use a stable, erasable business
    * identifier for externalRef and include this schema in its own data-erasure workflow.
    *
-   * With `maxTenantResources` (1-100,000, tenant-owned resources only), or the store's `resources`
-   * limit (the lower of the two when both are set), a new resource of a tenant is refused
-   * (`resource_limit_reached`, with the `limit`) once the tenant has that many; an existing
-   * `externalRef` is still updated. Capped creates for one tenant run one at a time under a database lock, so racing ones
-   * on any number of servers stop at the cap. The count needs READ COMMITTED: a capped create opens
-   * one itself, and inside a caller's transaction of another level it refuses
-   * (`invalid_transaction_isolation`). Uncapped creates do not wait for the lock and are not
-   * counted against a cap until they commit.
+   * With `maxTenantResources` (1-100,000) or the store's `resources` limit (the lower applies), a
+   * new resource is refused (`resource_limit_reached`) once the tenant has that many; an existing
+   * `externalRef` is still updated. Capped creates serialize on a database lock, so racing servers
+   * stop at the cap; this needs READ COMMITTED (`invalid_transaction_isolation` inside another
+   * level).
    */
   createResource(params: {
     externalRef?: string;
@@ -2365,13 +2281,11 @@ export interface SlotlockStore extends SlotlockEventFeed {
     includeArchived?: boolean;
   }): Promise<SlotlockResource[]>;
   /**
-   * Insert a confirmed reservation with the EXCLUDE constraint as the overlap arbiter. Never
-   * throws for the expected outcomes: an invalid window or a lost race come back structured.
-   * Expired holds overlapping the window are lazily reaped in the same transaction — an
-   * expired-but-unpurged hold can never block (no cron required). On a tenant's resource the
-   * booking takes the tenant, and its own id as reference, so cancel and reschedule reach it. With
-   * `tenantRef`, only a resource of that tenant (`resource_not_found` otherwise, whatever the
-   * connection's row-level security).
+   * Insert a confirmed reservation with the EXCLUDE constraint as the overlap arbiter; expected
+   * outcomes (invalid window, lost race) come back structured. Expired holds overlapping the window
+   * are reaped in the same transaction, so they never block. On a tenant's resource the booking
+   * takes the tenant and its own id as reference. With `tenantRef`, only that tenant's resource
+   * (`resource_not_found` otherwise, whatever the connection's RLS).
    */
   createReservation(params: {
     resourceId: string;
@@ -2397,11 +2311,9 @@ export interface SlotlockStore extends SlotlockEventFeed {
     revision: number;
   }): Promise<CancelExternalReservationResult>;
   /**
-   * Occupy a window WITHOUT committing: the hold blocks rivals under the same EXCLUDE arbiter
-   * until `expiresAt` (DB clock — the statement's time + ttl, never the app clock), then frees via
-   * lazy reap.
-   * With `tenantRef`, only a resource of that tenant (`resource_not_found` otherwise, whatever the
-   * connection's row-level security).
+   * Occupy a window without committing: the hold blocks rivals under the same EXCLUDE arbiter until
+   * `expiresAt` (database clock: statement time + ttl), then frees via lazy reap. With `tenantRef`,
+   * only that tenant's resource (`resource_not_found` otherwise, whatever the connection's RLS).
    */
   acquireHold(params: {
     resourceId: string;
@@ -2413,21 +2325,18 @@ export interface SlotlockStore extends SlotlockEventFeed {
     /** Turnaround kept busy after `end`, 0 to 30 days; the confirmed booking keeps it. */
     bufferAfterMs?: number;
     /**
-     * A retry identity, 1-500 UTF-8 bytes, unique inside `tenantRef` and `principalRef` (both
-     * required with it): a request repeated with the same key and body answers the hold the first
-     * made (`idempotent: true`), and one with another body is `idempotency_conflict`. The answer is
-     * kept until the hold would have expired, released or confirmed; a retry after that makes a new
-     * hold.
+     * A retry identity, 1-500 UTF-8 bytes, unique within `tenantRef` and `principalRef` (both
+     * required): the same key and body answer the first hold (`idempotent: true`); another body is
+     * `idempotency_conflict`. Kept until the hold would have expired, released or confirmed.
      */
     idempotencyKey?: string;
     /** Whose keys `idempotencyKey` is among, 1-500 UTF-8 bytes (an API key's subject, say). */
     principalRef?: string;
     /**
-     * Who the hold belongs to, 1-500 UTF-8 bytes, inside `tenantRef` (required with it): an agent
-     * acting for one person, say. `releaseHold` and `putCalendarEvent`'s `fromHold` with a
-     * `holderRef` take only their own, and a holder may have `maxHoldsPerHolder` (20) live at once,
-     * holding at most `maxHeldHoursPerHolder` together when that is set. Without it the hold has no
-     * holder and no cap: an application holding for its customers.
+     * Who the hold belongs to, 1-500 UTF-8 bytes, within `tenantRef` (required): `releaseHold` and
+     * `fromHold` with a `holderRef` take only their own, and a holder may have `maxHoldsPerHolder`
+     * live at once (and `maxHeldHoursPerHolder` together, when set). Without it the hold has no
+     * holder and no cap.
      */
     holderRef?: string;
     /**
@@ -2469,12 +2378,10 @@ export interface SlotlockStore extends SlotlockEventFeed {
     after?: { start: Date; id: string };
   }): Promise<SlotlockReservation[]>;
   /**
-   * Flip an unexpired hold to a confirmed booking (expiry cleared). On a tenant's resource the
-   * booking takes the tenant, and the hold's id as its reference at revision 1, so cancel and
-   * reschedule reach it like any other (`reservation_cancelled` when a cancel of that reference
-   * came first). Confirming it again answers the booking as it now is. With `tenantRef`, only a
-   * hold on one of that tenant's resources counts: another tenant's is `hold_not_found` whatever
-   * the connection's row-level security.
+   * Turn an unexpired hold into a confirmed booking. On a tenant's resource the booking takes the
+   * tenant and the hold's id as reference at revision 1 (`reservation_cancelled` when a cancel of
+   * that reference came first). Confirming again answers the booking as it now is. With
+   * `tenantRef`, another tenant's hold is `hold_not_found` whatever the connection's RLS.
    */
   confirmHold(holdId: string, options?: SlotlockHoldTenantOptions): Promise<ConfirmHoldResult>;
   /**
@@ -2562,12 +2469,10 @@ export interface SlotlockStore extends SlotlockEventFeed {
     expectedResourceId?: string;
   }): Promise<CancelCalendarEventResult>;
   /**
-   * Atomically rematerialize due recurring masters into one rolling window without changing their
-   * semantic revision. A collision rolls back that master and leaves its old coverage untouched.
-   * A master is rolled from the window's start through the later of its stored end and the
-   * window's, so its end never moves back. One that already covers the window, or whose end lies
-   * too far past it for the 367-day cap from the window's start, is not due: it is left as it is
-   * and not counted.
+   * Rematerialize due recurring masters into one rolling window without changing their revision. A
+   * collision rolls back that master and keeps its old coverage. A master is rolled from the
+   * window's start through the later of its stored end and the window's; one already covering the
+   * window, or too far past it for the 367-day cap, is not due and not counted.
    */
   rollCalendarEventHorizon(params: {
     tenantRef: string;
@@ -2577,12 +2482,10 @@ export interface SlotlockStore extends SlotlockEventFeed {
     after?: CalendarHorizonRollCursor;
   }): Promise<CalendarHorizonRollResult>;
   /**
-   * Delete one bounded batch of expired event bookkeeping for a tenant, which is what returns agent
-   * quota: idempotency commands older than the replay window (every owner), then agent-owned
-   * cancellation tombstones older than it with no remaining command. Active events and `internal`
-   * (provider/sync) tombstones are never deleted. Rows another transaction holds are skipped, not
-   * waited on. After the window a retried command is evaluated afresh under its expected revision,
-   * and a pruned agent identity can be created again. Call until `hasMore` is false.
+   * Delete one bounded batch of expired event bookkeeping, which returns agent quota: commands
+   * older than the replay window (every owner), then agent-owned tombstones older than it with no
+   * remaining command. Active events and `internal` tombstones are never deleted. Locked rows are
+   * skipped. Afterwards a retried command is evaluated afresh. Call until `hasMore` is false.
    */
   pruneCalendarEventRetention(params: {
     tenantRef: string;
@@ -2592,21 +2495,17 @@ export interface SlotlockStore extends SlotlockEventFeed {
     retentionDays?: number;
   }): Promise<CalendarEventRetentionResult>;
   /**
-   * Delete one bounded batch of a tenant's dead booking rows: holds past their expiry and the
-   * answers kept for keyed ones (at once), and references retired by a cancel no booking held,
-   * older than the retention window. A cancelled booking's tombstone is never deleted here (only by
-   * erasing the tenant), so its reference is never booked again. Rows another transaction holds
-   * are skipped, not waited on. It also gives a confirmed booking a 0.2 server wrote without its
-   * tenant the tenant and its own id as reference, as the migration does. Call until `hasMore` is
-   * false.
+   * Delete one bounded batch of a tenant's dead booking rows: expired holds and their keyed
+   * answers, and references retired with no booking past retention. A cancelled booking's tombstone
+   * is only deleted by erasure, so its reference is never booked again. Locked rows are skipped.
+   * Also gives a confirmed booking a 0.2 server wrote without a tenant its tenant and reference, as
+   * the migration does. Call until `hasMore` is false.
    */
   /**
-   * Time zone rules that changed since an event was booked (a new tzdata): a future one-off event
-   * whose wall-clock time in its zone now falls at another instant. Each is reported once on the
-   * feed (`event.timezone_shifted`, with the instant it has and the one its wall time now means).
-   * With `move`, it is moved there instead (a new revision, `event.updated` naming `slotlock:tzdata`),
-   * unless that overlaps another booking: then it stays and `event.timezone_conflict` reports it,
-   * for a person or an agent to decide. Up to `limit` (1-1,000, default 100) events a call.
+   * Find future one-off events whose wall-clock time now falls at another instant (new tzdata),
+   * each reported once (`event.timezone_shifted`). With `move`, it is moved (a new revision,
+   * `event.updated` by `slotlock:tzdata`) unless that overlaps another booking, which
+   * `event.timezone_conflict` reports instead. Up to `limit` (1-1,000, default 100) a call.
    */
   followZoneRules(params: {
     tenantRef: string;
@@ -2747,12 +2646,11 @@ export interface SlotlockStore extends SlotlockEventFeed {
    */
   sweepAssistantConversations(params?: { limit?: number }): Promise<number>;
   /**
-   * Offer freed time to the waitlist, in the order entries joined: each waiting entry whose window
-   * is free (on its resource, or on the first free member of its pool) gets a hold for its holder
-   * and the feed says so (`waitlist.offered`, with the hold). Entries whose window has started are
-   * expired (`waitlist.expired`); finished ones older than the change feed's retention are deleted.
-   * One tenant's offers run one at a time. One page of `limit` (1-100, default 50) entries: pass
-   * `next` back as `after` for the next, until it is null.
+   * Offer freed time to the waitlist in join order: each waiting entry whose window is free (on its
+   * resource, or the first free pool member) gets a hold for its holder (`waitlist.offered`).
+   * Started windows expire (`waitlist.expired`); finished entries past retention are deleted. One
+   * tenant's offers run one at a time. Pages of `limit` (1-100, default 50): pass `next` back as
+   * `after` until null.
    */
   offerWaitlist(params: {
     tenantRef: string;
@@ -2770,11 +2668,10 @@ export interface SlotlockStore extends SlotlockEventFeed {
     retentionDays?: number;
   }): Promise<BookingRetentionResult>;
   /**
-   * Suspend a tenant: from when this returns, every withTenant transaction for it (as every server
-   * runs its requests) may read, and its writes are refused (`tenant_suspended`); one in flight is
-   * waited for. Its keys still authenticate, but it gets no new key or secret. Maintenance and
-   * erasure go on. True when it was not suspended already. Only the deployment role, which owns the
-   * schema, may suspend (`tenant_suspension_not_permitted` for another).
+   * Suspend a tenant: from when this returns, its withTenant transactions may read but writes are
+   * refused (`tenant_suspended`); one in flight is waited for. Its keys still authenticate but it
+   * gets no new key. Maintenance and erasure go on. True when it was not suspended already.
+   * Deployment role only (`tenant_suspension_not_permitted`).
    */
   suspendTenant(params: {
     tenantRef: string;
@@ -2786,11 +2683,9 @@ export interface SlotlockStore extends SlotlockEventFeed {
   /** Whether the tenant is suspended. */
   isTenantSuspended(params: { tenantRef: string }): Promise<boolean>;
   /**
-   * Erase a tenant: delete every row it owns (resources, holds, bookings, events with their
-   * attendees and reminders, cancellations, idempotency records, coverage, API keys, and a personal
-   * tenant's dashboard records) in one transaction, waiting for its transactions in flight. API key
-   * digests are retired so no erased key works again; a suspension stays. Erasing again deletes
-   * nothing.
+   * Erase a tenant: delete every row it owns in one transaction, waiting for its transactions in
+   * flight. API key digests are retired so no erased key works again; a suspension stays. Erasing
+   * again deletes nothing.
    */
   eraseTenant(params: { tenantRef: string }): Promise<SlotlockTenantErasure>;
   /** Record the bounded, complete source window represented by a provider cursor/revision. */
@@ -2804,12 +2699,11 @@ export interface SlotlockStore extends SlotlockEventFeed {
     coverageMaxAgeMs?: number;
   }): Promise<CalendarFreeBusy>;
   /**
-   * The first slot of `durationMs` inside the hours, whose time and turnaround buffer are free:
-   * getFreeBusy × expandRules (in the resource's stored timezone) → findNextAvailable. Null when no
-   * slot is free, and when one cannot be proven free: the coverage of the window (with the buffer's
-   * tail) is not complete, because a recurring series is not stored that far or a required provider
-   * calendar is not read that far. Another tenant's resource, an unknown id or one the store never
-   * issues is `resource_not_found`. A search window longer than 367 days is `invalid_window`.
+   * The first slot of `durationMs` inside the hours whose time and turnaround buffer are free
+   * (getFreeBusy × expandRules in the resource's timezone → findNextAvailable). Null when no slot
+   * is free or one cannot be proven free (coverage incomplete: a series not stored that far, or a
+   * required provider not read that far). Unknown or another tenant's resource is
+   * `resource_not_found`; a window over 367 days is `invalid_window`.
    */
   findNextAvailableFor(params: {
     /** The resource's tenant; `null` for a resource that has none (the legacy namespace). */
@@ -2929,20 +2823,16 @@ export interface SlotlockStoreOptions {
   /** Hard retained-command ceiling per non-internal owner. Defaults to 10,000; cannot be disabled. */
   agentOwnerCommandQuota?: number;
   /**
-   * What one tenant may store, for a database tenants share (none by default). A write that would
-   * pass a limit is refused with it (`*_limit_reached`); what the tenant has can still be revised
-   * (a move adds no booking or event, so it is not refused), cancelled and released. Counted under
-   * a lock per tenant and limit, so racing writers never pass it, in READ COMMITTED transactions
-   * only (`invalid_transaction_isolation` otherwise). Bookings and events count while they are still
-   * to come, and for 30 days after they were made, whatever time they hold; history older than that
-   * does not count, and a count stops reading at the limit.
+   * What one tenant may store, for a shared database (none by default). A write that would pass a
+   * limit is refused (`*_limit_reached`); existing rows can still be revised, cancelled and
+   * released. Counted under a per-tenant lock in READ COMMITTED transactions only. Bookings and
+   * events count while still to come and for 30 days after they were made.
    */
   tenantLimits?: SlotlockTenantLimits;
   /**
-   * How many withTenant transactions of one tenant run at once on this store (1-1,000; no limit by
-   * default). The rest wait in this process, in order, so one tenant's transactions waiting on its
-   * own locks hold at most this many of a pool's connections. Not counted inside a caller's
-   * transaction, which holds its connection already.
+   * How many withTenant transactions of one tenant run at once on this store (1-1,000; unlimited by
+   * default). The rest wait in order, so one tenant waiting on its own locks holds at most this
+   * many pool connections. Not counted inside a caller's transaction.
    */
   maxTenantTransactions?: number;
   /**
@@ -2952,11 +2842,9 @@ export interface SlotlockStoreOptions {
    */
   tenantLockTimeoutMs?: number;
   /**
-   * How many days history is kept, 1-3,650 (default 30): the change feed (and how far back a cursor
-   * reaches) and waitlist entries that ended; and, when longer than 30 days, retired idempotency
-   * answers, booking references and past events' commands (never shorter, so a delayed retry is still
-   * answered as the first try was). Maintenance prunes what is older. A cursor before a change any
-   * store has pruned answers `cursor_expired`, so stores set differently never skip a change.
+   * Days history is kept, 1-3,650 (default 30): the change feed (and cursor reach) and ended
+   * waitlist entries; and, when longer than 30 days, retired idempotency answers, booking
+   * references and past events' commands. A cursor before a pruned change answers `cursor_expired`.
    */
   retentionDays?: number;
   /**
@@ -2976,10 +2864,9 @@ export interface SlotlockTenantLimits {
   /** Resources, archived ones included; the lower of this and a call's `maxTenantResources`. */
   resources?: number;
   /**
-   * Holds on the tenant's resources, expired ones included until they are deleted. A keyed hold
-   * keeps its place until it would have expired, released or confirmed, while its answer is kept
-   * for retries. A hold at the limit first deletes the tenant's expired holds and forgets their
-   * answers, as maintenance does, so only live holds keep a new one out.
+   * Holds, expired ones included until deleted; a keyed hold keeps its place while its answer is
+   * kept. At the limit, expired holds and their answers are deleted first, so only live holds keep
+   * a new one out.
    */
   holds?: number;
   /**
@@ -2988,9 +2875,9 @@ export interface SlotlockTenantLimits {
    */
   reservations?: number;
   /**
-   * Calendar events of every owner still to come (a series until it is known to have ended) or made
-   * in the last 30 days, cancellations of every owner made in the last 30 days, and agent-owned
-   * cancellations until maintenance prunes them. Each event stores at most 2,000 occurrences.
+   * Events of every owner still to come (a series until known to have ended) or made in the last 30
+   * days, cancellations made in the last 30 days, and agent cancellations until pruned. Each event
+   * stores at most 2,000 occurrences.
    */
   events?: number;
   /** Provider coverage rows: one per resource and source. */
@@ -3019,8 +2906,8 @@ function tenantLimitsOption(limits: SlotlockTenantLimits | undefined): SlotlockT
 }
 
 /**
- * Serialize one tenant's writes that add rows of one limited kind, so each counts what every
- * earlier one committed. Taken before any row lock, after the write's identity locks.
+ * Serialize a tenant's writes adding rows of one limited kind, so each counts what earlier ones
+ * committed. Taken after the identity locks, before any row lock.
  */
 async function lockTenantLimit(
   tx: TransactionSql,
@@ -3032,19 +2919,16 @@ async function lockTenantLimit(
 }
 
 /**
- * Rows a tenant added within this many days count against its limits whatever time they hold, so
- * bookings and events dated in the past, and cancellations, add at most the limit in any such
- * window. Ended history is not pruned: over a longer time it can still grow. Maintenance keeps
- * event idempotency records and stray retirements at least as long (the store's `retentionDays`).
+ * Rows added within this many days count whatever time they hold, so back-dated bookings and
+ * cancellations add at most the limit per window. Maintenance keeps idempotency records and stray
+ * retirements at least this long.
  */
 const TENANT_LIMIT_RECENT_DAYS = SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS;
 
 /**
- * The rows a tenant has that its limit of `kind` counts: what is still to come, and what it added
- * in the last TENANT_LIMIT_RECENT_DAYS days; what ended before then is history and does not count.
- * Each part stops at `limit` rows, read through an index, so a count costs no more than the limit
- * however much history the tenant keeps; the total is at least `limit` exactly when the tenant is
- * at it.
+ * The rows a tenant's `kind` limit counts: what is still to come plus what it added in the last
+ * TENANT_LIMIT_RECENT_DAYS days. Each part stops at `limit` rows read through an index, so a count
+ * costs at most the limit.
  */
 async function tenantLimitCount(
   tx: TransactionSql,
@@ -3055,10 +2939,8 @@ async function tenantLimitCount(
   let rows: { count: number }[];
   switch (kind) {
     case 'holds':
-      // Every held row, expired or not, until it is deleted: an expired hold no rival writes over
-      // stays stored until maintenance or a hold at the limit deletes it. And the answer kept for
-      // each keyed hold no longer held (released or confirmed, or its expired row deleted) until it
-      // is forgotten. An answer whose hold is still a held row is left out: that row counts.
+      // Every held row until deleted (expired ones too), plus each keyed hold's kept answer once
+      // its row is gone.
       rows = await tx<{ count: number }[]>`
         SELECT (
           (SELECT count(*) FROM (
@@ -3078,9 +2960,8 @@ async function tenantLimitCount(
         )::int AS count`;
       break;
     case 'reservations':
-      // Bookings still to come; bookings that have ended and cancellations, made recently; and
-      // references retired with no booking, until maintenance prunes them. A cancelled booking's
-      // tombstone is kept for good, and stops counting once it is no longer recent.
+      // Bookings still to come; ended bookings and cancellations made recently; and stray
+      // retirements until pruned.
       rows = await tx<{ count: number }[]>`
         WITH recent AS (
           SELECT now() - ${TENANT_LIMIT_RECENT_DAYS}::int * interval '1 day' AS since
@@ -3108,9 +2989,9 @@ async function tenantLimitCount(
         )::int AS count`;
       break;
     case 'events':
-      // One-off events still to come and series not known to have ended; events that have ended
-      // and cancellations of any owner, made recently; and agent cancellations until maintenance
-      // prunes them. The owner identity CHECK makes every owner but 'internal' an 'agent:' one.
+      // One-off events still to come and series not known to have ended; recent ended events and
+      // cancellations; and agent cancellations until pruned. The owner CHECK makes every owner but
+      // 'internal' an 'agent:' one.
       rows = await tx<{ count: number }[]>`
         WITH recent AS (
           SELECT now() - ${TENANT_LIMIT_RECENT_DAYS}::int * interval '1 day' AS since
@@ -3155,9 +3036,8 @@ async function tenantLimitCount(
 }
 
 /**
- * Delete up to `limit` of a tenant's holds that have expired, oldest first; the number deleted. A
- * writer reaping or confirming a hold locks it: such a row is skipped, and the delete repeats the
- * predicate on the row as it now is.
+ * Delete up to `limit` of a tenant's expired holds, oldest first. Rows a reaper or confirmer has
+ * locked are skipped, and the delete rechecks the predicate.
  */
 async function deleteExpiredHolds(
   tx: TransactionSql,
@@ -3186,8 +3066,8 @@ async function deleteExpiredHolds(
 }
 
 /**
- * Delete up to `limit` of a tenant's keyed hold answers whose hold has expired, so a retry with one
- * of their keys makes a new hold; answers another transaction holds are skipped. The number deleted.
+ * Delete up to `limit` keyed hold answers whose hold has expired, so a retry makes a new hold;
+ * locked answers are skipped.
  */
 async function forgetExpiredHoldAnswers(
   tx: TransactionSql,
@@ -3215,8 +3095,8 @@ async function forgetExpiredHoldAnswers(
 }
 
 /**
- * The time a booking of [start, end) keeping these buffers occupies, as the exclusion constraint
- * reads it: from its start less its leading buffer to its end plus its trailing one.
+ * A booking's occupied time as the exclusion constraint reads it: start less its leading buffer to
+ * end plus its trailing one.
  */
 function occupiedTime(params: { start: Date; end: Date; bufferBeforeMs?: number; bufferAfterMs?: number }): Interval {
   return {
@@ -3226,8 +3106,8 @@ function occupiedTime(params: { start: Date; end: Date; bufferBeforeMs?: number;
 }
 
 /**
- * A row's occupied time starts before `end`: a condition on its occupied start that still reads the
- * (resource_id, starts_at, ends_at) index, since no row starts more than a day after it.
+ * Occupied start before `end`, written so the (resource_id, starts_at, ends_at) index still
+ * applies: no row starts more than a day after its occupied start.
  */
 function occupiedStartsBefore(executor: StoreSql, end: Date, alias?: string) {
   const column = (name: string) => executor.unsafe(alias === undefined ? name : `${alias}.${name}`);
@@ -3236,12 +3116,9 @@ function occupiedStartsBefore(executor: StoreSql, end: Date, alias?: string) {
 }
 
 /**
- * Delete expired held rows whose occupied time (buffers included, as the EXCLUDE constraint reads
- * it) overlaps the requested window, whose `start` and `end` are its own occupied start and end
- * (`occupiedTime`), in deterministic id
- * order under FOR UPDATE — two concurrent reapers lock the same rows in the same order (no
- * deadlock), the loser simply finds them gone. Runs inside the caller's transaction, immediately
- * before its INSERT, so the EXCLUDE arbiter only ever sees LIVE occupation.
+ * Delete expired held rows whose occupied time overlaps the window, in id order under FOR UPDATE:
+ * concurrent reapers lock in the same order (no deadlock) and the loser finds them gone. Runs right
+ * before the caller's INSERT, so the EXCLUDE arbiter only sees live occupation.
  */
 async function reapExpiredHolds(
   tx: TransactionSql,
@@ -3264,10 +3141,9 @@ async function reapExpiredHolds(
 }
 
 /**
- * Structured answer after losing to the EXCLUDE arbiter: name the (live) winner.
- * conflictingReservationId can be null in one narrow race: the blocker expired between the
- * loser's transaction start (constraint saw it) and this lookup (live filter hides it) — an
- * immediate retry reaps it and wins.
+ * Structured answer after losing to the EXCLUDE arbiter: name the live winner.
+ * conflictingReservationId is null in one narrow race (the blocker expired between the constraint
+ * check and this lookup); an immediate retry reaps it and wins.
  */
 async function overlapLoss(
   sql: StoreSql,
@@ -3353,7 +3229,7 @@ export function createTenantSlots(
     return () => {
       if (released) return;
       released = true;
-      // Handed straight to the next in line, so the count stays as it is.
+      // Handed straight to the next in line, so the count is unchanged.
       const next = slots.waiting.shift();
       if (next) {
         next();
@@ -3432,9 +3308,8 @@ function staleSuspensionCheckError(): Error & { code: 'invalid_transaction_isola
 }
 
 /**
- * Reading a tenant's suspension needs EXECUTE on slotlock.tenant_suspended(text), which PUBLIC does
- * not hold (SQLSTATE 42501 without it), and a schema this release migrated (42883 before then).
- * Name the remedy for each; any other failure passes through.
+ * Reading a suspension needs EXECUTE on slotlock.tenant_suspended(text) (42501 without it) and a
+ * schema this release migrated (42883 before). Name the remedy for each.
  */
 function suspensionCheckRefusal(error: unknown): unknown {
   const code = pgCode(error);
@@ -3460,8 +3335,8 @@ function suspensionCheckRefusal(error: unknown): unknown {
 }
 
 /**
- * A store on `sql`. With `refusal`, every method in SLOTLOCK_TENANT_WRITE_METHODS throws what it
- * returns before any query (a suspended tenant, or a suspension check that could be stale).
+ * A store on `sql`. With `refusal`, every SLOTLOCK_TENANT_WRITE_METHODS method throws it before any
+ * query.
  */
 function buildSlotlockStore(
   sql: StoreSql,
@@ -3539,7 +3414,7 @@ function buildSlotlockStore(
       : undefined;
   const lockTimeout =
     ownTransactions && tenantLockTimeoutMs !== undefined ? `${tenantLockTimeoutMs}ms` : undefined;
-  createSlotlockTenantRlsDdl(configuredTenantSetting); // Validate once before any scoped query.
+  createSlotlockTenantRlsDdl(configuredTenantSetting);
   const storeOptions: SlotlockStoreOptions = {
     tenantContextSetting: configuredTenantSetting,
     agentOwnerEventQuota: configuredAgentOwnerEventQuota,
@@ -3551,9 +3426,8 @@ function buildSlotlockStore(
   };
 
   /**
-   * Under the tenant's lock for `kind`: the limit when the tenant is at it, else null. No limit for
-   * `kind`, or no tenant, takes no lock. Writes that only lower the count take no lock, so a count
-   * read early stays an upper bound for the rest of the transaction.
+   * Under the tenant's lock for `kind`: the limit when the tenant is at it, else null. Writes that
+   * only lower the count take no lock, so an early count stays an upper bound.
    */
   async function tenantLimitReached(
     tx: TransactionSql,
@@ -3565,10 +3439,8 @@ function buildSlotlockStore(
     await assertReadCommitted(tx);
     await lockTenantLimit(tx, tenantRef, kind);
     if ((await tenantLimitCount(tx, tenantRef, kind, limit)) < limit) return null;
-    // A hold, and a keyed hold's answer, keep their place only until the hold expires; at the
-    // limit, the expired holds and their answers are deleted, as maintenance would, and the count
-    // is read again. Counting expired rows until then keeps what a tenant stores within the limit
-    // between maintenance passes, however short its holds.
+    // At the limit, expired holds and their answers are deleted, as maintenance would, and the
+    // count is read again.
     if (
       kind !== 'holds' ||
       (await deleteExpiredHolds(tx, tenantRef, limit)) +
@@ -3582,7 +3454,7 @@ function buildSlotlockStore(
 
   /**
    * The tenant whose limit a write on the resource counts against: the caller's, else the
-   * resource's (a resource never changes tenant, so it is read before any lock). Null with no limit.
+   * resource's (never changes, so read before any lock). Null with no limit.
    */
   async function limitTenant(
     tx: TransactionSql,
@@ -3600,12 +3472,9 @@ function buildSlotlockStore(
   const store: SlotlockStore = {
     ...slotlockEventFeedMethods(sql, retentionDays),
     async applySchema(migrationOptions) {
-      // PostgreSQL's IF NOT EXISTS DDL is idempotent after commit but not race-free: two fresh
-      // application instances can still collide on pg_namespace/pg_extension unique indexes.
-      // inMigration serializes bootstrap per database and the transaction releases the lock on
-      // crashes. A schema this release already left as it is changes nothing and locks no table,
-      // unless old rows kept one of its constraints NOT VALID (then only the validation runs again)
-      // or the rename of earlier coverage changes is not done (then only a pass of it runs).
+      // IF NOT EXISTS DDL is idempotent but not race-free: two fresh instances can collide on
+      // pg_namespace/pg_extension indexes, so inMigration serializes bootstrap. An unchanged schema
+      // locks no table unless a constraint is still NOT VALID or the coverage rename is unfinished.
       const next = await inMigration(sql, migrationOptions, async (tx) => {
         await tx.unsafe(SLOTLOCK_DEPLOYMENT_CHECKS).catch((error: unknown) => {
           throw schemaControlRefusal(error);
@@ -3621,16 +3490,13 @@ function buildSlotlockStore(
         });
         return { validate: true, rename: await coverageChangesRenamePending(tx) };
       });
-      // Changes an earlier release wrote are renamed in short batches once the structure commits,
-      // never under its locks, by this migration and the next ones until a pass finds none
-      // (renameEarlierCoverageChanges); the feed serves any not renamed yet redacted (event-feed.ts,
-      // slotlockServedChange).
+      // Renamed in short batches after the structure commits, never under its locks; the feed
+      // redacts any not yet renamed (event-feed.ts, slotlockServedChange).
       if (next.rename) await renameEarlierCoverageChanges(sql, migrationOptions);
       if (!next.validate) return;
-      // Once the DDL has committed, its ACCESS EXCLUSIVE locks are gone: validating holds none that
-      // a serving query waits for (ddl.ts, DEPLOYMENT_VALIDATE_CONSTRAINTS). Inside a caller's
-      // transaction both steps share it, and its locks, until it ends. The digests go last, so a
-      // migration stopped before them runs whole again.
+      // After the DDL commits its ACCESS EXCLUSIVE locks are gone, so validation blocks no serving
+      // query (ddl.ts, DEPLOYMENT_VALIDATE_CONSTRAINTS). Digests go last, so a migration stopped
+      // earlier runs whole again.
       await inMigration(sql, migrationOptions, async (tx) => {
         await tx.unsafe(SLOTLOCK_VALIDATION_DDL);
         await tx`
@@ -3815,8 +3681,8 @@ function buildSlotlockStore(
         throw Object.assign(new Error('Slotlock key id must be a UUID'), { code: 'invalid_identity' as const });
       }
       const release = await tenantSlots?.(tenantRef, options?.signal);
-      // A lock wait that timed out leaves the transaction unusable, so the reset below fails with
-      // another error in its place: noted here as it happens.
+      // A lock timeout leaves the transaction unusable, so the reset below would fail with another
+      // error: noted here.
       let timedOut = false;
       return inTransaction(
         sql,
@@ -3825,9 +3691,8 @@ function buildSlotlockStore(
             await tx`SELECT set_config('lock_timeout', ${lockTimeout}, true)`;
           }
           if (isolation !== undefined) await assertReadCommitted(tx);
-          // Held shared until the transaction ends: suspension and erasure, which take it
-          // exclusively, wait for this transaction, and one that starts after them reads them below
-          // (READ COMMITTED: a statement after the lock sees what committed before it was granted).
+          // Held shared until the transaction ends: suspension and erasure take it exclusively, so
+          // they wait for this transaction, and one starting after them sees them (READ COMMITTED).
           const previous = await tx<
             { value: string | null; isolation: string; actor: string | null; origin: string | null; key: string | null }[]
           >`
@@ -3848,9 +3713,8 @@ function buildSlotlockStore(
                    slotlock.tenant_suspended(${tenantRef}) AS suspended`.catch((error: unknown) => {
             throw suspensionCheckRefusal(error);
           });
-          // A caller's REPEATABLE READ or SERIALIZABLE snapshot was taken before the lock was
-          // granted, so it may not show a suspension that committed while this transaction waited:
-          // its writes are refused, and it may read.
+          // A caller's REPEATABLE READ or SERIALIZABLE snapshot predates the lock, so it may miss a
+          // suspension: its writes are refused, reads allowed.
           const refusal =
             context?.suspended === true
               ? tenantSuspendedError
@@ -3917,7 +3781,7 @@ function buildSlotlockStore(
           // An object, so the key never equals a [tenantRef, externalRef] identity lock's.
           await tx`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify({ resourceCount: tenantRef })}, 0))`;
           // READ COMMITTED: each statement below sees every create committed before the lock.
-          // Re-creating a resource the tenant has (by its reference) adds none.
+          // Re-creating a known reference adds none.
           const known =
             externalRef === null
               ? []
@@ -4027,8 +3891,8 @@ function buildSlotlockStore(
       const tenantRef = params.tenantRef;
       return inTransaction(sql, async (tx) => {
         if (pool !== '') {
-          // Counted under the tenant's lock, so racing writes stop at the cap.
-          // The count after the lock sees every committed row only under READ COMMITTED.
+          // Counted under the tenant's lock, which only READ COMMITTED makes see every committed
+          // row.
           await assertReadCommitted(tx);
           await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`slotlock:rule-defaults:${tenantRef}`}, 0))`;
           const [counted] = await tx<{ pools: number; exists: boolean }[]>`
@@ -4160,8 +4024,8 @@ function buildSlotlockStore(
       if (!isValidIdentity(params.tenantRef) || !isValidResourceId(params.id)) {
         throw invalidIdentityError('Slotlock resource identity is invalid');
       }
-      // Its clock time, not the transaction's start: a booking that committed holding the row's
-      // share lock went in before this.
+      // Clock time, not transaction start: a booking that committed holding the row's share lock
+      // went in before this.
       const [row] = await sql<ResourceRow[]>`
         UPDATE slotlock.resources
            SET archived_at = COALESCE(archived_at, clock_timestamp())
@@ -4207,8 +4071,8 @@ function buildSlotlockStore(
                       AND (recurrence_rule IS NOT NULL OR ends_at > now())
                  ) AS live`;
         if (live?.live) return { ok: false, code: 'resource_in_use' };
-        // Its rows go with it: reservations, events and their children, coverage and hold answers
-        // all cascade from the resource.
+        // Reservations, events and their children, coverage and hold answers all cascade from the
+        // resource.
         await tx`DELETE FROM slotlock.resources WHERE id = ${params.id}`;
         return { ok: true, deleted: true };
       });
@@ -4222,10 +4086,9 @@ function buildSlotlockStore(
       if (params.tenantRef !== undefined && !isValidIdentity(params.tenantRef)) {
         return { ok: false, code: 'resource_not_found' };
       }
-      // A booking on a tenant's resource takes the tenant and its own id as reference, so it can be
-      // cancelled and moved like any other; one on a resource with no tenant stays tenantless.
+      // A booking on a tenant's resource takes the tenant and its own id as reference; one on a
+      // tenantless resource stays tenantless.
       const id = randomUUID();
-      // The buffers written, for the overlap answer if the write loses.
       let bufferBeforeMs = 0;
       let bufferAfterMs = 0;
       for (let attempt = 1; ; attempt++) {
@@ -4281,7 +4144,7 @@ function buildSlotlockStore(
         } catch (err) {
           const code = pgCode(err);
           if ((code === DEADLOCK_DETECTED || code === SERIALIZATION_FAILURE) && attempt === 1) {
-            continue; // fully rolled back — one retry wins cleanly or loses with a clean 23P01
+            continue; // fully rolled back: one retry wins or loses with a clean 23P01
           }
           if (
             code !== EXCLUSION_VIOLATION &&
@@ -4290,8 +4153,8 @@ function buildSlotlockStore(
           ) {
             throw err;
           }
-          // A SECOND contention abort is treated as a loss too (structured, possibly with a null
-          // winner if both rivals rolled back) — symmetric with 40P01, never a raw throw.
+          // A second contention abort is a structured loss too (possibly with a null winner), never
+          // a raw throw.
           const occupied = occupiedTime({ ...params, bufferBeforeMs, bufferAfterMs });
           await rollSeriesBehind(sql, params.resourceId, occupied.start, occupied.end);
           return overlapLoss(
@@ -4323,8 +4186,8 @@ function buildSlotlockStore(
                WHERE tenant_ref = ${params.tenantRef} AND external_ref = ${params.externalRef}`;
             if (cancelled[0]) return { ok: false, code: 'reservation_cancelled' };
             // A calendar event's occupation carries a reference in this namespace too, but it is
-            // not a booking: create, reschedule and cancel never read, replay, move or free it,
-            // and answer as for a reference no booking holds. Bookings have their own unique index.
+            // not a booking: create, reschedule and cancel treat it as a reference no booking
+            // holds.
             const existing = await tx<ReservationRow[]>`
               SELECT id, resource_id, tenant_ref, external_ref, starts_at, ends_at,
                      buffer_after_ms, revision, source
@@ -4335,7 +4198,7 @@ function buildSlotlockStore(
             const found = existing[0];
             const ruling = await bookingRuling(tx, params.resourceId, params, defaultHours);
             if (found) {
-              // The booking has moved on since: a delayed create is stale, as a delayed move is.
+              // Moved on since: a delayed create is stale, as a delayed move is.
               if (params.revision < Number(found.revision)) {
                 return { ok: false, code: 'stale_revision' };
               }
@@ -4553,8 +4416,8 @@ function buildSlotlockStore(
         }
 
         if (!found) {
-          // A calendar event's occupation row carries this reference: it is the event's, not a
-          // booking's. Nothing is cancelled, and nothing retired: a tombstone would only grow.
+          // This reference is a calendar event's occupation, not a booking: nothing to cancel or
+          // retire.
           const [occupation] = await tx<{ id: string }[]>`
             SELECT id FROM slotlock.reservations
              WHERE tenant_ref = ${params.tenantRef} AND external_ref = ${params.externalRef}
@@ -4566,7 +4429,7 @@ function buildSlotlockStore(
           if (limit !== null) return { ok: false, code: 'reservation_limit_reached', limit };
         }
         // A reference no booking holds yet is retired too, so a create delivered after its cancel
-        // cannot bring the booking back. Only such a stray retirement is pruned past retention.
+        // cannot bring it back.
         await tx`
           INSERT INTO slotlock.reservation_tombstones (tenant_ref, external_ref, revision, stray)
           VALUES (${params.tenantRef}, ${params.externalRef}, ${params.revision}, ${!found})`;
@@ -4581,9 +4444,8 @@ function buildSlotlockStore(
       if (!isFiniteWindow({ start: params.start, end: params.end })) {
         return { ok: false, code: 'invalid_window' };
       }
-      // Finiteness + cap: NaN/Infinity would raise raw 22008 in make_interval, and an absurd
-      // ttl mints an effectively-eternal hold whose expiry can even exceed the JS Date range
-      // (Invalid Date back to the caller). All refused pre-table.
+      // NaN/Infinity would raise a raw 22008 in make_interval, and a huge ttl could exceed the JS
+      // Date range.
       if (!Number.isFinite(params.ttlMs) || params.ttlMs <= 0 || params.ttlMs > MAX_HOLD_TTL_MS) {
         return { ok: false, code: 'invalid_ttl' };
       }
@@ -4626,8 +4488,7 @@ function buildSlotlockStore(
         ...(holderRef !== undefined ? { holderRef } : {}),
       });
       const ttlSeconds = params.ttlMs / 1000;
-      // The buffers written: the one asked for, raised to the resource's turnaround, and its rule's
-      // leading buffer.
+      // The buffer asked for, raised to the resource's turnaround, and its rule's leading buffer.
       let written = bufferAfterMs;
       let writtenBefore = 0;
       for (let attempt = 1; ; attempt++) {
@@ -4666,11 +4527,10 @@ function buildSlotlockStore(
             if (!resource) return { ok: false, code: 'resource_not_found' };
             if (resource.archived) return { ok: false, code: 'resource_archived' };
             if (holdLimit !== null) return { ok: false, code: 'hold_limit_reached', limit: holdLimit };
-            // Seconds the holder already holds, turnaround included, when its time is capped.
             let heldSeconds: number | null = null;
             if (holderRef !== undefined) {
-              // One holder's live holds, counted under a lock on the holder so racing holds stop
-              // at the cap: an agent cannot hold a resource's whole week.
+              // Counted under a lock on the holder, so racing holds stop at the cap: an agent
+              // cannot hold a resource's whole week.
               await tx`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify([
                 'slotlock-holder',
                 tenantRef,
@@ -4752,8 +4612,8 @@ function buildSlotlockStore(
           ) {
             throw err;
           }
-          // A SECOND contention abort is treated as a loss too (structured, possibly with a null
-          // winner if both rivals rolled back) — symmetric with 40P01, never a raw throw.
+          // A second contention abort is a structured loss too (possibly with a null winner), never
+          // a raw throw.
           const occupied = occupiedTime({ ...params, bufferBeforeMs: writtenBefore, bufferAfterMs: written });
           await rollSeriesBehind(sql, params.resourceId, occupied.start, occupied.end);
           return overlapLoss(
@@ -4881,12 +4741,11 @@ function buildSlotlockStore(
 
     async confirmHold(holdId, options = {}) {
       const tenantRef = holdTenantRef(options);
-      // Not an id the store issues: it names no hold (and would be a raw 22P02 in the query).
+      // Not an id the store issues (and a raw 22P02 in the query).
       if (!isValidResourceId(holdId)) return { ok: false, code: 'hold_not_found' };
       return inTransaction(sql, async (tx): Promise<ConfirmHoldResult> => {
-        // The tenant whose booking the hold becomes is its resource's; a hold never changes
-        // resource, so it is read before the identity lock, which is taken before the row lock as
-        // every booking write takes them.
+        // A hold never changes resource, so the owner is read before the identity lock, taken
+        // before the row lock as every booking write does.
         const [owner] = await tx<{ resource_id: string; resource_tenant: string | null }[]>`
           SELECT hold.resource_id, resource.tenant_ref AS resource_tenant
             FROM slotlock.reservations hold
@@ -4898,7 +4757,7 @@ function buildSlotlockStore(
         if (bookingTenant !== null) await lockExternalIdentity(tx, bookingTenant, holdId);
         const bookingLimit = await tenantLimitReached(tx, bookingTenant, 'reservations');
         // The resource's share lock, as every booking write takes it: an archive waits for this
-        // confirmation, and one that committed first is read here.
+        // confirmation.
         const [resource] = await tx<{ archived: boolean }[]>`
           SELECT archived_at IS NOT NULL AS archived FROM slotlock.resources
            WHERE id = ${owner.resource_id}
@@ -4910,23 +4769,19 @@ function buildSlotlockStore(
            WHERE id = ${holdId}
            FOR UPDATE`;
         if (!row) {
-          // NOTE: a hold reaped mid-flight by a rival (expired while this confirm waited on the
-          // reaper's lock) reads as hold_not_found: the row is gone and the space was legitimately
-          // taken; both refusal codes are terminal for the caller.
+          // A hold reaped by a rival while this confirm waited reads as hold_not_found; both
+          // refusals are terminal for the caller.
           return { ok: false, code: 'hold_not_found' };
         }
         if (row.status === 'confirmed') {
-          // Idempotent confirm: a retried confirm (network replay) of an already-confirmed hold is
-          // SUCCESS, the booking as it now is; reporting failure would make callers double-book
-          // elsewhere. A confirmed hold's reference is its own id (none without a tenant); a
-          // booking with another reference was never this hold.
+          // A retried confirm of an already-confirmed hold is success: reporting failure would make
+          // callers double-book elsewhere. A booking with another reference was never this hold.
           if (row.external_ref !== null && row.external_ref !== row.id) {
             return { ok: false, code: 'hold_not_found' };
           }
           return { ok: true, reservation: toReservation(row) };
         }
         if (!row.live) return { ok: false, code: 'hold_expired' };
-        // Archived since the hold was taken: a confirmation would be a new booking on it.
         if (resource?.archived !== false) return { ok: false, code: 'resource_archived' };
         if (bookingTenant !== null) {
           const [retired] = await tx<{ revision: string }[]>`
@@ -4942,8 +4797,8 @@ function buildSlotlockStore(
         if (bookingLimit !== null) {
           return { ok: false, code: 'reservation_limit_reached', limit: bookingLimit };
         }
-        // The occupied end is already the end plus the hold's buffer (the trigger set it); the
-        // tenant and reference make the hold a booking that cancel and reschedule reach.
+        // The trigger already set the occupied end; the tenant and reference make the hold a
+        // booking cancel and reschedule reach.
         const [confirmed] = await tx<ReservationRow[]>`
           UPDATE slotlock.reservations
              SET status = 'confirmed', expires_at = NULL,
@@ -5010,8 +4865,8 @@ function buildSlotlockStore(
           });
         }
       }
-      // Expired holds are dead occupation: excluded here so findNextAvailable can offer their
-      // space (the acquiring transaction reaps the row itself when it takes the window).
+      // Expired holds are excluded so findNextAvailable can offer their space; the acquiring
+      // transaction reaps the row itself.
       const rows = await sql<{ occupied_starts_at: Date; occupied_ends_at: Date }[]>`
         SELECT COALESCE(occupied_starts_at, starts_at) AS occupied_starts_at,
                COALESCE(occupied_ends_at, ends_at) AS occupied_ends_at
@@ -5060,8 +4915,8 @@ function buildSlotlockStore(
             stored: false,
           });
         } catch (error) {
-          // A long-running series can take more than a write searches from its start. If it is
-          // stored, it is expanded again below from where its last expansion stopped.
+          // A long-running series can outgrow the write's search budget from its start; a stored
+          // one is expanded below from its last cursor.
           if (!(error instanceof CalendarExpansionLimitError) || !event.recurrence) throw error;
         }
       } catch (error) {
@@ -5078,7 +4933,6 @@ function buildSlotlockStore(
       const recurrenceEndsBy = recurrenceEndsByColumn(event);
 
       let attempted: CalendarEventOccurrence[] = expanded?.occurrences ?? [];
-      // The buffers the attempt kept, for the overlap answer if it loses.
       let attemptedBuffers = { bufferBeforeMs: 0, bufferAfterMs: 0 };
       let storedEventId: string | undefined;
       for (let attempt = 1; ; attempt++) {
@@ -5109,8 +4963,8 @@ function buildSlotlockStore(
             if (ownerRef !== SLOTLOCK_INTERNAL_EVENT_OWNER_REF) {
               await lockCalendarOwnerQuota(tx, params.tenantRef, ownerRef);
               const commandCount = await calendarOwnerCommandCount(tx, params.tenantRef, ownerRef);
-              // Preserve one guaranteed cancellation slot for every possible live identity. This
-              // prevents update churn from making a principal unable to release calendar space.
+              // Reserve one cancellation slot for every possible live identity, so update churn
+              // cannot leave a principal unable to release calendar space.
               const putCommandLimit =
                 configuredAgentOwnerCommandQuota - configuredAgentOwnerEventQuota;
               if (commandCount >= putCommandLimit) {
@@ -5214,7 +5068,6 @@ function buildSlotlockStore(
               ) {
                 return { ok: false, code: 'hold_mismatch' };
               }
-              // The hold and its alternatives give way to the event in this transaction.
               await tx`
                 DELETE FROM slotlock.reservations
                  WHERE status = 'held' AND holder_ref = ${holderRef}
@@ -5311,8 +5164,8 @@ function buildSlotlockStore(
                 )`;
             }
 
-            // The normalized children are the queryable/canonical representation. The JSON
-            // columns above remain a migration-compatibility mirror until older readers retire.
+            // The normalized children are canonical; the JSON columns above are a compatibility
+            // mirror until older readers retire.
             await replaceCalendarEventChildren(tx, params.tenantRef, eventId, event);
             await replaceCalendarEventOccurrences(tx, {
               tenantRef: params.tenantRef,
@@ -5494,11 +5347,8 @@ function buildSlotlockStore(
         });
       }
       const after = rollCursor(params.after);
-      // Due: the masters rolledWindow rolls, which do not cover the window and end within the cap
-      // of its start. Those it has never put back come first, then those it has, longest waiting
-      // first: however many it cannot extend, they never stand in front of one it has not tried,
-      // so every pass that is not capped by such new ones reaches the healthy series, and the ones
-      // put back take turns.
+      // Due masters, never-deferred ones first, then deferred ones longest-waiting first: masters
+      // it cannot extend never starve healthy ones, and deferred ones take turns.
       const candidates = await sql<
         { id: string; materialized_ends_at: Date; roll_retry_at: Date | null }[]
       >`
@@ -5538,10 +5388,8 @@ function buildSlotlockStore(
             break;
           } catch (error) {
             if (error instanceof CalendarExpansionLimitError) {
-              // It takes more than Slotlock expands: a rule that never occurs again, one with no
-              // cursor to resume from whose search from its start has outgrown the budget, or one an
-              // earlier Slotlock stored that this one refuses. Nothing was written; its old coverage
-              // stays, and the masters after it still roll.
+              // Over the expansion budget (or a rule this release refuses): nothing written, old
+              // coverage kept, later masters still roll.
               refused += 1;
               refusedEventIds.push(candidate.id);
               await deferRoll(sql, params.tenantRef, candidate.id);
@@ -5556,16 +5404,15 @@ function buildSlotlockStore(
               code === DEADLOCK_DETECTED ||
               code === SERIALIZATION_FAILURE
             ) {
-              // The savepoint rolled every delete/insert back, so the previous materialized
-              // coverage remains truthful and callers will fail closed beyond it.
+              // The savepoint rolled everything back, so old coverage stays truthful and callers
+              // fail closed beyond it.
               conflicts += 1;
               conflictEventIds.push(candidate.id);
               await deferRoll(sql, params.tenantRef, candidate.id);
               break;
             }
-            // Anything else this one series meets (a row no Slotlock would write, a constraint it
-            // trips) was rolled back with its savepoint too: it is put back like one over the
-            // budget, so no single row stops the tenant's roll.
+            // Any other failure was rolled back with its savepoint too: defer it like an
+            // over-budget one, so no single row stops the tenant's roll.
             refused += 1;
             refusedEventIds.push(candidate.id);
             await deferRoll(sql, params.tenantRef, candidate.id);
@@ -5741,8 +5588,8 @@ function buildSlotlockStore(
             idempotent: true,
           };
         }
-        // An event's owner and reference never change, so they are read before its identity lock,
-        // which is taken before its row lock as every event write takes them.
+        // Owner and reference never change, so they are read before the identity lock, taken before
+        // the row lock as every event write does.
         const [identity] = await tx<{ owner_ref: string; external_ref: string }[]>`
           SELECT owner_ref, external_ref FROM slotlock.calendar_events
            WHERE tenant_ref = ${params.tenantRef} AND id = ${params.eventId}`;
@@ -5757,7 +5604,6 @@ function buildSlotlockStore(
           SELECT id, resource_id, revision FROM slotlock.calendar_events
            WHERE tenant_ref = ${params.tenantRef} AND id = ${params.eventId}
            FOR UPDATE`;
-        // Cancelled while this waited on its lock.
         if (!found) return { ok: false, code: 'event_not_found' };
         if (
           params.expectedResourceId !== undefined &&
@@ -5868,7 +5714,6 @@ function buildSlotlockStore(
           moved++;
         } catch (error) {
           if (pgCode(error) !== EXCLUSION_VIOLATION) throw error;
-          // It stays where it was; whoever owns it decides.
           await report(event, 'event.timezone_conflict');
           conflicts++;
         }
@@ -5886,8 +5731,8 @@ function buildSlotlockStore(
           code: 'invalid_limit' as const,
         });
       }
-      // Never under the default: a shorter retention trims the feed, not how long a retried write
-      // is answered as the first was.
+      // Never under the default: a shorter retention trims the feed, not how long a retry is
+      // answered as the first was.
       const keepDays =
         params.retentionDays ?? Math.max(retentionDays, SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS);
       if (
@@ -5900,11 +5745,10 @@ function buildSlotlockStore(
         });
       }
       return inTransaction(sql, async (tx): Promise<BookingRetentionResult> => {
-        // A 0.2 server still serving after the migration wrote its confirmed holds (and
-        // createReservation bookings) on the tenant's resources without the tenant or a reference,
-        // so no cancel or move reaches them; the migration gives those it finds the tenant and
-        // their own id, and this gives later ones the same. Each takes its reference's identity lock
-        // first, as every booking write does; a tombstone of its id retired nothing and goes.
+        // A 0.2 server still running after the migration wrote confirmed holds and
+        // createReservation bookings without the tenant or a reference; give them both, as the
+        // migration does. Each takes its reference's identity lock first, and a tombstone of its id
+        // goes.
         const legacy = await tx<{ id: string }[]>`
           SELECT booking.id
             FROM slotlock.reservations booking
@@ -5985,8 +5829,8 @@ function buildSlotlockStore(
           code: 'invalid_limit' as const,
         });
       }
-      // Never under the default: a shorter retention trims the feed, not how long a retried write
-      // is answered as the first was.
+      // Never under the default: a shorter retention trims the feed, not how long a retry is
+      // answered as the first was.
       const keepDays =
         params.retentionDays ?? Math.max(retentionDays, SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS);
       if (
@@ -5999,8 +5843,8 @@ function buildSlotlockStore(
         });
       }
       return inTransaction(sql, async (tx): Promise<CalendarEventRetentionResult> => {
-        // Commands are exact-replay evidence, never resurrection authority: after the window every
-        // owner's are eligible, and the active event or tombstone stays canonical where present.
+        // Commands are replay evidence, never resurrection authority: after the window every
+        // owner's go.
         const commands = await tx<{ deleted: number }[]>`
           WITH candidates AS MATERIALIZED (
             SELECT command.owner_ref, command.idempotency_key
@@ -6020,9 +5864,8 @@ function buildSlotlockStore(
             RETURNING 1
           )
           SELECT count(*)::int AS deleted FROM deleted`;
-        // Once every command of an agent-owned cancelled identity is gone its tombstone may follow;
-        // internal tombstones are provider/sync authority and stay. Event writers lock the tombstone
-        // row, so a row they hold is skipped and the delete repeats the selection predicate.
+        // An agent-owned tombstone may follow once all its commands are gone; internal ones are
+        // provider/sync authority and stay. Locked rows are skipped and the predicate rechecked.
         const tombstones = await tx<{ deleted: number }[]>`
           WITH candidates AS MATERIALIZED (
             SELECT tombstone.owner_ref, tombstone.external_ref
@@ -6127,7 +5970,6 @@ function buildSlotlockStore(
           if (params.revision !== currentRevision + 1) {
             return { ok: false, code: 'revision_conflict' };
           }
-          // A fresh read ends a staleness: the next one is reported again.
           await tx`
             UPDATE slotlock.calendar_coverage
                SET starts_at = ${window.start}, ends_at = ${window.end},
@@ -6292,7 +6134,7 @@ function buildSlotlockStore(
       // A suspended tenant's bookings stay as they are.
       if (refusal) return 0;
       const tenantRef = params.tenantRef;
-      // The same test twice: to find them, then under each reference's lock, as a cancel takes it.
+      // The same test twice: to find them, then under each reference's lock.
       const due = (tx: StoreSql, externalRef: string | null) => tx<
         { id: string; external_ref: string; revision: string | number; resource_id: string; minutes: number }[]
       >`
@@ -6374,7 +6216,8 @@ function buildSlotlockStore(
              LIMIT 1`;
           if (!member) return { ok: false, code: 'pool_not_found' };
         }
-        // Counted under the tenant's waitlist lock, which offers take too, so racing joins stop at the cap.
+        // Counted under the tenant's waitlist lock, which offers take too, so racing joins stop at
+        // the cap.
         await tx`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify(['slotlock-waitlist', tenantRef])}, 0))`;
         const [counts] = await tx<{ tenant: number; holder: number }[]>`
           SELECT count(*)::int AS tenant, count(*) FILTER (WHERE holder_ref = ${holderRef})::int AS holder
@@ -6416,15 +6259,13 @@ function buildSlotlockStore(
     async leaveWaitlist(params) {
       if (!isValidIdentity(params.tenantRef) || !isValidResourceId(params.id)) return false;
       return inTransaction(sql, async (tx) => {
-        // Waits for an offer pass that has this entry locked, so it leaves what that pass decided.
         const [left] = await tx<{ hold_id: string | null }[]>`
           DELETE FROM slotlock.waitlist_entries
            WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
              AND (${params.holderRef ?? null}::text IS NULL OR holder_ref = ${params.holderRef ?? null})
           RETURNING hold_id`;
         if (!left) return false;
-        // An offer not yet taken goes too, freeing the time for the next who waits; a confirmed
-        // one is a booking now and stays.
+        // An untaken offer's hold goes too; a confirmed one is a booking now and stays.
         if (left.hold_id) {
           await buildSlotlockStore(tx, options, null).releaseHold(left.hold_id, { tenantRef: params.tenantRef });
         }
@@ -6640,7 +6481,6 @@ function buildSlotlockStore(
              WHERE tenant_ref = ${tenantRef} AND status <> 'waiting'
                AND ends_at < statement_timestamp() - make_interval(days => ${retentionDays})`;
         }
-        // One page in join order; the caller passes `next` back for the rest.
         const waiting = await tx<WaitlistRow[]>`
           SELECT ${tx.unsafe(WAITLIST_COLUMNS)} FROM slotlock.waitlist_entries
            WHERE tenant_ref = ${tenantRef} AND status = 'waiting'
@@ -6648,18 +6488,15 @@ function buildSlotlockStore(
                   OR (created_at, id) > (${after?.createdAt ?? null}::timestamptz, ${after?.id ?? null}::uuid))
            ORDER BY created_at, id
            LIMIT ${limit}`;
-        // Holds made through a store on this transaction, each in a savepoint of its own.
         const inner = buildSlotlockStore(tx, options, null);
         let offered = 0;
         for (const entry of waiting) {
-          // Locked so a leave waits for this offer, and skipped if it left first.
           const [still] = await tx`
             SELECT 1 FROM slotlock.waitlist_entries
              WHERE id = ${entry.id} AND status = 'waiting' FOR UPDATE`;
           if (!still) continue;
-          // Only resources whose window looks free are tried: a hold refused keeps its locks
-          // until the transaction ends, so trying every member of a full pool would pile them up.
-          // A hold there keeps the resource's buffers (its rules as they apply), so they must be free too.
+          // Only resources that look free (buffers included) are tried: a refused hold keeps its
+          // locks until the transaction ends.
           const candidates = await tx<{ id: string }[]>`
             SELECT resources.id
               FROM slotlock.resources,
@@ -6759,7 +6596,6 @@ function buildSlotlockStore(
           code: 'resource_tenant_mismatch' as const,
         });
       }
-      // Each row's occupied time: its buffers are as busy as the booking.
       const busyRows = await sql<{ starts_at: Date; occupied_ends_at: Date }[]>`
         SELECT COALESCE(reservation.occupied_starts_at, reservation.starts_at) AS starts_at,
                COALESCE(reservation.occupied_ends_at, reservation.ends_at) AS occupied_ends_at
@@ -6812,8 +6648,8 @@ function buildSlotlockStore(
           FROM recurring_sources
          WHERE earliest_possible_at < ${window.end}`;
       const localRecurrenceRequired = Number(localRecurrenceCoverage?.source_count ?? 0) > 0;
-      // A resource that requires certainty requires every sync recording coverage of it, as its
-      // writes do (bookingJudge), and judges them by the same day.
+      // Requiring certainty means every sync covering the resource, judged by the same day, as
+      // writes do (bookingJudge).
       const requireCertain = owner[0].require_certain;
       const recordedSources = requireCertain
         ? (
@@ -6861,8 +6697,8 @@ function buildSlotlockStore(
       );
       if (localRecurrenceRequired) {
         if (localRecurrenceCoverage?.complete !== true) {
-          // Put the intrinsic source first: it is the boundary the caller can repair by rolling
-          // the event horizon, independently of any provider snapshot repair.
+          // The intrinsic source first: the caller can repair it by rolling the horizon,
+          // independent of providers.
           missingSources.unshift(SLOTLOCK_LOCAL_RECURRENCE_COVERAGE_SOURCE);
         }
         hasFreshOverlap ||= localRecurrenceCoverage?.overlaps === true;
@@ -6913,8 +6749,6 @@ function buildSlotlockStore(
       if (!Number.isFinite(params.durationMs) || params.durationMs <= 0) return null;
       const resource = toResource(row);
       const rules = params.rules ?? resource.availabilityRules ?? [];
-      // Only what a booking made now may take: the resource's booking rules (as they apply) bound
-      // the search.
       const search = bookingSearch({
         rules: resource.effectiveBookingRules,
         timezone: resource.timezone,
@@ -6924,11 +6758,11 @@ function buildSlotlockStore(
       });
       if (!search) return null;
       const { window } = search;
-      // A slot's buffers may run past the window: the time they can reach must be proven free too.
+      // A slot's buffers may run past the window: that reach must be proven free too.
       const reach = bookingSearchReach(search);
       let busy: Interval[];
       if (tenantRef === null) {
-        // No event, coverage or series can belong to a resource with no tenant: only its rows.
+        // A tenantless resource has no events, coverage or series: only its rows.
         busy = await this.listBusy(params.resourceId, reach);
       } else {
         busy = [];
@@ -6949,7 +6783,7 @@ function buildSlotlockStore(
               ? { coverageMaxAgeMs: params.coverageMaxAgeMs }
               : {}),
           });
-          // Absence is never treated as free time: what cannot be proven gives no slot.
+          // Absence is never free time.
           if (freeBusy.coverage.state !== 'complete') return null;
           busy.push(...freeBusy.busy);
         }
@@ -7043,7 +6877,7 @@ function buildSlotlockStore(
   );
 }
 
-/** The deployment role alone may suspend: another role is refused EXECUTE on the functions. */
+/** The deployment role alone may suspend: others are refused EXECUTE on the functions. */
 function suspensionRefusal(error: unknown): unknown {
   if (pgCode(error) !== '42501') return error;
   return Object.assign(

@@ -1,8 +1,7 @@
-// The REST API over the operation registries. Each agent route is one tool: reads and DELETE take their
-// input from the query string, POST, PUT and PATCH from a JSON body, and ids from the path. The
-// application operations (application-api.ts) are routes of the same shape. The OpenAPI 3.1 document
-// is built from the same input and output schemas the operations validate with, so the two cannot
-// describe different contracts.
+// The REST API over the operation registries: each agent route is one tool (reads and DELETE take
+// query input, POST/PUT/PATCH a JSON body, ids from the path), and application operations are
+// routes of the same shape. The OpenAPI 3.1 document is built from the operations' own schemas, so
+// the two cannot disagree.
 import type { SlotlockAgentOperation } from './agent-server.js';
 import {
   SLOTLOCK_APPLICATION_OPERATIONS,
@@ -16,9 +15,8 @@ export interface SlotlockRestRoute<Operation extends string = SlotlockAgentOpera
   path: string;
   operation: Operation;
   /**
-   * The store refusals the route can answer besides the ones every route can: 404 for a record
-   * that is missing or another tenant's, 409 for a conflict with what is stored (an overlap, a
-   * stale revision). The OpenAPI document declares them, so a generated client types them.
+   * Store refusals the route can answer beyond the common ones: 404 (missing or another tenant's)
+   * and 409 (a conflict with what is stored). Declared in OpenAPI so generated clients type them.
    */
   refusals?: readonly (404 | 409)[];
 }
@@ -119,9 +117,9 @@ const STATUS_TITLES: Readonly<Record<number, string>> = Object.freeze({
 });
 
 /**
- * A REST refusal as RFC 9457 problem details (`application/problem+json`): `type` and `title` name
- * the problem, `code` is Slotlock's code, and `error.code` repeats it, the body every earlier
- * client reads. `extensions` add what the refusal is about, such as the interval an overlap refused.
+ * A REST refusal as RFC 9457 problem details: `type` and `title` name the problem, `code` is
+ * Slotlock's code, and `error.code` repeats it for older clients. `extensions` add context, such as
+ * the interval an overlap refused.
  */
 export function slotlockProblem(
   status: number,
@@ -139,9 +137,9 @@ export function slotlockProblem(
 }
 
 /**
- * The Idempotency-Key header's value: a Structured Field String (RFC 9651, as
- * draft-ietf-httpapi-idempotency-key-header-08 defines it), or the bare token clients sent before.
- * `null` when it is a quoted string that does not parse.
+ * The Idempotency-Key header's value: a Structured Field String (RFC 9651, per
+ * draft-ietf-httpapi-idempotency-key-header-08), or a bare token as older clients send. `null` for
+ * a quoted string that does not parse.
  */
 export function parseIdempotencyKeyHeader(value: string): string | null {
   const trimmed = value.trim();
@@ -196,8 +194,8 @@ function matchPath(pattern: string, segments: readonly string[]): Record<string,
 }
 
 /**
- * The route for a method and path, the methods the path does have, or nothing. The first route in
- * `routes` that fits wins; no two of Slotlock's routes fit the same path and method (a test checks).
+ * The route for a method and path, the methods the path does have, or nothing. First fit wins; a
+ * test checks no two routes fit the same path and method.
  */
 export function matchSlotlockRestRoute<Operation extends string = SlotlockAgentOperation>(
   method: string,
@@ -249,9 +247,9 @@ function queryValue(value: string, schema: JsonSchema | undefined): unknown {
 }
 
 /**
- * An operation's input from a query string: an array parameter repeats (`resource_ids=a&resource_ids=b`,
- * OpenAPI's default form style), every other parameter appears once. A parameter the operation does
- * not have, or a repeated one, is passed on as it is, so the operation's strict schema refuses it.
+ * An operation's input from a query string: array parameters repeat (OpenAPI's default form style),
+ * others appear once. Unknown or repeated parameters pass through so the strict schema refuses
+ * them.
  */
 export function restQueryInput(
   search: URLSearchParams,
@@ -408,7 +406,6 @@ export function slotlockOpenApiDocument(args: {
           '403': ERROR_RESPONSE,
           '404': ERROR_RESPONSE,
           ...(route.method === 'GET' ? {} : { '409': ERROR_RESPONSE }),
-          // A change cursor past the feed's retention.
           ...(route.operation === 'slotlock_list_changes' ? { '410': ERROR_RESPONSE } : {}),
           '429': ERROR_RESPONSE,
           default: ERROR_RESPONSE,

@@ -1,5 +1,5 @@
-// One worker of createICalendarWorkerPool: reads the feeds it is sent with the ordinary parsers and
-// posts back what they return, or the code of the CalendarContractError they throw.
+// One worker of createICalendarWorkerPool: runs the ordinary parsers and posts back their result or
+// CalendarContractError code.
 import { parentPort } from 'node:worker_threads';
 import type { ICalendarWorkerReply, ICalendarWorkerRequest } from './ical-worker.js';
 import {
@@ -24,8 +24,7 @@ port.on('message', (request: ICalendarWorkerRequest) => {
           : parseTrustedICalendarEvents(request.input, request.calendarTimezone);
     reply = { id: request.id, ok: true, value };
   } catch (error) {
-    // The parsers turn every failure into a CalendarContractError; anything else is a fault, and
-    // ends this worker so the pool reports it.
+    // Anything but a CalendarContractError is a fault: end this worker so the pool reports it.
     if (!(error instanceof CalendarContractError)) throw error;
     reply = {
       id: request.id,

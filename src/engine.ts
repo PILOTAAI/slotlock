@@ -1,6 +1,5 @@
-// Pure gap-search math. No DB, no clock, no I/O — everything arrives as explicit parameters and
-// the answers are deterministic, which is what makes the engine testable to the boundary.
-// All intervals are half-open `[start, end)`.
+// Pure gap-search math: no DB, clock or I/O, so answers are deterministic. Intervals are half-open
+// `[start, end)`.
 import type { Interval } from './types.js';
 
 /** Sort + coalesce intervals; touching intervals (a.end === b.start) merge into one. */
@@ -39,22 +38,19 @@ export function subtractBusy(window: Interval, busy: Interval[]): Interval[] {
 }
 
 /**
- * Earliest `[s, s + durationMs)` that fits entirely inside one of `windows` without touching
- * `busy`. Returns null when nothing fits (no windows, saturated, duration too long, or a
- * non-positive duration — a zero-width slot is never a useful answer).
+ * Earliest `[s, s + durationMs)` inside one of `windows` without touching `busy`, or null when
+ * nothing fits (including a non-positive duration).
  *
- * Adjacency is NOT a booking boundary: touching windows merge (half-open point-set semantics,
- * RFC 7953 set-union), so a slot may legitimately span the seam of two abutting rules. "Distinct
- * shifts, no straddling" is unexpressible via touching windows — model it as a gap or a future
- * constraint layer.
+ * Touching windows merge (RFC 7953 set-union), so a slot may span the seam of two abutting rules;
+ * "no straddling" must be modelled as a gap.
  */
 export function findNextAvailable(params: {
   busy: Interval[];
   windows: Interval[];
   durationMs: number;
   /**
-   * Optional: the first allowed start at or after a candidate (a booking rule's step, say). It
-   * must not move a start backwards.
+   * The first allowed start at or after a candidate (a booking rule's step); must not move a start
+   * backwards.
    */
   align?: (start: Date) => Date;
 }): Interval | null {
@@ -62,8 +58,7 @@ export function findNextAvailable(params: {
   if (!Number.isFinite(durationMs) || durationMs <= 0) return null;
   const slotAt = (start: Date): Interval => ({ start, end: new Date(start.getTime() + durationMs) });
   const align = params.align ?? ((start: Date) => start);
-  // One walk of the merged busy list alongside the merged windows, both by start: a busy interval
-  // ending by a window's start ends before every later one too.
+  // One walk of merged busy alongside merged windows, both by start.
   const merged = mergeIntervals(busy);
   let next = 0;
   for (const window of mergeIntervals(windows)) {

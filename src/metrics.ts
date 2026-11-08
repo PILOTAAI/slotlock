@@ -1,7 +1,6 @@
-// Metrics in the Prometheus text format (0.0.4), for `slotlock serve`'s `/metrics`: what the server
-// reports to its hooks, counted. Labels are operations, protocols and outcome codes, all from closed
-// sets the server defines, never a tenant, a key, a client or an argument, so a scrape reveals no
-// one and its size stays bounded.
+// Prometheus text format (0.0.4) for `slotlock serve`'s `/metrics`. Labels come from closed sets
+// (operations, protocols, outcome codes), never a tenant, key, client or argument, so a scrape
+// reveals no one and stays bounded.
 import type { SlotlockAgentServerEvent } from './agent-server.js';
 import type { SlotlockMaintenanceResult } from './maintenance.js';
 import type { SlotlockRefusalCounts, SlotlockRefusalReason } from './rate-limit.js';
@@ -53,7 +52,6 @@ const key = (labels: Labels) => JSON.stringify(Object.entries(labels));
 function formatLabels(labels: Labels): string {
   const entries = Object.entries(labels);
   if (entries.length === 0) return '';
-  // Label values are from LABEL's set or the version strings below: escaped anyway.
   const escaped = entries.map(
     ([name, value]) =>
       `${name}="${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('\n', '\\n')}"`,

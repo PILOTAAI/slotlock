@@ -1,7 +1,5 @@
-// The package version, read from package.json so that file is the one place it is set. Built, this
-// module sits beside the artifact's own package.json (scripts/prepare-package.mjs writes it from the
-// root one), which is where it is installed from npm or copied into the image; run from a checkout's
-// src/, the root package.json is one directory up.
+// Read from package.json so that file is the one place the version is set: built, the artifact's
+// own package.json sits beside this module; in a checkout's src/, the root one is a directory up.
 import { readFileSync } from 'node:fs';
 
 /** Slotlock's version, or `'unknown'` where no manifest of its own can be read (a bundle). */

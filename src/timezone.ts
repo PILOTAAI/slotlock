@@ -9,9 +9,8 @@ export interface LocalDateTime {
 }
 
 /**
- * Which instant a wall time names where the clocks change. RFC 5545 §3.3.5 reads a time in a fold
- * (an hour the clocks repeat) as its first instant, and a time in a gap (an hour they skip) with the
- * offset in force before the gap, which moves it forward by the gap: the defaults.
+ * Which instant a wall time names where the clocks change. RFC 5545 §3.3.5 defaults: a fold
+ * (repeated hour) reads as its first instant, a gap (skipped hour) is moved forward by the gap.
  */
 export interface WallTimeChoice {
   /** In a fold: the earlier instant (default), or the later one. */
@@ -22,8 +21,8 @@ export interface WallTimeChoice {
 
 export interface TimeZoneConverter {
   /**
-   * Convert UTC-framed wall-clock fields to the instant that reads as those fields in this zone.
-   * By default the first instant for a fold, and shifted forward by the gap for a hole.
+   * UTC-framed wall-clock fields to the instant that reads as them in this zone (WallTimeChoice
+   * defaults).
    */
   wallFrameToUtc(wallFrameMs: number, choice?: WallTimeChoice): Date;
 }
@@ -31,11 +30,9 @@ export interface TimeZoneConverter {
 const FOURTEEN_HOURS_MS = 14 * 60 * 60 * 1000;
 
 /**
- * The instant, in ms, that reads as `wallFrameMs` (wall-clock fields framed as UTC) in a zone whose
- * offset at an instant `offsetAt` gives, in ms. The offsets in force within fourteen hours either
- * side are the candidates (no zone is further than that from UTC, so they include both sides of any
- * change the wall time is near); one that maps back to the wall time names it. Two do in a fold,
- * none in a gap, where the offset before the gap is the smaller one.
+ * The instant (ms) that reads as `wallFrameMs` (wall-clock fields framed as UTC) in a zone with
+ * offsets from `offsetAt`. Candidates are the offsets within fourteen hours either side (no zone is
+ * further from UTC); one that maps back names it. Two do in a fold, none in a gap.
  */
 export function wallFrameToInstant(
   wallFrameMs: number,
@@ -57,8 +54,8 @@ export function wallFrameToInstant(
   }
   const shifted = wallFrameMs - Math.min(...offsets);
   if (choice.gap !== 'end') return shifted;
-  // The gap ends at the change: the first whole second after the instant read with the offset
-  // after the gap (which is still before it) whose offset differs from that one's.
+  // The gap ends at the change: the first whole second after the instant read with the after-gap
+  // offset whose offset differs from it.
   let before = wallFrameMs - Math.max(...offsets);
   const offsetBefore = offsetAt(before);
   let after = shifted;
@@ -71,8 +68,8 @@ export function wallFrameToInstant(
 }
 
 /**
- * Date.UTC remaps years 0..99 to 1900..1999. Slotlock accepts ISO calendar years down to 1,
- * so construct UTC frames through setUTCFullYear instead of inheriting that legacy quirk.
+ * Date.UTC remaps years 0..99 to 1900..1999 and Slotlock accepts years down to 1, so frames are
+ * built with setUTCFullYear.
  */
 export function utcFrame(
   year: number,
@@ -90,10 +87,8 @@ export function utcFrame(
 }
 
 /**
- * Formatters already built, by zone name. Building one costs far more than using it, and every
- * conversion needs one: a recurring series reads about three times an occurrence. A formatter never
- * changes, so one per zone serves every caller. Intl accepts every capitalisation of each zone's
- * name, so the map is emptied when it fills rather than growing with whatever names arrive.
+ * Formatters by zone name: building one costs far more than using it. Intl accepts any
+ * capitalisation of a name, so the map is emptied when full rather than growing.
  */
 const formatters = new Map<string, Intl.DateTimeFormat>();
 const MAX_CACHED_FORMATTERS = 256;
@@ -117,8 +112,8 @@ export function zoneOffsetDay(utcMs: number): number {
 }
 
 /**
- * How far either side of a wall time converting it to its instant reads the zone's offsets: no zone
- * is further than this from UTC. The days from one end to the other hold every offset it reads.
+ * How far either side of a wall time its conversion reads offsets: no zone is further than this
+ * from UTC.
  */
 export const ZONE_OFFSET_REACH_MS = FOURTEEN_HOURS_MS;
 
@@ -127,13 +122,11 @@ const BLOCK_DAYS = 512;
 const NO_CHANGES: readonly ZoneTransition[] = [];
 
 /**
- * A zone's offsets, read from Intl a UTC day at a time and kept. Intl's formatToParts takes about
- * two microseconds and a conversion asks for four to six offsets, so a series that converts a time
- * at each of thousands of occurrences spent most of its time there (forty daily London series from
- * 2016, 35 seconds). Each UTC midnight's offset is read once; a day whose two midnights agree has
- * that offset throughout, and one whose midnights differ has each change in it narrowed to the
- * second (scanTransitions). A change and its reversal within one day would be missed; the tests
- * compare the zones whose clocks change most with an hourly search.
+ * A zone's offsets, read from Intl a UTC day at a time and kept: formatToParts costs about two
+ * microseconds and a conversion needs four to six offsets. Each midnight is read once; a day whose
+ * midnights agree has that offset throughout, and a day whose midnights differ has each change
+ * narrowed to the second (scanTransitions). A change and its reversal within one day would be
+ * missed; tests check the most volatile zones against an hourly search.
  */
 class ZoneOffsets {
   /** The offset at each UTC midnight read (NaN where none is), BLOCK_DAYS days to a block. */
@@ -148,7 +141,7 @@ class ZoneOffsets {
 
   offsetAt(utcMs: number): number {
     const day = zoneOffsetDay(utcMs);
-    // Not a time value: Intl refuses it, as it always has.
+    // Not a time value: let Intl refuse it.
     if (!Number.isFinite(day)) return offsetAt(utcMs, this.formatter);
     let offset = this.midnight(day);
     for (const change of this.changesOn(day)) {
@@ -220,10 +213,8 @@ function dayStart(day: number): number {
 }
 
 /**
- * Each zone's offsets, by name, as createFormatter keeps formatters. A block of midnights takes 4
- * KB; once there are this many (16 MB, about 57 zone-centuries), every zone's are emptied, and so
- * are the days with changes once there are this many of those (zones change twice a year at most
- * but for a few).
+ * Each zone's offsets by name. A block of midnights is 4 KB; past this many blocks (16 MB) every
+ * zone's are emptied, and likewise for days with changes.
  */
 const zoneOffsetTables = new Map<string, ZoneOffsets>();
 const MAX_CACHED_BLOCKS = 4_096;
@@ -245,10 +236,9 @@ function zoneOffsets(timezone: string): ZoneOffsets {
 }
 
 /**
- * How many instants reading `timezone`'s offsets on UTC day `day` asks Intl for with none of them
- * kept, beyond the day's two midnights (one each): about twenty to find each change between them.
- * A caller that must charge the same for an input however much the process has kept charges each
- * midnight and this the first time it reads them.
+ * How many Intl reads finding the changes on UTC day `day` takes beyond its two midnights (about
+ * twenty per change). Callers that must charge the same whatever the process has cached charge this
+ * on first read.
  */
 export function zoneOffsetChangeReads(timezone: string, day: number): number {
   if (timezone === 'UTC') return 0;
@@ -273,8 +263,8 @@ function buildFormatter(timezone: string): Intl.DateTimeFormat {
 }
 
 function offsetAt(utcMs: number, formatter: Intl.DateTimeFormat): number {
-  // Intl parts expose seconds but not milliseconds. Compute the zone offset against the same
-  // whole-second instant so sub-second input does not leak into the offset and get rounded away.
+  // Intl parts expose seconds, not milliseconds: compute the offset at the whole second so
+  // sub-second input is not rounded into it.
   const wholeSecondMs = Math.floor(utcMs / 1000) * 1000;
   const values: Record<string, number> = {};
   for (const part of formatter.formatToParts(new Date(wholeSecondMs))) {
@@ -306,11 +296,10 @@ export function createTimeZoneConverter(timezone: string): TimeZoneConverter {
 }
 
 /**
- * The spelling Slotlock keeps of an IANA zone name: Intl's, when Intl reads the name as itself in
- * another case (`europe/london` is `Europe/London`); otherwise the name as given (`US/Eastern` stays,
- * although this Node's ICU may call it `America/New_York`, so a stored name never depends on the
- * ICU version that wrote it). A UTC offset (`+05:00`, which Intl accepts as a zone) is not an IANA
- * name and is refused, as is anything Intl does not know: both with `code: 'invalid_timezone'`.
+ * The spelling Slotlock keeps of an IANA zone: Intl's when it reads the name as itself in another
+ * case (`europe/london` is `Europe/London`), else the name as given (`US/Eastern` stays, so a
+ * stored name never depends on the ICU version). A UTC offset such as `+05:00` and unknown names
+ * are refused with `code: 'invalid_timezone'`.
  */
 export function canonicalTimeZoneName(timezone: string): string {
   const name = timezone.trim();
@@ -335,9 +324,8 @@ export interface ZonedCalendarDate {
 }
 
 /**
- * The civil date and ISO weekday an instant falls on in `timezone` — the inverse direction of
- * {@link zonedDateTimeToUtc}. Pricing reads "which day is this night" through here so a pickup at
- * 00:30 BST on a Friday is a Friday, not the Thursday its UTC timestamp reads as.
+ * The civil date and ISO weekday an instant falls on in `timezone` (the inverse of {@link
+ * zonedDateTimeToUtc}): a pickup at 00:30 BST on a Friday is a Friday, whatever UTC says.
  */
 export function zonedCalendarDate(instant: Date, timezone: string): ZonedCalendarDate {
   const wall = wallFrame(instant, timezone);
@@ -353,9 +341,8 @@ export interface ZonedWallTime {
 }
 
 /**
- * The civil date and wall-clock time an instant reads as in `timezone`. Agreements and receipts
- * state a booking's start and end as a date and a time on the resource's own clock, not the
- * server's and not UTC.
+ * The civil date and wall-clock time an instant reads as in `timezone`, as agreements and receipts
+ * state a booking: on the resource's own clock.
  */
 export function zonedWallTime(instant: Date, timezone: string): ZonedWallTime {
   const wall = wallFrame(instant, timezone);
@@ -381,7 +368,7 @@ export interface ZonedDateTimeFields {
 
 /**
  * The wall-clock fields an instant reads as in `timezone`, to the second: what a calendar writes
- * beside a TZID. Reads through the cached formatters, as every conversion here does.
+ * beside a TZID.
  */
 export function zonedDateTimeFields(instant: Date, timezone: string): ZonedDateTimeFields {
   const wall = wallFrame(instant, timezone);
@@ -470,9 +457,8 @@ export interface ZoneTransition {
 }
 
 /**
- * Every change of `timezone`'s offset from `fromMs` to `toMs`, as Intl reads the zone, from its
- * offsets a day at a time (ZoneOffsets): Gaza's clocks go forward on 20 October 2040 and back six
- * days later, which a search a week at a time missed.
+ * Every change of `timezone`'s offset from `fromMs` to `toMs`, read a day at a time (ZoneOffsets):
+ * a weekly search misses short-lived changes such as Gaza's six-day one in October 2040.
  */
 export function zoneTransitions(timezone: string, fromMs: number, toMs: number): ZoneTransition[] {
   if (timezone === 'UTC') return [];
@@ -483,9 +469,8 @@ export function zoneTransitions(timezone: string, fromMs: number, toMs: number):
 }
 
 /**
- * The changes of the offset `offsetIn` reads from `fromMs` to `toMs`, found by comparing offsets
- * `stepMs` apart and narrowing each change to the second: a change and its reversal both within
- * one step are missed.
+ * Offset changes found by comparing `offsetIn` `stepMs` apart and narrowing each to the second; a
+ * change and its reversal within one step are missed.
  */
 function scanTransitions(
   offsetIn: (utcMs: number) => number,
@@ -502,7 +487,6 @@ function scanTransitions(
       at = next;
       continue;
     }
-    // The last whole second at `offset` and the first at another.
     let low = at;
     let high = next;
     while (high - low > 1000) {

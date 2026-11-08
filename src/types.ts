@@ -1,6 +1,6 @@
 import type { SlotlockBookingRule, SlotlockBookingRules } from './booking-rules.js';
-// Slotlock core types. Every interval is half-open `[start, end)`: back-to-back reservations do not
-// conflict, matching RFC 5545 interval semantics and PostgreSQL range boundaries.
+// Every interval is half-open `[start, end)`: back-to-back reservations do not conflict, matching
+// RFC 5545 and PostgreSQL range semantics.
 
 /** Half-open time interval `[start, end)`. */
 export interface Interval {
@@ -15,10 +15,9 @@ export interface SlotlockResource {
   /** Null only for legacy/parity-shadow resources created before authority primitives existed. */
   tenantRef: string | null;
   /**
-   * IANA timezone the resource's availability rules are authored in. expandRules evaluates
-   * BYDAY/startMinutes as LOCAL wall-clock in this zone (DST-correct, wall-clock ends);
-   * findNextAvailableFor reads it from the stored resource. Formerly the documented
-   * Rules remain stable across daylight-saving changes because wall time is resolved in this zone.
+   * IANA timezone the availability rules are authored in: expandRules evaluates BYDAY and
+   * startMinutes as local wall-clock time in this zone, so rules stay stable across daylight-saving
+   * changes.
    */
   timezone: string;
   /**
@@ -27,9 +26,8 @@ export interface SlotlockResource {
    */
   availabilityRules?: WeeklyAvailabilityRule[];
   /**
-   * `shared` resources are listed to agents and booked through them; `private` ones are invisible
-   * to agents and reached only by the tenant's own code. Fixed when the resource is created. The
-   * store always says which; a resource built elsewhere without it is shared.
+   * `shared` resources are listed to and booked by agents; `private` ones are invisible to agents.
+   * Fixed at creation; absent means shared.
    */
   visibility?: 'shared' | 'private';
   /** When the tenant archived it: no longer listed or booked, its history kept. Absent in use. */
@@ -37,14 +35,13 @@ export interface SlotlockResource {
   /** Its own booking rules (`SlotlockBookingRules`). Absent when it has none. */
   bookingRules?: SlotlockBookingRules;
   /**
-   * What a booking on it must satisfy: the tenant's default rules, overlaid by its pool's, overlaid
-   * by its own (`setBookingRuleDefaults`), a field set at a narrower level winning. Absent when no
-   * rule applies.
+   * What a booking on it must satisfy: tenant defaults, overlaid by its pool's, overlaid by its own
+   * (`setBookingRuleDefaults`). Absent when no rule applies.
    */
   effectiveBookingRules?: SlotlockBookingRules;
   /**
-   * The pool it belongs to: interchangeable resources sharing a name, such as a vehicle class or a
-   * room type, booked by the class (`slotlock_book_pool`). Absent when it is in none.
+   * Its pool: interchangeable resources (a vehicle class, a room type) booked by the class
+   * (`slotlock_book_pool`).
    */
   pool?: string;
 }
@@ -53,10 +50,7 @@ export interface SlotlockResource {
 export interface SlotlockReservation {
   id: string;
   resourceId: string;
-  /**
-   * Null only for live holds, rows on a resource that has no tenant (legacy), and parity-shadow rows.
-   * A booking made by confirming a hold, or by createReservation, on a tenant's resource has one.
-   */
+  /** Null only for live holds, rows on a tenantless (legacy) resource, and parity-shadow rows. */
   tenantRef: string | null;
   /**
    * Stable booking identity inside tenantRef; null exactly when tenantRef is. A confirmed hold, and
@@ -122,17 +116,15 @@ export type CancelExternalReservationResult =
   | { ok: false; code: 'reservation_limit_reached'; limit: number };
 
 /**
- * VAVAILABILITY-style bookable window (RFC 7953 semantics, weekly subset): a weekly-cadence RRULE
- * picks the days; the window on each matching day runs `[startMinutes, startMinutes+durationMinutes)`
- * after that day's local midnight in the evaluation timezone (`expandRules`' `timezone`, the
- * resource's stored zone for `findNextAvailableFor`, UTC when none is given).
+ * VAVAILABILITY-style bookable window (RFC 7953, weekly subset): a weekly RRULE picks the days, and
+ * each day's window is `[startMinutes, startMinutes+durationMinutes)` after local midnight in the
+ * evaluation timezone (UTC when none is given).
  */
 export interface WeeklyAvailabilityRule {
   /** RRULE content line without the `RRULE:` prefix, e.g. `FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR`. */
   rrule: string;
-  /** Window start, minutes after midnight in the evaluation timezone (UTC when none is given) of each matching day (0..1439). */
+  /** Window start, minutes after local midnight (0..1439). */
   startMinutes: number;
-  /** Window length in minutes (> 0). */
   durationMinutes: number;
 }
 
@@ -174,7 +166,6 @@ export interface SlotlockAgendaEntry {
   resourceId: string;
   start: Date;
   end: Date;
-  /** A booking, a calendar event's occurrence, or a live hold. */
   kind: 'booking' | 'event' | 'hold';
   /** The booking's reference; null for an event's occurrence and a hold. */
   reference: string | null;
@@ -335,18 +326,17 @@ export interface PutCalendarEventCommand extends CalendarEventContent {
   materializationWindow?: Interval;
   source?: string;
   /**
-   * Judge the event as a booking made now against the resource's booking rules (its first
-   * occurrence for notice and advance, every occurrence for step and hours), and keep the
-   * resource's turnaround after each occurrence. Off by default: an imported event is what happened
-   * elsewhere. The agent tools set it.
+   * Judge the event as a booking made now against the resource's booking rules (first occurrence
+   * for notice and advance, every occurrence for step and hours), and keep the resource's
+   * turnaround. Off by default, since an imported event already happened elsewhere; the agent tools
+   * set it.
    */
   enforceBookingRules?: boolean;
   /**
-   * Book the time a live hold keeps: the hold must be `holderRef`'s (`acquireHold`'s
-   * `principalRef`), on this resource, and cover the event, a single occurrence. In one transaction
-   * the hold and the rest of its group are released and the event takes the time, so no rival can
-   * come between. Its notice and advance were judged when it was held; step and hours are judged
-   * again.
+   * Book the time a live hold keeps: the hold must be `holderRef`'s, on this resource, and cover
+   * the event (a single occurrence). The hold's group is released and the event takes the time in
+   * one transaction, so no rival can come between. Notice and advance were judged at hold time;
+   * step and hours are judged again.
    */
   fromHold?: { holdId: string; holderRef: string };
 }
@@ -407,14 +397,11 @@ export type CancelCalendarEventResult =
   | { ok: false; code: 'owner_command_quota_exceeded'; limit: number }
   | { ok: false; code: 'revision_conflict'; currentRevision: number };
 
-/**
- * A place in the roll's order of due masters: the last one a batch examined. The roll takes the
- * masters it has never put back first, then those it has, longest waiting first.
- */
+/** A place in the roll's order of due masters: the last one a batch examined. */
 export interface CalendarHorizonRollCursor {
   /**
-   * When the master was due to be examined again, if the roll had put it back; null (or, from a
-   * cursor of an earlier release, missing) when it had not.
+   * When the master was due again, if the roll had deferred it; null (or missing, from an older
+   * cursor) when not.
    */
   rollRetryAt?: Date | null;
   materializedEndsAt: Date;
@@ -423,34 +410,27 @@ export interface CalendarHorizonRollCursor {
 
 /** Content-minimized outcome of one bounded recurring-event horizon maintenance batch. */
 export interface CalendarHorizonRollResult {
-  /** Due recurring masters examined in deterministic order. */
   examined: number;
   /**
-   * Masters atomically rematerialized from the requested window's start through the later of their
-   * stored end and the window's: a roll never moves a series' end back.
+   * Masters rematerialized through the later of their stored end and the window's: a roll never
+   * moves a series' end back.
    */
   extended: number;
-  /**
-   * Masters whose new occurrence collided; their previous coverage remains intact, and they wait an
-   * hour before a roll examines them again, behind every master it has not put back.
-   */
+  /** Masters whose new occurrence collided: their coverage stays, and they are deferred an hour. */
   conflicts: number;
   /** The ids of those masters: what blocks each is a booking or hold on its new occurrences. */
   conflictEventIds: string[];
   /**
-   * Masters whose rule takes more than the expansion budget to reach the window (one that never
-   * occurs again, or almost never), or whose roll failed for any other reason; their previous
-   * coverage remains intact, and they wait an hour
-   * before a roll examines them again, behind every master it has not put back.
+   * Masters over the expansion budget, or whose roll failed otherwise: their coverage stays, and
+   * they are deferred an hour.
    */
   refused: number;
-  /** The ids of those masters, to find and fix them. */
   refusedEventIds: string[];
   /** True when more due masters remain beyond this bounded batch. */
   hasMore: boolean;
   /**
-   * Pass as `after` for the next batch of this pass, so the masters this batch examined are not
-   * examined again by every later batch. `null` when none remain.
+   * Pass as `after` for the next batch, so this batch's masters are not examined again. `null` when
+   * none remain.
    */
   next: CalendarHorizonRollCursor | null;
 }
@@ -464,7 +444,6 @@ export interface CalendarEventRetentionResult {
   hasMore: boolean;
 }
 
-/** What erasing a tenant deleted. */
 /** A tenant's default booking rules (`SlotlockStore.getBookingRuleDefaults`). */
 export interface SlotlockBookingRuleDefaults {
   /** The tenant's own defaults, under every pool's; null when it has none. */
@@ -481,13 +460,13 @@ export interface SlotlockTenantErasure {
 }
 
 export interface BookingRetentionResult {
-  /** Holds past their expiry: they occupy nothing, and only a rival's write would reap them. */
+  /** Holds past their expiry: they occupy nothing, but only a rival's write would reap them. */
   expiredHoldsDeleted: number;
   /** Keyed hold answers whose hold has expired: a retry with that key makes a new hold. */
   holdCommandsDeleted: number;
   /**
-   * References a cancel retired with no booking, older than the window: a create with one makes a
-   * new booking. A cancelled booking's reference stays retired.
+   * References a cancel retired with no booking, older than the window. A cancelled booking's
+   * reference stays retired.
    */
   tombstonesDeleted: number;
   /** True when any class filled its batch, so more rows may already be eligible. */

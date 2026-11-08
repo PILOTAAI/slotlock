@@ -1,18 +1,15 @@
-// The dashboard assistant: an organization connects a model of its own (the Anthropic Messages API,
-// or any OpenAI-compatible chat completions endpoint: OpenAI, OpenRouter, vLLM, Ollama, LM Studio)
-// and its members operate Slotlock by chat. The server runs the tool loop: it calls the model with a
-// fixed list of agent tools, runs reads through the agent operation boundary (schemas, scopes,
-// authorization and limits, as for any agent) and turns every write into an action the member
-// approves on a form before it runs. Nothing the model says changes the list of tools.
+// The dashboard assistant: an organization connects its own model (the Anthropic Messages API, or
+// any OpenAI-compatible chat completions endpoint) and its members operate Slotlock by chat. The
+// server runs the tool loop with a fixed tool list: reads go through the agent operation boundary
+// (schemas, scopes, limits), and every write becomes an action the member approves before it runs.
+// Nothing the model says changes the list of tools.
 //
-// Request formats: the Messages API (POST <base>/v1/messages, x-api-key, anthropic-version; tool_use
-// and tool_result blocks) and Chat Completions (POST <base>/chat/completions, Bearer; tool_calls with
-// JSON-string arguments, role "tool" results), as the vendors' official TypeScript SDKs describe
-// them: @anthropic-ai/sdk 1.3.0 and openai 7.45.1, read from the npm registry 2026-10-28.
+// Request formats as the vendors' official TypeScript SDKs describe them: @anthropic-ai/sdk 1.3.0
+// and openai 7.45.1 (read from the npm registry 2026-10-28).
 //
-// The API key is sealed with AES-256-GCM (WebCrypto, in Node.js and Workers alike) under a key
-// derived by HKDF-SHA-256 from the deployment's SLOTLOCK_ASSISTANT_SECRET, with the tenant as
-// additional data: a sealed key copied to another tenant's row does not open.
+// The API key is sealed with AES-256-GCM (WebCrypto) under a key HKDF-SHA-256-derived from
+// SLOTLOCK_ASSISTANT_SECRET, with the tenant as additional data: a sealed key copied to another
+// tenant's row does not open.
 import {
   type SlotlockAgentOperation,
   slotlockAgentOperationScope,
@@ -32,11 +29,10 @@ export type SlotlockAssistantProvider = 'anthropic' | 'openai';
 export type SlotlockAssistantToolUse = 'read' | 'propose' | 'excluded';
 
 /**
- * The tools the model is offered, by agent operation. A record over every operation, so one a later
- * release adds does not compile until it is placed here. Reads run when the model calls them;
- * every write is only proposed, and runs when the member approves it. API keys, webhooks, booking
- * rules, pools, erasure and coverage are application operations, never agent ones, so no entry can
- * offer them.
+ * The tools the model is offered, by agent operation. A record over every operation, so a new one
+ * does not compile until placed here. Reads run when called; writes are only proposed and run on
+ * approval. API keys, webhooks, booking rules, pools, erasure and coverage are application
+ * operations, never agent ones, so none can be offered.
  */
 export const SLOTLOCK_ASSISTANT_TOOL_USE: Readonly<Record<SlotlockAgentOperation, SlotlockAssistantToolUse>> =
   Object.freeze({
@@ -70,9 +66,8 @@ export const SLOTLOCK_ASSISTANT_MAX_MESSAGE = 2_000;
 /** Entries a conversation keeps; the oldest exchanges go first. */
 const MAX_ENTRIES = 60;
 /**
- * UTF-8 bytes of the stored conversation as JSON, past which the oldest exchanges go first.
- * PostgreSQL's jsonb text adds at most one space per `:` or `,`, so at most half again: under the
- * table's 262,144-byte CHECK on `messages::text` whatever the text.
+ * UTF-8 bytes of the stored conversation as JSON. jsonb text adds at most one space per `:` or `,`,
+ * so this stays under the table's 262,144-byte CHECK on `messages::text`.
  */
 export const SLOTLOCK_ASSISTANT_MAX_STORED_BYTES = 160_000;
 /** UTF-8 bytes of the kept actions as JSON: under the 131,072-byte CHECK on `actions::text` as above. */
@@ -90,11 +85,7 @@ const MAX_CALLS_PER_STEP = 8;
 /** Bytes of one provider answer. */
 const MAX_RESPONSE_BYTES = 1_048_576;
 const MAX_OUTPUT_TOKENS = 1_024;
-/**
- * The Messages API version this sends: the one @anthropic-ai/sdk 1.3.0 (2026-10-23) sends, read
- * from its source on 2026-10-28. Top-level `system`, `tools[].input_schema`, `tool_use` and
- * `tool_result` blocks are as before in it.
- */
+/** The Messages API version @anthropic-ai/sdk 1.3.0 sends (read from its source 2026-10-28). */
 export const SLOTLOCK_ANTHROPIC_VERSION = '2026-10-21';
 
 /** A model as the assistant calls it, with the key opened. */
@@ -175,7 +166,6 @@ export interface SlotlockAssistantStore {
 
 /** The assistant's records in the store, each in a transaction under the tenant's row-level security. */
 export function createSlotlockAssistantStore(store: SlotlockStore): SlotlockAssistantStore {
-  // Every change here is the dashboard's, made by the person signed in (actor) when known.
   const by = (actor: string | undefined) =>
     actor === undefined ? { origin: 'dashboard' as const } : { origin: 'dashboard' as const, actor };
   return {
@@ -194,8 +184,8 @@ export function createSlotlockAssistantStore(store: SlotlockStore): SlotlockAssi
       ),
     deleteSettings: (tenantRef, actor) =>
       store.withTenant(tenantRef, (tenant) => tenant.deleteAssistantSettings({ tenantRef }), by(actor)),
-    // Each read deletes the tenant's expired conversations first, so they go on a deployment whose
-    // maintenance never meets the tenant (a Worker's) too.
+    // Each read deletes the tenant's expired conversations first, for deployments whose maintenance
+    // never meets the tenant (a Worker's).
     getConversation: (tenantRef, memberRef) =>
       store.withTenant(tenantRef, async (tenant) => {
         await tenant.pruneAssistantConversations({ tenantRef, limit: 100 });
@@ -274,7 +264,7 @@ export function createSlotlockMemoryAssistantStore(
     },
     async putConversation(tenantRef, memberRef, conversation, ttlMs) {
       const stored = live(tenantRef, memberRef);
-      // As the store: the stored ones kept as they stand, then the new ones not stored already.
+      // As the store does: stored ones kept as they stand, then new ones not stored already.
       const actions: Record<string, Record<string, unknown>> = {};
       for (const id of conversation.keep) {
         const kept = stored?.actions[id];
@@ -304,7 +294,6 @@ export function createSlotlockMemoryAssistantStore(
   };
 }
 
-// ---- The key, sealed ----
 
 const SEAL_VERSION = 'v1';
 const encoder = new TextEncoder();
@@ -368,7 +357,6 @@ export async function openSlotlockAssistantKey(
   }
 }
 
-// ---- Settings ----
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
@@ -380,11 +368,10 @@ function namesPrivateHost(url: URL): boolean {
 }
 
 /**
- * A provider base URL as stored: https, or http on localhost or 127.0.0.1 (a model on the server's
- * own machine); no credentials, query or fragment; no trailing slash. Unless `privateUrls`, a URL
- * whose host is `localhost` or a loopback, private, link-local, shared (CGNAT), unique-local or
- * metadata address (the webhooks' isPrivateAddress) is refused as `private`; a name that resolves
- * to one is refused when it is resolved (checkSlotlockAssistantHost, and at each connection).
+ * A provider base URL as stored: https, or http on localhost or 127.0.0.1; no credentials, query,
+ * fragment or trailing slash. Unless `privateUrls`, a host that is `localhost` or a private-range
+ * IP literal is refused as `private`; a name resolving to one is refused when resolved
+ * (checkSlotlockAssistantHost, and at each connection).
  */
 export function readSlotlockAssistantBaseUrl(
   value: string,
@@ -408,10 +395,9 @@ export function readSlotlockAssistantBaseUrl(
 }
 
 /**
- * Whether a base URL's host resolves only to public addresses: `resolve` lists them (dns.lookup's,
- * on Node.js). True when `privateUrls`, or when the host is an IP literal readSlotlockAssistantBaseUrl
- * already checked; false when any address is private. A name that does not resolve is not refused
- * here: the connection fails later, plainly.
+ * Whether a base URL's host resolves only to public addresses (`resolve`: dns.lookup on Node.js).
+ * True with `privateUrls` or an IP literal already checked; a name that does not resolve is not
+ * refused here: the connection fails later.
  */
 export async function checkSlotlockAssistantHost(
   baseUrl: string,
@@ -434,7 +420,6 @@ export const SLOTLOCK_ASSISTANT_MODEL_NAME = /^[\x21-\x7e]{1,200}$/;
 /** An API key as typed: 1-4,096 printable characters, no spaces. */
 export const SLOTLOCK_ASSISTANT_API_KEY = /^[\x21-\x7e]{1,4096}$/;
 
-// ---- Tools ----
 
 export interface SlotlockAssistantTool {
   name: SlotlockAgentOperation;
@@ -474,7 +459,6 @@ export function slotlockAssistantTools(): SlotlockAssistantTool[] {
   });
 }
 
-// ---- Providers ----
 
 /** Why a provider call failed, in words safe to show (never the key, never the provider's body). */
 export class SlotlockAssistantProviderError extends Error {
@@ -652,7 +636,7 @@ function readOpenai(body: unknown): SlotlockAssistantModelTurn {
     } catch {
       input = null;
     }
-    // Some local servers leave the id out; one is needed to pair the result.
+    // Some local servers omit the id; one is needed to pair the result.
     const id = typeof call.id === 'string' && call.id !== '' ? call.id : `call_${index}`;
     calls.push({ id, name: call.function.name, input });
   }
@@ -700,7 +684,7 @@ export async function callSlotlockAssistantModel(request: ModelRequest): Promise
       method: 'POST',
       headers,
       body: JSON.stringify(anthropic ? anthropicBody(request) : openaiBody(request)),
-      // A redirect is not followed: it would carry the key elsewhere.
+      // Never follow a redirect: it would carry the key elsewhere.
       redirect: 'manual',
       signal: request.signal,
     });
@@ -764,7 +748,6 @@ export async function testSlotlockAssistantModel(args: {
   return turn.calls.length === 1 && turn.calls[0]?.name === tool.name && isRecord(turn.calls[0].input ?? {});
 }
 
-// ---- The loop ----
 
 /** How a tool call came out, as the loop tells the model. */
 export type SlotlockAssistantToolOutcome =
@@ -898,14 +881,13 @@ export async function runSlotlockAssistantTurn(
 }
 
 /**
- * The conversation within its bounds: at most MAX_ENTRIES entries and MAX_STORED_CHARACTERS, the
- * oldest exchanges dropped whole, so it always starts at a member's message (a tool result is never
- * kept without the call it answers).
+ * The conversation within MAX_ENTRIES and the stored-bytes bound, oldest exchanges dropped whole,
+ * so it always starts at a member's message (a tool result is never kept without its call).
  */
 export function boundSlotlockAssistantEntries(
   entries: readonly SlotlockAssistantEntry[],
 ): SlotlockAssistantEntry[] {
-  // PostgreSQL's jsonb holds no NUL character: one would fail the write.
+  // jsonb holds no NUL character: one would fail the write.
   let kept = JSON.parse(
     JSON.stringify(entries, (_key, value: unknown) =>
       typeof value === 'string' ? value.replaceAll('\u0000', '') : value,
@@ -914,14 +896,13 @@ export function boundSlotlockAssistantEntries(
   const tooBig = () =>
     kept.length > MAX_ENTRIES ||
     Buffer.byteLength(JSON.stringify(kept), 'utf8') > SLOTLOCK_ASSISTANT_MAX_STORED_BYTES;
-  // The oldest exchanges first, whole.
   while (tooBig()) {
     const next = kept.findIndex((entry, index) => index > 0 && entry.role === 'user');
     if (next === -1) break;
     kept = kept.slice(next);
   }
-  // One exchange too big alone: its steps (a call and its results) from the oldest, those that
-  // proposed no change first; the member's message and the last answer stay.
+  // An exchange too big alone loses its steps from the oldest, non-proposing ones first; the
+  // member's message and the last answer stay.
   for (const keepProposals of [true, false]) {
     while (tooBig()) {
       const step = kept.findIndex(
@@ -949,8 +930,8 @@ export function boundSlotlockAssistantEntries(
 }
 
 /**
- * The actions a conversation keeps: those its kept entries show, the oldest settled ones dropped
- * first past MAX_ACTIONS_BYTES (a waiting one is kept: SLOTLOCK_ASSISTANT_MAX_PENDING bounds them).
+ * The actions a conversation keeps: those its entries show, oldest settled ones dropped first past
+ * MAX_ACTIONS_BYTES (waiting ones are bounded by SLOTLOCK_ASSISTANT_MAX_PENDING).
  */
 export function pruneSlotlockAssistantActions(
   entries: readonly SlotlockAssistantEntry[],

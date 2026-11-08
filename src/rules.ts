@@ -1,21 +1,13 @@
-// VAVAILABILITY-style rule expansion (RFC 7953 semantics, spike subset): recurrence handled by
-// rrule (BSD-3, pinned), window math local. Rules are evaluated in an optional IANA timezone
-// (per-resource — SlotlockResource.timezone): BYDAY means the LOCAL weekday, startMinutes are
-// local wall-clock minutes, and the window END is wall-clock too (a 09:00–18:00 rule stays
-// 09:00–18:00 local on DST days; the real UTC span shrinks/grows by the transition). rrule's
-// own `tzid` is deliberately NOT used (known-buggy): rrule does pure date arithmetic on UTC
-// stamps and each stamp's Y/M/D is re-interpreted as a LOCAL calendar date, converted to UTC
-// instants by Intl offset probing (dependency-free, deterministic: a window edge inside a
-// spring-forward gap stands where the gap ends, so a window holds only the wall times it names
-// that exist; a fall-back-ambiguous wall time is its FIRST occurrence — chosen explicitly,
-// identical in every zone sign).
+// VAVAILABILITY-style rule expansion (RFC 7953 semantics, weekly subset), recurrence by rrule
+// (pinned). Rules are evaluated in an optional IANA timezone (SlotlockResource.timezone): BYDAY is
+// the local weekday and windows are wall-clock (09:00-18:00 stays so on DST days). rrule's own
+// `tzid` is deliberately not used (buggy): each rrule day stamp is read as a local date and
+// converted by Intl offsets. A window edge in a spring-forward gap stands where the gap ends; an
+// ambiguous fall-back time is its first occurrence.
 //
-// ESM interop (LOAD-BEARING — a plain named import took the whole API down in review):
-// rrule 2.8.1 ships no `exports` map; under bundlers/vitest the `module` ESM build resolves and
-// RRule is a top-level named export, but under Node+tsx (the API's production loader) Node picks
-// the CJS `main` (a webpack UMD with zero detectable named exports) and a named import THROWS AT
-// MODULE INSTANTIATION — before any flag check or error handler exists. The namespace dance
-// below is verified under BOTH resolvers; apps/api carries a tsx-resolution smoke as the gate.
+// ESM interop (load-bearing): rrule 2.8.1 ships no `exports` map. Bundlers and vitest resolve its
+// ESM build, but Node picks the CJS UMD `main`, which has no detectable named exports, so a named
+// import throws at module instantiation. The namespace import below works under both resolvers.
 import type { RRule as RRuleClass, Options as RRuleOptions } from 'rrule';
 import * as rruleNs from 'rrule';
 const { RRule } = (
@@ -49,8 +41,8 @@ export function invalidWindowError(
 }
 
 /**
- * Refuse (`invalid_window`) a search window longer than SLOTLOCK_CALENDAR_HORIZON_DAYS. Expansion
- * is synchronous: fifty daily rules over a century are close to two million windows.
+ * Refuse (`invalid_window`) a search window longer than SLOTLOCK_CALENDAR_HORIZON_DAYS: expansion
+ * is synchronous and grows with the window.
  */
 export function assertBoundedSearchWindow(window: Interval): void {
   if (window.end.getTime() - window.start.getTime() > MAX_SEARCH_WINDOW_MS) {
@@ -60,7 +52,6 @@ export function assertBoundedSearchWindow(window: Interval): void {
   }
 }
 
-/** UTC midnight of the day containing `d`. */
 function utcDayFloor(d: Date): Date {
   return new Date(Math.floor(d.getTime() / DAY_MS) * DAY_MS);
 }
@@ -71,14 +62,14 @@ const ABSOLUTE_UNTIL = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/;
 
 /**
  * Whether `until` is an absolute UNTIL naming a real instant. rrule reads it with Date.UTC, which
- * carries an overflowing field into the next unit: 31 February became 3 March, and the rule stayed
- * bookable after the day it was written to end. A leap second (60) is real (RFC 5545 3.3.12).
+ * carries overflow into the next unit (31 February becomes 3 March). A leap second (60) is real
+ * (RFC 5545 3.3.12).
  */
 function isRealUntil(until: string): boolean {
   const match = ABSOLUTE_UNTIL.exec(until);
   if (!match) return false;
   const [, year, month, day, hour, minute, second] = match as unknown as string[];
-  // Set without overflow checks, the date reads back differently when any part overflowed.
+  // Set without overflow checks: the date reads back differently when any part overflowed.
   const date = new Date(0);
   date.setUTCFullYear(Number(year), Number(month) - 1, Number(day));
   return (
@@ -90,10 +81,10 @@ function isRealUntil(until: string): boolean {
 }
 
 /**
- * Whether `rrule` is written in SPEC.md's subset: `FREQ=WEEKLY`, a `BYDAY` of plain weekdays,
- * optionally `INTERVAL=1` and an absolute `UNTIL`, each once, in any order, and nothing else.
- * Checked before rrule parses it: rrule honours a DTSTART's TZID (Monday came out as Sunday) and
- * the first BYDAY of two, and BYHOUR/BYMINUTE/BYSECOND multiply occurrences (one rule took 0.7 s).
+ * Whether `rrule` is in SPEC.md's subset: `FREQ=WEEKLY`, a `BYDAY` of plain weekdays, optionally
+ * `INTERVAL=1` and an absolute `UNTIL`, each once, in any order. Checked before rrule parses it:
+ * rrule honours a DTSTART's TZID, takes the first of two BYDAYs, and lets BYHOUR/BYMINUTE/BYSECOND
+ * multiply occurrences.
  */
 function isWeeklySubset(rrule: string): boolean {
   const parts = new Map<string, string>();
@@ -113,21 +104,19 @@ function isWeeklySubset(rrule: string): boolean {
 }
 
 /**
- * The spike honours exactly the weekly-cadence subset it can answer DETERMINISTICALLY. Anything
- * else is refused (skipped = fails closed to "not bookable"), never guessed:
- * - freq must be WEEKLY — a freq-less-but-parseable string ('', 'COUNT=5') otherwise becomes a
- *   default-YEARLY rule anchored at the query date: phantom availability at every search start.
- * - COUNT is unanswerable without an authored DTSTART — re-anchoring makes "first N occurrences"
- *   restart on every query.
- * - INTERVAL>1 parity depends on the anchor — re-anchoring makes biweekly availability flip with
- *   the query date. (UNTIL is absolute and expands correctly, so it stays allowed.)
+ * Only the weekly subset that can be answered deterministically; anything else fails closed to not
+ * bookable:
+ * - freq must be WEEKLY: a freq-less string otherwise becomes a YEARLY rule anchored at the query
+ *   date;
+ * - COUNT needs an authored DTSTART: re-anchoring restarts it on every query;
+ * - INTERVAL>1 parity depends on the anchor. UNTIL is absolute and stays allowed.
  */
 function isSupportedRule(parsed: Partial<RRuleOptions>): boolean {
   if (parsed.freq !== RRule.WEEKLY) return false;
   if (parsed.count !== undefined && parsed.count !== null) return false;
   if (parsed.interval !== undefined && parsed.interval !== 1) return false;
-  // BYDAY-less WEEKLY inherits its weekday from the re-anchored DTSTART — the answer wobbles
-  // with the query date (and, before this gate, flipped between the UTC and zoned paths).
+  // BYDAY-less WEEKLY would take its weekday from the re-anchored DTSTART, varying with the query
+  // date.
   const byweekday = parsed.byweekday;
   if (byweekday === undefined || byweekday === null) return false;
   if (Array.isArray(byweekday) && byweekday.length === 0) return false;
@@ -135,11 +124,10 @@ function isSupportedRule(parsed: Partial<RRuleOptions>): boolean {
 }
 
 /**
- * Expand availability rules to concrete, merged, sorted UTC windows clipped to `searchWindow`.
- * Unsupported or unparseable rules contribute nothing rather than throwing: one bad rule must not
- * blank the whole calendar — and must never manufacture availability the rule doesn't mean.
- * Callers should validate rules at write time; this read-path skip remains the fail-closed backstop.
- * A search window longer than SLOTLOCK_CALENDAR_HORIZON_DAYS is refused (`invalid_window`).
+ * Expand availability rules to merged, sorted UTC windows clipped to `searchWindow`. Unsupported or
+ * unparseable rules contribute nothing rather than throwing: one bad rule must neither blank the
+ * calendar nor manufacture availability. Validate at write time; this is the fail-closed backstop.
+ * A window over SLOTLOCK_CALENDAR_HORIZON_DAYS is refused (`invalid_window`).
  */
 export function expandRules(
   rules: WeeklyAvailabilityRule[],
@@ -147,8 +135,7 @@ export function expandRules(
   timezone?: string,
 ): Interval[] {
   assertBoundedSearchWindow(searchWindow);
-  // Validate ONCE, loudly: a typo'd zone must never silently fall back to UTC math — that
-  // would manufacture availability shifted by the zone offset. 'UTC'/omitted = spike path.
+  // Validate once: a typo'd zone must never silently fall back to UTC and shift availability.
   const converter = timezone !== undefined ? createTimeZoneConverter(timezone) : null;
   const windows: Interval[] = [];
   for (const rule of rules) {
@@ -164,19 +151,16 @@ export function expandRules(
     }
     let rrule: RRuleClass;
     let absoluteUntil: Date | null = null;
-    // A window can START days before the search window and still reach into it — scan the
-    // recurrence back far enough for the longest window this rule can produce (multi-day
-    // windows like "Mon 00:00 + 3 days" are legal; a fixed one-day margin silently lost them).
+    // A window can start days before the search window and still reach into it: scan back as far as
+    // the longest window this rule can produce.
     const backScanDays = Math.ceil((rule.startMinutes + rule.durationMinutes) / (24 * 60));
     const scanStart = utcDayFloor(new Date(searchWindow.start.getTime() - backScanDays * DAY_MS));
     if (typeof rule.rrule !== 'string' || !isWeeklySubset(rule.rrule)) continue;
     try {
       const parsed = RRule.parseString(rule.rrule);
       if (!isSupportedRule(parsed)) continue;
-      // rrule's stamps are days, not window starts: a UTC midnight, or under a zone a LOCAL date
-      // read as UTC. Left to rrule, UNTIL would keep a window that starts after it on its own day,
-      // and under a zone east of UTC drop one that starts before it. Each window's real start is
-      // compared with UNTIL instead (below), with or without a zone, so the two paths agree.
+      // rrule's stamps are days, not window starts, so its UNTIL handling is wrong at both ends;
+      // each window's real start is compared with UNTIL below instead.
       if (parsed.until) {
         absoluteUntil = parsed.until;
         parsed.until = null;
@@ -186,19 +170,16 @@ export function expandRules(
     } catch {
       continue;
     }
-    // Under a zone, a LOCAL day whose UTC stamp lies past the window end can still start
-    // before it (east zones read a stamp's wall date up to 14h earlier) — scan one day over
-    // and let clipping discard the overshoot.
+    // Under a zone a local day whose UTC stamp is past the window end can still start before it
+    // (east zones are up to 14h ahead): scan one day over and let clipping discard the overshoot.
     const scanEnd = converter ? new Date(searchWindow.end.getTime() + DAY_MS) : searchWindow.end;
     const days = rrule.between(scanStart, scanEnd, true);
     for (const day of days) {
       let start: Date;
       let end: Date;
       if (converter) {
-        // The stamp's Y/M/D is the LOCAL calendar date; start and end are both wall-clock. An
-        // edge the clocks skip stands where the skipped hour ends: moved on by the gap, as RFC 5545
-        // reads a time, [02:30, 03:30) gave nothing although 03:00-03:30 exists, and [02:00,
-        // 02:30) gave 03:00-03:30, which it never names.
+        // The stamp's Y/M/D is the local date; start and end are wall-clock. An edge the clocks
+        // skip stands where the skipped hour ends, so the window holds only wall times that exist.
         const wallDay = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate());
         start = converter.wallFrameToUtc(wallDay + rule.startMinutes * MINUTE_MS, { gap: 'end' });
         end = converter.wallFrameToUtc(
@@ -212,7 +193,6 @@ export function expandRules(
         end = new Date(start.getTime() + rule.durationMinutes * MINUTE_MS);
       }
       if (absoluteUntil && start.getTime() > absoluteUntil.getTime()) continue;
-      // Clip to the search window; drop windows that miss it entirely.
       const clippedStart =
         start.getTime() < searchWindow.start.getTime() ? searchWindow.start : start;
       const clippedEnd = end.getTime() > searchWindow.end.getTime() ? searchWindow.end : end;

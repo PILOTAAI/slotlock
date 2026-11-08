@@ -1,8 +1,7 @@
-// Untrusted iCalendar read on worker threads. The parsers bound ical.js with a step budget and caps
-// on what a feed may carry, but they still run on the thread that called them: a feed can hold that
-// thread for about half a second, and a loop in ical.js nobody has found yet would hold it for
-// good. Here the main thread never runs ical.js on the feed. A worker that runs past its deadline
-// is stopped, one that runs out of its heap ends alone, and either way the feed is refused.
+// Untrusted iCalendar read on worker threads. The parsers bound ical.js, but a feed can still hold
+// the calling thread for about half a second, and an undiscovered loop in ical.js forever. Here the
+// main thread never runs ical.js on a feed: a worker past its deadline is stopped, one out of heap
+// ends alone, and either way the feed is refused.
 import type { Worker } from 'node:worker_threads';
 import {
   CalendarContractError,
@@ -48,9 +47,9 @@ export interface ICalendarWorkerPoolOptions {
   /** Workers that may run at once, 1-64. Defaults to 2. */
   size?: number;
   /**
-   * How long one parse may run on its worker, in ms, before the worker is stopped and the feed
-   * refused (CalendarExpansionLimitError), 100-60,000. Defaults to 3,000: several times what the
-   * parser's step budget takes, with room for a new worker to start.
+   * How long one parse may run, in ms (100-60,000), before its worker is stopped and the feed
+   * refused (CalendarExpansionLimitError). Defaults to 3,000: several times the parser's step
+   * budget, with room for a worker to start.
    */
   deadlineMs?: number;
   /** Parses that may wait for a worker, 0-10,000; more are refused at once. Defaults to 64. */
@@ -58,8 +57,8 @@ export interface ICalendarWorkerPoolOptions {
   /** The heap one worker may use, in MB, 16-4,096. Defaults to 128. */
   maxHeapMb?: number;
   /**
-   * The module each worker runs. Defaults to `ical-worker-thread.js` beside this module, which the
-   * built package ships; Slotlock's own TypeScript sources cannot start it (tests pass a stand-in).
+   * The module each worker runs. Defaults to the built `ical-worker-thread.js` beside this module;
+   * Slotlock's TypeScript sources cannot start it (tests pass a stand-in).
    */
   entry?: URL;
 }
@@ -129,11 +128,9 @@ function workerFailure(error: unknown): Error {
 }
 
 /**
- * A pool of worker threads that read untrusted iCalendar for the calling thread. Results and
- * errors are those of `parseICalendarChanges`, `parseICalendarFeed` and
- * `parseTrustedICalendarEvents` (the same
- * `CalendarContractError` codes), plus CalendarExpansionLimitError when a worker passes its
- * deadline or its heap, ICalendarWorkerBusyError when the queue is full, and
+ * A pool of worker threads reading untrusted iCalendar for the calling thread. Results and errors
+ * are the parsers' (same `CalendarContractError` codes), plus CalendarExpansionLimitError past a
+ * worker's deadline or heap, ICalendarWorkerBusyError when the queue is full, and
  * ICalendarWorkerPoolClosedError after `close()`. Idle workers do not keep the process alive.
  */
 export function createICalendarWorkerPool(
@@ -202,8 +199,8 @@ export function createICalendarWorkerPool(
     nextId += 1;
     slot.id = nextId;
     slot.worker.ref();
-    // Past its deadline the feed is refused and its worker stopped: whatever ical.js is doing,
-    // terminate() ends it, and the next parse gets a new worker.
+    // Past its deadline the feed is refused and terminate() ends the worker, whatever ical.js is
+    // doing.
     slot.timer = setTimeout(() => retire(slot, new CalendarExpansionLimitError()), deadlineMs);
     slot.worker.postMessage({ ...job.request, id: slot.id } satisfies ICalendarWorkerRequest);
   }
@@ -248,8 +245,8 @@ export function createICalendarWorkerPool(
     threads ??= import('node:worker_threads');
     WorkerClass ??= (await threads).Worker;
     if (closed) throw new ICalendarWorkerPoolClosedError();
-    // After the await: parses that arrived together resume in order, each seeing the queue as the
-    // ones before it left it.
+    // After the await, parses that arrived together resume in order, each seeing the queue as the
+    // ones before left it.
     if (queue.length >= maxQueue && !hasIdleCapacity()) throw new ICalendarWorkerBusyError();
     return new Promise((resolve, reject) => {
       queue.push({ request, resolve, reject });

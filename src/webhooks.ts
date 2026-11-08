@@ -1,8 +1,7 @@
-// Webhook delivery of the event feed (RFC 0002 P1-5): each change is a CloudEvents 1.0 envelope,
-// signed and headed as Standard Webhooks asks (webhook-id, webhook-timestamp, webhook-signature),
-// sent to each endpoint in feed order, one at a time, and retried on a growing schedule until the
-// endpoint has failed for a day. The store keeps the position and the schedule (event-feed.ts), so
-// a worker that stops mid-batch loses nothing: the next one sends the rest, with the same ids.
+// Webhook delivery of the event feed: each change is a CloudEvents 1.0 envelope, signed with
+// Standard Webhooks headers (webhook-id, webhook-timestamp, webhook-signature), sent per endpoint
+// in feed order, and retried on a growing schedule until the endpoint has failed for a day. The
+// store keeps position and schedule (event-feed.ts), so a stopped worker loses nothing.
 import { createHmac } from 'node:crypto';
 import { lookup as dnsLookup } from 'node:dns';
 import { Agent as HttpAgent, request as httpRequest } from 'node:http';
@@ -35,8 +34,8 @@ export interface SlotlockCloudEvent {
 
 /**
  * A change as CloudEvents 1.0 (structured mode): `type` is `io.pylota.slotlock.<change type>`, with
- * the extension attributes `slotlockorigin` and `slotlockkeyid` when the change records them. A
- * `coverage.*` change is redacted as the feed serves it (slotlockServedChange), whoever built it.
+ * `slotlockorigin` and `slotlockkeyid` when recorded. A `coverage.*` change is redacted as the feed
+ * serves it (slotlockServedChange).
  */
 export function slotlockCloudEvent(change: SlotlockChange): SlotlockCloudEvent {
   const served = slotlockServedChange(change.type, change.subject, change.data);
@@ -55,8 +54,8 @@ export function slotlockCloudEvent(change: SlotlockChange): SlotlockCloudEvent {
 }
 
 /**
- * The Standard Webhooks signature of one attempt: `v1,` and the base64 HMAC-SHA256, keyed by the
- * secret's bytes, of `id.timestamp.body`.
+ * The Standard Webhooks signature: `v1,` and the base64 HMAC-SHA256 of `id.timestamp.body`, keyed
+ * by the secret's bytes.
  */
 export function signSlotlockWebhook(params: {
   secret: string;
@@ -73,9 +72,8 @@ export function signSlotlockWebhook(params: {
 }
 
 /**
- * When to try a failed endpoint again, by how many attempts have failed in a row: the Standard
- * Webhooks example schedule (5 s, 5 min, 30 min, 2 h, 5 h, then 10 h), with ±10% jitter, and never
- * sooner than the endpoint's Retry-After (capped at a day).
+ * Retry delay by consecutive failures: the Standard Webhooks example schedule (5 s, 5 min, 30 min,
+ * 2 h, 5 h, then 10 h) with ±10% jitter, never sooner than Retry-After (capped at a day).
  */
 export function slotlockWebhookRetryDelayMs(
   attempts: number,
@@ -88,8 +86,8 @@ export function slotlockWebhookRetryDelayMs(
   return Math.max(jittered, Math.min(retryAfterMs ?? 0, 86_400_000));
 }
 
-// One list per family: a BlockList also checks an IPv4 address against IPv6 rules through its
-// mapped form, so ::ffff:0:0/96 in the same list would match every IPv4 address.
+// One list per family: a BlockList checks IPv4 against IPv6 rules via the mapped form, so
+// ::ffff:0:0/96 in the same list would match every IPv4 address.
 const PRIVATE_IPV4 = new BlockList();
 for (const [address, prefix] of [
   ['0.0.0.0', 8],
@@ -127,7 +125,6 @@ export function isPrivateAddress(address: string): boolean {
   const family = isIP(address);
   if (family === 4) return PRIVATE_IPV4.check(address, 'ipv4');
   if (family !== 6) return true;
-  // An IPv4-mapped address (::ffff:a.b.c.d, or its hex form) is the IPv4 address it carries.
   const mapped = /^::ffff:(?:(\d+\.\d+\.\d+\.\d+)|([0-9a-f]{1,4}):([0-9a-f]{1,4}))$/i.exec(address);
   if (mapped) {
     if (mapped[1]) return PRIVATE_IPV4.check(mapped[1], 'ipv4');
@@ -151,9 +148,9 @@ export type SlotlockWebhookSender = (request: {
 }) => Promise<SlotlockWebhookResponse>;
 
 /**
- * POST with Node's http client: no redirect is followed, the answer's body is never read beyond
- * 64 KiB, and every address the host resolves to is checked when the socket connects, so a name
- * that resolves to a private network (or is rebound to one) is refused unless `allowPrivateNetworks`.
+ * POST with Node's http client: no redirect is followed, at most 64 KiB of body is read, and every
+ * resolved address is checked at connect time, so a name resolving (or rebound) to a private
+ * network is refused unless `allowPrivateNetworks`.
  */
 export function createSlotlockWebhookSender(
   options: { timeoutMs?: number; allowPrivateNetworks?: boolean } = {},
@@ -177,8 +174,8 @@ export function createSlotlockWebhookSender(
         {
           method: 'POST',
           headers: { ...request.headers, 'Content-Length': String(Buffer.byteLength(request.body)) },
-          // An agent of its own, never the global one: with NODE_USE_ENV_PROXY a proxy from the
-          // environment would connect for us, and the address check below would never run.
+          // Our own agent, never the global one: with NODE_USE_ENV_PROXY a proxy would connect
+          // instead and the address check would never run.
           agent: url.protocol === 'https:' ? new HttpsAgent({ lookup }) : new HttpAgent({ lookup } as never),
           lookup,
           timeout: timeoutMs,
@@ -203,8 +200,8 @@ export function createSlotlockWebhookSender(
       const timedOut = () =>
         outgoing.destroy(Object.assign(new Error('webhook request timed out'), { code: 'webhook_timeout' }));
       outgoing.on('timeout', timedOut);
-      // `timeout` is idleness only: an answer dripped a byte at a time would hold the request
-      // open for hours. The whole exchange has this long.
+      // `timeout` is idleness only, so a dripped answer could hold the request for hours: the whole
+      // exchange gets this long.
       const deadline = setTimeout(timedOut, timeoutMs);
       deadline.unref?.();
       outgoing.on('close', () => clearTimeout(deadline));
@@ -220,10 +217,9 @@ function namesPrivateAddress(url: URL): boolean {
 }
 
 /**
- * A `dns.lookup` that answers every address a name resolves to, and refuses (an error with `code`)
- * a name with any private one unless `allowPrivateNetworks`. Given to a socket's connect, it checks
- * the addresses the connection will use, so a name rebound to a private address after an earlier
- * check is still refused. `resolve` stands in for `dns.lookup` (tests).
+ * A `dns.lookup` that returns every address and refuses (with `code`) a name with any private one
+ * unless `allowPrivateNetworks`. Used at socket connect, so a rebound name is still refused.
+ * `resolve` stands in for `dns.lookup` in tests.
  */
 export function slotlockPrivateAddressLookup(options: {
   allowPrivateNetworks: boolean;
@@ -248,11 +244,10 @@ export function slotlockPrivateAddressLookup(options: {
 }
 
 /**
- * A `fetch` for a server reaching a URL a tenant chose (the dashboard assistant's model): Node's
- * http client with the webhooks' address check. A URL naming a private address, or a host that
- * resolves to one when the socket connects, is refused with an error whose `code` is
- * `private_address`, unless `allowPrivateNetworks`. No redirect is followed (the answer is
- * returned as is) and no proxy from the environment is used. Takes a string body only.
+ * A `fetch` for URLs a tenant chose (the assistant's model), with the webhooks' address check: a
+ * private address or a host resolving to one at connect time is refused with `code`
+ * `private_address` unless `allowPrivateNetworks`. No redirects, no environment proxy, string
+ * bodies only.
  */
 export function createSlotlockGuardedFetch(
   options: { allowPrivateNetworks?: boolean; resolve?: typeof dnsLookup } = {},
@@ -283,7 +278,7 @@ export function createSlotlockGuardedFetch(
         {
           method: init.method ?? 'GET',
           headers,
-          // An agent of its own: a proxy from the environment would skip the address check.
+          // Our own agent: an environment proxy would skip the address check.
           agent: url.protocol === 'https:' ? new HttpsAgent({ lookup }) : new HttpAgent({ lookup } as never),
           lookup,
           ...(init.signal ? { signal: init.signal } : {}),
@@ -320,9 +315,9 @@ export interface SlotlockWebhookPassResult {
 }
 
 /**
- * One delivery pass for a tenant: claim each endpoint with changes due, send them in order until
- * one fails, and record how far each got. A 2xx is delivered; 410 disables the endpoint; anything
- * else, or no answer, is retried on the schedule. The send happens outside any transaction.
+ * One delivery pass for a tenant: claim each endpoint with changes due, send in order until one
+ * fails, and record progress. 2xx is delivered; 410 disables the endpoint; anything else is retried
+ * on the schedule. Sending happens outside any transaction.
  */
 export async function deliverSlotlockWebhooks(params: {
   feed: Pick<SlotlockEventFeed, 'claimWebhookDeliveries' | 'settleWebhookDelivery'>;
@@ -347,7 +342,7 @@ export async function deliverSlotlockWebhooks(params: {
     claims.map(async (claim) => {
       let last: string | undefined;
       let failure: { status: number | null; error: string; retryInMs: number; gone?: boolean } | undefined;
-      // The failures before this pass set the delay: the schedule grows across passes.
+      // Failures before this pass set the delay, so the schedule grows across passes.
       let attempts = claim.endpoint.attempts;
       for (const change of claim.changes) {
         if (now() >= stopAt) break;
@@ -413,9 +408,9 @@ export interface SlotlockWebhookScheduler {
 }
 
 /**
- * Delivery passes every `intervalMs` (250-60,000, default 2,000) for the tenants `tenants()` lists
- * (the store's webhook_tenants(), say) and those touched, one tenant at a time. A pass that fails
- * is reported and the next one runs as usual.
+ * Delivery passes every `intervalMs` (250-60,000, default 2,000) for `tenants()` (the store's
+ * webhook_tenants(), say) and touched tenants. A failed pass is reported and the next runs as
+ * usual.
  */
 export function startSlotlockWebhookDelivery(options: {
   tenants: () => Promise<readonly string[]>;
@@ -452,7 +447,7 @@ export function startSlotlockWebhookDelivery(options: {
     await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, worker));
   };
   const timer = setInterval(() => {
-    // A pass still running skips this tick rather than queue another behind it.
+    // A pass still running skips this tick.
     if (running || closed) return;
     running = pass()
       .catch((error) => options.onError?.(error))

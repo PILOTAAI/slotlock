@@ -74,40 +74,30 @@ const MAX_ICAL_OCCURRENCES = 2_000;
 const MAX_ICAL_COMPONENTS = 2_000;
 const MAX_ICAL_EXCEPTIONS_PER_SERIES = 1_000;
 const MAX_ICAL_WORK = 4_000;
-// The store materializes a recurring series for up to 369 days (SLOTLOCK_MATERIALIZATION_WINDOW_DAYS:
-// a 367-day search from any moment of the day, plus the day before it).
+// Up to SLOTLOCK_MATERIALIZATION_WINDOW_DAYS: a 367-day search from any moment of the day, plus the
+// day before.
 const MAX_ICAL_WINDOW_MS = 369 * 24 * 60 * 60 * 1000;
 /**
- * A feed's own time zones (VTIMEZONE), their STANDARD and DAYLIGHT observances, and the RDATE values
- * those list. A real feed carries one zone per zone its events use, each a few observances (a zone's
- * full history, a few hundred). ical.js expands every observance of a zone again whenever it reads a
- * later year than it has, appending all of them each time, and finds a zone by scanning them all for
- * each value whose TZID it does not know: 40,000 RDATE values ran a feed out of memory, and 20,000
- * zones held one for 31 seconds.
+ * A feed's own VTIMEZONEs, their observances, and the RDATE values those list. ical.js re-expands
+ * every observance whenever it reads a later year and scans them all for each unknown TZID, so
+ * large counts exhaust memory and time.
  */
 const MAX_ICAL_TIMEZONES = 100;
 /**
- * The name and parameters of one property, before its value: ical.js reads each parameter by
- * searching from it to the end of the line for the value, so 490,000 parameters on one line held a
- * parse for 7.9 seconds before anything else ran. A real property has a few parameters; a group
- * attendee listing its members, a few thousand characters.
+ * The name and parameters of one property, before its value. ical.js searches from each parameter
+ * to the end of the line, so cost is quadratic in the parameter count.
  */
 const MAX_ICAL_PROPERTY_HEAD_BYTES = 8_192;
 const MAX_ICAL_PROPERTY_PARAMETERS = 100;
 const MAX_ICAL_TIMEZONE_OBSERVANCES = 1_000;
 const MAX_ICAL_TIMEZONE_DATES = 2_000;
 /**
- * Work ical.js may do, in one parse, looking for occurrences, in steps of about a microsecond each.
- * RecurIterator.next() searches for a SECONDLY to WEEKLY rule's next occurrence one step (second,
- * minute, hour, day or week) at a time with no limit, and gives up on a MONTHLY or YEARLY one only
- * when whole months or years fail (not when one matches a part the rule then rules out), so a rule
- * that never occurs (`FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30`, `FREQ=DAILY;INTERVAL=7;BYDAY=TU` from a
- * Monday) held the whole process, and one that almost never does held it for minutes. Only this
- * count decides, never a clock, so a calendar is read or refused the same way however loaded the
- * machine (ICAL_STEP_CHARGES says what each piece of work costs).
- *
- * A feed, and a stored series as maintenance rolls it, may take half a million: thirty series on the
- * fifth Monday of the month since 2000 take about 350,000.
+ * Work ical.js may do in one parse looking for occurrences, in steps of about a microsecond.
+ * RecurIterator.next() searches a SECONDLY to WEEKLY rule one step at a time with no limit, and a
+ * MONTHLY or YEARLY one gives up only when whole periods fail, so a rule that never occurs
+ * (`FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30`) would hold the process. Only this count decides, never a
+ * clock, so a calendar is read or refused the same way however loaded the machine
+ * (ICAL_STEP_CHARGES).
  */
 const MAX_ICAL_STEPS = 500_000;
 
@@ -116,17 +106,13 @@ interface ExpansionLimits {
   steps: number;
 }
 
-/** A feed, and a stored series as maintenance rolls it. */
 const FEED_LIMITS: ExpansionLimits = { steps: MAX_ICAL_STEPS };
 
 /**
- * One event as it is written or asked about (expandCalendarEventOccurrences): a tenth of a feed's,
- * so a write is refused within a tenth of a second whatever its rule or zone (fifty writes of one
- * that walks 9,999 days a step held a hosted server for 23 seconds when a write could search for
- * half of one), and a series written today still fits when the roll searches it again from its
- * start for decades (that search grows as the window moves; the roll resumes from a cursor instead
- * whenever it has one). A yearly date written as a daily rule fits from 1990, and from 1950 does
- * not, but rolls.
+ * One event as written or asked about (expandCalendarEventOccurrences): a tenth of a feed's, so a
+ * write is refused within about a tenth of a second whatever its rule, and a series written today
+ * still fits when the roll searches it again from its start (it resumes from a cursor when it has
+ * one).
  */
 const EVENT_LIMITS: ExpansionLimits = { steps: 50_000 };
 
@@ -138,9 +124,8 @@ const MAX_ICAL_RULES_PER_EVENT = 8;
 const MAX_ICAL_DATES_PER_FEED = 20 * MAX_ICAL_DATES_PER_EVENT;
 /**
  * The furthest one step of a SECONDLY to WEEKLY rule may move, in days: about a century. ical.js
- * moves it a day at a time (RecurIterator#increment_monthday) inside one step:
- * `FREQ=DAILY;INTERVAL=1000000000` spent 97 seconds in its second step. The days are charged
- * (ICAL_STEP_CHARGES), and a century is 36,600 days, about 7 ms.
+ * moves a day at a time inside one step (RecurIterator#increment_monthday); the days are charged
+ * (ICAL_STEP_CHARGES).
  */
 const MAX_ICAL_STEP_DAYS = 36_600;
 const MAX_ICAL_INTERVAL: Readonly<Record<string, number>> = {
@@ -151,23 +136,13 @@ const MAX_ICAL_INTERVAL: Readonly<Record<string, number>> = {
   WEEKLY: Math.floor(MAX_ICAL_STEP_DAYS / 7),
 };
 /**
- * The RecurIterator methods work is charged on, and what each call costs, in steps of about a
- * microsecond (measured on ical.js 2.2.1 under Node 26, with the costliest rule shapes each method
- * serves). Every step of a search, whatever the frequency, ends in exactly one `next_second`
- * (`next_year`, `next_month`, `next_week` and `next_day` each call `next_hour`, which calls
- * `next_minute`, which calls `next_second`), and is followed by a check of the rule's parts: about
- * three microseconds for a DAILY rule with BYMONTH and BYMONTHDAY. `ruleDayOfWeek` reads one BYDAY value, which the
- * searches of a month and a week and the checks of a day do for every day and every value they
- * compare. `increment_monthday` walks its days one at a time, about a fifth of a microsecond each on a
- * 4-vCPU Linux runner under Node 22 (a tenth on the machine the rest was measured on).
- * `expand_year_days` lists the days of one year a YEARLY rule names, which the constructor repeats
- * as far as the year 20000: about three microseconds, and an eighth of one for each day it lists
- * and sorts (`BYMONTH` with 28 `BYMONTHDAY` values, 336 days, about 42). The days of the week
- * through a whole year, which it filters by month and day of the month, it gets from
- * `expand_by_day`: about half a microsecond for each day that lists (all seven weekdays filtered
- * to the 13th, 365 days, about 150). A scan of every day of a month for `BYSETPOS` is charged
- * through `ruleDayOfWeek`, as a day's check is. Outlook writes every zone's observances from 1601
- * as `BYMONTH` with one numbered `BYDAY`, so one zone's 430 years cost about 6,000 steps.
+ * The RecurIterator methods charged, and what each call costs in steps of about a microsecond
+ * (measured on ical.js 2.2.1, with the costliest rule shapes each method serves). Every search step
+ * ends in exactly one `next_second` (the coarser `next_*` methods call down to it) followed by a
+ * check of the rule's parts. `ruleDayOfWeek` is charged per BYDAY value compared;
+ * `increment_monthday` per day walked; `expand_year_days` and `expand_by_day` per day listed.
+ * Outlook writes every zone's observances from 1601 as `BYMONTH` with one numbered `BYDAY`: about
+ * 6,000 steps per zone.
  */
 const ICAL_STEP_CHARGES: Readonly<Record<string, StepCharge>> = {
   next_second: { before: () => 3 },
@@ -183,15 +158,10 @@ const ICAL_STEP_CHARGES: Readonly<Record<string, StepCharge>> = {
 };
 
 /**
- * What Slotlock's own work on what ical.js finds costs, in the same steps: each occurrence an
- * expansion passes (its instant, exceptions and change); each conversion of a time between a zone's
- * wall clock and its instants, half a step in an IANA zone (a few lookups in the offsets timezone.ts
- * keeps a day at a time) and one and a half in a zone only the feed defines (ical.js's list of its
- * changes, searched at each lookup, as ical.js itself searches it at each step); and each instant
- * Intl is asked for to read a day of an IANA zone's offsets (two and a half microseconds on the
- * machine the rest was measured on, and with reading its parts as long again on a 4-vCPU Linux
- * runner, five steps), the first time a budget reads that day. Before these were charged, a series in a named zone ran
- * twenty times as long as the same series in UTC within the same budget.
+ * What Slotlock's own work on what ical.js finds costs, in the same steps: each occurrence passed;
+ * each wall-time/instant conversion (half a step in an IANA zone, one and a half in a feed-defined
+ * zone); and each instant Intl is asked for to read a day of an IANA zone's offsets, the first time
+ * a budget reads that day.
  */
 const OCCURRENCE_STEPS = 1;
 /** Each further RRULE whose next time an expansion step compares, choosing among them. */
@@ -199,15 +169,13 @@ const RULE_SCAN_STEPS = 1;
 const ZONE_READ_STEPS = { conversion: 0.5, ownZone: 1.5, intl: 5 } as const;
 /**
  * Each change ical.js lists when it expands one of the feed's own zones (Timezone#_ensureCoverage):
- * it adjusts and sorts every one, about four tenths of a microsecond each, and the steps of the
- * zone's rules are charged besides. Uncharged, a zone at every cap read again for 1,000 later years
- * listed 3 million changes in one call, two seconds on a 4-vCPU Linux runner within the budget.
+ * it adjusts and sorts every one, about 0.4 µs each. The zone's rule steps are charged besides.
  */
 const ZONE_CHANGE_STEPS = 0.4;
 
 /**
- * What one RecurIterator method costs: charged before it runs, from its arguments, and after, from
- * the days it listed (at most a year's worth, so each call is bounded before it is charged).
+ * What one RecurIterator method costs: charged before it runs from its arguments, and after from
+ * the days it listed (at most a year's worth).
  */
 interface StepCharge {
   before: (...args: unknown[]) => number;
@@ -220,20 +188,17 @@ function listedDays(days: unknown): number {
 }
 
 /**
- * The ical.js release a series cursor holds the iterator state of. A cursor is ical.js's own
- * RecurIterator and RecurExpansion state, which only that release is known to continue exactly, so
- * a cursor another release wrote is ignored and the series searched from its start. A test pins this
- * to the installed package: upgrading ical.js means checking the state these cursors keep again.
+ * The ical.js release whose RecurIterator/RecurExpansion state a series cursor holds; only that
+ * release is known to continue it exactly, so a cursor another release wrote is ignored. A test
+ * pins this to the installed package: upgrading ical.js means rechecking cursor state.
  */
 export const ICAL_JS_VERSION = '2.2.1';
-/** The shape of the cursor this code writes and reads. */
 const SERIES_CURSOR_FORMAT = 1;
 /** The most a cursor may take as JSON; a bigger one is not kept (its series is searched from the start). */
 const MAX_SERIES_CURSOR_BYTES = 16_384;
 /**
- * How much later than its start plus the series' length an unmoved occurrence may end: ical.js adds
- * the length in wall-clock time, so a clock change between the two moves the end by up to a few
- * hours. A day covers every zone.
+ * ical.js adds the series' length in wall-clock time, so a clock change can move an unmoved
+ * occurrence's end by a few hours; a day covers every zone.
  */
 const OCCURRENCE_END_SLACK_MS = 24 * 60 * 60 * 1000;
 const BY_PARTS = new Set([
@@ -252,9 +217,8 @@ const BY_PARTS = new Set([
 type CursorTime = [number, number, number, number, number, number, boolean];
 
 /**
- * Where one expansion of a stored series stopped, as plain JSON a store keeps beside it: ical.js's
- * iterator state just before the first occurrence the next window may need, so the next expansion
- * continues there rather than searching again from the series' start.
+ * Where one expansion of a stored series stopped, as plain JSON stored beside it: ical.js's
+ * iterator state just before the first occurrence the next window may need.
  */
 export interface CalendarSeriesCursor {
   readonly v: typeof SERIES_CURSOR_FORMAT;
@@ -289,8 +253,8 @@ export interface CalendarSeriesExpansion {
 interface SeriesResume {
   cursor: unknown;
   /**
-   * The latest occurrence start a cursor may stand after: every occurrence up to it ends before the
-   * window, unmoved or wherever an exception moved it, so the window needs none of them.
+   * The latest occurrence start a cursor may stand after: every occurrence up to it (moved or not)
+   * ends before the window.
    */
   resumeLimitMs: number;
   left: CalendarSeriesCursor | null;
@@ -298,9 +262,8 @@ interface SeriesResume {
   /** Refuse rather than search from the start when the cursor cannot be used. */
   resumeOnly: boolean;
   /**
-   * A stored series' own instants: its first occurrence and its exceptions. Its text gives the
-   * iterator DTSTART's wall time and zone, which an instant in an hour the clocks repeat does not
-   * survive (01:15 GMT on 25 October 2026 read back as 01:15 BST, an hour early).
+   * A stored series' own instants. Its text gives DTSTART's wall time and zone, which an instant in
+   * a repeated hour does not survive (01:15 GMT on 25 October 2026 reads back as 01:15 BST).
    */
   stored?: { start: Date; end: Date; exceptions: CalendarRecurrenceException[] };
   /** Collect here, rather than refuse, the stored exceptions that name no occurrence. */
@@ -343,8 +306,7 @@ export class CalendarContractError extends Error {
 }
 
 /**
- * A calendar that needs more work than Slotlock does to read or expand it: steps, time, a step or a
- * span longer than a century, or more occurrences, exceptions or dates than it keeps. Still
+ * A calendar that needs more work than Slotlock does to read or expand it. Still
  * `invalid_icalendar` to callers; the horizon roll counts these and skips the series.
  */
 export class CalendarExpansionLimitError extends CalendarContractError {
@@ -377,7 +339,7 @@ function optionalIdentity(value: string | null | undefined): string | undefined 
 
 function instant(value: Date | string): Date {
   const parsed = value instanceof Date ? new Date(value.getTime()) : new Date(value);
-  // Years 1-9999: what an RFC 3339 date-time, as the events are returned, can write.
+  // Years 1-9999: what an RFC 3339 date-time can write.
   const year = parsed.getUTCFullYear();
   if (!Number.isFinite(parsed.getTime()) || year < 1 || year > 9999) {
     throw new CalendarContractError('invalid_external_interval');
@@ -386,9 +348,9 @@ function instant(value: Date | string): Date {
 }
 
 /**
- * Text as an event keeps it: trimmed, its line breaks LF. A tab or LF is kept (ical.js escapes LF in
- * a value and a parameter), and any other control character refused: ical.js leaves a bare CR as it
- * is, and a reader that ends lines at one would read what follows it as a property of its own.
+ * Trimmed, line breaks LF. Tab and LF are kept (ical.js escapes LF); other control characters are
+ * refused: ical.js leaves a bare CR as is, and a reader splitting lines on it would see a new
+ * property.
  */
 function boundedText(value: string, maxBytes: number, required: boolean): string | undefined {
   const normalized = value.replace(/\r\n/g, '\n').trim();
@@ -403,9 +365,8 @@ function boundedText(value: string, maxBytes: number, required: boolean): string
 }
 
 /**
- * An event's zone as Slotlock keeps it: an IANA name in one spelling (canonicalTimeZoneName). A UTC
- * offset such as `+05:00` is no zone a calendar can name (RFC 5545 §3.2.19 wants a VTIMEZONE for
- * each TZID, and an offset has no rules), and is refused.
+ * An IANA name in one spelling (canonicalTimeZoneName). A UTC offset such as `+05:00` is refused:
+ * RFC 5545 §3.2.19 wants a VTIMEZONE for each TZID, and an offset has no rules.
  */
 function validTimezone(timezone: string): string {
   const normalized = timezone.trim();
@@ -557,9 +518,7 @@ const RECUR_RULE_PARTS: ReadonlyMap<string, RegExp> = new Map([
   ['WKST', new RegExp(`^${WEEKDAY}$`)],
 ]);
 
-/** The longest each month can be, February in a leap year. */
 const MONTH_DAYS = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-/** The shortest each month can be, February in a common year. */
 const MIN_MONTH_DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 /** The numeric BY parts, which RFC 5545 §3.3.10 reads as sets and ical.js walks in written order. */
 const NUMERIC_BY_PARTS = [
@@ -574,9 +533,9 @@ const NUMERIC_BY_PARTS = [
 ];
 
 /**
- * Put a rule's numeric BY lists in ascending order, once each. RFC 5545 §3.3.10 reads each as a set,
- * but ical.js 2.2.1 walks BYHOUR, BYMINUTE, BYSECOND and BYMONTH in the order written:
- * `FREQ=DAILY;BYHOUR=17,8` gave 17:00 and then 08:00 the same day, an hour before it.
+ * Sort and dedupe a rule's numeric BY lists. RFC 5545 §3.3.10 reads each as a set, but ical.js
+ * 2.2.1 walks BYHOUR, BYMINUTE, BYSECOND and BYMONTH in written order (`FREQ=DAILY;BYHOUR=17,8`
+ * gave 17:00 then an earlier 08:00).
  */
 function sortRuleParts(recur: ICAL.Recur): void {
   const parts = recur.parts as Record<string, unknown[]>;
@@ -588,24 +547,18 @@ function sortRuleParts(recur: ICAL.Recur): void {
 }
 
 /**
- * Why ical.js 2.2.1 would expand `recur` other than RFC 5545 §3.3.10 says, or null for a rule it
- * expands correctly. Each refusal is a shape the readiness audit or a check against a brute-force
- * reading of the RFC (the tests' rrule-oracle) found it gets wrong:
- * - BYWEEKNO: unimplemented on its own, and with BYDAY it kept every week but the one named;
- * - a BYDAY ordinal of two digits: read by its last digit (`20MO` as every Monday);
- * - BYSETPOS other than with FREQ=MONTHLY and BYDAY alone: WEEKLY ignored it, others picked wrongly;
- * - BYMONTH with FREQ=MONTHLY: it walked BYMONTH from its first value whatever DTSTART's month,
- *   dropping whole months or repeating them;
- * - a negative BYMONTHDAY except with FREQ=MONTHLY and no BYDAY: compared as written with each day;
- * - BYMONTHDAY with FREQ=YEARLY but no BYMONTH (only DTSTART's month was expanded), naming only
- *   days none of its BYMONTH months has (it searched every year to 20000 for one), or a day one of
- *   them can lack with COUNT (31 April became 1 May, and was counted: yearlyDays filters it out
- *   otherwise) or with BYDAY (BYMONTH=4,5;BYMONTHDAY=30,31;BYDAY=WE missed 31 May 2034);
- * - with FREQ=YEARLY, BYYEARDAY with BYMONTH or BYMONTHDAY (it found no day at all), and a numbered
- *   BYDAY with BYMONTHDAY (counted in the year, not the month);
- * - BYHOUR with FREQ=HOURLY, BYMINUTE or BYSECOND with FREQ=MINUTELY, and any of the three with
- *   FREQ=MONTHLY or YEARLY: it repeated or dropped occurrences (it expands them correctly with
- *   DAILY and WEEKLY, and HOURLY's BYMINUTE and BYSECOND and MINUTELY's BYHOUR);
+ * Why ical.js 2.2.1 would expand `recur` other than RFC 5545 §3.3.10 says, or null. Each refusal is
+ * a shape found wrong against a brute-force reading of the RFC (the tests' rrule-oracle):
+ * - BYWEEKNO;
+ * - a two-digit BYDAY ordinal (read by its last digit);
+ * - BYSETPOS other than with FREQ=MONTHLY and BYDAY alone;
+ * - BYMONTH with FREQ=MONTHLY;
+ * - a negative BYMONTHDAY except with FREQ=MONTHLY and no BYDAY;
+ * - BYMONTHDAY with FREQ=YEARLY but no BYMONTH, naming only days its months lack, or a day one can
+ *   lack with COUNT or BYDAY;
+ * - with FREQ=YEARLY, BYYEARDAY with BYMONTH or BYMONTHDAY, and a numbered BYDAY with BYMONTHDAY;
+ * - BYHOUR with HOURLY, BYMINUTE or BYSECOND with MINUTELY, and any of the three with MONTHLY or
+ *   YEARLY;
  * - FREQ=SECONDLY, which nothing Slotlock reads needs.
  */
 function recurShapeProblem(recur: ICAL.Recur): string | null {
@@ -655,10 +608,10 @@ function recurShapeProblem(recur: ICAL.Recur): string | null {
 }
 
 /**
- * Why a rule cannot be expanded from this DTSTART, or null. FREQ=YEARLY with no BYMONTHDAY, BYDAY or
- * BYYEARDAY takes its day from DTSTART, and ical.js put a day its month lacks into the next month
- * (29 February 2024 recurred on 1 March 2025) instead of skipping that year (RFC 5545 §3.3.10).
- * yearlyDays filters those out, but COUNT has already counted them.
+ * Why a rule cannot be expanded from this DTSTART, or null. FREQ=YEARLY with no BYMONTHDAY, BYDAY
+ * or BYYEARDAY takes DTSTART's day, and ical.js moves a missing day into the next month (29
+ * February to 1 March) instead of skipping the year; yearlyDays filters those, but COUNT has
+ * already counted them.
  */
 function seriesShapeProblem(
   recur: ICAL.Recur,
@@ -670,11 +623,9 @@ function seriesShapeProblem(
 }
 
 /**
- * The months and days a FREQ=YEARLY rule's occurrences fall on, when it names a day one of its
- * months can lack (29 February, or a 31st with April), or null. ical.js 2.2.1 moves such a day into
- * the next month (29 February 2025 became 1 March) where RFC 5545 §3.3.10 ignores it, so an
- * occurrence on any other day is not one. With BYYEARDAY it picks real dates already; with BYDAY
- * such a rule is refused (recurShapeProblem).
+ * The months and days a FREQ=YEARLY rule's occurrences fall on when it names a day a month can lack
+ * (29 February, 31 April), or null. ical.js 2.2.1 moves such a day into the next month where RFC
+ * 5545 §3.3.10 ignores it.
  */
 function yearlyDays(
   recur: ICAL.Recur,
@@ -700,13 +651,11 @@ export function recurrenceRuleProblem(rule: string): string | null {
 }
 
 /**
- * A recurrence rule as RFC 5545 §3.3.10 writes it, in ical.js's canonical spelling, or `null`.
- * ical.js accepts more than it should: it drops unknown parts, lets a repeated part replace the
- * first, reads `COUNT=3X` as 3 and `COUNT=0` as no count at all. So every part must be one RFC 5545
- * names, appear once and match its grammar, with FREQ present and never UNTIL and COUNT together,
- * and the parts RFC 5545 forbids for a frequency (BYWEEKNO but YEARLY, BYYEARDAY with DAILY, WEEKLY
- * or MONTHLY, BYMONTHDAY with WEEKLY, a numbered BYDAY but MONTHLY or YEARLY) are refused. The
- * numeric BY lists come back in ascending order (sortRuleParts).
+ * A recurrence rule in ical.js's canonical spelling, or `null`. ical.js is too lenient (it drops
+ * unknown parts, lets a repeated part win, reads `COUNT=3X` as 3 and `COUNT=0` as none), so every
+ * part must be RFC 5545's, appear once and match its grammar, with FREQ present, never UNTIL with
+ * COUNT, and no part RFC 5545 forbids for the frequency. Numeric BY lists come back sorted
+ * (sortRuleParts).
  */
 export function canonicalRecurrenceRule(rule: string): string | null {
   const text = rule.trim().toUpperCase();
@@ -737,10 +686,9 @@ export function canonicalRecurrenceRule(rule: string): string | null {
 }
 
 /**
- * A rule Slotlock books from an agent: valid as RFC 5545 writes it, daily or less often, and able to
- * occur. ical.js searches day by day (or faster) for a DAILY, HOURLY, MINUTELY or SECONDLY rule's
- * next occurrence with no limit, so one that can never occur (`BYMONTH=2;BYMONTHDAY=30`), or a
- * sub-daily one that rarely does, holds the process forever.
+ * A rule Slotlock books from an agent: valid, daily or less often, and able to occur. ical.js
+ * searches sub-daily rules step by step with no limit, so one that never occurs
+ * (`BYMONTH=2;BYMONTHDAY=30`) would hold the process forever.
  */
 export function isBookableRecurrenceRule(rule: string): boolean {
   const canonical = canonicalRecurrenceRule(rule);
@@ -758,11 +706,9 @@ export function isBookableRecurrenceRule(rule: string): boolean {
 }
 
 /**
- * A stored series' rule: one Slotlock books (isBookableRecurrenceRule: RFC 5545's grammar, daily or
- * less often, able to occur, a shape ical.js expands correctly) for this start, in its canonical
- * spelling. A DATE UNTIL becomes the UTC instant its day ends in the event's zone: RFC 5545
- * §3.3.10 wants a zoned DTSTART's UNTIL in UTC and reads it inclusively, and read as midnight UTC
- * it lost the last day in every zone east of UTC with a morning start.
+ * A stored series' rule: bookable for this start, in canonical spelling. A DATE UNTIL becomes the
+ * UTC instant its day ends in the event's zone: RFC 5545 §3.3.10 wants a zoned DTSTART's UNTIL in
+ * UTC, inclusive; midnight UTC would lose the last day east of UTC.
  */
 function normalizeRecurrence(
   input: CalendarRecurrence | undefined,
@@ -896,9 +842,8 @@ interface CalendarTimeValue {
 }
 
 /**
- * How the wall times of one zone map to instants and back: an IANA zone through Intl, a zone only
- * the calendar's own VTIMEZONE defines through its observances, or UTC. Instants and wall times are
- * milliseconds, a wall time framed as UTC.
+ * How one zone's wall times map to instants and back: an IANA zone through Intl, a feed-defined
+ * VTIMEZONE, or UTC. Milliseconds; a wall time framed as UTC.
  */
 interface ZoneReader {
   /** The instant a wall time names: in a fold and a gap as `choice` says (RFC 5545 §3.3.5 default). */
@@ -932,8 +877,7 @@ function intlReader(timezone: string): ZoneReader {
       ).getTime();
     },
   };
-  // A feed names at most MAX_ICAL_TIMEZONES zones it does not define; the readers of all feeds
-  // read are kept like the formatters behind them, emptied rather than grown without bound.
+  // Feeds can name unknown zones freely, so the cache is emptied rather than grown without bound.
   if (intlReaders.size >= 256) intlReaders.clear();
   intlReaders.set(timezone, reader);
   return reader;
@@ -952,11 +896,10 @@ interface TimezoneChange {
 }
 
 /**
- * A zone only the calendar defines, read from its own observances. ical.js reads a wall time in
- * such a zone with `want_daylight = false; // TODO` (timezone.js), so a time the clocks repeat named
- * the later instant and one they skip moved back; here the offset in force at each instant comes
- * from the changes ical.js expands (UTC instants, each with the offset before and after it), and a
- * wall time is read from those as from any other zone (wallFrameToInstant).
+ * A zone only the calendar defines, read from its own observances. ical.js reads wall times in such
+ * a zone with `want_daylight = false; // TODO` (timezone.js), mishandling folds and gaps; here
+ * offsets come from the changes ical.js expands, and wall times are read as in any other zone
+ * (wallFrameToInstant).
  */
 function vtimezoneReader(zone: ICAL.Timezone): ZoneReader {
   const known = vtimezoneReaders.get(zone);
@@ -1010,14 +953,12 @@ function vtimezoneReader(zone: ICAL.Timezone): ZoneReader {
   return reader;
 }
 
-/** One reader per zone a calendar defines, for as long as its parse holds the zone. */
 const vtimezoneReaders = new WeakMap<ICAL.Timezone, ZoneReader>();
 
 /**
- * The zone a calendar time is read in: UTC; the IANA zone its TZID (or else the calendar's zone, for
- * a floating time) names; or the calendar's own VTIMEZONE for a TZID Intl does not know. A floating
- * time in a calendar without a zone, or a TZID neither Intl nor the calendar defines, is refused: a
- * server process has no local zone of its own to read it in.
+ * The zone a calendar time is read in: UTC, the IANA zone its TZID (or the calendar's zone, for a
+ * floating time) names, or the calendar's own VTIMEZONE. A floating time with no calendar zone, or
+ * an unknown TZID, is refused: a server has no local zone.
  */
 function zoneReader(
   value: unknown,
@@ -1036,8 +977,7 @@ function zoneReader(
   const defined = valueZone !== 'floating' && valueZone !== 'local' && own?.component;
   if (timezone) {
     if (isKnownTimezone(timezone)) return intlReader(timezone);
-    // A standards-compliant embedded VTIMEZONE may use a private TZID that Intl does not know; an
-    // undeclared TZID Intl does not know either remains `floating` and cannot reach this.
+    // A compliant VTIMEZONE may use a private TZID Intl does not know.
     if (zone && valueZone === zone && defined && own) return vtimezoneReader(own);
     throw new CalendarContractError('invalid_icalendar');
   }
@@ -1061,9 +1001,8 @@ function wallFrameOf(value: unknown): number {
 }
 
 /**
- * Where a DURATION from `start` (wall time `startWall`) ends exactly, RFC 5545 §3.3.6: its weeks and
- * days on the calendar first (the same wall time that many days on), then its hours, minutes and
- * seconds as elapsed time. PT48H is 48 hours however the clocks change; P2D may be 47 or 49.
+ * Where a DURATION from `start` ends, RFC 5545 §3.3.6: weeks and days on the calendar first, then
+ * hours, minutes and seconds elapsed. PT48H is always 48 hours; P2D may be 47 or 49.
  */
 function durationEnd(
   reader: ZoneReader,
@@ -1077,9 +1016,8 @@ function durationEnd(
 }
 
 /**
- * The value of every RRULE written inside a VEVENT of `input`, as written: what ical.js has read
- * by then is no longer the text (it read `COUNT=0` as no count, `COUNT=3X` as 3, and the second of
- * two FREQs). A time zone's own rules (inside VTIMEZONE) are not an event's and are left out.
+ * Every RRULE value written inside a VEVENT, as written: ical.js's parsed form has lost what it
+ * misreads (`COUNT=0`, `COUNT=3X`, a second FREQ). VTIMEZONE rules are left out.
  */
 function veventRuleTexts(input: string): string[] {
   const rules: string[] = [];
@@ -1097,9 +1035,9 @@ function veventRuleTexts(input: string): string[] {
 }
 
 /**
- * The instant a calendar time names (zoneReader), RFC 5545 §3.3.5's first instant of a repeated
- * time and a skipped time moved forward, charged to `budget` when one is given. ical.js frames a
- * floating value as a local JS date, which a server process has no business with.
+ * The instant a calendar time names (zoneReader), per RFC 5545 §3.3.5 (first instant of a repeated
+ * time, a skipped time moved forward), charged to `budget` when given. ical.js would frame a
+ * floating value as a local JS date.
  */
 function calendarTimeValue(
   value: unknown,
@@ -1122,16 +1060,16 @@ function ownZone(value: unknown): string | undefined {
 }
 
 /**
- * What one parse may spend: steps searching for occurrences (ICAL_STEP_CHARGES), reading each one
- * it finds, and reading times in their zones (ZONE_READ_STEPS).
+ * What one parse may spend: steps searching (ICAL_STEP_CHARGES), reading each occurrence, and
+ * reading times in their zones.
  */
 class RecurrenceBudget {
   private steps: number;
   /** Each zone's readers as this budget charges them, so a parse's readers stay one per zone. */
   private readonly readers = new Map<ZoneReader, ZoneReader>();
   /**
-   * What of each IANA zone's offsets this budget has paid for: the midnight that starts UTC day `d`
-   * as `2d`, the changes within day `d` as `2d + 1` (zoneOffsetDay).
+   * Which days of each IANA zone's offsets this budget has paid for: UTC day `d`'s midnight as
+   * `2d`, its changes as `2d + 1` (zoneOffsetDay).
    */
   private readonly read = new Map<string, Set<number>>();
 
@@ -1167,14 +1105,12 @@ class RecurrenceBudget {
   }
 
   /**
-   * Charge one conversion of a time in `zone` that reads its offsets from `fromMs` to `toMs` (at
-   * most three UTC days), and what of those days this budget has not paid for: each midnight, and
-   * the search for each day's changes (zoneOffsetChangeReads), as Intl is asked for them with none
-   * kept. The process keeps them, but a parse is charged as if it read them now, so what it refuses
-   * never depends on what was read before it.
+   * Charge one conversion in `zone` reading offsets from `fromMs` to `toMs` (at most three UTC
+   * days), plus the days not yet paid for. The process caches offsets, but each parse pays as if it
+   * read them now, so a refusal never depends on what ran before.
    */
   chargeZoneRead(zone: string | undefined, fromMs: number, toMs: number): void {
-    // Without an IANA zone, a reader reads one only the feed defines (UTC's is never charged).
+    // No IANA zone: a feed-defined one (UTC's is never charged).
     if (zone === undefined) {
       this.charge(ZONE_READ_STEPS.ownZone);
       return;
@@ -1203,11 +1139,10 @@ class RecurrenceBudget {
 }
 
 /**
- * A RecurIterator subclass, made for one parse, whose every step is charged to `budget` and throws
- * past it. The constructor's own scans (for a YEARLY rule, a year with a matching day, as far as the
- * year 20000) run through these methods on the instance being built, so they are charged too.
- * ical.js itself is not changed for anything else in the process; and if a new ical.js no longer
- * has a method this charges, every recurring event is refused rather than expanded without a limit.
+ * A RecurIterator subclass for one parse whose every step is charged to `budget` and throws past
+ * it. The constructor's own scans run through these methods, so they are charged too. ical.js
+ * itself is untouched; if a new ical.js drops a charged method, every recurring event is refused
+ * rather than expanded unbounded.
  */
 function budgetedRecurIterator(budget: RecurrenceBudget): typeof ICAL.RecurIterator {
   class BudgetedRecurIterator extends ICAL.RecurIterator {}
@@ -1227,8 +1162,8 @@ function budgetedRecurIterator(budget: RecurrenceBudget): typeof ICAL.RecurItera
 }
 
 /**
- * Make `rule` build `Budgeted` iterators, or refuse it: anything but a parsed rule, or a SECONDLY to
- * WEEKLY one whose step moves further than MAX_ICAL_STEP_DAYS.
+ * Make `rule` build `Budgeted` iterators, or refuse it (not a parsed rule, or a step longer than
+ * MAX_ICAL_STEP_DAYS).
  */
 function budgetRule(rule: unknown, Budgeted: typeof ICAL.RecurIterator): void {
   if (!(rule instanceof ICAL.Recur)) throw new CalendarContractError('invalid_icalendar');
@@ -1238,10 +1173,9 @@ function budgetRule(rule: unknown, Budgeted: typeof ICAL.RecurIterator): void {
 }
 
 /**
- * `event.iterator()`, with every rule iterator built as `Budgeted`. RecurExpansion builds them from
- * the event's own RRULE values (`rule.iterator(dtstart)`) and takes the first step at once, so the
- * values are changed before it is called: wrapping its iterators afterwards left that step, the
- * one most rules that never occur stop in, unbounded.
+ * `event.iterator()` with every rule iterator built as `Budgeted`. RecurExpansion takes its first
+ * step at once, so the rules are changed before it is called; wrapping afterwards would leave that
+ * step unbounded.
  */
 function budgetedExpansion(
   event: ICAL.Event,
@@ -1261,10 +1195,9 @@ function budgetedExpansion(
 }
 
 /**
- * `expansion`, choosing among its RRULEs' iterators correctly. ical.js 2.2.1's own choice
- * (RecurExpansion#_nextRecurrenceIter) drops one that has ended by index as it walks them: it
- * skipped the iterator after an ended first one, and for any other removed the one before it,
- * which had not ended, so a series with two RRULEs lost occurrences once either rule ended.
+ * `expansion`, choosing among its RRULE iterators correctly: ical.js 2.2.1's
+ * RecurExpansion#_nextRecurrenceIter removes the wrong iterator by index once a rule ends, losing
+ * occurrences of multi-RRULE series.
  */
 function withEveryRule(
   expansion: ICAL.RecurExpansion,
@@ -1293,10 +1226,7 @@ function withEveryRule(
   return expansion;
 }
 
-/**
- * How many values a property lists, read from its raw form: reading the values themselves makes
- * ical.js resolve each one's zone.
- */
+/** Counted from the raw form: reading values would make ical.js resolve each one's zone. */
 function valueCount(property: ICAL.Property): number {
   return Math.max(0, property.jCal.length - 3);
 }
@@ -1312,8 +1242,8 @@ function dayOf(time: ICAL.Time): string {
 }
 
 /**
- * Milliseconds since 1970 of a DATE or DATE-TIME property's first value as written, ignoring its
- * zone, or undefined for anything else. Read from the raw form, so nothing resolves a zone yet.
+ * Milliseconds of a DATE or DATE-TIME property's first value as written, ignoring its zone; read
+ * from the raw form so no zone resolves yet.
  */
 function writtenFieldsMs(property: ICAL.Property | null): number | undefined {
   const value = property?.jCal[3];
@@ -1333,13 +1263,10 @@ function writtenFieldsMs(property: ICAL.Property | null): number | undefined {
 }
 
 /**
- * Refuse a VEVENT that ical.js would spend unbounded work reading, before anything reads its times:
- * a DURATION, or a DTEND after its DTSTART, longer than MAX_ICAL_STEP_DAYS (ical.js adds a span to
- * a time a month at a time, Time#adjust, and `DURATION:PT99999999999999999999S` held the process),
- * a negative DURATION, more RDATE and EXDATE values than MAX_ICAL_DATES_PER_EVENT, or more RRULEs
- * than MAX_ICAL_RULES_PER_EVENT. Returns how
- * many it lists, for the feed's own limit. It reads times only as written, so it runs before the
- * times are framed: framing reads every date value, and 115,000 EXDATE values took 11 seconds.
+ * Refuse a VEVENT ical.js would spend unbounded work reading, before any time is read: a DURATION
+ * or DTEND span over MAX_ICAL_STEP_DAYS (ical.js adds spans a month at a time, Time#adjust), a
+ * negative DURATION, too many RDATE/EXDATE values or RRULEs. Returns how many dates it lists, for
+ * the feed's own limit. It reads times only as written, since framing reads every date value.
  */
 function boundComponent(component: ICAL.Component): number {
   const maxMs = MAX_ICAL_STEP_DAYS * 24 * 60 * 60 * 1000;
@@ -1373,10 +1300,9 @@ function boundComponents(components: ICAL.Component[]): void {
 }
 
 /**
- * The feed's VEVENTs as ical.js events, each related to no exception yet. Left to itself, ical.js
- * relates every VEVENT with a RECURRENCE-ID in the calendar to every series, whatever its UID, by
- * local time, so one series' cancelled 09:00 cancelled every other series' 09:00 that day; the
- * parsers relate each series' own exceptions themselves.
+ * The feed's VEVENTs as ical.js events, each related to no exception yet. ical.js relates every
+ * RECURRENCE-ID in the calendar to every series by local time whatever its UID, so the parsers
+ * relate each series' exceptions themselves.
  */
 function feedEvents(components: ICAL.Component[]): ICAL.Event[] {
   return components.map((component) => new ICAL.Event(component, { exceptions: [] }));
@@ -1395,17 +1321,15 @@ function boundInput(input: string): void {
 }
 
 /**
- * Refuse a property whose name and parameters run past MAX_ICAL_PROPERTY_HEAD_BYTES or list more
- * than MAX_ICAL_PROPERTY_PARAMETERS, as ical.js will read them. ical.js searches again from every
- * parameter for the next `;`, `:` and `"`, so the parameters on a line cost it their number times
- * their length; this finds them the same way, reading each character once.
+ * Refuse a property whose head runs past MAX_ICAL_PROPERTY_HEAD_BYTES or
+ * MAX_ICAL_PROPERTY_PARAMETERS as ical.js will read it. ical.js re-searches from every parameter,
+ * so cost is count times length; this reads each character once.
  */
 function boundPropertyHeads(input: string): void {
   const limits = { parameters: MAX_ICAL_PROPERTY_PARAMETERS, end: MAX_ICAL_PROPERTY_HEAD_BYTES };
   for (const head of icalendarPropertyHeads(input, limits)) {
-    // A VCARD moves ical.js to the vCard 3 parameters for the rest of the feed, where TYPE takes
-    // several quoted values, so what follows would be read differently than counted here. An
-    // iCalendar feed has no place for one.
+    // A VCARD switches ical.js to vCard 3 parameters for the rest of the feed, which this count
+    // does not follow; an iCalendar feed has no place for one.
     if (head.begins === 'vcard') throw new CalendarContractError('invalid_icalendar');
     if (head.end > MAX_ICAL_PROPERTY_HEAD_BYTES || head.parameters > MAX_ICAL_PROPERTY_PARAMETERS) {
       expansionLimit();
@@ -1414,13 +1338,11 @@ function boundPropertyHeads(input: string): void {
 }
 
 /**
- * Each line of `input` as ical.js 2.2.1's parser takes it, with the parameters it reads there: the
- * lines as parse._eachLine unfolds them, read with the design set ical.js picks at the first BEGIN,
- * and for a BEGIN line the component it begins. Ends at a line before that BEGIN, where ical.js
- * throws. ical.js changes its design set in one other place: a VCARD component's first property
- * (unless it is VERSION:4.0) moves it to vCard 3's for the rest of the feed. This does not follow
- * that move; boundPropertyHeads refuses a feed with a VCARD instead. With `limits`, a line's count
- * stops once it is past them. Exported for the tests, which hold it to ical.js's own reading.
+ * Each line of `input` as ical.js 2.2.1's parser takes it, with the parameters it reads there
+ * (parse._eachLine, with the design set picked at the first BEGIN), and for a BEGIN line the
+ * component. Stops before the first BEGIN, where ical.js throws. Does not follow a VCARD's switch
+ * to vCard 3 (boundPropertyHeads refuses those). With `limits`, a line's count stops once past
+ * them. Exported for the tests.
  */
 export function* icalendarPropertyHeads(
   input: string,
@@ -1514,12 +1436,11 @@ function forwardSearch(text: string, char: string): (from: number) => number {
 }
 
 /**
- * How many parameters ical.js 2.2.1 reads on one unfolded line and where it stops reading them
- * (parse._handleContentLine, then parse._parseParameters, step for step): a `"` opens a quoted value
- * only straight after `=`, a quoted value of a parameter that takes several (MEMBER, DELEGATED-TO)
- * goes on past `","`, and a `:` ends the parameters only where ical.js looks for one. ical.js throws
- * where this stops early (an empty name, an unclosed quote), and stops once past `limits` if given.
- * Exported for the tests, which hold it to ical.js's own count.
+ * How many parameters ical.js 2.2.1 reads on one unfolded line and where it stops
+ * (parse._handleContentLine, then _parseParameters, step for step): a `"` opens a quoted value only
+ * right after `=`, a multi-valued parameter (MEMBER, DELEGATED-TO) continues past `","`, and `:`
+ * ends the parameters only where ical.js looks for one. Stops early where ical.js throws, and past
+ * `limits` if given. Exported for the tests.
  */
 export function icalendarPropertyHead(
   line: string,
@@ -1580,10 +1501,9 @@ export function icalendarPropertyHead(
 }
 
 /**
- * Give every rule of the feed's own time zones (VTIMEZONE STANDARD and DAYLIGHT) a budgeted
- * iterator, before any time is read. ical.js expands a zone's rule (Timezone#_expandComponent, from
- * the same rule values) whenever it converts a time in a zone Intl does not know, so a private TZID
- * whose rule never occurs held the process on a feed's first event, recurring or not.
+ * Give every VTIMEZONE rule a budgeted iterator before any time is read: ical.js expands a zone's
+ * rules whenever it converts a time in a zone Intl does not know, so a private TZID whose rule
+ * never occurs would hang the first read.
  */
 function budgetTimezoneRules(
   root: ICAL.Component,
@@ -1620,15 +1540,11 @@ interface TimezoneCoverage {
 }
 
 /**
- * Keep one copy of the changes of each of the feed's own zones (their rules' steps are charged by
- * budgetTimezoneRules). Whenever ical.js reads a year past what it has expanded a zone to, it expands every observance
- * again from its start and appends all of them to what it already had: 1,000 date values in years
- * six apart, sorted inside one call, expanded a zone of 3,000 changes 1,000 times into 3 million
- * (26 to 35 seconds, 650 MB). Each expansion starts again from DTSTART, so emptying the list first
- * leaves the same changes, once, and each expansion is charged for the changes it lists
- * (ZONE_CHANGE_STEPS). If ical.js no longer expands zones this way, the feed is refused.
- * And charge each offset ical.js looks up in such a zone to `budget`, as a conversion in it is: it
- * compares a series' times at every step of its search.
+ * Keep one copy of each feed-defined zone's changes. Whenever ical.js reads past what it expanded,
+ * it re-expands every observance from its start and appends them all, growing without bound; each
+ * expansion restarts from DTSTART, so emptying the list first leaves the same changes once. Each
+ * expansion is charged per change (ZONE_CHANGE_STEPS), and each offset lookup as a conversion. If
+ * ical.js no longer expands zones this way, the feed is refused.
  */
 function budgetTimezoneCoverage(root: ICAL.Component, budget: RecurrenceBudget): void {
   for (const component of root.getAllSubcomponents('vtimezone')) {
@@ -1683,9 +1599,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * The key a cursor for this series must carry, or `null` for a series no cursor can serve: one that
- * is not exactly one DTSTART and one RRULE (RDATE and EXDATE values move the expansion's own state,
- * which a cursor does not keep; a stored series never has them).
+ * The key a cursor for this series must carry, or `null` when no cursor can serve it: anything but
+ * exactly one DTSTART and one RRULE (RDATE and EXDATE move state a cursor does not keep).
  */
 function seriesKey(component: ICAL.Component): string | null {
   const starts = component.getAllProperties('dtstart');
@@ -1700,9 +1615,8 @@ function seriesKey(component: ICAL.Component): string | null {
   }
   const start = starts[0] as ICAL.Property;
   const rule = rules[0] as ICAL.Property;
-  // Slotlock 0.1 compared a zoned series' occurrences with its UTC UNTIL as if they were UTC, so a
-  // cursor it kept for one that ends may have ended an occurrence early or gone one past: such a
-  // series has a key of its own now, and those cursors are searched past from the start.
+  // Slotlock 0.1 compared a zoned series with its UTC UNTIL as UTC, so its cursors may be off by
+  // one: such a series gets a key of its own and is searched from the start.
   const zone = start.getParameter('tzid');
   const zonedUntil =
     typeof zone === 'string' &&
@@ -1781,7 +1695,7 @@ function readSeriesCursor(value: unknown, key: string): CalendarSeriesCursor | n
   return value as unknown as CalendarSeriesCursor;
 }
 
-/** The expansion's state now, copied: what a cursor would keep if the window needs nothing before it. */
+/** A copy of the expansion's state: what a cursor keeps when the window needs nothing before it. */
 function snapshotSeries(
   expansion: ICAL.RecurExpansion,
   key: string,
@@ -1821,8 +1735,8 @@ function snapshotSeries(
 }
 
 /**
- * A snapshot as the store will keep it, or `null`: it must survive JSON whole (a part JSON cannot
- * hold, such as an `undefined` ical.js reads with `in`, would resume a different search) and fit.
+ * A snapshot as stored, or `null`: it must survive JSON whole (an `undefined` ical.js reads with
+ * `in` would resume a different search) and fit.
  */
 function keptSeriesCursor(snapshot: CalendarSeriesCursor | null): CalendarSeriesCursor | null {
   if (snapshot === null) return null;
@@ -1841,9 +1755,9 @@ function keptSeriesCursor(snapshot: CalendarSeriesCursor | null): CalendarSeries
 }
 
 /**
- * The series' expansion as `cursor` left it: ical.js's RecurExpansion and its one RecurIterator,
- * rebuilt from their state (`initialized`, so the iterator does not search again from DTSTART) with
- * this parse's rule, start and zone, and its steps charged to this parse's budget.
+ * The expansion as `cursor` left it: RecurExpansion and its one RecurIterator rebuilt from state
+ * (`initialized`, so it does not restart from DTSTART) with this parse's rule, start, zone and
+ * budget.
  */
 function resumedExpansion(
   event: ICAL.Event,
@@ -1854,7 +1768,7 @@ function resumedExpansion(
   const rule = event.component.getFirstPropertyValue('rrule') as ICAL.Recur;
   budgetRule(rule, Budgeted);
   const dtstart = event.startDate;
-  // What a search from the start begins with, built as ical.js builds it (its steps charged too).
+  // A search from the start, built as ical.js builds it (its steps charged too).
   const reference = new Budgeted({ rule, dtstart }) as unknown as IteratorState;
   if (!cursorFitsRule(cursor.iterator, reference, rule)) return null;
   const time = ([year, month, day, hour, minute, second, isDate]: CursorTime) =>
@@ -1888,11 +1802,9 @@ function resumedExpansion(
 
 /**
  * Whether a cursor's iterator state agrees with `reference`, an iterator ical.js built for the same
- * rule and start: the same BY lists (the rule's, and the start's defaults; BYMONTHDAY holds the
- * current month's days, which ical.js sets as it goes, so only its days are checked), an index
- * within each list, days of the year, and a count and an end the rule allows. Anything else is a
- * cursor no expansion of this rule left, and it is not resumed: an hour of 10^9, say, would have
- * ical.js walk it a month at a time inside one step.
+ * rule and start: same BY lists, indexes within them, valid days of the year, and a count and end
+ * the rule allows. Anything else did not come from this rule and is not resumed (an hour of 10^9
+ * would have ical.js walk it a month at a time inside one step).
  */
 function cursorFitsRule(
   state: CalendarSeriesCursor['iterator'],
@@ -1921,24 +1833,21 @@ function cursorFitsRule(
     const values = state.by_data[part];
     if (values === undefined ? index !== 0 : index >= Math.max(values.length, 1)) return false;
   }
-  // Days of the year, 1-366, except that a rule with BYYEARDAY alone keeps its values as written,
-  // so -366 to -1 count from the end of the year (ical.js expand_year_days).
+  // Days of the year 1-366, or -366 to -1 for a rule with BYYEARDAY alone (ical.js
+  // expand_year_days).
   if (!state.days.every((day) => Number.isInteger(day) && day !== 0 && Math.abs(day) <= 366)) {
     return false;
   }
   if (rule.count != null && state.occurrence_number > rule.count) return false;
-  // Only a rule that ends can have ended.
   if (state.completed && rule.count == null && rule.until == null) return false;
   return true;
 }
 
 /**
- * An IANA zone ical.js reads through Intl, for a TZID a calendar names without a VTIMEZONE (RFC
- * 5545 wants one for each; real feeds, and the series Slotlock stores, name IANA zones bare). Left
- * alone, ical.js reads such a time as floating and compares it with UTC values (an UNTIL, EXDATE,
- * RDATE or RECURRENCE-ID) as if it were UTC: a 09:00 Berlin series lost the occurrence its UNTIL
- * named, and a moved or excluded occurrence was not found. Offsets come from the converter the rest
- * of Slotlock reads wall times with: a gap moves forward, a fold takes its first instant.
+ * An IANA zone ical.js reads through Intl, for a TZID named without a VTIMEZONE (as real feeds and
+ * stored series do). Otherwise ical.js reads such a time as floating and compares it with UTC
+ * values as if UTC, losing UNTIL, EXDATE and RECURRENCE-ID matches. Offsets come from Slotlock's
+ * converter: a gap moves forward, a fold takes its first instant.
  */
 class IntlTimezone extends ICAL.Timezone {
   private readonly zone: string;
@@ -1950,7 +1859,7 @@ class IntlTimezone extends ICAL.Timezone {
 
   constructor(tzid: string, budget: RecurrenceBudget) {
     super({ tzid });
-    // A TZID is matched as written (" Europe/Berlin" is that TZID); Slotlock reads its zone trimmed.
+    // A TZID is matched as written; Slotlock reads its zone trimmed.
     this.zone = tzid.trim();
     this.converter = createTimeZoneConverter(this.zone);
     this.budget = budget;
@@ -1961,7 +1870,6 @@ class IntlTimezone extends ICAL.Timezone {
     const wallMs = wall.getTime();
     let offset = this.offsets.get(wallMs);
     if (offset === undefined) {
-      // ical.js compares a series' times at every step of its search, each in this zone.
       this.budget.chargeZoneRead(
         this.zone,
         wallMs - ZONE_OFFSET_REACH_MS,
@@ -1988,10 +1896,8 @@ interface RecurrencePeriod {
 const knownTimezones = new Map<string, boolean>();
 
 /**
- * Whether Intl reads `timezone` (trimmed) as a zone: how a feed's TZID is read, leniently. Asking
- * builds a formatter (about 30 microseconds), and every occurrence of a series asks again, so each
- * name's answer is kept: Intl gives one name the same answer for the life of a process. The map is
- * emptied when it fills, like the formatters (a feed names at most MAX_ICAL_TIMEZONES zones).
+ * Whether Intl reads `timezone` (trimmed) as a zone. Each check builds a formatter (~30 µs) and
+ * every occurrence asks again, so answers are cached and the map emptied when full.
  */
 function isKnownTimezone(timezone: string): boolean {
   const name = timezone.trim();
@@ -2042,7 +1948,6 @@ function localDateOf(value: string, tzid: unknown, timezone: string): string | u
   } else if (typeof tzid === 'string' && isKnownTimezone(tzid)) {
     instant = zonedDateTimeToUtc(fields, tzid.trim());
   } else {
-    // Floating: the wall time is the calendar's own, and so is its date.
     return value.slice(0, 10);
   }
   return jCalDateTime(zonedDateTimeFields(instant, timezone)).slice(0, 10);
@@ -2051,17 +1956,15 @@ function localDateOf(value: string, tzid: unknown, timezone: string): string | u
 /**
  * Prepare a calendar's events before anything reads their times, so ical.js compares them at their
  * real instants:
- * - a floating time is framed in the calendar's zone, the zone Slotlock reads it in;
- * - each zone the events name that Intl knows becomes an IntlTimezone, whether or not the feed
- *   defines it; a feed names no more zones it does not define than it may define
- *   (MAX_ICAL_TIMEZONES): 50,000 spellings of one zone, each a zone of its own to ical.js, took
- *   3.4 seconds;
- * - an all-day series' UTC or zoned UNTIL, EXDATE and RECURRENCE-ID become the local dates they
- *   fall on (RFC 5545 wants them as dates; a local midnight east of UTC is the day before in UTC);
- * - a PERIOD RDATE becomes its start, its end kept in the map returned, by event: ical.js orders a
- *   period among times by whether a time falls inside it, and hands back the period itself;
- * - then, every zone resolving, a timed series' own times are aligned (alignSeriesTimes).
- * Every DATE and DATE-TIME value this reads is one boundComponents has counted.
+ * - a floating time is framed in the calendar's zone;
+ * - each zone the events name that Intl knows becomes an IntlTimezone, defined by the feed or not
+ *   (undefined zones are capped at MAX_ICAL_TIMEZONES);
+ * - an all-day series' UTC or zoned UNTIL, EXDATE and RECURRENCE-ID become their local dates (RFC
+ *   5545 wants dates);
+ * - a PERIOD RDATE becomes its start, its end kept in the returned map: ical.js mis-orders periods
+ *   among times;
+ * - then a timed series' own times are aligned (alignSeriesTimes).
+ * Every value read here was counted by boundComponents.
  */
 function frameEventTimes(
   root: ICAL.Component,
@@ -2155,12 +2058,10 @@ function frameEventTimes(
   }
   const cache = (root as unknown as { _timezoneCache?: Map<string, ICAL.Timezone> })._timezoneCache;
   for (const tzid of named) {
-    // A zone Intl knows by this name is read through Intl, as calendarTimeValue reads it, even when
-    // the feed defines it: ical.js read a stale VTIMEZONE's rules (standard time only) while
-    // Slotlock read Intl's, so the two placed one time an hour apart and a moved occurrence was
-    // found in a feed but not in the series stored from it.
+    // A zone Intl knows is read through Intl even when the feed defines it, so ical.js and Slotlock
+    // never place one time in two places (a stale VTIMEZONE's rules can differ from Intl's).
     if (ICAL.TimezoneService.has(tzid) || !isKnownTimezone(tzid)) continue;
-    // ical.js keeps a calendar's zones here; without it, it could not use one of these.
+    // ical.js keeps a calendar's zones here; without it, it could not use these.
     if (!(cache instanceof Map)) throw new CalendarContractError('invalid_icalendar');
     cache.set(tzid, new IntlTimezone(tzid, budget));
   }
@@ -2169,19 +2070,17 @@ function frameEventTimes(
 }
 
 /**
- * With every zone resolving, put what ical.js compares with a timed series' own times in the terms
- * it compares them in:
- * - a floating UNTIL becomes the UTC instant it names on the series' clock: RFC 5545 §3.3.10 reads
- *   it as DTSTART is read, and ical.js read it as UTC, so a New York series lost its last day;
- * - a RECURRENCE-ID named in another zone becomes the same instant in UTC, which ical.js matches
- *   with an occurrence (it matched one in New York time with none); one for this and every later
- *   occurrence (RANGE=THISANDFUTURE) becomes the series' own wall time instead, since ical.js moves
- *   those by the wall-clock distance from it to the exception's start, read in the start's zone.
- * A DATE EXDATE of a timed series becomes the series' start time that day: ical.js excluded every
- * occurrence that day, and a series stored from the feed, whose exceptions are instants, excluded
- * none (most series occur once a day; one that occurs more keeps the others). And a series of
- * RDATEs with no RRULE gets its DTSTART as one: it is the first instance (RFC 5545 §3.8.2.4), which
- * ical.js left out.
+ * With every zone resolving, put what ical.js compares with a timed series' times in the terms it
+ * compares them in:
+ * - a floating UNTIL becomes the UTC instant it names on the series' clock (RFC 5545 §3.3.10;
+ *   ical.js read it as UTC);
+ * - a RECURRENCE-ID in another zone becomes the same instant in UTC, which ical.js can match; a
+ *   RANGE=THISANDFUTURE one becomes the series' own wall time, since ical.js moves later
+ *   occurrences by the wall-clock distance from it;
+ * - a DATE EXDATE of a timed series becomes the series' start time that day, so the feed and the
+ *   stored series agree;
+ * - an RDATE-only series gets its DTSTART as one: it is the first instance (RFC 5545 §3.8.2.4),
+ *   which ical.js left out.
  */
 function alignSeriesTimes(components: ICAL.Component[]): void {
   const seriesStarts = new Map<string, { time: ICAL.Time; tzid: unknown }>();
@@ -2211,9 +2110,8 @@ function alignSeriesTimes(components: ICAL.Component[]): void {
       const rule = property.jCal[3] as { until?: unknown } | undefined;
       const until = rule?.until;
       if (typeof until === 'string' && until.length === 10 && rule) {
-        // A DATE UNTIL on a timed series (RFC 5545 §3.3.10 wants DTSTART's value type, and UTC for
-        // a zoned one) names its whole day on the series' clock: up to the instant before the
-        // next day begins there. Read as midnight UTC, it lost that day in most zones.
+        // A DATE UNTIL on a timed series names its whole day on the series' clock: up to the
+        // instant before the next day begins there.
         const next = utcFrame(
           Number(until.slice(0, 4)),
           Number(until.slice(5, 7)),
@@ -2251,7 +2149,7 @@ function alignSeriesTimes(components: ICAL.Component[]): void {
     for (const property of component.getAllProperties('recurrence-id')) {
       const value = property.jCal[3];
       if (property.type !== 'date-time' || typeof value !== 'string') continue;
-      // Named in the series' own zone, it is matched by its wall time as it stands.
+      // In the series' own zone it is matched by its wall time as is.
       if (typeof series.tzid === 'string' && property.getParameter('tzid') === series.tzid)
         continue;
       const time = ICAL.Time.fromDateTimeString(value, property);
@@ -2280,9 +2178,9 @@ function alignSeriesTimes(components: ICAL.Component[]): void {
 
 /**
  * Parse VEVENTs with the standards library; event content is deliberately discarded. All or
- * nothing: a series Slotlock cannot read refuses the whole calendar, so a caller that reads the
- * result as the calendar's busy time never takes a refused series' time as free. To keep the rest
- * of a calendar when one series is refused, use parseICalendarFeed.
+ * nothing: a series Slotlock cannot read refuses the whole calendar, so a caller reading the result
+ * as busy time never takes its time as free. parseICalendarFeed keeps the rest of the calendar
+ * instead.
  */
 export function parseICalendarChanges(
   input: string,
@@ -2308,11 +2206,10 @@ export interface ICalendarFeedRead {
 }
 
 /**
- * parseICalendarChanges, refusing one series at a time: a series Slotlock cannot read (a rule
- * shape ical.js expands wrongly, an event whose end the clocks move before its start, DTEND with
- * DURATION, or one that needs more than its budget) is named in `refused` and the rest of the
- * calendar is read. A calendar that is not one (its size, its time zones, a missing UID, a window
- * past 367 days) is still refused whole, with CalendarContractError.
+ * parseICalendarChanges, refusing one series at a time: a series Slotlock cannot read (a
+ * misexpanded rule shape, an end the clocks move before its start, DTEND with DURATION, or over
+ * budget) is named in `refused` and the rest is read. A calendar that is not one (size, time zones,
+ * a missing UID, a window over 367 days) is still refused whole, with CalendarContractError.
  */
 export function parseICalendarFeed(
   input: string,
@@ -2379,20 +2276,19 @@ function parseCalendarChanges(
   refused?: ICalendarSeriesRefusal[],
 ): ExternalCalendarChange[] {
   try {
-    // Bound work before ical.js allocates and normalizes the full component tree. The parsed-tree
-    // checks below remain authoritative; these cheap standards-shaped counts are an early DoS guard.
+    // Cheap early DoS guards before ical.js builds the full tree; the parsed-tree checks below stay
+    // authoritative.
     boundInput(input);
     const budget = limits instanceof RecurrenceBudget ? limits : new RecurrenceBudget(limits);
     const root = new ICAL.Component(ICAL.parse(input));
-    // A bare VEVENT (or anything else) would read as a calendar with no events.
+    // A bare VEVENT would read as a calendar with no events.
     if (root.name !== 'vcalendar') throw new CalendarContractError('invalid_icalendar');
     let Budgeted: typeof ICAL.RecurIterator | undefined;
     const budgeted = () => (Budgeted ??= budgetedRecurIterator(budget));
     budgetTimezoneRules(root, budgeted);
     budgetTimezoneCoverage(root, budget);
-    // A time read in a zone of its own (a VTIMEZONE's, or an IntlTimezone) is read in that zone: an
-    // RDATE may name another zone than its series' DTSTART, and an occurrence keeps the RDATE's.
-    // Every time is read through the budget, which charges its conversions.
+    // A time in a zone of its own is read in that zone: an RDATE may name a different zone than
+    // DTSTART, and its occurrence keeps it. Every read goes through the budget.
     const timeValue = (value: unknown, zone: unknown, fallback: string | undefined) =>
       calendarTimeValue(value, ownZone(value) ?? zone, fallback, budget);
     const readerOf = (value: unknown, zone: unknown) =>
@@ -2409,9 +2305,8 @@ function parseCalendarChanges(
     boundComponents(components);
     const periods = frameEventTimes(root, components, defaultTimezone, budget);
     const events = feedEvents(components);
-    // A series is a master and the overrides (RECURRENCE-ID components) that share its UID. Each is
-    // read on its own: with `refused`, a series Slotlock cannot read is named there and the rest of
-    // the calendar is read; without, it refuses the calendar.
+    // A series is a master and the overrides sharing its UID, each read on its own: with `refused`,
+    // an unreadable series is named there; without, it refuses the calendar.
     const groups = new Map<string, { masters: ICAL.Event[]; overrides: ICAL.Event[] }>();
     for (const event of events) {
       const uid = event.uid;
@@ -2430,9 +2325,9 @@ function parseCalendarChanges(
     }
 
     /**
-     * A change for `start` to `end`, with the status, transparency and sequence of `component`, or
-     * null when it has no length: RFC 5545 §3.6.1 ends a DATE-TIME DTSTART without DTEND or DURATION
-     * when it starts, so it occupies no time. A cancelled one still says so, with no time.
+     * A change for `start` to `end` with `component`'s status, transparency and sequence, or null
+     * when it has no length (RFC 5545 §3.6.1: a DATE-TIME DTSTART without DTEND or DURATION
+     * occupies no time). A cancelled one still says so.
      */
     const makeChange = (
       component: ICAL.Component,
@@ -2470,9 +2365,8 @@ function parseCalendarChanges(
     };
 
     /**
-     * How long an event's occurrences last (SPEC.md, "Daylight-saving time"). DTSTART is read as
-     * written (the store's own instant for a stored series), DTEND as an instant per RFC 5545 §3.3.5,
-     * and a DURATION per §3.3.6: its days on the calendar, its hours, minutes and seconds exact.
+     * How long an event's occurrences last (SPEC.md, "Daylight-saving time"): DTSTART as written (a
+     * stored series' own instant), DTEND as an instant per RFC 5545 §3.3.5, a DURATION per §3.3.6.
      */
     const lengthsOf = (event: ICAL.Event, anchor?: { start: Date; end: Date }): SeriesLengths => {
       const component = event.component;
@@ -2498,17 +2392,16 @@ function parseCalendarChanges(
         const end = anchor
           ? anchor.end.getTime()
           : readerOf(endTime, endZone).toInstant(wallFrameOf(endTime));
-        // An end the clocks moved onto its start (both in the hour they skip), or before it, is
-        // refused: the event as written cannot be read. An end written as its start is no length.
+        // An end the clocks moved onto or before its start is refused; an end written as its start
+        // is no length.
         const sameZone = (ownZone(endTime) ?? endZone) === (ownZone(startTime) ?? startZone);
         const writtenAsStart = wallFrameOf(endTime) === startWall && sameZone;
         if (end < start || (end === start && !writtenAsStart)) {
           throw new CalendarContractError('invalid_icalendar');
         }
-        // DTEND's wall time as written, when it is written in DTSTART's zone: one in the hour the
-        // clocks skip is carried to later days as written, though its own instant reads an hour
-        // later (RFC 5545 §3.3.5). In another zone, or for a stored series (instants), it is the
-        // wall time its instant reads in DTSTART's zone.
+        // DTEND's wall time as written when in DTSTART's zone (carried to later days as written,
+        // even in a skipped hour); otherwise, or for a stored series, the wall time its instant
+        // reads in DTSTART's zone.
         const endWall = !anchor && sameZone ? wallFrameOf(endTime) : reader.toWall(end);
         return { ...base, exact: end - start, wall: endWall - startWall, ends: end > start };
       }
@@ -2540,10 +2433,8 @@ function parseCalendarChanges(
     };
 
     /**
-     * The end of a generated occurrence: the later of its exact end and its wall-clock end (DTEND's
-     * wall time carried to the occurrence's date, read at the later instant of an hour the clocks
-     * repeat). One reading or the other leaves time free that people mean as busy wherever the clocks
-     * change inside an occurrence; their union does not.
+     * The later of an occurrence's exact end and its wall-clock end: where clocks change inside an
+     * occurrence, either reading alone leaves time free that people mean as busy.
      */
     const occurrenceEnd = (
       lengths: SeriesLengths,
@@ -2557,9 +2448,9 @@ function parseCalendarChanges(
     };
 
     /**
-     * An override as Slotlock reads it: the instant of the occurrence it replaces, and its own
-     * interval, exact as written. One without DTEND or DURATION lasts its series' length (RFC 5545
-     * §3.6.1 alone would end it as it starts, leaving the moved occurrence free).
+     * An override: the instant of the occurrence it replaces and its own exact interval. Without
+     * DTEND or DURATION it lasts its series' length (§3.6.1 alone would leave the moved occurrence
+     * free).
      */
     const readOverride = (
       override: ICAL.Event,
@@ -2612,7 +2503,6 @@ function parseCalendarChanges(
         const startMs = reader.toInstant(startWall);
         let endMs: number;
         if (/^[+-]?P/.test(period.end)) {
-          // Bounded first, as boundComponent bounds a DURATION.
           const duration = ICAL.Duration.fromString(period.end);
           if (duration.isNegative || duration.toSeconds() * 1000 > maxMs) expansionLimit();
           const days = duration.weeks * 7 + duration.days;
@@ -2630,10 +2520,8 @@ function parseCalendarChanges(
     };
 
     /**
-     * A series' EXDATEs: the instants its DATE-TIME values name, and the days its DATE values name
-     * (one excludes every occurrence that day, as ical.js reads it). ical.js passes them one at a
-     * time as it goes, so an occurrence after two EXDATEs it had not passed, or the second of an
-     * instant both RRULE and RDATE name, escaped its EXDATE; RFC 5545 §3.8.5.1 has every EXDATE win.
+     * A series' EXDATEs: instants for DATE-TIME values, days for DATE values. ical.js applies them
+     * as it goes, so some occurrences escaped; RFC 5545 §3.8.5.1 has every EXDATE win.
      */
     const exclusionsOf = (event: ICAL.Event) => {
       const instants = new Set<number>();
@@ -2660,9 +2548,8 @@ function parseCalendarChanges(
         const change = makeChange(event.component, uid, lengths.start, end, recurrenceId);
         if (change) changes.push(change);
       }
-      // A server-expanded CalDAV series may send its first instance without a RECURRENCE-ID, and
-      // must send every other one with one (RFC 4791 §9.6.5): each is an override of this one-off,
-      // and occupies its own time.
+      // A server-expanded CalDAV series may send its first instance without a RECURRENCE-ID and
+      // every other one with one (RFC 4791 §9.6.5): each override occupies its own time.
       for (const override of overrides) if (override.change) changes.push(override.change);
     };
 
@@ -2722,9 +2609,8 @@ function parseCalendarChanges(
         }
         sortRuleParts(recur);
       }
-      // A yearly day some years lack is kept to the days the rule names (yearlyDays), which needs
-      // the rule to be the series' only source: ical.js mixes RDATEs and other rules in, and one of
-      // those on another day could not be told from a day it moved.
+      // yearlyDays needs the rule to be the series' only source: ical.js mixes RDATEs and other
+      // rules in, which could not be told from a moved day.
       const ruleValues = event.component.getAllProperties('rrule');
       const lacking =
         startTime instanceof ICAL.Time
@@ -2742,7 +2628,7 @@ function parseCalendarChanges(
       const overrides: ReadOverride[] = stored
         ? stored.exceptions.map((exception) => storedOverride(uid, event, lengths, exception))
         : overrideEvents.map((override) => readOverride(override, uid, lengths, startZone));
-      // What one series may pass from its start, so that one series' age never refuses another's.
+      // Per series, so one series' age never refuses another's.
       let remainingWork = MAX_ICAL_WORK;
       let maxBackwardExceptionShiftMs = 0;
       let lastOverrideAt = Number.NEGATIVE_INFINITY;
@@ -2753,15 +2639,14 @@ function parseCalendarChanges(
         if (backwardShiftMs > MAX_EXCEPTION_BACKWARD_SHIFT_MS) {
           throw new CalendarContractError('invalid_icalendar');
         }
-        // ical.js moved an occurrence by the shift a month at a time (Time#adjust); a range
-        // override still moves every later one by it.
+        // ical.js moves an occurrence a month at a time (Time#adjust).
         if (-backwardShiftMs > MAX_ICAL_STEP_DAYS * DAY_MS) expansionLimit();
         maxBackwardExceptionShiftMs = Math.max(maxBackwardExceptionShiftMs, backwardShiftMs);
         lastOverrideAt = Math.max(lastOverrideAt, override.at);
       }
       const recurrenceScanEndMs = expansionWindow.end.getTime() + maxBackwardExceptionShiftMs;
-      // A direct override replaces the occurrence it names; a RANGE=THISANDFUTURE one also moves
-      // every later occurrence by its own shift, with its own length.
+      // A direct override replaces its occurrence; a RANGE=THISANDFUTURE one also moves every later
+      // one by its shift, with its own length.
       const byInstant = new Map(overrides.map((override) => [override.at, override]));
       const ranges = overrides
         .filter((override) => override.range)
@@ -2774,8 +2659,8 @@ function parseCalendarChanges(
         }
         return found;
       };
-      // A stored series (the only master) resumes from its cursor when the cursor is this series'
-      // and stands where the window needs nothing before it, and leaves one for the next window.
+      // A stored series (the only master) resumes from its cursor when the cursor fits and the
+      // window needs nothing before it, and leaves one for the next window.
       const key = series && groups.size === 1 ? seriesKey(event.component) : null;
       const kept = key === null ? null : readSeriesCursor(series?.cursor, key);
       const usable =
@@ -2784,12 +2669,10 @@ function parseCalendarChanges(
           : null;
       let periodEnds: Map<number, number> | undefined;
       let exclusions: ReturnType<typeof exclusionsOf> | undefined;
-      // A feed's series that repeats every so many days (one RRULE, DAILY or WEEKLY, with no
-      // COUNT, RDATE or RANGE=THISANDFUTURE override) repeats the same way from DTSTART moved a
-      // whole number of its periods on the wall clock: a WEEKLY rule's weeks stay in step, a DAILY
-      // rule's BY parts only limit its days. So its search starts at the last such time from which
-      // no occurrence before it could reach the window (it lasts at most its wall-clock or exact
-      // length and a day more), and a daily standup since 2014 is read like one from this year.
+      // A feed series that repeats every so many days (one DAILY or WEEKLY RRULE, no COUNT, RDATE
+      // or THISANDFUTURE override) repeats identically from DTSTART moved by whole periods, so the
+      // search starts at the last such time no earlier occurrence could reach the window from: a
+      // daily standup since 2014 reads like one from this year.
       let from: ICAL.Time | undefined;
       const rules = event.component.getAllProperties('rrule');
       const only = rules.length === 1 ? rules[0]?.getFirstValue() : undefined;
@@ -2816,14 +2699,13 @@ function parseCalendarChanges(
           from.day = day.getUTCDate();
         }
       }
-      // The occurrences in the window from `resume` (or the start), and the cursor to keep; null
-      // when `resume` does not fit this series.
+      // The window's occurrences from `resume` (or the start) and the cursor to keep; null when
+      // `resume` does not fit.
       const expand = (resume: CalendarSeriesCursor | null) => {
         const iterator = resume
           ? resumedExpansion(event, budgeted(), budget, resume)
           : budgetedExpansion(event, budgeted(), budget, from);
         if (iterator === null) return null;
-        // The cursor stands on the occurrence it last passed: the same time, read the same way.
         if (
           resume &&
           timeValue(
@@ -2834,8 +2716,8 @@ function parseCalendarChanges(
         ) {
           return null;
         }
-        // A stored series' exceptions are checked against every occurrence up to the last of them
-        // when it is searched from its start, so one that names no occurrence is refused.
+        // Searched from the start, a stored series' exceptions are checked against every occurrence
+        // up to the last of them, so one naming no occurrence is refused.
         const scanEndMs =
           stored && !resume
             ? Math.max(recurrenceScanEndMs, lastOverrideAt + 1)
@@ -2855,8 +2737,8 @@ function parseCalendarChanges(
             ? startTime
             : null;
         const firstAt = first ? timeValue(first, startZone, defaultTimezone).getTime() : 0;
-        // Each zone the series' times are in is read with one reader for the whole series: an
-        // RRULE's occurrences are in DTSTART's zone, an RDATE's in its own.
+        // One reader per zone for the whole series: RRULE occurrences are in DTSTART's zone, an
+        // RDATE's in its own.
         const readers = new Map<unknown, ZoneReader>();
         const readerFor = (time: ICAL.Time) => {
           let reader = readers.get(time.zone);
@@ -2871,8 +2753,8 @@ function parseCalendarChanges(
           remainingWork -= 1;
           if (remainingWork < 0) expansionLimit();
           budget.charge(OCCURRENCE_STEPS);
-          // Before the next step, everything the iterator has passed may end before the window:
-          // then this is where the next expansion can start.
+          // Before the next step: if everything passed ends before the window, the next expansion
+          // can start here.
           if (leaving && key !== null && series && position !== undefined && held === undefined) {
             if (position <= series.resumeLimitMs)
               snapshot = snapshotSeries(iterator, key, position);
@@ -2921,9 +2803,8 @@ function parseCalendarChanges(
           }
           // The first instance is DTSTART's own instant: for a stored series, the instant stored.
           const at = isFirst ? lengths.start : position;
-          // An instant is one occurrence however many RRULEs and RDATEs name it (RFC 5545
-          // §3.8.5.3; ical.js yields it again, and a spring-forward can move a wall time onto one
-          // the rule names later), and none where an EXDATE names it.
+          // An instant is one occurrence however many RRULEs and RDATEs name it (RFC 5545 §3.8.5.3;
+          // ical.js yields duplicates), and none where an EXDATE names it.
           if (seen.has(at)) continue;
           seen.add(at);
           if (event.component.hasProperty('exdate')) {
@@ -2938,7 +2819,6 @@ function parseCalendarChanges(
             }
             continue;
           }
-          // A PERIOD RDATE's occurrence ends where its period does.
           const periodEnd = (periodEnds ??= periodEndsOf(event)).get(position);
           const range = periodEnd === undefined ? rangeBefore(at) : undefined;
           let start = at;
@@ -2947,8 +2827,8 @@ function parseCalendarChanges(
           if (periodEnd !== undefined) {
             end = periodEnd;
           } else if (range) {
-            // Moved by the range override's own shift on the wall clock, in its zone (as ical.js
-            // moves it), lasting the override's length.
+            // Moved by the range override's wall-clock shift in its zone (as ical.js moves it),
+            // lasting the override's length.
             const shifted = wall + (range.lengths.startWall - range.recurrenceWall);
             start = range.lengths.reader.toInstant(shifted);
             end = occurrenceEnd(range.lengths, range.lengths.reader, shifted, start);
@@ -2969,8 +2849,8 @@ function parseCalendarChanges(
         try {
           expanded = expand(usable);
         } catch (error) {
-          // A cursor ical.js cannot go on from is not this series' to use, like one that does not
-          // fit it: search from the start. Running out of budget is the series' own doing.
+          // A cursor ical.js cannot continue is treated as not fitting: search from the start.
+          // Running out of budget is the series' own doing.
           if (error instanceof CalendarExpansionLimitError) throw error;
         }
       }
@@ -2983,10 +2863,9 @@ function parseCalendarChanges(
       changes.push(...expanded.found);
       for (const override of overrides) {
         if (expanded.matched.has(override)) continue;
-        // An override whose occurrence an EXDATE removes, or that names none, still occupies its
-        // own interval, as the provider shows it. A stored exception that names no occurrence is
-        // refused wherever this expansion could tell (before the series starts, or before the first
-        // occurrence it did not reach), or collected in `series.unmatched` when that is given.
+        // An override whose occurrence was removed, or that names none, still occupies its own
+        // interval, as the provider shows it. A stored exception naming no occurrence is refused
+        // where this can tell, or collected in `series.unmatched`.
         const passed = resumed ? override.at <= (usable?.position ?? 0) : false;
         if (
           stored &&
@@ -3007,7 +2886,6 @@ function parseCalendarChanges(
       }
     };
 
-    /** A stored series' exception, read from its instants: they are what the store holds. */
     const storedOverride = (
       uid: string,
       event: ICAL.Event,
@@ -3058,13 +2936,11 @@ function parseCalendarChanges(
 }
 
 /**
- * Make one series' busy occurrences, `changes` from `from` on, disjoint without freeing a minute of
- * them: where one ends after the next starts, it ends where the next starts, and the next ends at
- * the later of the two ends. The union rule makes an occurrence of about a day or longer reach
- * into the next one where the clocks go forward (24 exact hours from midnight end at 01:00 the
- * next day), and the store holds each occurrence as a reservation under one EXCLUDE constraint,
- * which refuses two that overlap. Two that start at the same instant are left as they are. An
- * occurrence cut to end before the window is dropped: the next one holds its time there.
+ * Make one series' busy occurrences disjoint without freeing a minute: where one ends after the
+ * next starts, it ends there and the next ends at the later of the two. The union rule can make
+ * day-long occurrences overlap across a spring-forward, and the store's EXCLUDE constraint refuses
+ * overlaps. Same-instant starts are left alone; an occurrence cut to end before the window is
+ * dropped.
  */
 function separateOccurrences(
   changes: ExternalCalendarChange[],
@@ -3120,8 +2996,8 @@ function addDateTimeProperty(
 }
 
 /**
- * Whether `instant`'s wall time in `timezone` names it again as RFC 5545 §3.3.5 reads a wall time:
- * not for the second pass of an hour the clocks repeat, which reads as the first.
+ * Whether `instant`'s wall time in `timezone` names it again per RFC 5545 §3.3.5: not for the
+ * second pass of a repeated hour.
  */
 function wallTimeNames(instant: Date, timezone: string): boolean {
   if (timezone === 'UTC') return true;
@@ -3212,9 +3088,8 @@ function eventComponent(params: {
   component.updatePropertyWithValue('last-modified', ICAL.Time.fromJSDate(params.updatedAt, true));
   const { start, end, timezone } = params.event;
   const recurring = params.includeRecurrence === true && params.event.recurrence !== undefined;
-  // A series recurs at DTSTART's wall time, so its DTSTART is written in its zone. Any other time
-  // is written in its zone only where that wall time names it (wallTimeNames), else in UTC: the
-  // second 01:30 of the night the clocks go back reads, in its zone, as the first.
+  // DTSTART in its zone, since a series recurs at its wall time. Any other time is written in its
+  // zone only where that wall time names it (wallTimeNames), else in UTC.
   addDateTimeProperty(
     component,
     'dtstart',
@@ -3222,8 +3097,8 @@ function eventComponent(params: {
     recurring || wallTimeNames(start, timezone) ? timezone : 'UTC',
   );
   if (recurring && !wallTimeNames(start, timezone)) {
-    // Its length as a DURATION, exact (RFC 5545 §3.3.6), since its DTSTART reads an hour early:
-    // emitITipCalendar adds an override that puts the first instance at its own instants.
+    // Its length as an exact DURATION (§3.3.6), since its DTSTART reads an hour early:
+    // emitITipCalendar adds an override putting the first instance at its own instants.
     component.updatePropertyWithValue(
       'duration',
       ICAL.Duration.fromSeconds((end.getTime() - start.getTime()) / 1000),
@@ -3232,7 +3107,6 @@ function eventComponent(params: {
     addDateTimeProperty(component, 'dtend', end, wallTimeNames(end, timezone) ? timezone : 'UTC');
   }
   if (params.recurrenceId) {
-    // In UTC: the instant the occurrence starts names it, wherever the clocks change.
     addDateTimeProperty(component, 'recurrence-id', params.recurrenceId, 'UTC');
   }
   component.updatePropertyWithValue('summary', params.event.summary);
@@ -3268,7 +3142,7 @@ const VTIMEZONE_SERIES_YEARS = 30;
 /** And at most, from its first year: a longer series is left to the rules. */
 const MAX_VTIMEZONE_YEARS = 60;
 
-/** Changes of a zone already found, by zone and years: Intl answers the same for a process. */
+/** Cached: Intl answers the same for a process. */
 const zoneChanges = new Map<string, ZoneTransition[]>();
 
 /** One change a year, which one yearly rule names. */
@@ -3281,13 +3155,10 @@ interface ZoneRun {
 
 /**
  * A VTIMEZONE (RFC 5545 §3.6.5) for `timezone` as Intl reads it from `fromYear` to `toYear`: the
- * offset at the start of `fromYear`, then every change (zoneTransitions). Changes in consecutive
- * years on the same weekday of the same month, at the same local time and between the same
- * offsets, are one observance with a yearly rule (`BYMONTH=3;BYDAY=-1SU`), with an UNTIL where they
- * stop; one still running at `toYear` after three years at least is left open, so a reader carries
- * the zone on past `toYear` as the IANA rules do. Any other change is an observance of its own. An
- * observance starts at the local time before the change, as §3.6.5 has it, and offsets are written
- * in whole minutes: ical.js 2.2.1 reads no seconds in one (UtcOffset.fromString).
+ * offset at the start, then every change. Runs of yearly changes on the same weekday rule, local
+ * time and offsets become one observance with a yearly rule (UNTIL where they stop; left open if
+ * still running at `toYear` after at least three years). Other changes are observances of their
+ * own. Offsets are whole minutes: ical.js 2.2.1 reads no seconds (UtcOffset.fromString).
  */
 function vtimezoneComponent(timezone: string, fromYear: number, toYear: number): ICAL.Component {
   const from = Date.UTC(fromYear, 0, 1);
@@ -3422,9 +3293,9 @@ export function emitITipCalendar(input: ICalendarEvent, method: ITipMethod): str
     };
     if (status !== undefined) masterParams.status = status;
     const events = [eventComponent(masterParams)];
-    // A series whose first instance starts in the second pass of an hour the clocks repeat has a
-    // DTSTART that reads as the first pass: an override (keyed by that first pass) puts the
-    // instance at its own instants, unless an exception already says where it is.
+    // A series whose first instance starts in the second pass of a repeated hour has a DTSTART
+    // reading as the first pass: an override puts the instance at its own instants, unless an
+    // exception already does.
     const firstInstance =
       event.recurrence && !wallTimeNames(event.start, event.timezone)
         ? zonedDateTimeToUtc(zonedDateTimeFields(event.start, event.timezone), event.timezone)
@@ -3462,8 +3333,8 @@ export function emitITipCalendar(input: ICalendarEvent, method: ITipMethod): str
       if (exceptionStatus !== undefined) exceptionParams.status = exceptionStatus;
       events.push(eventComponent(exceptionParams));
     }
-    // RFC 5545 §3.6.5: a VTIMEZONE for the zone a time names, over every year the event's times
-    // fall in, and a series' rule's (to its UNTIL, else thirty years on, where its rules go on).
+    // RFC 5545 §3.6.5: a VTIMEZONE covering every year the event's times fall in, and a series'
+    // rule's (to its UNTIL, else thirty years on).
     const zoned = events.some((component) =>
       component.getAllProperties().some((property) => property.getParameter('tzid')),
     );
@@ -3492,7 +3363,7 @@ export function emitITipCalendar(input: ICalendarEvent, method: ITipMethod): str
     if (Buffer.byteLength(output, 'utf8') > MAX_ICAL_INPUT_BYTES) {
       throw new CalendarContractError('invalid_icalendar');
     }
-    // A real-library round trip catches an invalid decorated property before provider delivery.
+    // A real-library round trip catches an invalid property before provider delivery.
     new ICAL.Component(ICAL.parse(output));
     return output;
   } catch (error) {
@@ -3600,10 +3471,9 @@ function parseReminders(component: ICAL.Component): CalendarReminder[] {
 }
 
 /**
- * An all-day series is stored with local-midnight DATE-TIME bounds, so a DATE `UNTIL` must become
- * the matching DATE-TIME: RFC 5545 §3.3.10 requires UNTIL to share DTSTART's value type, and in UTC
- * when DTSTART carries a zone. The instant chosen is that day's local midnight, which is exactly the
- * start of the last occurrence the rule allows.
+ * An all-day series is stored with local-midnight DATE-TIME bounds, so a DATE `UNTIL` becomes that
+ * day's local midnight as DATE-TIME (RFC 5545 §3.3.10: UNTIL shares DTSTART's type, in UTC when
+ * zoned): exactly the last allowed start.
  */
 function allDayRecurrenceRule(rule: string, timezone: string): string {
   const recur = ICAL.Recur.fromString(rule);
@@ -3618,10 +3488,9 @@ function allDayRecurrenceRule(rule: string, timezone: string): string {
 }
 
 /**
- * Parse full, trusted event content. This is intentionally a different API from
- * parseICalendarChanges, whose return shape can never carry summaries, participants or notes.
- * All-day (DATE) events are converted to local-midnight bounds in the calendar's timezone: the
- * `calendarTimezone` argument, else the feed's X-WR-TIMEZONE; with neither they are refused.
+ * Parse full, trusted event content: deliberately a different API from parseICalendarChanges, whose
+ * result can never carry summaries, participants or notes. All-day events become local-midnight
+ * bounds in `calendarTimezone`, else X-WR-TIMEZONE; with neither they are refused.
  */
 export function parseTrustedICalendarEvents(
   input: string,
@@ -3647,8 +3516,7 @@ export function parseTrustedICalendarEvents(
       throw new CalendarContractError('invalid_icalendar');
     }
     boundComponents(components);
-    // Times are read as a feed's are, so a stored series occupies what the feed reports: zones it
-    // names without defining them, floating times in the calendar's zone, all-day EXDATEs as days.
+    // Times are read as a feed's are, so a stored series occupies what the feed reports.
     frameEventTimes(root, components, defaultTimezone, budget);
     const masters = new Map<string, ICAL.Event>();
     const exceptionsByUid = new Map<string, ICAL.Event[]>();
@@ -3668,8 +3536,8 @@ export function parseTrustedICalendarEvents(
     for (const uid of exceptionsByUid.keys()) {
       if (!masters.has(uid)) throw new CalendarContractError('invalid_icalendar');
     }
-    // Every VEVENT's rule as written must be one RFC 5545 §3.3.10 allows: ical.js has already read
-    // `COUNT=0` as no count, `COUNT=3X` as 3 and the last of two FREQs, so the text is read again.
+    // Every VEVENT's rule as written must be one RFC 5545 §3.3.10 allows: ical.js has already
+    // misread some, so the text is read again.
     for (const rule of veventRuleTexts(input)) {
       if (canonicalRecurrenceRule(rule) === null) {
         throw new CalendarContractError('invalid_icalendar');
@@ -3710,8 +3578,8 @@ export function parseTrustedICalendarEvents(
     for (const [uid, event] of masters) {
       const component = event.component;
       const startProperty = component.getFirstProperty('dtstart');
-      // An all-day event (DATE-valued DTSTART) covers whole local days of the calendar's zone. Its
-      // end must be a DATE too (RFC 5545 §3.6.1), and a DURATION may only count days or weeks.
+      // An all-day event covers whole local days; its end must be a DATE too (§3.6.1), and a
+      // DURATION may only count days or weeks.
       const allDay = event.startDate.isDate;
       if (event.endDate.isDate !== allDay) throw new CalendarContractError('invalid_icalendar');
       if (allDay) {
@@ -3772,19 +3640,15 @@ export function parseTrustedICalendarEvents(
       }
       const rrule = rrules[0]?.getFirstValue();
       if (rrule) {
-        // A series is stored as an instant and a zone, and recurs at that instant's wall time. A
-        // DTSTART the clocks skip (02:30 the night 02:00 becomes 03:00, or an all-day series'
-        // midnight where the clocks go forward at midnight, as in Santiago and Havana) has no
-        // instant that reads as it, so storing it would move every occurrence an hour: it is
-        // refused.
+        // A series is stored as an instant and a zone and recurs at that wall time. A DTSTART the
+        // clocks skip has no instant reading as it, so storing it would shift every occurrence an
+        // hour: refused.
         if (own.reader.toWall(own.start) !== own.startWall) {
           throw new CalendarContractError('invalid_icalendar');
         }
-        // Its later occurrences end on the wall clock where its first one's end instant reads, and
-        // last at least as long. A DTEND the clocks skip reads an hour later than written, and a
-        // DURATION that counts days lasts a day on the calendar, 23 or 25 hours across a change,
-        // where the first one's instants say 24: either would hold an hour the feed does not. They
-        // are refused (days only outside UTC, where every day is 24 hours).
+        // Later occurrences end at the first one's end wall time and last at least as long. A
+        // skipped DTEND or a day-counting DURATION across a change would hold an hour the feed does
+        // not, so they are refused (days only outside UTC).
         if (!allDay) {
           const endProperty = component.getFirstProperty('dtend');
           const endTime = endProperty?.getFirstValue();
@@ -3824,8 +3688,7 @@ export function parseTrustedICalendarEvents(
           const recurrenceProperty = exception.component.getFirstProperty('recurrence-id');
           const range = recurrenceProperty?.getFirstParameter('range');
           if (range) throw new CalendarContractError('invalid_icalendar');
-          // A stored series has one transparency; an instance that differs (an opaque instance
-          // of a free series, a free one of a busy series) cannot be stored as it is.
+          // A stored series has one transparency; an instance that differs cannot be stored as is.
           const transparency = String(
             exception.component.getFirstPropertyValue('transp') ?? 'opaque',
           ).toLowerCase();
@@ -3840,9 +3703,8 @@ export function parseTrustedICalendarEvents(
           const cancelled =
             String(exception.component.getFirstPropertyValue('status') ?? '').toLowerCase() ===
             'cancelled';
-          // An instance an EXDATE removes but an override still describes is the override, as
-          // the provider shows it. One that keeps its time (a new title, a reply) is still kept,
-          // and one with no end lasts its series' length.
+          // An instance an EXDATE removes but an override describes is the override, as the
+          // provider shows it; one with no end lasts its series' length.
           const parsedException: CalendarRecurrenceException = { recurrenceId };
           if (cancelled) {
             parsedException.cancelled = true;
@@ -3867,9 +3729,9 @@ export function parseTrustedICalendarEvents(
         throw new CalendarContractError('invalid_icalendar');
       }
       let content = normalizeCalendarEventContent(contentInput);
-      // An EXDATE or a cancelled instance that names no occurrence frees nothing in the feed (RFC
-      // 5545 §3.8.5.1), so it is dropped rather than stored, which the store refuses. A moved one
-      // that names none is busy in the feed at its own time, which a stored series cannot hold.
+      // An EXDATE or cancellation naming no occurrence frees nothing (RFC 5545 §3.8.5.1), so it is
+      // dropped rather than stored. A moved one naming none is busy at its own time, which a stored
+      // series cannot hold.
       const recurrence = content.recurrence;
       if (recurrence?.exceptions && recurrence.exceptions.length > 0) {
         const unmatched = unmatchedExceptions(content, budget);
@@ -3899,7 +3761,6 @@ export function parseTrustedICalendarEvents(
     }
     return trusted;
   } catch (error) {
-    // An event the calendar gives no length or no UID is the calendar's fault, as in a feed.
     if (error instanceof CalendarContractError && error.code === 'invalid_icalendar') throw error;
     throw new CalendarContractError('invalid_icalendar');
   }
@@ -3917,8 +3778,8 @@ export function expandCalendarEventOccurrences(
 }
 
 /**
- * The same expansion for a stored series as maintenance rolls it, within FEED_LIMITS: twice what it
- * was written within, so a series accepted once keeps rolling as its search grows.
+ * The same expansion for a stored series as maintenance rolls it, within FEED_LIMITS (more than a
+ * write gets), so a series accepted once keeps rolling as its search grows.
  */
 export function expandStoredCalendarEventOccurrences(
   input: CalendarEventContent,
@@ -3928,11 +3789,11 @@ export function expandStoredCalendarEventOccurrences(
 }
 
 /**
- * Expand a stored series, resuming from the cursor its last expansion left when that cursor can
- * vouch for everything it skips, and leave a cursor for the next. Within FEED_LIMITS as maintenance
- * rolls it (`stored`), or EVENT_LIMITS as it is written. Whatever a cursor cannot serve (another
- * rule, start, zone or ical.js; a window starting before it; a longer event or an exception that
- * could reach the window from before it; anything malformed) is searched from the series' start.
+ * Expand a stored series, resuming from its last cursor when that cursor can vouch for everything
+ * it skips, and leave a cursor for the next. Within FEED_LIMITS when maintenance rolls it
+ * (`stored`), else EVENT_LIMITS. Anything a cursor cannot serve (other rule, start, zone or
+ * ical.js; a window before it; something that could reach the window from before it; malformed) is
+ * searched from the start.
  */
 export function expandCalendarEventSeries(
   input: CalendarEventContent,
@@ -3963,10 +3824,9 @@ function expandOccurrences(
   try {
     return expandEventOccurrences(input, window, limits, cursor, resumeOnly);
   } catch (error) {
-    // A series stored by an earlier Slotlock that this one refuses (a rule shape it no longer
-    // expands, an exception that names no occurrence, a zone written as a UTC offset) is refused as
-    // maintenance rolls it, so the roll counts it and the series keeps its old coverage, rather than
-    // stopping every series after it. One no Slotlock stored is an error, as it always was.
+    // A series an earlier Slotlock stored that this one refuses is counted by the roll and keeps
+    // its old coverage rather than stopping every series after it. One no Slotlock stored is an
+    // error.
     if (
       limits === FEED_LIMITS &&
       error instanceof CalendarContractError &&
@@ -3980,10 +3840,8 @@ function expandOccurrences(
 }
 
 /**
- * Whether a Slotlock before this one could have stored `event`. Slotlock 0.2.0 kept any rule
- * ical.js reads that starts with FREQ= (`FREQ=DAILY;COUNT=0`, `FREQ=HOURLY`), in any zone Intl
- * knows (`+05:00` included), and checked the rest of an event as this release does; a rule such as
- * `FREQ=NEVERLY`, which ical.js cannot read, it refused.
+ * Whether an earlier Slotlock could have stored `event`: 0.2.0 kept any rule ical.js reads starting
+ * with FREQ= (`FREQ=DAILY;COUNT=0`, `FREQ=HOURLY`), in any zone Intl knows (`+05:00` included).
  */
 function storedByAnEarlierRelease(event: CalendarEventContent): boolean {
   const rule = event.recurrence?.rrule;
@@ -4022,9 +3880,8 @@ function seriesUid(event: CalendarEventContent): string {
 }
 
 /**
- * The instants of a normalized series' exceptions that name none of its occurrences, searched from
- * its start to the last of them within `budget`, as the store searches them when the series is
- * written.
+ * The instants of a series' exceptions naming none of its occurrences, searched from its start to
+ * the last of them within `budget`, as the store does on write.
  */
 function unmatchedExceptions(event: CalendarEventContent, budget: RecurrenceBudget): Set<number> {
   const unmatched = new Set<number>();
@@ -4051,12 +3908,9 @@ function unmatchedExceptions(event: CalendarEventContent, budget: RecurrenceBudg
 }
 
 /**
- * Why this Slotlock refuses an event an earlier one stored, in words, or null when it expands it.
- * Maintenance counts such a series as refused on every roll and leaves it its old coverage: a rule
- * shape ical.js expands wrongly (recurrenceRuleProblem), COUNT with a yearly day some years lack, a
- * rule it no longer stores at all, or exceptions that name no occurrence (searched from the series'
- * start to the last of them, within a roll's budget). It writes nothing, so it can be run over
- * stored events before an upgrade.
+ * Why this Slotlock refuses an event an earlier one stored, or null. Maintenance counts such a
+ * series as refused on every roll and leaves its old coverage. Writes nothing, so it can be run
+ * over stored events before an upgrade.
  */
 export function storedCalendarEventProblem(event: CalendarEventContent): string | null {
   const rule = event.recurrence?.rrule;
@@ -4096,10 +3950,9 @@ export function storedCalendarEventProblem(event: CalendarEventContent): string 
 }
 
 /**
- * The text a stored series is expanded from: its DTSTART's wall time in its zone and its rule, for
- * the iterator. Its first occurrence and its exceptions are not read back from text: a wall time
- * in an hour the clocks repeat names its first instant (RFC 5545 §3.3.5) whichever one was stored,
- * so they go to the expansion as the instants they are (SeriesResume.stored).
+ * The text a stored series is expanded from: DTSTART's wall time in its zone and its rule. The
+ * first occurrence and exceptions go as instants instead (SeriesResume.stored): a repeated-hour
+ * wall time would name the wrong one.
  */
 function seriesCalendar(event: CalendarEventContent, uid: string): string {
   const calendar = new ICAL.Component(['vcalendar', [], []]);
@@ -4138,8 +3991,8 @@ function expandEventOccurrences(
   ) {
     throw new CalendarContractError('invalid_icalendar');
   }
-  // A one-off event is one occurrence whatever its length (a multi-year lease included), so only
-  // recurrence expansion — whose work grows with the window — is bounded by the window cap.
+  // A one-off event is one occurrence whatever its length, so only recurrence expansion is bounded
+  // by the window cap.
   if (!event.recurrence) {
     const occurrences =
       event.end <= window.start || event.start >= window.end
@@ -4151,8 +4004,8 @@ function expandEventOccurrences(
     throw new CalendarContractError('invalid_icalendar');
   }
   const uid = seriesUid(event);
-  // A cursor may stand after an occurrence only if that occurrence ends before the window: unmoved,
-  // within the series' length (and a clock change) of its start; moved, where its exception says.
+  // A cursor may stand after an occurrence only if it ends before the window: unmoved, within the
+  // series' length (plus a clock change) of its start; moved, where its exception says.
   let resumeLimitMs =
     window.start.getTime() -
     (event.end.getTime() - event.start.getTime()) -
