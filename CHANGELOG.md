@@ -3,6 +3,22 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Changed
+
+- Dashboard: a new look on one set of design tokens, in light and dark. Calmer surfaces (hairline
+  borders, no drop shadows), a monospace label scale for table heads and stats, black primary
+  buttons, status pills with a dot, and empty states that name the one next step. Long names,
+  references, URLs and ids stay on one line with the whole value in a tooltip (and wrap on a
+  phone); table dates show the day, with the full UTC time on hover. On a phone the pages sit
+  under a top bar with a scrolling tab strip and a sign-out button. A skip link, a live region for
+  Copy, Escape and click-outside closing for Rotate, Revoke and Delete (whose button takes focus),
+  and reduced motion are respected. The key list names who created a key under its name instead
+  of in a column of its own. Routes, form fields, CSRF and origin checks, sessions and the
+  Content-Security-Policy are unchanged; the dashboard still loads only its own stylesheet and
+  script, and works without script.
+
 ## 0.6.0 - 2026-10-29
 
 ### Added
