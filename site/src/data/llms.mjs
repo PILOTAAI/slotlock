@@ -10,7 +10,7 @@ export function llmsDetails(pageList, version) {
   const knownIssues = version.startsWith('0.2.')
     ? ` Version ${version} has known double-booking defects around daylight-saving changes, to be fixed in 0.3.0: https://slotlock.pylota.io/docs/known-issues.md.`
     : '';
-  return `Slotlock is an early (0.x) TypeScript library and MCP/A2A server, on npm as \`slotlock\`. You run it against your own PostgreSQL 16 or newer: hosted Slotlock (https://slotlock-api.pylota.io) is not open, and self-hosting is the only supported path today (https://slotlock.pylota.io/docs/hosted.md).${knownIssues}
+  return `Slotlock is an early (0.x) TypeScript library and MCP/A2A server, on npm as \`slotlock\`. Use it hosted, as Slotlock Cloud: a person signs in with GitHub at https://app.slotlock.pylota.io/dashboard and creates an API key, and agents connect to https://slotlock-api.pylota.io (MCP at /mcp, A2A at /a2a, REST under /v1) with \`Authorization: Bearer slk_…\` (https://slotlock.pylota.io/docs/hosted.md). Or run it yourself against your own PostgreSQL 16 or newer.${knownIssues}
 
 Instructions for AI agents:
 

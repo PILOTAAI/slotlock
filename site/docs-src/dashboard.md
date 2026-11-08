@@ -7,6 +7,8 @@ sidebar:
 
 The server can serve a dashboard at `/dashboard`. Each person signs in with GitHub and gets a tenant
 of their own (`github:<user id>`): their resources, hours, keys and bookings are theirs alone.
+[Slotlock Cloud](/docs/hosted/) serves it at `https://app.slotlock.pylota.io/dashboard`; this page
+is for turning it on in your own server.
 
 ## Turn it on
 

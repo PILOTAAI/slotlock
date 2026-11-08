@@ -12,6 +12,7 @@ import Rich from '../components/landing/Rich.astro';
 import {
   capabilities,
   closing,
+  cloud,
   compare,
   dashboard,
   DDL_URL,
@@ -34,6 +35,7 @@ import {
   RACE_TEST_URL,
   REPO_URL,
   security,
+  signIn,
   specStrip,
   steps,
 } from '../data/landing';
@@ -138,7 +140,7 @@ const canonical = new URL('/', Astro.site).toString();
           <Icon name="github" />
           <span>GitHub</span>
         </a>
-        <a class="btn btn--primary" href="/docs/quickstart/">Get started</a>
+        <a class="btn btn--primary" href={signIn.href}>{signIn.label}</a>
       </div>
     </header>
 
@@ -157,7 +159,16 @@ const canonical = new URL('/', Astro.site).toString();
           </h1>
           <p class="lede">{hero.lede}</p>
           <div class="hero__actions">
-            <a class="btn btn--primary" href="/docs/quickstart/">Get started</a>
+            <div class="hero__ctas">
+              <div class="hero__buttons">
+                <a class="btn btn--primary" href={signIn.href}>
+                  <Icon name="github" />
+                  {signIn.long}
+                </a>
+                <a class="btn btn--ghost" href="#cloud">Cloud or self-host</a>
+              </div>
+              <p class="fine"><Rich text={signIn.terms} /></p>
+            </div>
             <div class="hero__install">
               {
                 hero.install.map((target, index) => (
@@ -219,6 +230,99 @@ const canonical = new URL('/', Astro.site).toString();
               ))
             }
           </dl>
+        </div>
+      </section>
+
+      <section class="band" id={cloud.id} aria-labelledby="cloud-title">
+        <div class="wrap">
+          <div class="head head--split">
+            <p class="counter">{cloud.counter} / Cloud</p>
+            <h2 class="h2" id="cloud-title">
+              <span class="soft">{cloud.heading.soft}</span>
+              <span class="strong">{cloud.heading.strong}</span>
+            </h2>
+            <p class="lede">{cloud.lede}</p>
+          </div>
+          <div class="choice">
+            <article class="choice__card choice__card--cloud" aria-labelledby="cloud-hosted-title">
+              <p class="eyebrow">{cloud.hosted.eyebrow}</p>
+              <h3 id="cloud-hosted-title">{cloud.hosted.title}</h3>
+              <ol class="cloud-steps">
+                {
+                  cloud.hosted.steps.map((step, index) => (
+                    <li>
+                      <span class="cloud-steps__n" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span>
+                      <div>
+                        <h4>{step.title}</h4>
+                        <p><Rich text={step.body} /></p>
+                      </div>
+                    </li>
+                  ))
+                }
+              </ol>
+              <div class="choice__actions">
+                <a class="btn btn--primary" href={signIn.href}>
+                  <Icon name="github" />
+                  {signIn.long}
+                </a>
+                <a class="arrow-link" href={cloud.hosted.link.href}>{cloud.hosted.link.label} <Icon name="arrow" /></a>
+              </div>
+              <p class="fine"><Rich text={signIn.terms} /></p>
+            </article>
+            <article class="choice__card" aria-labelledby="cloud-self-title">
+              <p class="eyebrow">{cloud.self.eyebrow}</p>
+              <h3 id="cloud-self-title">{cloud.self.title}</h3>
+              <p class="choice__body"><Rich text={cloud.self.body} /></p>
+              <code class="deploy__cmd">{cloud.self.command}</code>
+              <div class="choice__links">
+                {
+                  cloud.self.links.map((link) => (
+                    <a class="arrow-link" href={link.href}>{link.label} <Icon name="arrow" /></a>
+                  ))
+                }
+              </div>
+            </article>
+          </div>
+          <figure class="code endpoints">
+            <figcaption class="code__bar">
+              <span class="grow">{cloud.endpoints.caption}</span>
+            </figcaption>
+            <dl class="endpoints__list">
+              {
+                cloud.endpoints.items.map((item) => (
+                  <div class="endpoints__row">
+                    <dt>{item.label}</dt>
+                    <dd>
+                      <code id={`endpoint-${item.id}`}>{item.value}</code>
+                      <button class="copy" type="button" data-copy={`endpoint-${item.id}`} hidden>
+                        <Icon name="copy" />
+                        <span>Copy</span>
+                        <span class="sr-only"> {item.label} URL</span>
+                      </button>
+                    </dd>
+                  </div>
+                ))
+              }
+            </dl>
+            <div class="endpoints__command">
+              <div class="code__bar">
+                <span class="grow">{cloud.endpoints.commandCaption}</span>
+                <button class="copy" type="button" data-copy="endpoint-command" hidden>
+                  <Icon name="copy" />
+                  <span>Copy</span>
+                  <span class="sr-only"> command</span>
+                </button>
+              </div>
+              <pre><code id="endpoint-command">{cloud.endpoints.command}</code></pre>
+            </div>
+          </figure>
+          <p class="endpoints__links">
+            {
+              cloud.endpoints.links.map((link) => (
+                <a class="arrow-link" href={link.href}>{link.label} <Icon name="arrow" /></a>
+              ))
+            }
+          </p>
         </div>
       </section>
 
@@ -937,9 +1041,14 @@ curl "{apiBase}/v1/pool-availability?pool={developers.restPool}&start={poolStart
             <span class="strong">{closing.heading.strong}</span>
           </h2>
           <div class="hero__actions">
-            <a class="btn btn--primary" href="/docs/quickstart/">Get started</a>
+            <a class="btn btn--primary" href={signIn.href}>
+              <Icon name="github" />
+              {signIn.long}
+            </a>
+            <a class="btn btn--ghost" href="/docs/quickstart/">Self-host it</a>
             <a class="btn btn--ghost" href="/docs/specification/">Read the specification</a>
           </div>
+          <p class="fine"><Rich text={signIn.terms} /></p>
         </div>
       </section>
     </main>

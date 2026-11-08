@@ -3,6 +3,7 @@ import type { APIRoute } from 'astro';
 import {
   capabilities,
   closing,
+  cloud,
   compare,
   dashboard,
   developers,
@@ -23,6 +24,7 @@ import {
   RACE_TEST_URL,
   REPO_URL,
   security,
+  signIn,
   specStrip,
   steps,
 } from '../data/landing';
@@ -40,6 +42,7 @@ export const GET: APIRoute = () => {
     `${hero.eyebrow}. ${hero.pill.label}: [release notes](${abs(hero.pill.href)}).`,
     `## ${hero.heading.soft} ${hero.heading.strong}`,
     hero.lede,
+    `[${signIn.long}](${signIn.href}) to use Slotlock Cloud, or self-host it. ${signIn.terms.replace(/\]\(\//g, `](${SITE}/`)}`,
     list(hero.install.map((target) => `${target.label}: \`${target.command}\` (${target.note})`)),
     `What the calendar at the top of the page shows: ${heroAria}`,
     `The calls, in order, over MCP:\n\n${list(
@@ -49,6 +52,16 @@ export const GET: APIRoute = () => {
       ),
     )}`,
     list(specStrip.map((item) => `${item.label}: ${item.value}`)),
+    heading(cloud.heading),
+    cloud.lede,
+    `### ${cloud.hosted.eyebrow}: ${cloud.hosted.title}`,
+    cloud.hosted.steps.map((step, index) => `${index + 1}. **${step.title}.** ${step.body}`).join('\n'),
+    `[${signIn.long}](${signIn.href}) · [${cloud.hosted.link.label}](${abs(cloud.hosted.link.href)})`,
+    `${cloud.endpoints.caption}:\n\n${list(cloud.endpoints.items.map((item) => `${item.label}: \`${item.value}\``))}`,
+    `${cloud.endpoints.commandCaption}:\n\n\`\`\`sh\n${cloud.endpoints.command}\n\`\`\``,
+    list(cloud.endpoints.links.map((link) => `[${link.label}](${abs(link.href)})`)),
+    `### ${cloud.self.eyebrow}: ${cloud.self.title}`,
+    `${cloud.self.body} \`${cloud.self.command}\` ${cloud.self.links.map((link) => `[${link.label}](${abs(link.href)})`).join(' · ')}`,
     heading(proof.heading),
     proof.lede,
     `The constraint, from \`src/ddl.ts\`:\n\n\`\`\`sql\n${facts.excludeConstraint}\n\`\`\``,
@@ -112,7 +125,7 @@ export const GET: APIRoute = () => {
     heading(faq.heading),
     faq.items.map((item) => `**${item.q}** ${item.a}`).join('\n\n'),
     heading(closing.heading),
-    `[Get started](${SITE}/docs/quickstart/) · [Read the specification](${SITE}/docs/specification/) · [llms.txt](${SITE}/llms.txt)`,
+    `[${signIn.long}](${signIn.href}) · [Self-host it](${SITE}/docs/quickstart/) · [Read the specification](${SITE}/docs/specification/) · [llms.txt](${SITE}/llms.txt)`,
     `${footer.legal}`,
   ];
   return new Response(`${parts.join('\n\n')}\n`, {

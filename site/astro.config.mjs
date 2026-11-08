@@ -181,6 +181,10 @@ export default defineConfig({
         PageTitle: './src/components/docs/PageTitle.astro',
         // "Slotlock by Pylota", as in the landing page header.
         SiteTitle: './src/components/docs/SiteTitle.astro',
+        // Slotlock Cloud's sign-in button: beside GitHub in the wide header and the narrow-screen
+        // menu (SocialIcons), and beside the menu button in the narrow header (Header).
+        Header: './src/components/docs/Header.astro',
+        SocialIcons: './src/components/docs/SocialIcons.astro',
       },
       plugins: [
         starlightLlmsTxt({

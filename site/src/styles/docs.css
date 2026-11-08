@@ -562,3 +562,31 @@ starlight-toc a[aria-current='true'] {
   font-size: var(--sl-text-xs);
   color: var(--ink-3);
 }
+
+/* Slotlock Cloud's sign-in button in the header (components/docs/Header.astro, SocialIcons.astro),
+   the landing page header's primary button. */
+.sign-in {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  min-height: 2.25rem;
+  padding: 0 1rem;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--paper);
+  font-size: var(--sl-text-sm);
+  font-weight: 500;
+  line-height: 1;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.sign-in:hover {
+  background: color-mix(in srgb, var(--ink) 86%, var(--canvas));
+  color: var(--paper);
+}
+
+.sign-in:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}

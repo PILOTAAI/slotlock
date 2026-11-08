@@ -1,6 +1,6 @@
 ---
 title: Hosted Slotlock
-description: The hosted service is not open; self-hosting is the only supported path today. What hosted Slotlock will be, its limits, terms, privacy, status and support.
+description: Slotlock Cloud runs Slotlock for you. Sign in with GitHub, create a key and connect an agent, with nothing to deploy. Its addresses, limits, terms, privacy, status and support.
 ---
 
 <!-- include docs/hosted/README.md -->

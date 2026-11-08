@@ -1,25 +1,28 @@
 # Hosted Slotlock
 
-Hosted Slotlock is `slotlock serve` run for you by TREFT LTD (Pylota): sign in with GitHub, create a
-key, and point an agent at it. Nothing to install and no database to run.
+Hosted Slotlock (Slotlock Cloud) is `slotlock serve` run for you by TREFT LTD (Pylota): sign in with
+GitHub, create a key, and point an agent at it. Nothing to install and no database to run. Any GitHub
+account can sign in. Self-hosting stays fully supported: see
+[Self-host with Docker](/README.md#self-host-with-docker).
 
 | | |
 | --- | --- |
 | API (MCP, A2A, REST) | `https://slotlock-api.pylota.io` |
-| Dashboard | `https://app.slotlock.pylota.io` |
+| MCP | `https://slotlock-api.pylota.io/mcp` |
+| A2A | `https://slotlock-api.pylota.io/a2a`, agent card at `/.well-known/agent-card.json` |
+| REST | `https://slotlock-api.pylota.io/v1`, described at `/openapi.json` |
+| Dashboard | `https://app.slotlock.pylota.io/dashboard` |
 | Status | [Open `status` issues](https://github.com/PILOTAAI/slotlock/issues?q=is%3Aissue%20label%3Astatus%20is%3Aopen), and [how they are raised](/docs/hosted/status.md) |
 | Price | Free while it is a preview, best effort, with no service level agreement |
 
-**Not open.** The hosted service is not open; self-hosting is the only supported path today
-([Self-host with Docker](/README.md#self-host-with-docker)). The addresses above do not answer, and
-the rest of this page describes the service as it will run.
-
 ## Start
 
-1. Sign in at `https://app.slotlock.pylota.io` with your GitHub account. Slotlock asks GitHub for no
-   permissions and keeps only your user id and login.
-2. Add your resources and their weekly hours, then create an API key: **Read and write** for an
-   agent, **Full** for an application that also manages resources, holds and reservations.
+1. Sign in at `https://app.slotlock.pylota.io/dashboard` with your GitHub account. Slotlock asks
+   GitHub for no permissions and keeps only your user id and login. By signing in you agree to the
+   [Terms of Service](/TERMS.md) and the [Acceptable Use Policy](/ACCEPTABLE-USE.md).
+2. Add your resources and their weekly hours, then create an API key: **Read only** for an agent
+   that only looks, **Read and write** for an agent that books, **Full** for an application that
+   also manages resources, holds and reservations. A key can have an expiry.
 3. Connect an agent. Claude Code:
 
    ```sh
