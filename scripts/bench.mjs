@@ -1,15 +1,14 @@
 #!/usr/bin/env node
-// The benchmark in RFC 0002: Slotlock's range exclusion constraint against one row per 15-minute
-// slot, under the workloads of bench/*.sql, with pgbench. It creates a schema of its own,
-// slotlock_bench, and drops it at the end: point it at a scratch database, never production.
+// The RFC 0002 benchmark: Slotlock's range exclusion constraint against one row per 15-minute slot,
+// under bench/*.sql workloads, with pgbench. It creates and drops its own schema, slotlock_bench:
+// point it at a scratch database, never production.
 //
 //   DATABASE_URL=postgresql://… node scripts/bench.mjs [--clients 8] [--seconds 8] [--json] [--out DIR]
 //
-// Prints a Markdown table of transactions a second (pgbench's tps: each write attempt one booking
-// that either lands or is refused, each read one resource's busy times over a day) and the ratio of
-// slots to ranges; --json prints the result instead. --out DIR also writes both, as DIR/bench.json
-// and DIR/bench.md: release.yml attaches them to the release and the site reads bench.json
-// (scripts/bench-report.mjs has the format).
+// Prints a Markdown table of pgbench tps (each write one booking attempt, each read one resource's
+// busy times over a day) and the slots-to-ranges ratio; --json prints JSON instead. --out DIR
+// writes DIR/bench.json and DIR/bench.md, which release.yml attaches and the site reads (format:
+// scripts/bench-report.mjs).
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { availableParallelism } from 'node:os';

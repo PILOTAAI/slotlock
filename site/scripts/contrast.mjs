@@ -1,7 +1,6 @@
-// WCAG 2.2 contrast check for every text/background pair the site draws, in both themes, read from
-// the same token object that generates the CSS (src/styles/tokens.mjs). Translucent colours are
-// composited over what sits behind them; striped (hatched) fills are checked at their darkest and
-// lightest stripe, so a label on a hatch passes wherever it falls.
+// WCAG 2.2 contrast check for every text/background pair the site draws, in both themes, from the
+// token object that generates the CSS (src/styles/tokens.mjs). Translucent colours are composited
+// over what is behind them; hatched fills are checked at their darkest and lightest stripe.
 //
 //   npm run check:contrast            prints the table, exits 1 on any failure
 import { dark, light } from '../src/styles/tokens.mjs';
@@ -44,9 +43,8 @@ function ratio(a, b) {
 }
 
 /**
- * Each pair: what is drawn, the stack it sits on (top first, token names; the card colour `paper`
- * is always underneath, which matters only for translucent dark-theme fills), and the minimum ratio.
- * 4.5 for body-size text, 3 for large text (24px+, or 18.66px+ bold) and for non-text UI parts.
+ * Each pair: what is drawn, the stack under it (top first; `paper` is always underneath), and the
+ * minimum ratio: 4.5 for body text, 3 for large text (24px+, or 18.66px+ bold) and non-text UI.
  */
 const PAIRS = [
   // Page text

@@ -34,8 +34,8 @@ const artifactManifest = {
     './openapi.json': './openapi.json',
     './package.json': './package.json',
   },
-  // The root manifest names the built executable (`./dist/cli.js`); in the artifact it sits at the
-  // root, spelled the way npm normalizes a bin path so packing changes nothing.
+  // The root manifest names `./dist/cli.js`; in the artifact it sits at the root, spelled as npm
+  // normalizes a bin path so packing changes nothing.
   bin: Object.fromEntries(
     Object.entries(sourceManifest.bin).map(([name, path]) => [name, path.replace(/^\.\/dist\//, '')]),
   ),
@@ -52,8 +52,8 @@ const artifactManifest = {
 };
 
 writeFileSync(join(artifactRoot, 'package.json'), `${JSON.stringify(artifactManifest, null, 2)}\n`);
-// Written, not copied: it names the exact version of each runtime dependency this build installs,
-// so a dependency bump needs no edit to NOTICE.
+// Written, not copied: it names the exact version of each runtime dependency, so a bump needs no
+// NOTICE edit.
 writeFileSync(join(artifactRoot, 'NOTICE'), renderNotice(packageRoot, { versions: true }));
 
 for (const file of [
