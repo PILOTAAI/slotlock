@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +14,7 @@ const artifactRoot = join(packageRoot, 'dist');
 const sourceManifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'));
 const manifest = JSON.parse(readFileSync(join(artifactRoot, 'package.json'), 'utf8'));
 const npmCache = mkdtempSync(join(tmpdir(), 'slotlock-npm-pack-'));
+process.on('exit', () => rmSync(npmCache, { recursive: true, force: true }));
 const packedRoot = join(npmCache, 'packed');
 const consumerRoot = join(npmCache, 'consumer');
 mkdirSync(packedRoot);
