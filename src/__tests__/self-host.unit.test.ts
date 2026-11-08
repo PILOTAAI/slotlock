@@ -16,6 +16,7 @@ import {
   readSlotlockServeConfig,
   runSlotlockCli,
   slotlockHealthcheckUrl,
+  slotlockServeAllowsTenant,
 } from '../self-host.js';
 
 const secret = () => randomBytes(32).toString('hex');
@@ -460,6 +461,27 @@ describe('slotlock serve configuration', () => {
       );
     });
 
+    // A dashboard on Cloudflare Workers closes sign-up with SLOTLOCK_DASHBOARD_USERS, and "everyone
+    // else is signed out and their keys stop at once" only if the server that takes the keys reads
+    // the same list. Before, the users alone were refused as a half-configured dashboard, so a
+    // server without the GitHub settings let every github:<id> tenant's keys act whatever the list.
+    it('reads the users without the dashboard, and refuses the keys of people it no longer lists', () => {
+      const config = readSlotlockServeConfig(serveEnv({ SLOTLOCK_DASHBOARD_USERS: '4242, 7' }));
+      expect(config.dashboard).toBeUndefined();
+      expect(config.allowedUsers).toEqual(['4242', '7']);
+      expect(slotlockServeAllowsTenant(config, 'github:4242')).toBe(true);
+      expect(slotlockServeAllowsTenant(config, 'github:999')).toBe(false);
+      // Tenants that are not a GitHub person's (a CLI-made key's) are not the list's to refuse.
+      expect(slotlockServeAllowsTenant(config, 'pylota-deploy-smoke')).toBe(true);
+      const open = readSlotlockServeConfig(serveEnv({ SLOTLOCK_DASHBOARD_USERS: '*' }));
+      expect(open.allowedUsers).toBe('*');
+      expect(slotlockServeAllowsTenant(open, 'github:999')).toBe(true);
+      expect(slotlockServeAllowsTenant(readSlotlockServeConfig(serveEnv()), 'github:999')).toBe(true);
+      expect(refusal(serveEnv({ SLOTLOCK_DASHBOARD_USERS: 'octocat' })).message).toMatch(
+        /SLOTLOCK_DASHBOARD_USERS must be/,
+      );
+    });
+
     it.each([
       ['the client id is missing', { SLOTLOCK_GITHUB_CLIENT_ID: undefined }, /SLOTLOCK_GITHUB_CLIENT_ID is required/],
       ['the client id has a space', { SLOTLOCK_GITHUB_CLIENT_ID: 'a b' }, /SLOTLOCK_GITHUB_CLIENT_ID is required/],
@@ -469,7 +491,6 @@ describe('slotlock serve configuration', () => {
       ['no one is allowed', { SLOTLOCK_DASHBOARD_USERS: undefined }, /SLOTLOCK_DASHBOARD_USERS is required/],
       ['users are logins, not ids', { SLOTLOCK_DASHBOARD_USERS: 'octocat' }, /SLOTLOCK_DASHBOARD_USERS is required/],
       ['organizations are logins, not ids', { SLOTLOCK_DASHBOARD_ORGS: 'acme-fleet' }, /SLOTLOCK_DASHBOARD_ORGS must be/],
-      ['only the users are set', { SLOTLOCK_GITHUB_CLIENT_ID: undefined, SLOTLOCK_GITHUB_CLIENT_SECRET: undefined, SLOTLOCK_SESSION_SECRET: undefined }, /SLOTLOCK_GITHUB_CLIENT_ID is required/],
     ])('refuses to start when %s', (_case, overrides, message) => {
       expect(refusal(dashboardEnv(overrides)).message).toMatch(message);
     });

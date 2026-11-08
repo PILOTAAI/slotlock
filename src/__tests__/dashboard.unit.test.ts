@@ -247,6 +247,18 @@ describe('dashboard routes and headers', () => {
     }
   });
 
+  // Without HSTS a browser's first visit to the dashboard, or a typed http:// address, may be
+  // answered by anyone on the network before Cloudflare's redirect: a sign-in page of their own.
+  it('tells browsers to reach an https dashboard over https only, and a local http one nothing', async () => {
+    for (const path of ['/base/dashboard', '/base/dashboard/keys', '/base/dashboard/nowhere']) {
+      expect((await get(dashboard(), path)).headers.get('strict-transport-security')).toBe(
+        'max-age=31536000',
+      );
+    }
+    const local = dashboard({ publicUrl: 'http://localhost:8080' });
+    expect((await get(local, '/dashboard')).headers.get('strict-transport-security')).toBeNull();
+  });
+
   it('offers GitHub sign-in to a visitor, under a policy that runs no inline code', async () => {
     const response = await get(dashboard(), '/base/dashboard');
     expect(response.status).toBe(200);

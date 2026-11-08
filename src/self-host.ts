@@ -52,6 +52,7 @@ import {
   readAvailability,
   readDashboardConfig,
   readDashboardOrganizations,
+  readDashboardUsers,
   readLimits,
   readSecret,
   readServerUrl,
@@ -216,6 +217,11 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
    * keys may act for, whether it serves the dashboard or another server (a Worker) does.
    */
   organizations?: string[];
+  /**
+   * GitHub user ids (SLOTLOCK_DASHBOARD_USERS), or `'*'`, whose `github:<id>` tenants this server's
+   * keys may act for, whether it serves the dashboard or another server (a Worker) does.
+   */
+  allowedUsers?: '*' | string[];
   /**
    * Serve the REST API under /v1, with the application API for admin keys, and its OpenAPI document
    * (SLOTLOCK_REST_API: on unless off).
@@ -396,6 +402,8 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
   if (dashboard !== undefined) config.dashboard = dashboard;
   const organizations = readDashboardOrganizations(env);
   if (organizations !== undefined) config.organizations = organizations;
+  const allowedUsers = dashboard?.allowedUsers ?? readDashboardUsers(env);
+  if (allowedUsers !== undefined) config.allowedUsers = allowedUsers;
   if (confirmWrites.length > 0 && confirmationSecret !== undefined) {
     config.confirmationSecret = confirmationSecret;
   }
@@ -689,15 +697,18 @@ function serveMetrics(
 }
 
 /**
- * Whether the dashboard's allowlists let a tenant act: a `github-org:<id>` tenant only while
- * SLOTLOCK_DASHBOARD_ORGS lists that organization, wherever the dashboard runs; otherwise every
- * tenant when there is no dashboard or it allows everyone, and a `github:<id>` tenant only while
- * that id is listed.
+ * Whether the dashboard's allowlists let a tenant act, wherever the dashboard runs: a
+ * `github-org:<id>` tenant only while SLOTLOCK_DASHBOARD_ORGS lists that organization; a
+ * `github:<id>` tenant only while SLOTLOCK_DASHBOARD_USERS is `*` or lists that id; every tenant when
+ * SLOTLOCK_DASHBOARD_USERS is not set, and every other tenant.
  */
-function dashboardAllows(config: SlotlockServeConfig, tenantRef: string): boolean {
+export function slotlockServeAllowsTenant(
+  config: Pick<SlotlockServeConfig, 'organizations' | 'allowedUsers'>,
+  tenantRef: string,
+): boolean {
   const orgId = /^github-org:(\d+)$/.exec(tenantRef)?.[1];
   if (orgId !== undefined) return config.organizations?.includes(orgId) === true;
-  const users = config.dashboard?.allowedUsers;
+  const users = config.allowedUsers;
   if (users === undefined || users === '*') return true;
   const githubId = /^github:(\d+)$/.exec(tenantRef)?.[1];
   return githubId === undefined || users.includes(githubId);
@@ -904,7 +915,7 @@ export async function startSlotlockServer(
       // dashboard no longer allows loses their keys with their session.
       authenticate: async (request) => {
         const principal = (await authenticateToken?.(request)) ?? (await authenticateKey(request));
-        if (!principal || !dashboardAllows(config, principal.tenantRef)) return null;
+        if (!principal || !slotlockServeAllowsTenant(config, principal.tenantRef)) return null;
         maintenance?.touch(principal.tenantRef);
         return principal;
       },
@@ -1622,7 +1633,7 @@ Environment:
                                  resolves to, a loopback, private, link-local, CGNAT, unique-local
                                  or metadata address; on: allow them, for a self-hosted model
                                  (Ollama, vLLM) on this machine or network
-  SLOTLOCK_DASHBOARD_USERS       * or comma-separated GitHub user ids that may sign in (dashboard)
+  SLOTLOCK_DASHBOARD_USERS       * or comma-separated GitHub user ids that may sign in and whose keys work
   SLOTLOCK_DASHBOARD_ORGS        comma-separated GitHub organization ids: each is one shared tenant
   SLOTLOCK_DASHBOARD_NAME        What the dashboard calls this deployment (default Slotlock)
   HOST                           Listen address (default 127.0.0.1)
