@@ -65,8 +65,11 @@ describe('the published policies', () => {
     const maintenanceMinutes =
       declared('src/self-host.ts', /const SERVE_MAINTENANCE_INTERVAL_MS = ([0-9_ *]+);/) / 60_000;
     expect(maintenanceMinutes).toBe(60);
-    expect(privacy).toContain('a maintenance job that runs every hour for each account whose API keys');
-    expect(read('src/self-host.ts')).toContain('maintenance?.touch(principal.tenantRef);');
+    expect(privacy).toContain(
+      'a maintenance job that runs every hour for every account that has data, whether or not its keys are in use.',
+    );
+    expect(privacy).not.toContain('since it last started');
+    expect(read('src/self-host.ts')).toContain('SELECT slotlock.maintenance_tenants(');
     // What erasure leaves: key digests, and a suspension, which outlives it (README).
     expect(privacy).toContain('the digests of your erased keys, with nothing about you');
     expect(privacy).toContain('a record that the account was suspended, with the reason we gave, if it was');

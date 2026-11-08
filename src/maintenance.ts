@@ -1,8 +1,8 @@
 // Maintenance: extend recurring events to the rolling horizon and prune what retention no longer
 // needs (README, Operations); every tenant needs it at least daily. startSlotlockMaintenance runs
 // passes one tenant at a time with a per-tenant advisory lock, so servers never repeat each other's
-// work. RLS hides other tenants from a server's role, so it maintains the tenants it is configured
-// with and those whose keys it has served.
+// work. RLS hides other tenants from a server's role, so it finds them through the database's list
+// of tenants with data (names only, `discover`) and maintains each in its own tenant context.
 import type { Sql } from 'postgres';
 import { ignoreRejection } from './hooks.js';
 import {
@@ -211,6 +211,12 @@ export interface SlotlockMaintenanceSchedulerOptions {
   sql: Sql;
   /** Tenants maintained from the start, whether or not a key of theirs calls. */
   tenants: readonly string[];
+  /**
+   * Every tenant with data (slotlock.maintenance_tenants), read at the start and once an interval;
+   * each not maintained within the interval is queued, so a tenant whose keys never call is
+   * maintained too. What it throws goes to onError.
+   */
+  discover?: () => Promise<readonly string[]>;
   /** How often each tenant is maintained, at most a day. */
   intervalMs: number;
   /** Tenants remembered; the one served longest ago is forgotten first. Default 10,000. */
@@ -302,24 +308,43 @@ export function startSlotlockMaintenance(
       working = null;
     }
   };
+  const report = (error: unknown) => {
+    try {
+      ignoreRejection(options.onError?.(error));
+    } catch {
+      // Reporting must never stop maintenance.
+    }
+  };
   // Expired conversations of every tenant, including those no key calls (dashboard-only): one
   // bounded sweep at most every quarter hour.
   let lastSweep = 0;
   const sweep = () => {
     if (controller.signal.aborted || Date.now() - lastSweep < Math.min(intervalMs, SWEEP_INTERVAL_MS)) return;
     lastSweep = Date.now();
-    options.store.sweepAssistantConversations().catch((error: unknown) => {
-      try {
-        ignoreRejection(options.onError?.(error));
-      } catch {
-        // Reporting must never stop maintenance.
-      }
-    });
+    options.store.sweepAssistantConversations().catch(report);
+  };
+  // Every tenant with data, once an interval: those no key has called since the server started too.
+  let lastDiscovery = Number.NEGATIVE_INFINITY;
+  let discovering = false;
+  const discover = () => {
+    const list = options.discover;
+    if (!list || discovering || controller.signal.aborted) return;
+    if (Date.now() - lastDiscovery < intervalMs) return;
+    lastDiscovery = Date.now();
+    discovering = true;
+    (async () => list())()
+      .then((tenants) => {
+        for (const tenantRef of tenants) if (due(tenantRef)) enqueue(tenantRef);
+      }, report)
+      .finally(() => {
+        discovering = false;
+      });
   };
   const tick = () => {
     for (const tenantRef of [...pinned.keys(), ...served.keys()]) {
       if (due(tenantRef)) enqueue(tenantRef);
     }
+    discover();
     sweep();
   };
 

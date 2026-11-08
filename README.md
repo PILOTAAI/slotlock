@@ -1532,8 +1532,10 @@ a 12h/24h switch.
 Every tenant needs maintenance at least daily: it extends recurring events to the rolling horizon
 and prunes what the retention window no longer needs, which is what returns agent quota.
 
-- `slotlock serve` maintains `SLOTLOCK_TENANT` when it starts and every tenant whose key it serves,
-  then each hourly, one tenant at a time. It logs a `maintenance` line with counts.
+- `slotlock serve` maintains `SLOTLOCK_TENANT` and every tenant with data when it starts (whether
+  or not its keys call), then each hourly, one tenant at a time. It logs a `maintenance` line with
+  counts. It finds the tenants through `slotlock.maintenance_tenants(text)`, which lists names
+  only; each pass runs in its own tenant's context, under row-level security.
 - `slotlock maintain` runs one tenant's maintenance now, for cron or after a bulk import. An admin
   key can call `POST /v1/maintenance`.
 - Each pass holds a per-tenant PostgreSQL advisory lock, so servers and cron jobs never repeat each
