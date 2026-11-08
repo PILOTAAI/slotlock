@@ -86,7 +86,11 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
   when such a field arrives without the setting. Behind two proxies, such as Cloudflare and then
   kamal-proxy, name the first one's field: the server reads the last address of a list field such
   as `X-Forwarded-For`, which the second proxy writes as Cloudflare's. A client can send that field
-  itself, so let nothing reach the server except through the proxy.
+  itself, so let nothing reach the server except through the proxy. Where something else can reach
+  it (another container on kamal-proxy's network), also set `SLOTLOCK_TRUSTED_PROXY_SECRET` and have
+  the proxy set `X-Slotlock-Proxy-Proof` to it on every request (a Cloudflare request header
+  transform rule): the field is then believed only beside that exact value, and any other request
+  is counted by its connection's address.
 - The server also bounds what one tenant may store, whichever key, agent or application writes
   it: 10,000 holds, and 100,000 each of bookings, calendar events and coverage rows, counted as
   the store's `tenantLimits` count them, besides 10,000 resources. A write past one answers 409

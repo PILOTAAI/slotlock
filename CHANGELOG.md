@@ -5,6 +5,15 @@ versioning.
 
 ## Unreleased
 
+### Added
+
+- `SLOTLOCK_TRUSTED_PROXY_SECRET`: with it set, `slotlock serve` believes
+  `SLOTLOCK_TRUSTED_PROXY_HEADER` only on a request whose `X-Slotlock-Proxy-Proof` carries that
+  exact value (compared in constant time), and counts any other by its connection's address. A
+  process that reaches the server without passing the proxy, such as another container on
+  kamal-proxy's network, can then no longer pick its own rate-limit bucket. Unset, nothing changes.
+  The `listening` line says `client_address_proof`.
+
 ### Changed
 
 - Site: the landing page's Slotlock Cloud endpoints list only what an agent connects to (MCP, A2A,

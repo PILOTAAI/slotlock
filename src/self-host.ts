@@ -57,6 +57,7 @@ import {
   readSecret,
   readServerUrl,
   readTrustedProxyHeader,
+  readTrustedProxySecret,
   slotlockKeySubscriptions,
 } from './config.js';
 import { type SlotlockBookingRules, parseBookingRules } from './booking-rules.js';
@@ -107,6 +108,7 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_SHARED_LIMITS',
   'SLOTLOCK_LIMITS',
   'SLOTLOCK_TRUSTED_PROXY_HEADER',
+  'SLOTLOCK_TRUSTED_PROXY_SECRET',
   'SLOTLOCK_GITHUB_CLIENT_ID',
   'SLOTLOCK_GITHUB_CLIENT_SECRET',
   'SLOTLOCK_SESSION_SECRET',
@@ -235,6 +237,8 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
   limits: SlotlockLimits;
   /** The lower-case request field a trusted proxy sets to the client address; else the socket's. */
   trustedProxyHeader?: string;
+  /** The value that must accompany trustedProxyHeader in x-slotlock-proxy-proof; else the socket's. */
+  trustedProxySecret?: string;
 }
 
 function readDatabaseUrl(env: SlotlockEnv, name: string): string | undefined {
@@ -383,6 +387,8 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
   };
   const trustedProxyHeader = readTrustedProxyHeader(env);
   if (trustedProxyHeader !== undefined) config.trustedProxyHeader = trustedProxyHeader;
+  const trustedProxySecret = readTrustedProxySecret(env, trustedProxyHeader);
+  if (trustedProxySecret !== undefined) config.trustedProxySecret = trustedProxySecret;
   if (authToken !== undefined) config.authToken = authToken;
   const metricsToken = readSecret(env, 'SLOTLOCK_METRICS_TOKEN');
   if (metricsToken !== undefined) {
@@ -487,6 +493,7 @@ function secretsIn(env: SlotlockEnv): string[] {
     'SLOTLOCK_SESSION_SECRET',
     'SLOTLOCK_ASSISTANT_SECRET',
     'SLOTLOCK_METRICS_TOKEN',
+    'SLOTLOCK_TRUSTED_PROXY_SECRET',
   ]) {
     const value = env[name]?.trim();
     if (value) secrets.push(value);
@@ -909,6 +916,9 @@ export async function startSlotlockServer(
       ...(config.trustedProxyHeader !== undefined
         ? { trustedProxyHeader: config.trustedProxyHeader }
         : {}),
+      ...(config.trustedProxySecret !== undefined
+        ? { trustedProxySecret: config.trustedProxySecret }
+        : {}),
       basePath,
       signInPaths: config.dashboard ? ['/dashboard/sign-in', '/dashboard/callback'] : [],
       // The token is compared in constant time first; only then is a key looked up. A person the
@@ -1125,6 +1135,7 @@ export async function startSlotlockServer(
         key_subscriptions: slotlockKeySubscriptions(caps),
       },
       client_address: config.trustedProxyHeader ?? 'socket',
+      client_address_proof: config.trustedProxySecret !== undefined,
     });
     return {
       address,
@@ -1622,6 +1633,9 @@ Environment:
   SLOTLOCK_TRUSTED_PROXY_HEADER  The request field a proxy in front sets to the client address,
                                  such as CF-Connecting-IP (default: the connection's address);
                                  set it only when every request comes through that proxy
+  SLOTLOCK_TRUSTED_PROXY_SECRET  A secret the proxy adds to every request in x-slotlock-proxy-proof,
+                                 32+ random characters: without it there, the field above is
+                                 ignored and the connection's address counts
   SLOTLOCK_GITHUB_CLIENT_ID      Serve the dashboard at $SLOTLOCK_PUBLIC_URL/dashboard: the Client ID
                                  of a GitHub OAuth app with callback .../dashboard/callback
   SLOTLOCK_GITHUB_CLIENT_SECRET  That app's client secret (dashboard)
