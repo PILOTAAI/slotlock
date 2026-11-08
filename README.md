@@ -395,9 +395,10 @@ this one and read its session secret, which signs in as any tenant.
 - With organizations, set `SLOTLOCK_DASHBOARD_ORGS` on both the Worker and the server: the server
   takes an organization's keys only while its own list names it, whether or not it serves the
   dashboard.
-- The server checks a dashboard tenant against `SLOTLOCK_DASHBOARD_USERS` only when it serves the
-  dashboard itself. With the dashboard on Workers, removing a person from the Worker's list signs
-  them out of the dashboard; to stop their keys, revoke them or erase the tenant.
+- Set `SLOTLOCK_DASHBOARD_USERS` on both the Worker and the server too: the server takes a person's
+  keys only while its own list allows them, whether or not it serves the dashboard, so removing a
+  person from both lists signs them out and stops their keys. A server without it takes every
+  person's keys.
 - A missing or weak secret makes the Worker answer 503 and log which variable, never its value.
 
 ## Connect an MCP client

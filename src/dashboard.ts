@@ -1039,6 +1039,10 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const base = publicUrl.pathname.replace(/\/$/, '');
   const root = `${base}/dashboard`;
   const callbackUrl = `${origin}${root}/callback`;
+  // Its cookies are Secure, but a first visit over http:// could still be answered by someone else:
+  // a browser that has seen this goes straight to https:// for a year. Not for a local http one.
+  const hsts: Record<string, string> =
+    publicUrl.protocol === 'https:' ? { 'Strict-Transport-Security': 'max-age=31536000' } : {};
   const service = new URL(options.serviceUrl ?? options.publicUrl);
   const serviceRoot = `${service.origin}${service.pathname.replace(/\/$/, '')}`;
   const mcpUrl = `${serviceRoot}/mcp`;
@@ -1189,6 +1193,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
         'X-Content-Type-Options': 'nosniff',
         'Referrer-Policy': REFERRER_POLICY,
         'Cross-Origin-Opener-Policy': 'same-origin',
+        ...hsts,
         ...headers,
       },
     });

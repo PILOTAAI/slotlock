@@ -144,16 +144,35 @@ export interface SlotlockServeDashboardConfig {
   assistantPrivateUrls?: boolean;
 }
 
+/**
+ * Setting any of these means serving the dashboard. SLOTLOCK_DASHBOARD_USERS is not one: alone, it
+ * names whose keys a server takes when the dashboard runs elsewhere (readDashboardUsers).
+ */
 const DASHBOARD_VARIABLES = [
   'SLOTLOCK_GITHUB_CLIENT_ID',
   'SLOTLOCK_GITHUB_CLIENT_SECRET',
   'SLOTLOCK_SESSION_SECRET',
-  'SLOTLOCK_DASHBOARD_USERS',
 ] as const;
 
 /**
- * The dashboard's settings, or undefined when none is set. Setting any of them means serving the
- * dashboard, so the rest are then required: a half-configured sign-in is a startup error.
+ * SLOTLOCK_DASHBOARD_USERS: `'*'`, GitHub user ids, or undefined when it is not set. A server whose
+ * dashboard runs elsewhere (a Worker) reads it too, so that removing a person there stops their keys.
+ */
+export function readDashboardUsers(env: SlotlockEnv): '*' | string[] | undefined {
+  const users = optional(env, 'SLOTLOCK_DASHBOARD_USERS')?.replaceAll(' ', '');
+  if (users === undefined) return undefined;
+  if (users !== '*' && !/^[1-9]\d{0,19}(,[1-9]\d{0,19})*$/.test(users)) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_DASHBOARD_USERS must be * for every GitHub account, or a comma-separated list of GitHub user ids (gh api users/<login> --jq .id)',
+    );
+  }
+  return users === '*' ? '*' : [...new Set(users.split(','))];
+}
+
+/**
+ * The dashboard's settings, or undefined when none of DASHBOARD_VARIABLES is set. Setting any of
+ * them means serving the dashboard, so the rest, and SLOTLOCK_DASHBOARD_USERS, are then required: a
+ * half-configured sign-in is a startup error.
  */
 export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardConfig | undefined {
   if (DASHBOARD_VARIABLES.every((name) => optional(env, name) === undefined)) return undefined;
@@ -183,8 +202,13 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
   if (others.includes(sessionSecret)) {
     throw new SlotlockConfigError('SLOTLOCK_SESSION_SECRET must differ from every other secret');
   }
-  const users = optional(env, 'SLOTLOCK_DASHBOARD_USERS')?.replaceAll(' ', '');
-  if (users === undefined || (users !== '*' && !/^[1-9]\d{0,19}(,[1-9]\d{0,19})*$/.test(users))) {
+  let users: '*' | string[] | undefined;
+  try {
+    users = readDashboardUsers(env);
+  } catch {
+    users = undefined;
+  }
+  if (users === undefined) {
     throw new SlotlockConfigError(
       'SLOTLOCK_DASHBOARD_USERS is required to serve the dashboard: * for every GitHub account, or a comma-separated list of GitHub user ids (gh api users/<login> --jq .id)',
     );
@@ -211,7 +235,7 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
     githubClientId,
     githubClientSecret,
     sessionSecret,
-    allowedUsers: users === '*' ? '*' : [...new Set(users.split(','))],
+    allowedUsers: users,
     ...(orgs !== undefined ? { organizations: orgs } : {}),
     ...(name !== undefined && name !== '' ? { name } : {}),
     ...(assistantSecret !== undefined ? { assistantSecret } : {}),
