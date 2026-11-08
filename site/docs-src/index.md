@@ -7,6 +7,9 @@ description: Slotlock is the calendar AI agents cannot double-book. Each resourc
 
 ## Start here
 
+- [Slotlock Cloud](/docs/hosted/): nothing to deploy. Sign in with GitHub at
+  `https://app.slotlock.pylota.io/dashboard`, create a key, and connect an agent to
+  `https://slotlock-api.pylota.io/mcp`.
 - [Quickstart](/docs/quickstart/): run Slotlock with Docker and have Claude Code book a slot.
 - [Set up with a coding agent](/docs/agent-setup/): one prompt for Claude Code, Cursor or Codex.
 - [Connect an agent](/docs/connect/): Cursor, VS Code, the Claude API, MCP and A2A SDKs.

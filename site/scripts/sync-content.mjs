@@ -448,6 +448,11 @@ async function readFacts() {
       'the OpenAI-compatible list in the README',
     ),
     dashboardAgendaDays: must(numberConst(dashboard, 'AGENDA_DAYS'), 'AGENDA_DAYS in src/dashboard.ts'),
+    // How many resources one tenant may add in the dashboard (the landing page's Cloud steps).
+    dashboardMaxResources: must(
+      numberConst(dashboard, 'SLOTLOCK_DASHBOARD_MAX_RESOURCES'),
+      'SLOTLOCK_DASHBOARD_MAX_RESOURCES in src/dashboard.ts',
+    ),
     clients,
     clientCount: clients.length,
     eventQuota: must(numberConst(store, 'SLOTLOCK_AGENT_OWNER_EVENT_QUOTA'), 'event quota'),

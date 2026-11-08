@@ -3,6 +3,12 @@ title: Quickstart
 description: Run Slotlock and PostgreSQL 18 with Docker, connect Claude Code, and have an agent find and book a free slot.
 ---
 
+:::tip[Nothing to run]
+[Slotlock Cloud](/docs/hosted/) is hosted for you: sign in with GitHub at
+`https://app.slotlock.pylota.io/dashboard`, create a key, and connect your agent to
+`https://slotlock-api.pylota.io/mcp`. This page runs Slotlock yourself.
+:::
+
 You need Docker with Compose v2, `git`, `openssl` and Claude Code ([other clients](/docs/connect/)).
 The quickstart builds and runs Slotlock in a clone of the repository (`main`, which is
 {{version}} or later) with Docker Compose. Without Docker, install it from npm

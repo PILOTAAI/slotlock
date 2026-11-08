@@ -1635,7 +1635,7 @@ Slotlock is availability maths, holds and reservations, events with recurrence, 
 free/busy, tenant isolation, iCalendar interchange, MCP and A2A with human confirmation and live
 updates, an MCP Apps view, REST with the application API, scoped API keys, a GitHub sign-in
 dashboard, maintenance, and clients for five languages. [Hosted Slotlock](docs/hosted/README.md)
-is not open; self-hosting is the only supported path today. Provider sync (Google, Microsoft, CalDAV), notifications to people, and a human
+runs it for you, or you self-host it. Provider sync (Google, Microsoft, CalDAV), notifications to people, and a human
 calendar app are yours to build around it. What each version promises is in
 [VERSIONING.md](VERSIONING.md).
 

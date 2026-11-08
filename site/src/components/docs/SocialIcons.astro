@@ -1,0 +1,10 @@
+---
+// Starlight's social links (GitHub) and Slotlock Cloud's sign-in button, as in the landing page
+// header. Starlight renders this in the wide header and at the foot of the narrow-screen menu;
+// Header.astro adds the button to the narrow header. The button's style is in docs.css.
+import Default from '@astrojs/starlight/components/SocialIcons.astro';
+import { signIn } from '../../data/landing';
+---
+
+<Default />
+<a class="sign-in" href={signIn.href}>{signIn.label}</a>

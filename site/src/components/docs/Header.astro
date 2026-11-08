@@ -1,0 +1,30 @@
+---
+// Starlight's header with Slotlock Cloud's sign-in button beside the menu button on a narrow
+// screen, where Starlight hides the social links. Wide screens get it from SocialIcons.astro.
+import Default from '@astrojs/starlight/components/Header.astro';
+import { signIn } from '../../data/landing';
+---
+
+<div class="header-row">
+  <div class="header-default"><Default /></div>
+  <a class="sign-in sign-in--narrow" href={signIn.href}>{signIn.label}</a>
+</div>
+
+<style>
+  .header-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    height: 100%;
+  }
+  .header-default {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+  }
+  @media (min-width: 50rem) {
+    .sign-in--narrow {
+      display: none;
+    }
+  }
+</style>

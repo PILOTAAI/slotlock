@@ -8,6 +8,20 @@ export const REPO_URL = 'https://github.com/PILOTAAI/slotlock';
 export const RACE_TEST_URL = `${REPO_URL}/blob/main/src/__tests__/core.integration.test.ts`;
 export const DDL_URL = `${REPO_URL}/blob/main/src/ddl.ts`;
 
+/** Slotlock Cloud: the hosted server and its dashboard (docs/hosted/README.md). */
+export const CLOUD_API_URL = 'https://slotlock-api.pylota.io';
+export const SIGN_IN_URL = 'https://app.slotlock.pylota.io/dashboard';
+
+/** The sign-in button: the short label in the header, the long one in the page. */
+export const signIn = {
+  label: 'Sign in',
+  long: 'Sign in with GitHub',
+  href: SIGN_IN_URL,
+  /** Shown beside every sign-in button in the page. */
+  terms:
+    'By signing in you agree to the [Terms](/docs/terms/) and the [Acceptable Use Policy](/docs/acceptable-use/). The [Privacy notice](/docs/privacy/) says what is kept.',
+};
+
 export { facts };
 
 /** 0.2 can accept double bookings around daylight-saving changes (/docs/known-issues/). */
@@ -53,7 +67,7 @@ export interface Heading {
 export const meta = {
   title: 'Slotlock: the calendar AI agents cannot double-book',
   description:
-    'Slotlock is an open-source calendar for AI agents. Each resource is its own calendar; agents hold and book time over MCP, A2A or REST and show free slots as an MCP App; people manage it in a GitHub sign-in dashboard; PostgreSQL refuses any overlapping write and returns the conflict as data.',
+    'Slotlock is an open-source calendar for AI agents. Each resource is its own calendar; agents hold and book time over MCP, A2A or REST and show free slots as an MCP App; people manage it in a GitHub sign-in dashboard, hosted as Slotlock Cloud or on your own server; PostgreSQL refuses any overlapping write and returns the conflict as data.',
 };
 
 export interface InstallTarget {
@@ -321,9 +335,74 @@ export const specStrip: { label: string; value: string }[] = [
   { label: 'Interchange', value: 'CloudEvents, Standard Webhooks, iCalendar, JSCalendar' },
 ];
 
+/** The README's `claude mcp add` line, pointed at Slotlock Cloud with an API key. */
+function cloudMcpAdd(): string {
+  const local = 'http://localhost:8080/mcp';
+  const token = '$SLOTLOCK_AUTH_TOKEN';
+  if (!facts.claudeMcpAdd.includes(local) || !facts.claudeMcpAdd.includes(token)) {
+    throw new Error('landing: the README claude mcp add line changed; update cloudMcpAdd');
+  }
+  return facts.claudeMcpAdd.replace(local, `${CLOUD_API_URL}/mcp`).replace(token, '$SLOTLOCK_API_KEY');
+}
+
+/** Slotlock Cloud beside self-hosting: what docs/hosted/README.md and the dashboard offer. */
+export const cloud = {
+  id: 'cloud',
+  counter: '01',
+  heading: { soft: 'Use Slotlock Cloud,', strong: 'or run it yourself.' },
+  lede: 'Slotlock Cloud is the same server, run for you by Pylota: nothing to install and no database to run. Or run it yourself, on your own PostgreSQL.',
+  hosted: {
+    eyebrow: 'Slotlock Cloud',
+    title: 'Sign in and connect an agent',
+    steps: [
+      {
+        title: 'Sign in with GitHub',
+        body: 'You get a tenant of your own, or one your GitHub organization shares. Slotlock keeps only your GitHub user id and login.',
+      },
+      {
+        title: 'Create a resource and a key',
+        body: `Add up to ${facts.dashboardMaxResources} resources and their bookable hours, then an API key: read only, read and write, or full, with an optional expiry.`,
+      },
+      {
+        title: 'Point your agent at it',
+        body: 'Give your MCP client the URL below, with the key as `Authorization: Bearer slk_…`.',
+      },
+    ],
+    link: { label: 'Hosted Slotlock', href: '/docs/hosted/' },
+  },
+  self: {
+    eyebrow: 'Self-host',
+    title: 'Run it on your PostgreSQL',
+    body: `The same server, dashboard and ${facts.toolCount} tools, ${facts.license}, on PostgreSQL 16 to 18.`,
+    command: facts.composeUp ?? `npm install slotlock@${facts.version} postgres`,
+    links: [
+      { label: 'Quickstart', href: '/docs/quickstart/' },
+      { label: 'Self-hosting', href: '/docs/self-host/' },
+    ],
+  },
+  endpoints: {
+    caption: 'Slotlock Cloud endpoints',
+    items: [
+      { id: 'mcp', label: 'MCP', value: `${CLOUD_API_URL}/mcp` },
+      { id: 'a2a', label: 'A2A', value: `${CLOUD_API_URL}/a2a` },
+      { id: 'rest', label: 'REST', value: `${CLOUD_API_URL}/v1` },
+      { id: 'openapi', label: 'OpenAPI', value: `${CLOUD_API_URL}/openapi.json` },
+      { id: 'card', label: 'Agent card', value: `${CLOUD_API_URL}/.well-known/agent-card.json` },
+      { id: 'dashboard', label: 'Dashboard', value: SIGN_IN_URL },
+    ],
+    commandCaption: 'Claude Code',
+    command: cloudMcpAdd(),
+    links: [
+      { label: 'Connect an agent', href: '/docs/connect/' },
+      { label: 'API keys', href: '/docs/keys/' },
+      { label: 'REST API', href: '/docs/api/' },
+    ],
+  },
+};
+
 export const proof = {
   id: 'proof',
-  counter: '01',
+  counter: '02',
   heading: { soft: 'Two agents ask for the same van.', strong: 'PostgreSQL lets one through.' },
   lede: 'The overlap check is an exclusion constraint on the reservations table, so a race has exactly one winner and the loser gets a result it can act on.',
   constraintCaption: 'src/ddl.ts',
@@ -349,7 +428,7 @@ export const proof = {
 
 export const steps = {
   id: 'how',
-  counter: '02',
+  counter: '03',
   heading: { soft: 'Find it, hold it, confirm it.', strong: 'Or let the hold run out.' },
   items: [
     {
@@ -382,7 +461,7 @@ export const steps = {
 
 export const model = {
   id: 'model',
-  counter: '03',
+  counter: '04',
   heading: {
     soft: 'Calendars belong to resources,',
     strong: 'each with its own rules and clock.',
@@ -485,7 +564,7 @@ export function legendCounts(): Record<BlockKind, number> {
 /** The MCP Apps slot picker (src/mcp-app.ts), drawn with the words the view itself shows. */
 export const picker = {
   id: 'picker',
-  counter: '04',
+  counter: '05',
   heading: { soft: 'The agent shows the free slots.', strong: 'A person picks one in the chat.' },
   lede: 'Search results open in an MCP App, a calendar view any MCP Apps host renders in a sandbox, MCP-UI’s renderer included.',
   view: {
@@ -512,7 +591,7 @@ export const picker = {
 /** The org dashboard (src/dashboard.ts), drawn with the labels its Overview shows. */
 export const dashboard = {
   id: 'dashboard',
-  counter: '05',
+  counter: '06',
   heading: { soft: 'Sign in with GitHub.', strong: 'See what every agent booked.' },
   lede: 'The server serves a dashboard at `/dashboard`. Its pages render on the server, work without JavaScript, and follow light and dark.',
   view: {
@@ -611,7 +690,7 @@ export type CapabilityVisual = 'holds' | 'pools' | 'rules' | 'waitlist' | 'feed'
 /** What 0.4 adds beyond one hold and one booking, each linked to its operation's page. */
 export const capabilities = {
   id: 'capabilities',
-  counter: '06',
+  counter: '07',
   heading: { soft: 'Beyond one booking.', strong: 'What a fleet or a clinic needs.' },
   items: [
     {
@@ -713,7 +792,7 @@ export const capabilities = {
 
 export const developers = {
   id: 'developers',
-  counter: '07',
+  counter: '08',
   heading: { soft: 'One registry, four ways in.', strong: 'MCP, A2A, REST or TypeScript.' },
   lede: `The ${facts.toolCount} tools and their JSON Schemas come from one registry, so a refusal reads the same on every transport.`,
   /** The REST tab's example: pool availability, in the shape openapi.json gives it. */
@@ -754,7 +833,7 @@ export const developers = {
 
 export const security = {
   id: 'security',
-  counter: '08',
+  counter: '09',
   heading: { soft: 'Agents propose.', strong: 'A person confirms, PostgreSQL decides.' },
   approval: {
     eyebrow: 'slotlock_create_event · input required',
@@ -778,7 +857,7 @@ export const security = {
 
 export const compare = {
   id: 'compare',
-  counter: '09',
+  counter: '10',
   heading: { soft: 'Compared with', strong: 'a bookings table and a cron job.' },
   columns: ['', 'Table and cron job', 'Slotlock'],
   rows: [
@@ -827,7 +906,7 @@ export const compare = {
 
 export const openSource = {
   id: 'open-source',
-  counter: '10',
+  counter: '11',
   heading: { soft: 'Run it where your data is,', strong: `${facts.license}, on the PostgreSQL you run.` },
   deploy: [
     ...(facts.composeUp
@@ -857,8 +936,8 @@ export const openSource = {
         ]
       : []),
     {
-      title: 'Hosted',
-      body: 'The hosted service is not open; self-hosting is the only supported path today.',
+      title: 'Slotlock Cloud',
+      body: 'The same server, run for you. Sign in with GitHub, create a key and connect an agent.',
       command: null,
       link: { label: 'Hosted Slotlock', href: '/docs/hosted/' },
     },
@@ -883,6 +962,10 @@ export const faq = {
   id: 'faq',
   heading: { soft: 'Questions', strong: 'we expect first.' },
   items: [
+    {
+      q: 'Do I have to run it myself?',
+      a: `No. [Slotlock Cloud](/docs/hosted/) runs it for you: sign in with GitHub and connect an agent to \`${CLOUD_API_URL}/mcp\`. Self-hosting stays fully supported, on your own PostgreSQL.`,
+    },
     {
       q: 'Does it sync with Google Calendar or Outlook?',
       a: 'Not by itself. Provider adapters live in your application; Slotlock normalises their changes, reads and writes iCalendar, exports JSCalendar, and records how much of each feed has been read.',
@@ -925,6 +1008,7 @@ export const closing = {
 
 export const nav = [
   { label: 'Docs', href: '/docs/' },
+  { label: 'Cloud', href: '#cloud' },
   { label: 'Dashboard', href: '#dashboard' },
   { label: 'Capabilities', href: '#capabilities' },
   { label: 'Developers', href: '#developers' },
@@ -956,8 +1040,9 @@ export const footer = {
       ],
     },
     {
-      title: 'Hosted',
+      title: 'Slotlock Cloud',
       links: [
+        { label: 'Sign in', href: SIGN_IN_URL },
         { label: 'Hosted Slotlock', href: '/docs/hosted/' },
         { label: 'Status', href: '/docs/status/' },
         { label: 'Privacy notice', href: '/docs/privacy/' },

@@ -64,6 +64,16 @@ if (navigator.clipboard) {
     });
   }
 
+  // Slotlock Cloud's endpoints: each button copies the element its data-copy names.
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-copy]')) {
+    const target = document.getElementById(button.dataset.copy ?? '');
+    if (!target) continue;
+    button.hidden = false;
+    button.addEventListener('click', () => {
+      void copy(button, target.textContent?.trim() ?? '');
+    });
+  }
+
   const tab = document.querySelector<HTMLButtonElement>('[data-copy-tab]');
   if (tab) {
     tab.hidden = false;

@@ -6,7 +6,8 @@ sidebar:
 ---
 
 A key stands in for the server token for one agent or app. Create it on the server, then send it
-as a bearer token.
+as a bearer token. On [Slotlock Cloud](/docs/hosted/), create keys in the dashboard at
+`https://app.slotlock.pylota.io/dashboard` instead.
 
 ## Create a key
 

@@ -3294,3 +3294,191 @@ figure {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ---------- Slotlock Cloud ---------- */
+
+/* The sign-in buttons and the policies beside them. */
+.hero__ctas {
+  display: grid;
+  gap: 10px;
+  max-width: 100%;
+}
+
+.hero__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.fine {
+  margin: 0;
+  max-width: 36em;
+  color: var(--ink-3);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.fine a {
+  color: var(--ink-2);
+}
+
+.fine a:hover {
+  color: var(--ink);
+}
+
+.closing .fine {
+  margin: 14px auto 0;
+}
+
+.choice {
+  display: grid;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+@media (min-width: 900px) {
+  .choice {
+    grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
+  }
+}
+
+.choice__card {
+  display: grid;
+  gap: 14px;
+  align-content: start;
+  padding: clamp(20px, 3vw, 32px);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line);
+  background: var(--paper);
+  min-width: 0;
+}
+
+.choice__card--cloud {
+  border-color: var(--line-strong);
+  box-shadow: 0 1px 2px var(--shadow), 0 12px 32px -16px var(--shadow);
+}
+
+.choice__card h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(20px, 1.4vw + 14px, 24px);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.choice__body {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 14.5px;
+}
+
+.choice__actions,
+.choice__links,
+.endpoints__links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 20px;
+}
+
+.endpoints__links {
+  margin: 0;
+}
+
+.cloud-steps {
+  display: grid;
+  gap: 0;
+  margin: 4px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cloud-steps li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 14px;
+  padding-block: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.cloud-steps li:last-child {
+  border-bottom: 1px solid var(--line);
+}
+
+.cloud-steps__n {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 22px;
+  color: var(--accent);
+}
+
+.cloud-steps h4 {
+  margin: 0 0 2px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.cloud-steps p {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 14.5px;
+}
+
+.cloud-steps code,
+.choice__body code {
+  overflow-wrap: anywhere;
+}
+
+/* Endpoints: a dark code panel in both themes, one row per address. */
+.endpoints {
+  margin-bottom: 20px;
+}
+
+.endpoints__list {
+  margin: 0;
+  padding: 6px 0;
+}
+
+.endpoints__row {
+  display: grid;
+  grid-template-columns: 7.5rem minmax(0, 1fr);
+  align-items: center;
+  gap: 4px 12px;
+  padding: 6px 8px 6px 18px;
+}
+
+.endpoints__row + .endpoints__row {
+  border-top: 1px solid var(--code-line);
+}
+
+.endpoints__row dt {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--code-muted);
+}
+
+.endpoints__row dd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+}
+
+.endpoints__row code {
+  min-width: 0;
+  color: var(--code-ink);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.endpoints__command {
+  border-top: 1px solid var(--code-line);
+}
+
+@media (max-width: 639px) {
+  .endpoints__row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
