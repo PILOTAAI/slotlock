@@ -388,7 +388,6 @@ export const cloud = {
       { id: 'rest', label: 'REST', value: `${CLOUD_API_URL}/v1` },
       { id: 'openapi', label: 'OpenAPI', value: `${CLOUD_API_URL}/openapi.json` },
       { id: 'card', label: 'Agent card', value: `${CLOUD_API_URL}/.well-known/agent-card.json` },
-      { id: 'dashboard', label: 'Dashboard', value: SIGN_IN_URL },
     ],
     commandCaption: 'Claude Code',
     command: cloudMcpAdd(),

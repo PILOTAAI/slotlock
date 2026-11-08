@@ -5,14 +5,10 @@ versioning.
 
 ## Unreleased
 
-### Fixed
+### Changed
 
-- `slotlock serve` reads `SLOTLOCK_DASHBOARD_USERS` without the GitHub settings, as it reads
-  `SLOTLOCK_DASHBOARD_ORGS`: with the dashboard on Cloudflare Workers, a server given the same list
-  takes only the listed people's keys, so closing sign-up stops everyone else's keys too. Before, the
-  list alone was refused as a half-configured dashboard, and such a server took every person's keys.
-- Dashboard: an https dashboard sends `Strict-Transport-Security: max-age=31536000`, so a browser
-  that has visited it never asks for it over http:// again.
+- Site: the landing page's Slotlock Cloud endpoints list only what an agent connects to (MCP, A2A,
+  REST, OpenAPI, the agent card). The dashboard row is gone: people reach it through Sign in.
 
 ## 0.6.2 - 2026-11-08
 

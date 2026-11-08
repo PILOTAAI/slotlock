@@ -30,13 +30,55 @@ function declared(file: string, pattern: RegExp): number {
     .reduce((a, b) => a * b, 1);
 }
 
-const BANNER = '> **Draft — requires owner and legal review before the hosted service opens.**';
+const POLICIES = ['PRIVACY.md', 'TERMS.md', 'ACCEPTABLE-USE.md'];
+const POLICY_PAGES = ['privacy', 'terms', 'acceptable-use'];
 
-describe('the legal drafts', () => {
-  it('each open with the owner-and-legal-review banner', () => {
-    for (const file of ['PRIVACY.md', 'TERMS.md', 'ACCEPTABLE-USE.md']) {
-      expect(read(file).split('\n').slice(0, 4), file).toContain(BANNER);
+describe('the published policies', () => {
+  it('are published, not drafts: none of them, or their site pages, says draft', () => {
+    for (const file of [...POLICIES, ...POLICY_PAGES.map((page) => `site/docs-src/${page}.md`)]) {
+      expect(read(file), file).not.toBe('');
+      expect(read(file), file).not.toMatch(/\bdraft/i);
     }
+    for (const file of POLICIES) {
+      expect(read(file).split('\n').slice(0, 4).join('\n'), file).toMatch(
+        /^Last updated: \d{1,2} [A-Z][a-z]+ \d{4}\.$/m,
+      );
+    }
+  });
+
+  it('tell the privacy notice what the dashboard and maintenance actually do', () => {
+    const privacy = flat(read('PRIVACY.md'));
+    // The two cookies, by the names and lifetimes the dashboard sets.
+    const cookie = (name: string) => {
+      const match = new RegExp(`const ${name} = '([^']+)';`).exec(read('src/dashboard.ts'));
+      expect(match, `canary: ${name}`).not.toBeNull();
+      return match?.[1] ?? '';
+    };
+    expect(privacy).toContain(`\`${cookie('SESSION_COOKIE')}\` for your session`);
+    expect(privacy).toContain(`\`${cookie('SIGN_IN_COOKIE')}\` for the ten minutes a sign-in takes`);
+    expect(declared('src/dashboard.ts', /const SIGN_IN_TTL_MS = ([0-9_ *]+);/) / 60_000).toBe(10);
+    expect(privacy).toContain('| The sign-in in progress, in a cookie | The service | 10 minutes |');
+    // Assistant conversations, and the hourly maintenance that deletes what retention ends.
+    const conversationHours =
+      declared('src/dashboard.ts', /conversationTtlMs \?\? ([0-9_ *]+);/) / 3_600_000;
+    expect(privacy).toContain(`a conversation ${conversationHours} hours after its last message`);
+    const maintenanceMinutes =
+      declared('src/self-host.ts', /const SERVE_MAINTENANCE_INTERVAL_MS = ([0-9_ *]+);/) / 60_000;
+    expect(maintenanceMinutes).toBe(60);
+    expect(privacy).toContain('a maintenance job that runs every hour for each account whose API keys');
+    expect(read('src/self-host.ts')).toContain('maintenance?.touch(principal.tenantRef);');
+    // What erasure leaves: key digests, and a suspension, which outlives it (README).
+    expect(privacy).toContain('the digests of your erased keys, with nothing about you');
+    expect(privacy).toContain('a record that the account was suspended, with the reason we gave, if it was');
+    expect(flat(read('README.md'))).toContain('A suspension outlives it.');
+    // Backups and the log store are named; the old 150 MB cap was never hosted practice.
+    expect(privacy).toContain('Backups of the whole database, encrypted');
+    expect(privacy).toContain('stores our encrypted backups (R2)');
+    expect(privacy).toContain('keeps them for up to 10 years (3,650 days)');
+    expect(privacy).not.toContain('150 MB');
+    // Outbox rows hold no event content, as the history row says.
+    expect(read('src/ddl.ts')).toContain('never titles,\n// descriptions or attendees');
+    expect(privacy).toContain('It never holds titles, descriptions or attendees');
   });
 
   it('give the privacy notice every item UK GDPR Article 13 asks for', () => {
