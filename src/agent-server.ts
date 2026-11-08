@@ -40,6 +40,7 @@ import {
   type SlotlockAgentChangeSource,
   type SlotlockChangeWatcher,
   createSlotlockChangeReaders,
+  unref,
 } from './change-watch.js';
 import type { SlotlockChangeOrigin } from './event-feed.js';
 import { SLOTLOCK_EVENT_OUTPUT as EVENT } from './event-schema.js';
@@ -2283,11 +2284,6 @@ function parseSubscriptionFilter(
 }
 
 /** A timer that does not by itself keep a Node process alive (a no-op on other runtimes). */
-function unref<T>(timer: T): T {
-  (timer as { unref?: () => void }).unref?.();
-  return timer;
-}
-
 /** Natural-language guidance `server/discover` gives the model on how to use these tools well. */
 const SLOTLOCK_MCP_INSTRUCTIONS = [
   'Slotlock is a tenant-isolated resource calendar (vehicles, rooms, equipment).',

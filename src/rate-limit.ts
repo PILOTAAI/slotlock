@@ -305,7 +305,7 @@ function concurrencyFields(name: string, cap: number): Record<string, string> {
 }
 
 /** Token buckets of one policy, one per key, refilled lazily. */
-function bucketsFor(rate: SlotlockRate, now: () => number) {
+function bucketsFor(rate: SlotlockRate) {
   const buckets = new Map<string, Bucket>();
   const refill = (bucket: Bucket, at: number): void => {
     bucket.tokens = Math.min(rate.burst, bucket.tokens + ((at - bucket.at) / 1_000) * rate.perSecond);
@@ -349,7 +349,7 @@ export function createSlotlockRateLimiter(
   if (!(rate.perSecond > 0) || !(rate.burst >= 1)) {
     throw new Error('Slotlock rate limiter needs a positive rate and a burst of at least 1');
   }
-  const buckets = bucketsFor(rate, now);
+  const buckets = bucketsFor(rate);
   return {
     take(key) {
       const bucket = buckets.get(key, now());
@@ -549,7 +549,7 @@ export function createSlotlockRequestLimits(
   const { rates, caps } = options.limits;
   const policies = new Map<SlotlockRateName, { policy: Policy; buckets: ReturnType<typeof bucketsFor> }>();
   for (const [name, rate] of Object.entries(rates) as [SlotlockRateName, SlotlockRate | null][]) {
-    if (rate !== null) policies.set(name, { policy: { name, rate }, buckets: bucketsFor(rate, now) });
+    if (rate !== null) policies.set(name, { policy: { name, rate }, buckets: bucketsFor(rate) });
   }
   const states = new AsyncLocalStorage<RequestState>();
   const looked = new WeakMap<Request, SlotlockAgentPrincipal | null>();

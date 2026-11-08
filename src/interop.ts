@@ -5,7 +5,7 @@
 import ICAL from 'ical.js';
 import { zonedDateTimeFields } from './timezone.js';
 import type { SlotlockCalendarEvent, WeeklyAvailabilityRule } from './types.js';
-import { parseAvailabilityRules } from './weekly-hours.js';
+import { invalidAvailability, parseAvailabilityRules } from './weekly-hours.js';
 
 /** The longest VAVAILABILITY text `parseVAvailability` reads. */
 export const SLOTLOCK_MAX_VAVAILABILITY_CHARACTERS = 65_536;
@@ -15,10 +15,6 @@ const DAYS = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'] as const;
 /** 2024-01-07 is a Sunday: the reference week runs Sunday 7 to Saturday 13 January. */
 const REFERENCE_SUNDAY = Date.UTC(2024, 0, 7);
 const VAVAILABILITY_DTSTAMP = '20240101T000000Z';
-
-function invalidAvailability(message: string): Error & { code: 'invalid_availability' } {
-  return Object.assign(new Error(message), { code: 'invalid_availability' as const });
-}
 
 const pad = (value: number, width = 2) => String(value).padStart(width, '0');
 

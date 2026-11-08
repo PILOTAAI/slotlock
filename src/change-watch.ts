@@ -70,7 +70,7 @@ interface TenantReader {
   stopWatch?: () => unknown;
 }
 
-function unref<T>(timer: T): T {
+export function unref<T>(timer: T): T {
   (timer as { unref?: () => void }).unref?.();
   return timer;
 }
