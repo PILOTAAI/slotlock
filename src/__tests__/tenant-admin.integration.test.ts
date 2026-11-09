@@ -7,6 +7,7 @@ import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createSlotlockApiKeyStore } from '../api-keys.js';
 import { createSlotlockDashboardState } from '../dashboard.js';
+import { setSlotlockTenantPlan } from '../plans.js';
 import { type SlotlockStore, createSlotlockStore } from '../store.js';
 
 const url = process.env.DATABASE_URL?.trim();
@@ -487,6 +488,7 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
         tenantRef,
         id: (await keys.create({ tenantRef, name: 'Old key', scopes: ['read'] })).apiKey.id,
       });
+      await setSlotlockTenantPlan(application, { tenantRef, plan: 'developer', status: 'active' });
       const dashboard = createSlotlockDashboardState(application);
       expect(await dashboard.use('form', `form-${randomUUID()}`, Date.now() + HOUR, uid)).toBe(
         true,

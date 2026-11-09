@@ -245,6 +245,7 @@ export const SLOTLOCK_SCHEMA_FUNCTIONS = Object.freeze([
 /** The table of suspended tenants: they may read, and write nothing (store.ts withTenant). */
 export const SLOTLOCK_TENANT_ADMIN_TABLES = Object.freeze([
   'tenant_suspensions',
+  'tenant_plans',
   'webhook_tenants',
   'rate_buckets',
   'assistant_tenants',
@@ -266,6 +267,8 @@ export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.sweep_assistant_conversations(integer)',
   'slotlock.list_maintenance_tenant()',
   'slotlock.maintenance_tenants(text)',
+  'slotlock.tenant_plan(text)',
+  'slotlock.set_tenant_plan(text, text, text, integer, integer, integer, text, text, timestamptz)',
 ] as const);
 
 /**
@@ -437,7 +440,9 @@ BEGIN
            WHERE active.tenant_ref = requested_tenant_ref
              AND active.revoked_at IS NULL
              AND (active.expires_at IS NULL OR active.expires_at > now())
-         ) < ${SLOTLOCK_API_KEY_ACTIVE_LIMIT}
+         ) < LEAST(${SLOTLOCK_API_KEY_ACTIVE_LIMIT}, COALESCE(
+           (SELECT plan.max_api_keys FROM slotlock.tenant_plans plan
+             WHERE plan.tenant_ref = requested_tenant_ref), ${SLOTLOCK_API_KEY_ACTIVE_LIMIT}))
      AND (SELECT count(*) FROM slotlock.api_keys kept
            WHERE kept.tenant_ref = requested_tenant_ref
          ) < ${SLOTLOCK_API_KEY_RETAINED_LIMIT}
@@ -818,6 +823,99 @@ AS $slotlock_tenant_suspended$
 $slotlock_tenant_suspended$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[0]} FROM PUBLIC;
 
+-- A hosted tenant's plan (plans.ts): the limits it buys, set from its Stripe subscription. A tenant
+-- with no row has no plan limits; self-hosted Slotlock never writes one.
+CREATE TABLE IF NOT EXISTS slotlock.tenant_plans (
+  tenant_ref text PRIMARY KEY,
+  plan text NOT NULL,
+  status text NOT NULL,
+  max_resources integer NOT NULL,
+  max_api_keys integer NOT NULL,
+  max_webhook_endpoints integer NOT NULL,
+  stripe_customer text,
+  stripe_subscription text,
+  current_period_end timestamptz,
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_tenant_plans_tenant_ref_valid
+    CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500),
+  CONSTRAINT slotlock_tenant_plans_plan_valid CHECK (plan IN ('free', 'developer')),
+  CONSTRAINT slotlock_tenant_plans_status_valid CHECK (status IN ('active', 'past_due', 'canceled')),
+  CONSTRAINT slotlock_tenant_plans_limits_valid CHECK (
+    max_resources BETWEEN 1 AND 100000
+    AND max_api_keys BETWEEN 1 AND ${SLOTLOCK_API_KEY_ACTIVE_LIMIT}
+    AND max_webhook_endpoints BETWEEN 1 AND 1000
+  ),
+  CONSTRAINT slotlock_tenant_plans_stripe_valid CHECK (
+    (stripe_customer IS NULL OR stripe_customer ~ '^cus_[A-Za-z0-9]{1,250}$')
+    AND (stripe_subscription IS NULL OR stripe_subscription ~ '^sub_[A-Za-z0-9]{1,250}$')
+  )
+);
+ALTER TABLE slotlock.tenant_plans ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.tenant_plans FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION slotlock.tenant_plan(requested_tenant_ref text)
+RETURNS TABLE (
+  plan text, status text, max_resources integer, max_api_keys integer,
+  max_webhook_endpoints integer, stripe_customer text, stripe_subscription text,
+  current_period_end timestamptz
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_tenant_plan$
+  SELECT current.plan, current.status, current.max_resources, current.max_api_keys,
+         current.max_webhook_endpoints, current.stripe_customer, current.stripe_subscription,
+         current.current_period_end
+    FROM slotlock.tenant_plans current
+   WHERE current.tenant_ref = requested_tenant_ref;
+$slotlock_tenant_plan$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[10]} FROM PUBLIC;
+
+-- Sets the tenant's plan as its billing says it is now (the dashboard's Stripe webhook). Under the
+-- key lock, so a key being issued counts against the plan before or after, never between.
+CREATE OR REPLACE FUNCTION slotlock.set_tenant_plan(
+  requested_tenant_ref text,
+  requested_plan text,
+  requested_status text,
+  requested_max_resources integer,
+  requested_max_api_keys integer,
+  requested_max_webhook_endpoints integer,
+  requested_stripe_customer text,
+  requested_stripe_subscription text,
+  requested_period_end timestamptz
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_set_tenant_plan$
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || requested_tenant_ref, 0));
+  INSERT INTO slotlock.tenant_plans AS current (
+    tenant_ref, plan, status, max_resources, max_api_keys, max_webhook_endpoints,
+    stripe_customer, stripe_subscription, current_period_end, updated_at
+  )
+  VALUES (
+    requested_tenant_ref, requested_plan, requested_status, requested_max_resources,
+    requested_max_api_keys, requested_max_webhook_endpoints, requested_stripe_customer,
+    requested_stripe_subscription, requested_period_end, statement_timestamp()
+  )
+  ON CONFLICT (tenant_ref) DO UPDATE
+  SET plan = EXCLUDED.plan,
+      status = EXCLUDED.status,
+      max_resources = EXCLUDED.max_resources,
+      max_api_keys = EXCLUDED.max_api_keys,
+      max_webhook_endpoints = EXCLUDED.max_webhook_endpoints,
+      stripe_customer = COALESCE(EXCLUDED.stripe_customer, current.stripe_customer),
+      stripe_subscription = EXCLUDED.stripe_subscription,
+      current_period_end = EXCLUDED.current_period_end,
+      updated_at = EXCLUDED.updated_at;
+END
+$slotlock_set_tenant_plan$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[11]} FROM PUBLIC;
+
 -- True when the tenant was not suspended already; a second suspension keeps the first's reason.
 CREATE OR REPLACE FUNCTION slotlock.suspend_tenant(requested_tenant_ref text, requested_reason text)
 RETURNS boolean
@@ -944,6 +1042,10 @@ BEGIN
   RETURN NEXT;
   erased_table := 'booking_rule_defaults';
   DELETE FROM slotlock.booking_rule_defaults WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'tenant_plans';
+  DELETE FROM slotlock.tenant_plans WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
   erased_table := 'assistant_conversations';

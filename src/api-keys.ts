@@ -364,7 +364,7 @@ export function createSlotlockApiKeyStore(sql: SlotlockSql): SlotlockApiKeyStore
       if (!row) {
         throw invalid(
           'api_key_limit_reached',
-          `Slotlock allows ${SLOTLOCK_API_KEY_ACTIVE_LIMIT} active and ${SLOTLOCK_API_KEY_RETAINED_LIMIT} kept API keys per tenant; revoke one first`,
+          `Slotlock allows ${SLOTLOCK_API_KEY_ACTIVE_LIMIT} active and ${SLOTLOCK_API_KEY_RETAINED_LIMIT} kept API keys per tenant, or fewer active ones on a hosted plan; revoke one first`,
         );
       }
       return { key, apiKey: apiKeyFrom(row) };

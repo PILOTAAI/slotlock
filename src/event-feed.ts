@@ -474,11 +474,16 @@ export function slotlockEventFeedMethods(
       const secret = `whsec_${randomBytes(32).toString('base64')}`;
       return inTransaction(sql, async (tx): Promise<CreateWebhookEndpointResult> => {
         await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`slotlock:webhooks:${params.tenantRef}`}, 0))`;
-        const [count] = await tx<{ count: number }[]>`
-          SELECT count(*)::int AS count FROM slotlock.webhook_endpoints
+        const [count] = await tx<{ count: number; planned: number | null }[]>`
+          SELECT count(*)::int AS count,
+                 (SELECT max_webhook_endpoints FROM slotlock.tenant_plan(${params.tenantRef}::text))
+                   AS planned
+            FROM slotlock.webhook_endpoints
            WHERE tenant_ref = ${params.tenantRef}`;
-        if ((count?.count ?? 0) >= SLOTLOCK_MAX_WEBHOOK_ENDPOINTS) {
-          return { ok: false, code: 'webhook_limit_reached', limit: SLOTLOCK_MAX_WEBHOOK_ENDPOINTS };
+        // The lower of the server's limit and the tenant's plan (plans.ts), when it has one.
+        const limit = Math.min(SLOTLOCK_MAX_WEBHOOK_ENDPOINTS, count?.planned ?? SLOTLOCK_MAX_WEBHOOK_ENDPOINTS);
+        if ((count?.count ?? 0) >= limit) {
+          return { ok: false, code: 'webhook_limit_reached', limit };
         }
         // From now on: every transaction not yet ended is at or after this position.
         const [row] = await tx<EndpointRow[]>`

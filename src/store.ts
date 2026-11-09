@@ -3749,7 +3749,21 @@ function buildSlotlockStore(
     async createResource(params) {
       assertValidResourceInput(params);
       const requested = params.maxTenantResources;
-      const configured = params.tenantRef === undefined ? undefined : configuredTenantLimits.resources;
+      // The lower of the store's own limit and the tenant's plan (plans.ts), when it has one.
+      const planned =
+        params.tenantRef === undefined
+          ? undefined
+          : (
+              await sql<{ max_resources: number }[]>`
+                SELECT max_resources FROM slotlock.tenant_plan(${params.tenantRef}::text)`
+            )[0]?.max_resources;
+      const storeLimit = params.tenantRef === undefined ? undefined : configuredTenantLimits.resources;
+      const configured =
+        planned === undefined
+          ? storeLimit
+          : storeLimit === undefined
+            ? planned
+            : Math.min(planned, storeLimit);
       if (requested === undefined && configured === undefined) return upsertResource(sql, params);
       if (
         requested !== undefined &&
