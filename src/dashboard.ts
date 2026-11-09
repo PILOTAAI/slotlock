@@ -60,6 +60,7 @@ import { lookup as dnsLookup } from 'node:dns/promises';
 import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from './ddl.js';
 import { ignoreRejection } from './hooks.js';
 import { SLOTLOCK_BOOKING_RULE_LIMITS, type SlotlockBookingRules } from './booking-rules.js';
+import { SLOTLOCK_DASHBOARD_ICON_SVG } from './dashboard-icon.js';
 import {
   type CreateWebhookEndpointResult,
   SLOTLOCK_CHANGE_TYPES,
@@ -1244,6 +1245,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="${REFERRER_POLICY}">
 <title>${title} · ${brandName}</title>
+<link rel="icon" href="${root}/favicon.svg?v=${ASSET_VERSIONS.icon}" type="image/svg+xml">
 <link rel="stylesheet" href="${root}/style.css?v=${ASSET_VERSIONS.css}">
 <script src="${root}/app.js?v=${ASSET_VERSIONS.js}" defer></script>
 </head>`;
@@ -3204,6 +3206,8 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
               return asset(DASHBOARD_CSS, 'text/css; charset=utf-8', url, ASSET_VERSIONS.css);
             case '/app.js':
               return asset(DASHBOARD_JS, 'text/javascript; charset=utf-8', url, ASSET_VERSIONS.js);
+            case '/favicon.svg':
+              return asset(SLOTLOCK_DASHBOARD_ICON_SVG, 'image/svg+xml', url, ASSET_VERSIONS.icon);
             case '/sign-in':
               return await startSignIn();
             case '/callback':
@@ -3687,4 +3691,5 @@ pre { background: var(--surface-2); border: 1px solid var(--line); border-radius
 const ASSET_VERSIONS = Object.freeze({
   css: createHash('sha256').update(DASHBOARD_CSS).digest('base64url').slice(0, 12),
   js: createHash('sha256').update(DASHBOARD_JS).digest('base64url').slice(0, 12),
+  icon: createHash('sha256').update(SLOTLOCK_DASHBOARD_ICON_SVG).digest('base64url').slice(0, 12),
 });

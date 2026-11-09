@@ -283,6 +283,10 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       const { dashboard, root, signInPaths, limits, availability } = built;
       const path = new URL(request.url).pathname;
       if (path === '/') return Response.redirect(root, 302);
+      // Browsers and crawlers ask the origin's root for its icon; the dashboard serves it.
+      if (path === '/favicon.ico' || path === '/favicon.svg') {
+        return Response.redirect(`${root}/favicon.svg`, 301);
+      }
       if (!dashboard.handles(request)) {
         return new Response('Not found', {
           status: 404,

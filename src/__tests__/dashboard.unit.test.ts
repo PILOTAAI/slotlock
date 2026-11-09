@@ -2,6 +2,8 @@
 // checks, the key shown once, escaping, and the allowlist. GitHub is a fake `fetch`; keys and
 // resources are in-memory stores with the same contracts as the real ones.
 import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   type CreateSlotlockApiKeyInput,
@@ -293,6 +295,20 @@ describe('dashboard routes and headers', () => {
       (await get(dashboard(), '/base/dashboard/style.css?v=old')).headers.get('cache-control'),
     ).toBe('no-cache');
     expect((await get(dashboard(), '/base/dashboard/nothing')).status).toBe(404);
+  });
+
+  it('links and serves the Slotlock mark as its favicon, the same file as the site\'s', async () => {
+    const html = await (await get(dashboard(), '/base/dashboard')).text();
+    const iconPath = /<link rel="icon" href="(\/base\/dashboard\/favicon\.svg\?v=[A-Za-z0-9_-]{12})" type="image\/svg\+xml">/.exec(
+      html,
+    )?.[1];
+    expect(iconPath).toBeDefined();
+    const icon = await get(dashboard(), iconPath as string);
+    expect(icon.status).toBe(200);
+    expect(icon.headers.get('content-type')).toBe('image/svg+xml');
+    expect(icon.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+    expect(icon.headers.get('x-content-type-options')).toBe('nosniff');
+    expect((await icon.text()).trim()).toBe(readFileSync(resolve('site/public/favicon.svg'), 'utf8').trim());
   });
 });
 
