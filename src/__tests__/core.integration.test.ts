@@ -788,6 +788,19 @@ describe.skipIf(!url)('slotlock core (real Postgres)', () => {
         expect(restored[0]?.value ?? '').toBe('');
       });
 
+      // Adding a resource reads the tenant's plan through a function PUBLIC may not run either.
+      await expect(
+        sql.begin(async (tx) => {
+          await tx.unsafe(`SET LOCAL ROLE ${role}`);
+          await tx`SELECT set_config('slotlock.tenant_ref', ${tenantA}, true)`;
+          return createSlotlockStore(tx).createResource({
+            tenantRef: tenantA,
+            externalRef: `ungranted-${crypto.randomUUID()}`,
+          });
+        }),
+      ).rejects.toMatchObject({ code: 'application_role_not_granted' });
+      await sql.unsafe(`GRANT EXECUTE ON FUNCTION slotlock.tenant_plan(text) TO ${role}`);
+
       const sharedExternalRef = `shared-resource-${crypto.randomUUID()}`;
       const createRestrictedResource = async (tenantRef: string, timezone: string) =>
         sql.begin(async (tx) => {

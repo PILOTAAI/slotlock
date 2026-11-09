@@ -1,6 +1,7 @@
 // The event feed: what changed for a tenant, read by position, and the webhook endpoints it is
 // delivered to. Rows are appended by triggers in the changing transaction (ddl.ts,
 // SLOTLOCK_OUTBOX_DDL); webhooks.ts signs and sends.
+import { slotlockPlanReadRefusal } from './plans.js';
 import { randomBytes } from 'node:crypto';
 import type { Sql, TransactionSql } from 'postgres';
 
@@ -479,7 +480,9 @@ export function slotlockEventFeedMethods(
                  (SELECT max_webhook_endpoints FROM slotlock.tenant_plan(${params.tenantRef}::text))
                    AS planned
             FROM slotlock.webhook_endpoints
-           WHERE tenant_ref = ${params.tenantRef}`;
+           WHERE tenant_ref = ${params.tenantRef}`.catch((error: unknown) => {
+          throw slotlockPlanReadRefusal(error);
+        });
         // The lower of the server's limit and the tenant's plan (plans.ts), when it has one.
         const limit = Math.min(SLOTLOCK_MAX_WEBHOOK_ENDPOINTS, count?.planned ?? SLOTLOCK_MAX_WEBHOOK_ENDPOINTS);
         if ((count?.count ?? 0) >= limit) {

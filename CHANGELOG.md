@@ -11,6 +11,9 @@ versioning.
   tenant's resources, active API keys and webhook endpoints. Free allows 10, 10 and 2; Developer
   100, 100 and 10. A tenant with no plan, as on every self-hosted server, keeps the server's limits.
   Erasure removes the plan. `readSlotlockTenantPlan` and `setSlotlockTenantPlan` in `plans.ts`.
+  Adding a resource or webhook endpoint now reads the plan through `slotlock.tenant_plan(text)`:
+  `slotlock migrate` grants it to the serving role; a library user runs `grantApplicationRole`
+  again, and a role without it is refused `application_role_not_granted`.
 - Stripe billing (`billing.ts`) and the dashboard's Plan page, on the Worker with
   `STRIPE_SECRET_KEY` and the Developer price ids: Upgrade opens a Stripe Checkout with Managed
   Payments, Manage billing the customer portal, and a signed webhook at `/stripe/webhook` sets the

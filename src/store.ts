@@ -1,4 +1,5 @@
 // DB mechanics for the Slotlock core: explicit `postgres` client in, structured results out.
+import { slotlockPlanReadRefusal } from './plans.js';
 import {
   SLOTLOCK_CHANGE_ORIGINS,
   SLOTLOCK_CHANGE_RETENTION_DAYS,
@@ -3755,7 +3756,11 @@ function buildSlotlockStore(
           ? undefined
           : (
               await sql<{ max_resources: number }[]>`
-                SELECT max_resources FROM slotlock.tenant_plan(${params.tenantRef}::text)`
+                SELECT max_resources FROM slotlock.tenant_plan(${params.tenantRef}::text)`.catch(
+                (error: unknown) => {
+                  throw slotlockPlanReadRefusal(error);
+                },
+              )
             )[0]?.max_resources;
       const storeLimit = params.tenantRef === undefined ? undefined : configuredTenantLimits.resources;
       const configured =

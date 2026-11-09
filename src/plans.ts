@@ -86,3 +86,18 @@ export async function setSlotlockTenantPlan(
     ${input.stripeCustomer ?? null}::text, ${input.stripeSubscription ?? null}::text,
     ${input.currentPeriodEnd ?? null}::timestamptz)`;
 }
+
+/**
+ * Reading a tenant's plan needs EXECUTE on slotlock.tenant_plan(text), which `slotlock migrate` (or
+ * grantApplicationRole) grants: a role without it is told so (`application_role_not_granted`).
+ */
+export function slotlockPlanReadRefusal(error: unknown): unknown {
+  if ((error as { code?: unknown } | null)?.code !== '42501') return error;
+  return Object.assign(
+    new Error(
+      'Slotlock serving role may not run slotlock.tenant_plan(text): grant it what this release needs with grantApplicationRole (`slotlock migrate` does), once per release',
+      { cause: error },
+    ),
+    { code: 'application_role_not_granted' as const },
+  );
+}
