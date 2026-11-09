@@ -361,7 +361,7 @@ export const cloud = {
       },
       {
         title: 'Create a resource and a key',
-        body: `Add up to ${facts.dashboardMaxResources} resources and their bookable hours, then an API key: read only, read and write, or full, with an optional expiry.`,
+        body: 'Add resources and their bookable hours, then an API key: read only, read and write, or full, with an optional expiry.',
       },
       {
         title: 'Point your agent at it',
@@ -957,6 +957,33 @@ export const openSource = {
   ],
 };
 
+export const pricing = {
+  id: 'pricing',
+  counter: '12',
+  heading: { soft: 'Free to start,', strong: 'and free forever to run yourself.' },
+  plans: [
+    {
+      title: 'Free',
+      price: '$0',
+      body: '10 resources, 10 API keys and 2 webhook endpoints on Slotlock Cloud.',
+      link: { label: signIn.long, href: SIGN_IN_URL },
+    },
+    {
+      title: 'Developer',
+      price: '$10 a month, or $100 a year',
+      body: '100 resources, 100 API keys and 10 webhook endpoints. Paid in your currency through Stripe; cancel at any time.',
+      link: { label: 'Upgrade in the dashboard', href: `${SIGN_IN_URL}/plan` },
+    },
+    {
+      title: 'Custom',
+      price: 'Talk to us',
+      body: 'Slotlock on your own servers, with support from the people who build it.',
+      link: { label: 'Talk to the founder', href: 'mailto:clever.eziogor@gmail.com' },
+    },
+  ],
+  note: `Self-hosting is ${facts.license} with no limits from us. [Plans in detail](/docs/hosted/#plans).`,
+};
+
 export const faq = {
   id: 'faq',
   heading: { soft: 'Questions', strong: 'we expect first.' },
@@ -1013,6 +1040,7 @@ export const nav = [
   { label: 'Developers', href: '#developers' },
   { label: 'Security', href: '#security' },
   { label: 'Open source', href: '#open-source' },
+  { label: 'Pricing', href: '#pricing' },
 ];
 
 export const footer = {

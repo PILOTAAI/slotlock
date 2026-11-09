@@ -3482,3 +3482,24 @@ figure {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* ---------- Pricing: three plans ---------- */
+
+.deploy .plans__price {
+  margin: 0;
+  color: var(--ink);
+  font-size: 20px;
+  letter-spacing: -0.01em;
+}
+
+@media (min-width: 720px) {
+  .deploy.plans {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .deploy.plans li {
+    border-top: 0;
+  }
+  .deploy.plans li + li {
+    border-left: 1px solid var(--line);
+  }
+}

@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { SLOTLOCK_DASHBOARD_MAX_RESOURCES } from '../dashboard.js';
 import { SLOTLOCK_API_KEY_ACTIVE_LIMIT, SLOTLOCK_API_KEY_RETAINED_LIMIT } from '../ddl.js';
 import { SLOTLOCK_API_KEY_MAX_LIFETIME_DAYS } from '../api-keys.js';
+import { SLOTLOCK_PLAN_LIMITS } from '../plans.js';
 import { SLOTLOCK_CALENDAR_HORIZON_DAYS } from '../rules.js';
 import { parseAvailabilityRules } from '../weekly-hours.js';
 import {
@@ -164,7 +165,9 @@ describe('the published policies', () => {
     expect(terms.slice(terms.indexOf('8. '))).toContain(
       'allow for and contribute to audits, including inspections, by you or an auditor you mandate',
     );
-    expect(terms).toContain('free while it is offered as a preview');
+    expect(terms).toContain('## Plans and payment');
+    expect(terms).toContain('Stripe sells it to you as merchant of record');
+    expect(terms).toContain('at least 30 days\' notice of a new price');
     expect(terms).toContain('no service level agreement');
     expect(terms).toContain('law of England and Wales');
     expect(terms).toContain('[Acceptable Use Policy](ACCEPTABLE-USE.md)');
@@ -226,14 +229,15 @@ describe('the hosted service page', () => {
     const row = (what: string, limit: string) => expect(text).toContain(`| ${what} | ${limit}`);
     row(
       'Active API keys per account',
-      `${SLOTLOCK_API_KEY_ACTIVE_LIMIT} (${thousands(SLOTLOCK_API_KEY_RETAINED_LIMIT)} kept in all`,
+      `As the [plan](#plans) allows (${thousands(SLOTLOCK_API_KEY_RETAINED_LIMIT)} kept in all`,
     );
-    row('Resources added in the dashboard', `${SLOTLOCK_DASHBOARD_MAX_RESOURCES} |`);
-    const serveResources = declared(
-      'src/self-host.ts',
-      /const SERVE_MAX_TENANT_RESOURCES = ([0-9_]+);/,
-    );
-    row('Resources per account through the application API', `${thousands(serveResources)} |`);
+    // Every plan fits under the caps that hold without one.
+    const { free, developer } = SLOTLOCK_PLAN_LIMITS;
+    expect(developer.apiKeys).toBeLessThanOrEqual(SLOTLOCK_API_KEY_ACTIVE_LIMIT);
+    expect(developer.resources).toBeLessThanOrEqual(SLOTLOCK_DASHBOARD_MAX_RESOURCES);
+    row('Resources', `${free.resources} | ${developer.resources} |`);
+    row('Active API keys', `${free.apiKeys} | ${developer.apiKeys} |`);
+    row('Webhook endpoints', `${free.webhookEndpoints} | ${developer.webhookEndpoints} |`);
     row(
       'Events one key can hold, active and cancelled',
       `${thousands(SLOTLOCK_AGENT_OWNER_EVENT_QUOTA)} |`,

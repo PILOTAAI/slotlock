@@ -1,6 +1,6 @@
 # Privacy notice for hosted Slotlock
 
-Last updated: 8 November 2026.
+Last updated: 9 November 2026.
 
 This notice covers hosted Slotlock (Slotlock Cloud): the API at `https://slotlock-api.pylota.io`
 (MCP, A2A and REST) and the dashboard at `https://app.slotlock.pylota.io`. Any GitHub account can
@@ -41,6 +41,7 @@ protection officer.
 | Your dashboard session, in a cookie | The service | 12 hours |
 | The sign-in in progress, in a cookie | The service | 10 minutes |
 | Dashboard assistant settings, if the dashboard offers the assistant and you set it up: the provider, its address, the model, and your provider key, stored only encrypted (AES-256-GCM) with its last four characters to show; and your conversation with it | You | Settings while your account exists or until you remove them; a conversation 2 hours after its last message |
+| Your plan: which plan, its status and renewal date, and the Stripe customer and subscription ids that link your account to its purchase. Your name, email, billing address, tax id and payment details go to Stripe directly and never reach us | The service and Stripe, if you upgrade | While your account exists |
 | Connection details at Cloudflare: IP addresses, request times, paths and headers | Your browser or client, through Cloudflare | Cloudflare's dashboard request logs: at most 7 days |
 | Connection details at our server: IP address, time, path and user agent of each API request, in the log of the proxy in front of it | Your client, through Cloudflare | One file of at most 10 MB, overwritten as it fills |
 | The API server's own logs | The service | See below |
@@ -72,6 +73,7 @@ our mailboxes, hosted by Google Workspace, for two years and then delete them.
 | Purpose | Data | Lawful basis (UK GDPR Article 6(1)) |
 | --- | --- | --- |
 | Running your account and the service you signed up for: storing your calendars, answering your agents, sending your webhooks, keeping your activity history | Account, keys, calendar content, webhooks, history, write records, sessions, assistant settings | (b) contract: the Terms of Service |
+| Applying your plan: its limits, upgrading and managing it through Stripe | Account, plan | (b) contract: the Terms of Service |
 | Keeping the service secure and available: authenticating requests, rate limiting, stopping abuse, investigating faults, and restoring from backups | Account, keys, connection details, logs, backups | (f) legitimate interests: a service anyone with a GitHub account can use must be protected from misuse and recoverable after a failure, and the logs hold no request content |
 | Answering you when you write to us | What you send | (b) contract, or (f) legitimate interests when you are not a user |
 | Meeting a legal obligation, such as a lawful request from an authority | What the request covers | (c) legal obligation |
@@ -89,6 +91,7 @@ not use your data for marketing, and we do not use your calendar content to trai
 | Cloudflare, Inc. | DNS, TLS and the network path to the API, including the tunnel to our server; it runs the dashboard and keeps its request logs, connects the dashboard to the database (Hyperdrive), and stores our encrypted backups (R2) | Its global network; the dashboard is placed near the London server; backups in its European Union jurisdiction |
 | GitHub, Inc. | Signs you in. GitHub is a separate controller of your GitHub account and learns that you signed in to Slotlock | United States |
 | Google LLC (Google Workspace) | Hosts the support, abuse and privacy mailboxes, so it holds the email you send us | Its global data centres, including the United States |
+| Stripe (the Stripe company named on your invoice) | Sells the Developer plan as merchant of record: takes the payment, calculates and pays sales tax or VAT, and issues invoices. We send it your account's id (`github:<id>`) with each purchase; Stripe is a separate controller of the purchase and keeps its records under [its own privacy policy](https://stripe.com/privacy) | Ireland, the United States and its other locations |
 
 Our uptime monitor, healthchecks.io, receives only whether the service is up, how many errors it
 served, and how much space the database and its disk use: no personal data.
@@ -108,7 +111,8 @@ process connection details and dashboard requests outside the United Kingdom, in
 United States; Cloudflare's data processing agreement relies on its certification under the Data
 Privacy Framework for transfers to the United States. Google Workspace, which holds the email you
 send us, can also process it outside the United Kingdom; Google's data processing terms provide the
-safeguards for those transfers. Write to us for a copy of the safeguards.
+safeguards for those transfers. Stripe receives your account's id with each purchase, including in
+the United States, under the safeguards in its own terms. Write to us for a copy of the safeguards.
 
 ## Security
 
@@ -127,11 +131,12 @@ time.
 To erase your account and everything in it, write to [privacy@pylota.io](mailto:privacy@pylota.io)
 naming your GitHub login. We reply with a word; sign in to the dashboard and create an API key with
 that word as its name, which shows us the account is yours. We then erase every resource, booking,
-event, hold, waitlist entry, webhook, history entry, assistant setting and key in the account, in one
+event, hold, waitlist entry, webhook, history entry, assistant setting, plan and key in the account, in one
 step, and tell you when it is done. What stays: the digests of your erased keys, with nothing about
 you, so those keys are never accepted again; a record that the account was suspended, with the reason we gave, if it was; log
 lines until they age out as described above; and backups, until they are replaced within about five
-weeks.
+weeks. A Developer plan is cancelled before the account is erased; Stripe keeps its own records of the
+purchase, as its privacy policy says.
 
 We answer every request within one month.
 

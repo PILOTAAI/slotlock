@@ -31,6 +31,7 @@ import {
   nav,
   openSource,
   picker,
+  pricing,
   proof,
   RACE_TEST_URL,
   REPO_URL,
@@ -1013,7 +1014,32 @@ curl "{apiBase}/v1/pool-availability?pool={developers.restPool}&start={poolStart
         </div>
       </section>
 
-      <section class="band" id={faq.id} aria-labelledby="faq-title">
+      <section class="band" id={pricing.id} aria-labelledby="pricing-title">
+        <div class="wrap">
+          <div class="head">
+            <p class="counter">{pricing.counter} / Pricing</p>
+            <h2 class="h2" id="pricing-title">
+              <span class="soft">{pricing.heading.soft}</span>
+              <span class="strong">{pricing.heading.strong}</span>
+            </h2>
+          </div>
+          <ul class="deploy plans">
+            {
+              pricing.plans.map((plan) => (
+                <li>
+                  <h3>{plan.title}</h3>
+                  <p class="plans__price">{plan.price}</p>
+                  <p><Rich text={plan.body} /></p>
+                  <a class="arrow-link" href={plan.link.href}>{plan.link.label} <Icon name="arrow" /></a>
+                </li>
+              ))
+            }
+          </ul>
+          <p><Rich text={pricing.note} /></p>
+        </div>
+      </section>
+
+      <section class="band band--tint" id={faq.id} aria-labelledby="faq-title">
         <div class="wrap">
           <div class="head">
             <h2 class="h2" id="faq-title">

@@ -13,7 +13,7 @@ account can sign in. Self-hosting stays fully supported: see
 | REST | `https://slotlock-api.pylota.io/v1`, described at `/openapi.json` |
 | Dashboard | `https://app.slotlock.pylota.io/dashboard` |
 | Status | [Open `status` issues](https://github.com/PILOTAAI/slotlock/issues?q=is%3Aissue%20label%3Astatus%20is%3Aopen), and [how they are raised](/docs/hosted/status.md) |
-| Price | Free while it is a preview, best effort, with no service level agreement |
+| Price | Free, or Developer at $10 a month or $100 a year: see [Plans](#plans). Best effort, with no service level agreement |
 
 ## Start
 
@@ -33,6 +33,23 @@ account can sign in. Self-hosting stays fully supported: see
    Over REST: `curl https://slotlock-api.pylota.io/v1/resources -H "Authorization: Bearer $SLOTLOCK_API_KEY"`.
    The [language clients](/clients/README.md) work the same way.
 
+## Plans
+
+| | Free | Developer | Custom |
+| --- | --- | --- | --- |
+| Price | Free | $10 a month, or $100 a year | [Talk to the founder](mailto:clever.eziogor@gmail.com) |
+| Resources | 10 | 100 | On your own servers |
+| Active API keys | 10 | 100 | |
+| Webhook endpoints | 2 | 10 | |
+
+Every account starts on Free. Upgrade on the dashboard's **Plan** page: Stripe takes the payment as
+merchant of record, in your currency, with any sales tax or VAT added. **Manage billing** on the same
+page shows invoices, changes the payment method, switches between monthly and yearly, and cancels.
+A cancelled plan runs to the end of the period it was paid for. When a plan ends or a payment is not
+made, the account returns to Free: nothing is deleted, but nothing more can be added while it holds
+more than Free allows. Accounts created before 9 November 2026 move to the Free limits on
+9 December 2026. Custom is Slotlock on your own infrastructure, under its own agreement.
+
 ## How it differs from running it yourself
 
 - Your account is a tenant of its own, `github:<your user id>`: only your keys reach its data.
@@ -50,9 +67,8 @@ account can sign in. Self-hosting stays fully supported: see
 
 | What | Limit |
 | --- | --- |
-| Active API keys per account | 100 (1,000 kept in all, revoked and expired ones included) |
-| Resources added in the dashboard | 100 |
-| Resources per account through the application API | 10,000 |
+| Active API keys per account | As the [plan](#plans) allows (1,000 kept in all, revoked and expired ones included) |
+| Resources and webhook endpoints per account | As the plan allows |
 | Events one key can hold, active and cancelled | 1,000 |
 | Event writes one key can have on record | 10,000, each kept 30 days |
 | A free/busy or search window | 367 days |
