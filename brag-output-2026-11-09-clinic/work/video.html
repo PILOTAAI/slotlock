@@ -1,0 +1,180 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+@font-face{font-family:Inter;src:url(../../site/public/fonts/inter.woff2) format('woff2');font-weight:100 900}
+@font-face{font-family:'Inter Tight';src:url(../../site/public/fonts/inter-tight.woff2) format('woff2');font-weight:100 900}
+@font-face{font-family:'JetBrains Mono';src:url(../../site/public/fonts/jetbrains-mono.woff2) format('woff2');font-weight:100 900}
+:root{--canvas:#f6f4ee;--canvas-3:#e5e1d8;--paper:#fff;--ink:#171716;--ink-2:#5d5b56;--ink-3:#6b6963;--ink-4:#bdb8af;
+--line:#1a1a1a1a;--line-strong:#1a1a1a2e;--accent:#2655ff;--accent-ink:#0e2d9e;--accent-soft:#e8edff;--confirmed:#167758;--confirmed-soft:#e4f3ec;
+--hold:#935d12;--hold-soft:#f7ebd6;--refused:#a32d2d;--refused-soft:#f4e0df;--busy:#e5e1d8}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:1080px;height:1080px;overflow:hidden;background:var(--canvas);color:var(--ink);font-family:Inter,sans-serif}
+#hdr{position:absolute;left:80px;right:80px;top:56px;display:flex;align-items:center;justify-content:space-between;font-family:'JetBrains Mono';font-size:20px;letter-spacing:.12em;color:var(--ink-3)}
+#hdr .brand{display:flex;align-items:center;gap:14px;font-family:'Inter Tight';font-weight:700;font-size:34px;letter-spacing:-.04em;color:var(--ink)}
+.scene{position:absolute;inset:0}
+.cap{position:absolute;left:80px;top:150px;width:920px;font-family:'Inter Tight';font-weight:500;font-size:70px;letter-spacing:-.04em;line-height:1.04}
+.soft{color:#8f8c84}
+.card{position:absolute;left:80px;width:920px;background:var(--paper);border:1px solid var(--line-strong);border-radius:28px;box-shadow:0 30px 70px -36px #17171633,0 2px 6px #1717160a;padding:32px 36px}
+.mono{font-family:'JetBrains Mono'}
+.who{display:flex;align-items:center;gap:16px;font-size:30px;font-weight:600}
+.badge{display:grid;place-items:center;width:54px;height:54px;border-radius:50%;color:#fff;flex:none}
+.ask{font-family:'JetBrains Mono';font-size:26px;color:var(--ink-2);margin-top:16px}
+.res{font-family:'JetBrains Mono';font-size:26px;margin-top:12px;min-height:34px;font-weight:600}
+.row{position:relative;height:120px;border-top:1px solid var(--line)}
+.row .lbl{position:absolute;left:0;top:30px}
+.row .lbl b{display:block;font-size:28px;font-weight:600}
+.row .lbl small{font-family:'JetBrains Mono';font-size:18px;color:var(--ink-3)}
+.hrs{position:relative;height:40px}
+.hrs span{position:absolute;font-family:'JetBrains Mono';font-size:20px;color:var(--ink-3);transform:translateX(-50%)}
+.grid{position:absolute;top:0;bottom:0;width:1px;background:var(--line)}
+.blk{position:absolute;top:22px;height:76px;border-radius:14px;display:flex;align-items:center;padding:0 16px;font-size:22px;font-weight:600;white-space:nowrap;overflow:hidden}
+.booked{background:var(--confirmed);color:#fff}
+.hold{background:repeating-linear-gradient(135deg,var(--hold-soft) 0 12px,#efdcba 12px 24px);color:var(--hold);border:3px dashed var(--hold)}
+.busy{background:var(--busy);color:var(--ink-2);font-weight:500}
+.cancel{background:var(--refused-soft);color:var(--refused);border:2px solid var(--refused);text-decoration:line-through}
+.pend{background:var(--paper);color:var(--confirmed);border:3px solid var(--confirmed)}
+.tag{display:inline-block;font-family:'JetBrains Mono';font-size:22px;padding:8px 16px;border-radius:999px}
+#outro{display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
+</style></head>
+<body>
+<div id="hdr"><div class="brand"><svg width="48" height="48" viewBox="0 0 64 64"><use href="#lock"/></svg>slotlock</div><span id="ctr">CLINIC</span></div>
+<svg width="0" height="0" style="position:absolute"><defs><g id="lock"><rect width="64" height="64" rx="14" fill="#111110"/><g transform="translate(12.2 14.1) scale(0.465)"><path fill="#F6F4EE" d="M13.13 34.46L72.2 34.46C79.45 34.46 85.32 40.33 85.32 47.58L85.32 63.99C85.32 71.24 79.45 77.12 72.2 77.12L13.13 77.12C5.88 77.12 0 71.24 0 63.99L0 47.58C0 40.33 5.88 34.46 13.13 34.46ZM22.97 39.38L22.97 19.69C22.97 8.82 31.79 0 42.66 0C53.54 0 62.35 8.82 62.35 19.69L62.35 39.38L56.61 39.38L56.61 19.69C56.61 11.99 50.36 5.74 42.66 5.74C34.96 5.74 28.71 11.99 28.71 19.69L28.71 39.38Z"/><path fill="#FF5B2E" d="M19.69 52.51L65.63 52.51C67.45 52.51 68.91 53.98 68.91 55.79C68.91 57.6 67.45 59.07 65.63 59.07L19.69 59.07C17.88 59.07 16.41 57.6 16.41 55.79C16.41 53.98 17.88 52.51 19.69 52.51Z"/></g></g></defs></svg>
+
+<!-- 1+2 -->
+<div class="scene" id="s1">
+  <div class="cap" id="c1">Two assistants want<br><span style="color:var(--accent)">Dr Shah at 10:00.</span></div>
+  <div class="cap" id="c2">One books it.<br><span class="soft">The other joins the waitlist.</span></div>
+  <div class="card" id="qA" style="top:440px">
+    <div class="who"><span class="badge" style="background:var(--accent)"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg></span>Patient assistant</div>
+    <div class="ask">slotlock_hold_slots · Dr Shah · Tue 10:00–11:00</div>
+    <div class="res" id="resA"></div>
+  </div>
+  <div class="card" id="qB" style="top:700px">
+    <div class="who"><span class="badge" style="background:var(--ink)"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18M5 21V9l7-5 7 5v12M10 21v-6h4v6"/></svg></span>Front desk agent</div>
+    <div class="ask">slotlock_hold_slots · Dr Shah · Tue 10:00–11:00</div>
+    <div class="res" id="resB"></div>
+  </div>
+</div>
+
+<!-- 3: cancellation → waitlist hold -->
+<div class="scene" id="s3">
+  <div class="cap">Someone cancels.<br><span class="soft">The next in line gets a hold.</span></div>
+  <div class="card" style="top:470px">
+    <div class="hrs" id="h3"></div>
+    <div class="row trk" id="t3">
+      <div class="lbl"><b>Dr Shah</b><small>Europe/London</small></div>
+      <div class="blk busy" data-a="9" data-b="10">09:00</div>
+      <div class="blk booked" id="b10" data-a="10" data-b="11">Front desk</div>
+      <div class="blk cancel" id="x10" data-a="10" data-b="11">cancelled</div>
+      <div class="blk hold" id="w10" data-a="10" data-b="11">hold · #1</div>
+      <div class="blk busy" data-a="11.5" data-b="12.5">11:30</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:14px;margin-top:22px;min-height:52px">
+      <span class="tag" id="wl1" style="background:var(--hold-soft);color:var(--hold)">waitlist · #1 Patient assistant</span>
+      <span class="tag" id="wl2" style="background:var(--canvas);color:var(--ink-3)">#2</span>
+    </div>
+  </div>
+  <div class="mono" id="n3" style="position:absolute;left:84px;top:860px;font-size:24px;color:var(--ink-3)">Freed time goes to the waitlist in join order.</div>
+</div>
+
+<!-- 4: book together -->
+<div class="scene" id="s4">
+  <div class="cap">Doctor and room, together.<br><span class="soft">All or none.</span></div>
+  <div class="card" style="top:470px">
+    <div class="hrs" id="h4"></div>
+    <div class="row trk" id="t4a"><div class="lbl"><b>Dr Shah</b><small>Europe/London</small></div>
+      <div class="blk busy" data-a="10" data-b="11">10:00</div>
+      <div class="blk booked" id="tA" data-a="12" data-b="13">consult</div></div>
+    <div class="row trk" id="t4b"><div class="lbl"><b>Room 3</b><small>Europe/London</small></div>
+      <div class="blk busy" data-a="9" data-b="10">Sync</div>
+      <div class="blk booked" id="tB" data-a="12" data-b="13">consult</div></div>
+    <div class="mono" id="bt" style="font-size:24px;margin-top:20px"><span style="color:var(--accent-ink);font-weight:600">slotlock_book_together</span><span style="color:var(--ink-3)"> → </span><span id="btr" style="color:var(--confirmed);font-weight:600">both booked</span></div>
+  </div>
+</div>
+
+<!-- 5: no check-in -->
+<div class="scene" id="s5">
+  <div class="cap">No check-in?<br><span class="soft">Released and offered on.</span></div>
+  <div class="card" style="top:470px">
+    <div class="hrs" id="h5"></div>
+    <div class="row trk" id="t5">
+      <div class="lbl"><b>Dr Shah</b><small>Europe/London</small></div>
+      <div class="blk pend" id="p9" data-a="9" data-b="10">check-in?</div>
+      <div class="blk hold" id="o9" data-a="9" data-b="10">hold · #2</div>
+      <div class="blk booked" data-a="10" data-b="11">#1</div>
+      <div class="blk busy" data-a="11.5" data-b="12.5">11:30</div>
+    </div>
+    <div class="mono" id="n5" style="font-size:24px;margin-top:20px;min-height:34px"></div>
+  </div>
+</div>
+
+<!-- outro -->
+<div class="scene" id="outro">
+  <svg id="ol" width="160" height="160" viewBox="0 0 64 64"><use href="#lock"/></svg>
+  <div id="ow" style="font-family:'Inter Tight';font-weight:700;font-size:120px;letter-spacing:-.05em;margin-top:20px">slotlock</div>
+  <div id="ot" style="font-family:'Inter Tight';font-weight:500;font-size:58px;letter-spacing:-.035em;line-height:1.08;margin-top:26px"><span class="soft">Beyond one booking.</span><br>What a fleet or a clinic needs.</div>
+  <div id="of" class="mono" style="font-size:22px;letter-spacing:.1em;color:var(--ink-3);margin-top:44px">OPEN SOURCE · SLOTLOCK.PYLOTA.IO</div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const cl=(v,a=0,b=1)=>Math.min(b,Math.max(a,v));
+const eo=x=>1-Math.pow(1-cl(x),5);
+const eio=x=>{x=cl(x);return x<.5?16*x**5:1-Math.pow(-2*x+2,5)/2};
+const ramp=(t,a,d)=>cl((t-a)/d);
+function set(el,o,tx=0,ty=0,s=1){el.style.opacity=o;el.style.transform=`translate(${tx}px,${ty}px) scale(${s})`;}
+// timeline: label column 210px, track 230..848 (card inner width 848) for 09–13
+const X0=210,X1=836,hx=h=>X0+(h-9)*(X1-X0)/4;
+for(const id of ['h3','h4','h5']) for(let h=9;h<=13;h++){const s=document.createElement('span');s.textContent=String(h).padStart(2,'0')+':00';s.style.left=hx(h)+'px';$(id).appendChild(s);}
+document.querySelectorAll('.trk').forEach(r=>{for(let h=10;h<13;h++){const g=document.createElement('div');g.className='grid';g.style.left=hx(h)+'px';r.prepend(g);}});
+document.querySelectorAll('.blk').forEach(b=>{const a=+b.dataset.a,e=+b.dataset.b;b.style.left=(hx(a)+3)+'px';b.style.width=(hx(e)-hx(a)-6)+'px';});
+// 14:00 consult sits at the 13:00 gridline area? keep hours 09–13 honest: relabel the together blocks to 12:45
+
+
+// app-store slide: in from right over .45 s, out to left over .3 s
+const scenes=[['s1',0,8],['s3',8,12],['s4',12,16],['s5',16,20],['outro',20,99]];
+function slide(el,t,a,b){const i=eo(ramp(t,a,.5)),o=eio(ramp(t,b-.3,.3));el.style.display=(t>=a&&t<b)?(el.id==='outro'?'flex':'block'):'none';set(el,i*(1-o),(1-i)*140-o*140);}
+const pop=(el,t,a,d=.35,dy=30)=>{const p=eo(ramp(t,a,d));set(el,p,0,(1-p)*dy);};
+
+window.render=function(t){
+  for(const [id,a,b] of scenes) slide($(id),t,a,b);
+  $('hdr').style.opacity=1-eio(ramp(t,19.7,.3));
+  if(t<8){
+    // captions swap at 4 (old out .25, new in .35)
+    set($('c1'),eo(ramp(t,.1,.4))*(1-eio(ramp(t,3.75,.25))),0,(1-eo(ramp(t,.1,.4)))*24);
+    const c2=eo(ramp(t,4.0,.4));set($('c2'),c2,0,(1-c2)*24);
+    const a=eo(ramp(t,.5,.5)),b=eo(ramp(t,1.0,.5));
+    set($('qA'),a,(1-a)*-200,0); set($('qB'),b,(1-b)*200,0);
+    // results on the bar at 4: front desk booked; patient refused → waitlist at 5.0
+    $('resB').innerHTML=t>=4?'<span style="color:var(--confirmed)">→ held · then booked</span>':'';
+    $('resA').innerHTML=t>=4?(t<5?'<span style="color:var(--refused)">→ refused: \'overlap\'</span>':'<span style="color:var(--refused)">→ refused: \'overlap\'</span><span style="color:var(--ink-3)"> · </span><span style="color:var(--hold)">waitlist #1</span>'):'';
+    const k=t-4, sh=(k>0&&k<.45)?Math.sin(k*55)*12*(1-k/.45):0;
+    if(t>=4){$('qA').style.transform=`translate(${sh}px,0)`;$('qA').style.borderColor=t<5?'var(--refused)':'';}
+  } else if(t<12){
+    // 9.0 cancel, 10.0 hold for #1
+    $('b10').style.display=t<9?'flex':'none';
+    $('x10').style.display=(t>=9&&t<10)?'flex':'none';
+    pop($('w10'),t,10.0,.3,0); $('w10').style.display=t>=10?'flex':'none';
+    const s=t>=10?eo(ramp(t,10,.3)):0; $('w10').style.transform=`scale(${.9+.1*s})`;
+    $('wl1').style.opacity=t<10?1:1-eio(ramp(t,10,.3)); $('wl2').textContent=t<10.3?'#2':'#1 next';
+    pop($('n3'),t,10.4,.35,14);
+  } else if(t<16){
+    const d=eo(ramp(t,13.0,.35));
+    set($('tA'),d,0,(1-d)*-60); set($('tB'),d,0,(1-d)*60);
+    pop($('bt'),t,13.3,.3,10);
+  } else if(t<20){
+    const rel=t>=17.5, off=t>=18.5;
+    $('p9').style.display=off?'none':'flex';
+    $('p9').className='blk '+(rel?'cancel':'pend');
+    $('p9').textContent=rel?'released':'check-in?';
+    $('p9').style.textDecoration='none';
+    $('o9').style.display=off?'flex':'none';
+    const s=off?eo(ramp(t,18.5,.3)):0;$('o9').style.transform=`scale(${.9+.1*s})`;
+    $('n5').innerHTML=t<17.5?'<span style="color:var(--ink-3)">waiting for check-in…</span>':t<18.5?'<span style="color:var(--refused);font-weight:600">no check-in · released</span>':'<span style="color:var(--hold);font-weight:600">offered on · hold for waitlist #2</span>';
+  } else {
+    const o1=eo(ramp(t,20.1,.5)),o2=eo(ramp(t,20.5,.45)),o3=eo(ramp(t,20.9,.45)),o4=eo(ramp(t,21.3,.45));
+    set($('ol'),o1,0,(1-o1)*30,.9+.1*o1);set($('ow'),o2,0,(1-o2)*24);set($('ot'),o3,0,(1-o3)*24);set($('of'),o4,0,(1-o4)*16);
+  }
+};
+window.render(0);
+</script></body></html>

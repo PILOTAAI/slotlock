@@ -1,0 +1,1 @@
+Two assistants want Dr Shah at 10:00, so one books it and the other joins the waitlist. When someone cancels, the next in line gets a hold, doctor and room book together or not at all, and no-shows are released and offered on. Slotlock, the open-source calendar for AI agents: slotlock.pylota.io
