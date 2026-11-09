@@ -1,0 +1,1 @@
+One mill. Two agents. Two time zones. Both ask for Mill 2 at the same instant and PostgreSQL lets one through; the other asks the pool and gets Mill 3. Slotlock, the open-source calendar AI agents cannot double-book: slotlock.pylota.io

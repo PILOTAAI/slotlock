@@ -1,0 +1,222 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+@font-face{font-family:Inter;src:url(../../site/public/fonts/inter.woff2) format('woff2');font-weight:100 900}
+@font-face{font-family:'Inter Tight';src:url(../../site/public/fonts/inter-tight.woff2) format('woff2');font-weight:100 900}
+@font-face{font-family:'JetBrains Mono';src:url(../../site/public/fonts/jetbrains-mono.woff2) format('woff2');font-weight:100 900}
+:root{--canvas:#000;--paper:#0E0E10;--canvas-3:#131315;--ink:#F7F7F7;--ink-2:#CFCFCF;--ink-3:#9E9E9E;--ink-4:#6E6E6E;--line:rgba(255,255,255,.10);--line-strong:rgba(255,255,255,.18);
+--accent:#6B8AFF;--accent-ink:#AAC0FF;--confirmed:#4CC49A;--confirmed-soft:rgba(76,196,154,.16);--hold:#E8B76B;--hold-soft:rgba(232,183,107,.14);--refused:#E87373;--refused-soft:rgba(232,115,115,.14);--busy:#26262A;--code:#121214}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:1920px;height:1080px;overflow:hidden;background:#000;color:var(--ink);font-family:Inter,sans-serif}
+.scene{position:absolute;inset:0;display:none}
+.mono{font-family:'JetBrains Mono'}
+.cap{position:absolute;left:140px;top:110px;font-family:'Inter Tight';font-weight:600;font-size:88px;letter-spacing:-.04em;line-height:1.02;white-space:nowrap}
+.soft{color:var(--ink-4)}
+.title{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:'Inter Tight';font-weight:700;font-size:210px;letter-spacing:-.055em}
+.panel{position:absolute;background:var(--paper);border:1px solid var(--line-strong);border-radius:24px;padding:34px 40px}
+.agent{display:flex;align-items:center;gap:18px;font-size:30px;font-weight:600}
+.badge{display:grid;place-items:center;width:52px;height:52px;border-radius:50%;font-family:'JetBrains Mono';font-weight:700;font-size:26px;color:#000}
+.tz{font-family:'JetBrains Mono';font-size:22px;color:var(--ink-3);margin-top:8px}
+.clock{position:absolute;right:40px;top:28px;font-family:'JetBrains Mono';font-weight:600;font-size:64px;letter-spacing:-.03em}
+.call{font-family:'JetBrains Mono';font-size:27px;margin-top:28px;white-space:nowrap}
+.call .fn{color:var(--accent-ink)}
+.res{font-family:'JetBrains Mono';font-size:27px;margin-top:14px;min-height:36px;white-space:nowrap}
+.trk{position:absolute;left:0;right:0}
+.hrs span{position:absolute;font-family:'JetBrains Mono';font-size:20px;color:var(--ink-3);transform:translateX(-50%)}
+.row{position:absolute;left:0;right:0;height:120px;border-top:1px solid var(--line)}
+.row .lbl{position:absolute;left:36px;top:30px}
+.row .lbl b{display:block;font-size:28px;font-weight:600}
+.row .lbl small{font-family:'JetBrains Mono';font-size:18px;color:var(--ink-3)}
+.grid{position:absolute;top:0;bottom:0;width:1px;background:var(--line)}
+.blk{position:absolute;top:24px;height:72px;border-radius:12px;display:flex;align-items:center;padding:0 18px;font-size:24px;font-weight:600;white-space:nowrap;overflow:hidden}
+.booked{background:var(--confirmed);color:#04140E}
+.hold{background:repeating-linear-gradient(135deg,rgba(232,183,107,.16) 0 12px,rgba(232,183,107,.30) 12px 24px);color:var(--hold);border:2px dashed var(--hold)}
+.refused{background:var(--refused-soft);border:2px solid var(--refused);color:var(--refused)}
+.busy{background:var(--busy);color:var(--ink-2);font-weight:500}
+.closed{background:repeating-linear-gradient(135deg,rgba(255,255,255,.04) 0 10px,rgba(255,255,255,.09) 10px 20px);color:var(--ink-3);border:1px solid var(--line-strong);font-weight:500}
+.scan{position:absolute;left:0;right:0;height:120px;background:linear-gradient(90deg,rgba(107,138,255,0) 0%,rgba(107,138,255,.16) 50%,rgba(107,138,255,0) 100%)}
+.tag{position:absolute;right:30px;top:40px;font-family:'JetBrains Mono';font-size:22px}
+.code{position:absolute;left:140px;right:140px;background:var(--code);border:1px solid var(--line-strong);border-radius:24px;overflow:hidden}
+.code .bar{height:56px;display:flex;align-items:center;padding:0 30px;border-bottom:1px solid var(--line);font-family:'JetBrains Mono';font-size:22px;color:var(--ink-3)}
+.code pre{font-family:'JetBrains Mono';font-size:26px;line-height:1.55;padding:26px 34px;color:var(--ink)}
+.k{color:var(--accent-ink)}.m{color:var(--ink-4)}.g{color:var(--confirmed)}.r{color:var(--refused)}.a{color:var(--hold)}
+#wipe{position:absolute;top:0;bottom:0;width:6px;background:var(--accent);box-shadow:0 0 40px 12px rgba(107,138,255,.55);display:none}
+</style></head>
+<body>
+
+<!-- 1 -->
+<div class="scene" id="s1">
+  <div class="title" id="h1">One mill.</div>
+  <div class="title" id="h2">Two agents.</div>
+  <div class="title" id="h3">Two <span style="color:var(--accent);margin-left:.25em">time zones.</span></div>
+</div>
+
+<!-- 2 -->
+<div class="scene" id="s2">
+  <div class="cap" id="c2">Same instant. Same machine. <span style="color:var(--confirmed)">One booking.</span></div>
+  <div class="panel" id="pA" style="left:140px;top:290px;width:800px;height:290px">
+    <div class="agent"><span class="badge" style="background:var(--accent)">P</span>Planner agent</div>
+    <div class="tz">America/New_York</div>
+    <div class="clock">00:00</div>
+    <div class="call"><span class="fn">slotlock_hold_slots</span>  Mill 2 · 06:00–14:00</div>
+    <div class="res" id="rA">&nbsp;</div>
+  </div>
+  <div class="panel" id="pB" style="left:980px;top:290px;width:800px;height:290px">
+    <div class="agent"><span class="badge" style="background:var(--ink)">S</span>Shift agent</div>
+    <div class="tz">Europe/Berlin</div>
+    <div class="clock">06:00</div>
+    <div class="call"><span class="fn">slotlock_hold_slots</span>  Mill 2 · 06:00–14:00</div>
+    <div class="res" id="rB">&nbsp;</div>
+  </div>
+  <div class="panel" id="tl2" style="left:140px;top:640px;width:1640px;height:230px;padding:0">
+    <div class="trk hrs" style="top:28px;height:30px"></div>
+    <div class="row" style="top:80px"><div class="lbl"><b>Mill 2</b><small>Europe/Berlin</small></div>
+      <div class="blk closed" data-a="4" data-b="6">closed</div>
+      <div class="blk booked" id="j4471" data-a="6" data-b="14">Job 4471</div>
+      <div class="blk refused" id="ghostB" data-a="6" data-b="14" style="top:70px;height:56px">Shift agent · refused</div>
+      <div class="blk closed" data-a="22" data-b="24">closed</div>
+    </div>
+  </div>
+</div>
+
+<!-- 3 -->
+<div class="scene" id="s3">
+  <div class="cap"><span class="soft">Ask for any mill.</span> Get the first free one.</div>
+  <div class="panel" style="left:140px;top:290px;width:1640px;height:110px;padding:0 40px;display:flex;align-items:center;justify-content:space-between">
+    <div class="mono" style="font-size:30px"><span style="color:var(--ink-3)">S </span><span class="k">slotlock_book_pool</span>  mills · 06:00–14:00</div>
+    <div class="mono" id="poolres" style="font-size:30px">&nbsp;</div>
+  </div>
+  <div class="panel" style="left:140px;top:430px;width:1640px;height:470px;padding:0" id="pool">
+    <div class="trk hrs" style="top:28px;height:30px"></div>
+    <div class="scan" id="scan" style="top:80px"></div>
+    <div class="row" style="top:80px"><div class="lbl"><b>Mill 1</b><small>Europe/Berlin</small></div>
+      <div class="blk busy" data-a="5" data-b="15">busy</div><div class="tag r" id="t1">taken</div></div>
+    <div class="row" style="top:200px"><div class="lbl"><b>Mill 2</b><small>Europe/Berlin</small></div>
+      <div class="blk booked" data-a="6" data-b="14">Job 4471</div><div class="tag r" id="t2">taken</div></div>
+    <div class="row" style="top:320px"><div class="lbl"><b>Mill 3</b><small>Europe/Berlin</small></div>
+      <div class="blk hold" id="m3" data-a="6" data-b="14">Shift agent · hold</div><div class="tag g" id="t3">first free</div></div>
+  </div>
+</div>
+
+<!-- 4 -->
+<div class="scene" id="s4">
+  <div class="cap">Its own clock. <span class="soft">Daylight saving included.</span></div>
+  <div class="panel" style="left:140px;top:290px;width:1640px;height:100px;padding:0 40px;display:flex;align-items:center;gap:60px">
+    <span style="font-size:30px;font-weight:600">Mill 2</span>
+    <span class="mono" style="font-size:26px;color:var(--ink-3)">Europe/Berlin</span>
+    <span class="mono" style="font-size:26px"><span class="k">FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR</span></span>
+    <span class="mono" style="font-size:26px">hours <span class="g">06:00–22:00</span></span>
+  </div>
+  <div style="position:absolute;left:140px;top:440px;width:760px;height:460px" class="panel">
+    <div class="mono" style="font-size:24px;color:var(--ink-3)">Sun 29 Mar · Europe/Berlin</div>
+    <div class="mono" id="flip" style="font-size:190px;font-weight:600;letter-spacing:-.05em;margin-top:40px">02:00</div>
+    <div class="mono" id="zone" style="font-size:34px;margin-top:20px;color:var(--ink-3)">CET · UTC+1</div>
+  </div>
+  <div class="panel" style="left:940px;top:440px;width:840px;height:215px">
+    <div style="display:flex;justify-content:space-between"><span style="font-size:30px;font-weight:600">Mon 23 Mar</span><span class="mono" style="font-size:24px;color:var(--ink-3)">CET</span></div>
+    <div class="mono" style="font-size:44px;margin-top:22px"><span class="g">06:00</span>–22:00 <span style="font-size:26px;color:var(--ink-3)">· 05:00 UTC</span></div>
+  </div>
+  <div class="panel" id="mon30" style="left:940px;top:685px;width:840px;height:215px">
+    <div style="display:flex;justify-content:space-between"><span style="font-size:30px;font-weight:600">Mon 30 Mar</span><span class="mono" style="font-size:24px;color:var(--ink-3)">CEST</span></div>
+    <div class="mono" style="font-size:44px;margin-top:22px"><span class="g">06:00</span>–22:00 <span style="font-size:26px;color:var(--ink-3)">· <span class="a">04:00 UTC</span></span></div>
+  </div>
+</div>
+
+<!-- 5 -->
+<div class="scene" id="s5">
+  <div class="cap" style="font-size:80px"><span class="soft">Stop checking for conflicts in application code.</span><br>Let PostgreSQL refuse them.</div>
+  <div class="code" style="top:340px">
+    <div class="bar">src/ddl.ts</div>
+<pre id="ddl"><span class="k">CONSTRAINT</span> slotlock_reservations_no_overlap <span class="k">EXCLUDE USING</span> gist (
+  resource_id <span class="k">WITH</span> =,
+  tstzrange(COALESCE(occupied_starts_at, starts_at),
+            COALESCE(occupied_ends_at, ends_at), <span class="a">'[)'</span>) <span class="k">WITH</span> &amp;&amp;
+)</pre>
+<pre id="race" style="padding-top:0"></pre>
+  </div>
+</div>
+
+<!-- 6 -->
+<div class="scene" id="s6" style="flex-direction:column;align-items:center;justify-content:center;text-align:center">
+  <svg id="ologo" width="200" height="200" viewBox="0 0 64 64"><rect x=".5" y=".5" width="63" height="63" rx="14" fill="#1a1a1c" stroke="rgba(255,255,255,.22)"/><g transform="translate(12.2 14.1) scale(0.465)"><path fill="#F6F4EE" d="M13.13 34.46L72.2 34.46C79.45 34.46 85.32 40.33 85.32 47.58L85.32 63.99C85.32 71.24 79.45 77.12 72.2 77.12L13.13 77.12C5.88 77.12 0 71.24 0 63.99L0 47.58C0 40.33 5.88 34.46 13.13 34.46ZM22.97 39.38L22.97 19.69C22.97 8.82 31.79 0 42.66 0C53.54 0 62.35 8.82 62.35 19.69L62.35 39.38L56.61 39.38L56.61 19.69C56.61 11.99 50.36 5.74 42.66 5.74C34.96 5.74 28.71 11.99 28.71 19.69L28.71 39.38Z"/><path fill="#FF5B2E" d="M19.69 52.51L65.63 52.51C67.45 52.51 68.91 53.98 68.91 55.79C68.91 57.6 67.45 59.07 65.63 59.07L19.69 59.07C17.88 59.07 16.41 57.6 16.41 55.79C16.41 53.98 17.88 52.51 19.69 52.51Z"/></g></svg>
+  <div id="ow" style="font-family:'Inter Tight';font-weight:700;font-size:150px;letter-spacing:-.05em;margin-top:28px">slotlock</div>
+  <div id="ot" style="font-family:'Inter Tight';font-weight:500;font-size:64px;letter-spacing:-.03em;margin-top:24px">The calendar AI agents cannot <span style="color:var(--accent)">double-book.</span></div>
+  <div id="of" class="mono" style="font-size:26px;letter-spacing:.12em;color:var(--ink-3);margin-top:50px">OPEN SOURCE · SLOTLOCK.PYLOTA.IO</div>
+</div>
+
+<div id="wipe"></div>
+<script>
+const $=id=>document.getElementById(id);
+const cl=(v,a=0,b=1)=>Math.min(b,Math.max(a,v));
+const eo=x=>1-Math.pow(1-cl(x),4);
+const eio=x=>{x=cl(x);return x<.5?8*x**4:1-Math.pow(-2*x+2,4)/2};
+const ramp=(t,a,d)=>cl((t-a)/d);
+function set(el,o,tx=0,ty=0,s=1){el.style.opacity=o;el.style.transform=`translate(${tx}px,${ty}px) scale(${s})`;}
+const pop=(el,t,a,d=.4,dy=30)=>{const p=eo(ramp(t,a,d));set(el,p,0,(1-p)*dy);};
+// timelines: 00..24 for scene 2, 04..18 for pool
+function lay(root,h0,h1,x0,x1,step){
+  const hx=h=>x0+(h-h0)*(x1-x0)/(h1-h0);
+  root.querySelectorAll('.hrs').forEach(hr=>{for(let h=h0;h<=h1;h+=step){const s=document.createElement('span');s.textContent=String(h).padStart(2,'0');s.style.left=hx(h)+'px';hr.appendChild(s);}});
+  root.querySelectorAll('.row').forEach(r=>{for(let h=h0+step;h<h1;h+=step){const g=document.createElement('div');g.className='grid';g.style.left=hx(h)+'px';r.prepend(g);}});
+  root.querySelectorAll('.blk').forEach(b=>{const a=+b.dataset.a,e=+b.dataset.b;b.style.left=(hx(a)+3)+'px';b.style.width=(hx(e)-hx(a)-6)+'px';});
+}
+lay($('tl2'),4,24,330,1600,2);
+lay($('pool'),4,18,330,1360,2);
+
+const S=[['s1',0,3],['s2',3,7],['s3',7,11],['s4',11,15],['s5',15,19],['s6',19,99]];
+const CUTS=[3,7,11,15,19];
+window.render=function(t){
+  for(const [id,a,b] of S){
+    const el=$(id); const on=t>=a&&t<b; el.style.display=on?(id==='s6'?'flex':'block'):'none';
+    if(on){
+      // wipe in from left over 0.45 s; fade out over last 0.2 s
+      const w=a===0?1:eio(ramp(t,a,.45));
+      el.style.clipPath=`inset(0 ${(1-w)*100}% 0 0)`;
+      el.style.opacity=b<99?1-ramp(t,b-.2,.2):1;
+    }
+  }
+  const cut=CUTS.find(c=>t>=c&&t<c+.45); const wp=$('wipe');
+  if(cut!==undefined){wp.style.display='block';wp.style.left=(eio(ramp(t,cut,.45))*1920-3)+'px';wp.style.opacity=1-ramp(t,cut+.3,.15);}else wp.style.display='none';
+
+  if(t<3){ // trailer cards on beats
+    [['h1',0,1],['h2',1,2],['h3',2,3]].forEach(([id,a,b])=>{
+      const on=t>=a&&t<b; const p=eo(ramp(t,a,.35)); const el=$(id);
+      el.style.display=on?'flex':'none'; el.style.opacity=on?p*(1-ramp(t,b-.12,.12)):0;
+      el.style.transform=`scale(${1.12-.12*p})`; el.style.filter=`blur(${(1-p)*14}px)`;
+    });
+  } else if(t<7){
+    pop($('c2'),t,3.15,.4);
+    pop($('pA'),t,3.3,.4,40); pop($('pB'),t,3.3,.4,40); pop($('tl2'),t,3.5,.4,40);
+    const r=t>=4.5, bk=t>=5.3;
+    $('rA').innerHTML=r?(bk?'<span class="m">→ </span><span class="g">booked · Job 4471</span>':'<span class="m">→ </span><span class="a">held</span>'):'&nbsp;';
+    $('rB').innerHTML=r?'<span class="m">→ </span><span class="r">{ ok: false, code: \'overlap\' }</span>':'&nbsp;';
+    const j=$('j4471'); j.className='blk '+(bk?'booked':'hold'); j.textContent=bk?'Job 4471':'Planner agent · hold';
+    j.style.opacity=r?1:0; j.style.top=r&&!bk?'24px':'24px';
+    j.style.height='44px'; if(bk) j.style.height='72px';
+    const g=$('ghostB'); const gp=eo(ramp(t,4.5,.2)); const k=t-4.5; const sh=k>0&&k<.6?Math.sin(k*60)*14*(1-k/.6):0;
+    g.style.opacity=r?gp*(1-ramp(t,5.6,.4)):0; g.style.transform=`translateX(${sh}px)`;
+    $('pB').style.borderColor=r&&t<5.8?'var(--refused)':'var(--line-strong)';
+  } else if(t<11){
+    // scan rows at 8.0, 8.5, then lands on Mill 3 at 9.0
+    const sc=$('scan'); const y=t<8.5?80:t<9?200:320; sc.style.top=y+'px'; sc.style.opacity=t>=7.8?1:0;
+    $('t1').style.opacity=t>=8.25?1:0; $('t2').style.opacity=t>=8.75?1:0; $('t3').style.opacity=t>=9.0?1:0;
+    const m=eo(ramp(t,9.0,.3)); set($('m3'),m,0,0,.94+.06*m);
+    $('poolres').innerHTML=t>=9.0?'<span class="m">→ </span><span class="a">Mill 3 · held</span>':'&nbsp;';
+  } else if(t<15){
+    const f=t>=12.5; $('flip').textContent=f?'03:00':'02:00';
+    $('zone').innerHTML=f?'<span class="a">CEST · UTC+2</span>':'CET · UTC+1';
+    const fp=ramp(t,12.5,.25); $('flip').style.transform=`scaleY(${f?.6+.4*eo(fp):1})`;
+    $('flip').style.color=f&&t<13.2?'var(--hold)':'var(--ink)';
+    pop($('mon30'),t,13.0,.4,24);
+  } else if(t<19){
+    const lines=[['m','-- two writers, same mill, same instant'],['','racer-a  INSERT [06:00, 14:00)  '],['g','committed'],['','\nracer-b  INSERT [06:00, 14:00)  '],['r','SQLSTATE 23P01, exclusion_violation']];
+    const st=[15.8,16.2,16.7,17.0,17.5]; let h='';
+    lines.forEach(([c,s],i)=>{const n=Math.floor(cl((t-st[i])*90,0,s.length)); if(n>0) h+=(i===1?'\n':'')+`<span class="${c}">${s.slice(0,n)}</span>`;});
+    $('race').innerHTML=h||' ';
+  } else {
+    const o1=eo(ramp(t,19.3,.7)),o2=eo(ramp(t,19.8,.6)),o3=eo(ramp(t,20.4,.6)),o4=eo(ramp(t,21.0,.5));
+    set($('ologo'),o1,0,(1-o1)*30,.92+.08*o1); set($('ow'),o2,0,(1-o2)*30); set($('ot'),o3,0,(1-o3)*24); set($('of'),o4,0,(1-o4)*16);
+  }
+};
+window.render(0);
+</script></body></html>

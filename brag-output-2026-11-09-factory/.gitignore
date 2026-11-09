@@ -1,0 +1,7 @@
+# Rendered intermediates: rebuild with work/frames.cjs and work/music.py
+work/frames/
+work/*.png
+work/*.jpg
+work/*.wav
+work/*.woff2
+work/favicon.svg
