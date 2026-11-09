@@ -375,8 +375,36 @@ this one and read its session secret, which signs in as any tenant.
 4. Store the secrets on the Worker: `npx wrangler secret put` for `SLOTLOCK_GITHUB_CLIENT_ID`,
    `SLOTLOCK_GITHUB_CLIENT_SECRET` and `SLOTLOCK_SESSION_SECRET`, and `SLOTLOCK_ASSISTANT_SECRET`
    for the assistant.
+   For plans and billing (hosted Slotlock), also `STRIPE_SECRET_KEY` (a restricted key: write on
+   Checkout Sessions and Customer portal, read on Subscriptions) and `STRIPE_WEBHOOK_SECRET`; see
+   [Plans and billing](#plans-and-billing).
 5. Deploy: `npm ci --omit=dev` at the repository root (the Worker bundles Slotlock's sources), then
    `npx wrangler deploy --config <your configuration>` in `workers/dashboard`.
+
+#### Plans and billing
+
+Hosted Slotlock sells plans; self-hosted Slotlock writes no plan and keeps the server's limits.
+
+| Plan | Resources | Active API keys | Webhook endpoints | Price |
+| --- | --- | --- | --- | --- |
+| Free | 10 | 10 | 2 | Free |
+| Developer | 100 | 100 | 10 | $10 a month or $100 a year |
+| Custom | Your servers | | | Talk to the founder |
+
+With `STRIPE_SECRET_KEY`, `SLOTLOCK_STRIPE_PRICE_MONTHLY` and `SLOTLOCK_STRIPE_PRICE_YEARLY` (the
+Developer prices' ids), the dashboard gains a **Plan** page: the tenant's plan and use, **Upgrade**
+(a Stripe Checkout with Managed Payments, Stripe as merchant of record) and **Manage billing** (the
+Stripe customer portal). Point a Stripe webhook endpoint at `<SLOTLOCK_PUBLIC_URL>/stripe/webhook`
+with the `checkout.session.completed` and `customer.subscription.*` events and store its signing
+secret as `STRIPE_WEBHOOK_SECRET`. Each signed event makes the Worker read the subscription from
+Stripe and set the tenant's plan: `active` or `trialing` gives Developer, `past_due` keeps it while
+Stripe retries, anything else returns the tenant to Free. Nothing is deleted when a plan ends; the
+tenant cannot add more until it is under the Free limits.
+
+Optional variables: `SLOTLOCK_FREE_PLAN_FROM` (an ISO date; from then a tenant with no plan is put
+on Free the next time it adds a key, resource or webhook), `SLOTLOCK_PLAN_CONTACT` (where Custom
+enquiries go, an https or mailto URL), `SLOTLOCK_PLAN_PRICE_MONTHLY` and `SLOTLOCK_PLAN_PRICE_YEARLY`
+(the prices as shown, `$10` and `$100` by default) and `STRIPE_API_VERSION`.
 
 - Each request opens its own database client, at most five connections, and closes it when the
   response is sent; Hyperdrive keeps the pool.

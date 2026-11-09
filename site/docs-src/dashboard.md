@@ -59,6 +59,13 @@ page: every member of an organization can ask in plain words ("what's free tomor
 - It cannot touch API keys, webhooks, booking rules, pools or erasure.
 - Up to 10 messages a minute per member; a conversation is kept for 2 hours.
 
+## Plan
+
+On hosted Slotlock, **Plan** shows the workspace's plan and how much of it is used, with
+**Upgrade to Developer** (paid through Stripe, in your currency, with tax added where it applies) and
+**Manage billing** for invoices, the payment method and cancelling. Free allows 10 resources, 10 API
+keys and 2 webhook endpoints; Developer 100, 100 and 10. A self-hosted dashboard has no Plan page.
+
 ## Before you go live
 
 - Serve the dashboard on an origin of its own, such as `https://slotlock.example.com`, not as a path

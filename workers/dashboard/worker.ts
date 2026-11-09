@@ -35,6 +35,12 @@ import {
   createSlotlockDashboardState,
 } from '../../src/dashboard.js';
 import {
+  createSlotlockStripe,
+  handleSlotlockStripeWebhook,
+  type SlotlockStripe,
+} from '../../src/billing.js';
+import { readSlotlockTenantPlan, setSlotlockTenantPlan } from '../../src/plans.js';
+import {
   createSlotlockRateLimiter,
   slotlockClientKey,
   slotlockClientNetwork,
@@ -78,6 +84,7 @@ export interface SlotlockDashboardWorkerOptions {
 }
 
 interface RequestScope {
+  sql: ReturnType<typeof postgres>;
   keys: SlotlockApiKeyStore;
   /** The assistant's agent backend, on the request's own client. */
   agent: SlotlockAgentCalendarBackend;
@@ -109,6 +116,39 @@ export function createSlotlockWorkerAgentLimiter(vars: SlotlockEnv) {
     if (calls.count > SLOTLOCK_WORKER_AGENT_CALLS_PER_REQUEST) return false;
     const bucket = slotlockAgentOperationScope(args.operation) === 'write' ? writes : reads;
     return bucket ? bucket.take(args.principal.tenantRef) : true;
+  };
+}
+
+/**
+ * Hosted plans and Stripe billing, on when STRIPE_SECRET_KEY and both price ids are set:
+ * SLOTLOCK_STRIPE_PRICE_MONTHLY and SLOTLOCK_STRIPE_PRICE_YEARLY (the Developer plan's), and
+ * STRIPE_WEBHOOK_SECRET for the webhook at `<base>/stripe/webhook`. From SLOTLOCK_FREE_PLAN_FROM
+ * (an ISO date), a tenant with no plan is put on Free when it next adds something plans limit.
+ */
+function readBilling(vars: SlotlockEnv) {
+  const secretKey = vars.STRIPE_SECRET_KEY?.trim();
+  const month = vars.SLOTLOCK_STRIPE_PRICE_MONTHLY?.trim();
+  const year = vars.SLOTLOCK_STRIPE_PRICE_YEARLY?.trim();
+  if (!secretKey || !month || !year) return null;
+  const freeFrom = vars.SLOTLOCK_FREE_PLAN_FROM?.trim();
+  const freeFromMs = freeFrom ? Date.parse(freeFrom) : null;
+  if (freeFromMs !== null && Number.isNaN(freeFromMs)) {
+    throw new SlotlockConfigError('SLOTLOCK_FREE_PLAN_FROM must be an ISO date');
+  }
+  const apiVersion = vars.STRIPE_API_VERSION?.trim();
+  return {
+    stripe: createSlotlockStripe({
+      secretKey,
+      prices: { month, year },
+      ...(apiVersion ? { apiVersion } : {}),
+    }),
+    webhookSecret: vars.STRIPE_WEBHOOK_SECRET?.trim() || null,
+    freeFromMs,
+    contact: vars.SLOTLOCK_PLAN_CONTACT?.trim() || 'mailto:clever.eziogor@gmail.com',
+    prices: {
+      month: vars.SLOTLOCK_PLAN_PRICE_MONTHLY?.trim() || '$10',
+      year: vars.SLOTLOCK_PLAN_PRICE_YEARLY?.trim() || '$100',
+    },
   };
 }
 
@@ -166,6 +206,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
         root: string;
         availability: ReturnType<typeof readAvailability>;
         signInPaths: Set<string>;
+        stripeWebhook: { path: string; secret: string; stripe: SlotlockStripe } | null;
         limits: {
           client: SlotlockRateLimit;
           signIn: SlotlockRateLimit;
@@ -208,6 +249,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       throw new SlotlockConfigError('the HYPERDRIVE binding is required');
     }
     const agentLimiter = createSlotlockWorkerAgentLimiter(vars);
+    const billing = readBilling(vars);
     const dashboard = createSlotlockDashboard({
       publicUrl,
       serviceUrl,
@@ -236,6 +278,26 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
             },
           }
         : {}),
+      ...(billing
+        ? {
+            billing: {
+              async plan(tenantRef: string) {
+                const { sql } = current();
+                const found = await readSlotlockTenantPlan(sql, tenantRef);
+                if (found || billing.freeFromMs === null || Date.now() < billing.freeFromMs) {
+                  return found;
+                }
+                await setSlotlockTenantPlan(sql, { tenantRef, plan: 'free', status: 'active' });
+                return readSlotlockTenantPlan(sql, tenantRef);
+              },
+              checkout: (input) => billing.stripe.checkout(input),
+              portal: (input) => billing.stripe.portal(input),
+              prices: billing.prices,
+              contact: billing.contact,
+              formOrigins: ['https://checkout.stripe.com', 'https://billing.stripe.com'],
+            },
+          }
+        : {}),
       // Cloudflare sets CF-Connecting-IP itself, so one client's sign-ins in flight are capped.
       clientAddress: clientOf,
       keys: perRequest(() => current().keys),
@@ -257,6 +319,14 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       root,
       availability: readAvailability(vars),
       signInPaths: new Set([`${base}/sign-in`, `${base}/callback`]),
+      stripeWebhook:
+        billing?.webhookSecret
+          ? {
+              path: `${new URL(publicUrl).pathname.replace(/\/$/, '')}/stripe/webhook`,
+              secret: billing.webhookSecret,
+              stripe: billing.stripe,
+            }
+          : null,
       limits: { client, signIn, signInCeiling },
     };
   }
@@ -280,9 +350,29 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
           headers: { 'content-type': 'text/plain; charset=utf-8' },
         });
       }
-      const { dashboard, root, signInPaths, limits, availability } = built;
+      const { dashboard, root, signInPaths, limits, availability, stripeWebhook } = built;
       const path = new URL(request.url).pathname;
       if (path === '/') return Response.redirect(root, 302);
+      // Stripe's deliveries: the client connects only once the signature has been checked.
+      if (stripeWebhook && path === stripeWebhook.path) {
+        const sql = postgres(env.HYPERDRIVE.connectionString, { max: 1, onnotice: () => {} });
+        try {
+          return await handleSlotlockStripeWebhook(request, {
+            secret: stripeWebhook.secret,
+            stripe: stripeWebhook.stripe,
+            sql,
+            onError: (error) =>
+              console.error(
+                JSON.stringify({
+                  message: 'slotlock stripe webhook failed',
+                  error: error instanceof Error ? `${error.name}: ${error.message}` : 'unknown',
+                }),
+              ),
+          });
+        } finally {
+          ctx.waitUntil(sql.end({ timeout: 5 }));
+        }
+      }
       // Browsers and crawlers ask the origin's root for its icon; the dashboard serves it.
       if (path === '/favicon.ico' || path === '/favicon.svg') {
         return Response.redirect(`${root}/favicon.svg`, 301);
@@ -318,6 +408,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       try {
         const store = createSlotlockStore(sql);
         const requestScope: RequestScope = {
+          sql,
           keys: createSlotlockApiKeyStore(sql),
           agentCalls: { count: 0 },
           agent: createSlotlockStoreAgentBackend(store, {

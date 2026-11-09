@@ -20,6 +20,7 @@ import {
 } from '../dashboard.js';
 import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from '../ddl.js';
 import type { SlotlockChange, SlotlockWebhookEndpoint } from '../event-feed.js';
+import type { SlotlockTenantPlan } from '../plans.js';
 import type { SlotlockWaitlistEntry } from '../store.js';
 import type { SlotlockAgendaEntry, SlotlockResource, WeeklyAvailabilityRule } from '../types.js';
 
@@ -1419,6 +1420,40 @@ describe('organizations', () => {
     });
   };
 
+  it("leaves an organization's plan and billing to its owners", async () => {
+    const billing = {
+      plan: vi.fn(async () => ({
+        plan: 'free' as const,
+        status: 'active' as const,
+        limits: { resources: 10, apiKeys: 10, webhookEndpoints: 2 },
+        stripeCustomer: 'cus_Org1',
+        stripeSubscription: null,
+        currentPeriodEnd: null,
+      })),
+      checkout: vi.fn(async () => 'https://checkout.stripe.com/c/pay/cs_1'),
+      portal: vi.fn(async () => 'https://billing.stripe.com/p/session/1'),
+      prices: { month: '$10', year: '$100' },
+      contact: 'mailto:founder@example.com',
+      formOrigins: ['https://checkout.stripe.com', 'https://billing.stripe.com'],
+    };
+    const member = orgDashboard([ACME], { billing });
+    const { session } = await signIn(member);
+    const page = await (await get(member, '/base/dashboard/plan', session)).text();
+    expect(page).not.toContain('Upgrade to Developer');
+    expect(page).not.toContain('Manage billing');
+    for (const path of ['/base/dashboard/plan/upgrade', '/base/dashboard/plan/manage']) {
+      expect((await post(member, path, { csrf: await csrf(member, session) }, session)).status).toBe(403);
+    }
+    expect(billing.checkout).not.toHaveBeenCalled();
+    expect(billing.portal).not.toHaveBeenCalled();
+
+    const owner = orgDashboard([{ ...ACME, role: 'admin' }], { billing });
+    const signedIn = (await signIn(owner)).session;
+    const ownerPage = await (await get(owner, '/base/dashboard/plan', signedIn)).text();
+    expect(ownerPage).toContain('Upgrade to Developer');
+    expect(ownerPage).toContain('Manage billing');
+  });
+
   it('asks GitHub for read:org only when the server serves organizations', async () => {
     expect((await signIn(dashboard())).location.searchParams.has('scope')).toBe(false);
     expect((await signIn(orgDashboard([ACME]))).location.searchParams.get('scope')).toBe('read:org');
@@ -2113,5 +2148,134 @@ describe('the dashboard design', () => {
     const html = await (await get(target, '/base/dashboard/keys', session)).text();
     expect(html).toContain('title="&quot;&gt;&lt;img src=x onerror=alert(1)&gt;"');
     expect(html).not.toContain('<img src=x');
+  });
+});
+
+describe('the plan page', () => {
+  function billed(plan: SlotlockTenantPlan | null = null) {
+    const calls: Array<{ kind: string; input: unknown }> = [];
+    const billing = {
+      plan: vi.fn(async (_tenantRef: string) => plan),
+      checkout: vi.fn(async (input: unknown) => {
+        calls.push({ kind: 'checkout', input });
+        return 'https://checkout.stripe.com/c/pay/cs_test_1';
+      }),
+      portal: vi.fn(async (input: unknown) => {
+        calls.push({ kind: 'portal', input });
+        return 'https://billing.stripe.com/p/session/test_1';
+      }),
+      prices: { month: '$10', year: '$100' },
+      contact: 'mailto:founder@example.com',
+      formOrigins: ['https://checkout.stripe.com', 'https://billing.stripe.com'],
+    };
+    return { billing, calls, target: dashboard({ billing }) };
+  }
+  const developer: SlotlockTenantPlan = {
+    plan: 'developer',
+    status: 'active',
+    limits: { resources: 100, apiKeys: 100, webhookEndpoints: 10 },
+    stripeCustomer: 'cus_Test1',
+    stripeSubscription: 'sub_Test1',
+    currentPeriodEnd: new Date('2026-12-10T12:00:00Z'),
+  };
+
+  it('is not there without billing', async () => {
+    const { session } = await signIn();
+    const html = await (await get(dashboard(), '/base/dashboard', session)).text();
+    expect(html).not.toContain('/base/dashboard/plan');
+    expect((await get(dashboard(), '/base/dashboard/plan', session)).status).toBe(404);
+  });
+
+  it('shows a Free tenant its use against the limits, an upgrade and the founder', async () => {
+    const free: SlotlockTenantPlan = {
+      plan: 'free',
+      status: 'active',
+      limits: { resources: 10, apiKeys: 10, webhookEndpoints: 2 },
+      stripeCustomer: null,
+      stripeSubscription: null,
+      currentPeriodEnd: null,
+    };
+    const { target } = billed(free);
+    const { session } = await signIn(target);
+    const response = await get(target, '/base/dashboard/plan', session);
+    expect(response.status).toBe(200);
+    // Upgrade and Manage redirect to Stripe, so the policy lets forms go there and nowhere else.
+    expect(response.headers.get('content-security-policy')).toContain(
+      "form-action 'self' https://checkout.stripe.com https://billing.stripe.com;",
+    );
+    const html = await response.text();
+    expect(html).toContain('href="/base/dashboard/plan"');
+    expect(html).toContain('Plan: Free');
+    expect(html).toContain('<span class="meta"> of 10</span>');
+    expect(html).toContain('action="/base/dashboard/plan/upgrade"');
+    expect(html).toContain('Monthly, $10 a month');
+    expect(html).toContain('Yearly, $100 a year');
+    expect(html).not.toContain('Manage billing');
+    expect(html).toContain('href="mailto:founder@example.com">Talk to the founder');
+  });
+
+  it('sends Upgrade to a checkout page tagged with the tenant, and back to the plan page', async () => {
+    const { target, calls } = billed(null);
+    const { session } = await signIn(target);
+    const response = await post(target, '/base/dashboard/plan/upgrade', { csrf: await csrf(target, session), interval: 'year' }, session);
+    expect(response.status).toBe(303);
+    expect(response.headers.get('location')).toBe('https://checkout.stripe.com/c/pay/cs_test_1');
+    expect(calls).toEqual([
+      {
+        kind: 'checkout',
+        input: {
+          tenantRef: `github:${GITHUB_USER.id}`,
+          interval: 'year',
+          customer: null,
+          successUrl: `${DASHBOARD}/plan?checkout=done`,
+          cancelUrl: `${DASHBOARD}/plan`,
+        },
+      },
+    ]);
+    const back = await (await get(target, '/base/dashboard/plan?checkout=done', session)).text();
+    expect(back).toContain('once Stripe confirms the payment');
+  });
+
+  it('shows a Developer tenant its renewal and Manage billing, which opens the portal', async () => {
+    const { target, calls } = billed(developer);
+    const { session } = await signIn(target);
+    const html = await (await get(target, '/base/dashboard/plan', session)).text();
+    expect(html).toContain('Plan: Developer');
+    expect(html).toContain('Renews 2026-12-10 12:00 UTC');
+    expect(html).not.toContain('Upgrade to Developer');
+    const manage = await post(target, '/base/dashboard/plan/manage', { csrf: await csrf(target, session) }, session);
+    expect(manage.headers.get('location')).toBe('https://billing.stripe.com/p/session/test_1');
+    expect(calls).toEqual([
+      { kind: 'portal', input: { customer: 'cus_Test1', returnUrl: `${DASHBOARD}/plan` } },
+    ]);
+    const again = await post(target, '/base/dashboard/plan/upgrade', { csrf: await csrf(target, session) }, session);
+    expect(again.status).toBe(409);
+  });
+
+  it('warns a tenant whose payment failed, and says so when Stripe does not answer', async () => {
+    const { target, billing } = billed({ ...developer, status: 'past_due' });
+    const { session } = await signIn(target);
+    expect(await (await get(target, '/base/dashboard/plan', session)).text()).toContain(
+      'Your last payment failed',
+    );
+    billing.portal.mockRejectedValueOnce(new Error('down'));
+    const failed = await post(target, '/base/dashboard/plan/manage', { csrf: await csrf(target, session) }, session);
+    expect(failed.status).toBe(502);
+    expect(await failed.text()).toContain('Billing did not open');
+  });
+
+  it('puts a tenant on a plan before it adds what plans limit', async () => {
+    const { target, billing } = billed(null);
+    const { session } = await signIn(target);
+    billing.plan.mockClear();
+    await post(target, '/base/dashboard/keys', { csrf: await csrf(target, session), name: 'agent', access: 'read', expires: 'never' }, session);
+    expect(billing.plan).toHaveBeenCalledWith(`github:${GITHUB_USER.id}`);
+  });
+
+  it('refuses billing that would loosen the policy', () => {
+    const { billing } = billed();
+    expect(() => dashboard({ billing: { ...billing, formOrigins: ['http://checkout.stripe.com'] } })).toThrow();
+    expect(() => dashboard({ billing: { ...billing, formOrigins: ["https://a.com 'unsafe-inline'"] } })).toThrow();
+    expect(() => dashboard({ billing: { ...billing, contact: 'javascript:alert(1)' } })).toThrow();
   });
 });

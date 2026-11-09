@@ -61,6 +61,7 @@ import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from './ddl.js';
 import { ignoreRejection } from './hooks.js';
 import { SLOTLOCK_BOOKING_RULE_LIMITS, type SlotlockBookingRules } from './booking-rules.js';
 import { SLOTLOCK_DASHBOARD_ICON_SVG } from './dashboard-icon.js';
+import { SLOTLOCK_PLAN_LIMITS, type SlotlockTenantPlan } from './plans.js';
 import {
   type CreateWebhookEndpointResult,
   SLOTLOCK_CHANGE_TYPES,
@@ -123,6 +124,8 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/settings/assistant',
   '/settings/assistant/test',
   '/settings/assistant/remove',
+  '/plan/upgrade',
+  '/plan/manage',
 ]);
 const SIGN_IN_AGAIN = 'That sign-in did not finish here, or took too long. Sign in again.';
 const GITHUB_ERROR_CODE = /^[a-z0-9_]{1,64}$/;
@@ -157,6 +160,26 @@ const KEY_EXPIRY_DAYS: Readonly<Record<string, number | null>> = Object.freeze({
 const REFERRER_POLICY = 'same-origin';
 const CONTENT_SECURITY_POLICY =
   "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+
+/** The policy, with billing's origins allowed as form targets so Upgrade and Manage can redirect. */
+function policyFor(billing: SlotlockDashboardBilling | undefined): string {
+  if (!billing) return CONTENT_SECURITY_POLICY;
+  const contact = new URL(billing.contact);
+  if (contact.protocol !== 'https:' && contact.protocol !== 'mailto:') {
+    throw new Error('billing.contact must be an https or mailto URL');
+  }
+  const origins = billing.formOrigins.map((value) => {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'https:' || parsed.origin !== value.replace(/\/$/, '')) {
+      throw new Error(`billing.formOrigins must be https origins: ${value}`);
+    }
+    return parsed.origin;
+  });
+  return CONTENT_SECURITY_POLICY.replace(
+    "form-action 'self'",
+    ["form-action 'self'", ...origins].join(' '),
+  );
+}
 
 /**
  * A tenant's calendar resources, as the dashboard lists and adds them. Each write takes, last, the
@@ -313,6 +336,31 @@ export interface SlotlockDashboardAssistantOptions {
   conversationTtlMs?: number;
 }
 
+/**
+ * Hosted Slotlock's plans (plans.ts) and their billing: a Plan page with the tenant's plan and use,
+ * Upgrade (to a checkout page) and Manage (to a billing portal). Off unless set.
+ */
+export interface SlotlockDashboardBilling {
+  /** The tenant's plan, or null when it has none (the server's limits apply). */
+  plan(tenantRef: string): Promise<SlotlockTenantPlan | null>;
+  /** A checkout URL for the Developer plan. */
+  checkout(input: {
+    tenantRef: string;
+    interval: 'month' | 'year';
+    customer: string | null;
+    successUrl: string;
+    cancelUrl: string;
+  }): Promise<string>;
+  /** A billing portal URL for the tenant's customer. */
+  portal(input: { customer: string; returnUrl: string }): Promise<string>;
+  /** The Developer plan's prices as shown, such as `$10`. */
+  prices: { month: string; year: string };
+  /** Where a Custom (self-hosted) enquiry goes: an https or mailto URL. */
+  contact: string;
+  /** The https origins Upgrade and Manage redirect to, allowed in the policy's form-action. */
+  formOrigins: readonly string[];
+}
+
 export interface SlotlockDashboardOptions {
   /** Where people reach the server; the dashboard lives at `<publicUrl>/dashboard`. */
   publicUrl: string;
@@ -359,6 +407,8 @@ export interface SlotlockDashboardOptions {
   availability?: readonly WeeklyAvailabilityRule[];
   /** The chat assistant; off unless set. */
   assistant?: SlotlockDashboardAssistantOptions;
+  /** Plans and billing (hosted Slotlock); off unless set. */
+  billing?: SlotlockDashboardBilling;
   fetch?: typeof fetch;
   now?: () => number;
   /**
@@ -760,6 +810,7 @@ const ICONS = Object.freeze({
   waitlist: icon('<path d="M4 6h16M4 12h10M4 18h6"/><circle cx="18" cy="16" r="3"/>'),
   webhooks: icon('<path d="M9 7a3 3 0 1 1 4 2.8L16 15M6.5 13.5A3 3 0 1 0 9 18h6M15 18a3 3 0 1 0 1.5-5.6"/>'),
   assistant: icon('<path d="M4 5h16v11H9l-5 4z"/><path d="M8 9h8M8 12h5"/>'),
+  plan: icon('<rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h4"/>'),
   settings: icon(
     '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
   ),
@@ -1040,6 +1091,8 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const base = publicUrl.pathname.replace(/\/$/, '');
   const root = `${base}/dashboard`;
   const callbackUrl = `${origin}${root}/callback`;
+  const publicRoot = `${origin}${root}`;
+  const contentSecurityPolicy = policyFor(options.billing);
   // Its cookies are Secure, but a first visit over http:// could still be answered by someone else:
   // a browser that has seen this goes straight to https:// for a year. Not for a local http one.
   const hsts: Record<string, string> =
@@ -1188,7 +1241,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       status,
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
-        'Content-Security-Policy': CONTENT_SECURITY_POLICY,
+        'Content-Security-Policy': contentSecurityPolicy,
         'Cache-Control': 'no-store',
         'X-Frame-Options': 'DENY',
         'X-Content-Type-Options': 'nosniff',
@@ -1205,7 +1258,15 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const redirect = (status: number, location: string, cookies: string[] = []) =>
     respond(status, '', { Location: location }, cookies);
 
-  type Section = 'overview' | 'resources' | 'waitlist' | 'keys' | 'webhooks' | 'assistant' | 'settings';
+  type Section =
+    | 'overview'
+    | 'resources'
+    | 'waitlist'
+    | 'keys'
+    | 'webhooks'
+    | 'assistant'
+    | 'plan'
+    | 'settings';
   // Pages for what the adapter offers, so a custom one without a waitlist shows none. Read per
   // request: on Workers the adapter exists only inside one.
   const nav = (): ReadonlyArray<{ section: Section; label: string; path: string; icon: Html }> => [
@@ -1220,6 +1281,9 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       : []),
     ...(assistantStore()
       ? [{ section: 'assistant' as const, label: 'Assistant', path: '/assistant', icon: ICONS.assistant }]
+      : []),
+    ...(options.billing
+      ? [{ section: 'plan' as const, label: 'Plan', path: '/plan', icon: ICONS.plan }]
       : []),
     { section: 'settings', label: 'Settings', path: '/settings', icon: ICONS.settings },
   ];
@@ -2494,6 +2558,119 @@ ${
     return redirect(303, `${root}/assistant`);
   }
 
+  async function planPage(
+    session: Session,
+    status = 200,
+    notice?: string,
+    thanks = false,
+  ): Promise<Response> {
+    const billing = options.billing;
+    if (!billing) return notFound(session);
+    const tenantRef = tenantOf(session);
+    const [plan, resources, keys, webhooks] = await Promise.all([
+      billing.plan(tenantRef),
+      options.resources.list(tenantRef),
+      options.keys.list({ tenantRef }),
+      options.resources.webhooks?.list(tenantRef),
+    ]);
+    const active = keys.filter(
+      (key) => !key.revokedAt && (key.expiresAt === null || key.expiresAt.getTime() > now()),
+    );
+    const token = csrfToken(session);
+    const paying = plan?.plan === 'developer';
+    const name = paying ? 'Developer' : plan ? 'Free' : 'No plan';
+    const use = (label: string, used: number, limit: number | undefined) =>
+      html`<div class="stat"><span class="stat-label">${label}</span><span class="stat-value">${String(used)}${limit === undefined ? html`` : html`<span class="meta"> of ${String(limit)}</span>`}</span></div>`;
+    const warning =
+      plan?.status === 'past_due'
+        ? html`<p class="notice warn" role="alert">Your last payment failed. Update your payment method to keep the Developer plan.</p>`
+        : html``;
+    const free = SLOTLOCK_PLAN_LIMITS.free;
+    const developer = SLOTLOCK_PLAN_LIMITS.developer;
+    const upgrade = paying || !isAdmin(session)
+      ? html``
+      : html`<section class="panel" id="upgrade">
+<h2>Developer</h2>
+<p>${String(developer.resources)} resources, ${String(developer.apiKeys)} API keys and ${String(developer.webhookEndpoints)} webhook endpoints.</p>
+<form method="post" action="${root}/plan/upgrade">
+<input type="hidden" name="csrf" value="${token}">
+<input type="hidden" name="once" value="${formNonce(session)}">
+<fieldset class="modes"><legend>Billed</legend>
+<label class="choice"><input type="radio" name="interval" value="month" checked> Monthly, ${billing.prices.month} a month</label>
+<label class="choice"><input type="radio" name="interval" value="year"> Yearly, ${billing.prices.year} a year</label>
+</fieldset>
+<button class="primary" type="submit">Upgrade to Developer</button>
+</form>
+<p class="fine">Paid through Stripe, in your currency, with tax added where it applies. Cancel at any time.</p>
+</section>`;
+    const manage = plan?.stripeCustomer && isAdmin(session)
+      ? html`<form class="inline" method="post" action="${root}/plan/manage"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><button type="submit">Manage billing</button></form>`
+      : html``;
+    const renews =
+      paying && plan?.currentPeriodEnd
+        ? html`<p class="fine">${plan.status === 'past_due' ? 'Payment due since' : 'Renews'} ${formatDate(plan.currentPeriodEnd)}.</p>`
+        : html``;
+    const content = html`${thanks ? html`<p class="notice">${notice ?? ''}</p>` : noticeOf(notice)}
+${warning}
+${pageHead(`Plan: ${name}`, manage)}
+<div class="stats">
+${use('Resources', resources.length, plan?.limits.resources)}
+${use('Active API keys', active.length, plan?.limits.apiKeys)}
+${webhooks ? use('Webhooks', webhooks.length, plan?.limits.webhookEndpoints) : html``}
+</div>
+${renews}
+${plan ? html`` : html`<p class="fine">Free allows ${String(free.resources)} resources, ${String(free.apiKeys)} API keys and ${String(free.webhookEndpoints)} webhook endpoints.</p>`}
+${upgrade}
+<section class="panel" id="custom">
+<h2>Custom</h2>
+<p>Slotlock on your own servers, with support from the people who build it.</p>
+<a class="button" href="${billing.contact}">Talk to the founder</a>
+</section>`;
+    return respond(status, layout('Plan', content, session, 'plan'));
+  }
+
+  async function upgradePlan(session: Session, form: URLSearchParams): Promise<Response> {
+    const billing = options.billing;
+    if (!billing) return notFound(session);
+    if (!isAdmin(session)) return planPage(session, 403, 'Only owners of the organization can change its plan.');
+    const interval = form.get('interval') === 'year' ? 'year' : 'month';
+    const tenantRef = tenantOf(session);
+    const plan = await billing.plan(tenantRef);
+    if (plan?.plan === 'developer') {
+      return planPage(session, 409, 'You are on the Developer plan already.');
+    }
+    let url: string;
+    try {
+      url = await billing.checkout({
+        tenantRef,
+        interval,
+        customer: plan?.stripeCustomer ?? null,
+        successUrl: `${publicRoot}/plan?checkout=done`,
+        cancelUrl: `${publicRoot}/plan`,
+      });
+    } catch (error) {
+      ignoreRejection(options.onError?.(error));
+      return planPage(session, 502, 'The payment page did not open. Try again in a minute.');
+    }
+    return redirect(303, url);
+  }
+
+  async function manageBilling(session: Session): Promise<Response> {
+    const billing = options.billing;
+    if (!billing) return notFound(session);
+    if (!isAdmin(session)) return planPage(session, 403, 'Only owners of the organization can manage its billing.');
+    const plan = await billing.plan(tenantOf(session));
+    if (!plan?.stripeCustomer) return planPage(session, 409, 'There is no billing to manage yet.');
+    let url: string;
+    try {
+      url = await billing.portal({ customer: plan.stripeCustomer, returnUrl: `${publicRoot}/plan` });
+    } catch (error) {
+      ignoreRejection(options.onError?.(error));
+      return planPage(session, 502, 'Billing did not open. Try again in a minute.');
+    }
+    return redirect(303, url);
+  }
+
   /** The page a form was sent from, to show what went wrong with it. */
   function pageFor(route: string) {
     if (route.startsWith('/keys')) return keysPage;
@@ -2502,6 +2679,7 @@ ${
     if (route.startsWith('/resources') || route === '/hours') return resourcesPage;
     if (route.startsWith('/assistant') && assistantStore()) return assistantPage;
     if (route.startsWith('/settings')) return settingsPage;
+    if (route.startsWith('/plan') && options.billing) return planPage;
     return overviewPage;
   }
 
@@ -3121,6 +3299,10 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         );
       }
     }
+    // A tenant new to plans is put on one (where billing says so) before it adds what plans limit.
+    if (route === '/keys' || route === '/resources' || route === '/webhooks') {
+      await options.billing?.plan(tenantOf(session));
+    }
     switch (route) {
       case '/sign-out':
         await options.state.endSession(session.sid, session.exp);
@@ -3163,6 +3345,10 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         return testAssistant(session);
       case '/settings/assistant/remove':
         return removeAssistantSettings(session);
+      case '/plan/upgrade':
+        return upgradePlan(session, form);
+      case '/plan/manage':
+        return manageBilling(session);
       default:
         return respond(
           404,
@@ -3192,9 +3378,20 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
             case '/webhooks':
             case '/waitlist':
             case '/assistant':
+            case '/plan':
             case '/settings': {
               const session = await readSession(request);
               if (!session) return redirect(303, root);
+              if (route === '/plan') {
+                return await planPage(
+                  session,
+                  200,
+                  url.searchParams.get('checkout') === 'done'
+                    ? 'Thank you. Your plan changes here once Stripe confirms the payment, usually within a minute.'
+                    : undefined,
+                  url.searchParams.get('checkout') === 'done',
+                );
+              }
               if (route === '/keys') return await keysPage(session);
               if (route === '/resources') return await resourcesPage(session);
               if (route === '/webhooks') return await webhooksPage(session);
