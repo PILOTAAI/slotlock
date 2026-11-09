@@ -1,0 +1,1 @@
+Two agents ask for the same van at 09:41. PostgreSQL lets one through, and the other gets the conflict back as data, finds 12:00–14:00 and books that instead. Slotlock is an open-source calendar for AI agents: slotlock.pylota.io

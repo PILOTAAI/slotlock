@@ -1,0 +1,215 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+@font-face{font-family:Inter;src:url(../../site/public/fonts/inter.woff2) format('woff2');font-weight:100 900}
+@font-face{font-family:'Inter Tight';src:url(../../site/public/fonts/inter-tight.woff2) format('woff2');font-weight:100 900}
+@font-face{font-family:'JetBrains Mono';src:url(../../site/public/fonts/jetbrains-mono.woff2) format('woff2');font-weight:100 900}
+:root{--canvas:#f6f4ee;--canvas-2:#eeebe3;--canvas-3:#e5e1d8;--paper:#fff;--ink:#171716;--ink-2:#5d5b56;--ink-3:#6b6963;--ink-4:#bdb8af;
+--line:#1a1a1a1a;--line-strong:#1a1a1a2e;--accent:#2655ff;--accent-soft:#e8edff;--confirmed:#167758;--confirmed-soft:#e4f3ec;
+--hold:#935d12;--hold-soft:#f7ebd6;--hold-stripe:#935d1222;--refused:#a32d2d;--refused-soft:#f4e0df;--busy:#e5e1d8;
+--code-bg:#0e0e10;--code-ink:#f7f7f7;--code-muted:#9e9e9e;--code-accent:#aac0ff;--code-green:#4cc49a;--code-amber:#e8b76b;--code-red:#e87373}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:1920px;height:1080px;overflow:hidden;background:var(--canvas);color:var(--ink);font-family:Inter,sans-serif}
+#stage{position:absolute;inset:0}
+.abs{position:absolute}
+.cap{position:absolute;left:180px;top:118px;width:1560px;font-family:'Inter Tight';font-weight:500;font-size:84px;letter-spacing:-.035em;line-height:1.04;white-space:nowrap}
+.cap .soft{color:#8a877f}
+.eyebrow{position:absolute;left:182px;top:84px;font-family:'JetBrains Mono';font-size:20px;letter-spacing:.12em;color:var(--ink-3);text-transform:uppercase}
+#card{position:absolute;left:180px;width:1560px;background:var(--paper);border:1px solid var(--line-strong);border-radius:20px;box-shadow:0 30px 80px #17171612,0 2px 6px #1717160a;overflow:hidden}
+#cardbar{height:58px;border-bottom:1px solid var(--line);display:flex;align-items:center;padding:0 24px;font-size:20px;color:var(--ink-3)}
+#cardbar .dots i{display:inline-block;width:13px;height:13px;border-radius:50%;background:var(--canvas-3);margin-right:9px}
+#cardbar .mid{flex:1;text-align:center}
+#cardbar .now{font-family:'JetBrains Mono';font-size:18px}
+.hours{position:absolute;top:78px;left:0;right:0;height:30px}
+.hours span{position:absolute;font-family:'JetBrains Mono';font-size:18px;color:var(--ink-3);transform:translateX(-50%)}
+.row{position:absolute;left:0;right:0;height:150px;border-top:1px solid var(--line)}
+.row .lbl{position:absolute;left:34px;top:46px}
+.row .lbl b{display:block;font-weight:600;font-size:28px;letter-spacing:-.01em}
+.row .lbl small{font-family:'JetBrains Mono';font-size:17px;color:var(--ink-3)}
+.grid{position:absolute;top:0;bottom:0;width:1px;background:var(--line)}
+.blk{position:absolute;top:38px;height:74px;border-radius:12px;font-size:22px;font-weight:600;padding:0 18px;display:flex;align-items:center;white-space:nowrap;overflow:hidden}
+.booked{background:var(--confirmed);color:#fff}
+.hold{background:repeating-linear-gradient(135deg,var(--hold-soft) 0 12px,#efdcba 12px 24px);color:var(--hold);border:2px dashed var(--hold)}
+.refused{background:var(--refused-soft);color:var(--refused);border:2px solid var(--refused)}
+.closed{background:repeating-linear-gradient(135deg,#f1eee7 0 10px,#e3dfd6 10px 20px);color:var(--ink-3);border:1px solid var(--line-strong);font-weight:500}
+.busy{background:var(--busy);color:var(--ink-2);font-weight:500}
+.unproven{background:repeating-linear-gradient(135deg,#fff 0 10px,#ebe8e1 10px 20px);color:var(--ink-2);border:1px solid var(--line-strong);font-weight:500}
+.ghost{border:3px dashed var(--accent);background:#2655ff14;color:var(--accent)}
+.ghostB{border:3px dashed var(--ink);background:#17171610;color:var(--ink)}
+.nowline{position:absolute;top:22px;bottom:22px;width:3px;background:var(--accent);border-radius:2px}
+.nowline:before{content:'';position:absolute;top:-6px;left:-5px;width:13px;height:13px;border-radius:50%;background:var(--accent)}
+.agent{position:absolute;display:flex;align-items:center;gap:12px;font-family:'JetBrains Mono';font-size:22px;font-weight:600;padding:10px 18px 10px 12px;border-radius:999px;color:#fff;box-shadow:0 12px 30px #1717162e;white-space:nowrap}
+.agent i{font-style:normal;display:grid;place-items:center;width:34px;height:34px;border-radius:50%;background:#ffffff2b}
+.agentA{background:var(--accent)}
+.agentB{background:var(--ink)}
+.cursor{position:absolute;width:0;height:0}
+.cursor svg{position:absolute;left:-4px;top:-4px}
+#code{position:absolute;left:180px;width:1560px;height:150px;background:var(--code-bg);border-radius:20px;color:var(--code-ink);font-family:'JetBrains Mono';font-size:28px;padding:30px 40px;overflow:hidden}
+#code .ln{position:absolute;left:40px;white-space:pre}
+.m{color:var(--code-muted)}.ac{color:var(--code-accent)}.gr{color:var(--code-green)}.am{color:var(--code-amber)}.rd{color:var(--code-red)}
+.chips{position:absolute;left:180px;display:flex;gap:16px}
+.chip{font-family:'JetBrains Mono';font-size:24px;padding:12px 22px;border-radius:999px;background:var(--paper);border:1px solid var(--line-strong);color:var(--ink)}
+#outro{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
+#logo{display:flex;align-items:center;gap:28px}
+#logo .w{font-family:'Inter Tight';font-weight:700;font-size:150px;letter-spacing:-.05em}
+#tag{margin-top:34px;font-family:'Inter Tight';font-weight:500;font-size:64px;letter-spacing:-.03em}
+#foot{margin-top:40px;font-family:'JetBrains Mono';font-size:26px;letter-spacing:.06em;color:var(--ink-3)}
+</style></head>
+<body><div id="stage">
+  <div class="eyebrow" id="eyebrow">slotlock · a calendar for AI agents</div>
+  <div class="cap" id="c1">Two agents want the <span style="color:var(--accent)">same van.</span></div>
+  <div class="cap" id="c2">PostgreSQL lets <span style="color:var(--confirmed)">one</span> through.</div>
+  <div class="cap" id="c3">The loser gets a result it can act on.</div>
+  <div class="cap" id="c4">Every car, room, person and machine<br><span class="soft">is its own calendar.</span></div>
+
+  <div id="card">
+    <div id="cardbar"><span class="dots"><i></i><i></i><i></i></span><span class="mid">Today · each resource in its own time zone</span><span class="now">now 09:41</span></div>
+    <div class="hours" id="hours"></div>
+    <div class="row" id="r0" style="top:118px">
+      <div class="lbl"><b>Van AB12 CDE</b><small>Europe/London</small></div>
+      <div class="blk booked" data-a="8" data-b="9.5">BK-1838</div>
+      <div class="blk closed" data-a="17" data-b="18">closed</div>
+      <div class="blk ghost" id="gA" data-a="10" data-b="12">A</div>
+      <div class="blk ghostB" id="gB" data-a="11" data-b="13">B</div>
+      <div class="blk hold" id="hA" data-a="10" data-b="12">A · hold</div>
+      <div class="blk booked" id="bA" data-a="10" data-b="12">A · booked</div>
+      <div class="blk refused" id="rB" data-a="11" data-b="13">B · refused</div>
+      <div class="blk hold" id="hB" data-a="12" data-b="14">B · hold</div>
+      <div class="nowline" data-x="9.683"></div>
+    </div>
+    <div class="row" id="r1" style="top:268px">
+      <div class="lbl"><b>Room 3</b><small>Europe/London</small></div>
+      <div class="blk booked" data-a="9" data-b="10">Sync</div>
+      <div class="blk booked" data-a="13" data-b="14.5">Interview</div>
+      <div class="blk closed" data-a="17" data-b="18">closed</div>
+    </div>
+    <div class="row" id="r2" style="top:418px">
+      <div class="lbl"><b>Dr Shah</b><small>Europe/London</small></div>
+      <div class="blk busy" data-a="9" data-b="10.5">busy · .ics</div>
+      <div class="blk unproven" data-a="14" data-b="18">unproven after 14:00</div>
+    </div>
+    <div class="row" id="r3" style="top:568px">
+      <div class="lbl"><b>Mill 2</b><small>Europe/Berlin</small></div>
+      <div class="blk booked" data-a="10.5" data-b="15">Job 4471</div>
+      <div class="blk closed" data-a="16" data-b="18">closed</div>
+    </div>
+  </div>
+
+  <div id="code">
+    <div class="ln" id="k1"></div>
+    <div class="ln" id="k2"></div>
+  </div>
+
+  <div class="chips" id="chips"><span class="chip">MCP</span><span class="chip">A2A</span><span class="chip">REST</span><span class="chip">TypeScript</span><span class="chip">PostgreSQL 16–18</span></div>
+
+  <div class="agent agentA" id="pA"><i>A</i>Agent A</div>
+  <div class="agent agentB" id="pB"><i>B</i>Agent B</div>
+
+  <div id="outro">
+    <div id="logo">
+      <svg width="150" height="150" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#111110"/><g transform="translate(12.2 14.1) scale(0.465)"><path fill="#F6F4EE" d="M13.13 34.46L72.2 34.46C79.45 34.46 85.32 40.33 85.32 47.58L85.32 63.99C85.32 71.240 79.45 77.12 72.2 77.12L13.13 77.12C5.88 77.12 0 71.24 0 63.99L0 47.58C0 40.33 5.88 34.46 13.13 34.46ZM22.97 39.38L22.97 19.69C22.97 8.82 31.79 0 42.66 0C53.54 0 62.35 8.82 62.35 19.690L62.35 39.38L56.61 39.38L56.61 19.69C56.61 11.99 50.36 5.74 42.66 5.74C34.96 5.74 28.71 11.99 28.71 19.69L28.71 39.38Z"/><path fill="#FF5B2E" d="M19.69 52.51L65.63 52.51C67.45 52.51 68.91 53.98 68.91 55.79C68.91 57.6 67.45 59.07 65.630 59.07L19.69 59.07C17.88 59.07 16.41 57.6 16.41 55.79C16.41 53.98 17.88 52.51 19.69 52.51Z"/></g></svg>
+      <span class="w">slotlock</span>
+    </div>
+    <div id="tag">The calendar AI agents cannot <span style="color:var(--accent)">double-book.</span></div>
+    <div id="foot">OPEN SOURCE · APACHE-2.0 · SLOTLOCK.PYLOTA.IO</div>
+  </div>
+</div>
+<script>
+const X0=380, X1=1520; // track inside card (card-relative)
+const hx=h=>X0+(h-8)*(X1-X0)/10;
+const $=id=>document.getElementById(id);
+// hours + grid
+for(let h=8;h<=18;h++){const s=document.createElement('span');s.textContent=String(h).padStart(2,'0');s.style.left=hx(h)+'px';$('hours').appendChild(s);}
+document.querySelectorAll('.row').forEach(r=>{for(let h=9;h<18;h++){const g=document.createElement('div');g.className='grid';g.style.left=hx(h)+'px';r.prepend(g);}});
+document.querySelectorAll('.blk').forEach(b=>{const a=+b.dataset.a,e=+b.dataset.b;b.style.left=(hx(a)+3)+'px';b.style.width=(hx(e)-hx(a)-6)+'px';});
+document.querySelectorAll('.nowline').forEach(n=>n.style.left=hx(+n.dataset.x)+'px');
+
+const cl=(v,a=0,b=1)=>Math.min(b,Math.max(a,v));
+const eo=x=>1-Math.pow(1-cl(x),5);           // ease-out quint ≈ site's --ease-out
+const eio=x=>{x=cl(x);return x<.5?16*x**5:1-Math.pow(-2*x+2,5)/2};
+const ramp=(t,a,d)=>cl((t-a)/d);
+// fade in at a over d, out at b over e
+const win=(t,a,b,d=.35,e=.25)=>eo(ramp(t,a,d))*(1-eio(ramp(t,b,e)));
+function set(el,o,tx=0,ty=0,s=1){el.style.opacity=o;el.style.transform=`translate(${tx}px,${ty}px) scale(${s})`;}
+
+function typed(str,t,a,cps=60){const n=Math.floor(cl((t-a)*cps,0,1e4));return str.slice(0,n);}
+// spans for code lines: build html from parts [[cls,text],...] with typing
+function code(parts,t,a,cps=70){let n=Math.floor(Math.max(0,(t-a)*cps));let h='';for(const [c,s] of parts){const k=s.slice(0,n);n-=k.length;if(k)h+=`<span class="${c}">${k.replace(/</g,'&lt;')}</span>`;if(n<=0)break;}return h;}
+
+window.render=function(t){
+  // captions (staggered: old out, then new in)
+  set($('c1'),win(t,.15,3.7),0,(1-eo(ramp(t,.15,.5)))*30);
+  set($('c2'),win(t,4.05,7.7),0,(1-eo(ramp(t,4.05,.5)))*30);
+  set($('c3'),win(t,8.05,11.7),0,(1-eo(ramp(t,8.05,.5)))*30);
+  set($('c4'),win(t,12.05,15.7),0,(1-eo(ramp(t,12.05,.5)))*30);
+  set($('eyebrow'),win(t,.1,15.7));
+
+  // card: enters at 0, grows at 12, exits 15.75
+  const grow=eio(ramp(t,12.0,.9));
+  const cardTop=380-grow*60, cardH=268+grow*450;
+  const cin=eo(ramp(t,0,.6));
+  const cout=eio(ramp(t,15.7,.35));
+  const card=$('card');card.style.top=cardTop+'px';card.style.height=cardH+'px';
+  set(card,cin*(1-cout),0,(1-cin)*40+cout*-20,1-cout*.02);
+  ['r1','r2','r3'].forEach((id,i)=>{const p=eo(ramp(t,12.35+i*.22,.5));set($(id),p,0,(1-p)*24);});
+  // chips
+  const chp=0;set($('chips'),chp,0,(1-eo(ramp(t,13.2,.5)))*20);
+  $('chips').style.top=(cardTop+cardH+34)+'px';
+
+  // code strip under card (scenes 2–3)
+  const cd=$('code');cd.style.top='690px';
+  set(cd,win(t,4.25,11.8,.35,.3),0,(1-eo(ramp(t,4.25,.45)))*20);
+  let l1='',l2='';
+  if(t<8){
+    l1=code([['m','B  '],['ac','slotlock_hold_slots'],['','  van, 11:00–13:00, 600 s']],t,4.4);
+    l2=code([['m','→  '],['rd',"{ holds: [], refused: [{ index: 0, code: 'overlap' }] }"]],t,5.1,80);
+  }else if(t<10.25){
+    l1=code([['m','B  '],['ac','slotlock_find_next_available'],['','  van, 120 min, from 10:00']],t,8.2);
+    l2=code([['m','→  '],['gr','12:00–14:00 · certain']],t,8.95);
+  }else{
+    l1=code([['m','A  '],['ac','slotlock_create_event'],['','  from its hold_id']],t,10.3,80);
+    l2=code([['m','→  '],['gr','booked, revision 1']],t,10.75);
+  }
+  const fadeSwap=(t>=10.0&&t<10.3)?1-ramp(t,10.0,.25):1;
+  $('k1').innerHTML=l1;$('k2').innerHTML=l2;$('k1').style.top='30px';$('k2').style.top='80px';
+  $('k1').style.opacity=$('k2').style.opacity=fadeSwap;
+
+  // agents: fly in from sides, drag selections (0.6–2.6), pills retreat at 3.6
+  const cx=180, rowY=cardTop+118; // card-left, row top in stage coords
+  const fa=eo(ramp(t,.55,.9)), da=eio(ramp(t,1.3,1.0));
+  const pAx=-300+fa*(cx+hx(10)-40+300)+da*(hx(12)-hx(10)), pAy=860-fa*(860-(rowY+120));
+  const pBx=2000-fa*(2000-(cx+hx(11)-40))+da*(hx(13)-hx(11)), pBy=-80+fa*((rowY+10)+80) - 0;
+  const ag=1-eio(ramp(t,3.5,.4));
+  set($('pA'),ag*cl(fa*3),pAx,pAy);
+  set($('pB'),ag*cl(fa*3),pBx,pBy-70);
+  // ghosts grow with the drag
+  const gw=(a,b)=>(hx(b)-hx(a)-6)*Math.max(.02,da);
+  $('gA').style.width=gw(10,12)+'px';$('gB').style.width=gw(11,13)+'px';
+  const gvis=cl(fa*2)*(1-ramp(t,3.95,.12));
+  $('gA').style.opacity=gvis; $('gB').style.opacity=gvis*.9;
+  $('gB').style.top=(38+0)+'px';
+  // overlap: B ghost sits slightly lower so both read
+  $('gA').style.top='26px';$('gA').style.height='60px';$('gB').style.top='70px';$('gB').style.height='60px';
+
+  // scene 2: A hold locks at 4.0; B refused shakes, fades by 7.0
+  const hAin=eo(ramp(t,4.0,.3));
+  set($('hA'),hAin*(1-ramp(t,10.55,.2)),0,0,.94+.06*hAin);
+  const rIn=eo(ramp(t,4.0,.25)), shake=t>4&&t<4.6?Math.sin((t-4)*60)*14*(1-(t-4)/.6):0;
+  set($('rB'),rIn*(1-eio(ramp(t,6.9,.45))),shake,0);
+  $('rB').style.top='70px';$('rB').style.height='60px';$('hA').style.top='26px';$('hA').style.height='60px';
+  // after refusal, A hold drops back to full height
+  const settle=eio(ramp(t,7.35,.4));
+  $('hA').style.top=(26+settle*12)+'px';$('hA').style.height=(60+settle*14)+'px';
+  // scene 3: B hold at 9.5, A booked at 10.5
+  set($('hB'),eo(ramp(t,9.5,.3)),0,0,.94+.06*eo(ramp(t,9.5,.3)));
+  const bk=eo(ramp(t,10.5,.3));set($('bA'),bk,0,0,.94+.06*bk);
+
+  // outro: dip through canvas, logo in at 16.2
+  const o1=eo(ramp(t,16.15,.6)),o2=eo(ramp(t,16.6,.5)),o3=eo(ramp(t,17.0,.5));
+  set($('logo'),o1,0,(1-o1)*40,.96+.04*o1);
+  set($('tag'),o2,0,(1-o2)*30);
+  set($('foot'),o3,0,(1-o3)*20);
+  $('outro').style.display=t>16?'flex':'none';
+};
+window.render(0);
+</script></body></html>
