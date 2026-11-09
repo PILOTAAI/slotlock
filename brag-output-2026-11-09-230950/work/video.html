@@ -1,0 +1,208 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+@font-face{font-family:Inter;src:url(../../site/public/fonts/inter.woff2) format('woff2');font-weight:100 900}
+@font-face{font-family:'Inter Tight';src:url(../../site/public/fonts/inter-tight.woff2) format('woff2');font-weight:100 900}
+@font-face{font-family:'JetBrains Mono';src:url(../../site/public/fonts/jetbrains-mono.woff2) format('woff2');font-weight:100 900}
+:root{--canvas:#f6f4ee;--canvas-2:#eeebe3;--canvas-3:#e5e1d8;--paper:#fff;--ink:#171716;--ink-2:#5d5b56;--ink-3:#6b6963;--ink-4:#bdb8af;
+--line:#1a1a1a1a;--line-strong:#1a1a1a2e;--accent:#2655ff;--accent-ink:#0e2d9e;--accent-soft:#e8edff;--confirmed:#167758;--confirmed-soft:#e4f3ec;
+--hold:#935d12;--hold-soft:#f7ebd6;--refused:#a32d2d;--refused-soft:#f4e0df;--busy:#e5e1d8}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:1080px;height:1920px;overflow:hidden;background:var(--canvas);color:var(--ink);font-family:Inter,sans-serif}
+.scene{position:absolute;inset:0;display:none}
+#hdr{position:absolute;left:80px;right:80px;top:84px;display:flex;align-items:center;justify-content:space-between}
+#hdr .brand{display:flex;align-items:center;gap:18px;font-family:'Inter Tight';font-weight:700;font-size:46px;letter-spacing:-.04em}
+#hdr .ctr{font-family:'JetBrains Mono';font-size:26px;letter-spacing:.12em;color:var(--ink-3)}
+.cap{position:absolute;left:80px;top:290px;width:920px;font-family:'Inter Tight';font-weight:500;font-size:108px;letter-spacing:-.045em;line-height:1.0}
+.soft{color:#8f8c84}
+.card{position:absolute;left:80px;width:920px;background:var(--paper);border:1px solid var(--line-strong);border-radius:32px;box-shadow:0 40px 90px -40px #17171630,0 2px 8px #1717160c;padding:40px 44px}
+.mono{font-family:'JetBrains Mono'}
+.req .who{display:flex;align-items:center;gap:20px}
+.badge{display:grid;place-items:center;width:62px;height:62px;border-radius:50%;color:#fff;font-family:'JetBrains Mono';font-weight:700;font-size:30px;flex:none}
+.req .fn{font-family:'JetBrains Mono';font-size:36px;font-weight:600;color:var(--accent-ink)}
+.req .args{font-family:'JetBrains Mono';font-size:30px;color:var(--ink-2);margin-top:22px}
+.req .res{font-family:'JetBrains Mono';font-size:30px;margin-top:20px;min-height:40px}
+.req.refusedc{background:var(--refused-soft);border-color:var(--refused)}
+/* picker, from site landing.css ×2.4 */
+.picker .eyebrow{font-family:'JetBrains Mono';font-size:26px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3)}
+.picker .resource{margin:14px 0 34px;font-size:38px}
+.chips{display:flex;flex-wrap:wrap;gap:14px}
+.chips span{padding:15px 30px;border-radius:999px;border:2px solid var(--line-strong);font-size:33px;font-variant-numeric:tabular-nums}
+.chips .on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.days{margin-bottom:34px}
+.group{display:grid;gap:14px;margin-bottom:30px}
+.glabel{color:var(--ink-3);font-size:29px}
+.foot{display:flex;align-items:center;justify-content:space-between;margin-top:14px}
+.held{font-family:'JetBrains Mono';font-size:28px;color:var(--ink-3)}
+.book{padding:20px 40px;border-radius:999px;font-size:33px;font-weight:500;background:var(--ink);color:var(--paper)}
+.receipt{position:absolute;left:80px;display:flex;align-items:center;gap:18px;padding:24px 34px;border-radius:999px;background:var(--confirmed-soft);color:var(--confirmed);font-size:34px;font-weight:600}
+.cursor{position:absolute;width:56px;height:56px;margin:-10px 0 0 -10px}
+.ring{position:absolute;width:90px;height:90px;border-radius:50%;border:4px solid var(--accent);margin:-45px 0 0 -45px}
+/* hold */
+.hblk{height:190px;border-radius:24px;display:flex;align-items:center;padding:0 40px;font-size:44px;font-weight:600}
+.hold{background:repeating-linear-gradient(135deg,var(--hold-soft) 0 18px,#efdcba 18px 36px);color:var(--hold);border:4px dashed var(--hold)}
+.freed{border:4px dashed var(--ink-4);color:var(--ink-3);background:transparent;font-weight:500}
+.count{font-family:'JetBrains Mono';font-size:150px;font-weight:600;letter-spacing:-.04em;font-variant-numeric:tabular-nums}
+/* row */
+.trk{position:relative;height:270px;margin-top:30px}
+.lane2{top:150px!important;height:100px!important}
+.hrs{position:relative;height:40px}
+.hrs span{position:absolute;font-family:'JetBrains Mono';font-size:24px;color:var(--ink-3);transform:translateX(-50%)}
+.blk{position:absolute;top:20px;height:110px;border-radius:16px;display:flex;align-items:center;padding:0 18px;font-size:27px;font-weight:500;white-space:nowrap;overflow:hidden}
+.busy{background:var(--busy);color:var(--ink-2)}
+.unproven{background:repeating-linear-gradient(135deg,#fff 0 12px,#ebe8e1 12px 24px);color:var(--ink-2);border:2px solid var(--line-strong)}
+.ghost{border:4px dashed var(--accent);background:#2655ff14;color:var(--accent);font-weight:600}
+.refused{background:var(--refused-soft);border:3px solid var(--refused);color:var(--refused);font-weight:600}
+.grid{position:absolute;top:0;bottom:0;width:2px;background:var(--line)}
+#outro{flex-direction:column;align-items:center;justify-content:center;text-align:center}
+</style></head>
+<body>
+<div id="hdr"><div class="brand"><svg width="64" height="64" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#111110"/><g transform="translate(12.2 14.1) scale(0.465)"><path fill="#F6F4EE" d="M13.13 34.46L72.2 34.46C79.45 34.46 85.32 40.33 85.32 47.58L85.32 63.99C85.32 71.24 79.45 77.12 72.2 77.12L13.13 77.12C5.88 77.12 0 71.24 0 63.99L0 47.58C0 40.33 5.88 34.46 13.13 34.46ZM22.97 39.38L22.97 19.69C22.97 8.82 31.79 0 42.66 0C53.54 0 62.35 8.82 62.35 19.69L62.35 39.38L56.61 39.38L56.61 19.69C56.61 11.99 50.36 5.74 42.66 5.74C34.96 5.74 28.71 11.990 28.71 19.69L28.71 39.38Z"/><path fill="#FF5B2E" d="M19.69 52.51L65.63 52.51C67.45 52.51 68.91 53.98 68.91 55.79C68.91 57.6 67.45 59.07 65.63 59.07L19.69 59.07C17.88 59.07 16.41 57.6 16.41 55.79C16.41 53.98 17.88 52.51 19.69 52.51Z"/></g></svg>slotlock</div><div class="ctr" id="ctr">01 / 05</div></div>
+
+<!-- 1+2: the race -->
+<div class="scene" id="s12">
+  <div class="cap" id="c1">Your agents will try to book the <span style="color:var(--accent)">same van.</span></div>
+  <div class="cap" id="c2">Slotlock says no.<br><span class="soft" id="c2b">To one of them.</span></div>
+  <div class="card req" id="qA" style="top:880px">
+    <div class="who"><span class="badge" style="background:var(--accent)">A</span><span class="fn">slotlock_hold_slots</span></div>
+    <div class="args">van · 10:00–12:00 · 600 s</div>
+    <div class="res" id="resA"></div>
+  </div>
+  <div class="card req" id="qB" style="top:1210px">
+    <div class="who"><span class="badge" style="background:var(--ink)">B</span><span class="fn">slotlock_hold_slots</span></div>
+    <div class="args">van · 10:00–12:00 · 600 s</div>
+    <div class="res" id="resB"></div>
+  </div>
+</div>
+
+<!-- 3: picker -->
+<div class="scene" id="s3">
+  <div class="cap" style="font-size:96px"><span class="soft">The agent shows<br>the free slots.</span><br>You pick one<br>in the chat.</div>
+  <div class="card picker" id="pk" style="top:800px">
+    <p class="eyebrow">Pick a time</p>
+    <p class="resource">Van AB12 CDE · Europe/London</p>
+    <div class="chips days"><span>Mon 29</span><span class="on">Tue 30</span><span>Wed 31</span></div>
+    <div class="group"><span class="glabel">Morning</span><div class="chips"><span>09:00</span><span>10:30</span></div></div>
+    <div class="group"><span class="glabel">Afternoon</span><div class="chips"><span id="t12">12:00</span><span>14:00</span><span>15:30</span></div></div>
+    <div class="foot"><span class="held" id="held">&nbsp;</span><span class="book" id="book">Book this time</span></div>
+  </div>
+  <div class="receipt" id="rcpt"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Sent to your agent</div>
+  <div class="ring" id="ring"></div>
+  <svg class="cursor" id="cur" viewBox="0 0 24 24"><path d="M4 2.5l15 9.2-6.6 1.5 3.9 7.3-2.9 1.5-3.9-7.3-4.9 4.6z" fill="#171716" stroke="#fff" stroke-width="1.4" stroke-linejoin="round"/></svg>
+</div>
+
+<!-- 4: hold expires -->
+<div class="scene" id="s4">
+  <div class="cap">Holds expire.<br><span class="soft">No cron job.</span></div>
+  <div class="card" style="top:860px">
+    <div class="mono" style="font-size:28px;color:var(--ink-3);margin-bottom:26px">Van AB12 CDE · Tue 30 · 12:00–14:00</div>
+    <div class="hblk hold" id="hb">B · hold</div>
+    <div style="display:flex;align-items:baseline;justify-content:space-between;margin-top:34px">
+      <span class="count" id="cnt">9:59</span><span class="mono" style="font-size:34px;color:var(--ink-3)" id="cntl">left</span>
+    </div>
+    <div class="mono" id="fr" style="font-size:30px;margin-top:10px;color:var(--ink-3);min-height:40px">&nbsp;</div>
+  </div>
+</div>
+
+<!-- 5: unproven -->
+<div class="scene" id="s5">
+  <div class="cap">Unproven is<br><span class="soft">not free.</span></div>
+  <div class="card" style="top:860px">
+    <div style="font-size:40px;font-weight:600">Dr Shah</div>
+    <div class="mono" style="font-size:26px;color:var(--ink-3);margin-top:6px">Europe/London · calendar feed</div>
+    <div class="hrs" id="hrs" style="margin-top:40px"></div>
+    <div class="trk" id="trk">
+      <div class="blk busy" data-a="9" data-b="11">busy · .ics</div>
+      <div class="blk unproven" data-a="13.6" data-b="18">unproven after 14:00</div>
+      <div class="blk ghost lane2" id="g15" data-a="15" data-b="17">15:00</div>
+      <div class="blk refused lane2" id="r15" data-a="15" data-b="17">refused</div>
+    </div>
+    <div class="mono" id="rc" style="font-size:30px;margin-top:34px;min-height:40px">&nbsp;</div>
+  </div>
+</div>
+
+<!-- 6: outro -->
+<div class="scene" id="outro">
+  <svg id="ologo" width="220" height="220" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#111110"/><g transform="translate(12.2 14.1) scale(0.465)"><path fill="#F6F4EE" d="M13.13 34.46L72.2 34.46C79.45 34.46 85.32 40.33 85.32 47.58L85.32 63.99C85.32 71.24 79.45 77.12 72.2 77.12L13.13 77.12C5.88 77.12 0 71.24 0 63.99L0 47.58C0 40.33 5.88 34.46 13.13 34.46ZM22.97 39.38L22.97 19.69C22.97 8.82 31.79 0 42.66 0C53.54 0 62.35 8.82 62.35 19.69L62.35 39.38L56.61 39.38L56.61 19.69C56.61 11.99 50.36 5.74 42.66 5.74C34.96 5.74 28.71 11.99 28.71 19.69L28.71 39.38Z"/><path fill="#FF5B2E" d="M19.69 52.51L65.63 52.51C67.45 52.51 68.91 53.98 68.91 55.79C68.91 57.6 67.45 59.07 65.63 59.07L19.69 59.07C17.88 59.07 16.41 57.6 16.41 55.79C16.41 53.98 17.88 52.51 19.69 52.51Z"/></g></svg>
+  <div id="ow" style="font-family:'Inter Tight';font-weight:700;font-size:150px;letter-spacing:-.05em;margin-top:30px">slotlock</div>
+  <div id="ot" style="font-family:'Inter Tight';font-weight:500;font-size:76px;letter-spacing:-.035em;line-height:1.05;margin-top:40px;width:900px">Two agents, one slot,<br><span style="color:var(--accent)">one booking.</span></div>
+  <div id="of" class="mono" style="font-size:28px;letter-spacing:.1em;color:var(--ink-3);margin-top:60px">OPEN SOURCE · SLOTLOCK.PYLOTA.IO</div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const cl=(v,a=0,b=1)=>Math.min(b,Math.max(a,v));
+const eo=x=>1-Math.pow(1-cl(x),5);
+const ramp=(t,a,d)=>cl((t-a)/d);
+function set(el,o,tx=0,ty=0,s=1){el.style.opacity=o;el.style.transform=`translate(${tx}px,${ty}px) scale(${s})`;}
+const pop=(el,t,a,d=.3,dy=40)=>{const p=eo(ramp(t,a,d));set(el,p,0,(1-p)*dy);};
+// track geometry for scene 5: 840px wide inside card padding
+const X0=0,X1=830,hx=h=>X0+(h-8)*(X1-X0)/10;
+for(let h=8;h<=18;h+=2){const s=document.createElement('span');s.textContent=String(h).padStart(2,'0');s.style.left=hx(h)+'px';$('hrs').appendChild(s);}
+for(let h=10;h<18;h+=2){const g=document.createElement('div');g.className='grid';g.style.left=hx(h)+'px';$('trk').prepend(g);}
+document.querySelectorAll('.blk').forEach(b=>{const a=+b.dataset.a,e=+b.dataset.b;b.style.left=(hx(a)+3)+'px';b.style.width=(hx(e)-hx(a)-6)+'px';});
+
+const scenes=[['s12',0,6.0],['s3',6.0,10.8],['s4',10.8,14.4],['s5',14.4,16.8],['outro',16.8,99]];
+window.render=function(t){
+  for(const [id,a,b] of scenes) $(id).style.display=(t>=a&&t<b)?(id==='outro'?'flex':'block'):'none';
+  const idx=t<3.6?1:t<6?2:t<10.8?3:t<14.4?4:t<16.8?5:0;
+  $('ctr').textContent=idx?`0${idx} / 05`:'';
+  $('hdr').style.opacity=t<16.8?1:0;
+
+  if(t<6){
+    // 1: caption, then two requests on beats 0.6 and 1.2
+    $('c1').style.display=t<3.6?'block':'none'; $('c2').style.display=t>=3.6?'block':'none';
+    if(t<3.6) pop($('c1'),t,.05,.35,24); else set($('c2'),1);
+    $('c2b').style.opacity=eo(ramp(t,4.8,.3));
+    pop($('qA'),t,.6,.35,60); pop($('qB'),t,1.2,.35,60);
+    // 2: results at the cut
+    const r=t>=3.6;
+    $('resA').innerHTML=r?'<span style="color:var(--ink-3)">→ </span><span style="color:var(--hold);font-weight:600">held to 09:51:02</span>':'';
+    $('resB').innerHTML=r?'<span style="color:var(--ink-3)">→ </span><span style="color:var(--refused);font-weight:600">{ refused: [{ index: 0,<br>&nbsp;&nbsp;&nbsp;code: \'overlap\' }] }</span>':'';
+    $('qB').classList.toggle('refusedc',r);
+    if(r){const k=t-3.6;const sh=k<.5?Math.sin(k*55)*16*(1-k/.5):0;$('qB').style.transform=`translateX(${sh}px)`;}
+  }
+  else if(t<10.8){
+    const pk=$('pk');pop(pk,t,6.0,.35,50);
+    const picked=t>=7.8, booked=t>=9.0;
+    $('t12').classList.toggle('on',picked);
+    $('held').innerHTML=picked?'Held until 09:51':'&nbsp;';
+    $('book').style.background=booked&&t<9.15?'#3a3a38':'';
+    pop($('rcpt'),t,9.6,.3,24); $('rcpt').style.top=(pk.offsetTop+pk.offsetHeight+40)+'px';
+    if(t<9.6){}
+    // cursor path: enter 6.6→7.6 to 12:00, press 7.8; move 8.2→8.9 to button, press 9.0; leave
+    const r12=$('t12').getBoundingClientRect(), rb=$('book').getBoundingClientRect();
+    const p1=[r12.left+r12.width*.55,r12.top+r12.height*.6], p2=[rb.left+rb.width*.5,rb.top+rb.height*.6], p0=[1150,1750];
+    const m1=eo(ramp(t,6.6,1.0)), m2=eo(ramp(t,8.2,.7)), m3=eo(ramp(t,9.9,.6));
+    let x=p0[0]+(p1[0]-p0[0])*m1+(p2[0]-p1[0])*m2+(1150-p2[0])*m3, y=p0[1]+(p1[1]-p0[1])*m1+(p2[1]-p1[1])*m2+(1750-p2[1])*m3;
+    const press=(t>=7.8&&t<7.95)||(t>=9.0&&t<9.15);
+    const c=$('cur');c.style.left=x+'px';c.style.top=y+'px';c.style.transform=`scale(${press?.85:1})`;
+    const rg=$('ring');const ra=t>=9.0?9.0:7.8, rp=ramp(t,ra,.45);
+    rg.style.left=(ra===9.0?p2[0]:p1[0])+'px';rg.style.top=(ra===9.0?p2[1]:p1[1])+'px';
+    rg.style.opacity=t>=7.8&&rp<1?(1-rp)*.8:0;rg.style.transform=`scale(${.4+rp*.9})`;
+  }
+  else if(t<14.4){
+    // countdown 600 s → 0 between 11.4 and 13.2 (time-lapse), freed at 13.2
+    const left=Math.round(599*(1-ramp(t,11.4,1.8)));
+    $('cnt').textContent=`${Math.floor(left/60)}:${String(left%60).padStart(2,'0')}`;
+    $('cnt').style.color=left<60?'var(--refused)':'var(--ink)';
+    const freed=t>=13.2;
+    $('hb').className='hblk '+(freed?'freed':'hold');
+    $('hb').textContent=freed?'freed for the next writer':'B · hold';
+    $('fr').innerHTML=freed?'no confirm by 09:51':'&nbsp;';
+    $('cntl').textContent='left';
+  }
+  else if(t<16.8){
+    const g=t>=15.0&&t<15.6, r=t>=15.6;
+    pop($('g15'),t,15.0,.25,0); $('g15').style.display=g?'flex':'none';
+    $('r15').style.display=r?'flex':'none';
+    if(r){const k=t-15.6;$('r15').style.transform=`translateX(${k<.4?Math.sin(k*55)*10*(1-k/.4):0}px)`;}
+    $('rc').innerHTML=r?'<span style="color:var(--ink-3)">requireCertain → </span><span style="color:var(--refused);font-weight:600">refused</span>':'&nbsp;';
+  }
+  else{
+    const o1=eo(ramp(t,16.8,.5)),o2=eo(ramp(t,17.4,.45)),o3=eo(ramp(t,18.0,.45)),o4=eo(ramp(t,18.6,.45));
+    set($('ologo'),o1,0,(1-o1)*40,.9+.1*o1); set($('ow'),o2,0,(1-o2)*30); set($('ot'),o3,0,(1-o3)*30); set($('of'),o4,0,(1-o4)*20);
+  }
+};
+window.render(0);
+</script></body></html>
