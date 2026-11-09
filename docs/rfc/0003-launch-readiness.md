@@ -1,0 +1,578 @@
+# RFC 0003: Launch readiness: the assistant on Slotlock Cloud, grouped resources, partner access and metered usage
+
+| | |
+| --- | --- |
+| Status | Proposed |
+| Target | PR #161 follow-ups before 9 December 2026, then 0.7.0 (launch) and 0.8.0 (partners) |
+| Builds on | PR #161 (hosted plans and Stripe billing), RFC 0002 |
+| Decision | GOVERNANCE.md: adds tables, an authorization surface (partner keys, key scopes) and billing; needs the maintainer's approval, and an independent security review for every PR marked T2 below |
+
+## Summary
+
+Three questions came up while preparing Slotlock Cloud for launch. This RFC answers each from the
+code at `a54136b` (main) and `23136fa` (PR #161), outlines the plans already written, and lists the
+work left, one PR per line, with its tier and release.
+
+1. **"Cloud has a built-in chat assistant with bring-your-own model, but I cannot find it."** The
+   assistant is built and tested (`src/assistant.ts`, the dashboard's Assistant page and Settings →
+   Assistant). It is off unless the deployment sets `SLOTLOCK_ASSISTANT_SECRET`, and the Cloud
+   dashboard Worker does not set it, so neither the **Assistant** sidebar item nor the Settings panel
+   is drawn. The landing page advertises the assistant anyway, because the site decides from the
+   source code, not from what Cloud runs. Turning it on is one secret; making it safe to keep on
+   needs secret rotation and two docs changes.
+2. **"What are resources attached to, and can they be grouped?"** A resource belongs to exactly one
+   tenant and, at most, to one pool. It has no name, kind, capacity, labels, location or group, and
+   an API key reaches every resource in its tenant. Pools mean "interchangeable, book any one"; they
+   are not a way to organize. This RFC adds a resource profile, locations (a tree), groups (many to
+   many), search by those, and later key scopes, composite resources and test environments.
+3. **"Can stackapi.app consume Slotlock and let its users use it through the Slotlock API, with
+   pricing and usage tracked end to end?"** Yes, in two shapes. Today, with no code, a stackapi user
+   can bring their own Slotlock key. For stackapi to resell Slotlock under its own billing, Slotlock
+   needs partner accounts that provision a tenant per stackapi user, and a usage meter it does not
+   have yet: today nothing counts use per tenant, by design. The meter is the same one the Free and
+   Developer plans need, so it is built once.
+
+PR #161 is sound and should merge, but eight findings below (one about enforcement, one about
+erasure and billing, one about duplicate charges) should be fixed before 9 December 2026, the date
+its Terms give existing accounts.
+
+## Where the existing plans stand
+
+### RFC 0001 (deploy anywhere)
+
+Still *Proposed*. The local spike passed (`spikes/hyperdrive`, results in the RFC); the run against
+real Hyperdrive has not been done, so PRs 2–6 (maintenance lease, `workers/server`, `slotlock
+deploy cloudflare`, `slotlock deploy vps`, docs) have not started. Maintenance still uses a
+per-tenant advisory lock (`src/maintenance.ts`). Nothing in this RFC depends on it. Cloud runs the
+API as `slotlock serve` on OVHcloud and the dashboard as the Worker in `workers/dashboard`.
+
+### RFC 0002 (world class)
+
+| Part | State |
+| --- | --- |
+| P0-1 to P0-3, P1-11 (correctness and security fixes) | Delivered, 0.3.1 |
+| P1-1 agent holds, P1-2 bundles and any-N, P1-4 booking rules, P1-7 time zone changes, P1-9 problem details and `Idempotency-Key`, P1-10 shared limits | Delivered, 0.4.0 to 0.5.x |
+| P1-3 pools, P1-5 outbox and webhooks, P1-6 history, P1-8 feed health | Delivered, 0.5.0 to 0.6.0 |
+| P2-1 benchmarks, P2-4 interop (VAVAILABILITY, JSCalendar), P2-8 waitlists and no-show release | Delivered (`bench/`, `src/interop.ts`, waitlist and check-in) |
+| P2-5 operations | Partly: `traceparent` ids are read and logged, `/metrics` exists, status issues are raised by `scripts/status-probe.sh`; no OpenTelemetry export, no published SLOs |
+| P2-2 partitioning, P2-3 home region, P2-6 solver guide, P2-7 SOC 2, DPA, SSO, SCIM | Not started |
+
+Open question 2 of RFC 0002 (round robin or least-used order in pools) is still open; it matters
+for fleets, where the first member of a pool takes all the wear. It is listed again below.
+
+### PR #161 (hosted plans and Stripe billing)
+
+What it does: a `slotlock.tenant_plans` table read and set through definer functions; Free (10
+resources, 10 active keys, 2 webhook endpoints) and Developer (100, 100, 10; $10 a month or $100 a
+year); each cap is the lower of the plan's and the server's, and the key cap is checked inside
+`create_api_key`, so it holds under concurrent creates; a Plan page with Upgrade (Stripe Checkout
+with Managed Payments) and Manage billing (the customer portal); a signed webhook that reads the
+subscription back from Stripe rather than trusting the event, and never lets a late event about an
+old subscription end a newer one; Terms and privacy wording; existing accounts move to Free on 9
+December 2026.
+
+Findings, each checked against the branch:
+
+1. **Free is enforced only where the dashboard is used.** A tenant with no plan row keeps the
+   server's limits. The Worker puts such a tenant on Free only when, after `SLOTLOCK_FREE_PLAN_FROM`,
+   it posts to `/keys`, `/resources` or `/webhooks` in the dashboard (`workers/dashboard/worker.ts`,
+   `billing.plan`). A tenant that adds resources through `POST /v1/resources` or endpoints through
+   `POST /v1/webhooks` on `slotlock serve` never meets that code, and keeps 10,000 resources and 10
+   endpoints. Accounts created between the deploy and 9 December also get the old limits, though the
+   Terms say Free applies at once to accounts created from 9 November (that date should be the
+   deploy date). *Fix:* a deployment default in the database
+   (`slotlock.plan_defaults`: plan, from), which `slotlock.tenant_plan()` returns for a tenant with
+   no row once `from` has passed, so both servers enforce the same plan; and a Free row written at
+   the first sign-in of a new tenant.
+2. **The dashboard still shows the old caps.** The Resources page says "*n* of 100"
+   (`SLOTLOCK_DASHBOARD_MAX_RESOURCES`) on Free. *Fix:* show the plan's limit wherever a count is
+   shown, and refuse in the form before the store does.
+3. **The Plan page undercounts resources.** The cap counts archived resources ("archived ones
+   included", `src/plans.ts`), but the page counts `options.resources.list()`, which leaves archived
+   ones out and stops at 101. A Free tenant with 7 archived and 3 in use sees "3 of 10" and is
+   refused at the next add. *Fix:* a count from the store that includes archived resources, and one
+   line saying archived resources count until deleted.
+4. **Two tabs can buy two subscriptions, and cancelling one can drop the plan.** Upgrade checks the
+   stored plan, which changes only when the webhook arrives, so two Checkouts started before then
+   both charge. The plan row then names whichever subscription's webhook came last; cancelling that
+   one puts the tenant on Free while the other still renews. *Fix:* before creating a Checkout for a
+   known customer, list its subscriptions with status `active`, `trialing` or `past_due` and refuse
+   if one exists; when a subscription ends, look for another live one of the same tenant before
+   setting Free; log a second live subscription as `slotlock billing duplicate subscription` for
+   the owner to refund.
+5. **Erasure does not touch Stripe.** `erase_tenant` deletes the plan row, but the subscription
+   keeps renewing and the customer keeps its tenant metadata. The privacy notice in the PR says "A
+   Developer plan is cancelled before the account is erased"; nothing enforces it. *Fix:* `slotlock
+   tenant erase` and `/v1/tenant/erase` refuse with `billing_active` while the plan row names a
+   live subscription, and the erasure runbook cancels it in Stripe first.
+6. **A personal address is the default contact.** `readBilling` defaults `SLOTLOCK_PLAN_CONTACT` to
+   a personal Gmail address, which is then published in the page and in this public repository.
+   *Fix:* require the setting (or default to `mailto:support@pylota.io`) and remove the address.
+7. **Managed Payments is unverified in live mode.** The PR notes that live mode may refuse
+   `managed_payments[enabled]`. *Fix:* the owner runs one live Checkout before 9 December, and
+   [Billing facts](#billing-facts-to-verify) lists what to check.
+8. **There is no usage limit.** A Free tenant is bounded only by rate limits: `tenant_read` is 20
+   a second, about 52 million reads a month. The plans need a monthly quota, and the Terms need to
+   name it now, because they promise 30 days' notice of any lower limit. *Fix:* put the quotas of
+   [Pricing](#pricing-and-plans-after-this-rfc) into the plans table in PR #161 before it merges,
+   so the one notice covers them, and enforce them with [the meter](#3-usage-metering).
+
+Also true, and fine for launch: Plans exist only on the Worker dashboard (`slotlock serve`'s own
+dashboard has no billing, which is right for self-hosting); Cloud serves `github-org:` tenants
+only when listed in `SLOTLOCK_DASHBOARD_ORGS`, so "organization owners" on the Plan page are, on
+Cloud, people on their personal tenants (see [Teams on Cloud](#later)).
+
+## 1. The chat assistant on Slotlock Cloud
+
+### What exists
+
+- **Bring your own model.** An owner connects the organization's model in Settings → Assistant:
+  Anthropic's Messages API, or any OpenAI-compatible chat completions API (OpenAI, OpenRouter,
+  vLLM, Ollama, LM Studio, and others behind a public URL). The key is sealed with AES-256-GCM under
+  a key derived from `SLOTLOCK_ASSISTANT_SECRET`, bound to the tenant, and shown only by its last
+  four characters (`src/assistant.ts`).
+- **Reads run, writes wait.** Seven read operations run at once; seven writes become cards a member
+  approves, run once under the same booking rules and limits as an agent, and are recorded as
+  "Assistant for @login" (`SLOTLOCK_ASSISTANT_TOOL_USE`). Keys, webhooks, rules, pools and erasure
+  are never offered.
+- **Bounds.** 8 model calls a message, 10 messages a minute per member, 4 pending changes,
+  conversations kept 2 hours; model URLs on loopback, private and metadata addresses, and the
+  deployment's own hosts, are refused (#157).
+- **Covered already:** the privacy notice ("if the dashboard offers the assistant", PRIVACY.md) and
+  the Terms (TERMS.md, "your own AI provider key").
+
+### Why Cloud does not show it
+
+- `createSlotlockDashboard` draws the **Assistant** nav item only when `options.assistant` is set
+  (`src/dashboard.ts`, the nav list), and Settings draws the Assistant panel only then.
+- The Worker sets `options.assistant` only when `SLOTLOCK_ASSISTANT_SECRET` is a secret of the
+  Worker (`workers/dashboard/worker.ts`, `config.assistantSecret`). It is marked optional in
+  `wrangler.jsonc`, and Cloud's Worker does not have it: the Cloud sidebar has no such item.
+- The landing page shows "Operate it by chat" whenever the source mentions the secret
+  (`site/scripts/sync-content.mjs`, `assistant: selfHost.includes("'SLOTLOCK_ASSISTANT_SECRET'")`),
+  so it promises the feature to Cloud visitors whether or not Cloud runs it. The hosted page
+  (`docs/hosted/README.md`) does not mention it at all.
+
+### Plan
+
+| # | Change | Tier |
+| --- | --- | --- |
+| A1 | **Owner:** `openssl rand -hex 32`, then `npx wrangler secret put SLOTLOCK_ASSISTANT_SECRET` on the Cloud Worker, keep the value in the password manager, redeploy, and check that Assistant appears in the sidebar and Settings → Assistant offers the form. Losing the value makes every saved model key unopenable (owners must enter them again); A2 makes changing it safe. | Ops |
+| A2 | `SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS`: keys sealed under an earlier secret still open, and are sealed again under the current one the next time they are used. The secret must still differ from every other secret. | T2 |
+| A3 | `docs/hosted/README.md` gains an Assistant row: on, bring your own model, what is sent to the provider, that a model on your own machine is not reachable from Cloud (use a hosted provider or a public HTTPS URL). The site's assistant section is shown for Cloud only when the hosted page says so, and `release-hosted-docs` pins the two together. | T0 |
+| A4 | Provider presets in Settings: Anthropic, OpenAI, OpenRouter, Google (its OpenAI-compatible endpoint), Mistral, Groq, Together, and Custom, each filling the base URL; **Load models** lists the provider's models (`GET /v1/models`) for the Model field. No JavaScript: a preset is a submit button that fills the form. | T1 |
+| A5 | Agent operations the assistant runs count in the usage meter (part 3) as `origin = dashboard-assistant`, so a busy organization's assistant is bounded by its plan's quota as an agent is. The assistant itself is on every plan: the model and its cost are the customer's. | T1 |
+
+Worker budget: a message makes at most 8 model calls (30 s each, 90 s a turn) and at most 24 agent
+operations (`SLOTLOCK_WORKER_AGENT_CALLS_PER_REQUEST`). That is within a Worker's subrequest limit,
+and the time is spent waiting, not on CPU ([Billing facts](#billing-facts-to-verify) has the
+limits).
+
+## 2. What a resource is attached to, and grouping
+
+### Today, from the schema
+
+`slotlock.resources` (`src/ddl.ts`) has: `id`, `tenant_ref`, `external_ref` (unique in the tenant),
+`timezone`, `availability_rules`, `booking_rules`, `pool_ref`, `visibility` (`shared` or
+`private`, fixed at creation), `archived_at`, `check_in_since` and `created_at`.
+
+| Attached to a resource | Attached to the tenant |
+| --- | --- |
+| Reservations and holds (and hold groups), events and their occurrences (each owned by the key or agent that wrote it), coverage per external source, waitlist entries, history | API keys (tenant and scopes only), webhook endpoints (filtered by event type only), booking-rule defaults (tenant-wide and per pool), assistant settings, the plan |
+
+- **A tenant is the only container.** On Cloud it is a person (`github:<id>`), or an organization
+  listed in `SLOTLOCK_DASHBOARD_ORGS` (`github-org:<id>`). Forced row-level security isolates it.
+- **A pool is the only grouping**, and it is booking semantics: one pool per resource, flat, used
+  by `slotlock_book_pool` (take any free member), pool availability (how many are free), pool rule
+  defaults and pool waitlists.
+- **Missing:** a display name (agents and the dashboard show `external_ref`), description, kind,
+  capacity, attributes, labels, a location or site, many-to-many groups, a parent made of children
+  (a divisible hall), API keys limited to some resources, webhooks for some resources, and a test
+  environment beside live.
+- **Search takes ids.** `free-busy` and `next-available` take up to 100 `resource_ids`,
+  `available-slots` up to 20. "A free electric van at Heathrow tomorrow" is a list call, a filter in
+  the agent, then a search.
+
+### What the use cases need
+
+The repository's own examples are a fleet (vans, `van-class`, a UK plate, check-in and no-show), so
+Pylota's case is treated as fleet and rental first; please correct this if Pylota's product books
+something else. The other rows are the cases the industry models.
+
+| Case | Groups it needs | Edge cases |
+| --- | --- | --- |
+| Fleet and car rental | Vehicle → class (an ACRISS code such as `CDMR`) → branch → region; attributes (electric, seats, transmission, accessible) | Book by class at a branch; one-way hire returns the vehicle elsewhere (the location changes over time); a vehicle with a driver (two resources, one booking); maintenance blocks; wear spread across a class |
+| Rooms and desks | Building → floor → zone; capacity; features (video, whiteboard) | A divisible hall: booking the hall blocks its parts and booking a part blocks the hall; desks booked by zone |
+| Clinics and services | Practitioner, room and device; service type; site | A practitioner at different sites on different days; one appointment needs a person, a room and a device together |
+| Equipment hire | Item → product → bundle | 50 identical chairs (quantity, not identity); kits made of items |
+| Classes and tours | Session with seats | Capacity per slot; a group taking several seats at once |
+| Agencies, franchises and platforms | Customer → their resources | Each customer isolated, billed and supported separately: a tenant each (part 4) |
+| Teams inside one customer | Site or team → its resources | Staff and keys that see only their own site |
+
+### Design
+
+Three concepts, kept apart because they mean different things:
+
+- **Pool** (unchanged): interchangeable members, booked as a class. One per resource.
+- **Location**: where a resource is. A tree, one per resource, used for search and scoping.
+- **Group**: any set a tenant wants (a team, a contract, "London airport fleet"). Many per
+  resource, no booking semantics.
+
+**G1. Resource profile (T1).** Columns on `slotlock.resources`, each optional:
+
+| Field | Bound | Use |
+| --- | --- | --- |
+| `name` | 1–200 characters | Shown to agents and people instead of the reference |
+| `description` | ≤ 2,000 characters | Shown in the dashboard and on `slotlock_list_resources` (truncated to 500) |
+| `kind` | `vehicle`, `room`, `desk`, `person`, `equipment`, `space`, `service`, `other` | Filtering; icons in the dashboard |
+| `capacity` | 1–100,000 | People or seats it holds; informational, never enforced as concurrent bookings |
+| `labels` | ≤ 20, each `^[a-z0-9][a-z0-9._-]{0,63}$` | Filtering (`ev`, `wheelchair`, `projector`), GIN-indexed |
+| `attributes` | JSON object, ≤ 50 keys, ≤ 4 KiB, string, number or boolean values | Data the integrator wants back (plate, VIN, ACRISS code) |
+
+- `POST /v1/resources` accepts them; `PATCH /v1/resources/{id}` changes them; the dashboard's
+  resource page edits them.
+- `slotlock_list_resources` returns `name`, `kind`, `capacity`, `labels`, `location`, `groups`, and
+  filters by `kind`, `label` (all of them), `location` and `group`.
+- The outbox and history record **which** profile fields changed, never their values: the feed's
+  rule is "ids, times and states, never titles", and a name may name a person.
+- The privacy notice lists resource names and descriptions under calendar content.
+
+**G2. Locations (T1).** `slotlock.locations (tenant_ref, ref, name, parent_ref, timezone)`, forced
+RLS like every tenant table; depth at most 5 (region, site, building, floor, zone); 1,000 per
+tenant; deleting one is refused while a resource or child uses it. A resource has at most one
+`location_ref`; a new resource takes its location's time zone when none is given. API:
+`GET/POST /v1/locations`, `PATCH` and `DELETE /v1/locations/{ref}`. A location filter includes the
+locations below it.
+
+**G3. Groups (T1).** `slotlock.resource_groups (tenant_ref, ref, name, description)` and
+`slotlock.resource_group_members (tenant_ref, group_ref, resource_id)`; 500 groups a tenant, 20
+groups a resource. API: `GET/POST /v1/groups`, `PUT` and `DELETE
+/v1/groups/{ref}/members/{resource_id}`. Pools stay as they are; a pool is not a group.
+
+**G4. Search by selection (T1).** `free-busy`, `next-available`, `available-slots` and their tools
+accept a `select` of `location`, `group`, `labels`, `kind` and `pool` in place of `resource_ids`.
+It resolves inside the same transaction, in a stable order, to at most the operation's limit (100,
+or 20 for slots), and is refused with `selection_too_large` beyond it, so a search is never silently
+partial. The answer names the resources it covered.
+
+**G5. Webhook filters (T1).** An endpoint may also filter by `resource_ids`, `pools`, `locations`
+or `groups`, matched when the change is delivered (the outbox row has the resource id).
+
+**G6. Keys limited to part of a tenant (T2, 0.8.0).** An API key may carry a scope of locations
+and groups. It is enforced in the database: a restrictive RLS policy on resources and on every table
+keyed by resource compares the row's resource with a transaction-local setting that `withTenant`
+sets from the key, so a scoped key cannot read or write outside its scope through any code path. A
+resource outside the scope answers `resource_not_found`, never `forbidden`, so a scoped key learns
+nothing about the rest.
+
+**G7. Pool order (T1).** `slotlock_book_pool` tries members in a stable order today. Add a pool
+setting, `order`: `stable` (today), `least_booked` (fewest bookings in the last 30 days first) or
+`round_robin`, to spread wear across a fleet class (RFC 0002 open question 2).
+
+**G8. Composite resources (T2, later).** A parent made of children (a hall of three rooms), one
+level deep. Each occupancy row gains a span, an `int4range` over the parent's children: a booking of
+the whole parent writes one row on the parent spanning all of them; a booking of child *i* writes its
+own row and a row on the parent spanning `[i, i+1)`. The exclusion constraint becomes
+`EXCLUDE (resource_id WITH =, during WITH &&, span WITH &&)`: the whole conflicts with every part,
+two different parts never conflict, and the guarantee is still PostgreSQL's. A child's free/busy
+adds the parent's rows whose span covers it. Existing rows get the full span, so nothing changes for
+a resource without children.
+
+**G9. Test environments (T2, later).** A `slk_test_` key acts in `<tenant>~test`, a tenant of its
+own with the same plan limits and no billing; the dashboard switches between Live and Test.
+`slotlockServeAllowsTenant` must learn the suffix: today it lets through any reference that is not
+`github:<id>` or `github-org:<id>`, whatever `SLOTLOCK_DASHBOARD_USERS` says, so a removed person's
+`github:<id>~test` would keep working.
+
+Quantity (50 chairs) stays a pool of 50 members, created at once by `slotlock resource add
+--count 50 --pool chair`; a seat counter cannot be expressed as an exclusion constraint, and this
+RFC does not weaken the guarantee to get one.
+
+## 3. Usage metering
+
+Nothing counts use per tenant today, by design: `/metrics` labels come from closed sets and never
+name a tenant or key (`src/metrics.ts`), and the API logs record "each call's operation and
+outcome, never its arguments or who made it" (PRIVACY.md). Plans, partner billing and stackapi's
+reconciliation all need per-tenant counts, so one meter serves all three.
+
+### What is counted
+
+| Metric | One unit is | Counted from | Exact? |
+| --- | --- | --- | --- |
+| `operations` | A named operation that ran (REST, an MCP `tools/call`, an A2A message, an approved or read assistant call), whatever its outcome. Protocol messages (`initialize`, `tools/list`), and requests refused before an operation runs (401, 413, 429), are not counted | The server, in memory, flushed every 15 s | At most 15 s lost on a crash; never counted twice |
+| `bookings` | A committed `reservation.created` or `event.created` (a bundle of five resources is five) | The outbox, in the transaction that wrote it | Exact |
+| `holds` | A committed `hold.created` | The outbox | Exact |
+| `webhook_deliveries` | A delivery the endpoint accepted | The webhook pass | Exact |
+| `resources` | Resources at the end of each day, archived included | A daily count | Exact |
+| `assistant_messages` | A member's message to the assistant | The dashboard Worker, in the request | Exact |
+
+Maintenance's own changes (expiry, no-show release) are `origin = maintenance` and never counted.
+
+### How it is counted, end to end
+
+```text
+request ─▶ authenticate (tenant, key, partner) ─▶ Slotlock-Request-Id ─▶ quota check ─▶ operation
+                                                                                     │
+                 ┌───────────────────────────────────────────────────────────────────┤
+                 ▼                                                                   ▼
+   in-memory delta (operations)                                  outbox row (in the same transaction)
+                 │ every 15 s                                                         │ every minute
+                 ▼                                                                   ▼
+   slotlock.record_usage(flush_id, rows) ──────▶ slotlock.usage_daily ◀────── outbox rollup (cursor)
+                                                        │
+          ┌────────────────────┬────────────────────────┼───────────────────────┬──────────────────┐
+          ▼                    ▼                        ▼                       ▼                  ▼
+   quota cache (30 s)   Plan page and          partner usage API       Stripe meter events   threshold
+   in every server      GET /v1/usage          and period webhook      (partners, daily)     webhooks
+```
+
+- **Tables (owner only, read through definer functions, erased with the tenant):**
+  `slotlock.usage_daily (tenant_ref, day, metric, key_id, origin, count)`, primary key on all but
+  `count`; `slotlock.usage_flushes (flush_id, at)`, kept 7 days; `slotlock.usage_cursor
+  (txid, id)` for the outbox rollup.
+- **Operations** are added to a per-process map keyed by (tenant, key, origin) at the point where
+  `consumeRateLimit` already runs for every named operation (`src/self-host.ts`), and flushed by
+  `slotlock.record_usage(flush_id, rows)`, which inserts the flush id and adds the counts in one
+  transaction. A flush whose answer was lost is retried with the same id and adds nothing, so a
+  count is never doubled. On shutdown the server flushes before it exits.
+- **Writes** are rolled up from `slotlock.outbox` by maintenance, which already reads it in
+  committed order with `(txid, id)` and the snapshot's `xmin`: each pass adds the counts and moves
+  the cursor in one transaction, well inside the outbox's retention. No write path changes, and a
+  write that rolled back is never counted.
+- **The Worker** (assistant and dashboard operations) adds its counts with one
+  `slotlock.record_usage` call per request in `ctx.waitUntil`, with a flush id per request.
+- **Every response** carries `Slotlock-Request-Id` (a UUID, also logged with the outcome) and, for
+  a counted call, `Slotlock-Usage: operations=1` (and `bookings=n` for a write), so a gateway can
+  count on its side and compare.
+
+### Enforcement
+
+- A plan gains monthly quotas per metric (UTC calendar month, so every tenant resets at the same
+  instant and the Plan page can say when).
+- Each server keeps month-to-date counts per tenant, read from `slotlock.tenant_usage(tenant,
+  month)` at most every 30 s plus its own unflushed delta. With one API server the overshoot is
+  bounded by 30 s of traffic; with several, by that times their number. This is a quota, not a
+  ledger: billing reads the table, not the cache.
+- Over quota, an operation is refused before it runs with `429 quota_exceeded`, a problem detail
+  naming the metric, the limit and the reset, and `Retry-After` set to the reset. Reads stay
+  allowed when only `bookings` is used up, so an agent can still tell a person why it cannot book.
+- Free stops at 100%. Developer stops at 110%, so production is not cut off by a busy day; both
+  are told at 80% and 100%.
+- Notices: a `usage.threshold_reached` event in the tenant's feed (a tenant-level outbox row, so
+  webhooks and live updates carry it), a banner on every dashboard page, and the
+  `RateLimit-Policy` and `RateLimit` response fields of the IETF draft, which also carry the
+  existing per-second limits.
+
+### Reading it
+
+- `GET /v1/usage?from=&to=&group_by=day|key` (admin scope): counts per metric, per day or per key,
+  with the plan's quotas and the reset.
+- The Plan page: each metric this month against its quota, a 30-day bar chart drawn server-side as
+  SVG (no script), and the counts per key.
+
+### Privacy and retention
+
+The privacy notice gains a row: "How much your account uses the service: counts per day of
+operations, bookings, holds, webhook deliveries, resources and assistant messages, by API key and
+surface, never what was asked or answered. Kept 13 months, then deleted; erased with the account."
+Thirteen months covers a yearly plan and its disputes; invoices are Stripe's records, not ours.
+
+## 4. stackapi.app consuming Slotlock
+
+This environment could not reach `stackapi.app` (the network policy refused the host) and search
+engines have no page for it, so this part does not depend on how stackapi works inside. It covers
+the two ways any API platform can offer another API to its users. Open question 1 asks which one
+stackapi is.
+
+### Shape A: users bring their own Slotlock key (works today)
+
+A stackapi user signs up to Slotlock Cloud, picks a plan, creates a key, and gives it to stackapi,
+which forwards their calls to `https://slotlock-api.pylota.io` (REST, MCP or A2A). Slotlock bills
+the user; stackapi bills nothing for Slotlock.
+
+- Works now: `/openapi.json` is OpenAPI 3.1 with stable `operationId`s, `x-slotlock-scope` per
+  operation, a bearer scheme and the server's public URL; MCP and A2A take the same key;
+  `server.json` lists Slotlock in the MCP registry.
+- Adds: `Slotlock-Request-Id` and `RateLimit` fields (part 3) so stackapi can show them, and a
+  `Slotlock-Client` request field (for example `stackapi.app/1`), matched against a list of known
+  integrators and counted as `other` otherwise, so `/metrics` shows traffic by integrator and still
+  names no one.
+- `server.json` already describes Slotlock for the MCP registry, which a catalogue can import.
+
+### Shape B: stackapi resells Slotlock (needs the partner API)
+
+stackapi holds the relationship and the billing. Each stackapi user gets a Slotlock tenant of their
+own, created and managed by stackapi; stackapi pays Pylota wholesale and charges its users retail.
+
+**P1. Partner accounts (T2).** `slotlock.partners (id, name, status, tenant_prefix, stripe_customer,
+contract jsonb)`, created only by the deployment owner (`slotlock partner create stackapi`).
+Partner keys (`slk_partner_…`), stored like API keys (SHA-256 digests, definer functions), carry a
+new scope, `partner`, which reaches only the partner API: no calendar data, no tenant's tools.
+
+**P2. Sub-tenants.** A partner's tenants are `partner:<partner id>:<account>`, where `account` is
+stackapi's own id for the user (`^[A-Za-z0-9._-]{1,128}$`). They are ordinary tenants: forced RLS
+isolates each stackapi user from every other, and every limit, history and erasure works as for a
+direct customer. A suspended partner suspends every sub-tenant at once; `slotlockServeAllowsTenant`
+refuses a `partner:` tenant whose partner is not active.
+
+**P3. Partner API (REST, `partner` scope).**
+
+| Call | Does |
+| --- | --- |
+| `PUT /v1/partner/accounts/{account}` | Create the sub-tenant, or update it; idempotent. Body: `plan` (one of the partner's contract plans) |
+| `GET /v1/partner/accounts`, `GET …/{account}` | List, read: plan, status, created, counts |
+| `POST …/{account}/keys`, `POST …/keys/{id}/rotate`, `DELETE …/keys/{id}` | API keys for the sub-tenant, shown once, scopes capped by the contract |
+| `POST …/{account}/suspend`, `…/unsuspend` | As `slotlock tenant suspend` |
+| `POST …/{account}/erase` | Erase, with the account repeated as confirmation, as `/v1/tenant/erase` |
+| `GET /v1/partner/usage?from=&to=&account=&group_by=day` | `usage_daily` for the partner's sub-tenants |
+
+stackapi stores each user's Slotlock key (encrypted, its side) and forwards the user's calls with
+it. Every existing path then works unchanged, per key, with no new way to act as a tenant. Acting
+on behalf with one partner key and a `Slotlock-Account` field, as Stripe Connect's
+`Stripe-Account`, is possible later (T2), and only if stackapi cannot keep a key per user.
+
+**P4. Plans for sub-tenants.** `tenant_plans` gains `source` (`stripe` or `partner`) and
+`partner_id`; a partner sets a sub-tenant's plan from its contract's list (for example
+`partner_free` and `partner_pro` with their own quotas), never above it. Stripe never sees
+sub-tenants: Pylota bills the partner.
+
+**P5. Usage to the partner, end to end.**
+
+- `GET /v1/partner/usage` (above), the same counts Pylota invoices from.
+- A signed webhook to the partner, `usage.period_closed`, on the 1st of each month: the month's
+  totals per account and metric, and a SHA-256 of the canonical rows, so both sides can check they
+  hold the same numbers.
+- Each response's `Slotlock-Request-Id` and `Slotlock-Usage` let stackapi count independently. A
+  daily job on each side compares totals; a difference above 0.5% opens an incident on our side.
+- Disputes are settled from `usage_daily` (13 months). A request id stackapi sends can be found in
+  our log with its operation and outcome; the log still names no tenant.
+
+**P6. Billing the partner.** Pylota invoices the partner monthly through Stripe Billing as an
+ordinary business customer, not through the Managed Payments Checkout that PR #161 uses for
+self-serve plans: a daily job sends the partner's totals as meter events, each with an
+`identifier` of `<partner>:<metric>:<day>`, so a resend is ignored; usage-based prices on the
+partner's subscription turn them into invoice lines; a reconciliation job compares Stripe's event
+summaries with `usage_daily` every day. Pylota is then the merchant: VAT on these invoices is ours
+to handle (B2B reverse charge outside the UK), which the accountant should confirm.
+
+**P7. Contract (owner).** A partner agreement and DPA: Pylota processes stackapi's users' data for
+stackapi; the Acceptable Use Policy flows down; stackapi gives its users first-line support; Pylota
+may suspend a sub-tenant for abuse; on termination stackapi can export each account and Pylota
+erases them after 30 days. The privacy notice says partner accounts are covered by the partner's
+notice, as it already says of self-hosted deployments.
+
+## Pricing and plans after this RFC
+
+Prices and resource numbers are PR #161's. The quotas are proposed, sized so that one agent booking
+(list, search, hold, confirm: four to six operations) fits many times over, and so that a runaway
+Free loop at the rate limit uses its month in about 20 minutes rather than costing us all month.
+The owner sets the final numbers before PR #161 merges (finding 8).
+
+| | Free | Developer | Partner (wholesale) | Custom |
+| --- | --- | --- | --- | --- |
+| Price | $0 | $10 a month or $100 a year | Per active account a month, plus usage above the account's quota, with a monthly minimum (contract) | Agreed in writing |
+| Resources | 10 | 100 | Per contract plan | Own servers |
+| Active API keys | 10 | 100 | Per contract plan | |
+| Webhook endpoints | 2 | 10 | Per contract plan | |
+| Operations a month | 25,000 | 500,000 (stops at 110%) | Per contract plan | |
+| Bookings a month | 1,000 | 25,000 (stops at 110%) | Per contract plan | |
+| Assistant (bring your own model) | Yes | Yes | No (stackapi's users have no Slotlock dashboard) | |
+| Locations and groups | Yes | Yes | Yes | |
+| Keys limited to locations or groups (0.8.0) | No | Yes | Yes | |
+
+- An *active account* is a sub-tenant with at least one counted operation in the month, so
+  stackapi pays nothing for users who signed up and left.
+- A wholesale price at about 60–70% of retail leaves stackapi a margin on Developer-sized users;
+  the owner sets it.
+- Usage above quota stays a hard stop for Free and Developer at launch. Metered overage for
+  Developer (a price per 10,000 operations) can follow once Managed Payments is confirmed to
+  support usage-based prices.
+
+## Launch checklist (owner, outside the code)
+
+- [ ] Stripe live mode as PR #161 lists (product, two prices, portal, webhook for
+      `checkout.session.completed` and `customer.subscription.*`), and one real Checkout and
+      cancellation end to end.
+- [ ] Worker secrets `STRIPE_SECRET_KEY` (restricted), `STRIPE_WEBHOOK_SECRET`,
+      `SLOTLOCK_ASSISTANT_SECRET`; variables `SLOTLOCK_STRIPE_PRICE_MONTHLY`,
+      `SLOTLOCK_STRIPE_PRICE_YEARLY`, `SLOTLOCK_FREE_PLAN_FROM=2026-12-09`, `SLOTLOCK_PLAN_CONTACT`.
+- [ ] A lawyer reviews the Terms and privacy changes of PR #161 and of parts 3 and 4, and the
+      partner agreement.
+- [ ] The final quotas, in the Terms before PR #161 merges, so the 30 days' notice covers them.
+- [ ] The status probe switched on (`docs/hosted/status.md`: it stays off until the service opens).
+- [ ] A restore from the R2 backups, timed, on a scratch server.
+- [ ] support@, abuse@ and privacy@ watched, with an erasure runbook that cancels Stripe first.
+- [ ] The landing page and hosted page say the same about the assistant (A3).
+
+## Delivery
+
+Each line is one PR with its own red-to-green test. T2 PRs need an independent security review
+before merge (GOVERNANCE.md).
+
+| # | PR | Tier | Release |
+| --- | --- | --- | --- |
+| 1 | Plan default in the database, Free at first sign-in (finding 1) | T2 | 0.6.4, before 9 Dec |
+| 2 | Plan limits in every counter; a store count with archived resources (findings 2, 3) | T1 | 0.6.4 |
+| 3 | Refuse a second subscription; log a duplicate (finding 4) | T1 | 0.6.4 |
+| 4 | Erasure refused while billing is live; runbook (finding 5) | T1 | 0.6.4 |
+| 5 | Contact from config; personal address removed (finding 6) | T0 | 0.6.4 |
+| 6 | Assistant on Cloud: hosted docs, the site fact pinned to them (A3); owner sets the secret (A1) | T0 | 0.6.4 |
+| 7 | Previous assistant secrets (A2) | T2 | 0.6.4 |
+| 8 | Usage meter: tables, `record_usage`, operation counter, outbox rollup, `Slotlock-Request-Id`, `Slotlock-Usage` | T2 | 0.7.0 |
+| 9 | Quotas in plans, `quota_exceeded`, `RateLimit` fields, threshold events and banner | T2 | 0.7.0 |
+| 10 | `GET /v1/usage` and usage on the Plan page; privacy notice row | T1 | 0.7.0 |
+| 11 | Resource profile (G1), with list filters and dashboard editing | T1 | 0.7.0 |
+| 12 | Locations and groups (G2, G3) | T1 | 0.7.0 |
+| 13 | Search by selection (G4) and webhook filters (G5) | T1 | 0.7.0 |
+| 14 | Pool order (G7) | T1 | 0.7.0 |
+| 15 | Provider presets and model list (A4); assistant usage (A5) | T1 | 0.7.0 |
+| 16 | Partner accounts, partner keys, sub-tenants and the partner API (P1–P4) | T2 | 0.8.0 |
+| 17 | Partner usage API, `usage.period_closed`, `Slotlock-Client` label (P5) | T1 | 0.8.0 |
+| 18 | Stripe meter events for partners and the daily reconciliation (P6) | T1 | 0.8.0 |
+| 19 | Keys limited by location and group, by RLS (G6) | T2 | 0.8.0 |
+
+### Later
+
+- **Teams on Cloud (T2):** organizations that enable themselves (an owner signs in with
+  `read:org` and turns Slotlock on for the organization, stored in the database rather than in
+  `SLOTLOCK_DASHBOARD_ORGS`), then a Team plan per organization.
+- **Sign-in without GitHub (T2):** Google (OpenID Connect) for the people who operate a fleet or a
+  front desk and use the assistant, who often have no GitHub account.
+- **Test environments (G9), composite resources (G8), acting on behalf of a sub-tenant (P3).**
+- **Metered overage for Developer**, once Managed Payments is confirmed to support it.
+- RFC 0002 P2: OpenTelemetry export and published SLOs first, as a paid service needs them.
+
+## Billing facts to verify
+
+These come from vendor documentation and decide details above; the owner confirms them in the
+Stripe and Cloudflare dashboards before PRs 3, 9 and 18.
+
+- Stripe Managed Payments: availability for a UK seller, its fee, the Checkout parameter, and
+  whether it supports usage-based prices and the customer portal.
+- Stripe Billing meter events: the `identifier` deduplication window, how far back a timestamp may
+  be, and the live-mode rate.
+- Cloudflare Workers (paid): subrequests per request, CPU time per request, and whether the rate
+  limiting binding is per location.
+
+## Open questions
+
+1. **What is stackapi.app?** A catalogue that forwards the user's own keys (Shape A, nothing to
+   build), or a platform that bills its users for the APIs it offers (Shape B, PRs 16–18)? Does it
+   speak MCP to its users, or REST only? Can it keep a key per user?
+2. **What does Pylota book?** This RFC assumes vehicles. If it is people, rooms or services, G2
+   (locations) and G8 (composite) move up or down. Pylota's own app could be the first partner,
+   which would test P1–P6 before stackapi.
+3. **Quotas:** the numbers in the pricing table, and whether Developer should stop at 110% or 100%.
+4. **Archived resources:** keep counting them against the plan (today, simple) or count only
+   resources in use and check the limit on restore (friendlier)?
+5. **A bundle of five resources:** five bookings (proposed) or one?
+
+## Sources
+
+**Slotlock code:** `src/assistant.ts`, `src/dashboard.ts` (nav, Settings → Assistant, the Resources
+counter), `workers/dashboard/worker.ts` and `wrangler.jsonc` (the assistant secret, `readBilling`),
+`site/scripts/sync-content.mjs` (the site's assistant fact), `src/ddl.ts` (resources, outbox,
+webhook endpoints, API keys, rate buckets), `src/types.ts` (`SlotlockResource`), `src/metrics.ts`,
+`src/self-host.ts` (`authenticate`, `consumeRateLimit`, `slotlockServeAllowsTenant`),
+`openapi.json`; on PR #161: `src/plans.ts`, `src/billing.ts`, its `src/ddl.ts`, `src/dashboard.ts`,
+`workers/dashboard/worker.ts`, `TERMS.md`, `PRIVACY.md`.
