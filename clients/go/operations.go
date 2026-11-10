@@ -10,7 +10,7 @@ import "context"
 // operations is every operation, by name: its method, path, path parameters and query parameters.
 var operations = func() map[string]operation {
 	list := []operation{
-		{name: "slotlock_list_resources", method: "GET", path: "/v1/resources", pathParams: nil, query: []string{"cursor", "limit", "pool"}},
+		{name: "slotlock_list_resources", method: "GET", path: "/v1/resources", pathParams: nil, query: []string{"cursor", "limit", "pool", "kind", "labels"}},
 		{name: "slotlock_create_resource", method: "POST", path: "/v1/resources", pathParams: nil, query: nil},
 		{name: "slotlock_get_free_busy", method: "GET", path: "/v1/free-busy", pathParams: nil, query: []string{"resource_ids", "start", "end"}},
 		{name: "slotlock_find_next_available", method: "GET", path: "/v1/next-available", pathParams: nil, query: []string{"resource_ids", "start", "end", "duration_minutes"}},
@@ -26,6 +26,7 @@ var operations = func() map[string]operation {
 		{name: "slotlock_update_event", method: "PATCH", path: "/v1/events/{event_id}", pathParams: []string{"event_id"}, query: nil},
 		{name: "slotlock_delete_event", method: "DELETE", path: "/v1/events/{event_id}", pathParams: []string{"event_id"}, query: []string{"expected_revision", "idempotency_key"}},
 		{name: "slotlock_get_resource", method: "GET", path: "/v1/resources/{resource_id}", pathParams: []string{"resource_id"}, query: nil},
+		{name: "slotlock_update_resource", method: "PATCH", path: "/v1/resources/{resource_id}", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_delete_resource", method: "DELETE", path: "/v1/resources/{resource_id}", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_archive_resource", method: "POST", path: "/v1/resources/{resource_id}/archive", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_restore_resource", method: "POST", path: "/v1/resources/{resource_id}/restore", pathParams: []string{"resource_id"}, query: nil},
@@ -88,6 +89,10 @@ type ListResourcesInput struct {
 	Limit *int64
 
 	Pool *string
+
+	Kind *string
+
+	Labels []string
 }
 
 func (in ListResourcesInput) values() map[string]any {
@@ -101,12 +106,20 @@ func (in ListResourcesInput) values() map[string]any {
 	if in.Pool != nil {
 		values["pool"] = *in.Pool
 	}
+	if in.Kind != nil {
+		values["kind"] = *in.Kind
+	}
+	if in.Labels != nil {
+		values["labels"] = in.Labels
+	}
 	return values
 }
 
 // ListResources: List calendar resources. List resources visible to the authenticated tenant
-// principal, with the pool each belongs to (a vehicle class, a room type). With pool, only that
-// pool's members, in the order slotlock_book_pool tries them.
+// principal, with what each says about itself: its name (show it rather than the reference),
+// description, kind, capacity and labels, and the pool it belongs to (a vehicle class, a room
+// type). With kind, only resources of that kind; with labels, only those with every label given.
+// With pool, only that pool's members, in the order slotlock_book_pool tries them.
 func (c *Client) ListResources(ctx context.Context, in ListResourcesInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_list_resources", in.values())
 }
@@ -118,6 +131,18 @@ type CreateResourceInput struct {
 	Timezone *string
 
 	Visibility *string
+
+	Name Nullable[string]
+
+	Description Nullable[string]
+
+	Kind *string
+
+	Capacity Nullable[int64]
+
+	Labels []string
+
+	Attributes map[string]any
 }
 
 func (in CreateResourceInput) values() map[string]any {
@@ -129,14 +154,35 @@ func (in CreateResourceInput) values() map[string]any {
 	if in.Visibility != nil {
 		values["visibility"] = *in.Visibility
 	}
+	if value, ok := in.Name.get(); ok {
+		values["name"] = value
+	}
+	if value, ok := in.Description.get(); ok {
+		values["description"] = value
+	}
+	if in.Kind != nil {
+		values["kind"] = *in.Kind
+	}
+	if value, ok := in.Capacity.get(); ok {
+		values["capacity"] = value
+	}
+	if in.Labels != nil {
+		values["labels"] = in.Labels
+	}
+	if in.Attributes != nil {
+		values["attributes"] = in.Attributes
+	}
 	return values
 }
 
 // CreateResource: Create or update a resource. Create the resource with this external reference,
-// or update its time zone if the tenant already has it. Repeating the call changes nothing more.
-// visibility is shared (the default: agents list and book it) or private (agents never see it),
-// fixed at creation: naming another for an existing resource answers 409
-// resource_visibility_conflict.
+// or update its time zone, and the profile fields given, if the tenant already has it. Repeating
+// the call changes nothing more. visibility is shared (the default: agents list and book it) or
+// private (agents never see it), fixed at creation: naming another for an existing resource
+// answers 409 resource_visibility_conflict. Its profile is optional: a name agents and people see
+// instead of the reference, a description, its kind (person, room, desk, space, vehicle, machine,
+// equipment, service or other: a hint, never a rule), its capacity (informational), up to 20
+// labels to find it by, and attributes you want back.
 func (c *Client) CreateResource(ctx context.Context, in CreateResourceInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_create_resource", in.values())
 }
@@ -645,6 +691,56 @@ func (in GetResourceInput) values() map[string]any {
 // bookable hours and its visibility.
 func (c *Client) GetResource(ctx context.Context, in GetResourceInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_get_resource", in.values())
+}
+
+// UpdateResourceInput holds the arguments of [Client.UpdateResource].
+type UpdateResourceInput struct {
+	ResourceID string
+
+	Name Nullable[string]
+
+	Description Nullable[string]
+
+	Kind *string
+
+	Capacity Nullable[int64]
+
+	Labels []string
+
+	Attributes map[string]any
+}
+
+func (in UpdateResourceInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_id"] = in.ResourceID
+	if value, ok := in.Name.get(); ok {
+		values["name"] = value
+	}
+	if value, ok := in.Description.get(); ok {
+		values["description"] = value
+	}
+	if in.Kind != nil {
+		values["kind"] = *in.Kind
+	}
+	if value, ok := in.Capacity.get(); ok {
+		values["capacity"] = value
+	}
+	if in.Labels != nil {
+		values["labels"] = in.Labels
+	}
+	if in.Attributes != nil {
+		values["attributes"] = in.Attributes
+	}
+	return values
+}
+
+// UpdateResource: Change a resource's profile. Change a resource's name, description, kind,
+// capacity, labels or attributes: the fields given, keeping the rest. null clears a name,
+// description or capacity; [] and {} clear labels and attributes. The feed's resource.updated
+// names the fields that changed (profile_changed), never their values. 400
+// invalid_resource_profile outside the bounds, naming the field.
+func (c *Client) UpdateResource(ctx context.Context, in UpdateResourceInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_update_resource", in.values())
 }
 
 // DeleteResourceInput holds the arguments of [Client.DeleteResource].

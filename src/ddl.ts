@@ -8,6 +8,7 @@
 // role can write to ("$user", public) would run with that ownership. The DDL pins search_path to
 // pg_catalog and pg_temp while it runs and restores the caller's at the end. Apply it in one
 // transaction: under autocommit the pin ends with its own statement.
+import { SLOTLOCK_RESOURCE_KINDS, SLOTLOCK_RESOURCE_PROFILE_LIMITS } from './resource-profile.js';
 import { SLOTLOCK_CHANGE_ORIGINS, legacyCoverageSourceDigestSql } from './event-feed.js';
 import { SLOTLOCK_MAX_AVAILABILITY_RULES } from './weekly-hours.js';
 
@@ -2515,6 +2516,8 @@ DECLARE
   kind text;
   before jsonb := '{}'::jsonb;
   after jsonb := '{}'::jsonb;
+  -- The profile fields that changed, by name only: a name or description is calendar content.
+  profile_changed text[] := '{}';
   details jsonb;
 BEGIN
   changed := CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
@@ -2552,9 +2555,24 @@ BEGIN
       before := before || jsonb_build_object('booking_rules', OLD.booking_rules);
       after := after || jsonb_build_object('booking_rules', NEW.booking_rules);
     END IF;
-    IF after = '{}'::jsonb THEN RETURN NULL; END IF;
+    IF OLD.name IS DISTINCT FROM NEW.name THEN profile_changed := profile_changed || 'name'::text; END IF;
+    IF OLD.description IS DISTINCT FROM NEW.description THEN
+      profile_changed := profile_changed || 'description'::text;
+    END IF;
+    IF OLD.kind IS DISTINCT FROM NEW.kind THEN profile_changed := profile_changed || 'kind'::text; END IF;
+    IF OLD.capacity IS DISTINCT FROM NEW.capacity THEN
+      profile_changed := profile_changed || 'capacity'::text;
+    END IF;
+    IF OLD.labels IS DISTINCT FROM NEW.labels THEN profile_changed := profile_changed || 'labels'::text; END IF;
+    IF OLD.attributes IS DISTINCT FROM NEW.attributes THEN
+      profile_changed := profile_changed || 'attributes'::text;
+    END IF;
+    IF after = '{}'::jsonb AND cardinality(profile_changed) = 0 THEN RETURN NULL; END IF;
     kind := 'resource.updated';
-    details := jsonb_build_object('before', before, 'after', after);
+    details := jsonb_build_object('before', before, 'after', after)
+      || CASE WHEN cardinality(profile_changed) > 0
+              THEN jsonb_build_object('profile_changed', to_jsonb(profile_changed))
+              ELSE '{}'::jsonb END;
   END IF;
   INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
   VALUES (
@@ -2782,6 +2800,18 @@ CREATE INDEX IF NOT EXISTS slotlock_resources_pool_idx
 ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS visibility text NOT NULL DEFAULT 'shared';
 -- When the tenant archived it: listed nowhere and booked no more, its history kept. NULL: in use.
 ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS archived_at timestamptz;
+-- Its profile (resource-profile.ts, RFC 0003 G1), each part optional: a name shown instead of the
+-- reference, a description, what kind of thing it is (a hint for filtering, never a rule), how many
+-- people or seats it holds (informational, never enforced), labels to find it by, and attributes
+-- the integrator wants back. Calendar content: the feed names the fields that changed, never their
+-- values. Added with constant defaults, so no row is rewritten.
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS name text;
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS description text;
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'other';
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS capacity integer;
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS labels text[] NOT NULL DEFAULT '{}';
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS attributes jsonb NOT NULL DEFAULT '{}'::jsonb;
+CREATE INDEX IF NOT EXISTS slotlock_resources_labels_idx ON slotlock.resources USING gin (labels);
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS tenant_ref text;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS external_ref text;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS buffer_after_ms bigint NOT NULL DEFAULT 0;
@@ -3067,6 +3097,30 @@ BEGIN
   ) THEN
     ALTER TABLE slotlock.resources
       ADD CONSTRAINT slotlock_resources_visibility_valid CHECK (visibility IN ('shared', 'private'));
+  END IF;
+  -- The profile's bounds (SLOTLOCK_RESOURCE_PROFILE_LIMITS), NOT VALID so adding them scans
+  -- nothing under the lock; DEPLOYMENT_VALIDATE_CONSTRAINTS validates them after the migration.
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'slotlock_resources_profile_valid'
+       AND conrelid = 'slotlock.resources'::regclass
+  ) THEN
+    ALTER TABLE slotlock.resources
+      ADD CONSTRAINT slotlock_resources_profile_valid CHECK (
+        (name IS NULL OR (char_length(name) BETWEEN 1 AND ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.name}
+                          AND btrim(name) <> ''))
+        AND (description IS NULL
+             OR (char_length(description) BETWEEN 1 AND ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.description}
+                 AND btrim(description) <> ''))
+        AND kind IN (${SLOTLOCK_RESOURCE_KINDS.map((kind) => `'${kind}'`).join(', ')})
+        AND (capacity IS NULL OR capacity BETWEEN 1 AND ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.capacity})
+        AND cardinality(labels) <= ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.labels}
+        AND array_position(labels, NULL) IS NULL
+        AND (cardinality(labels) = 0
+             OR array_to_string(labels, ',') ~ '^[a-z0-9][a-z0-9._-]{0,63}(,[a-z0-9][a-z0-9._-]{0,63})*$')
+        AND jsonb_typeof(attributes) = 'object'
+        AND octet_length(attributes::text) <= ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.attributeBytes * 2}
+      ) NOT VALID;
   END IF;
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint

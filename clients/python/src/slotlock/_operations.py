@@ -13,7 +13,7 @@ OPERATIONS: dict[str, Operation] = {
         "GET",
         "/v1/resources",
         (),
-        ("cursor", "limit", "pool"),
+        ("cursor", "limit", "pool", "kind", "labels"),
     ),
     "slotlock_create_resource": Operation(
         "slotlock_create_resource",
@@ -116,6 +116,13 @@ OPERATIONS: dict[str, Operation] = {
     "slotlock_get_resource": Operation(
         "slotlock_get_resource",
         "GET",
+        "/v1/resources/{resource_id}",
+        ("resource_id",),
+        (),
+    ),
+    "slotlock_update_resource": Operation(
+        "slotlock_update_resource",
+        "PATCH",
         "/v1/resources/{resource_id}",
         ("resource_id",),
         (),
@@ -461,12 +468,16 @@ class Operations(Transport):
         cursor: str | None = None,
         limit: int | None = None,
         pool: str | None = None,
+        kind: str | None = None,
+        labels: list[str] | None = None,
     ) -> dict[str, Any]:
         """List calendar resources.
 
-        List resources visible to the authenticated tenant principal, with the pool each belongs
-        to (a vehicle class, a room type). With pool, only that pool's members, in the order
-        slotlock_book_pool tries them.
+        List resources visible to the authenticated tenant principal, with what each says about
+        itself: its name (show it rather than the reference), description, kind, capacity and
+        labels, and the pool it belongs to (a vehicle class, a room type). With kind, only
+        resources of that kind; with labels, only those with every label given. With pool, only
+        that pool's members, in the order slotlock_book_pool tries them.
         """
         values: dict[str, Any] = {}
         if cursor is not None:
@@ -475,6 +486,10 @@ class Operations(Transport):
             values["limit"] = limit
         if pool is not None:
             values["pool"] = pool
+        if kind is not None:
+            values["kind"] = kind
+        if labels is not None:
+            values["labels"] = labels
         return self.call("slotlock_list_resources", values)
 
     def create_resource(
@@ -483,19 +498,41 @@ class Operations(Transport):
         external_ref: str,
         timezone: str | None = None,
         visibility: str | None = None,
+        name: str | None | Unset = UNSET,
+        description: str | None | Unset = UNSET,
+        kind: str | None = None,
+        capacity: int | None | Unset = UNSET,
+        labels: list[str] | None = None,
+        attributes: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Create or update a resource.
 
-        Create the resource with this external reference, or update its time zone if the tenant
-        already has it. Repeating the call changes nothing more. visibility is shared (the
-        default: agents list and book it) or private (agents never see it), fixed at creation:
-        naming another for an existing resource answers 409 resource_visibility_conflict.
+        Create the resource with this external reference, or update its time zone, and the profile
+        fields given, if the tenant already has it. Repeating the call changes nothing more.
+        visibility is shared (the default: agents list and book it) or private (agents never see
+        it), fixed at creation: naming another for an existing resource answers 409
+        resource_visibility_conflict. Its profile is optional: a name agents and people see
+        instead of the reference, a description, its kind (person, room, desk, space, vehicle,
+        machine, equipment, service or other: a hint, never a rule), its capacity (informational),
+        up to 20 labels to find it by, and attributes you want back.
         """
         values: dict[str, Any] = {"external_ref": external_ref}
         if timezone is not None:
             values["timezone"] = timezone
         if visibility is not None:
             values["visibility"] = visibility
+        if not isinstance(name, Unset):
+            values["name"] = name
+        if not isinstance(description, Unset):
+            values["description"] = description
+        if kind is not None:
+            values["kind"] = kind
+        if not isinstance(capacity, Unset):
+            values["capacity"] = capacity
+        if labels is not None:
+            values["labels"] = labels
+        if attributes is not None:
+            values["attributes"] = attributes
         return self.call("slotlock_create_resource", values)
 
     def get_free_busy(self, *, resource_ids: list[str], start: str, end: str) -> dict[str, Any]:
@@ -830,6 +867,40 @@ class Operations(Transport):
         """
         values: dict[str, Any] = {"resource_id": resource_id}
         return self.call("slotlock_get_resource", values)
+
+    def update_resource(
+        self,
+        resource_id: str,
+        *,
+        name: str | None | Unset = UNSET,
+        description: str | None | Unset = UNSET,
+        kind: str | None = None,
+        capacity: int | None | Unset = UNSET,
+        labels: list[str] | None = None,
+        attributes: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Change a resource's profile.
+
+        Change a resource's name, description, kind, capacity, labels or attributes: the fields
+        given, keeping the rest. null clears a name, description or capacity; [] and {} clear
+        labels and attributes. The feed's resource.updated names the fields that changed
+        (profile_changed), never their values. 400 invalid_resource_profile outside the bounds,
+        naming the field.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id}
+        if not isinstance(name, Unset):
+            values["name"] = name
+        if not isinstance(description, Unset):
+            values["description"] = description
+        if kind is not None:
+            values["kind"] = kind
+        if not isinstance(capacity, Unset):
+            values["capacity"] = capacity
+        if labels is not None:
+            values["labels"] = labels
+        if attributes is not None:
+            values["attributes"] = attributes
+        return self.call("slotlock_update_resource", values)
 
     def delete_resource(self, resource_id: str) -> dict[str, Any]:
         """Delete a resource.

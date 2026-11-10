@@ -63,6 +63,24 @@ versioning.
 - The dashboard's Plan page shows this month's operations, bookings and holds, and who used them by
   API key, when the deployment meters (the dashboard's `usage` option, set from `SLOTLOCK_USAGE` by
   `slotlock serve` and the Worker).
+- A resource's profile (RFC 0003 G1, `resource-profile.ts`), each part optional: a `name` shown to
+  agents and people instead of the reference, a `description` (2,000 characters), a `kind`
+  (`person`, `room`, `desk`, `space`, `vehicle`, `machine`, `equipment`, `service`, `other`: a hint,
+  never a rule), a `capacity` (1-100,000, informational), up to 20 `labels` and `attributes` (up to
+  50 keys of text, numbers and booleans, 4 KiB). New columns on `slotlock.resources` with constant
+  defaults, so no row is rewritten, bounded by a CHECK the migration validates after it commits, and
+  a GIN index on labels. `createResource` takes `profile` (an existing reference keeps the fields
+  not given); the store's new `updateResourceProfile` changes the fields given, `null` clearing a
+  name, description or capacity; `listResources` narrows by `kind` and `labels` (every one).
+  `POST /v1/resources` takes the profile and `PATCH /v1/resources/{resource_id}`
+  (`slotlock_update_resource`) changes it, 400 `invalid_resource_profile` naming the `field`; a
+  resource in the application API carries all six. `slotlock_list_resources` shows agents each
+  resource's name, kind, capacity, labels and the first 500 characters of its description (never
+  its attributes), and narrows by `kind` and `labels`; a confirmation names a resource by its name.
+  `resource.updated` on the feed lists the profile fields that changed in `profile_changed`, never
+  their values. The dashboard's resource page edits the profile and shows the name in place of the
+  reference. The privacy notice lists names, descriptions, labels and attributes as calendar
+  content. In the OpenAPI document and the five clients. Run `slotlock migrate`.
 - Monthly quotas, off unless `SLOTLOCK_QUOTAS=on` (which needs `SLOTLOCK_USAGE=on`; RFC 0003
   part 3). A tenant on a plan may run so many operations and make so many bookings a UTC calendar
   month (`SLOTLOCK_PLAN_QUOTAS`): Free 25,000 and 1,000, refused at 100%; Developer 500,000 and

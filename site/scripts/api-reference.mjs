@@ -12,6 +12,7 @@ export const GROUPS = [
     operations: [
       'slotlock_list_resources',
       'slotlock_create_resource',
+      'slotlock_update_resource',
       'slotlock_get_resource',
       'slotlock_archive_resource',
       'slotlock_restore_resource',

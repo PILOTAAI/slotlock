@@ -64,6 +64,12 @@ import { ignoreRejection } from './hooks.js';
 import { SLOTLOCK_BOOKING_RULE_LIMITS, type SlotlockBookingRules } from './booking-rules.js';
 import { SLOTLOCK_DASHBOARD_ICON_SVG } from './dashboard-icon.js';
 import { SLOTLOCK_PLAN_LIMITS, SLOTLOCK_PLAN_QUOTAS, type SlotlockTenantPlan } from './plans.js';
+import {
+  SLOTLOCK_RESOURCE_KINDS,
+  SLOTLOCK_RESOURCE_PROFILE_LIMITS,
+  type SlotlockResourceKind,
+  type SlotlockResourceProfileInput,
+} from './resource-profile.js';
 import { slotlockQuotaPeriod } from './quotas.js';
 import { type SlotlockUsageRow, slotlockUsageMonthToDate, summarizeSlotlockUsage } from './usage.js';
 import {
@@ -115,6 +121,7 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/resources',
   '/resources/rules',
   '/resources/pool',
+  '/resources/profile',
   '/webhooks',
   '/webhooks/delete',
   '/webhooks/enable',
@@ -233,6 +240,16 @@ export interface SlotlockDashboardResources {
   ): Promise<SlotlockResource | null>;
   /** The tenant's default booking rules and its pools', which a resource's own rules overlay. */
   ruleDefaults?(tenantRef: string): Promise<SlotlockBookingRuleDefaults>;
+  /**
+   * Change one of the tenant's resources' profile (resource-profile.ts): the fields given, keeping
+   * the rest. As setRules; `code: 'invalid_resource_profile'`, with the `field`.
+   */
+  setProfile?(
+    tenantRef: string,
+    id: string,
+    profile: SlotlockResourceProfileInput,
+    actor?: string,
+  ): Promise<SlotlockResource | null>;
   /** Put one of the tenant's resources in a pool, or none: as setRules; `code: 'invalid_pool'`. */
   setPool?(
     tenantRef: string,
@@ -518,6 +535,12 @@ export function createSlotlockDashboardResources(store: SlotlockStore): Slotlock
       store.withTenant(tenantRef, (tenant) => tenant.getBookingRuleDefaults({ tenantRef })),
     setPool: (tenantRef, id, pool, actor) =>
       store.withTenant(tenantRef, (tenant) => tenant.setResourcePool({ tenantRef, id, pool }), by(actor)),
+    setProfile: (tenantRef, id, profile, actor) =>
+      store.withTenant(
+        tenantRef,
+        (tenant) => tenant.updateResourceProfile({ tenantRef, id, profile }),
+        by(actor),
+      ),
     waitlist: {
       list: (tenantRef, limit) =>
         store.withTenant(tenantRef, (tenant) => tenant.listWaitlist({ tenantRef, limit })),
@@ -859,6 +882,30 @@ const ICONS = Object.freeze({
   github: new Html(
     '<svg class="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path class="fill" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>',
   ),
+});
+
+/** How the dashboard names each kind of resource. */
+const KIND_NAMES: Readonly<Record<SlotlockResourceKind, string>> = Object.freeze({
+  person: 'Person',
+  room: 'Room',
+  desk: 'Desk',
+  space: 'Space',
+  vehicle: 'Vehicle',
+  machine: 'Machine',
+  equipment: 'Equipment',
+  service: 'Service',
+  other: 'Not said',
+});
+
+/** What a profile field it could not keep must be, in a person's words. */
+const PROFILE_PROBLEMS = Object.freeze({
+  name: `A name is 1 to ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.name} characters on one line.`,
+  description: `A description is at most ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.description.toLocaleString('en')} characters.`,
+  kind: 'Choose a kind from the list.',
+  capacity: `Capacity is a whole number from 1 to ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.capacity.toLocaleString('en')}. Leave it empty for none.`,
+  labels: `Up to ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.labels} labels, each 1 to 64 letters, digits, dots, dashes or underscores.`,
+  attributes: 'Those attributes are not ones Slotlock can keep.',
+  other: 'That profile is not one Slotlock can keep.',
 });
 
 type Tone = 'good' | 'bad' | 'neutral';
@@ -1440,8 +1487,9 @@ ${noticeOf(notice)}
     }</div>`;
 
   /** A resource as people name it: its reference, else the start of its id. */
+  // Its profile's name, else its reference, else the start of its id.
   const resourceName = (resource: SlotlockResource | undefined, id: string) =>
-    resource?.externalRef ?? `${id.slice(0, 8)}…`;
+    resource?.name ?? resource?.externalRef ?? `${id.slice(0, 8)}…`;
 
   function agendaPanel(
     entries: readonly SlotlockAgendaEntry[],
@@ -1639,7 +1687,7 @@ ${
     ? emptyState(ICONS.resources, 'No resources yet. Agents can only book what is listed here.', { href: '#reference', label: 'Add a resource' })
     : html`<div class="table"><table><thead><tr><th>Reference</th><th>Time zone</th><th>Bookable hours</th><th>Resource id</th></tr></thead><tbody>${resources.map(
         (resource) =>
-          html`<tr><td data-label="Reference" class="strong"><span class="cell"><a class="truncate" href="${root}/resources/${resource.id}" title="${resourceName(resource, resource.id)}">${resourceName(resource, resource.id)}</a>${resource.pool ? html`<span class="meta" title="Pool ${resource.pool}">Pool ${resource.pool}</span>` : html``}</span></td><td data-label="Time zone">${resource.timezone}</td><td data-label="Bookable hours"><span class="cell"><span>${hoursSummary(resource.availabilityRules)}</span><a class="meta-link" href="${root}/hours?resource=${resource.id}">Set hours</a></span></td><td data-label="Resource id"><code class="muted truncate id" title="${resource.id}">${resource.id}</code></td></tr>`,
+          html`<tr><td data-label="Reference" class="strong"><span class="cell"><a class="truncate" href="${root}/resources/${resource.id}" title="${resourceName(resource, resource.id)}">${resourceName(resource, resource.id)}</a>${resource.name && resource.externalRef ? html`<span class="meta" title="Reference ${resource.externalRef}">${resource.externalRef}</span>` : html``}${resource.pool ? html`<span class="meta" title="Pool ${resource.pool}">Pool ${resource.pool}</span>` : html``}</span></td><td data-label="Time zone">${resource.timezone}</td><td data-label="Bookable hours"><span class="cell"><span>${hoursSummary(resource.availabilityRules)}</span><a class="meta-link" href="${root}/hours?resource=${resource.id}">Set hours</a></span></td><td data-label="Resource id"><code class="muted truncate id" title="${resource.id}">${resource.id}</code></td></tr>`,
       )}</tbody></table></div>`
 }`;
     return respond(status, layout('Resources', content, session, 'resources'));
@@ -1721,7 +1769,8 @@ ${current ? html`<p class="fine">Membership is read from GitHub when you sign in
     const content = html`${noticeOf(notice)}
 <p><a class="back" href="${root}/resources">Resources</a></p>
 ${pageHead(resourceName(resource, resource.id))}
-<dl class="facts"><dt>Time zone</dt><dd>${resource.timezone}</dd><dt>Bookable hours</dt><dd>${hoursSummary(resource.availabilityRules)} <a href="${root}/hours?resource=${resource.id}">Set hours</a></dd><dt>Resource id</dt><dd><code class="muted">${resource.id}</code></dd></dl>
+${resource.description ? html`<p>${resource.description}</p>` : html``}
+<dl class="facts">${resource.name && resource.externalRef ? html`<dt>Reference</dt><dd>${resource.externalRef}</dd>` : html``}${resource.kind ? html`<dt>Kind</dt><dd>${KIND_NAMES[resource.kind]}</dd>` : html``}${resource.capacity !== undefined ? html`<dt>Capacity</dt><dd>${String(resource.capacity)}</dd>` : html``}${resource.labels ? html`<dt>Labels</dt><dd>${resource.labels.join(', ')}</dd>` : html``}<dt>Time zone</dt><dd>${resource.timezone}</dd><dt>Bookable hours</dt><dd>${hoursSummary(resource.availabilityRules)} <a href="${root}/hours?resource=${resource.id}">Set hours</a></dd><dt>Resource id</dt><dd><code class="muted">${resource.id}</code></dd></dl>
 <div class="split">
 <div class="stack">
 ${
@@ -1746,6 +1795,30 @@ ${toggle('requireCertain', 'require_certain', 'Only in time its calendar syncs h
 ${inheritedNote(inherited)}
 <p class="fine">Leave a field empty for no rule${inherited.size > 0 ? ' of its own' : ''}.</p>
 <button class="primary" type="submit">Save rules</button>
+</form>
+</section>`
+    : html``
+}
+${
+  options.resources.setProfile
+    ? html`<section class="panel">
+<h2>Profile</h2>
+<form method="post" action="${root}/resources/profile">
+<input type="hidden" name="csrf" value="${token}">
+<input type="hidden" name="once" value="${formNonce(session)}">
+<input type="hidden" name="id" value="${resource.id}">
+<div class="grid-form">
+<label>Name<input name="name" maxlength="${String(SLOTLOCK_RESOURCE_PROFILE_LIMITS.name)}" value="${resource.name ?? ''}" placeholder="${resource.externalRef ?? ''}"></label>
+<label>Kind<select name="kind">${SLOTLOCK_RESOURCE_KINDS.map(
+        (kind) =>
+          html`<option value="${kind}"${(resource.kind ?? 'other') === kind ? html` selected` : html``}>${KIND_NAMES[kind]}</option>`,
+      )}</select></label>
+<label>Capacity<span class="unit-input"><input type="number" inputmode="numeric" min="1" max="${String(SLOTLOCK_RESOURCE_PROFILE_LIMITS.capacity)}" name="capacity" value="${resource.capacity === undefined ? '' : String(resource.capacity)}"><span>people or seats</span></span></label>
+<label>Labels<input name="labels" value="${(resource.labels ?? []).join(', ')}" placeholder="video, accessible"></label>
+</div>
+<label>Description<textarea name="description" rows="3" maxlength="${String(SLOTLOCK_RESOURCE_PROFILE_LIMITS.description)}">${resource.description ?? ''}</textarea></label>
+<p class="fine">Agents and people see the name instead of the reference. Kind, capacity and labels help them find it, and change nothing about how it is booked.${resource.attributes ? html` Its attributes (${Object.keys(resource.attributes).join(', ')}) are set over the API.` : html``}</p>
+<button class="primary" type="submit">Save profile</button>
 </form>
 </section>`
     : html``
@@ -1812,6 +1885,49 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
     } catch (error) {
       if ((error as { code?: unknown }).code !== 'invalid_booking_rules') throw error;
       return resourceDetailPage(session, id, 400, 'Those rules are not ones Slotlock can keep.');
+    }
+    return redirect(303, `${root}/resources/${id}`);
+  }
+
+  async function saveProfile(session: Session, form: URLSearchParams): Promise<Response> {
+    const id = form.get('id') ?? '';
+    const resource = await ownResource(session, id);
+    if (!resource || !options.resources.setProfile) return notFound(session);
+    const text = (key: string) => {
+      const value = (form.get(key) ?? '').trim();
+      return value === '' ? null : value;
+    };
+    const capacity = text('capacity');
+    if (capacity !== null && !/^\d{1,6}$/.test(capacity)) {
+      return resourceDetailPage(session, id, 400, PROFILE_PROBLEMS.capacity);
+    }
+    const kind = form.get('kind') ?? 'other';
+    try {
+      await options.resources.setProfile(
+        tenantOf(session),
+        id,
+        {
+          name: text('name'),
+          description: text('description'),
+          kind: kind as SlotlockResourceKind,
+          capacity: capacity === null ? null : Number(capacity),
+          // Commas or spaces between them; a person may type them in capitals.
+          labels: (form.get('labels') ?? '')
+            .split(/[\s,]+/)
+            .map((label) => label.trim().toLowerCase())
+            .filter((label) => label !== ''),
+        },
+        personOf(session),
+      );
+    } catch (error) {
+      if ((error as { code?: unknown }).code !== 'invalid_resource_profile') throw error;
+      const field = (error as { field?: unknown }).field;
+      return resourceDetailPage(
+        session,
+        id,
+        400,
+        PROFILE_PROBLEMS[typeof field === 'string' && field in PROFILE_PROBLEMS ? (field as keyof typeof PROFILE_PROBLEMS) : 'other'],
+      );
     }
     return redirect(303, `${root}/resources/${id}`);
   }
@@ -3495,6 +3611,8 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         return saveRules(session, form);
       case '/resources/pool':
         return savePool(session, form);
+      case '/resources/profile':
+        return saveProfile(session, form);
       case '/webhooks':
         return addWebhook(session, form);
       case '/webhooks/delete':
@@ -3853,6 +3971,7 @@ textarea { padding: 10px var(--space-3); resize: vertical; min-height: 72px; lin
 .create { display: flex; flex-wrap: wrap; align-items: end; gap: var(--space-3); margin: 0; }
 .create .grow { flex: 1 1 220px; }
 label > input, label > select, label > .unit-input { width: 100%; }
+label > textarea { width: 100%; padding: var(--space-2) var(--space-3); resize: vertical; }
 label.choice > input { width: 16px; }
 .create label:not(.grow) { flex: 0 1 auto; }
 form > label { margin-bottom: var(--space-3); }

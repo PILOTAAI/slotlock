@@ -13,7 +13,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "GET",
         path: "/v1/resources",
         path_params: &[],
-        query: &["cursor", "limit", "pool"],
+        query: &["cursor", "limit", "pool", "kind", "labels"],
     },
     Operation {
         name: "slotlock_create_resource",
@@ -116,6 +116,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
     Operation {
         name: "slotlock_get_resource",
         method: "GET",
+        path: "/v1/resources/{resource_id}",
+        path_params: &["resource_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_update_resource",
+        method: "PATCH",
         path: "/v1/resources/{resource_id}",
         path_params: &["resource_id"],
         query: &[],
@@ -460,6 +467,10 @@ pub struct ListResourcesInput {
     pub limit: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<String>>,
 }
 
 /// The arguments of [`Client::create_resource`].
@@ -470,6 +481,21 @@ pub struct CreateResourceInput {
     pub timezone: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visibility: Option<String>,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<Option<String>>,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<Option<i64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<Value>,
 }
 
 /// The arguments of [`Client::get_free_busy`].
@@ -654,6 +680,27 @@ pub struct DeleteEventInput {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct GetResourceInput {
     pub resource_id: String,
+}
+
+/// The arguments of [`Client::update_resource`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UpdateResourceInput {
+    pub resource_id: String,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<Option<String>>,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<Option<i64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<Value>,
 }
 
 /// The arguments of [`Client::delete_resource`].
@@ -1027,19 +1074,25 @@ pub struct GetUsageInput {
 impl Client {
     /// List calendar resources.
     ///
-    /// List resources visible to the authenticated tenant principal, with the pool each belongs
-    /// to (a vehicle class, a room type). With pool, only that pool's members, in the order
-    /// slotlock_book_pool tries them.
+    /// List resources visible to the authenticated tenant principal, with what each says about
+    /// itself: its name (show it rather than the reference), description, kind, capacity and
+    /// labels, and the pool it belongs to (a vehicle class, a room type). With kind, only
+    /// resources of that kind; with labels, only those with every label given. With pool, only
+    /// that pool's members, in the order slotlock_book_pool tries them.
     pub fn list_resources(&self, input: &ListResourcesInput) -> Result<Value, Error> {
         self.call("slotlock_list_resources", serde_json::to_value(input)?)
     }
 
     /// Create or update a resource.
     ///
-    /// Create the resource with this external reference, or update its time zone if the tenant
-    /// already has it. Repeating the call changes nothing more. visibility is shared (the
-    /// default: agents list and book it) or private (agents never see it), fixed at creation:
-    /// naming another for an existing resource answers 409 resource_visibility_conflict.
+    /// Create the resource with this external reference, or update its time zone, and the profile
+    /// fields given, if the tenant already has it. Repeating the call changes nothing more.
+    /// visibility is shared (the default: agents list and book it) or private (agents never see
+    /// it), fixed at creation: naming another for an existing resource answers 409
+    /// resource_visibility_conflict. Its profile is optional: a name agents and people see
+    /// instead of the reference, a description, its kind (person, room, desk, space, vehicle,
+    /// machine, equipment, service or other: a hint, never a rule), its capacity (informational),
+    /// up to 20 labels to find it by, and attributes you want back.
     pub fn create_resource(&self, input: &CreateResourceInput) -> Result<Value, Error> {
         self.call("slotlock_create_resource", serde_json::to_value(input)?)
     }
@@ -1165,6 +1218,17 @@ impl Client {
     /// visibility.
     pub fn get_resource(&self, input: &GetResourceInput) -> Result<Value, Error> {
         self.call("slotlock_get_resource", serde_json::to_value(input)?)
+    }
+
+    /// Change a resource's profile.
+    ///
+    /// Change a resource's name, description, kind, capacity, labels or attributes: the fields
+    /// given, keeping the rest. null clears a name, description or capacity; [] and {} clear
+    /// labels and attributes. The feed's resource.updated names the fields that changed
+    /// (profile_changed), never their values. 400 invalid_resource_profile outside the bounds,
+    /// naming the field.
+    pub fn update_resource(&self, input: &UpdateResourceInput) -> Result<Value, Error> {
+        self.call("slotlock_update_resource", serde_json::to_value(input)?)
     }
 
     /// Delete a resource.

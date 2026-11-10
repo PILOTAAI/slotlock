@@ -1,3 +1,8 @@
+import {
+  SLOTLOCK_RESOURCE_PROFILE_FIELDS,
+  type SlotlockResourceProfileInput,
+  slotlockResourceHasLabels,
+} from './resource-profile.js';
 import type { Sql } from 'postgres';
 import {
   SLOTLOCK_USAGE_RETENTION_DAYS,
@@ -789,19 +794,36 @@ export function createSlotlockStoreAgentBackend(
           id: resourceId,
           visibility: 'shared',
         });
+        // Its profile's name when it has one, as a person reading a confirmation knows it.
         return resource
-          ? { name: resource.externalRef ?? null, timezone: resource.timezone }
+          ? { name: resource.name ?? resource.externalRef ?? null, timezone: resource.timezone }
           : null;
       });
     },
 
     async listResources(context, input) {
       const cursor = parseResourceCursor(input.cursor);
+      const kind = input.kind as SlotlockResource['kind'] | 'other' | undefined;
+      const labels = input.labels as string[] | undefined;
+      // What a resource says about itself, for an agent to show and choose by; its attributes are
+      // the integrator's, and stay on the application API.
       const output = (resource: SlotlockResource) => ({
         id: resource.id,
         external_ref: resource.externalRef,
         timezone: resource.timezone,
         ...(resource.pool !== undefined ? { pool: resource.pool } : {}),
+        ...(resource.name !== undefined ? { name: resource.name } : {}),
+        ...(resource.description !== undefined
+          ? {
+              description:
+                [...resource.description].length > 500
+                  ? `${[...resource.description].slice(0, 500).join('')}…`
+                  : resource.description,
+            }
+          : {}),
+        ...(resource.kind !== undefined ? { kind: resource.kind } : {}),
+        ...(resource.capacity !== undefined ? { capacity: resource.capacity } : {}),
+        ...(resource.labels !== undefined ? { labels: resource.labels } : {}),
       });
       if (typeof input.pool === 'string') {
         return withTenant(store, context, async (tenantStore) => ({
@@ -811,7 +833,13 @@ export function createSlotlockStoreAgentBackend(
               pool: input.pool as string,
               visibility: 'shared',
             })
-          ).map(output),
+          )
+            .filter(
+              (resource) =>
+                (kind === undefined || (resource.kind ?? 'other') === kind) &&
+                (labels === undefined || slotlockResourceHasLabels(resource.labels, labels)),
+            )
+            .map(output),
           next_cursor: null,
         }));
       }
@@ -822,6 +850,8 @@ export function createSlotlockStoreAgentBackend(
           visibility: 'shared',
           limit: limit + 1,
           ...(cursor !== undefined ? { after: cursor } : {}),
+          ...(kind !== undefined ? { kind } : {}),
+          ...(labels !== undefined ? { labels } : {}),
         });
         const page = resources.slice(0, limit);
         return {
@@ -1197,6 +1227,11 @@ export interface SlotlockStoreApplicationBackendOptions {
 function storeRefusal(error: unknown): unknown {
   const code = (error as { code?: unknown } | null)?.code;
   if (typeof code !== 'string') return error;
+  if (code === 'invalid_resource_profile') {
+    // Which field, so a client can say what to change.
+    const field = (error as { field?: unknown }).field;
+    return new SlotlockAgentOperationError(code, 400, typeof field === 'string' ? { field } : undefined);
+  }
   if (
     code === 'resource_limit_reached' ||
     code === 'resource_visibility_conflict' ||
@@ -1334,7 +1369,22 @@ function resourceOutput(resource: SlotlockResource) {
     visibility: resource.visibility ?? 'shared',
     archived_at: resource.archivedAt?.toISOString() ?? null,
     pool: resource.pool ?? null,
+    name: resource.name ?? null,
+    description: resource.description ?? null,
+    kind: resource.kind ?? 'other',
+    capacity: resource.capacity ?? null,
+    labels: resource.labels ?? [],
+    attributes: resource.attributes ?? {},
   };
+}
+
+/** The profile fields of an operation's input, as the store takes them; absent ones left out. */
+function profileInput(input: Record<string, unknown>): SlotlockResourceProfileInput {
+  const profile: Record<string, unknown> = {};
+  for (const field of SLOTLOCK_RESOURCE_PROFILE_FIELDS) {
+    if (input[field] !== undefined) profile[field] = input[field];
+  }
+  return profile as SlotlockResourceProfileInput;
 }
 
 /** Any of a tenant's events: the store's id, which the tenant-event routes take, and its owner's. */
@@ -1465,6 +1515,9 @@ export function createSlotlockStoreApplicationBackend(
                 ? { visibility: input.visibility as 'shared' | 'private' }
                 : {}),
               ...(max !== undefined ? { maxTenantResources: max } : {}),
+              ...(SLOTLOCK_RESOURCE_PROFILE_FIELDS.some((field) => input[field] !== undefined)
+                ? { profile: profileInput(input) }
+                : {}),
             });
             return { resource: resourceOutput(resource) };
           } catch (error) {
@@ -1473,6 +1526,25 @@ export function createSlotlockStoreApplicationBackend(
         },
         max !== undefined ? { isolation: 'read committed' } : undefined,
       );
+    },
+
+    async updateResource(context, input) {
+      const id = input.resource_id as string;
+      if (!STORE_ID_PATTERN.test(id)) throw new SlotlockAgentOperationError('resource_not_found', 404);
+      return withTenant(store, context, async (tenant) => {
+        let resource: SlotlockResource | null;
+        try {
+          resource = await tenant.updateResourceProfile({
+            tenantRef: tenantOf(context),
+            id,
+            profile: profileInput(input),
+          });
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+        if (!resource) throw new SlotlockAgentOperationError('resource_not_found', 404);
+        return { resource: resourceOutput(resource) };
+      }, WRITE);
     },
 
     async getResource(context, input) {

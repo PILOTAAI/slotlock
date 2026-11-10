@@ -1,6 +1,7 @@
 // The dashboard without a database: GitHub sign-in (state + PKCE), sealed sessions, CSRF and origin
 // checks, the key shown once, escaping, and the allowlist. GitHub is a fake `fetch`; keys and
 // resources are in-memory stores with the same contracts as the real ones.
+import { type SlotlockResourceProfileInput, parseSlotlockResourceProfile } from '../resource-profile.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -1905,6 +1906,92 @@ describe('resource detail, webhooks and the waitlist', () => {
     expect((await post(target, '/base/dashboard/resources/pool', { csrf: token, id: OWN, pool: 'bad pool!' }, session)).status).toBe(400);
     await post(target, '/base/dashboard/resources/pool', { csrf: token, id: OWN, pool: '' }, session);
     expect(store.setPool).toHaveBeenLastCalledWith('github:4242', OWN, null, 'github:4242');
+  });
+
+  it("edits a resource's profile, shows its name in place of the reference, and says what it could not keep", async () => {
+    const { store } = full();
+    const setProfile = vi.fn(async (tenantRef: string, id: string, profile: SlotlockResourceProfileInput) => {
+      const row = resources.rows.find((r) => r.id === id && r.tenantRef === tenantRef) as SlotlockResource | undefined;
+      if (!row) return null;
+      const change = parseSlotlockResourceProfile(profile);
+      if (change.name !== undefined) {
+        if (change.name === null) delete row.name;
+        else row.name = change.name;
+      }
+      if (change.kind !== undefined) {
+        if (change.kind === 'other') delete row.kind;
+        else row.kind = change.kind;
+      }
+      if (change.capacity !== undefined) {
+        if (change.capacity === null) delete row.capacity;
+        else row.capacity = change.capacity;
+      }
+      if (change.labels !== undefined) {
+        if (change.labels.length === 0) delete row.labels;
+        else row.labels = change.labels;
+      }
+      if (change.description !== undefined) {
+        if (change.description === null) delete row.description;
+        else row.description = change.description;
+      }
+      return row;
+    });
+    const target = dashboard({ resources: { ...store, setProfile } });
+    const { session } = await signIn(target);
+    const token = await csrf(target, session);
+    const saved = await post(
+      target,
+      '/base/dashboard/resources/profile',
+      {
+        csrf: token,
+        id: OWN,
+        name: ' Van 1, white ',
+        kind: 'vehicle',
+        capacity: '3',
+        labels: 'EV, lhr  tow-bar',
+        description: 'Long wheelbase.',
+      },
+      session,
+    );
+    expect(saved.status).toBe(303);
+    expect(setProfile).toHaveBeenLastCalledWith(
+      'github:4242',
+      OWN,
+      {
+        name: 'Van 1, white',
+        description: 'Long wheelbase.',
+        kind: 'vehicle',
+        capacity: 3,
+        labels: ['ev', 'lhr', 'tow-bar'],
+      },
+      'github:4242',
+    );
+    const page = await (await get(target, `/base/dashboard/resources/${OWN}`, session)).text();
+    expect(page).toContain('Van 1, white');
+    expect(page).toContain('<dt>Reference</dt><dd>van-1</dd><dt>Kind</dt><dd>Vehicle</dd><dt>Capacity</dt><dd>3</dd><dt>Labels</dt><dd>ev, lhr, tow-bar</dd>');
+    expect(page).toContain('<option value="vehicle" selected>Vehicle</option>');
+    expect(page).toContain('name="labels" value="ev, lhr, tow-bar"');
+    // The list shows the name, with the reference beside it.
+    const listed = await (await get(target, '/base/dashboard/resources', session)).text();
+    expect(listed).toContain('>Van 1, white</a><span class="meta" title="Reference van-1">van-1</span>');
+    // Out of bounds: said in a person's words, naming the field.
+    const badCapacity = await post(target, '/base/dashboard/resources/profile', { csrf: token, id: OWN, capacity: '0' }, session);
+    expect(badCapacity.status).toBe(400);
+    expect(await badCapacity.text()).toContain('Capacity is a whole number from 1 to 100,000.');
+    const badLabel = await post(target, '/base/dashboard/resources/profile', { csrf: token, id: OWN, labels: 'ok, no!' }, session);
+    expect(badLabel.status).toBe(400);
+    expect(await badLabel.text()).toContain('Up to 20 labels, each 1 to 64 letters');
+    // Empty fields clear it all.
+    await post(target, '/base/dashboard/resources/profile', { csrf: token, id: OWN, kind: 'other' }, session);
+    expect(setProfile).toHaveBeenLastCalledWith(
+      'github:4242',
+      OWN,
+      { name: null, description: null, kind: 'other', capacity: null, labels: [] },
+      'github:4242',
+    );
+    expect(await (await get(target, '/base/dashboard/resources', session)).text()).toContain('>van-1</a>');
+    // Another tenant's resource is not found.
+    expect((await post(target, '/base/dashboard/resources/profile', { csrf: token, id: THEIRS, name: 'x' }, session)).status).toBe(404);
   });
 
   it('shows which booking rules a resource takes from the pool and tenant defaults, and saves the new ones', async () => {

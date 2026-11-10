@@ -115,6 +115,13 @@ describe.skipIf(!url)('the application API on the real store', () => {
           visibility: 'shared',
           archived_at: null,
           pool: null,
+          // No profile given: nothing said.
+          name: null,
+          description: null,
+          kind: 'other',
+          capacity: null,
+          labels: [],
+          attributes: {},
         },
       },
     });

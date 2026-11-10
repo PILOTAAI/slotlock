@@ -36,7 +36,7 @@
       "get": {
         "operationId": "slotlock_list_resources",
         "summary": "List calendar resources",
-        "description": "List resources visible to the authenticated tenant principal, with the pool each belongs to (a vehicle class, a room type). With pool, only that pool's members, in the order slotlock_book_pool tries them.",
+        "description": "List resources visible to the authenticated tenant principal, with what each says about itself: its name (show it rather than the reference), description, kind, capacity and labels, and the pool it belongs to (a vehicle class, a room type). With kind, only resources of that kind; with labels, only those with every label given. With pool, only that pool's members, in the order slotlock_book_pool tries them.",
         "tags": [
           "Agent tools"
         ],
@@ -69,6 +69,39 @@
             "schema": {
               "type": "string",
               "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "person",
+                "room",
+                "desk",
+                "space",
+                "vehicle",
+                "machine",
+                "equipment",
+                "service",
+                "other"
+              ]
+            }
+          },
+          {
+            "name": "labels",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "minItems": 1,
+              "maxItems": 20,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+              }
             }
           }
         ],
@@ -110,6 +143,41 @@
                           "pool": {
                             "type": "string",
                             "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                          },
+                          "name": {
+                            "type": "string",
+                            "maxLength": 200
+                          },
+                          "description": {
+                            "type": "string",
+                            "maxLength": 1001
+                          },
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "person",
+                              "room",
+                              "desk",
+                              "space",
+                              "vehicle",
+                              "machine",
+                              "equipment",
+                              "service",
+                              "other"
+                            ]
+                          },
+                          "capacity": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 9007199254740991
+                          },
+                          "labels": {
+                            "maxItems": 20,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                            }
                           }
                         },
                         "required": [
@@ -161,7 +229,7 @@
       "post": {
         "operationId": "slotlock_create_resource",
         "summary": "Create or update a resource",
-        "description": "Create the resource with this external reference, or update its time zone if the tenant already has it. Repeating the call changes nothing more. visibility is shared (the default: agents list and book it) or private (agents never see it), fixed at creation: naming another for an existing resource answers 409 resource_visibility_conflict.",
+        "description": "Create the resource with this external reference, or update its time zone, and the profile fields given, if the tenant already has it. Repeating the call changes nothing more. visibility is shared (the default: agents list and book it) or private (agents never see it), fixed at creation: naming another for an existing resource answers 409 resource_visibility_conflict. Its profile is optional: a name agents and people see instead of the reference, a description, its kind (person, room, desk, space, vehicle, machine, equipment, service or other: a hint, never a rule), its capacity (informational), up to 20 labels to find it by, and attributes you want back.",
         "tags": [
           "Application"
         ],
@@ -190,6 +258,86 @@
                       "shared",
                       "private"
                     ]
+                  },
+                  "name": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "description": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 2000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "person",
+                      "room",
+                      "desk",
+                      "space",
+                      "vehicle",
+                      "machine",
+                      "equipment",
+                      "service",
+                      "other"
+                    ]
+                  },
+                  "capacity": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "labels": {
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                    }
+                  },
+                  "attributes": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "additionalProperties": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 1000
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        }
+                      ]
+                    }
                   }
                 },
                 "required": [
@@ -405,6 +553,84 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "name": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 200
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "description": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 2000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "person",
+                            "room",
+                            "desk",
+                            "space",
+                            "vehicle",
+                            "machine",
+                            "equipment",
+                            "service",
+                            "other"
+                          ]
+                        },
+                        "capacity": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "labels": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                          }
+                        },
+                        "attributes": {
+                          "type": "object",
+                          "propertyNames": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 1000
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -416,7 +642,13 @@
                         "effective_booking_rules",
                         "visibility",
                         "archived_at",
-                        "pool"
+                        "pool",
+                        "name",
+                        "description",
+                        "kind",
+                        "capacity",
+                        "labels",
+                        "attributes"
                       ],
                       "additionalProperties": false
                     }
@@ -4247,6 +4479,456 @@
       }
     },
     "/v1/resources/{resource_id}": {
+      "patch": {
+        "operationId": "slotlock_update_resource",
+        "summary": "Change a resource's profile",
+        "description": "Change a resource's name, description, kind, capacity, labels or attributes: the fields given, keeping the rest. null clears a name, description or capacity; [] and {} clear labels and attributes. The feed's resource.updated names the fields that changed (profile_changed), never their values. 400 invalid_resource_profile outside the bounds, naming the field.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "description": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 2000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "person",
+                      "room",
+                      "desk",
+                      "space",
+                      "vehicle",
+                      "machine",
+                      "equipment",
+                      "service",
+                      "other"
+                    ]
+                  },
+                  "capacity": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "labels": {
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                    }
+                  },
+                  "attributes": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "additionalProperties": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 1000
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "resource_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "resource": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "external_ref": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 500
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "timezone": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 100
+                        },
+                        "availability": {
+                          "anyOf": [
+                            {
+                              "maxItems": 50,
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "rrule": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 500
+                                  },
+                                  "start_minutes": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 1439
+                                  },
+                                  "duration_minutes": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 10080
+                                  }
+                                },
+                                "required": [
+                                  "rrule",
+                                  "start_minutes",
+                                  "duration_minutes"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "booking_rules": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "min_notice_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "max_advance_days": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 3660
+                                },
+                                "slot_step_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
+                                },
+                                "step_offset_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1439
+                                },
+                                "buffer_before_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1440
+                                },
+                                "turnaround_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1440
+                                },
+                                "enforce_hours": {
+                                  "type": "boolean"
+                                },
+                                "check_in_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
+                                },
+                                "require_certain": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "effective_booking_rules": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "min_notice_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "max_advance_days": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 3660
+                                },
+                                "slot_step_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
+                                },
+                                "step_offset_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1439
+                                },
+                                "buffer_before_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1440
+                                },
+                                "turnaround_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1440
+                                },
+                                "enforce_hours": {
+                                  "type": "boolean"
+                                },
+                                "check_in_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
+                                },
+                                "require_certain": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "visibility": {
+                          "type": "string",
+                          "enum": [
+                            "shared",
+                            "private"
+                          ]
+                        },
+                        "archived_at": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "pool": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "name": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 200
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "description": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 2000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "person",
+                            "room",
+                            "desk",
+                            "space",
+                            "vehicle",
+                            "machine",
+                            "equipment",
+                            "service",
+                            "other"
+                          ]
+                        },
+                        "capacity": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "labels": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                          }
+                        },
+                        "attributes": {
+                          "type": "object",
+                          "propertyNames": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 1000
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "external_ref",
+                        "timezone",
+                        "availability",
+                        "booking_rules",
+                        "effective_booking_rules",
+                        "visibility",
+                        "archived_at",
+                        "pool",
+                        "name",
+                        "description",
+                        "kind",
+                        "capacity",
+                        "labels",
+                        "attributes"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "resource"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
       "get": {
         "operationId": "slotlock_get_resource",
         "summary": "Get a resource",
@@ -4472,6 +5154,84 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "name": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 200
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "description": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 2000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "person",
+                            "room",
+                            "desk",
+                            "space",
+                            "vehicle",
+                            "machine",
+                            "equipment",
+                            "service",
+                            "other"
+                          ]
+                        },
+                        "capacity": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "labels": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                          }
+                        },
+                        "attributes": {
+                          "type": "object",
+                          "propertyNames": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 1000
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -4483,7 +5243,13 @@
                         "effective_booking_rules",
                         "visibility",
                         "archived_at",
-                        "pool"
+                        "pool",
+                        "name",
+                        "description",
+                        "kind",
+                        "capacity",
+                        "labels",
+                        "attributes"
                       ],
                       "additionalProperties": false
                     }
@@ -4819,6 +5585,84 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "name": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 200
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "description": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 2000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "person",
+                            "room",
+                            "desk",
+                            "space",
+                            "vehicle",
+                            "machine",
+                            "equipment",
+                            "service",
+                            "other"
+                          ]
+                        },
+                        "capacity": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "labels": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                          }
+                        },
+                        "attributes": {
+                          "type": "object",
+                          "propertyNames": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 1000
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -4830,7 +5674,13 @@
                         "effective_booking_rules",
                         "visibility",
                         "archived_at",
-                        "pool"
+                        "pool",
+                        "name",
+                        "description",
+                        "kind",
+                        "capacity",
+                        "labels",
+                        "attributes"
                       ],
                       "additionalProperties": false
                     }
@@ -5106,6 +5956,84 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "name": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 200
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "description": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 2000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "person",
+                            "room",
+                            "desk",
+                            "space",
+                            "vehicle",
+                            "machine",
+                            "equipment",
+                            "service",
+                            "other"
+                          ]
+                        },
+                        "capacity": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "labels": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                          }
+                        },
+                        "attributes": {
+                          "type": "object",
+                          "propertyNames": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 1000
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -5117,7 +6045,13 @@
                         "effective_booking_rules",
                         "visibility",
                         "archived_at",
-                        "pool"
+                        "pool",
+                        "name",
+                        "description",
+                        "kind",
+                        "capacity",
+                        "labels",
+                        "attributes"
                       ],
                       "additionalProperties": false
                     }
@@ -5532,6 +6466,84 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "name": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 200
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "description": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 2000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "person",
+                            "room",
+                            "desk",
+                            "space",
+                            "vehicle",
+                            "machine",
+                            "equipment",
+                            "service",
+                            "other"
+                          ]
+                        },
+                        "capacity": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "labels": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                          }
+                        },
+                        "attributes": {
+                          "type": "object",
+                          "propertyNames": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 1000
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -5543,7 +6555,13 @@
                         "effective_booking_rules",
                         "visibility",
                         "archived_at",
-                        "pool"
+                        "pool",
+                        "name",
+                        "description",
+                        "kind",
+                        "capacity",
+                        "labels",
+                        "attributes"
                       ],
                       "additionalProperties": false
                     }
@@ -5895,6 +6913,84 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "name": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 200
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "description": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 2000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "person",
+                            "room",
+                            "desk",
+                            "space",
+                            "vehicle",
+                            "machine",
+                            "equipment",
+                            "service",
+                            "other"
+                          ]
+                        },
+                        "capacity": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "labels": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                          }
+                        },
+                        "attributes": {
+                          "type": "object",
+                          "propertyNames": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 1000
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -5906,7 +7002,13 @@
                         "effective_booking_rules",
                         "visibility",
                         "archived_at",
-                        "pool"
+                        "pool",
+                        "name",
+                        "description",
+                        "kind",
+                        "capacity",
+                        "labels",
+                        "attributes"
                       ],
                       "additionalProperties": false
                     }
@@ -6239,6 +7341,84 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "name": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 200
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "description": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 2000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "person",
+                            "room",
+                            "desk",
+                            "space",
+                            "vehicle",
+                            "machine",
+                            "equipment",
+                            "service",
+                            "other"
+                          ]
+                        },
+                        "capacity": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "labels": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                          }
+                        },
+                        "attributes": {
+                          "type": "object",
+                          "propertyNames": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 1000
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -6250,7 +7430,13 @@
                         "effective_booking_rules",
                         "visibility",
                         "archived_at",
-                        "pool"
+                        "pool",
+                        "name",
+                        "description",
+                        "kind",
+                        "capacity",
+                        "labels",
+                        "attributes"
                       ],
                       "additionalProperties": false
                     }
@@ -6540,6 +7726,84 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "name": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 200
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "description": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 2000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "person",
+                            "room",
+                            "desk",
+                            "space",
+                            "vehicle",
+                            "machine",
+                            "equipment",
+                            "service",
+                            "other"
+                          ]
+                        },
+                        "capacity": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "labels": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                          }
+                        },
+                        "attributes": {
+                          "type": "object",
+                          "propertyNames": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 1000
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -6551,7 +7815,13 @@
                         "effective_booking_rules",
                         "visibility",
                         "archived_at",
-                        "pool"
+                        "pool",
+                        "name",
+                        "description",
+                        "kind",
+                        "capacity",
+                        "labels",
+                        "attributes"
                       ],
                       "additionalProperties": false
                     }

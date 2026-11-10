@@ -12,7 +12,7 @@ public abstract class SlotlockOperations {
   /** Every operation, by name: its method, path, path parameters and query parameters. */
   static final Map<String, Operation> OPERATIONS =
       Map.ofEntries(
-          Map.entry("slotlock_list_resources", new Operation("GET", "/v1/resources", List.of(), List.of("cursor", "limit", "pool"))),
+          Map.entry("slotlock_list_resources", new Operation("GET", "/v1/resources", List.of(), List.of("cursor", "limit", "pool", "kind", "labels"))),
           Map.entry("slotlock_create_resource", new Operation("POST", "/v1/resources", List.of(), List.of())),
           Map.entry("slotlock_get_free_busy", new Operation("GET", "/v1/free-busy", List.of(), List.of("resource_ids", "start", "end"))),
           Map.entry("slotlock_find_next_available", new Operation("GET", "/v1/next-available", List.of(), List.of("resource_ids", "start", "end", "duration_minutes"))),
@@ -28,6 +28,7 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_update_event", new Operation("PATCH", "/v1/events/{event_id}", List.of("event_id"), List.of())),
           Map.entry("slotlock_delete_event", new Operation("DELETE", "/v1/events/{event_id}", List.of("event_id"), List.of("expected_revision", "idempotency_key"))),
           Map.entry("slotlock_get_resource", new Operation("GET", "/v1/resources/{resource_id}", List.of("resource_id"), List.of())),
+          Map.entry("slotlock_update_resource", new Operation("PATCH", "/v1/resources/{resource_id}", List.of("resource_id"), List.of())),
           Map.entry("slotlock_delete_resource", new Operation("DELETE", "/v1/resources/{resource_id}", List.of("resource_id"), List.of())),
           Map.entry("slotlock_archive_resource", new Operation("POST", "/v1/resources/{resource_id}/archive", List.of("resource_id"), List.of())),
           Map.entry("slotlock_restore_resource", new Operation("POST", "/v1/resources/{resource_id}/restore", List.of("resource_id"), List.of())),
@@ -102,24 +103,28 @@ public abstract class SlotlockOperations {
 
   /**
    * List calendar resources. List resources visible to the authenticated tenant principal, with
-   * the pool each belongs to (a vehicle class, a room type). With pool, only that pool's members,
-   * in the order slotlock_book_pool tries them.
+   * what each says about itself: its name (show it rather than the reference), description, kind,
+   * capacity and labels, and the pool it belongs to (a vehicle class, a room type). With kind,
+   * only resources of that kind; with labels, only those with every label given. With pool, only
+   * that pool's members, in the order slotlock_book_pool tries them.
    *
    * @param optional the optional arguments, or null: {@code cursor} (string), {@code limit}
-   * (integer), {@code pool} (string)
+   * (integer), {@code pool} (string), {@code kind} (string), {@code labels} (list of string)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> listResources(Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
-    putOptional(values, optional, Set.of("cursor", "limit", "pool"), "slotlock_list_resources");
+    putOptional(values, optional, Set.of("cursor", "limit", "pool", "kind", "labels"), "slotlock_list_resources");
     return call("slotlock_list_resources", values);
   }
 
   /**
    * List calendar resources. List resources visible to the authenticated tenant principal, with
-   * the pool each belongs to (a vehicle class, a room type). With pool, only that pool's members,
-   * in the order slotlock_book_pool tries them.
+   * what each says about itself: its name (show it rather than the reference), description, kind,
+   * capacity and labels, and the pool it belongs to (a vehicle class, a room type). With kind,
+   * only resources of that kind; with labels, only those with every label given. With pool, only
+   * that pool's members, in the order slotlock_book_pool tries them.
    *
    * @return the response body
    * @throws SlotlockException when the server refuses the call
@@ -130,28 +135,38 @@ public abstract class SlotlockOperations {
 
   /**
    * Create or update a resource. Create the resource with this external reference, or update its
-   * time zone if the tenant already has it. Repeating the call changes nothing more. visibility
-   * is shared (the default: agents list and book it) or private (agents never see it), fixed at
-   * creation: naming another for an existing resource answers 409 resource_visibility_conflict.
+   * time zone, and the profile fields given, if the tenant already has it. Repeating the call
+   * changes nothing more. visibility is shared (the default: agents list and book it) or private
+   * (agents never see it), fixed at creation: naming another for an existing resource answers 409
+   * resource_visibility_conflict. Its profile is optional: a name agents and people see instead
+   * of the reference, a description, its kind (person, room, desk, space, vehicle, machine,
+   * equipment, service or other: a hint, never a rule), its capacity (informational), up to 20
+   * labels to find it by, and attributes you want back.
    *
    * @param externalRef {@code external_ref}, string
    * @param optional the optional arguments, or null: {@code timezone} (string), {@code
-   * visibility} (string)
+   * visibility} (string), {@code name} (string, null clears it), {@code description} (string,
+   * null clears it), {@code kind} (string), {@code capacity} (integer, null clears it), {@code
+   * labels} (list of string), {@code attributes} (object)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> createResource(String externalRef, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("external_ref", externalRef);
-    putOptional(values, optional, Set.of("timezone", "visibility"), "slotlock_create_resource");
+    putOptional(values, optional, Set.of("timezone", "visibility", "name", "description", "kind", "capacity", "labels", "attributes"), "slotlock_create_resource");
     return call("slotlock_create_resource", values);
   }
 
   /**
    * Create or update a resource. Create the resource with this external reference, or update its
-   * time zone if the tenant already has it. Repeating the call changes nothing more. visibility
-   * is shared (the default: agents list and book it) or private (agents never see it), fixed at
-   * creation: naming another for an existing resource answers 409 resource_visibility_conflict.
+   * time zone, and the profile fields given, if the tenant already has it. Repeating the call
+   * changes nothing more. visibility is shared (the default: agents list and book it) or private
+   * (agents never see it), fixed at creation: naming another for an existing resource answers 409
+   * resource_visibility_conflict. Its profile is optional: a name agents and people see instead
+   * of the reference, a description, its kind (person, room, desk, space, vehicle, machine,
+   * equipment, service or other: a hint, never a rule), its capacity (informational), up to 20
+   * labels to find it by, and attributes you want back.
    *
    * @param externalRef {@code external_ref}, string
    * @return the response body
@@ -567,6 +582,42 @@ public abstract class SlotlockOperations {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("resource_id", resourceId);
     return call("slotlock_get_resource", values);
+  }
+
+  /**
+   * Change a resource's profile. Change a resource's name, description, kind, capacity, labels or
+   * attributes: the fields given, keeping the rest. null clears a name, description or capacity;
+   * [] and {} clear labels and attributes. The feed's resource.updated names the fields that
+   * changed (profile_changed), never their values. 400 invalid_resource_profile outside the
+   * bounds, naming the field.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param optional the optional arguments, or null: {@code name} (string, null clears it),
+   * {@code description} (string, null clears it), {@code kind} (string), {@code capacity}
+   * (integer, null clears it), {@code labels} (list of string), {@code attributes} (object)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> updateResource(String resourceId, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("resource_id", resourceId);
+    putOptional(values, optional, Set.of("name", "description", "kind", "capacity", "labels", "attributes"), "slotlock_update_resource");
+    return call("slotlock_update_resource", values);
+  }
+
+  /**
+   * Change a resource's profile. Change a resource's name, description, kind, capacity, labels or
+   * attributes: the fields given, keeping the rest. null clears a name, description or capacity;
+   * [] and {} clear labels and attributes. The feed's resource.updated names the fields that
+   * changed (profile_changed), never their values. 400 invalid_resource_profile outside the
+   * bounds, naming the field.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> updateResource(String resourceId) {
+    return updateResource(resourceId, null);
   }
 
   /**

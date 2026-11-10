@@ -1,4 +1,12 @@
 // DB mechanics for the Slotlock core: explicit `postgres` client in, structured results out.
+import {
+  type SlotlockResourceAttributes,
+  type SlotlockResourceKind,
+  type SlotlockResourceProfileChange,
+  type SlotlockResourceProfileInput,
+  SLOTLOCK_RESOURCE_KINDS,
+  parseSlotlockResourceProfile,
+} from './resource-profile.js';
 import { type SlotlockUsageRow, readSlotlockTenantUsage } from './usage.js';
 import { slotlockPlanReadRefusal } from './plans.js';
 import {
@@ -1756,9 +1764,20 @@ type ResourceRow = {
   pool_ref: string | null;
   visibility: NonNullable<SlotlockResource['visibility']>;
   archived_at: Date | null;
+  /** The profile (resource-profile.ts); absent when the query did not read it. */
+  name?: string | null;
+  description?: string | null;
+  kind?: string;
+  capacity?: number | null;
+  labels?: string[];
+  attributes?: unknown;
   /** The rules that apply (EFFECTIVE_BOOKING_RULES); absent when the query did not read them. */
   effective_booking_rules?: unknown;
 };
+
+/** A resource's own columns, as toResource reads them. */
+const RESOURCE_COLUMNS =
+  'id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref, visibility, archived_at, name, description, kind, capacity, labels, attributes';
 
 /**
  * A resource row's effective booking rules (jsonb; NULL for none): tenant defaults, overlaid by its
@@ -1796,6 +1815,22 @@ function toResource(row: ResourceRow): SlotlockResource {
   };
   if (row.archived_at !== null) resource.archivedAt = row.archived_at;
   if (row.pool_ref !== null && row.pool_ref !== undefined) resource.pool = row.pool_ref;
+  // The profile, each part only when it says something.
+  if (typeof row.name === 'string') resource.name = row.name;
+  if (typeof row.description === 'string') resource.description = row.description;
+  if (row.kind !== undefined && row.kind !== 'other' && (SLOTLOCK_RESOURCE_KINDS as readonly string[]).includes(row.kind)) {
+    resource.kind = row.kind as SlotlockResourceKind;
+  }
+  if (typeof row.capacity === 'number') resource.capacity = row.capacity;
+  if (Array.isArray(row.labels) && row.labels.length > 0) resource.labels = [...row.labels];
+  if (
+    row.attributes !== null &&
+    typeof row.attributes === 'object' &&
+    !Array.isArray(row.attributes) &&
+    Object.keys(row.attributes).length > 0
+  ) {
+    resource.attributes = { ...(row.attributes as SlotlockResourceAttributes) };
+  }
   if (row.availability_rules !== null && row.availability_rules !== undefined) {
     // Written validated; anything else reads as closed.
     try {
@@ -1836,6 +1871,28 @@ function availabilityParameter(sql: StoreSql, rules: readonly WeeklyAvailability
   );
 }
 
+/**
+ * A checked profile change as statement parameters: each field's value (null when not given or
+ * cleared) and whether it was given. Labels travel as one comma-joined string, which a label never
+ * contains: postgres.js binds an array as text[] only once the pool knows the server's types.
+ */
+function profileParameters(change: SlotlockResourceProfileChange) {
+  return {
+    name: change.name ?? null,
+    setName: change.name !== undefined,
+    description: change.description ?? null,
+    setDescription: change.description !== undefined,
+    kind: change.kind ?? null,
+    setKind: change.kind !== undefined,
+    capacity: change.capacity ?? null,
+    setCapacity: change.capacity !== undefined,
+    labels: change.labels === undefined ? null : change.labels.join(','),
+    setLabels: change.labels !== undefined,
+    attributes: change.attributes === undefined ? null : JSON.stringify(change.attributes),
+    setAttributes: change.attributes !== undefined,
+  };
+}
+
 async function upsertResource(
   executor: StoreSql,
   params: {
@@ -1843,24 +1900,43 @@ async function upsertResource(
     tenantRef?: string;
     timezone?: string;
     visibility?: SlotlockResource['visibility'];
+    profile?: SlotlockResourceProfileChange;
   },
 ): Promise<SlotlockResource> {
   type ResourceIdentityRow = ResourceRow;
   const visibility = params.visibility ?? 'shared';
   const asked = params.visibility ?? null;
+  const profile = profileParameters(params.profile ?? {});
   let rows: ResourceIdentityRow[];
   // An existing identity keeps its visibility: re-creating with another is refused, so a private
-  // one is never made shared.
+  // one is never made shared. Its profile takes the fields given, and keeps the rest.
   if (params.tenantRef !== undefined && params.externalRef !== undefined) {
     rows = await executor<ResourceIdentityRow[]>`
-      INSERT INTO slotlock.resources (external_ref, tenant_ref, timezone, visibility)
-      VALUES (${params.externalRef}, ${params.tenantRef}, ${params.timezone ?? 'UTC'}, ${visibility})
+      INSERT INTO slotlock.resources (
+        external_ref, tenant_ref, timezone, visibility, name, description, kind, capacity, labels, attributes
+      )
+      VALUES (
+        ${params.externalRef}, ${params.tenantRef}, ${params.timezone ?? 'UTC'}, ${visibility},
+        ${profile.name}::text, ${profile.description}::text, COALESCE(${profile.kind}::text, 'other'),
+        ${profile.capacity}::integer,
+        COALESCE(pg_catalog.string_to_array(${profile.labels}::text, ','), '{}'::text[]),
+        COALESCE(${profile.attributes}::text::jsonb, '{}'::jsonb)
+      )
       ON CONFLICT (tenant_ref, external_ref)
         WHERE tenant_ref IS NOT NULL AND external_ref IS NOT NULL
-      DO UPDATE SET timezone = EXCLUDED.timezone
+      DO UPDATE SET timezone = EXCLUDED.timezone,
+        name = CASE WHEN ${profile.setName}::boolean THEN EXCLUDED.name ELSE slotlock.resources.name END,
+        description = CASE WHEN ${profile.setDescription}::boolean THEN EXCLUDED.description
+                           ELSE slotlock.resources.description END,
+        kind = CASE WHEN ${profile.setKind}::boolean THEN EXCLUDED.kind ELSE slotlock.resources.kind END,
+        capacity = CASE WHEN ${profile.setCapacity}::boolean THEN EXCLUDED.capacity ELSE slotlock.resources.capacity END,
+        labels = CASE WHEN ${profile.setLabels}::boolean THEN EXCLUDED.labels ELSE slotlock.resources.labels END,
+        attributes = CASE WHEN ${profile.setAttributes}::boolean THEN EXCLUDED.attributes
+                          ELSE slotlock.resources.attributes END
       WHERE ${asked}::text IS NULL OR slotlock.resources.visibility = ${asked}::text
-      RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref, visibility, archived_at, ${executor.unsafe(EFFECTIVE_BOOKING_RULES)}`;
+      RETURNING ${executor.unsafe(RESOURCE_COLUMNS)}, ${executor.unsafe(EFFECTIVE_BOOKING_RULES)}`;
   } else if (params.externalRef !== undefined) {
+    // A legacy resource (no tenant) has no profile.
     rows = await executor<ResourceIdentityRow[]>`
       INSERT INTO slotlock.resources (external_ref, tenant_ref, timezone, visibility)
       VALUES (${params.externalRef}, NULL, ${params.timezone ?? 'UTC'}, ${visibility})
@@ -1868,12 +1944,12 @@ async function upsertResource(
         WHERE tenant_ref IS NULL AND external_ref IS NOT NULL
       DO UPDATE SET external_ref = EXCLUDED.external_ref
       WHERE ${asked}::text IS NULL OR slotlock.resources.visibility = ${asked}::text
-      RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref, visibility, archived_at, ${executor.unsafe(EFFECTIVE_BOOKING_RULES)}`;
+      RETURNING ${executor.unsafe(RESOURCE_COLUMNS)}, ${executor.unsafe(EFFECTIVE_BOOKING_RULES)}`;
   } else {
     rows = await executor<ResourceIdentityRow[]>`
       INSERT INTO slotlock.resources (external_ref, tenant_ref, timezone, visibility)
       VALUES (NULL, NULL, ${params.timezone ?? 'UTC'}, ${visibility})
-      RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref, visibility, archived_at, ${executor.unsafe(EFFECTIVE_BOOKING_RULES)}`;
+      RETURNING ${executor.unsafe(RESOURCE_COLUMNS)}, ${executor.unsafe(EFFECTIVE_BOOKING_RULES)}`;
   }
   const row = rows[0];
   if (!row) {
@@ -2184,7 +2260,24 @@ export interface SlotlockStore extends SlotlockEventFeed {
      * refused (`resource_visibility_conflict`).
      */
     visibility?: SlotlockResource['visibility'];
+    /**
+     * Its profile (resource-profile.ts): name, description, kind, capacity, labels and attributes,
+     * each optional. Creating an existing reference again sets the fields given and keeps the rest.
+     * Refused (`invalid_resource_profile`) outside its bounds, or for a resource with no tenant.
+     */
+    profile?: SlotlockResourceProfileInput;
   }): Promise<SlotlockResource>;
+  /**
+   * Change one of the tenant's resources' profile: the fields given, keeping the rest (`null`
+   * clears a name, description or capacity). Null for an id that is not the tenant's; refused
+   * (`invalid_resource_profile`) outside its bounds. The feed's `resource.updated` names the
+   * fields that changed (`profile_changed`), never their values.
+   */
+  updateResourceProfile(params: {
+    tenantRef: string;
+    id: string;
+    profile: SlotlockResourceProfileInput;
+  }): Promise<SlotlockResource | null>;
   /**
    * Resolve one tenant-owned resource without revealing another tenant's matching id. An archived
    * one is returned (with `archivedAt`); with `visibility`, only one of that visibility.
@@ -2281,6 +2374,10 @@ export interface SlotlockStore extends SlotlockEventFeed {
     visibility?: SlotlockResource['visibility'];
     /** Archived resources too; omitted, only those in use. */
     includeArchived?: boolean;
+    /** Only resources of this kind (`other` for those that say none). */
+    kind?: SlotlockResourceKind;
+    /** Only resources with every one of these labels (at most 20). */
+    labels?: readonly string[];
   }): Promise<SlotlockResource[]>;
   /**
    * How many resources the tenant has, archived ones included: the count a resource limit (a hosted
@@ -3284,6 +3381,7 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
  */
 export const SLOTLOCK_TENANT_WRITE_METHODS = Object.freeze([
   'createResource',
+  'updateResourceProfile',
   'archiveResource',
   'restoreResource',
   'deleteResource',
@@ -3775,6 +3873,16 @@ function buildSlotlockStore(
 
     async createResource(params) {
       assertValidResourceInput(params);
+      if (params.profile !== undefined && params.tenantRef === undefined) {
+        throw Object.assign(new Error('Slotlock gives a profile only to a resource with a tenant'), {
+          code: 'invalid_resource_profile' as const,
+        });
+      }
+      const { profile: given, maxTenantResources: _limit, ...identity } = params;
+      const upsert = {
+        ...identity,
+        ...(given !== undefined ? { profile: parseSlotlockResourceProfile(given) } : {}),
+      };
       const requested = params.maxTenantResources;
       // The lower of the store's own limit and the tenant's plan (plans.ts), when it has one.
       const planned =
@@ -3795,7 +3903,7 @@ function buildSlotlockStore(
           : storeLimit === undefined
             ? planned
             : Math.min(planned, storeLimit);
-      if (requested === undefined && configured === undefined) return upsertResource(sql, params);
+      if (requested === undefined && configured === undefined) return upsertResource(sql, upsert);
       if (
         requested !== undefined &&
         (!Number.isSafeInteger(requested) ||
@@ -3843,7 +3951,7 @@ function buildSlotlockStore(
               );
             }
           }
-          return upsertResource(tx, params);
+          return upsertResource(tx, upsert);
         },
         'read committed',
       );
@@ -3857,10 +3965,35 @@ function buildSlotlockStore(
         });
       }
       const rows = await sql<ResourceRow[]>`
-        SELECT id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref, visibility, archived_at, ${sql.unsafe(EFFECTIVE_BOOKING_RULES)}
+        SELECT ${sql.unsafe(RESOURCE_COLUMNS)}, ${sql.unsafe(EFFECTIVE_BOOKING_RULES)}
           FROM slotlock.resources
          WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
            AND (${params.visibility ?? null}::text IS NULL OR visibility = ${params.visibility ?? null})`;
+      const row = rows[0];
+      return row ? toResource(row) : null;
+    },
+
+    async updateResourceProfile(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidResourceId(params.id)) {
+        throw Object.assign(new Error('Slotlock resource identity is invalid'), {
+          code: 'invalid_identity' as const,
+        });
+      }
+      const profile = profileParameters(parseSlotlockResourceProfile(params.profile));
+      const rows = await sql<ResourceRow[]>`
+        UPDATE slotlock.resources
+           SET name = CASE WHEN ${profile.setName}::boolean THEN ${profile.name}::text ELSE name END,
+               description = CASE WHEN ${profile.setDescription}::boolean
+                                  THEN ${profile.description}::text ELSE description END,
+               kind = CASE WHEN ${profile.setKind}::boolean THEN ${profile.kind}::text ELSE kind END,
+               capacity = CASE WHEN ${profile.setCapacity}::boolean
+                               THEN ${profile.capacity}::integer ELSE capacity END,
+               labels = CASE WHEN ${profile.setLabels}::boolean
+                             THEN pg_catalog.string_to_array(${profile.labels}::text, ',') ELSE labels END,
+               attributes = CASE WHEN ${profile.setAttributes}::boolean
+                                 THEN ${profile.attributes}::text::jsonb ELSE attributes END
+         WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
+        RETURNING ${sql.unsafe(RESOURCE_COLUMNS)}, ${sql.unsafe(EFFECTIVE_BOOKING_RULES)}`;
       const row = rows[0];
       return row ? toResource(row) : null;
     },
@@ -3876,7 +4009,7 @@ function buildSlotlockStore(
         UPDATE slotlock.resources
            SET availability_rules = ${rules}::jsonb
          WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
-        RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref, visibility, archived_at, ${sql.unsafe(EFFECTIVE_BOOKING_RULES)}`;
+        RETURNING ${sql.unsafe(RESOURCE_COLUMNS)}, ${sql.unsafe(EFFECTIVE_BOOKING_RULES)}`;
       const row = rows[0];
       return row ? toResource(row) : null;
     },
@@ -3907,8 +4040,7 @@ function buildSlotlockStore(
                  ELSE statement_timestamp()
                END
          WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
-        RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref,
-                  visibility, archived_at, ${sql.unsafe(EFFECTIVE_BOOKING_RULES)}`;
+        RETURNING ${sql.unsafe(RESOURCE_COLUMNS)}, ${sql.unsafe(EFFECTIVE_BOOKING_RULES)}`;
       const row = rows[0];
       return row ? toResource(row) : null;
     },
@@ -3988,8 +4120,7 @@ function buildSlotlockStore(
       const rows = await sql<ResourceRow[]>`
         UPDATE slotlock.resources SET pool_ref = ${params.pool}
          WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
-        RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref,
-                  visibility, archived_at, ${sql.unsafe(EFFECTIVE_BOOKING_RULES)}`;
+        RETURNING ${sql.unsafe(RESOURCE_COLUMNS)}, ${sql.unsafe(EFFECTIVE_BOOKING_RULES)}`;
       const row = rows[0];
       return row ? toResource(row) : null;
     },
@@ -3998,8 +4129,7 @@ function buildSlotlockStore(
       if (!isValidIdentity(params.tenantRef)) throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
       if (!isPoolName(params.pool)) throw invalidPoolError();
       const rows = await sql<ResourceRow[]>`
-        SELECT id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref,
-               visibility, archived_at, ${sql.unsafe(EFFECTIVE_BOOKING_RULES)}
+        SELECT ${sql.unsafe(RESOURCE_COLUMNS)}, ${sql.unsafe(EFFECTIVE_BOOKING_RULES)}
           FROM slotlock.resources
          WHERE tenant_ref = ${params.tenantRef} AND pool_ref = ${params.pool}
            AND archived_at IS NULL
@@ -4053,13 +4183,21 @@ function buildSlotlockStore(
           code: 'invalid_cursor' as const,
         });
       }
+      // The filters are checked as a profile is, so a bad one is refused rather than matching none.
+      const filter = parseSlotlockResourceProfile({
+        ...(params.kind !== undefined ? { kind: params.kind } : {}),
+        ...(params.labels !== undefined ? { labels: params.labels } : {}),
+      });
       const rows = await sql<ResourceRow[]>`
-        SELECT id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref, visibility, archived_at, ${sql.unsafe(EFFECTIVE_BOOKING_RULES)}
+        SELECT ${sql.unsafe(RESOURCE_COLUMNS)}, ${sql.unsafe(EFFECTIVE_BOOKING_RULES)}
           FROM slotlock.resources
          WHERE tenant_ref = ${params.tenantRef}
            AND (${params.visibility ?? null}::text IS NULL OR visibility = ${params.visibility ?? null})
            AND (${params.includeArchived === true} OR archived_at IS NULL)
            AND (${params.after ?? null}::uuid IS NULL OR id > ${params.after ?? null}::uuid)
+           AND (${filter.kind ?? null}::text IS NULL OR kind = ${filter.kind ?? null}::text)
+           AND (${filter.labels === undefined || filter.labels.length === 0 ? null : filter.labels.join(',')}::text IS NULL
+                OR labels @> pg_catalog.string_to_array(${filter.labels?.join(',') ?? ''}::text, ','))
          ORDER BY id
          LIMIT ${limit}`;
       return rows.map(toResource);
@@ -4108,7 +4246,7 @@ function buildSlotlockStore(
         UPDATE slotlock.resources
            SET archived_at = COALESCE(archived_at, clock_timestamp())
          WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
-        RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref, visibility, archived_at, ${sql.unsafe(EFFECTIVE_BOOKING_RULES)}`;
+        RETURNING ${sql.unsafe(RESOURCE_COLUMNS)}, ${sql.unsafe(EFFECTIVE_BOOKING_RULES)}`;
       return row ? toResource(row) : null;
     },
 
@@ -4120,7 +4258,7 @@ function buildSlotlockStore(
         UPDATE slotlock.resources
            SET archived_at = NULL
          WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
-        RETURNING id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref, visibility, archived_at, ${sql.unsafe(EFFECTIVE_BOOKING_RULES)}`;
+        RETURNING ${sql.unsafe(RESOURCE_COLUMNS)}, ${sql.unsafe(EFFECTIVE_BOOKING_RULES)}`;
       return row ? toResource(row) : null;
     },
 
@@ -6829,8 +6967,7 @@ function buildSlotlockStore(
         });
       if (!isValidResourceId(params.resourceId)) throw notFound();
       const [row] = await sql<(ResourceRow & { now: Date })[]>`
-        SELECT id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref, visibility,
-               archived_at, ${sql.unsafe(EFFECTIVE_BOOKING_RULES)}, statement_timestamp() AS now
+        SELECT ${sql.unsafe(RESOURCE_COLUMNS)}, ${sql.unsafe(EFFECTIVE_BOOKING_RULES)}, statement_timestamp() AS now
           FROM slotlock.resources
          WHERE id = ${params.resourceId} AND tenant_ref IS NOT DISTINCT FROM ${tenantRef}`;
       if (!row) throw notFound();

@@ -237,7 +237,10 @@ Three concepts, kept apart because they mean different things:
 - **Group**: any set a tenant wants (a team, a department, a contract, "Saturday clinic", "airport
   vans"). Many per resource, no booking semantics.
 
-**G1. Resource profile (T1).** Columns on `slotlock.resources`, each optional:
+**G1. Resource profile (T1).** Status: built on `claude/inspiring-dijkstra-bfvqif`, as below, except
+that the dashboard edits name, description, kind, capacity and labels while attributes are set over
+the API, and `location` and `groups` wait for G2 and G3. Columns on `slotlock.resources`, each
+optional:
 
 | Field | Bound | Use |
 | --- | --- | --- |

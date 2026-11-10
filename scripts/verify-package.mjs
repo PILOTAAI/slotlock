@@ -145,6 +145,8 @@ const expectedFiles = new Set([
   'quotas.d.ts',
   'rate-limit.js',
   'rate-limit.d.ts',
+  'resource-profile.js',
+  'resource-profile.d.ts',
   'rest-api.js',
   'rest-api.d.ts',
   'rules.js',

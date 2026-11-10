@@ -1,4 +1,5 @@
 import type { SlotlockBookingRule, SlotlockBookingRules } from './booking-rules.js';
+import type { SlotlockResourceAttributes, SlotlockResourceKind } from './resource-profile.js';
 // Every interval is half-open `[start, end)`: back-to-back reservations do not conflict, matching
 // RFC 5545 and PostgreSQL range semantics.
 
@@ -44,6 +45,18 @@ export interface SlotlockResource {
    * (`slotlock_book_pool`).
    */
   pool?: string;
+  /** Its name, shown instead of `externalRef` (resource-profile.ts). Absent when it has none. */
+  name?: string;
+  /** What it is, in a sentence or a paragraph. Absent when it has none. */
+  description?: string;
+  /** What kind of thing it is, a hint for filtering that changes no booking. Absent: `other`. */
+  kind?: SlotlockResourceKind;
+  /** How many people or seats it holds, said for people to read; never enforced. Absent: not said. */
+  capacity?: number;
+  /** Labels to find it by, sorted. Absent when it has none. */
+  labels?: string[];
+  /** What the integrator keeps on it. Absent when it has none. */
+  attributes?: SlotlockResourceAttributes;
 }
 
 /** A confirmed occupation of a resource. The DB EXCLUDE constraint is the overlap arbiter. */

@@ -35,6 +35,12 @@ const RESOURCE = {
   visibility: 'shared',
   archived_at: null,
   pool: null,
+  name: null,
+  description: null,
+  kind: 'other',
+  capacity: null,
+  labels: [],
+  attributes: {},
 };
 const HOLD = {
   id: HOLD_ID,
@@ -90,6 +96,7 @@ const agentBackend = {
 
 const backend = {
   createResource: vi.fn(),
+  updateResource: vi.fn(),
   getResource: vi.fn(),
   archiveResource: vi.fn(),
   restoreResource: vi.fn(),
@@ -268,6 +275,7 @@ const WAITLIST_ENTRY = {
 
 const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>> = {
   createResource: { resource: RESOURCE },
+  updateResource: { resource: { ...RESOURCE, name: 'Van 42', labels: ['ev'] } },
   getResource: { resource: RESOURCE },
   archiveResource: { resource: { ...RESOURCE, archived_at: '2027-03-01T00:00:00.000Z' } },
   restoreResource: { resource: RESOURCE },

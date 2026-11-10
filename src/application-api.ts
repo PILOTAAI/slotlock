@@ -14,9 +14,15 @@ import type { SlotlockAgentPrincipal } from './agent-server.js';
 import { SLOTLOCK_EVENT_OUTPUT } from './event-schema.js';
 import type { SlotlockTraceContext } from './mcp-modern.js';
 import { SLOTLOCK_CALENDAR_HORIZON_DAYS } from './rules.js';
+import {
+  SLOTLOCK_RESOURCE_KINDS,
+  SLOTLOCK_RESOURCE_LABEL,
+  SLOTLOCK_RESOURCE_PROFILE_LIMITS,
+} from './resource-profile.js';
 
 export type SlotlockApplicationOperation =
   | 'slotlock_create_resource'
+  | 'slotlock_update_resource'
   | 'slotlock_get_resource'
   | 'slotlock_archive_resource'
   | 'slotlock_restore_resource'
@@ -91,6 +97,7 @@ type Handler = (
  */
 export interface SlotlockApplicationBackend {
   createResource: Handler;
+  updateResource: Handler;
   getResource: Handler;
   archiveResource: Handler;
   restoreResource: Handler;
@@ -145,7 +152,7 @@ export interface SlotlockApplicationOperationDefinition {
   name: SlotlockApplicationOperation;
   title: string;
   description: string;
-  method: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   /** Relative to the server's base URL; `{name}` is one path segment, an input of that name. */
   path: string;
   input: z.ZodType<Record<string, unknown>>;
@@ -261,6 +268,32 @@ const DEFAULT_BOOKING_RULES = BOOKING_RULES.omit({ check_in_minutes: true }).str
 
 const POOL = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,99}$/);
 
+const PROFILE = SLOTLOCK_RESOURCE_PROFILE_LIMITS;
+/** What a resource is: a hint for filtering and display that changes no booking. */
+const RESOURCE_KIND = z.enum(SLOTLOCK_RESOURCE_KINDS);
+const RESOURCE_LABEL = z.string().regex(SLOTLOCK_RESOURCE_LABEL);
+const RESOURCE_ATTRIBUTES = z.record(
+  z.string().min(1).max(PROFILE.attributeKey),
+  z.union([z.string().max(PROFILE.attributeValue), z.number(), z.boolean()]),
+);
+/**
+ * A resource's profile, each field optional (resource-profile.ts): a field left out is kept, `null`
+ * clears a name, description or capacity, and `[]` and `{}` clear labels and attributes. The store
+ * also refuses attributes over 4 KiB, or with more than 50 keys (400 invalid_resource_profile).
+ */
+const PROFILE_INPUT = {
+  /** Shown to agents and people instead of the reference. */
+  name: z.string().min(1).max(PROFILE.name).nullable().optional(),
+  description: z.string().min(1).max(PROFILE.description).nullable().optional(),
+  kind: RESOURCE_KIND.optional(),
+  /** People or seats it holds: informational, never enforced as bookings at once. */
+  capacity: z.number().int().min(1).max(PROFILE.capacity).nullable().optional(),
+  /** Replaces its labels; sorted and without repeats when stored. */
+  labels: z.array(RESOURCE_LABEL).max(PROFILE.labels).optional(),
+  /** Replaces its attributes: text, numbers and true or false. */
+  attributes: RESOURCE_ATTRIBUTES.optional(),
+};
+
 const RESOURCE = z
   .object({
     id: RESOURCE_ID,
@@ -280,6 +313,15 @@ const RESOURCE = z
     archived_at: DATE_TIME.nullable(),
     /** The pool it is a member of (a vehicle class, a room type); `null` when none. */
     pool: POOL.nullable(),
+    /** Its name; `null` when it has none, and agents and people see the reference. */
+    name: z.string().max(PROFILE.name).nullable(),
+    description: z.string().max(PROFILE.description).nullable(),
+    /** What it is; `other` when not said. */
+    kind: RESOURCE_KIND,
+    /** People or seats it holds; `null` when not said. */
+    capacity: z.number().int().nullable(),
+    labels: z.array(RESOURCE_LABEL).max(PROFILE.labels),
+    attributes: RESOURCE_ATTRIBUTES,
   })
   .strict();
 
@@ -420,7 +462,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_create_resource',
       title: 'Create or update a resource',
       description:
-        'Create the resource with this external reference, or update its time zone if the tenant already has it. Repeating the call changes nothing more. visibility is shared (the default: agents list and book it) or private (agents never see it), fixed at creation: naming another for an existing resource answers 409 resource_visibility_conflict.',
+        'Create the resource with this external reference, or update its time zone, and the profile fields given, if the tenant already has it. Repeating the call changes nothing more. visibility is shared (the default: agents list and book it) or private (agents never see it), fixed at creation: naming another for an existing resource answers 409 resource_visibility_conflict. Its profile is optional: a name agents and people see instead of the reference, a description, its kind (person, room, desk, space, vehicle, machine, equipment, service or other: a hint, never a rule), its capacity (informational), up to 20 labels to find it by, and attributes you want back.',
       method: 'POST',
       path: '/v1/resources',
       input: z
@@ -428,12 +470,39 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           external_ref: IDENTITY,
           timezone: TIMEZONE.default('UTC'),
           visibility: VISIBILITY.optional(),
+          ...PROFILE_INPUT,
         })
         .strict(),
       output: z.object({ resource: RESOURCE }).strict(),
       risk: { readOnly: false, destructive: false, idempotent: true },
       invoke: 'createResource',
-      example: { external_ref: 'vehicle-42', timezone: 'Europe/London' },
+      example: {
+        external_ref: 'room-3',
+        timezone: 'Europe/London',
+        name: 'Room 3',
+        kind: 'room',
+        capacity: 10,
+        labels: ['video', 'whiteboard'],
+      },
+    },
+    {
+      name: 'slotlock_update_resource',
+      title: "Change a resource's profile",
+      description:
+        "Change a resource's name, description, kind, capacity, labels or attributes: the fields given, keeping the rest. null clears a name, description or capacity; [] and {} clear labels and attributes. The feed's resource.updated names the fields that changed (profile_changed), never their values. 400 invalid_resource_profile outside the bounds, naming the field.",
+      method: 'PATCH',
+      path: '/v1/resources/{resource_id}',
+      input: z
+        .object({ resource_id: RESOURCE_ID, ...PROFILE_INPUT })
+        .strict()
+        .refine(
+          (input) => Object.keys(input).some((key) => key !== 'resource_id'),
+          'Give at least one profile field to change',
+        ),
+      output: z.object({ resource: RESOURCE }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'updateResource',
+      example: { resource_id: EXAMPLE_RESOURCE_ID, name: 'Board room', labels: ['video'] },
     },
     {
       name: 'slotlock_get_resource',

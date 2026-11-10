@@ -17,6 +17,17 @@ export {
   parseBookingRules,
 } from './booking-rules.js';
 export {
+  SLOTLOCK_RESOURCE_KINDS,
+  SLOTLOCK_RESOURCE_LABEL,
+  SLOTLOCK_RESOURCE_PROFILE_FIELDS,
+  SLOTLOCK_RESOURCE_PROFILE_LIMITS,
+  parseSlotlockResourceProfile,
+  type SlotlockResourceAttributes,
+  type SlotlockResourceKind,
+  type SlotlockResourceProfileChange,
+  type SlotlockResourceProfileInput,
+} from './resource-profile.js';
+export {
   type CreateWebhookEndpointResult,
   type ListChangesResult,
   SLOTLOCK_CHANGE_ORIGINS,

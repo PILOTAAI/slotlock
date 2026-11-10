@@ -134,6 +134,31 @@ const RESOURCE_ID = z.string().trim().min(1).max(200);
 const EVENT_ID = z.string().trim().min(1).max(500);
 const HOLD_ID = z.string().uuid();
 const POOL = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,99}$/);
+/**
+ * A resource's profile as the tools show it (resource-profile.ts, which the store checks it with):
+ * written out here, where the site reads the tools' schemas as text. A test holds the two equal.
+ */
+const RESOURCE_KIND = z.enum([
+  'person',
+  'room',
+  'desk',
+  'space',
+  'vehicle',
+  'machine',
+  'equipment',
+  'service',
+  'other',
+]);
+const RESOURCE_LABEL = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/);
+const MAX_RESOURCE_LABELS = 20;
+const MAX_RESOURCE_NAME = 200;
+/** The tools' copy of the profile's kinds and bounds, for the test that holds it to resource-profile.ts. */
+export const SLOTLOCK_AGENT_RESOURCE_PROFILE = Object.freeze({
+  kinds: RESOURCE_KIND.options,
+  label: RESOURCE_LABEL,
+  labels: MAX_RESOURCE_LABELS,
+  name: MAX_RESOURCE_NAME,
+});
 const IDEMPOTENCY_KEY = z.string().trim().min(1).max(200);
 const REVISION = z.number().int().positive();
 const MAX_AGENT_WINDOW_MS = SLOTLOCK_CALENDAR_HORIZON_DAYS * 24 * 60 * 60 * 1_000;
@@ -1015,12 +1040,14 @@ const OPERATION_DEFINITIONS = [
     name: 'slotlock_list_resources',
     title: 'List calendar resources',
     description:
-      'List resources visible to the authenticated tenant principal, with the pool each belongs to (a vehicle class, a room type). With pool, only that pool\'s members, in the order slotlock_book_pool tries them.',
+      'List resources visible to the authenticated tenant principal, with what each says about itself: its name (show it rather than the reference), description, kind, capacity and labels, and the pool it belongs to (a vehicle class, a room type). With kind, only resources of that kind; with labels, only those with every label given. With pool, only that pool\'s members, in the order slotlock_book_pool tries them.',
     input: z
       .object({
         cursor: z.string().max(500).optional(),
         limit: z.number().int().min(1).max(100).default(50),
         pool: POOL.optional(),
+        kind: RESOURCE_KIND.optional(),
+        labels: z.array(RESOURCE_LABEL).min(1).max(MAX_RESOURCE_LABELS).optional(),
       })
       .strict(),
     output: z
@@ -1033,6 +1060,12 @@ const OPERATION_DEFINITIONS = [
                 external_ref: z.string().max(500).nullable(),
                 timezone: z.string().min(1).max(100),
                 pool: POOL.optional(),
+                name: z.string().max(MAX_RESOURCE_NAME).optional(),
+                /** Its first 500 characters (code points, so up to 1,001 UTF-16 units). */
+                description: z.string().max(1_001).optional(),
+                kind: RESOURCE_KIND.optional(),
+                capacity: z.number().int().min(1).optional(),
+                labels: z.array(RESOURCE_LABEL).max(MAX_RESOURCE_LABELS).optional(),
               })
               .strict(),
           )

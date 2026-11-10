@@ -2,7 +2,7 @@
   {
     "name": "slotlock_list_resources",
     "title": "List calendar resources",
-    "description": "List resources visible to the authenticated tenant principal, with the pool each belongs to (a vehicle class, a room type). With pool, only that pool's members, in the order slotlock_book_pool tries them.",
+    "description": "List resources visible to the authenticated tenant principal, with what each says about itself: its name (show it rather than the reference), description, kind, capacity and labels, and the pool it belongs to (a vehicle class, a room type). With kind, only resources of that kind; with labels, only those with every label given. With pool, only that pool's members, in the order slotlock_book_pool tries them.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -19,6 +19,29 @@
         "pool": {
           "type": "string",
           "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "person",
+            "room",
+            "desk",
+            "space",
+            "vehicle",
+            "machine",
+            "equipment",
+            "service",
+            "other"
+          ]
+        },
+        "labels": {
+          "minItems": 1,
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+          }
         }
       },
       "additionalProperties": false
@@ -56,6 +79,41 @@
               "pool": {
                 "type": "string",
                 "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+              },
+              "name": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "description": {
+                "type": "string",
+                "maxLength": 1001
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "person",
+                  "room",
+                  "desk",
+                  "space",
+                  "vehicle",
+                  "machine",
+                  "equipment",
+                  "service",
+                  "other"
+                ]
+              },
+              "capacity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "labels": {
+                "maxItems": 20,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                }
               }
             },
             "required": [

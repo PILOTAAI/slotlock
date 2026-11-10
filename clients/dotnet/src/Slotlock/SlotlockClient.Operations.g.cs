@@ -15,7 +15,7 @@ public sealed partial class SlotlockClient
     /// <summary>Every operation, by name: its method, path, path parameters and query parameters.</summary>
     internal static readonly IReadOnlyDictionary<string, Operation> Operations = new Dictionary<string, Operation>
     {
-        ["slotlock_list_resources"] = new("GET", "/v1/resources", [], ["cursor", "limit", "pool"]),
+        ["slotlock_list_resources"] = new("GET", "/v1/resources", [], ["cursor", "limit", "pool", "kind", "labels"]),
         ["slotlock_create_resource"] = new("POST", "/v1/resources", [], []),
         ["slotlock_get_free_busy"] = new("GET", "/v1/free-busy", [], ["resource_ids", "start", "end"]),
         ["slotlock_find_next_available"] = new("GET", "/v1/next-available", [], ["resource_ids", "start", "end", "duration_minutes"]),
@@ -31,6 +31,7 @@ public sealed partial class SlotlockClient
         ["slotlock_update_event"] = new("PATCH", "/v1/events/{event_id}", ["event_id"], []),
         ["slotlock_delete_event"] = new("DELETE", "/v1/events/{event_id}", ["event_id"], ["expected_revision", "idempotency_key"]),
         ["slotlock_get_resource"] = new("GET", "/v1/resources/{resource_id}", ["resource_id"], []),
+        ["slotlock_update_resource"] = new("PATCH", "/v1/resources/{resource_id}", ["resource_id"], []),
         ["slotlock_delete_resource"] = new("DELETE", "/v1/resources/{resource_id}", ["resource_id"], []),
         ["slotlock_archive_resource"] = new("POST", "/v1/resources/{resource_id}/archive", ["resource_id"], []),
         ["slotlock_restore_resource"] = new("POST", "/v1/resources/{resource_id}/restore", ["resource_id"], []),
@@ -82,13 +83,17 @@ public sealed partial class SlotlockClient
 
     /// <summary>List calendar resources.</summary>
     /// <remarks>
-    /// List resources visible to the authenticated tenant principal, with the pool each belongs
-    /// to (a vehicle class, a room type). With pool, only that pool's members, in the order
-    /// slotlock_book_pool tries them.
+    /// List resources visible to the authenticated tenant principal, with what each says about
+    /// itself: its name (show it rather than the reference), description, kind, capacity and
+    /// labels, and the pool it belongs to (a vehicle class, a room type). With kind, only
+    /// resources of that kind; with labels, only those with every label given. With pool, only
+    /// that pool's members, in the order slotlock_book_pool tries them.
     /// </remarks>
     /// <param name="cursor">cursor</param>
     /// <param name="limit">limit</param>
     /// <param name="pool">pool</param>
+    /// <param name="kind">kind</param>
+    /// <param name="labels">labels</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -96,12 +101,16 @@ public sealed partial class SlotlockClient
         Optional<string> cursor = default,
         Optional<long> limit = default,
         Optional<string> pool = default,
+        Optional<string> kind = default,
+        Optional<IEnumerable<string>> labels = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         if (cursor.HasValue) values["cursor"] = Json.ToNode(cursor.Value);
         if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
         if (pool.HasValue) values["pool"] = Json.ToNode(pool.Value);
+        if (kind.HasValue) values["kind"] = Json.ToNode(kind.Value);
+        if (labels.HasValue) values["labels"] = Json.ToNode(labels.Value);
         return CallAsync("slotlock_list_resources", values, cancellationToken);
     }
 
@@ -116,18 +125,30 @@ public sealed partial class SlotlockClient
             cursor: cursor,
             limit: limit,
             cancellationToken: cancellationToken,
-            pool: default);
+            pool: default,
+            kind: default,
+            labels: default);
 
     /// <summary>Create or update a resource.</summary>
     /// <remarks>
-    /// Create the resource with this external reference, or update its time zone if the tenant
-    /// already has it. Repeating the call changes nothing more. visibility is shared (the
-    /// default: agents list and book it) or private (agents never see it), fixed at creation:
-    /// naming another for an existing resource answers 409 resource_visibility_conflict.
+    /// Create the resource with this external reference, or update its time zone, and the profile
+    /// fields given, if the tenant already has it. Repeating the call changes nothing more.
+    /// visibility is shared (the default: agents list and book it) or private (agents never see
+    /// it), fixed at creation: naming another for an existing resource answers 409
+    /// resource_visibility_conflict. Its profile is optional: a name agents and people see
+    /// instead of the reference, a description, its kind (person, room, desk, space, vehicle,
+    /// machine, equipment, service or other: a hint, never a rule), its capacity (informational),
+    /// up to 20 labels to find it by, and attributes you want back.
     /// </remarks>
     /// <param name="externalRef">external_ref</param>
     /// <param name="timezone">timezone</param>
     /// <param name="visibility">visibility</param>
+    /// <param name="name">name Null clears it; leave it out to keep it.</param>
+    /// <param name="description">description Null clears it; leave it out to keep it.</param>
+    /// <param name="kind">kind</param>
+    /// <param name="capacity">capacity Null clears it; leave it out to keep it.</param>
+    /// <param name="labels">labels</param>
+    /// <param name="attributes">attributes</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -135,12 +156,24 @@ public sealed partial class SlotlockClient
         string externalRef,
         Optional<string> timezone = default,
         Optional<string> visibility = default,
+        Optional<string?> name = default,
+        Optional<string?> description = default,
+        Optional<string> kind = default,
+        Optional<long?> capacity = default,
+        Optional<IEnumerable<string>> labels = default,
+        Optional<JsonObject> attributes = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["external_ref"] = Json.ToNode(externalRef);
         if (timezone.HasValue) values["timezone"] = Json.ToNode(timezone.Value);
         if (visibility.HasValue) values["visibility"] = Json.ToNode(visibility.Value);
+        if (name.HasValue) values["name"] = Json.ToNode(name.Value);
+        if (description.HasValue) values["description"] = Json.ToNode(description.Value);
+        if (kind.HasValue) values["kind"] = Json.ToNode(kind.Value);
+        if (capacity.HasValue) values["capacity"] = Json.ToNode(capacity.Value);
+        if (labels.HasValue) values["labels"] = Json.ToNode(labels.Value);
+        if (attributes.HasValue) values["attributes"] = Json.ToNode(attributes.Value);
         return CallAsync("slotlock_create_resource", values, cancellationToken);
     }
 
@@ -155,7 +188,13 @@ public sealed partial class SlotlockClient
             externalRef: externalRef,
             timezone: timezone,
             cancellationToken: cancellationToken,
-            visibility: default);
+            visibility: default,
+            name: default,
+            description: default,
+            kind: default,
+            capacity: default,
+            labels: default,
+            attributes: default);
 
     /// <summary>Get free-busy.</summary>
     /// <remarks>
@@ -687,6 +726,45 @@ public sealed partial class SlotlockClient
         var values = new JsonObject();
         values["resource_id"] = Json.ToNode(resourceId);
         return CallAsync("slotlock_get_resource", values, cancellationToken);
+    }
+
+    /// <summary>Change a resource's profile.</summary>
+    /// <remarks>
+    /// Change a resource's name, description, kind, capacity, labels or attributes: the fields
+    /// given, keeping the rest. null clears a name, description or capacity; [] and {} clear
+    /// labels and attributes. The feed's resource.updated names the fields that changed
+    /// (profile_changed), never their values. 400 invalid_resource_profile outside the bounds,
+    /// naming the field.
+    /// </remarks>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="name">name Null clears it; leave it out to keep it.</param>
+    /// <param name="description">description Null clears it; leave it out to keep it.</param>
+    /// <param name="kind">kind</param>
+    /// <param name="capacity">capacity Null clears it; leave it out to keep it.</param>
+    /// <param name="labels">labels</param>
+    /// <param name="attributes">attributes</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> UpdateResourceAsync(
+        string resourceId,
+        Optional<string?> name = default,
+        Optional<string?> description = default,
+        Optional<string> kind = default,
+        Optional<long?> capacity = default,
+        Optional<IEnumerable<string>> labels = default,
+        Optional<JsonObject> attributes = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_id"] = Json.ToNode(resourceId);
+        if (name.HasValue) values["name"] = Json.ToNode(name.Value);
+        if (description.HasValue) values["description"] = Json.ToNode(description.Value);
+        if (kind.HasValue) values["kind"] = Json.ToNode(kind.Value);
+        if (capacity.HasValue) values["capacity"] = Json.ToNode(capacity.Value);
+        if (labels.HasValue) values["labels"] = Json.ToNode(labels.Value);
+        if (attributes.HasValue) values["attributes"] = Json.ToNode(attributes.Value);
+        return CallAsync("slotlock_update_resource", values, cancellationToken);
     }
 
     /// <summary>Delete a resource.</summary>

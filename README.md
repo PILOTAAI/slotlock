@@ -1023,7 +1023,7 @@ export async function startCalendarServer(config: CalendarServerConfig) {
 
 | Tool | Does | Hints |
 | --- | --- | --- |
-| `slotlock_list_resources` | Resources visible to the tenant | read-only |
+| `slotlock_list_resources` | Resources visible to the tenant, with each one's name, kind, capacity and labels; by `kind` or `labels` | read-only |
 | `slotlock_get_free_busy` | Busy intervals plus coverage certainty | read-only |
 | `slotlock_find_next_available` | Earliest *certain* slot across resources | read-only |
 | `slotlock_find_available_slots` | Up to 50 *certain* slots, earliest first, to offer a choice | read-only |
@@ -1057,6 +1057,16 @@ together, each judged by its own hours and rules) and books with `slotlock_book_
 per resource in one transaction, all or none. A refusal names the `resource_id` that refused, on
 MCP and A2A in the error beside its `code`, on REST in the problem. Bundles take their resources
 in one order, so two racing over the same ones end with one booked, never a deadlock.
+
+A resource says what it is through its profile, each part optional: a `name` agents and people see
+instead of the reference, a `description`, its `kind` (`person`, `room`, `desk`, `space`, `vehicle`,
+`machine`, `equipment`, `service` or `other`), its `capacity` (people or seats), up to 20 `labels`
+(`ev`, `wheelchair`, `projector`) and `attributes` you want back (a staff number, a plate, a floor
+plan link: text, numbers and booleans, 4 KiB at most). Set it when you create the resource, or with
+`PATCH /v1/resources/{id}` (`updateResourceProfile`); `slotlock_list_resources` shows agents the
+name, description, kind, capacity and labels, and narrows by `kind` and `labels`. None of it changes
+how a resource is booked: a kind is a hint and a capacity is said, never enforced. The feed's
+`resource.updated` names the profile fields that changed (`profile_changed`), never what they say.
 
 Rentals sell a class, not a plate. Put interchangeable resources in a pool
 (`PUT /v1/resources/{id}/pool`, `setResourcePool`); agents see each resource's `pool`, list a pool's
@@ -1267,8 +1277,9 @@ waits for a confirmation.
 
 | Request | Does |
 | --- | --- |
-| `POST /v1/resources` | Create the resource with this `external_ref`, or update its `timezone`; `visibility: "private"` hides it from agents |
-| `GET /v1/resources/{resource_id}` | One resource, with its own weekly hours, visibility and `archived_at` |
+| `POST /v1/resources` | Create the resource with this `external_ref`, or update its `timezone` and the profile fields given; `visibility: "private"` hides it from agents |
+| `PATCH /v1/resources/{resource_id}` | Change its profile: `name`, `description`, `kind`, `capacity`, `labels`, `attributes`, the fields given (`null` clears) |
+| `GET /v1/resources/{resource_id}` | One resource, with its own weekly hours, visibility, `archived_at` and profile |
 | `POST /v1/resources/{resource_id}/archive` | Take it out of use; `…/restore` puts it back |
 | `DELETE /v1/resources/{resource_id}` | Delete it with its history (`409 resource_in_use` while anything on it is live) |
 | `GET /v1/resources/{resource_id}/busy?start=…&end=…` | Its occupied time, private resources included |
