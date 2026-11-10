@@ -98,7 +98,10 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
   (`reservation.created`, `event.created`, `hold.confirmed`) and holds (`hold.created`) its feed
   shows committed, rolled up by maintenance before the feed is pruned, so a write that rolled back
   is never counted and maintenance's own changes never are. Counts only, never what was asked; kept
-  400 days, erased with the tenant; read back with `GET /v1/usage` (an admin key: totals, by day,
+  400 days, erased with the tenant. It also counts webhook deliveries endpoints accepted, messages to
+  the assistant, and each day's resources (a count, archived included). Every answer carries
+  `Slotlock-Request-Id`; with metering on, one whose operations ran carries
+  `Slotlock-Usage: operations=<n>`. Read it back with `GET /v1/usage` (an admin key: totals, by day,
   by key and by surface), `readSlotlockTenantUsage` (usage.ts), and on the dashboard's Plan page.
   Writes from
   before the release that created the tables are not counted. The dashboard Worker takes the same

@@ -299,7 +299,13 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
                 principal: SlotlockAgentPrincipal;
                 operation: SlotlockAgentOperation;
               }) => agentLimiter(current().agentCalls, args),
-              ...(metering ? { onUsage: (usage: SlotlockAgentUsage) => current().usage?.count(usage) } : {}),
+              ...(metering
+                ? {
+                    onUsage: (usage: SlotlockAgentUsage) => current().usage?.count(usage),
+                    onMessage: (tenantRef: string) =>
+                      current().usage?.add({ tenantRef, metric: 'assistant_messages', origin: 'dashboard-assistant' }),
+                  }
+                : {}),
               ...(config.assistantPrivateUrls ? { privateUrls: true } : {}),
             },
           }

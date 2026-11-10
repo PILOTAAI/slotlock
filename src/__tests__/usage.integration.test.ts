@@ -65,6 +65,7 @@ describe.skipIf(!url)('usage metering (real Postgres, application role)', () => 
   const operations = (tenantRef: string, keyId: string, count: number, origin = 'mcp'): SlotlockUsageCount => ({
     tenantRef,
     day: today(),
+    metric: 'operations',
     keyId,
     origin,
     count,
@@ -94,12 +95,21 @@ describe.skipIf(!url)('usage metering (real Postgres, application role)', () => 
     for (const bad of [
       [],
       [{ ...row, metric: 'bookings' }],
+      [{ ...row, metric: 'resources' }],
       [{ ...row, day: '2020-01-01' }],
       [{ ...row, count: 0 }],
       [{ ...row, count: '1' }],
     ]) {
       await expect(refused(bad), JSON.stringify(bad)).rejects.toMatchObject({ code: '22023' });
     }
+    // What else a server counts: webhook deliveries and assistant messages.
+    expect(
+      await recordSlotlockUsage(application, randomUUID(), [
+        { ...operations(acme, '', 3, 'webhooks'), metric: 'webhook_deliveries' },
+        { ...operations(acme, '', 1, 'dashboard-assistant'), metric: 'assistant_messages' },
+      ]),
+    ).toBe(true);
+    expect(totalSlotlockUsage(await read(acme))).toMatchObject({ webhook_deliveries: 3, assistant_messages: 1 });
     // No key, no feed: erased, or never was. Its counts are dropped, the batch still recorded.
     const gone = `usage-gone-${randomUUID()}`;
     expect(await recordSlotlockUsage(application, randomUUID(), [operations(gone, '', 5)])).toBe(true);
@@ -167,10 +177,22 @@ describe.skipIf(!url)('usage metering (real Postgres, application role)', () => 
       // A confirmed hold and an external booking.
       { day: today(), metric: 'bookings', keyId: key, origin: 'mcp', count: 2 },
       { day: today(), metric: 'holds', keyId: key, origin: 'mcp', count: 2 },
+      // The day's resource count.
+      { day: today(), metric: 'resources', keyId: '', origin: 'maintenance', count: 1 },
     ]);
-    // Rolled up again, nothing is counted twice.
-    expect(await store.withTenant(fleet, (scoped) => scoped.rollUpUsage({ tenantRef: fleet }))).toBe(0);
-    expect(totalSlotlockUsage(await read(fleet))).toEqual({ operations: 0, bookings: 2, holds: 2 });
+    // Rolled up again, nothing is counted twice, and the resource count is replaced, not added to.
+    await store.withTenant(fleet, (scoped) =>
+      scoped.createResource({ tenantRef: fleet, externalRef: 'room-2', timezone: 'UTC' }),
+    );
+    expect(await store.withTenant(fleet, (scoped) => scoped.rollUpUsage({ tenantRef: fleet }))).toBe(1);
+    expect(totalSlotlockUsage(await read(fleet))).toEqual({
+      operations: 0,
+      bookings: 2,
+      holds: 2,
+      webhook_deliveries: 0,
+      assistant_messages: 0,
+      resources: 2,
+    });
   });
 
   it('reads at most a retention of days, and keeps the tables from the serving role', async () => {
@@ -209,7 +231,10 @@ describe.skipIf(!url)('usage metering (real Postgres, application role)', () => 
       await admin`UPDATE slotlock.usage_meter_start
                      SET txid = pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot())`;
       await store.withTenant(before, (scoped) => scoped.rollUpUsage({ tenantRef: before }));
-      expect(await read(before)).toEqual([]);
+      // The hold is not counted; the resource it held is in today's count, which is the state now.
+      expect(await read(before)).toEqual([
+        { day: today(), metric: 'resources', keyId: '', origin: 'maintenance', count: 1 },
+      ]);
     } finally {
       await admin`UPDATE slotlock.usage_meter_start SET txid = ${kept?.txid as string}::xid8`;
     }
@@ -230,28 +255,25 @@ describe.skipIf(!url)('usage metering (real Postgres, application role)', () => 
       signal: new AbortController().signal,
     };
     const day = today();
+    const none = { operations: 0, bookings: 0, holds: 0, webhook_deliveries: 0, assistant_messages: 0, resources: 0 };
     expect(await backend.getUsage(context, {})).toEqual({
       from: `${day.slice(0, 8)}01`,
       to: day,
-      totals: { operations: 7, bookings: 0, holds: 0 },
-      days: [{ day, operations: 7, bookings: 0, holds: 0 }],
+      totals: { ...none, operations: 7 },
+      days: [{ day, ...none, operations: 7 }],
       keys: [
-        { key_id: key, operations: 5, bookings: 0, holds: 0 },
-        { key_id: null, operations: 2, bookings: 0, holds: 0 },
+        { key_id: key, ...none, operations: 5 },
+        { key_id: null, ...none, operations: 2 },
       ],
       surfaces: [
-        { origin: 'mcp', operations: 4, bookings: 0, holds: 0 },
-        { origin: 'dashboard-assistant', operations: 2, bookings: 0, holds: 0 },
-        { origin: 'application', operations: 1, bookings: 0, holds: 0 },
+        { origin: 'mcp', ...none, operations: 4 },
+        { origin: 'dashboard-assistant', ...none, operations: 2 },
+        { origin: 'application', ...none, operations: 1 },
       ],
     });
     // Another tenant's key sees only its own.
     const other = { ...context, principal: { subject: 'key:other', tenantRef: tenant('other-api') } };
-    expect((await backend.getUsage(other, { from: day, to: day })).totals).toEqual({
-      operations: 0,
-      bookings: 0,
-      holds: 0,
-    });
+    expect((await backend.getUsage(other, { from: day, to: day })).totals).toEqual(none);
     for (const range of [
       { from: day, to: '2000-01-01' },
       { from: '2020-01-01', to: day },
@@ -274,9 +296,10 @@ describe.skipIf(!url)('usage metering (real Postgres, application role)', () => 
       await store.withTenant(ref, (scoped) => scoped.rollUpUsage({ tenantRef: ref }));
     }
     const result = await store.eraseTenant({ tenantRef: erased });
-    expect(result.rows).toMatchObject({ usage_daily: 1, usage_cursors: 1 });
+    // Its operations and its resource count.
+    expect(result.rows).toMatchObject({ usage_daily: 2, usage_cursors: 1 });
     expect(await read(erased)).toEqual([]);
-    expect(await read(kept)).toHaveLength(1);
+    expect(await read(kept)).toHaveLength(2);
     const [cursor] = await admin<{ count: number }[]>`
       SELECT count(*)::int AS count FROM slotlock.usage_cursors WHERE tenant_ref = ${erased}`;
     expect(cursor?.count).toBe(0);

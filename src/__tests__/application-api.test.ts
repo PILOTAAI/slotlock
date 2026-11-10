@@ -362,10 +362,12 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   getUsage: {
     from: '2026-11-01',
     to: '2026-11-10',
-    totals: { operations: 3, bookings: 1, holds: 0 },
-    days: [{ day: '2026-11-10', operations: 3, bookings: 1, holds: 0 }],
-    keys: [{ key_id: null, operations: 3, bookings: 1, holds: 0 }],
-    surfaces: [{ origin: 'rest', operations: 3, bookings: 1, holds: 0 }],
+    totals: { operations: 3, bookings: 1, holds: 0, webhook_deliveries: 2, assistant_messages: 0, resources: 4 },
+    days: [
+      { day: '2026-11-10', operations: 3, bookings: 1, holds: 0, webhook_deliveries: 2, assistant_messages: 0, resources: 4 },
+    ],
+    keys: [{ key_id: null, operations: 3, bookings: 1, holds: 0, webhook_deliveries: 2, assistant_messages: 0, resources: 0 }],
+    surfaces: [{ origin: 'rest', operations: 3, bookings: 1, holds: 0, webhook_deliveries: 0, assistant_messages: 0, resources: 0 }],
   },
 };
 

@@ -1,5 +1,5 @@
-import { AsyncResource } from 'node:async_hooks';
-import { createHash, randomBytes } from 'node:crypto';
+import { AsyncLocalStorage, AsyncResource } from 'node:async_hooks';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
   SLOTLOCK_MCP_APPS_EXTENSION,
@@ -877,9 +877,14 @@ export interface SlotlockAgentUsage {
   origin: SlotlockChangeOrigin;
 }
 
+/** The operations counted for the request being answered, for its `Slotlock-Usage` field. */
+const requestUsage = new AsyncLocalStorage<{ operations: number }>();
+
 /** Report usage without letting the reporter change the call: a throw or rejection is dropped. */
 function reportUsage(onUsage: ((usage: SlotlockAgentUsage) => void) | undefined, usage: SlotlockAgentUsage) {
   if (!onUsage) return;
+  const counted = requestUsage.getStore();
+  if (counted) counted.operations += 1;
   try {
     ignoreRejection(onUsage(usage));
   } catch {
@@ -4429,7 +4434,31 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       shuttingDown = true;
       for (const subscription of [...openSubscriptions]) subscription.end('shutdown');
     },
+    /**
+     * Every answer carries `Slotlock-Request-Id`, a UUID of its own, for a client or a gateway to
+     * quote; with `onUsage`, one answered after its operations ran also carries `Slotlock-Usage`,
+     * how many were counted for it (a stream answered before its operation runs carries none).
+     */
     async fetch(request: Request): Promise<Response> {
+      const requestId = randomUUID();
+      const counted = { operations: 0 };
+      const response = await requestUsage.run(counted, () => answer(request));
+      const headers = new Headers(response.headers);
+      headers.set('Slotlock-Request-Id', requestId);
+      if (options.onUsage && counted.operations > 0) {
+        headers.set('Slotlock-Usage', `operations=${String(counted.operations)}`);
+      }
+      // A response's own headers may be immutable (Response.redirect): answer with a copy.
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+      });
+    },
+  };
+
+  async function answer(request: Request): Promise<Response> {
+    {
       const url = new URL(request.url);
 
       // Discovery documents whose location the protocols fix at the origin root: the A2A card
@@ -4867,6 +4896,6 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       } catch {
         return json(200, rpcError(id, -32603, 'Internal error'));
       }
-    },
-  };
+    }
+  }
 }

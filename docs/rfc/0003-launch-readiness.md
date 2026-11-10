@@ -317,10 +317,10 @@ reconciliation all need per-tenant counts, so one meter serves all three.
 
 ### What is counted
 
-Status: `operations`, `bookings` and `holds`, `GET /v1/usage` and the Plan page's usage are built
-on `claude/inspiring-dijkstra-bfvqif`, off unless `SLOTLOCK_USAGE=on` (a self-hoster may not want
-per-tenant counts kept; Cloud sets it). The other three metrics, quotas and the response fields
-follow.
+Status: every metric below, `GET /v1/usage`, the Plan page's usage, `Slotlock-Request-Id` and
+`Slotlock-Usage` are built on `claude/inspiring-dijkstra-bfvqif`, off unless `SLOTLOCK_USAGE=on` (a
+self-hoster may not want per-tenant counts kept; Cloud sets it). `RateLimit` fields already carry the
+per-second limits; quotas, which add their monthly policies, wait on the numbers.
 
 | Metric | One unit is | Counted from | Exact? |
 | --- | --- | --- | --- |

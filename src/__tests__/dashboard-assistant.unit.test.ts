@@ -518,6 +518,28 @@ describe('assistant settings', () => {
     expect(reported).toEqual([]);
   });
 
+  it('reports each message the assistant answers for usage, and none it refuses', async () => {
+    const messages: string[] = [];
+    const usage: string[] = [];
+    const target = dashboard({
+      onMessage: (tenantRef) => {
+        messages.push(tenantRef);
+      },
+      onUsage: ({ principal, operation }) => {
+        usage.push(`${principal.tenantRef} ${operation}`);
+      },
+    });
+    const alice = await signIn(target, 'alice');
+    // No model yet: refused, not counted.
+    expect((await chat(target, alice, 'Hello?')).status).toBe(409);
+    expect(messages).toEqual([]);
+    await connect(target, alice, model, 'openai');
+    model.script({ text: 'Looking.', calls: [{ name: 'slotlock_list_resources', input: {} }] }, { text: 'One van.' });
+    expect((await chat(target, alice, 'What is there?')).status).toBe(303);
+    expect(messages).toEqual(['github-org:91']);
+    expect(usage).toEqual(['github-org:91 slotlock_list_resources']);
+  });
+
   it('refuses previous secrets that are short, repeated, the current one, or too many', () => {
     const other = (n: number) => `${String(n)}d4f6a1c3e5b7d9f0a2c4e6b8d1f3a5c7e9b0d2f4a6c8e1b3d5f7a9c0e2b4`;
     expect(() => dashboard({ previousSecrets: [ASSISTANT_SECRET] })).toThrow('must differ');

@@ -5,17 +5,24 @@
 // arguments or results. Off unless the deployment asks for it (SLOTLOCK_USAGE=on).
 import { randomUUID } from 'node:crypto';
 import type { SlotlockAgentUsage } from './agent-server.js';
-import { SLOTLOCK_USAGE_METRICS, SLOTLOCK_USAGE_RETENTION_DAYS } from './ddl.js';
+import {
+  SLOTLOCK_RECORDED_USAGE_METRICS,
+  SLOTLOCK_USAGE_METRICS,
+  SLOTLOCK_USAGE_RETENTION_DAYS,
+} from './ddl.js';
 import type { SlotlockSql } from './store.js';
 
 export type SlotlockUsageMetric = (typeof SLOTLOCK_USAGE_METRICS)[number];
-export { SLOTLOCK_USAGE_METRICS, SLOTLOCK_USAGE_RETENTION_DAYS };
+/** What a server counts and records itself; bookings, holds and resources the database counts. */
+export type SlotlockRecordedUsageMetric = (typeof SLOTLOCK_RECORDED_USAGE_METRICS)[number];
+export { SLOTLOCK_RECORDED_USAGE_METRICS, SLOTLOCK_USAGE_METRICS, SLOTLOCK_USAGE_RETENTION_DAYS };
 
-/** One counted row: a tenant's operations on one UTC day, by key ('' for none) and surface. */
+/** One counted row: a tenant's count of one metric on one UTC day, by key ('' for none) and surface. */
 export interface SlotlockUsageCount {
   tenantRef: string;
   /** The UTC day, `YYYY-MM-DD`. */
   day: string;
+  metric: SlotlockRecordedUsageMetric;
   keyId: string;
   origin: string;
   count: number;
@@ -39,6 +46,17 @@ export interface SlotlockUsageMeterOptions {
 export interface SlotlockUsageMeter {
   /** Count one operation (the agent server's `onUsage`). Never throws, never waits. */
   count(usage: SlotlockAgentUsage): void;
+  /**
+   * Count something else a server sees: webhook deliveries an endpoint accepted, messages to the
+   * assistant. Never throws, never waits; a count below 1 is ignored.
+   */
+  add(usage: {
+    tenantRef: string;
+    metric: Exclude<SlotlockRecordedUsageMetric, 'operations'>;
+    origin: string;
+    count?: number;
+    keyId?: string;
+  }): void;
   /**
    * Record what has been counted. A batch the database refuses is kept, with its id, and sent again
    * first next time, so a batch whose answer was lost is never added twice.
@@ -116,20 +134,33 @@ export function createSlotlockUsageMeter(options: SlotlockUsageMeterOptions): Sl
   const timer = interval > 0 ? setInterval(() => void flush(), interval) : null;
   timer?.unref?.();
 
+  function tally(
+    tenantRef: unknown,
+    metric: SlotlockRecordedUsageMetric,
+    keyIdGiven: unknown,
+    origin: string,
+    count: number,
+  ) {
+    try {
+      if (typeof tenantRef !== 'string' || tenantRef.length === 0) return;
+      if (!Number.isSafeInteger(count) || count < 1) return;
+      const keyId = typeof keyIdGiven === 'string' && UUID.test(keyIdGiven) ? keyIdGiven : '';
+      const day = slotlockUsageDay(now());
+      const key = `${tenantRef}\0${day}\0${metric}\0${keyId}\0${origin}`;
+      const found = counted.get(key);
+      if (found) found.count += count;
+      else counted.set(key, { tenantRef, day, metric, keyId, origin, count });
+    } catch {
+      // Metering never changes a call.
+    }
+  }
+
   return {
     count({ principal, origin }) {
-      try {
-        const tenantRef = principal.tenantRef;
-        if (typeof tenantRef !== 'string' || tenantRef.length === 0) return;
-        const keyId = typeof principal.keyId === 'string' && UUID.test(principal.keyId) ? principal.keyId : '';
-        const day = slotlockUsageDay(now());
-        const key = `${tenantRef}\0${day}\0${keyId}\0${origin}`;
-        const found = counted.get(key);
-        if (found) found.count += 1;
-        else counted.set(key, { tenantRef, day, keyId, origin, count: 1 });
-      } catch {
-        // Metering never changes a call.
-      }
+      tally(principal.tenantRef, 'operations', principal.keyId, origin, 1);
+    },
+    add({ tenantRef, metric, origin, count = 1, keyId }) {
+      tally(tenantRef, metric, keyId, origin, count);
     },
     flush,
     async close() {
@@ -142,7 +173,7 @@ export function createSlotlockUsageMeter(options: SlotlockUsageMeterOptions): Sl
   };
 }
 
-/** `slotlock.record_usage`: one batch of operation counts, once per flush id. */
+/** `slotlock.record_usage`: one batch of counts, once per flush id. */
 export async function recordSlotlockUsage(
   sql: SlotlockSql,
   flushId: string,
@@ -151,7 +182,7 @@ export async function recordSlotlockUsage(
   const payload = rows.map((row) => ({
     tenant_ref: row.tenantRef,
     day: row.day,
-    metric: 'operations',
+    metric: row.metric,
     key_id: row.keyId,
     origin: row.origin,
     count: row.count,
@@ -189,13 +220,23 @@ export async function readSlotlockTenantUsage(
   }));
 }
 
-/** Each metric's total over some rows: every metric present, 0 when unused. */
+/**
+ * Each metric's total over some rows: every metric present, 0 when unused. Resources are a count
+ * each day, not something used up, so theirs is the latest day's.
+ */
 export function totalSlotlockUsage(rows: readonly SlotlockUsageRow[]): Record<SlotlockUsageMetric, number> {
   const totals = Object.fromEntries(SLOTLOCK_USAGE_METRICS.map((metric) => [metric, 0])) as Record<
     SlotlockUsageMetric,
     number
   >;
-  for (const row of rows) totals[row.metric] += row.count;
+  let resourcesDay = '';
+  for (const row of rows) {
+    if (row.metric !== 'resources') totals[row.metric] += row.count;
+    else if (row.day > resourcesDay) {
+      resourcesDay = row.day;
+      totals.resources = row.count;
+    } else if (row.day === resourcesDay) totals.resources += row.count;
+  }
   return totals;
 }
 
@@ -207,9 +248,9 @@ export interface SlotlockUsageSummary {
   totals: SlotlockUsageTotals;
   /** Each UTC day with any use, in order. */
   days: Array<{ day: string } & SlotlockUsageTotals>;
-  /** Each API key with any use (`keyId` null: no key, such as the assistant), most operations first. */
+  /** Each API key with any use (`keyId` null: no key, such as the assistant), most operations first; no resources. */
   keys: Array<{ keyId: string | null } & SlotlockUsageTotals>;
-  /** Each surface with any use (mcp, a2a, rest, application, dashboard-assistant, …), most first. */
+  /** Each surface with any use (mcp, a2a, rest, application, dashboard-assistant, webhooks), most first; no resources. */
   surfaces: Array<{ origin: string } & SlotlockUsageTotals>;
 }
 
@@ -226,11 +267,17 @@ export function summarizeSlotlockUsage(rows: readonly SlotlockUsageRow[]): Slotl
   };
   for (const row of rows) {
     add(days, row.day, row);
+    // A day's resource count belongs to no key or surface.
+    if (row.metric === 'resources') continue;
     add(keys, row.keyId, row);
     add(surfaces, row.origin, row);
   }
   const byUse = (a: SlotlockUsageTotals, b: SlotlockUsageTotals) =>
-    b.operations - a.operations || b.bookings - a.bookings || b.holds - a.holds;
+    b.operations - a.operations ||
+    b.bookings - a.bookings ||
+    b.holds - a.holds ||
+    b.webhook_deliveries - a.webhook_deliveries ||
+    b.assistant_messages - a.assistant_messages;
   return {
     totals: totalSlotlockUsage(rows),
     days: [...days].sort(([a], [b]) => a.localeCompare(b)).map(([day, totals]) => ({ day, ...totals })),

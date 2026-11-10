@@ -1102,7 +1102,13 @@ export async function startSlotlockServer(
                   // operations, rate limits and series-write slots as an API key's.
                   assistant: {
                     secret: config.dashboard.assistantSecret,
-                    ...(usage ? { onUsage: usage.count } : {}),
+                    ...(usage
+                      ? {
+                          onUsage: usage.count,
+                          onMessage: (tenantRef: string) =>
+                            usage.add({ tenantRef, metric: 'assistant_messages', origin: 'dashboard-assistant' }),
+                        }
+                      : {}),
                     ...(config.dashboard.assistantPreviousSecrets
                       ? { previousSecrets: config.dashboard.assistantPreviousSecrets }
                       : {}),
@@ -1178,10 +1184,11 @@ export async function startSlotlockServer(
                 }),
             },
           }),
-        // Counts only, never the tenant or a URL.
-        onPass: (_tenant, result) => {
+        // Counts only, never the tenant or a URL; the tenant's own count goes to its usage.
+        onPass: (tenantRef, result) => {
           metrics?.webhooks(result);
           log.info('webhooks', { ...result });
+          usage?.add({ tenantRef, metric: 'webhook_deliveries', origin: 'webhooks', count: result.delivered });
         },
         onError: (error) => log.error('webhooks_failed', describeError(error)),
       });

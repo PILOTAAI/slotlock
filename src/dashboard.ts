@@ -308,6 +308,8 @@ export interface SlotlockDashboardAssistantOptions {
   previousSecrets?: readonly string[];
   /** Each operation the assistant runs, for usage metering (the agent server's `onUsage`). */
   onUsage?: (usage: SlotlockAgentUsage) => void;
+  /** Each message a member sends that the assistant answers, for usage metering. Never awaited. */
+  onMessage?: (tenantRef: string) => void;
   backend: SlotlockAgentCalendarBackend;
   /**
    * As the agent server's: false refuses an operation. Every offered operation by default. It also
@@ -2496,6 +2498,11 @@ ${
     if ('problem' in found) return assistantPage(session, 409, found.problem);
     const tenantRef = tenantOf(session);
     const member = personOf(session);
+    try {
+      ignoreRejection(assistantOptions?.onMessage?.(tenantRef));
+    } catch {
+      // Metering never changes an answer.
+    }
     const stored = await store.getConversation(tenantRef, member);
     const entries = boundSlotlockAssistantEntries([
       ...readSlotlockAssistantEntries(stored?.messages),
@@ -2717,6 +2724,8 @@ ${
 ${use('Operations', used.totals.operations, undefined)}
 ${use('Bookings', used.totals.bookings, undefined)}
 ${use('Holds', used.totals.holds, undefined)}
+${use('Webhook deliveries', used.totals.webhook_deliveries, undefined)}
+${use('Assistant messages', used.totals.assistant_messages, undefined)}
 </div>
 <p class="fine">Since ${month.from}, in UTC. An operation is a call that reached Slotlock, whatever it answered; it shows here within 15 seconds. A booking is a reservation, a calendar event or a confirmed hold, and with holds shows within the hour.</p>
 ${

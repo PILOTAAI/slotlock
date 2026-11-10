@@ -50,6 +50,16 @@ versioning.
   by surface, bounded whatever the volume; 400 `invalid_usage_range` for a range that is reversed,
   too long or ends after today. In the OpenAPI document and the five clients. The store's
   `readUsage` and usage.ts's `summarizeSlotlockUsage` back it.
+- Usage also counts webhook deliveries an endpoint accepted (`slotlock serve`'s delivery pass), messages
+  sent to the dashboard assistant that it answered (the assistant's new `onMessage`), and each day's
+  resource count, archived ones included (maintenance's roll-up; a count, so `GET /v1/usage` totals
+  the last day's rather than summing). `GET /v1/usage` and the Plan page carry them, and the
+  privacy notice lists them; `slotlock.record_usage` takes the metrics a server counts and refuses
+  the ones the database does. The metric list's CHECK is replaced only when the list changes.
+- Every answer of the agent server carries `Slotlock-Request-Id`, a UUID of its own; with
+  `onUsage` (`SLOTLOCK_USAGE=on`) an answer whose operations ran before it was sent also carries
+  `Slotlock-Usage: operations=<n>`, the operations counted for it, so a gateway can count on its side
+  and compare. The per-second `RateLimit` and `RateLimit-Policy` fields are as before.
 - The dashboard's Plan page shows this month's operations, bookings and holds, and who used them by
   API key, when the deployment meters (the dashboard's `usage` option, set from `SLOTLOCK_USAGE` by
   `slotlock serve` and the Worker).

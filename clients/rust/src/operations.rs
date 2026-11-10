@@ -1625,13 +1625,16 @@ impl Client {
     ///
     /// How much the tenant used the service from one UTC day to another (inclusive, at most 400
     /// days apart; by default the first of this month to today): operations its keys and the
-    /// dashboard assistant ran (each call that reached its operation, whatever it returned), and
-    /// bookings (bookings, events and confirmed holds) and holds it made. Totals, then by day, by
-    /// API key (key_id null for none) and by surface (mcp, a2a, rest, application,
-    /// dashboard-assistant). Counts only, never what was asked. Empty unless the server meters
-    /// usage (SLOTLOCK_USAGE=on); operations appear within 15 seconds, bookings and holds within
-    /// the hour. 400 invalid_usage_range when to is before from, the range is longer than 400
-    /// days, or to is after today.
+    /// dashboard assistant ran (each call that reached its operation, whatever it returned),
+    /// bookings (bookings, events and confirmed holds) and holds it made, webhook deliveries its
+    /// endpoints accepted, messages to the dashboard assistant, and the resources it held (each
+    /// day's count, archived ones included; in totals, the last day's, not a sum). Totals, then
+    /// by day, by API key (key_id null for none) and by surface (mcp, a2a, rest, application,
+    /// dashboard-assistant, webhooks); resources are by day only. Counts only, never what was
+    /// asked. Empty unless the server meters usage (SLOTLOCK_USAGE=on); operations, deliveries
+    /// and messages appear within 15 seconds; bookings, holds and resources within the hour. 400
+    /// invalid_usage_range when to is before from, the range is longer than 400 days, or to is
+    /// after today.
     pub fn get_usage(&self, input: &GetUsageInput) -> Result<Value, Error> {
         self.call("slotlock_get_usage", serde_json::to_value(input)?)
     }

@@ -2,7 +2,13 @@
 // again under its own id.
 import { describe, expect, it } from 'vitest';
 import type { SlotlockAgentPrincipal } from '../agent-server.js';
-import { type SlotlockUsageCount, createSlotlockUsageMeter, slotlockUsageDay, totalSlotlockUsage } from '../usage.js';
+import {
+  type SlotlockUsageCount,
+  createSlotlockUsageMeter,
+  slotlockUsageDay,
+  summarizeSlotlockUsage,
+  totalSlotlockUsage,
+} from '../usage.js';
 
 const KEY = '0f0e0d0c-0b0a-4908-8706-050403020100';
 const principal = (tenantRef: string, keyId?: string): SlotlockAgentPrincipal => ({
@@ -42,11 +48,11 @@ describe('the usage meter', () => {
     await meter.flush();
     expect(calls).toHaveLength(1);
     expect(calls[0]?.rows).toEqual([
-      { tenantRef: 'acme', day: '2026-11-10', keyId: KEY, origin: 'mcp', count: 2 },
-      { tenantRef: 'acme', day: '2026-11-10', keyId: '', origin: 'rest', count: 1 },
-      { tenantRef: 'acme', day: '2026-11-11', keyId: KEY, origin: 'mcp', count: 1 },
+      { tenantRef: 'acme', day: '2026-11-10', metric: 'operations', keyId: KEY, origin: 'mcp', count: 2 },
+      { tenantRef: 'acme', day: '2026-11-10', metric: 'operations', keyId: '', origin: 'rest', count: 1 },
+      { tenantRef: 'acme', day: '2026-11-11', metric: 'operations', keyId: KEY, origin: 'mcp', count: 1 },
       // A key id that is not a UUID is recorded as no key.
-      { tenantRef: 'globex', day: '2026-11-11', keyId: '', origin: 'a2a', count: 1 },
+      { tenantRef: 'globex', day: '2026-11-11', metric: 'operations', keyId: '', origin: 'a2a', count: 1 },
     ]);
     expect(meter.pending()).toBe(0);
     await meter.flush();
@@ -100,6 +106,39 @@ describe('the usage meter', () => {
     expect(most).toBe(1);
   });
 
+  it('counts deliveries and messages beside operations, and ignores a count below one', async () => {
+    const { calls, record } = recorder();
+    const meter = createSlotlockUsageMeter({ record, intervalMs: 0, now: () => Date.UTC(2026, 10, 10) });
+    meter.add({ tenantRef: 'acme', metric: 'webhook_deliveries', origin: 'webhooks', count: 3 });
+    meter.add({ tenantRef: 'acme', metric: 'webhook_deliveries', origin: 'webhooks', count: 0 });
+    meter.add({ tenantRef: 'acme', metric: 'assistant_messages', origin: 'dashboard-assistant' });
+    meter.add({ tenantRef: 'acme', metric: 'assistant_messages', origin: 'dashboard-assistant' });
+    meter.count({ principal: principal('acme'), operation: 'slotlock_list_resources', origin: 'dashboard-assistant' });
+    await meter.close();
+    expect(calls[0]?.rows).toEqual([
+      { tenantRef: 'acme', day: '2026-11-10', metric: 'webhook_deliveries', keyId: '', origin: 'webhooks', count: 3 },
+      { tenantRef: 'acme', day: '2026-11-10', metric: 'assistant_messages', keyId: '', origin: 'dashboard-assistant', count: 2 },
+      { tenantRef: 'acme', day: '2026-11-10', metric: 'operations', keyId: '', origin: 'dashboard-assistant', count: 1 },
+    ]);
+  });
+
+  it('totals resources as the latest day’s count, not a sum, and keeps them out of keys and surfaces', () => {
+    const summary = summarizeSlotlockUsage([
+      { day: '2026-11-08', metric: 'resources', keyId: '', origin: 'maintenance', count: 7 },
+      { day: '2026-11-09', metric: 'resources', keyId: '', origin: 'maintenance', count: 9 },
+      { day: '2026-11-09', metric: 'operations', keyId: KEY, origin: 'mcp', count: 4 },
+    ]);
+    expect(summary.totals).toMatchObject({ resources: 9, operations: 4 });
+    expect(summary.days.map((day) => [day.day, day.resources])).toEqual([
+      ['2026-11-08', 7],
+      ['2026-11-09', 9],
+    ]);
+    expect(summary.keys).toEqual([
+      { keyId: KEY, operations: 4, bookings: 0, holds: 0, webhook_deliveries: 0, assistant_messages: 0, resources: 0 },
+    ]);
+    expect(summary.surfaces.map((surface) => surface.origin)).toEqual(['mcp']);
+  });
+
   it('names UTC days and totals every metric', () => {
     expect(slotlockUsageDay(Date.UTC(2026, 0, 1, 0, 0, 0))).toBe('2026-01-01');
     expect(
@@ -108,6 +147,6 @@ describe('the usage meter', () => {
         { day: '2026-11-11', metric: 'operations', keyId: KEY, origin: 'mcp', count: 2 },
         { day: '2026-11-11', metric: 'bookings', keyId: KEY, origin: 'mcp', count: 1 },
       ]),
-    ).toEqual({ operations: 5, bookings: 1, holds: 0 });
+    ).toEqual({ operations: 5, bookings: 1, holds: 0, webhook_deliveries: 0, assistant_messages: 0, resources: 0 });
   });
 });

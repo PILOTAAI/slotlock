@@ -288,8 +288,25 @@ export const SLOTLOCK_USAGE_FUNCTIONS = Object.freeze([
   'slotlock.tenant_usage(text, date, date)',
 ] as const);
 
-/** What usage.ts meters, per tenant and day: operations run, and bookings and holds committed. */
-export const SLOTLOCK_USAGE_METRICS = Object.freeze(['operations', 'bookings', 'holds'] as const);
+/**
+ * What usage.ts meters, per tenant and day: operations run, bookings and holds committed, webhook
+ * deliveries accepted, messages to the dashboard assistant, and resources held (a count each day, not
+ * a sum).
+ */
+export const SLOTLOCK_USAGE_METRICS = Object.freeze([
+  'operations',
+  'bookings',
+  'holds',
+  'webhook_deliveries',
+  'assistant_messages',
+  'resources',
+] as const);
+/** The metrics a server counts and records (slotlock.record_usage); the rest the database counts. */
+export const SLOTLOCK_RECORDED_USAGE_METRICS = Object.freeze([
+  'operations',
+  'webhook_deliveries',
+  'assistant_messages',
+] as const);
 /** Days a tenant's daily usage is kept: a yearly plan, and a month for disputes after it. */
 export const SLOTLOCK_USAGE_RETENTION_DAYS = 400;
 
@@ -1070,13 +1087,29 @@ CREATE TABLE IF NOT EXISTS slotlock.usage_daily (
   count bigint NOT NULL,
   CONSTRAINT slotlock_usage_daily_pkey PRIMARY KEY (tenant_ref, day, metric, key_id, origin),
   CONSTRAINT slotlock_usage_daily_tenant_ref_valid CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500),
-  CONSTRAINT slotlock_usage_daily_metric_valid
-    CHECK (metric IN (${SLOTLOCK_USAGE_METRICS.map((metric) => `'${metric}'`).join(', ')})),
   CONSTRAINT slotlock_usage_daily_key_id_valid
     CHECK (key_id = '' OR key_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'),
   CONSTRAINT slotlock_usage_daily_origin_valid CHECK (origin ~ '^[a-z][a-z-]{0,39}$'),
   CONSTRAINT slotlock_usage_daily_count_valid CHECK (count > 0)
 );
+-- The metrics it takes, and no other. Its comment is the list it was built from: a release that
+-- adds a metric replaces it (NOT VALID, so nothing is scanned under the lock; validated after).
+DO $slotlock_usage_daily_metric$
+BEGIN
+  ALTER TABLE slotlock.usage_daily DROP CONSTRAINT IF EXISTS slotlock_usage_daily_metric_valid;
+  IF (
+    SELECT pg_catalog.obj_description(oid, 'pg_constraint') FROM pg_catalog.pg_constraint
+     WHERE conrelid = 'slotlock.usage_daily'::regclass AND conname = 'slotlock_usage_daily_metric_known'
+  ) IS DISTINCT FROM '${SLOTLOCK_USAGE_METRICS.join(' ')}' THEN
+    ALTER TABLE slotlock.usage_daily DROP CONSTRAINT IF EXISTS slotlock_usage_daily_metric_known;
+    ALTER TABLE slotlock.usage_daily
+      ADD CONSTRAINT slotlock_usage_daily_metric_known
+      CHECK (metric IN (${SLOTLOCK_USAGE_METRICS.map((metric) => `'${metric}'`).join(', ')})) NOT VALID;
+    COMMENT ON CONSTRAINT slotlock_usage_daily_metric_known ON slotlock.usage_daily
+      IS '${SLOTLOCK_USAGE_METRICS.join(' ')}';
+  END IF;
+END
+$slotlock_usage_daily_metric$;
 ALTER TABLE slotlock.usage_daily ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON slotlock.usage_daily FROM PUBLIC;
 
@@ -1114,10 +1147,10 @@ ON CONFLICT (only_row) DO NOTHING;
 ALTER TABLE slotlock.usage_meter_start ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON slotlock.usage_meter_start FROM PUBLIC;
 
--- Adds a server's batch of operation counts, once per flush id: true when added, false when that
--- batch was added before. Each row names a tenant, a day within a day of today, the metric
--- 'operations', a key ('' for none), a surface and a count; rows for the same day, key and surface
--- are summed first.
+-- Adds a server's batch of counts, once per flush id: true when added, false when that batch was
+-- added before. Each row names a tenant, a day within a day of today, a metric a server counts
+-- (operations, webhook deliveries, assistant messages), a key ('' for none), a surface and a count;
+-- rows for the same day, metric, key and surface are summed first.
 CREATE OR REPLACE FUNCTION slotlock.record_usage(requested_flush_id uuid, requested_rows jsonb)
 RETURNS boolean
 LANGUAGE plpgsql
@@ -1134,13 +1167,13 @@ BEGIN
   IF EXISTS (
     SELECT 1 FROM jsonb_array_elements(requested_rows) given
      WHERE jsonb_typeof(given) <> 'object'
-        OR given ->> 'metric' IS DISTINCT FROM 'operations'
+        OR COALESCE(given ->> 'metric', '') NOT IN (${SLOTLOCK_RECORDED_USAGE_METRICS.map((metric) => `'${metric}'`).join(', ')})
         OR (given ->> 'day') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
         OR (given ->> 'day')::date NOT BETWEEN current_date - 1 AND current_date + 1
         OR jsonb_typeof(given -> 'count') <> 'number'
         OR (given ->> 'count')::numeric NOT BETWEEN 1 AND 1000000000
   ) THEN
-    RAISE EXCEPTION 'Slotlock usage rows must be operations counts of 1-1,000,000,000 within a day of today'
+    RAISE EXCEPTION 'Slotlock usage rows must be counts a server records, 1-1,000,000,000, within a day of today'
       USING ERRCODE = 'invalid_parameter_value';
   END IF;
   INSERT INTO slotlock.usage_flushes (flush_id) VALUES (requested_flush_id) ON CONFLICT DO NOTHING;
@@ -1156,13 +1189,13 @@ BEGIN
   -- Only for a tenant that still exists, one with an API key or a feed: counts a server held while
   -- the tenant was erased are dropped rather than recreate rows for it.
   INSERT INTO slotlock.usage_daily AS kept (tenant_ref, day, metric, key_id, origin, count)
-  SELECT given ->> 'tenant_ref', (given ->> 'day')::date, 'operations',
+  SELECT given ->> 'tenant_ref', (given ->> 'day')::date, given ->> 'metric',
          COALESCE(given ->> 'key_id', ''), given ->> 'origin', sum((given ->> 'count')::bigint)
     FROM jsonb_array_elements(requested_rows) given
    WHERE EXISTS (SELECT 1 FROM slotlock.api_keys issued WHERE issued.tenant_ref = given ->> 'tenant_ref')
       OR EXISTS (SELECT 1 FROM slotlock.maintenance_tenants listed
                   WHERE listed.tenant_ref = given ->> 'tenant_ref')
-   GROUP BY 1, 2, 4, 5
+   GROUP BY 1, 2, 3, 4, 5
   ON CONFLICT (tenant_ref, day, metric, key_id, origin) DO UPDATE SET count = kept.count + EXCLUDED.count;
   -- Now and then, batches older than a week (never sent again by then) are forgotten.
   IF random() < 0.01 THEN
@@ -1240,6 +1273,15 @@ BEGIN
          (SELECT batch.id FROM batch ORDER BY batch.txid DESC, batch.id DESC LIMIT 1),
          (SELECT count(*) FROM batch)::integer
     INTO last_txid, last_id, scanned;
+  -- How many resources the tenant holds today (archived ones included, as a plan counts them): the
+  -- day's last pass leaves the count at the end of the day. A count, so it replaces, never adds.
+  INSERT INTO slotlock.usage_daily AS kept (tenant_ref, day, metric, key_id, origin, count)
+  SELECT requested_tenant_ref, (statement_timestamp() AT TIME ZONE 'UTC')::date, 'resources', '',
+         'maintenance', count(*)
+    FROM slotlock.resources held
+   WHERE held.tenant_ref = requested_tenant_ref
+  HAVING count(*) > 0
+  ON CONFLICT (tenant_ref, day, metric, key_id, origin) DO UPDATE SET count = EXCLUDED.count;
   IF scanned > 0 THEN
     INSERT INTO slotlock.usage_cursors AS kept (tenant_ref, txid, id)
     VALUES (requested_tenant_ref, last_txid, last_id)

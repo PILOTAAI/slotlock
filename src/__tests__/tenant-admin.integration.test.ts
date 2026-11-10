@@ -492,7 +492,7 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
       await setSlotlockTenantPlan(application, { tenantRef, plan: 'developer', status: 'active' });
       // Its usage: operations a server counted, and its feed rolled up (which writes its cursor).
       await recordSlotlockUsage(application, randomUUID(), [
-        { tenantRef, day: slotlockUsageDay(Date.now()), keyId: '', origin: 'rest', count: 1 },
+        { tenantRef, day: slotlockUsageDay(Date.now()), metric: 'operations', keyId: '', origin: 'rest', count: 1 },
       ]);
       await app.withTenant(tenantRef, (tenant) => tenant.rollUpUsage({ tenantRef }));
       const dashboard = createSlotlockDashboardState(application);
