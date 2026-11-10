@@ -3,6 +3,20 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Fixed
+
+- The dashboard assistant's Stop stops the turn on any runtime. Cancelling the streamed reply now
+  aborts the turn itself, which keeps what it had. Before, only `request.signal` stopped it, and a
+  runtime that does not abort it when the client goes kept the turn running. On Workers, the
+  request's database connection now closes only once the stopped turn is kept.
+- The Overview never shows a change by its type. A change it has no words for, from a newer server,
+  reads "Something changed", on its resource when it names one. A type such as `constructor` no
+  longer finds an inherited entry.
+- The assistant page's script keeps live steps in a map with no prototype, so a provider's tool-call
+  id of `__proto__` names nothing.
+
 ## 0.8.0 - 2026-11-10
 
 ### Added
