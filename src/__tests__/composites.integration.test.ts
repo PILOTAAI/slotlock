@@ -4,7 +4,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { type SlotlockStore, createSlotlockStore } from '../store.js';
+import { type SlotlockStore, calendarEventRollingHorizon, createSlotlockStore } from '../store.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
 
@@ -137,5 +137,48 @@ describe.skipIf(!url)('composite resources (real Postgres, application role)', (
       (await admin`SELECT count(*)::int AS n FROM slotlock.composite_claims WHERE tenant_ref <> ${tenantRef}
                     AND resource_id = ${ids.hall as string}`)[0],
     ).toEqual({ n: 0 });
+  });
+
+  it("writes a series on the whole in one pass: reaps a part's expired hold, and is refused by a live one", async () => {
+    const series = (externalRef: string, hour: number) =>
+      store.withTenant(tenantRef, (tenant) =>
+        tenant.putCalendarEvent({
+          tenantRef,
+          externalRef,
+          idempotencyKey: externalRef,
+          expectedRevision: 0,
+          resourceId: ids.hall as string,
+          start: at(hour).start,
+          end: at(hour).end,
+          timezone: 'UTC',
+          summary: externalRef,
+          recurrence: { rrule: 'FREQ=DAILY;COUNT=3' },
+          materializationWindow: calendarEventRollingHorizon(),
+        }),
+      );
+    // An expired hold on a part, under the series' second occurrence: reaped, as one write's would be.
+    const expired = await store.withTenant(tenantRef, (tenant) =>
+      tenant.acquireHold({ tenantRef, resourceId: ids['room-b'] as string, ...at(24 + 20), ttlMs: 1_000 }),
+    );
+    expect(expired).toMatchObject({ ok: true });
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    const written = await series('evening', 20);
+    expect(written).toMatchObject({ ok: true, occurrenceCount: 3 });
+    expect(
+      (await admin`SELECT count(*)::int AS n FROM slotlock.reservations WHERE id = ${(expired as { hold: { id: string } }).hold.id}`)[0],
+    ).toEqual({ n: 0 });
+    expect(
+      (await admin`SELECT count(*)::int AS n FROM slotlock.composite_claims claim
+                     JOIN slotlock.calendar_event_occurrences occurrence ON occurrence.reservation_id = claim.reservation_id
+                    WHERE claim.resource_id = ${ids.hall as string} AND claim.span = '[0,)'::int4range`)[0],
+    ).toEqual({ n: 3 });
+    // A live hold on a part, under a later series' third occurrence: the whole series is refused.
+    const live = await hold('room-a', 48 + 22);
+    expect(live).toMatchObject({ ok: true });
+    expect(await series('late', 22)).toMatchObject({
+      ok: false,
+      code: 'overlap',
+      conflictingReservationId: (live as { hold: { id: string } }).hold.id,
+    });
   });
 });

@@ -359,6 +359,14 @@ versioning.
 - Privacy notice: email sent to support@, abuse@ or privacy@pylota.io is held in Google Workspace for
   two years; Google is listed as a recipient, with its transfers. The notice has no owner TODO left.
 
+### Fixed
+
+- A recurring event's occurrences are written in three statements for the whole series, not three
+  per occurrence (reap the expired holds in the way, insert the bookings, insert the occurrences).
+  A 2,000-occurrence series took 6,000 round trips while holding its tenant's locks, so on a busy
+  database every write queued behind it timed out; it now takes three. The same rows are reaped,
+  in the same order, across a composite's parts and whole.
+
 ## 0.6.3 - 2026-11-08
 
 ### Added

@@ -1286,43 +1286,60 @@ async function replaceCalendarEventOccurrences(
         WHERE event_id = ${params.eventId} AND reservation_id IS NOT NULL
      )`;
   await tx`DELETE FROM slotlock.calendar_event_occurrences WHERE event_id = ${params.eventId}`;
+  if (params.occurrences.length === 0) return;
 
-  for (const occurrence of params.occurrences) {
-    let reservationId: string | null = null;
-    if ((params.event.transparency ?? 'opaque') === 'opaque') {
-      const occupied = occupiedTime({
+  // Three statements for the whole series, not three per occurrence: a series of 2,000 holds the
+  // tenant's locks for as long as its round trips take, and every write queued behind it waits.
+  const starts = params.occurrences.map((occurrence) => occurrence.start.toISOString());
+  const ends = params.occurrences.map((occurrence) => occurrence.end.toISOString());
+  const reservationIds: string[] = params.occurrences.map(() => '');
+  if ((params.event.transparency ?? 'opaque') === 'opaque') {
+    const occupied = params.occurrences.map((occurrence) =>
+      occupiedTime({
         ...occurrence,
         bufferBeforeMs: params.bufferBeforeMs ?? 0,
         bufferAfterMs: params.bufferAfterMs ?? 0,
-      });
-      await reapExpiredHolds(tx, params.resourceId, occupied.start, occupied.end);
-      const derivedExternalRef = `calendar:${params.eventId}:${createHash('sha256')
-        .update(occurrence.recurrenceId)
-        .digest('hex')}`;
-      const reservations = await tx<{ id: string }[]>`
-        INSERT INTO slotlock.reservations (
-          resource_id, tenant_ref, external_ref, starts_at, ends_at,
-          buffer_after_ms, buffer_before_ms, revision, source, calendar_event_id
-        ) VALUES (
-          ${params.resourceId}, ${params.tenantRef}, ${derivedExternalRef},
-          ${occurrence.start}, ${occurrence.end}, ${params.bufferAfterMs ?? 0},
-          ${params.bufferBeforeMs ?? 0}, ${params.revision},
-          ${`calendar-event:${params.eventId}`}, ${params.eventId}
-        )
-        RETURNING id`;
-      reservationId = reservations[0]?.id ?? null;
-      if (!reservationId) {
-        throw new Error('slotlock: calendar occurrence reservation insert returned no row');
-      }
-    }
-    await tx`
-      INSERT INTO slotlock.calendar_event_occurrences (
-        event_id, tenant_ref, recurrence_id, starts_at, ends_at, reservation_id
-      ) VALUES (
-        ${params.eventId}, ${params.tenantRef}, ${occurrence.recurrenceId},
-        ${occurrence.start}, ${occurrence.end}, ${reservationId}
-      )`;
+      }),
+    );
+    await reapExpiredHoldsAcross(tx, params.resourceId, occupied);
+    const externalRefs = params.occurrences.map(
+      (occurrence) =>
+        `calendar:${params.eventId}:${createHash('sha256').update(occurrence.recurrenceId).digest('hex')}`,
+    );
+    const inserted = await tx<{ id: string; external_ref: string }[]>`
+      INSERT INTO slotlock.reservations (
+        resource_id, tenant_ref, external_ref, starts_at, ends_at,
+        buffer_after_ms, buffer_before_ms, revision, source, calendar_event_id
+      )
+      SELECT ${params.resourceId}, ${params.tenantRef}, occurrence.external_ref,
+             occurrence.starts_at, occurrence.ends_at, ${params.bufferAfterMs ?? 0},
+             ${params.bufferBeforeMs ?? 0}, ${params.revision},
+             ${`calendar-event:${params.eventId}`}, ${params.eventId}
+        FROM ROWS FROM (pg_catalog.unnest(${externalRefs}::text[]),
+                        pg_catalog.unnest(${starts}::text[]::timestamptz[]),
+                        pg_catalog.unnest(${ends}::text[]::timestamptz[]))
+             WITH ORDINALITY AS occurrence(external_ref, starts_at, ends_at, ordinal)
+       ORDER BY occurrence.ordinal
+      RETURNING id, external_ref`;
+    const byRef = new Map(inserted.map((row) => [row.external_ref, row.id]));
+    externalRefs.forEach((externalRef, index) => {
+      const id = byRef.get(externalRef);
+      if (!id) throw new Error('slotlock: calendar occurrence reservation insert returned no row');
+      reservationIds[index] = id;
+    });
   }
+  await tx`
+    INSERT INTO slotlock.calendar_event_occurrences (
+      event_id, tenant_ref, recurrence_id, starts_at, ends_at, reservation_id
+    )
+    SELECT ${params.eventId}, ${params.tenantRef}, occurrence.recurrence_id,
+           occurrence.starts_at, occurrence.ends_at, NULLIF(occurrence.reservation_id, '')::uuid
+      FROM ROWS FROM (pg_catalog.unnest(${params.occurrences.map((occurrence) => occurrence.recurrenceId)}::text[]),
+                      pg_catalog.unnest(${starts}::text[]::timestamptz[]),
+                      pg_catalog.unnest(${ends}::text[]::timestamptz[]),
+                      pg_catalog.unnest(${reservationIds}::text[]))
+           WITH ORDINALITY AS occurrence(recurrence_id, starts_at, ends_at, reservation_id, ordinal)
+     ORDER BY occurrence.ordinal`;
 }
 
 function seriesWindow(window: Interval): Interval {
@@ -3508,6 +3525,48 @@ async function reapExpiredHolds(
           AND ${occupiedStartsBefore(tx, end)}
           AND COALESCE(occupied_ends_at, ends_at) > ${start}
         ORDER BY id
+        FOR UPDATE
+     )`;
+}
+
+/**
+ * reapExpiredHolds for many windows on one resource in one statement (a series' occurrences): the
+ * same rows, in the same id order under FOR UPDATE, as one call per window would delete. The
+ * envelope of the windows bounds the scan so the index applies; each row must still overlap one.
+ */
+async function reapExpiredHoldsAcross(
+  tx: TransactionSql,
+  resourceId: string,
+  windows: readonly Interval[],
+): Promise<void> {
+  if (windows.length === 0) return;
+  let first = Number.POSITIVE_INFINITY;
+  let last = Number.NEGATIVE_INFINITY;
+  for (const window of windows) {
+    first = Math.min(first, window.start.getTime());
+    last = Math.max(last, window.end.getTime());
+  }
+  await tx`
+    DELETE FROM slotlock.reservations
+     WHERE id IN (
+       SELECT held.id FROM slotlock.reservations held
+        WHERE held.resource_id IN (
+                SELECT ${resourceId}::uuid
+                UNION ALL SELECT family.parent_id FROM slotlock.resources family
+                           WHERE family.id = ${resourceId} AND family.parent_id IS NOT NULL
+                UNION ALL SELECT family.id FROM slotlock.resources family WHERE family.parent_id = ${resourceId})
+          AND held.status = 'held'
+          AND held.expires_at <= statement_timestamp()
+          AND ${occupiedStartsBefore(tx, new Date(last), 'held')}
+          AND COALESCE(held.occupied_ends_at, held.ends_at) > ${new Date(first)}
+          AND EXISTS (
+                SELECT 1
+                  FROM ROWS FROM (pg_catalog.unnest(${windows.map((window) => window.start.toISOString())}::text[]::timestamptz[]),
+                                  pg_catalog.unnest(${windows.map((window) => window.end.toISOString())}::text[]::timestamptz[]))
+                       AS occupied(starts_at, ends_at)
+                 WHERE COALESCE(held.occupied_starts_at, held.starts_at) < occupied.ends_at
+                   AND COALESCE(held.occupied_ends_at, held.ends_at) > occupied.starts_at)
+        ORDER BY held.id
         FOR UPDATE
      )`;
 }
