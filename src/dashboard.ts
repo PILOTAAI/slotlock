@@ -2872,6 +2872,12 @@ ${
       text = `Hold ${slots.join('; ')} for ${String(input.ttl_seconds ?? '')} seconds, as alternatives.`;
     } else if (operation === 'slotlock_release_slots') {
       text = `Release the hold ${String(input.hold_id)} and every slot held with it.`;
+    } else if (operation === 'slotlock_confirm_slot') {
+      text = `Book the time held by ${String(input.hold_id)}${input.title ? `, as "${String(input.title)}"` : ''}, and release the other holds made with it.`;
+    } else if (operation === 'slotlock_reschedule') {
+      text = `Move the event ${String(input.event_id)} to ${String(input.starts_at)} to ${String(input.ends_at)}${input.resource_id ? ` on resource ${String(input.resource_id)}` : ''}.`;
+    } else if (operation === 'slotlock_cancel') {
+      text = `Cancel the event ${String(input.event_id)}.`;
     } else {
       text = '';
     }

@@ -25,11 +25,14 @@ public sealed partial class SlotlockClient
         ["slotlock_book_pool"] = new("POST", "/v1/pool-bookings", [], []),
         ["slotlock_get_pool_availability"] = new("GET", "/v1/pool-availability", [], ["pool", "start", "end"]),
         ["slotlock_release_slots"] = new("DELETE", "/v1/slot-holds/{hold_id}", ["hold_id"], []),
+        ["slotlock_confirm_slot"] = new("POST", "/v1/slot-holds/{hold_id}/confirm", ["hold_id"], []),
         ["slotlock_list_events"] = new("GET", "/v1/events", [], ["resource_ids", "start", "end", "cursor", "limit"]),
         ["slotlock_create_event"] = new("POST", "/v1/events", [], []),
         ["slotlock_get_event"] = new("GET", "/v1/events/{event_id}", ["event_id"], []),
         ["slotlock_update_event"] = new("PATCH", "/v1/events/{event_id}", ["event_id"], []),
         ["slotlock_delete_event"] = new("DELETE", "/v1/events/{event_id}", ["event_id"], ["expected_revision", "idempotency_key"]),
+        ["slotlock_reschedule"] = new("POST", "/v1/events/{event_id}/reschedule", ["event_id"], []),
+        ["slotlock_cancel"] = new("POST", "/v1/events/{event_id}/cancel", ["event_id"], []),
         ["slotlock_get_resource"] = new("GET", "/v1/resources/{resource_id}", ["resource_id"], []),
         ["slotlock_update_resource"] = new("PATCH", "/v1/resources/{resource_id}", ["resource_id"], []),
         ["slotlock_delete_resource"] = new("DELETE", "/v1/resources/{resource_id}", ["resource_id"], []),
@@ -237,10 +240,11 @@ public sealed partial class SlotlockClient
 
     /// <summary>Get free-busy.</summary>
     /// <remarks>
-    /// Return privacy-minimized busy intervals and explicit coverage certainty. Name the
-    /// resources with resource_ids, or select them instead by location (and every location in
-    /// it), group, labels (every one), kind or pool: at most 100 (more answers
-    /// selection_too_large, none selection_empty), named in selected_resource_ids.
+    /// When each resource is busy in a window, as busy intervals only (never whose or what), and
+    /// whether that is certain (coverage: "uncertain" where a calendar feeding it has not been
+    /// read lately). Name the resources with resource_ids, or select them instead by location
+    /// (and every location in it), group, labels (every one), kind or pool: at most 100 (more
+    /// answers selection_too_large, none selection_empty), named in selected_resource_ids.
     /// </remarks>
     /// <param name="start">start</param>
     /// <param name="end">end</param>
@@ -418,7 +422,8 @@ public sealed partial class SlotlockClient
     /// as alternatives in one group: each free one is held, the others are listed with why not.
     /// Book one by passing its hold_id to slotlock_create_event, which releases the rest;
     /// unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at
-    /// once.
+    /// once. A candidate refused for its time comes with alternatives (the earliest free times of
+    /// its length). slotlock_confirm_slot books a held time.
     /// </remarks>
     /// <param name="slots">slots</param>
     /// <param name="idempotencyKey">idempotency_key</param>
@@ -555,9 +560,44 @@ public sealed partial class SlotlockClient
         return CallAsync("slotlock_release_slots", values, cancellationToken);
     }
 
+    /// <summary>Confirm a held slot.</summary>
+    /// <remarks>
+    /// Book a time you hold (a hold_id from slotlock_hold_slots): the held resource and time
+    /// exactly, with the title and details you give, and the rest of its group released. 409
+    /// hold_expired when the hold lapsed first; 404 hold_not_found when it was released, booked
+    /// or is not yours. A retry answers the same event (replayed).
+    /// </remarks>
+    /// <param name="holdId">hold_id</param>
+    /// <param name="title">title</param>
+    /// <param name="description">description</param>
+    /// <param name="location">location</param>
+    /// <param name="timezone">timezone</param>
+    /// <param name="idempotencyKey">idempotency_key</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ConfirmSlotAsync(
+        string holdId,
+        Optional<string> title = default,
+        Optional<string> description = default,
+        Optional<string> location = default,
+        Optional<string> timezone = default,
+        Optional<string> idempotencyKey = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["hold_id"] = Json.ToNode(holdId);
+        if (title.HasValue) values["title"] = Json.ToNode(title.Value);
+        if (description.HasValue) values["description"] = Json.ToNode(description.Value);
+        if (location.HasValue) values["location"] = Json.ToNode(location.Value);
+        if (timezone.HasValue) values["timezone"] = Json.ToNode(timezone.Value);
+        if (idempotencyKey.HasValue) values["idempotency_key"] = Json.ToNode(idempotencyKey.Value);
+        return CallAsync("slotlock_confirm_slot", values, cancellationToken);
+    }
+
     /// <summary>List resource events.</summary>
     /// <remarks>
-    /// List bounded events intersecting a time window.
+    /// List your events that meet a time window, earliest first.
     /// </remarks>
     /// <param name="resourceIds">resource_ids</param>
     /// <param name="start">start</param>
@@ -586,8 +626,12 @@ public sealed partial class SlotlockClient
 
     /// <summary>Create resource event.</summary>
     /// <remarks>
-    /// Create an event of up to 3,660 days (a booking, lease or long rental); opaque occurrences
-    /// use the database overlap arbiter.
+    /// Book a resource for a time, as an event of up to 3,660 days (a booking, lease or long
+    /// rental). The database refuses a time already taken: 409 overlap, with alternatives (the
+    /// earliest free times of the same length) and, when the booking in the way is yours, its id.
+    /// A booking rule that refuses the time answers booking_rule_… with alternatives too. To book
+    /// a time you hold, pass its hold_id, or use slotlock_confirm_slot. A retry with the same
+    /// idempotency_key answers the same event.
     /// </remarks>
     /// <param name="resourceId">resource_id</param>
     /// <param name="startsAt">starts_at</param>
@@ -688,7 +732,8 @@ public sealed partial class SlotlockClient
 
     /// <summary>Get resource event.</summary>
     /// <remarks>
-    /// Read one tenant-scoped event by stable identifier.
+    /// Read one of your events by its id, with its revision (pass it as expected_revision to
+    /// change or cancel it).
     /// </remarks>
     /// <param name="eventId">event_id</param>
     /// <param name="cancellationToken">Cancels the request.</param>
@@ -705,9 +750,11 @@ public sealed partial class SlotlockClient
 
     /// <summary>Update resource event.</summary>
     /// <remarks>
-    /// Apply an expected-revision event patch and rematerialize occupancy atomically. With
-    /// expected_resource_id, the resource you read the event on, an event since moved elsewhere
-    /// is not found.
+    /// Change one of your events at the revision you last read (expected_revision): its time,
+    /// resource or details, all or nothing. A time already taken is 409 overlap with
+    /// alternatives; a stale revision is 409 revision_conflict (read the event again). With
+    /// expected_resource_id, the resource you read it on, an event since moved elsewhere is not
+    /// found. To change only the time, slotlock_reschedule is simpler.
     /// </remarks>
     /// <param name="eventId">event_id</param>
     /// <param name="expectedRevision">expected_revision</param>
@@ -819,7 +866,9 @@ public sealed partial class SlotlockClient
 
     /// <summary>Delete resource event.</summary>
     /// <remarks>
-    /// Tombstone an event at an expected revision so stale sync cannot resurrect it.
+    /// Cancel one of your events at the revision you last read (expected_revision); a stale one
+    /// is 409 revision_conflict. It cannot come back at that revision, so an old copy synced
+    /// later does not restore it. slotlock_cancel does the same with fewer fields.
     /// </remarks>
     /// <param name="eventId">event_id</param>
     /// <param name="expectedRevision">expected_revision</param>
@@ -838,6 +887,66 @@ public sealed partial class SlotlockClient
         values["expected_revision"] = Json.ToNode(expectedRevision);
         values["idempotency_key"] = Json.ToNode(idempotencyKey);
         return CallAsync("slotlock_delete_event", values, cancellationToken);
+    }
+
+    /// <summary>Reschedule an event.</summary>
+    /// <remarks>
+    /// Move one of your events to a new time, and to another resource if you give one, at the
+    /// revision you last read (expected_revision). A time already taken is 409 overlap with
+    /// alternatives; a stale revision 409 revision_conflict. A retry answers the same move
+    /// (replayed).
+    /// </remarks>
+    /// <param name="eventId">event_id</param>
+    /// <param name="expectedRevision">expected_revision</param>
+    /// <param name="startsAt">starts_at</param>
+    /// <param name="endsAt">ends_at</param>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="idempotencyKey">idempotency_key</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> RescheduleAsync(
+        string eventId,
+        long expectedRevision,
+        string startsAt,
+        string endsAt,
+        Optional<string> resourceId = default,
+        Optional<string> idempotencyKey = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["event_id"] = Json.ToNode(eventId);
+        values["expected_revision"] = Json.ToNode(expectedRevision);
+        values["starts_at"] = Json.ToNode(startsAt);
+        values["ends_at"] = Json.ToNode(endsAt);
+        if (resourceId.HasValue) values["resource_id"] = Json.ToNode(resourceId.Value);
+        if (idempotencyKey.HasValue) values["idempotency_key"] = Json.ToNode(idempotencyKey.Value);
+        return CallAsync("slotlock_reschedule", values, cancellationToken);
+    }
+
+    /// <summary>Cancel an event.</summary>
+    /// <remarks>
+    /// Cancel one of your events at the revision you last read (expected_revision); a stale one
+    /// is 409 revision_conflict. Its time is free at once. A retry answers the same cancellation
+    /// (replayed).
+    /// </remarks>
+    /// <param name="eventId">event_id</param>
+    /// <param name="expectedRevision">expected_revision</param>
+    /// <param name="idempotencyKey">idempotency_key</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> CancelAsync(
+        string eventId,
+        long expectedRevision,
+        Optional<string> idempotencyKey = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["event_id"] = Json.ToNode(eventId);
+        values["expected_revision"] = Json.ToNode(expectedRevision);
+        if (idempotencyKey.HasValue) values["idempotency_key"] = Json.ToNode(idempotencyKey.Value);
+        return CallAsync("slotlock_cancel", values, cancellationToken);
     }
 
     /// <summary>Get a resource.</summary>

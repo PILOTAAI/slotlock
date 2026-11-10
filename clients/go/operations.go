@@ -20,11 +20,14 @@ var operations = func() map[string]operation {
 		{name: "slotlock_book_pool", method: "POST", path: "/v1/pool-bookings", pathParams: nil, query: nil},
 		{name: "slotlock_get_pool_availability", method: "GET", path: "/v1/pool-availability", pathParams: nil, query: []string{"pool", "start", "end"}},
 		{name: "slotlock_release_slots", method: "DELETE", path: "/v1/slot-holds/{hold_id}", pathParams: []string{"hold_id"}, query: nil},
+		{name: "slotlock_confirm_slot", method: "POST", path: "/v1/slot-holds/{hold_id}/confirm", pathParams: []string{"hold_id"}, query: nil},
 		{name: "slotlock_list_events", method: "GET", path: "/v1/events", pathParams: nil, query: []string{"resource_ids", "start", "end", "cursor", "limit"}},
 		{name: "slotlock_create_event", method: "POST", path: "/v1/events", pathParams: nil, query: nil},
 		{name: "slotlock_get_event", method: "GET", path: "/v1/events/{event_id}", pathParams: []string{"event_id"}, query: nil},
 		{name: "slotlock_update_event", method: "PATCH", path: "/v1/events/{event_id}", pathParams: []string{"event_id"}, query: nil},
 		{name: "slotlock_delete_event", method: "DELETE", path: "/v1/events/{event_id}", pathParams: []string{"event_id"}, query: []string{"expected_revision", "idempotency_key"}},
+		{name: "slotlock_reschedule", method: "POST", path: "/v1/events/{event_id}/reschedule", pathParams: []string{"event_id"}, query: nil},
+		{name: "slotlock_cancel", method: "POST", path: "/v1/events/{event_id}/cancel", pathParams: []string{"event_id"}, query: nil},
 		{name: "slotlock_get_resource", method: "GET", path: "/v1/resources/{resource_id}", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_update_resource", method: "PATCH", path: "/v1/resources/{resource_id}", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_delete_resource", method: "DELETE", path: "/v1/resources/{resource_id}", pathParams: []string{"resource_id"}, query: nil},
@@ -273,10 +276,12 @@ func (in GetFreeBusyInput) values() map[string]any {
 	return values
 }
 
-// GetFreeBusy: Get free-busy. Return privacy-minimized busy intervals and explicit coverage
-// certainty. Name the resources with resource_ids, or select them instead by location (and every
-// location in it), group, labels (every one), kind or pool: at most 100 (more answers
-// selection_too_large, none selection_empty), named in selected_resource_ids.
+// GetFreeBusy: Get free-busy. When each resource is busy in a window, as busy intervals only
+// (never whose or what), and whether that is certain (coverage: "uncertain" where a calendar
+// feeding it has not been read lately). Name the resources with resource_ids, or select them
+// instead by location (and every location in it), group, labels (every one), kind or pool: at
+// most 100 (more answers selection_too_large, none selection_empty), named in
+// selected_resource_ids.
 func (c *Client) GetFreeBusy(ctx context.Context, in GetFreeBusyInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_get_free_busy", in.values())
 }
@@ -427,7 +432,8 @@ func (in HoldSlotsInput) values() map[string]any {
 // seconds) while a person chooses, as alternatives in one group: each free one is held, the
 // others are listed with why not. Book one by passing its hold_id to slotlock_create_event, which
 // releases the rest; unbooked holds expire on their own. A hold is yours alone, and you may have
-// 20 live at once.
+// 20 live at once. A candidate refused for its time comes with alternatives (the earliest free
+// times of its length). slotlock_confirm_slot books a held time.
 func (c *Client) HoldSlots(ctx context.Context, in HoldSlotsInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_hold_slots", in.values())
 }
@@ -550,6 +556,50 @@ func (c *Client) ReleaseSlots(ctx context.Context, in ReleaseSlotsInput) (map[st
 	return c.Call(ctx, "slotlock_release_slots", in.values())
 }
 
+// ConfirmSlotInput holds the arguments of [Client.ConfirmSlot].
+type ConfirmSlotInput struct {
+	HoldID string
+
+	Title *string
+
+	Description *string
+
+	Location *string
+
+	Timezone *string
+
+	IdempotencyKey *string
+}
+
+func (in ConfirmSlotInput) values() map[string]any {
+	values := map[string]any{}
+	values["hold_id"] = in.HoldID
+	if in.Title != nil {
+		values["title"] = *in.Title
+	}
+	if in.Description != nil {
+		values["description"] = *in.Description
+	}
+	if in.Location != nil {
+		values["location"] = *in.Location
+	}
+	if in.Timezone != nil {
+		values["timezone"] = *in.Timezone
+	}
+	if in.IdempotencyKey != nil {
+		values["idempotency_key"] = *in.IdempotencyKey
+	}
+	return values
+}
+
+// ConfirmSlot: Confirm a held slot. Book a time you hold (a hold_id from slotlock_hold_slots):
+// the held resource and time exactly, with the title and details you give, and the rest of its
+// group released. 409 hold_expired when the hold lapsed first; 404 hold_not_found when it was
+// released, booked or is not yours. A retry answers the same event (replayed).
+func (c *Client) ConfirmSlot(ctx context.Context, in ConfirmSlotInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_confirm_slot", in.values())
+}
+
 // ListEventsInput holds the arguments of [Client.ListEvents].
 type ListEventsInput struct {
 	ResourceIDs []string
@@ -577,7 +627,7 @@ func (in ListEventsInput) values() map[string]any {
 	return values
 }
 
-// ListEvents: List resource events. List bounded events intersecting a time window.
+// ListEvents: List resource events. List your events that meet a time window, earliest first.
 func (c *Client) ListEvents(ctx context.Context, in ListEventsInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_list_events", in.values())
 }
@@ -660,8 +710,12 @@ func (in CreateEventInput) values() map[string]any {
 	return values
 }
 
-// CreateEvent: Create resource event. Create an event of up to 3,660 days (a booking, lease or
-// long rental); opaque occurrences use the database overlap arbiter.
+// CreateEvent: Create resource event. Book a resource for a time, as an event of up to 3,660 days
+// (a booking, lease or long rental). The database refuses a time already taken: 409 overlap, with
+// alternatives (the earliest free times of the same length) and, when the booking in the way is
+// yours, its id. A booking rule that refuses the time answers booking_rule_… with alternatives
+// too. To book a time you hold, pass its hold_id, or use slotlock_confirm_slot. A retry with the
+// same idempotency_key answers the same event.
 func (c *Client) CreateEvent(ctx context.Context, in CreateEventInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_create_event", in.values())
 }
@@ -677,7 +731,8 @@ func (in GetEventInput) values() map[string]any {
 	return values
 }
 
-// GetEvent: Get resource event. Read one tenant-scoped event by stable identifier.
+// GetEvent: Get resource event. Read one of your events by its id, with its revision (pass it as
+// expected_revision to change or cancel it).
 func (c *Client) GetEvent(ctx context.Context, in GetEventInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_get_event", in.values())
 }
@@ -774,9 +829,11 @@ func (in UpdateEventInput) values() map[string]any {
 	return values
 }
 
-// UpdateEvent: Update resource event. Apply an expected-revision event patch and rematerialize
-// occupancy atomically. With expected_resource_id, the resource you read the event on, an event
-// since moved elsewhere is not found.
+// UpdateEvent: Update resource event. Change one of your events at the revision you last read
+// (expected_revision): its time, resource or details, all or nothing. A time already taken is 409
+// overlap with alternatives; a stale revision is 409 revision_conflict (read the event again).
+// With expected_resource_id, the resource you read it on, an event since moved elsewhere is not
+// found. To change only the time, slotlock_reschedule is simpler.
 func (c *Client) UpdateEvent(ctx context.Context, in UpdateEventInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_update_event", in.values())
 }
@@ -798,10 +855,76 @@ func (in DeleteEventInput) values() map[string]any {
 	return values
 }
 
-// DeleteEvent: Delete resource event. Tombstone an event at an expected revision so stale sync
-// cannot resurrect it.
+// DeleteEvent: Delete resource event. Cancel one of your events at the revision you last read
+// (expected_revision); a stale one is 409 revision_conflict. It cannot come back at that
+// revision, so an old copy synced later does not restore it. slotlock_cancel does the same with
+// fewer fields.
 func (c *Client) DeleteEvent(ctx context.Context, in DeleteEventInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_delete_event", in.values())
+}
+
+// RescheduleInput holds the arguments of [Client.Reschedule].
+type RescheduleInput struct {
+	EventID string
+
+	ExpectedRevision int64
+
+	StartsAt string
+
+	EndsAt string
+
+	ResourceID *string
+
+	IdempotencyKey *string
+}
+
+func (in RescheduleInput) values() map[string]any {
+	values := map[string]any{}
+	values["event_id"] = in.EventID
+	values["expected_revision"] = in.ExpectedRevision
+	values["starts_at"] = in.StartsAt
+	values["ends_at"] = in.EndsAt
+	if in.ResourceID != nil {
+		values["resource_id"] = *in.ResourceID
+	}
+	if in.IdempotencyKey != nil {
+		values["idempotency_key"] = *in.IdempotencyKey
+	}
+	return values
+}
+
+// Reschedule: Reschedule an event. Move one of your events to a new time, and to another resource
+// if you give one, at the revision you last read (expected_revision). A time already taken is 409
+// overlap with alternatives; a stale revision 409 revision_conflict. A retry answers the same
+// move (replayed).
+func (c *Client) Reschedule(ctx context.Context, in RescheduleInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_reschedule", in.values())
+}
+
+// CancelInput holds the arguments of [Client.Cancel].
+type CancelInput struct {
+	EventID string
+
+	ExpectedRevision int64
+
+	IdempotencyKey *string
+}
+
+func (in CancelInput) values() map[string]any {
+	values := map[string]any{}
+	values["event_id"] = in.EventID
+	values["expected_revision"] = in.ExpectedRevision
+	if in.IdempotencyKey != nil {
+		values["idempotency_key"] = *in.IdempotencyKey
+	}
+	return values
+}
+
+// Cancel: Cancel an event. Cancel one of your events at the revision you last read
+// (expected_revision); a stale one is 409 revision_conflict. Its time is free at once. A retry
+// answers the same cancellation (replayed).
+func (c *Client) Cancel(ctx context.Context, in CancelInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_cancel", in.values())
 }
 
 // GetResourceInput holds the arguments of [Client.GetResource].

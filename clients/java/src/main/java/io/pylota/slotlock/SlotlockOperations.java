@@ -22,11 +22,14 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_book_pool", new Operation("POST", "/v1/pool-bookings", List.of(), List.of())),
           Map.entry("slotlock_get_pool_availability", new Operation("GET", "/v1/pool-availability", List.of(), List.of("pool", "start", "end"))),
           Map.entry("slotlock_release_slots", new Operation("DELETE", "/v1/slot-holds/{hold_id}", List.of("hold_id"), List.of())),
+          Map.entry("slotlock_confirm_slot", new Operation("POST", "/v1/slot-holds/{hold_id}/confirm", List.of("hold_id"), List.of())),
           Map.entry("slotlock_list_events", new Operation("GET", "/v1/events", List.of(), List.of("resource_ids", "start", "end", "cursor", "limit"))),
           Map.entry("slotlock_create_event", new Operation("POST", "/v1/events", List.of(), List.of())),
           Map.entry("slotlock_get_event", new Operation("GET", "/v1/events/{event_id}", List.of("event_id"), List.of())),
           Map.entry("slotlock_update_event", new Operation("PATCH", "/v1/events/{event_id}", List.of("event_id"), List.of())),
           Map.entry("slotlock_delete_event", new Operation("DELETE", "/v1/events/{event_id}", List.of("event_id"), List.of("expected_revision", "idempotency_key"))),
+          Map.entry("slotlock_reschedule", new Operation("POST", "/v1/events/{event_id}/reschedule", List.of("event_id"), List.of())),
+          Map.entry("slotlock_cancel", new Operation("POST", "/v1/events/{event_id}/cancel", List.of("event_id"), List.of())),
           Map.entry("slotlock_get_resource", new Operation("GET", "/v1/resources/{resource_id}", List.of("resource_id"), List.of())),
           Map.entry("slotlock_update_resource", new Operation("PATCH", "/v1/resources/{resource_id}", List.of("resource_id"), List.of())),
           Map.entry("slotlock_delete_resource", new Operation("DELETE", "/v1/resources/{resource_id}", List.of("resource_id"), List.of())),
@@ -209,10 +212,11 @@ public abstract class SlotlockOperations {
   }
 
   /**
-   * Get free-busy. Return privacy-minimized busy intervals and explicit coverage certainty. Name
-   * the resources with resource_ids, or select them instead by location (and every location in
-   * it), group, labels (every one), kind or pool: at most 100 (more answers selection_too_large,
-   * none selection_empty), named in selected_resource_ids.
+   * Get free-busy. When each resource is busy in a window, as busy intervals only (never whose or
+   * what), and whether that is certain (coverage: "uncertain" where a calendar feeding it has not
+   * been read lately). Name the resources with resource_ids, or select them instead by location
+   * (and every location in it), group, labels (every one), kind or pool: at most 100 (more
+   * answers selection_too_large, none selection_empty), named in selected_resource_ids.
    *
    * @param start {@code start}, string
    * @param end {@code end}, string
@@ -231,10 +235,11 @@ public abstract class SlotlockOperations {
   }
 
   /**
-   * Get free-busy. Return privacy-minimized busy intervals and explicit coverage certainty. Name
-   * the resources with resource_ids, or select them instead by location (and every location in
-   * it), group, labels (every one), kind or pool: at most 100 (more answers selection_too_large,
-   * none selection_empty), named in selected_resource_ids.
+   * Get free-busy. When each resource is busy in a window, as busy intervals only (never whose or
+   * what), and whether that is certain (coverage: "uncertain" where a calendar feeding it has not
+   * been read lately). Name the resources with resource_ids, or select them instead by location
+   * (and every location in it), group, labels (every one), kind or pool: at most 100 (more
+   * answers selection_too_large, none selection_empty), named in selected_resource_ids.
    *
    * @param start {@code start}, string
    * @param end {@code end}, string
@@ -435,7 +440,8 @@ public abstract class SlotlockOperations {
    * a person chooses, as alternatives in one group: each free one is held, the others are listed
    * with why not. Book one by passing its hold_id to slotlock_create_event, which releases the
    * rest; unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at
-   * once.
+   * once. A candidate refused for its time comes with alternatives (the earliest free times of
+   * its length). slotlock_confirm_slot books a held time.
    *
    * @param slots {@code slots}, list of object
    * @param idempotencyKey {@code idempotency_key}, string
@@ -456,7 +462,8 @@ public abstract class SlotlockOperations {
    * a person chooses, as alternatives in one group: each free one is held, the others are listed
    * with why not. Book one by passing its hold_id to slotlock_create_event, which releases the
    * rest; unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at
-   * once.
+   * once. A candidate refused for its time comes with alternatives (the earliest free times of
+   * its length). slotlock_confirm_slot books a held time.
    *
    * @param slots {@code slots}, list of object
    * @param idempotencyKey {@code idempotency_key}, string
@@ -594,7 +601,41 @@ public abstract class SlotlockOperations {
   }
 
   /**
-   * List resource events. List bounded events intersecting a time window.
+   * Confirm a held slot. Book a time you hold (a hold_id from slotlock_hold_slots): the held
+   * resource and time exactly, with the title and details you give, and the rest of its group
+   * released. 409 hold_expired when the hold lapsed first; 404 hold_not_found when it was
+   * released, booked or is not yours. A retry answers the same event (replayed).
+   *
+   * @param holdId {@code hold_id}, string
+   * @param optional the optional arguments, or null: {@code title} (string), {@code description}
+   * (string), {@code location} (string), {@code timezone} (string), {@code idempotency_key}
+   * (string)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> confirmSlot(String holdId, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("hold_id", holdId);
+    putOptional(values, optional, Set.of("title", "description", "location", "timezone", "idempotency_key"), "slotlock_confirm_slot");
+    return call("slotlock_confirm_slot", values);
+  }
+
+  /**
+   * Confirm a held slot. Book a time you hold (a hold_id from slotlock_hold_slots): the held
+   * resource and time exactly, with the title and details you give, and the rest of its group
+   * released. 409 hold_expired when the hold lapsed first; 404 hold_not_found when it was
+   * released, booked or is not yours. A retry answers the same event (replayed).
+   *
+   * @param holdId {@code hold_id}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> confirmSlot(String holdId) {
+    return confirmSlot(holdId, null);
+  }
+
+  /**
+   * List resource events. List your events that meet a time window, earliest first.
    *
    * @param resourceIds {@code resource_ids}, list of string
    * @param start {@code start}, string
@@ -614,7 +655,7 @@ public abstract class SlotlockOperations {
   }
 
   /**
-   * List resource events. List bounded events intersecting a time window.
+   * List resource events. List your events that meet a time window, earliest first.
    *
    * @param resourceIds {@code resource_ids}, list of string
    * @param start {@code start}, string
@@ -627,8 +668,12 @@ public abstract class SlotlockOperations {
   }
 
   /**
-   * Create resource event. Create an event of up to 3,660 days (a booking, lease or long rental);
-   * opaque occurrences use the database overlap arbiter.
+   * Create resource event. Book a resource for a time, as an event of up to 3,660 days (a
+   * booking, lease or long rental). The database refuses a time already taken: 409 overlap, with
+   * alternatives (the earliest free times of the same length) and, when the booking in the way is
+   * yours, its id. A booking rule that refuses the time answers booking_rule_… with alternatives
+   * too. To book a time you hold, pass its hold_id, or use slotlock_confirm_slot. A retry with
+   * the same idempotency_key answers the same event.
    *
    * @param resourceId {@code resource_id}, string
    * @param startsAt {@code starts_at}, string
@@ -655,8 +700,12 @@ public abstract class SlotlockOperations {
   }
 
   /**
-   * Create resource event. Create an event of up to 3,660 days (a booking, lease or long rental);
-   * opaque occurrences use the database overlap arbiter.
+   * Create resource event. Book a resource for a time, as an event of up to 3,660 days (a
+   * booking, lease or long rental). The database refuses a time already taken: 409 overlap, with
+   * alternatives (the earliest free times of the same length) and, when the booking in the way is
+   * yours, its id. A booking rule that refuses the time answers booking_rule_… with alternatives
+   * too. To book a time you hold, pass its hold_id, or use slotlock_confirm_slot. A retry with
+   * the same idempotency_key answers the same event.
    *
    * @param resourceId {@code resource_id}, string
    * @param startsAt {@code starts_at}, string
@@ -671,7 +720,8 @@ public abstract class SlotlockOperations {
   }
 
   /**
-   * Get resource event. Read one tenant-scoped event by stable identifier.
+   * Get resource event. Read one of your events by its id, with its revision (pass it as
+   * expected_revision to change or cancel it).
    *
    * @param eventId {@code event_id}, string
    * @return the response body
@@ -684,9 +734,11 @@ public abstract class SlotlockOperations {
   }
 
   /**
-   * Update resource event. Apply an expected-revision event patch and rematerialize occupancy
-   * atomically. With expected_resource_id, the resource you read the event on, an event since
-   * moved elsewhere is not found.
+   * Update resource event. Change one of your events at the revision you last read
+   * (expected_revision): its time, resource or details, all or nothing. A time already taken is
+   * 409 overlap with alternatives; a stale revision is 409 revision_conflict (read the event
+   * again). With expected_resource_id, the resource you read it on, an event since moved
+   * elsewhere is not found. To change only the time, slotlock_reschedule is simpler.
    *
    * @param eventId {@code event_id}, string
    * @param expectedRevision {@code expected_revision}, integer
@@ -711,9 +763,11 @@ public abstract class SlotlockOperations {
   }
 
   /**
-   * Update resource event. Apply an expected-revision event patch and rematerialize occupancy
-   * atomically. With expected_resource_id, the resource you read the event on, an event since
-   * moved elsewhere is not found.
+   * Update resource event. Change one of your events at the revision you last read
+   * (expected_revision): its time, resource or details, all or nothing. A time already taken is
+   * 409 overlap with alternatives; a stale revision is 409 revision_conflict (read the event
+   * again). With expected_resource_id, the resource you read it on, an event since moved
+   * elsewhere is not found. To change only the time, slotlock_reschedule is simpler.
    *
    * @param eventId {@code event_id}, string
    * @param expectedRevision {@code expected_revision}, integer
@@ -726,8 +780,10 @@ public abstract class SlotlockOperations {
   }
 
   /**
-   * Delete resource event. Tombstone an event at an expected revision so stale sync cannot
-   * resurrect it.
+   * Delete resource event. Cancel one of your events at the revision you last read
+   * (expected_revision); a stale one is 409 revision_conflict. It cannot come back at that
+   * revision, so an old copy synced later does not restore it. slotlock_cancel does the same with
+   * fewer fields.
    *
    * @param eventId {@code event_id}, string
    * @param expectedRevision {@code expected_revision}, integer
@@ -741,6 +797,81 @@ public abstract class SlotlockOperations {
     values.put("expected_revision", expectedRevision);
     values.put("idempotency_key", idempotencyKey);
     return call("slotlock_delete_event", values);
+  }
+
+  /**
+   * Reschedule an event. Move one of your events to a new time, and to another resource if you
+   * give one, at the revision you last read (expected_revision). A time already taken is 409
+   * overlap with alternatives; a stale revision 409 revision_conflict. A retry answers the same
+   * move (replayed).
+   *
+   * @param eventId {@code event_id}, string
+   * @param expectedRevision {@code expected_revision}, integer
+   * @param startsAt {@code starts_at}, string
+   * @param endsAt {@code ends_at}, string
+   * @param optional the optional arguments, or null: {@code resource_id} (string), {@code
+   * idempotency_key} (string)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> reschedule(String eventId, long expectedRevision, String startsAt, String endsAt, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("event_id", eventId);
+    values.put("expected_revision", expectedRevision);
+    values.put("starts_at", startsAt);
+    values.put("ends_at", endsAt);
+    putOptional(values, optional, Set.of("resource_id", "idempotency_key"), "slotlock_reschedule");
+    return call("slotlock_reschedule", values);
+  }
+
+  /**
+   * Reschedule an event. Move one of your events to a new time, and to another resource if you
+   * give one, at the revision you last read (expected_revision). A time already taken is 409
+   * overlap with alternatives; a stale revision 409 revision_conflict. A retry answers the same
+   * move (replayed).
+   *
+   * @param eventId {@code event_id}, string
+   * @param expectedRevision {@code expected_revision}, integer
+   * @param startsAt {@code starts_at}, string
+   * @param endsAt {@code ends_at}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> reschedule(String eventId, long expectedRevision, String startsAt, String endsAt) {
+    return reschedule(eventId, expectedRevision, startsAt, endsAt, null);
+  }
+
+  /**
+   * Cancel an event. Cancel one of your events at the revision you last read (expected_revision);
+   * a stale one is 409 revision_conflict. Its time is free at once. A retry answers the same
+   * cancellation (replayed).
+   *
+   * @param eventId {@code event_id}, string
+   * @param expectedRevision {@code expected_revision}, integer
+   * @param optional the optional arguments, or null: {@code idempotency_key} (string)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> cancel(String eventId, long expectedRevision, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("event_id", eventId);
+    values.put("expected_revision", expectedRevision);
+    putOptional(values, optional, Set.of("idempotency_key"), "slotlock_cancel");
+    return call("slotlock_cancel", values);
+  }
+
+  /**
+   * Cancel an event. Cancel one of your events at the revision you last read (expected_revision);
+   * a stale one is 409 revision_conflict. Its time is free at once. A retry answers the same
+   * cancellation (replayed).
+   *
+   * @param eventId {@code event_id}, string
+   * @param expectedRevision {@code expected_revision}, integer
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> cancel(String eventId, long expectedRevision) {
+    return cancel(eventId, expectedRevision, null);
   }
 
   /**

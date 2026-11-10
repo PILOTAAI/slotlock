@@ -790,7 +790,7 @@
       "get": {
         "operationId": "slotlock_get_free_busy",
         "summary": "Get free-busy",
-        "description": "Return privacy-minimized busy intervals and explicit coverage certainty. Name the resources with resource_ids, or select them instead by location (and every location in it), group, labels (every one), kind or pool: at most 100 (more answers selection_too_large, none selection_empty), named in selected_resource_ids.",
+        "description": "When each resource is busy in a window, as busy intervals only (never whose or what), and whether that is certain (coverage: \"uncertain\" where a calendar feeding it has not been read lately). Name the resources with resource_ids, or select them instead by location (and every location in it), group, labels (every one), kind or pool: at most 100 (more answers selection_too_large, none selection_empty), named in selected_resource_ids.",
         "tags": [
           "Agent tools"
         ],
@@ -1516,7 +1516,7 @@
       "post": {
         "operationId": "slotlock_hold_slots",
         "summary": "Hold candidate slots",
-        "description": "Hold up to five candidate slots for a short time (30-900 seconds) while a person chooses, as alternatives in one group: each free one is held, the others are listed with why not. Book one by passing its hold_id to slotlock_create_event, which releases the rest; unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at once.",
+        "description": "Hold up to five candidate slots for a short time (30-900 seconds) while a person chooses, as alternatives in one group: each free one is held, the others are listed with why not. Book one by passing its hold_id to slotlock_create_event, which releases the rest; unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at once. A candidate refused for its time comes with alternatives (the earliest free times of its length). slotlock_confirm_slot books a held time.",
         "tags": [
           "Agent tools"
         ],
@@ -1655,6 +1655,44 @@
                           "code": {
                             "type": "string",
                             "maxLength": 64
+                          },
+                          "alternatives": {
+                            "maxItems": 3,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "resource_id": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 200
+                                },
+                                "start": {
+                                  "type": "string",
+                                  "format": "date-time"
+                                },
+                                "end": {
+                                  "type": "string",
+                                  "format": "date-time"
+                                },
+                                "resource_ids": {
+                                  "minItems": 1,
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 200
+                                  }
+                                }
+                              },
+                              "required": [
+                                "resource_id",
+                                "start",
+                                "end"
+                              ],
+                              "additionalProperties": false
+                            }
                           }
                         },
                         "required": [
@@ -2750,11 +2788,418 @@
         }
       }
     },
+    "/v1/slot-holds/{hold_id}/confirm": {
+      "post": {
+        "operationId": "slotlock_confirm_slot",
+        "summary": "Confirm a held slot",
+        "description": "Book a time you hold (a hold_id from slotlock_hold_slots): the held resource and time exactly, with the title and details you give, and the rest of its group released. 409 hold_expired when the hold lapsed first; 404 hold_not_found when it was released, booked or is not yours. A retry answers the same event (replayed).",
+        "tags": [
+          "Agent tools"
+        ],
+        "x-slotlock-scope": "write",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "description": {
+                    "type": "string",
+                    "maxLength": 10000
+                  },
+                  "location": {
+                    "type": "string",
+                    "maxLength": 1000
+                  },
+                  "timezone": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  "idempotency_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "hold_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Stands in for idempotency_key: a Structured Field String (`\"8e03978e-40d5-43e8-bc93-6894a57f9324\"`, draft-ietf-httpapi-idempotency-key-header-08) or the bare key; when both are sent they must be equal. A retry with the same key and request answers what the first did; the same key with another request is 422 idempotency_conflict. An event write keeps its key for 30 days (maintenance removes it after that), a hold until the hold would have expired, is released or is confirmed. Where the key is required and neither is sent: 400 idempotency_key_required.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 502
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "event": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "resource_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "starts_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "ends_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "timezone": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 100
+                        },
+                        "title": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "description": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 16384
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "location": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 16384
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "organizer": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "address": {
+                                  "type": "string",
+                                  "minLength": 3,
+                                  "maxLength": 320
+                                },
+                                "name": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "maxLength": 1024
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "address",
+                                "name"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "attendees": {
+                          "maxItems": 100,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "address": {
+                                "type": "string",
+                                "minLength": 3,
+                                "maxLength": 320
+                              },
+                              "name": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "maxLength": 1024
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "role": {
+                                "type": "string",
+                                "enum": [
+                                  "chair",
+                                  "required",
+                                  "optional",
+                                  "non_participant"
+                                ]
+                              },
+                              "participation_status": {
+                                "type": "string",
+                                "enum": [
+                                  "needs_action",
+                                  "accepted",
+                                  "declined",
+                                  "tentative",
+                                  "delegated"
+                                ]
+                              },
+                              "rsvp": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "address",
+                              "name",
+                              "role",
+                              "participation_status",
+                              "rsvp"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "reminders": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "minutes_before": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 527040
+                              },
+                              "channel": {
+                                "type": "string",
+                                "enum": [
+                                  "display",
+                                  "email"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "minutes_before",
+                              "channel"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "tentative",
+                            "confirmed",
+                            "cancelled"
+                          ]
+                        },
+                        "transparency": {
+                          "type": "string",
+                          "enum": [
+                            "opaque",
+                            "transparent"
+                          ]
+                        },
+                        "sequence": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "revision": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "recurrence_rule": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "recurrence_exceptions": {
+                          "maxItems": 1000,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "recurrence_id": {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              "cancelled": {
+                                "type": "boolean"
+                              },
+                              "starts_at": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "format": "date-time"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "ends_at": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "format": "date-time"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            "required": [
+                              "recurrence_id",
+                              "cancelled",
+                              "starts_at",
+                              "ends_at"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "recurrence_id": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "resource_id",
+                        "starts_at",
+                        "ends_at",
+                        "timezone",
+                        "title",
+                        "description",
+                        "location",
+                        "organizer",
+                        "attendees",
+                        "reminders",
+                        "status",
+                        "transparency",
+                        "sequence",
+                        "revision",
+                        "recurrence_rule",
+                        "recurrence_exceptions",
+                        "recurrence_id"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "replayed": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "event",
+                    "replayed"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/v1/events": {
       "get": {
         "operationId": "slotlock_list_events",
         "summary": "List resource events",
-        "description": "List bounded events intersecting a time window.",
+        "description": "List your events that meet a time window, earliest first.",
         "tags": [
           "Agent tools"
         ],
@@ -3158,7 +3603,7 @@
       "post": {
         "operationId": "slotlock_create_event",
         "summary": "Create resource event",
-        "description": "Create an event of up to 3,660 days (a booking, lease or long rental); opaque occurrences use the database overlap arbiter.",
+        "description": "Book a resource for a time, as an event of up to 3,660 days (a booking, lease or long rental). The database refuses a time already taken: 409 overlap, with alternatives (the earliest free times of the same length) and, when the booking in the way is yours, its id. A booking rule that refuses the time answers booking_rule_… with alternatives too. To book a time you hold, pass its hold_id, or use slotlock_confirm_slot. A retry with the same idempotency_key answers the same event.",
         "tags": [
           "Agent tools"
         ],
@@ -3720,7 +4165,7 @@
       "get": {
         "operationId": "slotlock_get_event",
         "summary": "Get resource event",
-        "description": "Read one tenant-scoped event by stable identifier.",
+        "description": "Read one of your events by its id, with its revision (pass it as expected_revision to change or cancel it).",
         "tags": [
           "Agent tools"
         ],
@@ -4065,7 +4510,7 @@
       "patch": {
         "operationId": "slotlock_update_event",
         "summary": "Update resource event",
-        "description": "Apply an expected-revision event patch and rematerialize occupancy atomically. With expected_resource_id, the resource you read the event on, an event since moved elsewhere is not found.",
+        "description": "Change one of your events at the revision you last read (expected_revision): its time, resource or details, all or nothing. A time already taken is 409 overlap with alternatives; a stale revision is 409 revision_conflict (read the event again). With expected_resource_id, the resource you read it on, an event since moved elsewhere is not found. To change only the time, slotlock_reschedule is simpler.",
         "tags": [
           "Agent tools"
         ],
@@ -4671,7 +5116,7 @@
       "delete": {
         "operationId": "slotlock_delete_event",
         "summary": "Delete resource event",
-        "description": "Tombstone an event at an expected revision so stale sync cannot resurrect it.",
+        "description": "Cancel one of your events at the revision you last read (expected_revision); a stale one is 409 revision_conflict. It cannot come back at that revision, so an old copy synced later does not restore it. slotlock_cancel does the same with fewer fields.",
         "tags": [
           "Agent tools"
         ],
@@ -4705,6 +5150,543 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 200
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Stands in for idempotency_key: a Structured Field String (`\"8e03978e-40d5-43e8-bc93-6894a57f9324\"`, draft-ietf-httpapi-idempotency-key-header-08) or the bare key; when both are sent they must be equal. A retry with the same key and request answers what the first did; the same key with another request is 422 idempotency_conflict. An event write keeps its key for 30 days (maintenance removes it after that), a hold until the hold would have expired, is released or is confirmed. Where the key is required and neither is sent: 400 idempotency_key_required.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 502
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "event_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "revision": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "deleted": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "replayed": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "event_id",
+                    "revision",
+                    "deleted",
+                    "replayed"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/events/{event_id}/reschedule": {
+      "post": {
+        "operationId": "slotlock_reschedule",
+        "summary": "Reschedule an event",
+        "description": "Move one of your events to a new time, and to another resource if you give one, at the revision you last read (expected_revision). A time already taken is 409 overlap with alternatives; a stale revision 409 revision_conflict. A retry answers the same move (replayed).",
+        "tags": [
+          "Agent tools"
+        ],
+        "x-slotlock-scope": "write",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expected_revision": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "starts_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "ends_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "resource_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "idempotency_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "required": [
+                  "expected_revision",
+                  "starts_at",
+                  "ends_at"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Stands in for idempotency_key: a Structured Field String (`\"8e03978e-40d5-43e8-bc93-6894a57f9324\"`, draft-ietf-httpapi-idempotency-key-header-08) or the bare key; when both are sent they must be equal. A retry with the same key and request answers what the first did; the same key with another request is 422 idempotency_conflict. An event write keeps its key for 30 days (maintenance removes it after that), a hold until the hold would have expired, is released or is confirmed. Where the key is required and neither is sent: 400 idempotency_key_required.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 502
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "event": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "resource_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "starts_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "ends_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "timezone": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 100
+                        },
+                        "title": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "description": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 16384
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "location": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 16384
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "organizer": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "address": {
+                                  "type": "string",
+                                  "minLength": 3,
+                                  "maxLength": 320
+                                },
+                                "name": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "maxLength": 1024
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "address",
+                                "name"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "attendees": {
+                          "maxItems": 100,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "address": {
+                                "type": "string",
+                                "minLength": 3,
+                                "maxLength": 320
+                              },
+                              "name": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "maxLength": 1024
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "role": {
+                                "type": "string",
+                                "enum": [
+                                  "chair",
+                                  "required",
+                                  "optional",
+                                  "non_participant"
+                                ]
+                              },
+                              "participation_status": {
+                                "type": "string",
+                                "enum": [
+                                  "needs_action",
+                                  "accepted",
+                                  "declined",
+                                  "tentative",
+                                  "delegated"
+                                ]
+                              },
+                              "rsvp": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "address",
+                              "name",
+                              "role",
+                              "participation_status",
+                              "rsvp"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "reminders": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "minutes_before": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 527040
+                              },
+                              "channel": {
+                                "type": "string",
+                                "enum": [
+                                  "display",
+                                  "email"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "minutes_before",
+                              "channel"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "tentative",
+                            "confirmed",
+                            "cancelled"
+                          ]
+                        },
+                        "transparency": {
+                          "type": "string",
+                          "enum": [
+                            "opaque",
+                            "transparent"
+                          ]
+                        },
+                        "sequence": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "revision": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "recurrence_rule": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "recurrence_exceptions": {
+                          "maxItems": 1000,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "recurrence_id": {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              "cancelled": {
+                                "type": "boolean"
+                              },
+                              "starts_at": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "format": "date-time"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "ends_at": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "format": "date-time"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            "required": [
+                              "recurrence_id",
+                              "cancelled",
+                              "starts_at",
+                              "ends_at"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "recurrence_id": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "resource_id",
+                        "starts_at",
+                        "ends_at",
+                        "timezone",
+                        "title",
+                        "description",
+                        "location",
+                        "organizer",
+                        "attendees",
+                        "reminders",
+                        "status",
+                        "transparency",
+                        "sequence",
+                        "revision",
+                        "recurrence_rule",
+                        "recurrence_exceptions",
+                        "recurrence_id"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "replayed": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "event",
+                    "replayed"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/events/{event_id}/cancel": {
+      "post": {
+        "operationId": "slotlock_cancel",
+        "summary": "Cancel an event",
+        "description": "Cancel one of your events at the revision you last read (expected_revision); a stale one is 409 revision_conflict. Its time is free at once. A retry answers the same cancellation (replayed).",
+        "tags": [
+          "Agent tools"
+        ],
+        "x-slotlock-scope": "write",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expected_revision": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "idempotency_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "required": [
+                  "expected_revision"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
             }
           },
           {
@@ -17579,6 +18561,55 @@
           "end": {
             "type": "string",
             "description": "An overlap: the end it refused."
+          },
+          "busy_start": {
+            "type": "string",
+            "description": "An overlap: when the booking in the way makes the time busy, from (buffers included)."
+          },
+          "busy_end": {
+            "type": "string",
+            "description": "An overlap: until when that booking makes it busy."
+          },
+          "conflicting_hold_id": {
+            "type": "string",
+            "description": "An overlap with a hold of your own: its id, to book or release it."
+          },
+          "conflicting_event_id": {
+            "type": "string",
+            "description": "An overlap with an event of your own: its id, to move or cancel it."
+          },
+          "alternatives": {
+            "type": "array",
+            "maxItems": 3,
+            "description": "A refusal another time can answer (overlap, pool_full, a booking rule): the earliest free times of the same length, within 7 days of the time asked for, checked as slotlock_find_available_slots checks them. Suggestions, not holds. Empty when none was found.",
+            "items": {
+              "type": "object",
+              "required": [
+                "resource_id",
+                "start",
+                "end"
+              ],
+              "properties": {
+                "resource_id": {
+                  "type": "string"
+                },
+                "start": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "end": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "resource_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "A bundle or pool booking: the resources free together then."
+                }
+              }
+            }
           },
           "issues": {
             "type": "array",

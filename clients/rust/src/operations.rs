@@ -79,6 +79,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
+        name: "slotlock_confirm_slot",
+        method: "POST",
+        path: "/v1/slot-holds/{hold_id}/confirm",
+        path_params: &["hold_id"],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_list_events",
         method: "GET",
         path: "/v1/events",
@@ -112,6 +119,20 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         path: "/v1/events/{event_id}",
         path_params: &["event_id"],
         query: &["expected_revision", "idempotency_key"],
+    },
+    Operation {
+        name: "slotlock_reschedule",
+        method: "POST",
+        path: "/v1/events/{event_id}/reschedule",
+        path_params: &["event_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_cancel",
+        method: "POST",
+        path: "/v1/events/{event_id}/cancel",
+        path_params: &["event_id"],
+        query: &[],
     },
     Operation {
         name: "slotlock_get_resource",
@@ -778,6 +799,22 @@ pub struct ReleaseSlotsInput {
     pub hold_id: String,
 }
 
+/// The arguments of [`Client::confirm_slot`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ConfirmSlotInput {
+    pub hold_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
 /// The arguments of [`Client::list_events`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ListEventsInput {
@@ -877,6 +914,28 @@ pub struct DeleteEventInput {
     pub event_id: String,
     pub expected_revision: i64,
     pub idempotency_key: String,
+}
+
+/// The arguments of [`Client::reschedule`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RescheduleInput {
+    pub event_id: String,
+    pub expected_revision: i64,
+    pub starts_at: String,
+    pub ends_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+/// The arguments of [`Client::cancel`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CancelInput {
+    pub event_id: String,
+    pub expected_revision: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
 }
 
 /// The arguments of [`Client::get_resource`].
@@ -1508,10 +1567,11 @@ impl Client {
 
     /// Get free-busy.
     ///
-    /// Return privacy-minimized busy intervals and explicit coverage certainty. Name the
-    /// resources with resource_ids, or select them instead by location (and every location in
-    /// it), group, labels (every one), kind or pool: at most 100 (more answers
-    /// selection_too_large, none selection_empty), named in selected_resource_ids.
+    /// When each resource is busy in a window, as busy intervals only (never whose or what), and
+    /// whether that is certain (coverage: "uncertain" where a calendar feeding it has not been
+    /// read lately). Name the resources with resource_ids, or select them instead by location
+    /// (and every location in it), group, labels (every one), kind or pool: at most 100 (more
+    /// answers selection_too_large, none selection_empty), named in selected_resource_ids.
     pub fn get_free_busy(&self, input: &GetFreeBusyInput) -> Result<Value, Error> {
         self.call("slotlock_get_free_busy", serde_json::to_value(input)?)
     }
@@ -1544,7 +1604,8 @@ impl Client {
     /// as alternatives in one group: each free one is held, the others are listed with why not.
     /// Book one by passing its hold_id to slotlock_create_event, which releases the rest;
     /// unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at
-    /// once.
+    /// once. A candidate refused for its time comes with alternatives (the earliest free times of
+    /// its length). slotlock_confirm_slot books a held time.
     pub fn hold_slots(&self, input: &HoldSlotsInput) -> Result<Value, Error> {
         self.call("slotlock_hold_slots", serde_json::to_value(input)?)
     }
@@ -1589,42 +1650,80 @@ impl Client {
         self.call("slotlock_release_slots", serde_json::to_value(input)?)
     }
 
+    /// Confirm a held slot.
+    ///
+    /// Book a time you hold (a hold_id from slotlock_hold_slots): the held resource and time
+    /// exactly, with the title and details you give, and the rest of its group released. 409
+    /// hold_expired when the hold lapsed first; 404 hold_not_found when it was released, booked
+    /// or is not yours. A retry answers the same event (replayed).
+    pub fn confirm_slot(&self, input: &ConfirmSlotInput) -> Result<Value, Error> {
+        self.call("slotlock_confirm_slot", serde_json::to_value(input)?)
+    }
+
     /// List resource events.
     ///
-    /// List bounded events intersecting a time window.
+    /// List your events that meet a time window, earliest first.
     pub fn list_events(&self, input: &ListEventsInput) -> Result<Value, Error> {
         self.call("slotlock_list_events", serde_json::to_value(input)?)
     }
 
     /// Create resource event.
     ///
-    /// Create an event of up to 3,660 days (a booking, lease or long rental); opaque occurrences
-    /// use the database overlap arbiter.
+    /// Book a resource for a time, as an event of up to 3,660 days (a booking, lease or long
+    /// rental). The database refuses a time already taken: 409 overlap, with alternatives (the
+    /// earliest free times of the same length) and, when the booking in the way is yours, its id.
+    /// A booking rule that refuses the time answers booking_rule_… with alternatives too. To book
+    /// a time you hold, pass its hold_id, or use slotlock_confirm_slot. A retry with the same
+    /// idempotency_key answers the same event.
     pub fn create_event(&self, input: &CreateEventInput) -> Result<Value, Error> {
         self.call("slotlock_create_event", serde_json::to_value(input)?)
     }
 
     /// Get resource event.
     ///
-    /// Read one tenant-scoped event by stable identifier.
+    /// Read one of your events by its id, with its revision (pass it as expected_revision to
+    /// change or cancel it).
     pub fn get_event(&self, input: &GetEventInput) -> Result<Value, Error> {
         self.call("slotlock_get_event", serde_json::to_value(input)?)
     }
 
     /// Update resource event.
     ///
-    /// Apply an expected-revision event patch and rematerialize occupancy atomically. With
-    /// expected_resource_id, the resource you read the event on, an event since moved elsewhere
-    /// is not found.
+    /// Change one of your events at the revision you last read (expected_revision): its time,
+    /// resource or details, all or nothing. A time already taken is 409 overlap with
+    /// alternatives; a stale revision is 409 revision_conflict (read the event again). With
+    /// expected_resource_id, the resource you read it on, an event since moved elsewhere is not
+    /// found. To change only the time, slotlock_reschedule is simpler.
     pub fn update_event(&self, input: &UpdateEventInput) -> Result<Value, Error> {
         self.call("slotlock_update_event", serde_json::to_value(input)?)
     }
 
     /// Delete resource event.
     ///
-    /// Tombstone an event at an expected revision so stale sync cannot resurrect it.
+    /// Cancel one of your events at the revision you last read (expected_revision); a stale one
+    /// is 409 revision_conflict. It cannot come back at that revision, so an old copy synced
+    /// later does not restore it. slotlock_cancel does the same with fewer fields.
     pub fn delete_event(&self, input: &DeleteEventInput) -> Result<Value, Error> {
         self.call("slotlock_delete_event", serde_json::to_value(input)?)
+    }
+
+    /// Reschedule an event.
+    ///
+    /// Move one of your events to a new time, and to another resource if you give one, at the
+    /// revision you last read (expected_revision). A time already taken is 409 overlap with
+    /// alternatives; a stale revision 409 revision_conflict. A retry answers the same move
+    /// (replayed).
+    pub fn reschedule(&self, input: &RescheduleInput) -> Result<Value, Error> {
+        self.call("slotlock_reschedule", serde_json::to_value(input)?)
+    }
+
+    /// Cancel an event.
+    ///
+    /// Cancel one of your events at the revision you last read (expected_revision); a stale one
+    /// is 409 revision_conflict. Its time is free at once. A retry answers the same cancellation
+    /// (replayed).
+    pub fn cancel(&self, input: &CancelInput) -> Result<Value, Error> {
+        self.call("slotlock_cancel", serde_json::to_value(input)?)
     }
 
     /// Get a resource.

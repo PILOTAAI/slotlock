@@ -194,7 +194,10 @@ Status: built on `claude/inspiring-dijkstra-bfvqif`, each with its test.
 
 ### P1: agent-native completion (0.7.0)
 
-**A1. Alternatives on every refusal (T1).** An `overlap`, `hold_limit_reached` with time left,
+**A1. Alternatives on every refusal (T1).** Status: built. The refusals are `overlap`,
+`pool_full` and the booking-rule refusals other than `booking_rule_uncertain`.
+`hold_limit_reached` gets none: another time does not help an agent that holds too much.
+ An `overlap`, `hold_limit_reached` with time left,
 or a booking-rule refusal returns `alternatives`. These are up to 3 slots of the same length,
 taken from:
 - the same resource;
@@ -206,8 +209,10 @@ They come from the same evaluator as `find_available_slots`, inside the request'
 `hold_slots`, each refused index carries its own. They are suggestions, not holds. The agent holds
 the one it wants, so nothing is reserved on its behalf.
 
-**A2. A semantic tool set (T1).** Add three tools that wrap existing operations:
-- `slotlock_confirm_hold`: `hold_id` plus the event fields, flat;
+**A2. A semantic tool set (T1).** Status: built. The confirm tool is named `slotlock_confirm_slot`,
+because the application API already has `slotlock_confirm_hold`. Each of the three derives its
+idempotency key when none is given. Add three tools that wrap existing operations:
+- `slotlock_confirm_slot`: `hold_id` plus the event fields, flat;
 - `slotlock_reschedule`: a reference, a new start and a new end;
 - `slotlock_cancel`: a reference.
 

@@ -30,6 +30,7 @@ const READS = [
   'listRecentChanges',
   'getReservation',
   'describeBooking',
+  'getHolderHold',
   'listReservations',
   'listBusy',
   'getCalendarEvent',

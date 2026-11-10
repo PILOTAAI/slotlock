@@ -739,12 +739,15 @@ describe('the application API over REST', () => {
       'slotlock_acquire_hold',
       'slotlock_book_pool',
       'slotlock_book_together',
+      'slotlock_cancel',
       'slotlock_cancel_tenant_event',
+      'slotlock_confirm_slot',
       'slotlock_create_event',
       'slotlock_create_webhook',
       'slotlock_delete_event',
       'slotlock_hold_slots',
       'slotlock_join_waitlist',
+      'slotlock_reschedule',
       'slotlock_update_event',
     ]);
   });

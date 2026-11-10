@@ -1180,6 +1180,7 @@ export async function startCalendarServer(config: CalendarServerConfig) {
 | `slotlock_find_available_slots` | Up to 50 *certain* slots, earliest first, to offer a choice | read-only |
 | `slotlock_hold_slots` | Hold up to 5 candidates for 30-900 seconds while a person chooses | write |
 | `slotlock_release_slots` | Release a hold and the rest of its group | write |
+| `slotlock_confirm_slot` | Book a held time exactly, releasing the rest of its group (idempotent) | write |
 | `slotlock_book_together` | Book the same time on 2-20 resources, all or none | write |
 | `slotlock_book_pool` | Book any one free member of a pool (a vehicle class, a room type) | write |
 | `slotlock_get_pool_availability` | How many of a pool's members are free across a window | read |
@@ -1188,9 +1189,19 @@ export async function startCalendarServer(config: CalendarServerConfig) {
 | `slotlock_create_event` | Create an event of up to 3,660 days (idempotent) | write |
 | `slotlock_update_event` | Patch at an expected revision, optionally fenced to `expected_resource_id` | write |
 | `slotlock_delete_event` | Tombstone at an expected revision | write, destructive |
+| `slotlock_reschedule` | Move an event to a new time (and resource) at an expected revision (idempotent) | write |
+| `slotlock_cancel` | Cancel an event at an expected revision (idempotent) | write, destructive |
 
 A query window is at most 367 days. Each caller sees only the events it created, but everyone's
 events count as busy time.
+
+A refused write another time can answer (`overlap`, `pool_full`, or a booking rule other than
+`booking_rule_uncertain`) carries `alternatives`: up to three free times of the same length from the
+time asked for, within seven days, found as `slotlock_find_available_slots` finds them (on a
+bundle, times when every resource is free; on a pool, when any member is). They are suggestions,
+not holds. An `overlap` also says when the booking in the way makes the time busy (`busy_start`,
+`busy_end`), and names it when it is the agent's own (`conflicting_hold_id`,
+`conflicting_event_id`).
 
 An agent offering a person several times holds them first, so none is taken while the person
 decides: `slotlock_hold_slots` holds each free candidate in one group (and lists the taken ones in
@@ -1419,6 +1430,7 @@ never cached. W3C `traceparent`, `tracestate` and `baggage` reach your backend a
 | `GET /v1/available-slots` | `slotlock_find_available_slots` |
 | `POST /v1/slot-holds` | `slotlock_hold_slots` |
 | `DELETE /v1/slot-holds/{hold_id}` | `slotlock_release_slots` |
+| `POST /v1/slot-holds/{hold_id}/confirm` | `slotlock_confirm_slot` |
 | `POST /v1/bundles` | `slotlock_book_together` |
 | `POST /v1/pool-bookings` | `slotlock_book_pool` |
 | `GET /v1/pool-availability` | `slotlock_get_pool_availability` |
@@ -1426,6 +1438,8 @@ never cached. W3C `traceparent`, `tracestate` and `baggage` reach your backend a
 | `POST /v1/events` | `slotlock_create_event` |
 | `GET /v1/events/{event_id}` | `slotlock_get_event` |
 | `PATCH /v1/events/{event_id}` | `slotlock_update_event` |
+| `POST /v1/events/{event_id}/reschedule` | `slotlock_reschedule` |
+| `POST /v1/events/{event_id}/cancel` | `slotlock_cancel` |
 | `DELETE /v1/events/{event_id}` | `slotlock_delete_event` |
 
 ```sh

@@ -50,6 +50,9 @@ export const SLOTLOCK_ASSISTANT_TOOL_USE: Readonly<Record<SlotlockAgentOperation
     slotlock_create_event: 'propose',
     slotlock_update_event: 'propose',
     slotlock_delete_event: 'propose',
+    slotlock_confirm_slot: 'propose',
+    slotlock_reschedule: 'propose',
+    slotlock_cancel: 'propose',
   });
 
 for (const [operation, use] of Object.entries(SLOTLOCK_ASSISTANT_TOOL_USE)) {

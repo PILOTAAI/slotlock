@@ -2730,6 +2730,15 @@ export interface SlotlockStore extends SlotlockEventFeed {
   }): Promise<AcquireHoldResult>;
   /** One of the tenant's live holds, or null (none, expired, confirmed, or another tenant's). */
   getHold(params: { tenantRef: string; holdId: string }): Promise<SlotlockHold | null>;
+  /**
+   * One holder's own hold by id, lapsed or live (`live`), so a confirm can say `hold_expired`
+   * rather than not found. Null when it is gone, booked, or another holder's.
+   */
+  getHolderHold(params: {
+    tenantRef: string;
+    holdId: string;
+    holderRef: string;
+  }): Promise<{ hold: SlotlockHold; live: boolean } | null>;
   /** The tenant's live holds on one resource, by start then id, keyset-paginated like events. */
   listHolds(params: {
     tenantRef: string;
@@ -5565,6 +5574,21 @@ function buildSlotlockStore(
          WHERE hold.id = ${params.holdId} AND resource.tenant_ref = ${params.tenantRef}
            AND hold.status = 'held' AND hold.expires_at > statement_timestamp()`;
       return row ? toHold(row) : null;
+    },
+
+    async getHolderHold(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidIdentity(params.holderRef)) {
+        throw invalidIdentityError('Slotlock tenant and holder must be 1-500 UTF-8 bytes');
+      }
+      if (!isValidResourceId(params.holdId)) return null;
+      const [row] = await sql<(HoldRow & { live: boolean })[]>`
+        SELECT hold.id, hold.resource_id, hold.starts_at, hold.ends_at, hold.buffer_after_ms,
+               hold.expires_at, hold.source, hold.expires_at > statement_timestamp() AS live
+          FROM slotlock.reservations hold
+          JOIN slotlock.resources resource ON resource.id = hold.resource_id
+         WHERE hold.id = ${params.holdId} AND resource.tenant_ref = ${params.tenantRef}
+           AND hold.status = 'held' AND hold.holder_ref = ${params.holderRef}`;
+      return row ? { hold: toHold(row), live: row.live } : null;
     },
 
     async listHolds(params) {

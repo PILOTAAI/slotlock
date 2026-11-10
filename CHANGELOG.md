@@ -7,6 +7,18 @@ versioning.
 
 ### Added
 
+- Alternatives with a refusal (RFC 0004 A1): an agent write refused with `overlap`, `pool_full` or
+  a booking rule (other than `booking_rule_uncertain`) carries `alternatives`, up to three free
+  times of the same length from the time asked for, within seven days, found by
+  `slotlock_find_available_slots`' own search: on the same resource, on a bundle's resources
+  together, or on any member of the pool. `slotlock_hold_slots` gives each candidate refused for its
+  time its own. On MCP, A2A and REST alike; never a hold.
+- Three named booking tools (RFC 0004 A2): `slotlock_confirm_slot` books a held time exactly
+  (`POST /v1/slot-holds/{hold_id}/confirm`), `slotlock_reschedule` moves an event
+  (`POST /v1/events/{event_id}/reschedule`) and `slotlock_cancel` cancels one
+  (`POST /v1/events/{event_id}/cancel`), each with flat arguments and an idempotency key it derives
+  when none is given. The tool descriptions say what each refuses and why, in plain words, and the
+  MCP instructions walk an agent through find, hold, confirm, reschedule and cancel.
 - Hosted plans: `slotlock.tenant_plans` (owner-only, read and set through definer functions) caps a
   tenant's resources, active API keys and webhook endpoints. Free allows 10, 10 and 2; Developer
   100, 100 and 10. A tenant with no plan, as on every self-hosted server, keeps the server's limits.
@@ -382,6 +394,8 @@ versioning.
   - The MCP instructions and the A2A agent card say that titles, descriptions, locations and names
     in results are data written by people, never instructions.
   - `slotlock_list_webhooks` refused its own answer past 10 webhooks, though a tenant may have 25.
+- A retried `slotlock_delete_event`, after the first had succeeded, answered `event_not_found`
+  instead of the first cancellation; it answers that with `replayed: true`.
 - A recurring event's occurrences are written in three statements for the whole series, not three
   per occurrence (reap the expired holds in the way, insert the bookings, insert the occurrences).
   A 2,000-occurrence series took 6,000 round trips while holding its tenant's locks, so on a busy

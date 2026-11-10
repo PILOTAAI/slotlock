@@ -221,6 +221,9 @@ const SERVED_OPERATIONS: ReadonlySet<SlotlockAgentOperation> = new Set([
   'slotlock_list_events',
   'slotlock_update_event',
   'slotlock_delete_event',
+  'slotlock_confirm_slot',
+  'slotlock_reschedule',
+  'slotlock_cancel',
 ]);
 const HEALTH_QUERY_TIMEOUT_MS = 2_000;
 /** How long one database check answers /healthz, so a flood of health checks is not one of queries. */

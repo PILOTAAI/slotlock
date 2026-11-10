@@ -846,6 +846,74 @@ export function createSlotlockStoreAgentBackend(
       }, WRITE);
     },
 
+    async confirmHold(this: SlotlockAgentCalendarBackend, context, rawInput) {
+      const input = rawInput as {
+        hold_id: string;
+        title?: string;
+        description?: string;
+        location?: string;
+        timezone?: string;
+        idempotency_key: string;
+      };
+      // The holder's own hold, lapsed or live, and its resource's zone; then the booking exactly
+      // as create_event with its hold_id makes it, which judges the hold again under its lock.
+      const found = await withTenant(store, context, async (tenantStore) => {
+        const held = await tenantStore.getHolderHold({
+          tenantRef: context.principal.tenantRef,
+          holdId: input.hold_id,
+          holderRef: agentOwnerRef(context),
+        });
+        if (!held) return null;
+        const resource = await requireAgentResource(tenantStore, context.principal.tenantRef, held.hold.resourceId);
+        return { ...held, timezone: resource.timezone };
+      });
+      if (!found) {
+        // Booked already: a retry answers the event this key made (the store compares the
+        // request, so another one with the same key is idempotency_conflict).
+        const booked = await withTenant(store, context, (tenantStore) =>
+          tenantStore.getCalendarEvent({
+            tenantRef: context.principal.tenantRef,
+            ownerRef: agentOwnerRef(context),
+            externalRef: agentExternalRef(context, input.idempotency_key),
+          }),
+        );
+        if (!booked) throw new SlotlockAgentOperationError('hold_not_found', 404);
+        return this.createEvent(
+          { ...context, operation: 'slotlock_create_event' },
+          {
+            resource_id: booked.resourceId,
+            starts_at: booked.start.toISOString(),
+            ends_at: booked.end.toISOString(),
+            timezone: input.timezone ?? booked.timezone,
+            ...(input.title !== undefined ? { title: input.title } : {}),
+            ...(input.description !== undefined ? { description: input.description } : {}),
+            ...(input.location !== undefined ? { location: input.location } : {}),
+            transparency: 'opaque',
+            status: 'confirmed',
+            hold_id: input.hold_id,
+            idempotency_key: input.idempotency_key,
+          },
+        );
+      }
+      if (!found.live) throw new SlotlockAgentOperationError('hold_expired', 409);
+      return this.createEvent(
+        { ...context, operation: 'slotlock_create_event' },
+        {
+          resource_id: found.hold.resourceId,
+          starts_at: found.hold.start.toISOString(),
+          ends_at: found.hold.end.toISOString(),
+          timezone: input.timezone ?? found.timezone,
+          ...(input.title !== undefined ? { title: input.title } : {}),
+          ...(input.description !== undefined ? { description: input.description } : {}),
+          ...(input.location !== undefined ? { location: input.location } : {}),
+          transparency: 'opaque',
+          status: 'confirmed',
+          hold_id: input.hold_id,
+          idempotency_key: input.idempotency_key,
+        },
+      );
+    },
+
     async releaseSlots(context, input) {
       const id = input.hold_id as string;
       if (!STORE_ID_PATTERN.test(id)) return { released: false };
@@ -1301,12 +1369,13 @@ export function createSlotlockStoreAgentBackend(
           ownerRef: agentOwnerRef(context),
           externalRef,
         });
-        if (!current) throw new SlotlockAgentOperationError('event_not_found', 404);
+        // Gone already: a retry of a cancellation that succeeded, answered from its key, or
+        // event_not_found from the store when there was none.
         const result = await tenantStore.cancelCalendarEvent({
           tenantRef: context.principal.tenantRef,
           ownerRef: agentOwnerRef(context),
           externalRef,
-          expectedResourceId: current.resourceId,
+          ...(current ? { expectedResourceId: current.resourceId } : {}),
           idempotencyKey: agentCommandIdempotencyKey(context, input.idempotency_key as string),
           expectedRevision: input.expected_revision as number,
         });

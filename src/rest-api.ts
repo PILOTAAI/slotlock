@@ -51,6 +51,12 @@ export const SLOTLOCK_REST_ROUTES: readonly SlotlockRestRoute[] = Object.freeze(
     operation: 'slotlock_release_slots',
     refusals: [409],
   },
+  {
+    method: 'POST',
+    path: '/v1/slot-holds/{hold_id}/confirm',
+    operation: 'slotlock_confirm_slot',
+    refusals: [404, 409],
+  },
   { method: 'GET', path: '/v1/events', operation: 'slotlock_list_events', refusals: [404] },
   { method: 'POST', path: '/v1/events', operation: 'slotlock_create_event', refusals: [404, 409] },
   { method: 'GET', path: '/v1/events/{event_id}', operation: 'slotlock_get_event', refusals: [404] },
@@ -64,6 +70,18 @@ export const SLOTLOCK_REST_ROUTES: readonly SlotlockRestRoute[] = Object.freeze(
     method: 'DELETE',
     path: '/v1/events/{event_id}',
     operation: 'slotlock_delete_event',
+    refusals: [404, 409],
+  },
+  {
+    method: 'POST',
+    path: '/v1/events/{event_id}/reschedule',
+    operation: 'slotlock_reschedule',
+    refusals: [404, 409],
+  },
+  {
+    method: 'POST',
+    path: '/v1/events/{event_id}/cancel',
+    operation: 'slotlock_cancel',
     refusals: [404, 409],
   },
 ]);
@@ -483,6 +501,39 @@ export function slotlockOpenApiDocument(args: {
             resource_id: { type: 'string', description: 'An overlap: the resource it refused.' },
             start: { type: 'string', description: 'An overlap: the start it refused.' },
             end: { type: 'string', description: 'An overlap: the end it refused.' },
+            busy_start: {
+              type: 'string',
+              description: 'An overlap: when the booking in the way makes the time busy, from (buffers included).',
+            },
+            busy_end: { type: 'string', description: 'An overlap: until when that booking makes it busy.' },
+            conflicting_hold_id: {
+              type: 'string',
+              description: 'An overlap with a hold of your own: its id, to book or release it.',
+            },
+            conflicting_event_id: {
+              type: 'string',
+              description: 'An overlap with an event of your own: its id, to move or cancel it.',
+            },
+            alternatives: {
+              type: 'array',
+              maxItems: 3,
+              description:
+                'A refusal another time can answer (overlap, pool_full, a booking rule): the earliest free times of the same length, within 7 days of the time asked for, checked as slotlock_find_available_slots checks them. Suggestions, not holds. Empty when none was found.',
+              items: {
+                type: 'object',
+                required: ['resource_id', 'start', 'end'],
+                properties: {
+                  resource_id: { type: 'string' },
+                  start: { type: 'string', format: 'date-time' },
+                  end: { type: 'string', format: 'date-time' },
+                  resource_ids: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'A bundle or pool booking: the resources free together then.',
+                  },
+                },
+              },
+            },
             issues: {
               type: 'array',
               description:

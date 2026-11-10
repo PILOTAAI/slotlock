@@ -65,13 +65,16 @@ export const GROUPS = [
     operations: [
       'slotlock_hold_slots',
       'slotlock_release_slots',
+      'slotlock_confirm_slot',
       'slotlock_book_together',
       'slotlock_book_pool',
       'slotlock_create_event',
       'slotlock_list_events',
       'slotlock_get_event',
       'slotlock_update_event',
+      'slotlock_reschedule',
       'slotlock_delete_event',
+      'slotlock_cancel',
       'slotlock_list_tenant_events',
       'slotlock_get_tenant_event',
       'slotlock_export_tenant_event',
@@ -367,6 +370,7 @@ function withRunVariables(operationId, args) {
  */
 const CLEAN_UP = new Set([
   'slotlock_delete_event',
+  'slotlock_cancel',
   'slotlock_delete_resource',
   'slotlock_erase_tenant',
 ]);

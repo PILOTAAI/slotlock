@@ -78,6 +78,13 @@ OPERATIONS: dict[str, Operation] = {
         ("hold_id",),
         (),
     ),
+    "slotlock_confirm_slot": Operation(
+        "slotlock_confirm_slot",
+        "POST",
+        "/v1/slot-holds/{hold_id}/confirm",
+        ("hold_id",),
+        (),
+    ),
     "slotlock_list_events": Operation(
         "slotlock_list_events",
         "GET",
@@ -112,6 +119,20 @@ OPERATIONS: dict[str, Operation] = {
         "/v1/events/{event_id}",
         ("event_id",),
         ("expected_revision", "idempotency_key"),
+    ),
+    "slotlock_reschedule": Operation(
+        "slotlock_reschedule",
+        "POST",
+        "/v1/events/{event_id}/reschedule",
+        ("event_id",),
+        (),
+    ),
+    "slotlock_cancel": Operation(
+        "slotlock_cancel",
+        "POST",
+        "/v1/events/{event_id}/cancel",
+        ("event_id",),
+        (),
     ),
     "slotlock_get_resource": Operation(
         "slotlock_get_resource",
@@ -723,10 +744,11 @@ class Operations(Transport):
     ) -> dict[str, Any]:
         """Get free-busy.
 
-        Return privacy-minimized busy intervals and explicit coverage certainty. Name the
-        resources with resource_ids, or select them instead by location (and every location in
-        it), group, labels (every one), kind or pool: at most 100 (more answers
-        selection_too_large, none selection_empty), named in selected_resource_ids.
+        When each resource is busy in a window, as busy intervals only (never whose or what), and
+        whether that is certain (coverage: "uncertain" where a calendar feeding it has not been
+        read lately). Name the resources with resource_ids, or select them instead by location
+        (and every location in it), group, labels (every one), kind or pool: at most 100 (more
+        answers selection_too_large, none selection_empty), named in selected_resource_ids.
         """
         values: dict[str, Any] = {"start": start, "end": end}
         if resource_ids is not None:
@@ -834,7 +856,8 @@ class Operations(Transport):
         as alternatives in one group: each free one is held, the others are listed with why not.
         Book one by passing its hold_id to slotlock_create_event, which releases the rest;
         unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at
-        once.
+        once. A candidate refused for its time comes with alternatives (the earliest free times of
+        its length). slotlock_confirm_slot books a held time.
         """
         values: dict[str, Any] = {"slots": slots, "idempotency_key": idempotency_key}
         if ttl_seconds is not None:
@@ -919,6 +942,36 @@ class Operations(Transport):
         values: dict[str, Any] = {"hold_id": hold_id}
         return self.call("slotlock_release_slots", values)
 
+    def confirm_slot(
+        self,
+        hold_id: str,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        location: str | None = None,
+        timezone: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Confirm a held slot.
+
+        Book a time you hold (a hold_id from slotlock_hold_slots): the held resource and time
+        exactly, with the title and details you give, and the rest of its group released. 409
+        hold_expired when the hold lapsed first; 404 hold_not_found when it was released, booked
+        or is not yours. A retry answers the same event (replayed).
+        """
+        values: dict[str, Any] = {"hold_id": hold_id}
+        if title is not None:
+            values["title"] = title
+        if description is not None:
+            values["description"] = description
+        if location is not None:
+            values["location"] = location
+        if timezone is not None:
+            values["timezone"] = timezone
+        if idempotency_key is not None:
+            values["idempotency_key"] = idempotency_key
+        return self.call("slotlock_confirm_slot", values)
+
     def list_events(
         self,
         *,
@@ -930,7 +983,7 @@ class Operations(Transport):
     ) -> dict[str, Any]:
         """List resource events.
 
-        List bounded events intersecting a time window.
+        List your events that meet a time window, earliest first.
         """
         values: dict[str, Any] = {"resource_ids": resource_ids, "start": start, "end": end}
         if cursor is not None:
@@ -961,8 +1014,12 @@ class Operations(Transport):
     ) -> dict[str, Any]:
         """Create resource event.
 
-        Create an event of up to 3,660 days (a booking, lease or long rental); opaque occurrences
-        use the database overlap arbiter.
+        Book a resource for a time, as an event of up to 3,660 days (a booking, lease or long
+        rental). The database refuses a time already taken: 409 overlap, with alternatives (the
+        earliest free times of the same length) and, when the booking in the way is yours, its id.
+        A booking rule that refuses the time answers booking_rule_… with alternatives too. To book
+        a time you hold, pass its hold_id, or use slotlock_confirm_slot. A retry with the same
+        idempotency_key answers the same event.
         """
         values: dict[str, Any] = {
             "resource_id": resource_id,
@@ -998,7 +1055,8 @@ class Operations(Transport):
     def get_event(self, event_id: str) -> dict[str, Any]:
         """Get resource event.
 
-        Read one tenant-scoped event by stable identifier.
+        Read one of your events by its id, with its revision (pass it as expected_revision to
+        change or cancel it).
         """
         values: dict[str, Any] = {"event_id": event_id}
         return self.call("slotlock_get_event", values)
@@ -1027,9 +1085,11 @@ class Operations(Transport):
     ) -> dict[str, Any]:
         """Update resource event.
 
-        Apply an expected-revision event patch and rematerialize occupancy atomically. With
-        expected_resource_id, the resource you read the event on, an event since moved elsewhere
-        is not found.
+        Change one of your events at the revision you last read (expected_revision): its time,
+        resource or details, all or nothing. A time already taken is 409 overlap with
+        alternatives; a stale revision is 409 revision_conflict (read the event again). With
+        expected_resource_id, the resource you read it on, an event since moved elsewhere is not
+        found. To change only the time, slotlock_reschedule is simpler.
         """
         values: dict[str, Any] = {
             "event_id": event_id,
@@ -1077,7 +1137,9 @@ class Operations(Transport):
     ) -> dict[str, Any]:
         """Delete resource event.
 
-        Tombstone an event at an expected revision so stale sync cannot resurrect it.
+        Cancel one of your events at the revision you last read (expected_revision); a stale one
+        is 409 revision_conflict. It cannot come back at that revision, so an old copy synced
+        later does not restore it. slotlock_cancel does the same with fewer fields.
         """
         values: dict[str, Any] = {
             "event_id": event_id,
@@ -1085,6 +1147,53 @@ class Operations(Transport):
             "idempotency_key": idempotency_key,
         }
         return self.call("slotlock_delete_event", values)
+
+    def reschedule(
+        self,
+        event_id: str,
+        *,
+        expected_revision: int,
+        starts_at: str,
+        ends_at: str,
+        resource_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Reschedule an event.
+
+        Move one of your events to a new time, and to another resource if you give one, at the
+        revision you last read (expected_revision). A time already taken is 409 overlap with
+        alternatives; a stale revision 409 revision_conflict. A retry answers the same move
+        (replayed).
+        """
+        values: dict[str, Any] = {
+            "event_id": event_id,
+            "expected_revision": expected_revision,
+            "starts_at": starts_at,
+            "ends_at": ends_at,
+        }
+        if resource_id is not None:
+            values["resource_id"] = resource_id
+        if idempotency_key is not None:
+            values["idempotency_key"] = idempotency_key
+        return self.call("slotlock_reschedule", values)
+
+    def cancel(
+        self,
+        event_id: str,
+        *,
+        expected_revision: int,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Cancel an event.
+
+        Cancel one of your events at the revision you last read (expected_revision); a stale one
+        is 409 revision_conflict. Its time is free at once. A retry answers the same cancellation
+        (replayed).
+        """
+        values: dict[str, Any] = {"event_id": event_id, "expected_revision": expected_revision}
+        if idempotency_key is not None:
+            values["idempotency_key"] = idempotency_key
+        return self.call("slotlock_cancel", values)
 
     def get_resource(self, resource_id: str) -> dict[str, Any]:
         """Get a resource.
