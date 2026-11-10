@@ -265,6 +265,28 @@ slotlock partner suspend stackapi        # every account with it; its keys stop
   keys work over MCP, A2A and REST as any key. A suspended partner suspends its accounts and their
   keys stop authenticating.
 
+Each month is closed once it has ended, by the schema owner (the 1st is a good day):
+
+```sh
+slotlock partner customer stackapi cus_…                 # the Stripe customer it is billed as
+slotlock partner webhook stackapi https://stackapi.app/hooks/slotlock   # prints the signing secret once
+STRIPE_SECRET_KEY=sk_live_… slotlock partner close stackapi              # last month; or --month 2026-10
+```
+
+- `partner close` reads the month's usage of every account, prices it with the contract (active
+  accounts, each account's operations and bookings above its plan's quota, the minimum's
+  shortfall) and records those lines in `slotlock.partner_invoices`. A month is priced once: a
+  later run sends the same lines, whatever changed since.
+- It then sends the partner `usage.period_closed`, signed as any Slotlock webhook (`webhook-id`,
+  `webhook-timestamp`, `webhook-signature`): each account's totals by metric, the lines, and a
+  SHA-256 of both, so the two sides can check they hold the same numbers.
+- With `STRIPE_SECRET_KEY`, each line Stripe has not taken becomes an invoice item on the partner's
+  next invoice, and its id is kept. It exits 1 while a line waits (no key, or Stripe failed): run
+  it again for the same month, and only those lines are sent.
+- `/metrics` counts authenticated requests by the integrator their `Slotlock-Client` field names
+  (`slotlock_requests_by_client_total`): the names in `SLOTLOCK_KNOWN_CLIENTS`, else `other`, or
+  `none` without the field.
+
 ### Retiring resources and tenants
 
 ```sh

@@ -40,7 +40,7 @@ import {
   handleSlotlockStripeWebhook,
   type SlotlockStripe,
 } from '../../src/billing.js';
-import { enrolSlotlockTenantPlan, readSlotlockTenantPlan } from '../../src/plans.js';
+import { enrolSlotlockTenantPlan, readSlotlockTenantPlan, readSlotlockTenantQuotas } from '../../src/plans.js';
 import {
   type SlotlockQuotas,
   createSlotlockQuotas,
@@ -506,7 +506,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
           quotas:
             quotas && meter
               ? createSlotlockQuotas({
-                  plan: async (tenantRef) => (await readSlotlockTenantPlan(sql, tenantRef))?.plan ?? null,
+                  plan: (tenantRef) => readSlotlockTenantQuotas(sql, tenantRef),
                   used: (tenantRef, fromDay) => readSlotlockQuotaUse(sql, tenantRef, fromDay),
                   local: (tenantRef, metric, fromDay) => meter.local(tenantRef, metric, fromDay),
                   notice: (notice) => noteSlotlockQuotaThreshold(sql, notice),

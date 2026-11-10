@@ -77,6 +77,7 @@ import {
   setSlotlockPartnerStatus,
   slotlockPartnerContractJson,
 } from './partners.js';
+import { closeSlotlockPartnerMonth, slotlockClientLabel, slotlockPreviousMonth } from './partner-billing.js';
 import { readFile } from 'node:fs/promises';
 import {
   SLOTLOCK_DASHBOARD_FUNCTIONS,
@@ -122,7 +123,10 @@ import { parseAvailabilityRules } from './weekly-hours.js';
 
 export { SlotlockConfigError, type SlotlockEnv, type SlotlockServeDashboardConfig };
 
-/** Every variable the commands read. The README, `.env.example` and `server.json` document these. */
+/**
+ * Every variable the commands read. The README, `.env.example` and `server.json` document these.
+ * Not STRIPE_SECRET_KEY, which only the owner's `partner close` reads, to bill partners.
+ */
 export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'DATABASE_URL',
   'SLOTLOCK_MIGRATE_DATABASE_URL',
@@ -142,6 +146,7 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_LIMITS',
   'SLOTLOCK_TRUSTED_PROXY_HEADER',
   'SLOTLOCK_TRUSTED_PROXY_SECRET',
+  'SLOTLOCK_KNOWN_CLIENTS',
   'SLOTLOCK_GITHUB_CLIENT_ID',
   'SLOTLOCK_GITHUB_CLIENT_SECRET',
   'SLOTLOCK_SESSION_SECRET',
@@ -281,6 +286,11 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
   limits: SlotlockLimits;
   /** The lower-case request field a trusted proxy sets to the client address; else the socket's. */
   trustedProxyHeader?: string;
+  /**
+   * Integrators metrics count by name from the `Slotlock-Client` field (SLOTLOCK_KNOWN_CLIENTS,
+   * RFC 0003 P5); any other is `other`. Empty: every named client is `other`.
+   */
+  knownClients?: readonly string[];
   /** The value that must accompany trustedProxyHeader in x-slotlock-proxy-proof; else the socket's. */
   trustedProxySecret?: string;
 }
@@ -412,6 +422,22 @@ function readQuotas(env: SlotlockEnv, usage: boolean): boolean {
   return value === 'on';
 }
 
+/**
+ * SLOTLOCK_KNOWN_CLIENTS: the integrators metrics name (comma-separated, lower-case names like
+ * stackapi or n8n), at most 50, so a scrape stays bounded and names only those the deployment chose.
+ */
+function readKnownClients(env: SlotlockEnv): string[] {
+  const value = optional(env, 'SLOTLOCK_KNOWN_CLIENTS');
+  if (value === undefined) return [];
+  const names = value.split(',').map((name) => name.trim());
+  if (names.length > 50 || names.some((name) => !/^[a-z][a-z0-9_.-]{0,39}$/.test(name) || name === 'other' || name === 'none')) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_KNOWN_CLIENTS must be up to 50 comma-separated lower-case names (letters, digits, _ . -), not other or none',
+    );
+  }
+  return [...new Set(names)];
+}
+
 function readRestApi(env: SlotlockEnv): boolean {
   const value = optional(env, 'SLOTLOCK_REST_API') ?? 'on';
   if (value !== 'on' && value !== 'off') {
@@ -459,6 +485,8 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
   if (trustedProxyHeader !== undefined) config.trustedProxyHeader = trustedProxyHeader;
   const trustedProxySecret = readTrustedProxySecret(env, trustedProxyHeader);
   if (trustedProxySecret !== undefined) config.trustedProxySecret = trustedProxySecret;
+  const knownClients = readKnownClients(env);
+  if (knownClients.length > 0) config.knownClients = knownClients;
   if (authToken !== undefined) config.authToken = authToken;
   const metricsToken = readSecret(env, 'SLOTLOCK_METRICS_TOKEN');
   if (metricsToken !== undefined) {
@@ -1026,6 +1054,7 @@ export async function startSlotlockServer(
             version: slotlockPackageVersion(),
             ...(process.versions.tz ? { tzdata: process.versions.tz } : {}),
           });
+    const knownClients: ReadonlySet<string> = new Set(config.knownClients ?? []);
     const limits = createSlotlockRequestLimits({
       limits: config.limits,
       ...(config.sharedLimits
@@ -1060,6 +1089,7 @@ export async function startSlotlockServer(
         if (!principal || !slotlockServeAllowsTenant(config, principal.tenantRef)) return null;
         // A partner key's own tenant holds nothing to maintain; its accounts' keys are as any key.
         if (principal.partnerId === undefined) maintenance?.touch(principal.tenantRef);
+        metrics?.client(slotlockClientLabel(request.headers.get('slotlock-client'), knownClients));
         return principal;
       },
       // Counts and pseudonyms only: never an address, a credential or a tenant.
@@ -1543,6 +1573,7 @@ async function runPartnerCommand(
   action: string,
   operands: readonly string[],
   contractGiven: string | undefined,
+  close: { month: string | undefined; stripeSecretKey: string | undefined } = { month: undefined, stripeSecretKey: undefined },
 ): Promise<number> {
   const owner = connect(config.migrateDatabaseUrl ?? config.databaseUrl, 1);
   const [id = '', second = ''] = operands;
@@ -1616,6 +1647,37 @@ async function runPartnerCommand(
         line({ id, webhook_url: second, webhook_secret: secret });
         io.stderr.write('slotlock: the webhook secret is shown once; the partner verifies usage.period_closed with it\n');
         return 0;
+      }
+      case 'close': {
+        const closed = await closeSlotlockPartnerMonth(owner, {
+          partnerId: id,
+          month: close.month ?? slotlockPreviousMonth(Date.now()),
+          ...(close.stripeSecretKey ? { stripe: { secretKey: close.stripeSecretKey } } : {}),
+        });
+        line({
+          partner: closed.partner,
+          month: closed.month,
+          accounts: closed.accounts.length,
+          lines: closed.lines.map((entry) => ({
+            line: entry.line,
+            quantity: entry.quantity,
+            amount: entry.amount,
+            currency: entry.currency,
+            stripe_item: entry.stripeItem,
+          })),
+          checksum: closed.checksum,
+          webhook: closed.webhook,
+          invoiced: closed.invoiced,
+          pending: closed.pending,
+        });
+        if (closed.pending > 0) {
+          io.stderr.write(
+            close.stripeSecretKey
+              ? 'slotlock: some lines did not reach Stripe; run partner close again for the same month\n'
+              : 'slotlock: lines recorded, not invoiced: set STRIPE_SECRET_KEY (and partner customer) and run it again\n',
+          );
+        }
+        return closed.pending > 0 || closed.webhook === 'failed' ? 1 : 0;
       }
       default:
         return 2;
@@ -1913,6 +1975,11 @@ Commands:
                            The Stripe customer its monthly invoice goes to
   partner webhook <id> <https-url>
                            Where usage.period_closed goes; prints its signing secret once
+  partner close <id> [--month <YYYY-MM>]
+                           Close an ended month (default: last month): price its accounts' use
+                           with the contract, record the lines once, send usage.period_closed,
+                           and with STRIPE_SECRET_KEY add the lines to the partner's next Stripe
+                           invoice; safe to run again
   tenant status            Print whether the tenant is suspended
   tenant suspend [--reason <text>]
                            Suspend the tenant: it may read, and writes nothing; its keys get
@@ -1993,6 +2060,8 @@ Environment:
   SLOTLOCK_TRUSTED_PROXY_SECRET  A secret the proxy adds to every request in x-slotlock-proxy-proof,
                                  32+ random characters: without it there, the field above is
                                  ignored and the connection's address counts
+  SLOTLOCK_KNOWN_CLIENTS         Comma-separated integrator names /metrics counts requests by, from
+                                 their Slotlock-Client field (any other: other; none sent: none)
   SLOTLOCK_GITHUB_CLIENT_ID      Serve the dashboard at $SLOTLOCK_PUBLIC_URL/dashboard: the Client ID
                                  of a GitHub OAuth app with callback .../dashboard/callback
   SLOTLOCK_GITHUB_CLIENT_SECRET  That app's client secret (dashboard)
@@ -2089,6 +2158,7 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     'partner revoke-key': 3,
     'partner customer': 3,
     'partner webhook': 3,
+    'partner close': 2,
   };
   const expected = expectedOperands[subcommand];
   if (expected === undefined) return usage(`unknown command "${subcommand}"`);
@@ -2101,6 +2171,12 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     if (values[option] !== undefined && subcommand !== 'key create') {
       return usage(`--${option} applies only to key create`);
     }
+  }
+  if (values.month !== undefined && subcommand !== 'partner close') {
+    return usage('--month applies only to partner close');
+  }
+  if (values.month !== undefined && !/^\d{4}-(0[1-9]|1[0-2])$/.test(values.month)) {
+    return usage('--month must be a month, like 2026-10');
   }
   if (values.contract !== undefined && subcommand !== 'partner create') {
     return usage('--contract applies only to partner create');
@@ -2295,7 +2371,8 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
       case 'partner key':
       case 'partner revoke-key':
       case 'partner customer':
-      case 'partner webhook': {
+      case 'partner webhook':
+      case 'partner close': {
         try {
           return await runPartnerCommand(
             readSlotlockDatabaseConfig(io.env),
@@ -2303,10 +2380,15 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
             subcommand.slice('partner '.length),
             operands.slice(1),
             values.contract,
+            { month: values.month, stripeSecretKey: io.env.STRIPE_SECRET_KEY?.trim() || undefined },
           );
         } catch (error) {
           const code = (error as { code?: unknown } | null)?.code;
-          if (code === 'invalid_partner_contract' || code === 'invalid_partner') {
+          if (code === 'partner_not_found') {
+            io.stderr.write('slotlock: no partner with that id\n');
+            return 1;
+          }
+          if (code === 'invalid_partner_contract' || code === 'invalid_partner' || code === 'month_not_ended' || code === 'invalid_month') {
             io.stderr.write(`slotlock: ${(error as Error).message}\n`);
             return 2;
           }
@@ -2448,6 +2530,7 @@ function parseCliArguments(argv: readonly string[]) {
       locations: { type: 'string' },
       groups: { type: 'string' },
       contract: { type: 'string' },
+      month: { type: 'string' },
       resource: { type: 'string' },
       all: { type: 'boolean' },
       reason: { type: 'string' },

@@ -521,6 +521,19 @@ does not support.
 `partner_free` and `partner_pro` with their own quotas), never above it. Stripe never sees
 sub-tenants: Pylota bills the partner.
 
+**P5 and P6 status:** built on `claude/inspiring-dijkstra-bfvqif` as `slotlock partner close <id>
+[--month YYYY-MM]` (`src/partner-billing.ts`), run by the owner on the 1st, not by a scheduler in
+`serve`: it closes an ended month only, prices it with the contract (each account rounded up on its
+own; an account on a plan the contract no longer has is billed as active, never for overage),
+records the lines once, sends `usage.period_closed` (webhook id
+`usage_period_closed_<partner>_<YYYY_MM>`, signed with the secret `partner webhook` printed), then
+adds each line Stripe has not taken as an invoice item, and exits 1 while any line waits, so a
+retry finishes the month. The webhook carries the lines and the checksum covers them too. The
+`Slotlock-Client` field is counted as `slotlock_requests_by_client_total{client}` for the names in
+`SLOTLOCK_KNOWN_CLIENTS`. Known gap: an account erased before its month closes takes its usage
+with it and is not billed for that month. The daily cross-check and the 0.5% incident are the
+owner's runbook, not code.
+
 **P5. Usage to the partner, end to end.**
 
 - `GET /v1/partner/usage` (above), the same counts Pylota invoices from.

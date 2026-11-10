@@ -244,6 +244,17 @@ export {
   SLOTLOCK_PARTNER_ID,
   SLOTLOCK_PARTNER_SCOPE,
 } from './partners.js';
+export {
+  closeSlotlockPartnerMonth,
+  priceSlotlockPartnerMonth,
+  slotlockClientLabel,
+  slotlockPartnerMonthChecksum,
+} from './partner-billing.js';
+export type {
+  SlotlockPartnerAccountMonth,
+  SlotlockPartnerInvoiceLine,
+  SlotlockPartnerMonthClose,
+} from './partner-billing.js';
 export type {
   SlotlockPartnerAccount,
   SlotlockPartnerContract,

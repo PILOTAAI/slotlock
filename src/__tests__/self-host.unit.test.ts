@@ -119,6 +119,17 @@ describe('slotlock serve configuration', () => {
     );
   });
 
+  it('names in metrics only the integrators the deployment lists', () => {
+    expect(readSlotlockServeConfig(serveEnv({})).knownClients).toBeUndefined();
+    expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_KNOWN_CLIENTS: 'stackapi, n8n,stackapi' })).knownClients).toEqual([
+      'stackapi',
+      'n8n',
+    ]);
+    for (const bad of ['StackAPI', 'other', 'a,,b', 'x'.repeat(41), Array.from({ length: 51 }, (_, i) => `c${i}`).join(',')]) {
+      expect(() => readSlotlockServeConfig(serveEnv({ SLOTLOCK_KNOWN_CLIENTS: bad })), bad).toThrow('SLOTLOCK_KNOWN_CLIENTS must be');
+    }
+  });
+
   it('shares tenant budgets through the database only when asked', () => {
     expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_SHARED_LIMITS: 'on' })).sharedLimits).toBe(true);
     expect(() => readSlotlockServeConfig(serveEnv({ SLOTLOCK_SHARED_LIMITS: 'yes' }))).toThrow(
@@ -754,6 +765,9 @@ describe('slotlock command line', () => {
     [['key', 'create', 'agent', '--scope', 'read,'], /--scope must be a comma-separated list of read, write and admin/],
     [['key', 'create', 'agent', '--scope', ''], /--scope must be a comma-separated list of read, write and admin/],
     [['maintain', 'now'], /wrong number of arguments for "maintain"/],
+    [['partner', 'close'], /wrong number of arguments for "partner close"/],
+    [['partner', 'close', 'stackapi', '--month', '2026-13'], /--month must be a month/],
+    [['partner', 'list', '--month', '2026-10'], /--month applies only to partner close/],
     [['key', 'create', 'agent', '--expires-in-days', '0'], /--expires-in-days must be/],
     [['key', 'create', 'agent', '--expires-in-days', '3651'], /--expires-in-days must be/],
     [['key', 'create', 'agent', '--expires-in-days', '7.5'], /--expires-in-days must be/],

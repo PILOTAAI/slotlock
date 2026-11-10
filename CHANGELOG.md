@@ -122,6 +122,14 @@ versioning.
   returns quota numbers). A suspended partner suspends every account (`tenant_suspended`) and
   their keys stop authenticating (`authenticate_scoped_api_key`); erasing an account removes the
   partner's record of it. Run `slotlock migrate`.
+- Closing a partner's month (RFC 0003 P5, P6): `slotlock partner close <id> [--month YYYY-MM]`,
+  as the schema owner, closes an ended month: it prices each account's usage with the contract
+  (`priceSlotlockPartnerMonth`), records the lines once in `slotlock.partner_invoices`, sends the
+  signed `usage.period_closed` webhook (the totals by account and metric, the lines and a SHA-256,
+  `slotlockPartnerMonthChecksum`), and with `STRIPE_SECRET_KEY` adds each line Stripe has not
+  taken to the partner's next invoice; it is safe to run again (`closeSlotlockPartnerMonth` in
+  `partner-billing.ts`). `/metrics` gains `slotlock_requests_by_client_total{client}`, from the
+  `Slotlock-Client` request field matched against the new `SLOTLOCK_KNOWN_CLIENTS`.
 - Keys limited to part of their tenant (RFC 0003 G6). `slotlock key create --locations <refs>
   --groups <refs>`, the dashboard's "Limit to locations or groups" (Developer plan and up when the
   dashboard has plans) or the key store's `resourceScope` makes a key that reaches only the

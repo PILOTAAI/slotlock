@@ -43,6 +43,11 @@ export interface SlotlockMetrics {
   webhooks(result: SlotlockWebhookPassResult): void;
   /** Count a scrape refused for its credential. */
   refusedScrape(): void;
+  /**
+   * Count an authenticated request by the integrator its `Slotlock-Client` field names (RFC 0003
+   * P5): a name from the deployment's known list, `other` or `none` (slotlockClientLabel).
+   */
+  client(name: string): void;
   /** Everything counted so far, as a scrape answers it. */
   render(): string;
 }
@@ -154,6 +159,10 @@ export function createSlotlockMetrics(info: {
     'slotlock_maintenance_items_total',
     'What maintenance did, by kind: series extended, holds pruned, no-shows released, waitlist offers made, and so on.',
   );
+  const clients = new Counter(
+    'slotlock_requests_by_client_total',
+    'Authenticated requests by the integrator their Slotlock-Client field names (known ones, other or none).',
+  );
   const deliveries = new Counter(
     'slotlock_webhook_deliveries_total',
     'Webhook changes delivered, and deliveries that failed and will be retried.',
@@ -189,6 +198,9 @@ export function createSlotlockMetrics(info: {
     refusedScrape() {
       refused.add({ reason: 'metrics_auth_refused' });
     },
+    client(name) {
+      clients.add({ client: label(name) });
+    },
     webhooks(result) {
       if (result.delivered > 0) deliveries.add({ result: 'delivered' }, result.delivered);
       if (result.failed > 0) deliveries.add({ result: 'failed' }, result.failed);
@@ -212,6 +224,7 @@ export function createSlotlockMetrics(info: {
         ...passes.render(),
         ...upkeep.render(),
         ...deliveries.render(),
+        ...clients.render(),
       ];
       return `${lines.join('\n')}\n`;
     },
