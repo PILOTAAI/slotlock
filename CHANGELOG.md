@@ -52,6 +52,10 @@ versioning.
   key or webhook names the plan.
 - Talk to the founder defaults to the founder's Pylota address, on the Plan page, the landing page
   and the hosted service page.
+- The hosted service page has an Assistant section: bring your own model (Anthropic or
+  OpenAI-compatible), what is sent to it, that writes wait for approval, its bounds, and that a model
+  must be reachable from the internet. A test holds it to the bounds in the code. The Worker's
+  wrangler.jsonc says to set `SLOTLOCK_ASSISTANT_SECRET` once and keep it.
 
 - Privacy notice: email sent to support@, abuse@ or privacy@pylota.io is held in Google Workspace for
   two years; Google is listed as a recipient, with its transfers. The notice has no owner TODO left.

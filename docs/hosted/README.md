@@ -53,6 +53,29 @@ add things: in the dashboard, over the API or from the language clients. Account
 once its plan is cancelled, so it is never charged again. Custom is Slotlock on your own
 infrastructure, under its own agreement.
 
+## Assistant
+
+The dashboard's **Assistant** page lets you and your organization's members operate Slotlock by
+chat ("what's free tomorrow on room-3?", "book it for Ana") with a model you bring:
+
+- **Connect your own model** in Settings, Assistant: the Anthropic Messages API, or any
+  OpenAI-compatible API (OpenAI, OpenRouter, and others that answer tool calls), with its base
+  URL, the model name and your API key. **Test connection** makes one real request. You pay your
+  provider for what the model uses; Slotlock does not charge for it.
+- **Your key** is stored encrypted (AES-256-GCM) and never shown again: only that it is set, and its
+  last four characters.
+- **What goes to your provider:** your messages, and the resources and bookings the assistant reads
+  to answer them, under your own agreement with that provider.
+- **Reads run, writes wait.** The assistant looks things up at once, up to 8 model calls a message.
+  A booking, hold, change or cancellation appears as a card to **Approve** or **Dismiss**, and runs
+  once, when approved, under the same booking rules and limits as an agent, recorded as "Assistant
+  for @login". It cannot touch API keys, webhooks, booking rules, pools or erasure.
+- **Bounds:** 10 messages a minute per member; a conversation is kept for 2 hours after its last
+  message.
+- **The model must be reachable from the internet.** Slotlock Cloud refuses model addresses on
+  loopback, private and metadata networks, so a model on your own machine (Ollama, LM Studio) needs
+  a public HTTPS address, or a hosted provider.
+
 ## How it differs from running it yourself
 
 - Your account is a tenant of its own, `github:<your user id>`: only your keys reach its data.

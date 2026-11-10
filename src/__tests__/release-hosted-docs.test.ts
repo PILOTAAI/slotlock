@@ -224,6 +224,30 @@ describe('the hosted service page', () => {
     expect(text).not.toMatch(/opens once|is released;/);
   });
 
+  // The landing page offers the assistant whenever the server reads its secret
+  // (site/scripts/sync-content.mjs); the hosted page says Slotlock Cloud has it, with the bounds
+  // the code sets.
+  it('says Slotlock Cloud has the assistant the landing page offers, with the bounds the code sets', () => {
+    const offered = read('src/self-host.ts').includes("'SLOTLOCK_ASSISTANT_SECRET'");
+    expect(offered, 'canary: the server reads the assistant secret').toBe(true);
+    const assistant = flat(read('docs/hosted/README.md').split('\n## Assistant\n')[1]?.split('\n## ')[0] ?? '');
+    const source = read('src/assistant.ts');
+    const dashboard = read('src/dashboard.ts');
+    const steps = /SLOTLOCK_ASSISTANT_MAX_STEPS = (\d+);/.exec(source)?.[1];
+    const perMinute = /rate \?\? \{ perSecond: (\d+) \/ 60,/.exec(dashboard)?.[1];
+    const hours = /conversationTtlMs \?\? (\d+) \* 3_600_000/.exec(dashboard)?.[1];
+    expect([steps, perMinute, hours]).toEqual(['8', '10', '2']);
+    expect(assistant).toContain('in Settings, Assistant');
+    expect(assistant).toContain('the Anthropic Messages API, or any OpenAI-compatible API');
+    expect(assistant).toContain(`up to ${String(steps)} model calls a message`);
+    expect(assistant).toContain(`${String(perMinute)} messages a minute per member`);
+    expect(assistant).toContain(`kept for ${String(hours)} hours after its last message`);
+    expect(assistant).toContain('**Approve** or **Dismiss**');
+    expect(assistant).toContain('needs a public HTTPS address, or a hosted provider');
+    // Its privacy notice row is the one for a dashboard that offers the assistant.
+    expect(flat(read('PRIVACY.md'))).toContain('if the dashboard offers the assistant and you set it up');
+  });
+
   it('publishes the limits the code enforces', () => {
     const text = page();
     const row = (what: string, limit: string) => expect(text).toContain(`| ${what} | ${limit}`);

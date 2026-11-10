@@ -58,7 +58,8 @@ API as `slotlock serve` on OVHcloud and the dashboard as the Worker in `workers/
 | P2-2 partitioning, P2-3 home region, P2-6 solver guide, P2-7 SOC 2, DPA, SSO, SCIM | Not started |
 
 Open question 2 of RFC 0002 (round robin or least-used order in pools) is still open; it matters
-for fleets, where the first member of a pool takes all the wear. It is listed again below.
+wherever members of a pool should share the work (vans that wear, rooms that need cleaning,
+clinicians who should see as many patients as each other). It is listed again below.
 
 ### PR #161 (hosted plans and Stripe billing)
 
@@ -165,6 +166,9 @@ Cloud, people on their personal tenants (see [Teams on Cloud](#later)).
 
 ### Plan
 
+A3 is done on `claude/inspiring-dijkstra-bfvqif`; A1 waits on the owner, who holds the Cloudflare
+credentials (this repository holds none, by design).
+
 | # | Change | Tier |
 | --- | --- | --- |
 | A1 | **Owner:** `openssl rand -hex 32`, then `npx wrangler secret put SLOTLOCK_ASSISTANT_SECRET` on the Cloud Worker, keep the value in the password manager, redeploy, and check that Assistant appears in the sidebar and Settings → Assistant offers the form. Losing the value makes every saved model key unopenable (owners must enter them again); A2 makes changing it safe. | Ops |
@@ -201,22 +205,25 @@ raising.
   (a divisible hall), API keys limited to some resources, webhooks for some resources, and a test
   environment beside live.
 - **Search takes ids.** `free-busy` and `next-available` take up to 100 `resource_ids`,
-  `available-slots` up to 20. "A free electric van at Heathrow tomorrow" is a list call, a filter in
-  the agent, then a search.
+  `available-slots` up to 20. "A physiotherapist free at the Leeds clinic on Tuesday", "a room for
+  ten with video on floor 3" or "an electric van at Heathrow tomorrow" is each a list call, a
+  filter in the agent, then a search.
 
 ### What the use cases need
 
-The repository's own examples are a fleet (vans, `van-class`, a UK plate, check-in and no-show), so
-Pylota's case is treated as fleet and rental first; please correct this if Pylota's product books
-something else. The other rows are the cases the industry models.
+Slotlock is not a fleet product. SPEC.md says "Vehicles, rooms, machines, and people are all
+resources; no semantic rule assumes a particular industry", and the site says "Each car, room,
+person and machine is its own calendar", with a van, a meeting room, a clinician and a machine in
+its demo. Grouping has to serve all four equally, and the organizations around them, so no case
+below comes first and no field is named after one industry.
 
-| Case | Groups it needs | Edge cases |
+| Resources | Groups they need | Edge cases |
 | --- | --- | --- |
-| Fleet and car rental | Vehicle → class (an ACRISS code such as `CDMR`) → branch → region; attributes (electric, seats, transmission, accessible) | Book by class at a branch; one-way hire returns the vehicle elsewhere (the location changes over time); a vehicle with a driver (two resources, one booking); maintenance blocks; wear spread across a class |
-| Rooms and desks | Building → floor → zone; capacity; features (video, whiteboard) | A divisible hall: booking the hall blocks its parts and booking a part blocks the hall; desks booked by zone |
-| Clinics and services | Practitioner, room and device; service type; site | A practitioner at different sites on different days; one appointment needs a person, a room and a device together |
-| Equipment hire | Item → product → bundle | 50 identical chairs (quantity, not identity); kits made of items |
-| Classes and tours | Session with seats | Capacity per slot; a group taking several seats at once |
+| People (clinicians, tutors, consultants, technicians, support staff) | Team or department → site; skills or services as labels | One person at different sites on different days; an appointment that needs a person, a room and a device together; spreading bookings fairly across a team |
+| Rooms, desks and spaces (meeting rooms, studios, courts, hot desks) | Building → floor → zone; capacity; features (video, whiteboard) | A divisible hall: booking the hall blocks its parts and booking a part blocks the hall; desks booked by zone |
+| Vehicles (rental cars, vans, delivery and service fleets) | Class (an ACRISS code such as `CDMR`) → branch → region; attributes (electric, seats, transmission, accessible) | Book by class at a branch; a one-way hire ends the vehicle somewhere else (its location changes over time); a vehicle with a driver (two resources, one booking); maintenance blocks |
+| Machines and equipment (lab instruments, 3D printers, tools, hire stock) | Item → product → kit; site | 50 identical chairs (quantity, not identity); kits made of items; a machine that needs an operator |
+| Sessions with seats (classes, tours, events) | Session → seats | Capacity per slot; a group taking several seats at once |
 | Agencies, franchises and platforms | Customer → their resources | Each customer isolated, billed and supported separately: a tenant each (part 4) |
 | Teams inside one customer | Site or team → its resources | Staff and keys that see only their own site |
 
@@ -226,8 +233,8 @@ Three concepts, kept apart because they mean different things:
 
 - **Pool** (unchanged): interchangeable members, booked as a class. One per resource.
 - **Location**: where a resource is. A tree, one per resource, used for search and scoping.
-- **Group**: any set a tenant wants (a team, a contract, "London airport fleet"). Many per
-  resource, no booking semantics.
+- **Group**: any set a tenant wants (a team, a department, a contract, "Saturday clinic", "airport
+  vans"). Many per resource, no booking semantics.
 
 **G1. Resource profile (T1).** Columns on `slotlock.resources`, each optional:
 
@@ -235,10 +242,10 @@ Three concepts, kept apart because they mean different things:
 | --- | --- | --- |
 | `name` | 1–200 characters | Shown to agents and people instead of the reference |
 | `description` | ≤ 2,000 characters | Shown in the dashboard and on `slotlock_list_resources` (truncated to 500) |
-| `kind` | `vehicle`, `room`, `desk`, `person`, `equipment`, `space`, `service`, `other` | Filtering; icons in the dashboard |
+| `kind` | `person`, `room`, `desk`, `space`, `vehicle`, `machine`, `equipment`, `service`, `other` (default) | Filtering; icons in the dashboard. A hint, never a rule: no booking behaves differently by kind, as SPEC.md requires |
 | `capacity` | 1–100,000 | People or seats it holds; informational, never enforced as concurrent bookings |
 | `labels` | ≤ 20, each `^[a-z0-9][a-z0-9._-]{0,63}$` | Filtering (`ev`, `wheelchair`, `projector`), GIN-indexed |
-| `attributes` | JSON object, ≤ 50 keys, ≤ 4 KiB, string, number or boolean values | Data the integrator wants back (plate, VIN, ACRISS code) |
+| `attributes` | JSON object, ≤ 50 keys, ≤ 4 KiB, string, number or boolean values | Data the integrator wants back (a staff number, an asset tag, a plate, a room's floor plan link) |
 
 - `POST /v1/resources` accepts them; `PATCH /v1/resources/{id}` changes them; the dashboard's
   resource page edits them.
@@ -278,7 +285,8 @@ nothing about the rest.
 
 **G7. Pool order (T1).** `slotlock_book_pool` tries members in a stable order today. Add a pool
 setting, `order`: `stable` (today), `least_booked` (fewest bookings in the last 30 days first) or
-`round_robin`, to spread wear across a fleet class (RFC 0002 open question 2).
+`round_robin`, to share bookings across a pool's members: vans, rooms or a team of people (RFC 0002
+open question 2).
 
 **G8. Composite resources (T2, later).** A parent made of children (a hall of three rooms), one
 level deep. Each occupancy row gains a span, an `int4range` over the parent's children: a booking of
@@ -565,8 +573,8 @@ before merge (GOVERNANCE.md).
 - **Teams on Cloud (T2):** organizations that enable themselves (an owner signs in with
   `read:org` and turns Slotlock on for the organization, stored in the database rather than in
   `SLOTLOCK_DASHBOARD_ORGS`), then a Team plan per organization.
-- **Sign-in without GitHub (T2):** Google (OpenID Connect) for the people who operate a fleet or a
-  front desk and use the assistant, who often have no GitHub account.
+- **Sign-in without GitHub (T2):** Google (OpenID Connect) for the people who run a front desk, a
+  clinic's rota or a depot and use the assistant, who often have no GitHub account.
 - **Test environments (G9), composite resources (G8), acting on behalf of a sub-tenant (P3).**
 - **Metered overage for Developer**, once Stripe confirms Managed Payments supports metered prices.
 - RFC 0002 P2: OpenTelemetry export and published SLOs first, as a paid service needs them.
@@ -611,9 +619,10 @@ How others group what they book, which the design in part 2 follows:
 1. **What is stackapi.app?** A catalogue that forwards the user's own keys (Shape A, nothing to
    build), or a platform that bills its users for the APIs it offers (Shape B, PRs 16–18)? Does it
    speak MCP to its users, or REST only? Can it keep a key per user?
-2. **What does Pylota book?** This RFC assumes vehicles. If it is people, rooms or services, G2
-   (locations) and G8 (composite) move up or down. Pylota's own app could be the first partner,
-   which would test P1–P6 before stackapi.
+2. **Which grouping comes first?** Part 2 orders G1–G5 for every kind of resource alike. If launch
+   customers lean one way (people and teams, rooms and buildings, or vehicles and branches), G2
+   (locations), G7 (pool order) and G8 (composite) can move up or down. Pylota's own app could be
+   the first partner, which would test P1–P6 before stackapi.
 3. **Quotas:** the numbers in the pricing table, and whether Developer should stop at 110% or 100%.
 4. **Archived resources:** keep counting them against the plan (today, simple) or count only
    resources in use and check the limit on restore (friendlier)?
