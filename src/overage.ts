@@ -1,6 +1,7 @@
-// Metered overage for Developer (RFC 0003 "Later"), off unless SLOTLOCK_OVERAGE=on. Off by
-// default because Stripe has not said that Managed Payments takes metered prices: turn it on only
-// once it has, and once the Terms say what overage costs.
+// Metered overage for Developer (RFC 0003 "Later"), off unless SLOTLOCK_OVERAGE=on. Stripe's test
+// mode takes the metered price in a Managed Payments checkout (read 2026-11-10, RFC 0003 vendor
+// facts); it stays off until a paid test subscription shows the meter billed and the Terms say what
+// overage costs.
 //
 // With it on: a paying Developer tenant is not refused at 110% of its monthly operations but at
 // SLOTLOCK_OVERAGE_STOP_PERCENT (300% by default); checkout adds the metered price
@@ -8,7 +9,8 @@
 // owner (daily, and on the 1st for the month before), sends Stripe a Billing Meter event for each
 // tenant's operations above its quota that it has not reported yet. What was reported is recorded
 // in slotlock.overage_reports first by month, so no operation is billed twice, and each event
-// carries an identifier Stripe deduplicates within a day.
+// carries an identifier Stripe deduplicates within a day: Stripe refusing one as already taken counts
+// as sent.
 import { createHash } from 'node:crypto';
 import type { Sql } from 'postgres';
 import { SLOTLOCK_STRIPE_API_VERSION } from './billing.js';
@@ -105,7 +107,7 @@ export async function reportSlotlockOverage(
         timestamp: String(Math.floor(Math.min(input.now ?? Date.now(), monthEnd) / 1_000)),
       }).toString(),
     }).catch(() => null);
-    if (!response?.ok) {
+    if (!response?.ok && !(await takenBefore(response, identifier))) {
       // Not taken: put the record back, so the next run sends it.
       await sql`
         UPDATE slotlock.overage_reports SET reported = ${reported}, updated_at = statement_timestamp()
@@ -118,4 +120,18 @@ export async function reportSlotlockOverage(
     report.tenants.push({ tenant: row.tenant_ref, over, reported: over, sent: delta });
   }
   return report;
+}
+
+/**
+ * Whether Stripe refused an event only because it took one with this identifier before: a run whose
+ * answer was lost sends it again, and Stripe says so with a 400 and no code (read in test mode,
+ * 2026-11-10). Counted as sent, or the record would go back and the next total bill this delta twice.
+ */
+async function takenBefore(response: Response | null, identifier: string): Promise<boolean> {
+  if (response?.status !== 400) return false;
+  const body = (await response.json().catch(() => null)) as { error?: { type?: string; message?: string } } | null;
+  return (
+    body?.error?.type === 'invalid_request_error' &&
+    body.error.message === `An event already exists with identifier ${identifier}.`
+  );
 }

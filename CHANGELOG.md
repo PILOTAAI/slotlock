@@ -146,8 +146,10 @@ versioning.
   owner with `STRIPE_SECRET_KEY`, sends Stripe Billing Meter events for what each tenant used above
   its quota and has not been billed for, recorded first in the new owner-only table
   `slotlock.overage_reports` (erased with the tenant), so nothing is billed twice
-  (`reportSlotlockOverage`, `overage.ts`). Stays off until Stripe confirms Managed Payments takes
-  metered prices and the Terms name the price. Run `slotlock migrate`.
+  (`reportSlotlockOverage`, `overage.ts`); an event Stripe refuses as already taken (its answer to a
+  resent identifier) counts as sent, so a lost answer neither sticks nor bills twice. Stripe's test
+  mode takes the metered price in a Managed Payments checkout; it stays off until a paid test
+  subscription shows the meter billed and the Terms name the price. Run `slotlock migrate`.
 - OpenTelemetry trace export and published objectives (RFC 0002 P2-5, RFC 0003 Later). With
   `OTEL_EXPORTER_OTLP_ENDPOINT` (or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`), `serve` sends a SERVER
   span for each MCP, A2A and REST call to an OpenTelemetry collector, OTLP over HTTP as JSON, in

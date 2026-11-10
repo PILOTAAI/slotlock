@@ -728,6 +728,12 @@ describe('resources in the dashboard', () => {
     const whole = await (await get(target, `/base/dashboard/resources/${hall.id}`, session)).text();
     expect(whole).toContain('A whole of 1 part');
     expect(whole).toContain(`href="/base/dashboard/resources/${room.id}"`);
+    // Parts are listed in their order, not the order they were added.
+    const first = await resources.store.add('github:4242', 'room-0', 'UTC');
+    Object.assign(room, { partIndex: 1 });
+    Object.assign(resources.rows.find((row) => row.id === first.id) as SlotlockResource, { parentId: hall.id, partIndex: 0 });
+    const ordered = await (await get(target, `/base/dashboard/resources/${hall.id}`, session)).text();
+    expect(ordered).toMatch(new RegExp(`A whole of 2 parts: <a href="[^"]+${first.id}">room-0</a>, <a href="[^"]+${room.id}">room-1</a>`));
     // Another tenant's resource is not a choice, and a refusal is said in words.
     expect((await post(target, '/base/dashboard/resources/parent', { csrf: await csrf(target, session), id: room.id, parent: randomUUID() }, session)).status).toBe(400);
   });

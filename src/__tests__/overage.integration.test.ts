@@ -91,6 +91,49 @@ describe.skipIf(!url)('metered overage (real Postgres)', () => {
       '100000',
       '2500',
     ]);
+    // Stripe took an event but its answer was lost: the next run sends the same identifier, and
+    // Stripe's refusal of a duplicate (its words, read in test mode) counts as sent, not as new.
+    await sql`
+      INSERT INTO slotlock.usage_daily (tenant_ref, day, metric, key_id, origin, count)
+      VALUES (${paying}, current_date, 'operations', '', 'rest', 500)
+      ON CONFLICT (tenant_ref, day, metric, key_id, origin) DO UPDATE SET count = slotlock.usage_daily.count + EXCLUDED.count`;
+    const taken = new Set<string>();
+    const lossy = {
+      ...stripe,
+      fetch: (async (_url: string, init: RequestInit) => {
+        const form = new URLSearchParams(String(init.body));
+        const id = form.get('identifier') as string;
+        if (taken.has(id)) {
+          return Response.json(
+            { error: { message: `An event already exists with identifier ${id}.`, type: 'invalid_request_error' } },
+            { status: 400 },
+          );
+        }
+        taken.add(id);
+        events.push(form);
+        throw new TypeError('fetch failed');
+      }) as typeof fetch,
+    };
+    expect(ours(await reportSlotlockOverage(sql, { month, stripe: lossy }))).toMatchObject({ sent: 0, reported: 102_500 });
+    expect(ours(await reportSlotlockOverage(sql, { month, stripe: lossy }))).toMatchObject({ sent: 500, reported: 103_000 });
+    // Another 400 is still a failure, and a later total sends only what Stripe has not had.
+    await sql`
+      INSERT INTO slotlock.usage_daily (tenant_ref, day, metric, key_id, origin, count)
+      VALUES (${paying}, current_date, 'operations', '', 'dashboard', 100)
+      ON CONFLICT (tenant_ref, day, metric, key_id, origin) DO UPDATE SET count = slotlock.usage_daily.count + EXCLUDED.count`;
+    const refused = {
+      ...stripe,
+      fetch: (async () =>
+        Response.json({ error: { message: 'No such customer', type: 'invalid_request_error' } }, { status: 400 })) as typeof fetch,
+    };
+    expect(ours(await reportSlotlockOverage(sql, { month, stripe: refused }))).toMatchObject({ sent: 0, reported: 103_000 });
+    expect(ours(await reportSlotlockOverage(sql, { month, stripe }))).toMatchObject({ sent: 100, reported: 103_100 });
+    expect(events.filter((form) => form.get('payload[stripe_customer_id]') === 'cus_Overage1').map((form) => form.get('payload[value]'))).toEqual([
+      '100000',
+      '2500',
+      '500',
+      '100',
+    ]);
     await expect(reportSlotlockOverage(sql, { month: '2026-13', stripe })).rejects.toMatchObject({ code: 'invalid_month' });
   });
 });

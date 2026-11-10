@@ -550,8 +550,12 @@ Stripe and set the tenant's plan: `active` or `trialing` gives Developer, `past_
 Stripe retries, anything else returns the tenant to Free. Nothing is deleted when a plan ends; the
 tenant cannot add more until it is under the Free limits.
 
-**Metered overage for Developer** is off, and stays off until Stripe confirms that Managed Payments
-takes metered prices and the Terms say what overage costs. With `SLOTLOCK_OVERAGE=on` (or a percent,
+**Metered overage for Developer** is off. Stripe's test mode takes it: a Managed Payments Checkout
+Session with the Developer price and a metered price on a Billing Meter is created, with Managed
+Payments on and its own parameter checks passed, and a meter event in Slotlock's form is taken
+(checked 2026-11-10). It stays off until the owner pays one test checkout (card 4242 4242 4242
+4242), sends a meter event and sees it on the subscription's upcoming invoice, and the Terms say
+what overage costs. With `SLOTLOCK_OVERAGE=on` (or a percent,
 111-1000; `on` is 300) on the server and the Worker, beside `SLOTLOCK_QUOTAS=on`, a paying Developer
 tenant is refused only past that share of its monthly operations; the Worker adds the metered price
 `SLOTLOCK_STRIPE_PRICE_OVERAGE` (on a Stripe Billing Meter) to a Developer checkout and shows
@@ -566,7 +570,8 @@ STRIPE_SECRET_KEY=sk_live_… slotlock overage report --month 2026-10 --event sl
 It sends Stripe a meter event for each paying Developer tenant's operations above its quota that
 have not been sent, and records the total in `slotlock.overage_reports` first, so an operation is
 never billed twice (a run that stops halfway bills too little, and the next run does not catch up
-on it). It exits 1 while an event was not taken; run it again.
+on it). An event Stripe already took, whose answer was lost, counts as sent when it is sent again.
+It exits 1 while an event was not taken; run it again.
 
 The Team plan is an organization's (Teams on Cloud, `SLOTLOCK_DASHBOARD_ORGS=enabled`): 500
 resources, 100 keys and 25 webhook endpoints, and monthly quotas its members share (2,000,000

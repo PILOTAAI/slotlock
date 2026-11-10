@@ -615,12 +615,63 @@ keys stay the cap. It is offered once the owner sets its two Stripe price ids.
   stackapi pays nothing for users who signed up and left.
 - A wholesale price at about 60–70% of retail leaves stackapi a margin on Developer-sized users;
   the owner sets it.
-- Usage above quota stays a hard stop for Free and Developer at launch. Stripe documents
-  subscriptions under Managed Payments but says nothing about metered prices either way, so
-  metered overage for Developer (a price per 10,000 operations) waits until Stripe confirms it.
+- Usage above quota stays a hard stop for Free and Developer at launch. Stripe's documents say
+  nothing about metered prices under Managed Payments either way, so they were tried in test mode
+  on 2026-11-10 (vendor facts): Stripe takes a metered price in a Managed Payments checkout, beside
+  the Developer price or alone, and runs Managed Payments' own checks on it. Metered overage for
+  Developer (a price per 10,000 operations) waits for one paid test subscription that shows the
+  meter billed, which the owner does in a browser, and for the Terms.
 - What Stripe keeps of a $10 month: 3.5% for Managed Payments, 0.7% for Billing, plus card
   processing and its fixed fee. The yearly price pays the fixed fee once instead of twelve times,
   so the Plan page should offer it first.
+
+## Where Slotlock stands after this RFC
+
+Each feature this RFC built, checked on 2026-11-10 against what scheduling vendors document
+(Cal.com, coss.com, Calendly, Nylas, Cronofy, Google, Microsoft, SimplyBook, Skedda, Offision,
+Event Temple, Robin, Booqable, Acuity). "Nobody documents" means none of their public pages says
+so. It does not prove that nobody does it.
+
+**Ahead: nobody documents these.**
+
+| Feature | What others document | What Slotlock does |
+| --- | --- | --- |
+| Guarantees held by the database | coss.com: an exclusion constraint per host. The rest compute availability, then write | Every write meets one exclusion constraint per resource, so holds, pools, bundles and now composites are refused at write time (G8 adds a claim per part). Keys limited to locations and groups are held by a restrictive RLS policy (G6) |
+| A2A | Nobody. No agent card at any vendor's host; MCP is common (eight vendors) | MCP and A2A on one backend |
+| Usage webhooks | Nobody in scheduling (the nearest is Twilio's UsageTrigger) | `usage.threshold_reached` and `usage.period_closed`, signed and retried like the feed |
+| Acting for a sub-account by a header | Stripe's `Stripe-Account`; in scheduling, only per-account keys or a path id | `Slotlock-Account`, in the five generated clients, checked before a request is sent |
+| OpenTelemetry export and published objectives | Nobody exports traces to customers. Cronofy publishes a 99.99% SLA; nobody publishes SLOs | OTLP traces (a child of the caller's span) and metrics, and objectives on the status page |
+
+**On par: others have these, and Slotlock's version is held more strictly.**
+
+| Feature | Others | Slotlock's difference |
+| --- | --- | --- |
+| Composite resources | Skedda space sharing (an extra space and rules, ignored for some booking types), Offision combined rooms, Event Temple blocked spaces | Enforced by the constraint, never skipped, and a refusal names the booking in the way |
+| Test environments | coss.com `coss_test_` keys in their own environment; Cal.com `cal_` keys; Cronofy development applications | Much the same as coss.com: `slk_test_` keys in a tenant of their own, on the live plan's limits, never billed |
+| Keys limited to part of an account | Nylas IAM (a key bound to a grant or workspace); Microsoft RBAC for Applications (a set of mailboxes) | Limited by location and group, in the database |
+| Partner sub-accounts | Cal.com managed orgs (Scale plan and up); Nylas workspaces | Sub-accounts with their usage, a monthly close that invoices the partner through Stripe once, and daily reconciliation |
+| Team plan | Flat team tiers at 1.7–4x their single-developer tier; per-seat schedulers at $12–20 a seat | $40 (4x Developer, the same price per operation), whatever the number of members |
+
+**Behind: what the leaders have and Slotlock does not.**
+
+- **Certifications.** Cronofy, Nylas, Cal.com and Calendly have SOC 2 Type II, and some have ISO
+  27001. Slotlock has neither.
+- **A contractual SLA.** Cronofy offers 99.99% with service credits. Slotlock's objectives are
+  proposals, and the status probe is off until the service opens.
+- **Data regions.** Cronofy has six and Nylas has two. Slotlock Cloud runs in one.
+- **Enterprise identity.** Calendly has SAML SSO, SCIM and audit-log export. Slotlock has GitHub
+  and Google sign-in, GitHub organizations and its own history.
+- **A track record.** None of this has run with paying customers yet. The end-to-end proofs still
+  missing are the owner's: a live Stripe checkout and cancellation, a paid overage test, a timed
+  restore, and the T2 security reviews.
+- **Usage billing on Stripe's newer path.** Stripe recommends Metronome for new usage-based
+  integrations. Slotlock uses Billing Meters, which Stripe still supports, and Metronome works with
+  Checkout only through custom calls.
+
+So, is it world class? The engine and the agent surface are, and are distinctive. They hold
+guarantees in the database that nobody else documents, and they speak A2A, which nobody else
+does. The service around them is not world class yet. That needs the certifications, an SLA, a
+second region and a track record. None of those is code in this repository.
 
 ## Launch checklist (owner, outside the code)
 
@@ -640,6 +691,9 @@ keys stay the cap. It is offered once the owner sets its two Stripe price ids.
       (SaaS tax code, Managed Payments), and their ids in `SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY` and
       `SLOTLOCK_STRIPE_PRICE_TEAM_YEARLY`.
 - [ ] `slotlock billing daily` in a daily cron job as the schema owner, with `STRIPE_SECRET_KEY`.
+- [ ] Before `SLOTLOCK_OVERAGE`: one test-mode Developer checkout with the metered price, paid in a
+      browser (card 4242 4242 4242 4242), a meter event from `slotlock overage report`, and the
+      event on the subscription's upcoming invoice; then the overage price in the Terms.
 - [x] The privacy notice's draft rows for organizations and Google sign-in: approved by the lawyer.
 - [ ] The Terms' Team paragraph (new in this change, after that approval) seen by the lawyer.
 - [ ] The status probe switched on (`docs/hosted/status.md`: it stays off until the service opens).
@@ -689,7 +743,8 @@ before merge (GOVERNANCE.md).
 Worker and `serve` check alike), then its issuer, audience, expiry and nonce, and the
   allowlist's `google:<subject>` entries, read by `serve` too.
 - **Test environments (G9), composite resources (G8), acting on behalf of a sub-tenant (P3).**
-- **Metered overage for Developer**, once Stripe confirms Managed Payments supports metered prices.
+- **Metered overage for Developer**, once a paid test subscription shows Managed Payments billing
+  the meter (Stripe's test mode takes the metered price at checkout: vendor facts).
   Status: built on `claude/inspiring-dijkstra-bfvqif` and off by default (`SLOTLOCK_OVERAGE`): a
   paying Developer tenant's stop moves to 300% of its operations (or the percent set), checkout adds
   the metered price, and `slotlock overage report` sends Billing Meter events for what is above the
@@ -713,9 +768,11 @@ Read 2026-11-09 from each vendor's documentation (links under [Sources](#sources
 | What it forbids in Checkout | `automatic_tax`, `tax_id_collection`, `payment_method_types`, `customer_update` name and address, shipping, Connect | Finding 7 |
 | Eligible products | Digital only, each with an eligible tax code (SaaS for business `txcd_10103001`), sold directly, not through a platform or marketplace | Finding 7, P6 |
 | Subscriptions and portal | Supported, created through Checkout or Payment Links; the customer portal works | PR #161 |
-| Metered prices under Managed Payments | Not documented either way | Pricing |
+| Metered prices under Managed Payments | Not documented either way. Tried in test mode (2026-11-10, API `2026-04-22.dahlia`, Slotlock's own `createSlotlockStripe().checkout`): a subscription Checkout Session with `managed_payments[enabled]=true`, the Developer price and a metered price on a Billing Meter is created, `managed_payments.enabled` true, both items on it; so is one with the metered price alone. Managed Payments' checks ran: the same session with `payment_method_types` was refused ("Managed Payments handles this parameter for you"), and a quantity on the metered item too. Not seen: a paid subscription billing the meter (the Checkout page cannot be paid from the build environment) | Pricing |
+| Subscriptions outside Checkout | `POST /v1/subscriptions` refuses `managed_payments` ("unknown parameter"): a Managed Payments subscription starts at Checkout | Pricing |
 | Stripe Billing fee | 0.7% of Billing volume (pay as you go) | Pricing |
 | Meter event `identifier` | Unique within a rolling period of at least 24 hours; timestamps up to 35 days back; 1,000 calls a second in live mode | P6 |
+| A meter event sent again | Refused with HTTP 400, `invalid_request_error`, no code, "An event already exists with identifier <id>." (test mode, 2026-11-10): `slotlock overage report` counts that answer as sent | P6 |
 | Stripe's advice on meters | New usage-based integrations should use Metronome | P6 |
 | Workers (paid) | 10,000 subrequests a request by default; 30 s CPU by default, up to 5 minutes; no duration limit for an HTTP request while the client is connected; `waitUntil` runs up to 30 s more | Part 1, part 3 (Worker usage writes) |
 | Workers rate limiting binding | Approximate, counted separately in each Cloudflare location | Part 3 (quotas are kept in PostgreSQL, not in the binding) |
@@ -801,3 +858,18 @@ Fleetio [groups and subgroups](https://help.fleetio.com/en_US/groups-subgroups);
 [room resources](https://developer.nylas.com/docs/cookbook/calendar/book-room-resources/),
 [availability](https://developer.nylas.com/docs/v3/calendar/calendar-availability/);
 [ACRISS car codes](https://www.acriss.org/car-codes/).
+
+**Where Slotlock stands** (read 2026-11-10): coss.com
+[scheduling](https://coss.com/products/scheduling), [environments](https://coss.com/docs/environments),
+[pricing](https://coss.com/pricing); Skedda [space sharing](https://support.skedda.com/en/articles/105725-space-sharing);
+Offision [combined rooms](https://offision.com/help/en/booking/combine-rooms-into-one/); Event Temple
+[blocked spaces](https://support.eventtemple.com/en/articles/8519961-blocked-spaces); Nylas
+[IAM](https://developer.nylas.com/docs/v3/auth/nylas-iam/); Cronofy
+[API SLA](https://docs.cronofy.com/policies/api-sla/),
+[application management](https://docs.cronofy.com/developers/application-management); Cal.com
+[API v2](https://cal.com/docs/api-reference/v2/introduction),
+[access control](https://cal.com/docs/api-reference/v2/access-control), [pricing](https://cal.com/pricing);
+Calendly [pricing](https://calendly.com/pricing); Stripe
+[usage-based billing](https://docs.stripe.com/billing/subscriptions/usage-based),
+[Connect authentication](https://docs.stripe.com/connect/authentication); Twilio
+[UsageTrigger](https://www.twilio.com/docs/usage/api/usage-trigger).

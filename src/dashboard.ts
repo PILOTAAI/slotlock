@@ -2179,7 +2179,9 @@ ${current ? html`<p class="fine">Membership is read from GitHub when you sign in
       // For a composite: its parts, or the wholes it can be a part of.
       options.resources.setParent ? options.resources.list(tenantRef) : undefined,
     ]);
-    const parts = everyResource?.filter((other) => other.parentId === resource.id) ?? [];
+    const parts = (everyResource?.filter((other) => other.parentId === resource.id) ?? []).sort(
+      (one, other) => (one.partIndex ?? 0) - (other.partIndex ?? 0),
+    );
     const wholes =
       everyResource?.filter((other) => other.id !== resource.id && other.parentId === undefined && other.archivedAt === undefined) ?? [];
     const paths = locationPaths(locations ?? []);
@@ -5032,6 +5034,7 @@ label > textarea { width: 100%; padding: var(--space-2) var(--space-3); resize: 
 label.choice > input { width: 16px; }
 .create label:not(.grow) { flex: 0 1 auto; }
 form > label { margin-bottom: var(--space-3); }
+.create > label { margin-bottom: 0; }
 .grid-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-4) var(--space-3); margin-bottom: var(--space-4); align-items: end; }
 .unit-input { display: flex; align-items: center; gap: var(--space-2); }
 .unit-input input { width: 100%; }
@@ -5221,6 +5224,7 @@ pre { background: var(--surface-2); border: 1px solid var(--line); border-radius
   .week th[scope="row"] { display: block; padding: var(--space-2) var(--space-4) 0; }
   .actions { text-align: left; width: auto; padding-top: var(--space-2); }
   .act { margin: 0 var(--space-2) 0 0; }
+  .actions form.inline { margin-right: var(--space-2); }
   .act:first-child, form.inline + .act { margin-left: 0; }
   .act summary { border: 1px solid var(--line-strong); height: 32px; }
   .act.danger summary { border-color: var(--bad-line); }
