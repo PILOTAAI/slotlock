@@ -222,7 +222,7 @@ describe('the Worker with Stripe billing', () => {
     expect((env.SLOTLOCK_CLIENT_RATE_LIMIT as ReturnType<typeof limiter>).asked).toEqual([]);
   });
 
-  it('has no webhook without its secret, and refuses a bad free-plan date', async () => {
+  it('has no webhook without its secret, and refuses the retired free-plan date setting', async () => {
     const { STRIPE_WEBHOOK_SECRET: _secret, ...env } = billed();
     const response = await createSlotlockDashboardWorker().fetch(
       new Request(`${APP}/stripe/webhook`, { method: 'POST', body: '{}' }),
@@ -230,11 +230,19 @@ describe('the Worker with Stripe billing', () => {
       ctx,
     );
     expect(response.status).toBe(404);
-    const misconfigured = await createSlotlockDashboardWorker().fetch(
-      new Request(`${APP}/dashboard`),
-      billed({ SLOTLOCK_FREE_PLAN_FROM: 'soon' }),
-      ctx,
-    );
-    expect(misconfigured.status).toBe(503);
+    // The default plan lives in the database now (slotlock plan default): a Worker still given the
+    // date would let its operator believe it applies.
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const misconfigured = await createSlotlockDashboardWorker().fetch(
+        new Request(`${APP}/dashboard`),
+        billed({ SLOTLOCK_FREE_PLAN_FROM: '2026-12-09' }),
+        ctx,
+      );
+      expect(misconfigured.status).toBe(503);
+      expect(JSON.stringify(error.mock.calls)).toContain('slotlock plan default');
+    } finally {
+      error.mockRestore();
+    }
   });
 });

@@ -20,6 +20,7 @@ const READS = [
   'listWebhookEndpoints',
   'getResource',
   'listResources',
+  'countResources',
   'getHold',
   'listHolds',
   'listAgenda',

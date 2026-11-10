@@ -5,6 +5,7 @@ import { createHmac, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
+  SLOTLOCK_STRIPE_API_VERSION,
   type SlotlockStripeSubscription,
   createSlotlockStripe,
   handleSlotlockStripeWebhook,
@@ -31,6 +32,23 @@ function fakeStripe(subscriptions: Map<string, SlotlockStripeSubscription>) {
     calls.push({ url: target, body: (init.body as string) ?? null, headers: new Headers(init.headers) });
     if (target.endsWith('/v1/checkout/sessions')) return Response.json({ url: 'https://checkout.stripe.com/c/pay/cs_1' });
     if (target.endsWith('/v1/billing_portal/sessions')) return Response.json({ url: 'https://billing.stripe.com/p/session/1' });
+    const query = new URL(target).searchParams;
+    // A customer's subscriptions that are not canceled, as Stripe lists them without a status.
+    if (new URL(target).pathname === '/v1/subscriptions') {
+      const customer = query.get('customer');
+      return Response.json({
+        data: [...subscriptions.values()].filter(
+          (found) => found.customer === customer && found.status !== 'canceled',
+        ),
+      });
+    }
+    // Search by metadata: metadata['tenant_ref']:'<tenant>'.
+    if (new URL(target).pathname === '/v1/subscriptions/search') {
+      const tenant = /^metadata\['tenant_ref'\]:'(.*)'$/.exec(query.get('query') ?? '')?.[1];
+      return Response.json({
+        data: [...subscriptions.values()].filter((found) => found.metadata?.tenant_ref === tenant),
+      });
+    }
     const id = /\/v1\/subscriptions\/(\w+)$/.exec(target)?.[1];
     const found = id ? subscriptions.get(id) : undefined;
     return found
@@ -70,6 +88,7 @@ describe('Stripe signatures and plans', () => {
 
   it('asks Checkout for a Managed Payments subscription tagged with the tenant', async () => {
     const { stripe, calls } = fakeStripe(new Map());
+    const sent = (path: string) => calls.find((call) => call.url.endsWith(path));
     const at = await stripe.checkout({
       tenantRef: 'github:42',
       interval: 'year',
@@ -78,8 +97,7 @@ describe('Stripe signatures and plans', () => {
       cancelUrl: 'https://app.example.com/dashboard/plan',
     });
     expect(at).toBe('https://checkout.stripe.com/c/pay/cs_1');
-    const sent = Object.fromEntries(new URLSearchParams(calls[0]?.body ?? ''));
-    expect(sent).toEqual({
+    expect(Object.fromEntries(new URLSearchParams(sent('/v1/checkout/sessions')?.body ?? ''))).toEqual({
       mode: 'subscription',
       'line_items[0][price]': 'price_year',
       'line_items[0][quantity]': '1',
@@ -91,13 +109,35 @@ describe('Stripe signatures and plans', () => {
       'subscription_data[metadata][tenant_ref]': 'github:42',
       customer: 'cus_Old',
     });
-    expect(calls[0]?.headers.get('authorization')).toBe('Bearer rk_test_fake');
+    expect(sent('/v1/checkout/sessions')?.headers.get('authorization')).toBe('Bearer rk_test_fake');
+    // Pinned, so the account's default API version never changes what is sent or read.
+    expect(sent('/v1/checkout/sessions')?.headers.get('stripe-version')).toBe(SLOTLOCK_STRIPE_API_VERSION);
+    // A known customer's subscriptions are read first: none is live here.
+    expect(calls[0]?.url).toBe('https://api.stripe.com/v1/subscriptions?customer=cus_Old&limit=100');
     await stripe.portal({ customer: 'cus_Old', returnUrl: 'https://app.example.com/dashboard/plan' });
-    expect(Object.fromEntries(new URLSearchParams(calls[1]?.body ?? ''))).toEqual({
+    expect(Object.fromEntries(new URLSearchParams(sent('/v1/billing_portal/sessions')?.body ?? ''))).toEqual({
       customer: 'cus_Old',
       return_url: 'https://app.example.com/dashboard/plan',
     });
     await expect(stripe.subscription('sub_../x')).rejects.toThrow('Not a subscription id');
+  });
+
+  it('opens no second Checkout for a customer who already pays', async () => {
+    const paid: SlotlockStripeSubscription = { id: 'sub_Paid', status: 'past_due', customer: 'cus_Paid' };
+    const { stripe, calls } = fakeStripe(new Map([['sub_Paid', paid]]));
+    await expect(
+      stripe.checkout({
+        tenantRef: 'github:42',
+        interval: 'month',
+        customer: 'cus_Paid',
+        successUrl: 'https://app.example.com/dashboard/plan?checkout=done',
+        cancelUrl: 'https://app.example.com/dashboard/plan',
+      }),
+    ).rejects.toMatchObject({ code: 'subscription_exists', status: 409 });
+    expect(calls.some((call) => call.url.endsWith('/v1/checkout/sessions'))).toBe(false);
+    await expect(stripe.liveSubscriptionsOfTenant("github:42' OR 'x")).rejects.toThrow(
+      'Not a searchable tenant',
+    );
   });
 });
 
@@ -176,6 +216,57 @@ describe.skipIf(!url)('the Stripe webhook (real Postgres)', () => {
       stripeSubscription: null,
       limits: { resources: 10 },
     });
+  });
+
+  it('keeps Developer while a second purchase still renews, and reports it', async () => {
+    const twice = `billing-twice-${randomUUID()}`;
+    const duplicates: string[][] = [];
+    const paid = (id: string, customer: string, status: string): SlotlockStripeSubscription => ({
+      id,
+      status,
+      customer,
+      metadata: { tenant_ref: twice },
+      items: { data: [{ current_period_end: Math.floor(Date.UTC(2026, 11, 9) / 1000) }] },
+    });
+    const send = (id: string) => {
+      const body = JSON.stringify({ data: { object: { object: 'subscription', id } } });
+      return handleSlotlockStripeWebhook(
+        new Request('https://app.example.com/stripe/webhook', {
+          method: 'POST',
+          headers: { 'stripe-signature': sign(body) },
+          body,
+        }),
+        { secret: SECRET, stripe, sql, now: () => NOW, onDuplicate: (ids) => duplicates.push([...ids]) },
+      );
+    };
+    try {
+      // Two tabs, two Checkouts, two customers: both paid before either webhook arrived.
+      subscriptions.set('sub_T1', paid('sub_T1', 'cus_Tab1', 'active'));
+      subscriptions.set('sub_T2', paid('sub_T2', 'cus_Tab2', 'active'));
+      await send('sub_T1');
+      await send('sub_T2');
+      expect(duplicates).toEqual([['sub_T1', 'sub_T2']]);
+      expect(await readSlotlockTenantPlan(sql, twice)).toMatchObject({ stripeSubscription: 'sub_T2' });
+
+      // The one the plan names ends; the other still renews, so the plan stays and names it.
+      subscriptions.set('sub_T2', paid('sub_T2', 'cus_Tab2', 'canceled'));
+      await send('sub_T2');
+      expect(await readSlotlockTenantPlan(sql, twice)).toMatchObject({
+        plan: 'developer',
+        stripeSubscription: 'sub_T1',
+        stripeCustomer: 'cus_Tab1',
+      });
+
+      // The last one ends: Free.
+      subscriptions.set('sub_T1', paid('sub_T1', 'cus_Tab1', 'canceled'));
+      await send('sub_T1');
+      expect(await readSlotlockTenantPlan(sql, twice)).toMatchObject({
+        plan: 'free',
+        stripeSubscription: null,
+      });
+    } finally {
+      await sql`SELECT * FROM slotlock.erase_tenant(${twice}::text)`;
+    }
   });
 
   it('ignores events about nothing of ours, and asks Stripe to retry when it cannot read one', async () => {

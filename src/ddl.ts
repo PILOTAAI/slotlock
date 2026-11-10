@@ -246,6 +246,7 @@ export const SLOTLOCK_SCHEMA_FUNCTIONS = Object.freeze([
 export const SLOTLOCK_TENANT_ADMIN_TABLES = Object.freeze([
   'tenant_suspensions',
   'tenant_plans',
+  'plan_defaults',
   'webhook_tenants',
   'rate_buckets',
   'assistant_tenants',
@@ -269,15 +270,19 @@ export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.maintenance_tenants(text)',
   'slotlock.tenant_plan(text)',
   'slotlock.set_tenant_plan(text, text, text, integer, integer, integer, text, text, timestamptz)',
+  'slotlock.plan_default()',
+  'slotlock.enrol_tenant_plan(text)',
 ] as const);
 
 /**
- * Functions only the deployment role runs: suspending and lifting a suspension. No other role is
- * granted them, so a serving role cannot lift a suspension.
+ * Functions only the deployment role runs: suspending and lifting a suspension, and setting the
+ * hosted plan every tenant without one of its own is on. No other role is granted them, so a serving
+ * role cannot lift a suspension or change the default plan.
  */
 export const SLOTLOCK_OPERATOR_FUNCTIONS = Object.freeze([
   'slotlock.suspend_tenant(text, text)',
   'slotlock.unsuspend_tenant(text)',
+  'slotlock.set_plan_default(text, integer, integer, integer, timestamptz)',
 ] as const);
 
 /** Every SECURITY DEFINER function the serving role may execute, by signature. */
@@ -441,8 +446,8 @@ BEGIN
              AND active.revoked_at IS NULL
              AND (active.expires_at IS NULL OR active.expires_at > now())
          ) < LEAST(${SLOTLOCK_API_KEY_ACTIVE_LIMIT}, COALESCE(
-           (SELECT plan.max_api_keys FROM slotlock.tenant_plans plan
-             WHERE plan.tenant_ref = requested_tenant_ref), ${SLOTLOCK_API_KEY_ACTIVE_LIMIT}))
+           (SELECT plan.max_api_keys FROM slotlock.tenant_plan(requested_tenant_ref) plan),
+           ${SLOTLOCK_API_KEY_ACTIVE_LIMIT}))
      AND (SELECT count(*) FROM slotlock.api_keys kept
            WHERE kept.tenant_ref = requested_tenant_ref
          ) < ${SLOTLOCK_API_KEY_RETAINED_LIMIT}
@@ -824,7 +829,8 @@ $slotlock_tenant_suspended$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[0]} FROM PUBLIC;
 
 -- A hosted tenant's plan (plans.ts): the limits it buys, set from its Stripe subscription. A tenant
--- with no row has no plan limits; self-hosted Slotlock never writes one.
+-- with no row is on the deployment's default plan (plan_defaults) once that applies, and otherwise
+-- has no plan limits; self-hosted Slotlock writes neither.
 CREATE TABLE IF NOT EXISTS slotlock.tenant_plans (
   tenant_ref text PRIMARY KEY,
   plan text NOT NULL,
@@ -853,6 +859,29 @@ CREATE TABLE IF NOT EXISTS slotlock.tenant_plans (
 ALTER TABLE slotlock.tenant_plans ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON slotlock.tenant_plans FROM PUBLIC;
 
+-- The plan a hosted deployment puts every tenant without a row of its own on, from applies_from:
+-- one row or none. Both servers read it through tenant_plan, so a limit holds whichever one a write
+-- comes through. Only the deployment role sets it (set_plan_default, \`slotlock plan default\`).
+CREATE TABLE IF NOT EXISTS slotlock.plan_defaults (
+  only_row boolean PRIMARY KEY DEFAULT true,
+  plan text NOT NULL,
+  max_resources integer NOT NULL,
+  max_api_keys integer NOT NULL,
+  max_webhook_endpoints integer NOT NULL,
+  applies_from timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_plan_defaults_one_row CHECK (only_row),
+  CONSTRAINT slotlock_plan_defaults_plan_valid CHECK (plan IN ('free', 'developer')),
+  CONSTRAINT slotlock_plan_defaults_limits_valid CHECK (
+    max_resources BETWEEN 1 AND 100000
+    AND max_api_keys BETWEEN 1 AND ${SLOTLOCK_API_KEY_ACTIVE_LIMIT}
+    AND max_webhook_endpoints BETWEEN 1 AND 1000
+  )
+);
+ALTER TABLE slotlock.plan_defaults ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.plan_defaults FROM PUBLIC;
+
+-- The tenant's own plan, or the default once it applies; no row when neither does.
 CREATE OR REPLACE FUNCTION slotlock.tenant_plan(requested_tenant_ref text)
 RETURNS TABLE (
   plan text, status text, max_resources integer, max_api_keys integer,
@@ -868,9 +897,102 @@ AS $slotlock_tenant_plan$
          current.max_webhook_endpoints, current.stripe_customer, current.stripe_subscription,
          current.current_period_end
     FROM slotlock.tenant_plans current
-   WHERE current.tenant_ref = requested_tenant_ref;
+   WHERE current.tenant_ref = requested_tenant_ref
+  UNION ALL
+  SELECT fallback.plan, 'active', fallback.max_resources, fallback.max_api_keys,
+         fallback.max_webhook_endpoints, NULL, NULL, NULL
+    FROM slotlock.plan_defaults fallback
+   WHERE fallback.applies_from <= statement_timestamp()
+     AND NOT EXISTS (SELECT 1 FROM slotlock.tenant_plans current
+                      WHERE current.tenant_ref = requested_tenant_ref);
 $slotlock_tenant_plan$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[10]} FROM PUBLIC;
+
+-- The default plan and when it applies, for the dashboard and \`slotlock plan status\`.
+CREATE OR REPLACE FUNCTION slotlock.plan_default()
+RETURNS TABLE (
+  plan text, max_resources integer, max_api_keys integer, max_webhook_endpoints integer,
+  applies_from timestamptz
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_plan_default$
+  SELECT fallback.plan, fallback.max_resources, fallback.max_api_keys,
+         fallback.max_webhook_endpoints, fallback.applies_from
+    FROM slotlock.plan_defaults fallback;
+$slotlock_plan_default$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[12]} FROM PUBLIC;
+
+-- Before the default applies to every tenant, a new one is put on it at once: one with no API key
+-- (ever), no row in the feed or anything maintenance lists, and no webhook. Existing tenants keep
+-- what they had until applies_from, as the notice given to them says. True when a plan was written.
+-- Under the key lock, so a key being issued is either counted here or sees the plan.
+CREATE OR REPLACE FUNCTION slotlock.enrol_tenant_plan(requested_tenant_ref text)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_enrol_tenant_plan$
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || requested_tenant_ref, 0));
+  INSERT INTO slotlock.tenant_plans (
+    tenant_ref, plan, status, max_resources, max_api_keys, max_webhook_endpoints
+  )
+  SELECT requested_tenant_ref, fallback.plan, 'active', fallback.max_resources,
+         fallback.max_api_keys, fallback.max_webhook_endpoints
+    FROM slotlock.plan_defaults fallback
+   WHERE fallback.applies_from > statement_timestamp()
+     AND NOT EXISTS (SELECT 1 FROM slotlock.api_keys issued
+                      WHERE issued.tenant_ref = requested_tenant_ref)
+     AND NOT EXISTS (SELECT 1 FROM slotlock.maintenance_tenants listed
+                      WHERE listed.tenant_ref = requested_tenant_ref)
+     AND NOT EXISTS (SELECT 1 FROM slotlock.webhook_tenants hooked
+                      WHERE hooked.tenant_ref = requested_tenant_ref)
+  ON CONFLICT (tenant_ref) DO NOTHING;
+  RETURN FOUND;
+END
+$slotlock_enrol_tenant_plan$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[13]} FROM PUBLIC;
+
+-- Sets the default plan, or removes it with a null plan. Runs as its caller: only the deployment
+-- role, which owns the table, can.
+CREATE OR REPLACE FUNCTION slotlock.set_plan_default(
+  requested_plan text,
+  requested_max_resources integer,
+  requested_max_api_keys integer,
+  requested_max_webhook_endpoints integer,
+  requested_applies_from timestamptz
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_set_plan_default$
+BEGIN
+  IF requested_plan IS NULL THEN
+    DELETE FROM slotlock.plan_defaults;
+    RETURN;
+  END IF;
+  INSERT INTO slotlock.plan_defaults AS current (
+    only_row, plan, max_resources, max_api_keys, max_webhook_endpoints, applies_from, updated_at
+  )
+  VALUES (
+    true, requested_plan, requested_max_resources, requested_max_api_keys,
+    requested_max_webhook_endpoints, requested_applies_from, statement_timestamp()
+  )
+  ON CONFLICT (only_row) DO UPDATE
+  SET plan = EXCLUDED.plan,
+      max_resources = EXCLUDED.max_resources,
+      max_api_keys = EXCLUDED.max_api_keys,
+      max_webhook_endpoints = EXCLUDED.max_webhook_endpoints,
+      applies_from = EXCLUDED.applies_from,
+      updated_at = EXCLUDED.updated_at;
+END
+$slotlock_set_plan_default$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_OPERATOR_FUNCTIONS[2]} FROM PUBLIC;
 
 -- Sets the tenant's plan as its billing says it is now (the dashboard's Stripe webhook). Under the
 -- key lock, so a key being issued counts against the plan before or after, never between.
@@ -975,6 +1097,15 @@ BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:tenant:' || requested_tenant_ref, 0));
   -- A key being issued commits first, so its row is deleted below with the rest.
   PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || requested_tenant_ref, 0));
+  -- A paid plan is cancelled first (plans.ts): erasing the tenant would leave its subscription
+  -- renewing for an account that no longer exists. Cancelling it in Stripe moves the plan to Free
+  -- (the dashboard's webhook), and then erasure runs. Under the key lock, which set_tenant_plan takes.
+  IF EXISTS (SELECT 1 FROM slotlock.tenant_plans billed
+              WHERE billed.tenant_ref = requested_tenant_ref
+                AND billed.stripe_subscription IS NOT NULL) THEN
+    RAISE EXCEPTION 'Slotlock tenant has a live subscription: cancel it before erasing the tenant'
+      USING ERRCODE = 'object_in_use', HINT = 'billing_active';
+  END IF;
   FOR setting IN
     SELECT DISTINCT contract.tenant_context_setting FROM slotlock.rls_policy_contracts contract
   LOOP

@@ -1107,7 +1107,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_erase_tenant',
       title: 'Erase the tenant',
       description:
-        "Delete everything the key's tenant has, at once and for good: resources, holds, bookings, events, coverage and every API key, this one included. confirm_tenant_ref must be the tenant's reference (slotlock_get_tenant), or it answers 400 invalid_confirmation. Off unless the server allows it (403 tenant_erasure_disabled; slotlock serve does not: its operator runs slotlock tenant erase). A suspended tenant cannot erase itself (403 tenant_suspended). Erasing again deletes nothing.",
+        "Delete everything the key's tenant has, at once and for good: resources, holds, bookings, events, coverage and every API key, this one included. confirm_tenant_ref must be the tenant's reference (slotlock_get_tenant), or it answers 400 invalid_confirmation. Off unless the server allows it (403 tenant_erasure_disabled; slotlock serve does not: its operator runs slotlock tenant erase). A suspended tenant cannot erase itself (403 tenant_suspended), nor can one whose hosted plan is still paid for until it is cancelled (409 billing_active). Erasing again deletes nothing.",
       method: 'POST',
       path: '/v1/tenant/erase',
       input: z.object({ confirm_tenant_ref: IDENTITY }).strict(),

@@ -187,6 +187,8 @@ function policyFor(billing: SlotlockDashboardBilling | undefined): string {
  */
 export interface SlotlockDashboardResources {
   list(tenantRef: string): Promise<SlotlockResource[]>;
+  /** How many resources the tenant has, archived ones included, as a resource limit counts them. */
+  count?(tenantRef: string): Promise<number>;
   /**
    * Create the resource, or re-zone the tenant's resource with that reference. Refuse a new one
    * (an error with `code: 'resource_limit_reached'`) once the tenant has
@@ -341,8 +343,13 @@ export interface SlotlockDashboardAssistantOptions {
  * Upgrade (to a checkout page) and Manage (to a billing portal). Off unless set.
  */
 export interface SlotlockDashboardBilling {
-  /** The tenant's plan, or null when it has none (the server's limits apply). */
+  /** The tenant's plan (its own, or the default), or null when it has none (the server's limits apply). */
   plan(tenantRef: string): Promise<SlotlockTenantPlan | null>;
+  /**
+   * Puts a tenant new to plans on the default plan before it adds a key, resource or webhook
+   * endpoint, while the default does not yet apply to every tenant (plans.ts).
+   */
+  enrol?(tenantRef: string): Promise<void>;
   /** A checkout URL for the Developer plan. */
   checkout(input: {
     tenantRef: string;
@@ -443,6 +450,8 @@ export function createSlotlockDashboardResources(store: SlotlockStore): Slotlock
       store.withTenant(tenantRef, (tenant) =>
         tenant.listResources({ tenantRef, limit: SLOTLOCK_DASHBOARD_MAX_RESOURCES + 1 }),
       ),
+    count: (tenantRef) =>
+      store.withTenant(tenantRef, (tenant) => tenant.countResources({ tenantRef })),
     add: (tenantRef, externalRef, timezone, actor) =>
       store.withTenant(
         tenantRef,
@@ -1556,8 +1565,30 @@ ${
     return respond(status, layout('API keys', content, session, 'keys'));
   }
 
+  /**
+   * How many resources the tenant may have here, and how many it has as that limit counts them: the
+   * dashboard's own limit, or its plan's when lower (archived resources count against a plan).
+   */
+  async function resourceAllowance(
+    tenantRef: string,
+    resources: readonly SlotlockResource[],
+  ): Promise<{ used: number; limit: number; planned: boolean; archived: number }> {
+    const plan = options.billing ? await options.billing.plan(tenantRef) : null;
+    if (!plan || plan.limits.resources >= SLOTLOCK_DASHBOARD_MAX_RESOURCES) {
+      return { used: resources.length, limit: SLOTLOCK_DASHBOARD_MAX_RESOURCES, planned: false, archived: 0 };
+    }
+    const counted = options.resources.count ? await options.resources.count(tenantRef) : resources.length;
+    return {
+      used: counted,
+      limit: plan.limits.resources,
+      planned: true,
+      archived: Math.max(0, counted - resources.length),
+    };
+  }
+
   async function resourcesPage(session: Session, status = 200, notice?: string): Promise<Response> {
     const resources = await options.resources.list(tenantOf(session));
+    const allowance = await resourceAllowance(tenantOf(session), resources);
     const token = csrfToken(session);
     const content = html`${noticeOf(notice)}
 ${pageHead('Resources', resources.length > 0 ? html`<a class="button" href="${root}/hours">Set hours for every resource</a>` : undefined)}
@@ -1570,7 +1601,7 @@ ${pageHead('Resources', resources.length > 0 ? html`<a class="button" href="${ro
 <label>Time zone<input name="timezone" required maxlength="64" value="UTC" placeholder="Europe/London"></label>
 <button class="primary" type="submit">Add resource</button>
 </form>
-<p class="fine">${String(resources.length)} of ${String(SLOTLOCK_DASHBOARD_MAX_RESOURCES)}. Adding a reference you have changes its time zone.</p>
+<p class="fine">${String(allowance.used)} of ${String(allowance.limit)}${allowance.planned ? html` on your plan${allowance.archived > 0 ? html`, ${String(allowance.archived)} of them archived (archived resources count until deleted)` : html``}` : html``}. Adding a reference you have changes its time zone.</p>
 </section>
 ${
   resources.length === 0
@@ -1853,7 +1884,7 @@ ${
     if (!created.ok) {
       const message =
         created.code === 'webhook_limit_reached'
-          ? `You have ${String(created.limit)} webhooks, as many as Slotlock allows. Delete one first.`
+          ? `You have ${String(created.limit)} webhooks, as many as ${options.billing ? 'your plan' : 'Slotlock'} allows. Delete one first${options.billing ? ', or see Plan' : ''}.`
           : created.code === 'invalid_webhook_url'
             ? 'Give an https URL, with no user name, password or #fragment.'
             : 'Choose events from the list.';
@@ -2567,9 +2598,12 @@ ${
     const billing = options.billing;
     if (!billing) return notFound(session);
     const tenantRef = tenantOf(session);
-    const [plan, resources, keys, webhooks] = await Promise.all([
+    const [plan, resourceCount, keys, webhooks] = await Promise.all([
       billing.plan(tenantRef),
-      options.resources.list(tenantRef),
+      // As the limit counts them: archived resources included.
+      options.resources.count
+        ? options.resources.count(tenantRef)
+        : options.resources.list(tenantRef).then((listed) => listed.length),
       options.keys.list({ tenantRef }),
       options.resources.webhooks?.list(tenantRef),
     ]);
@@ -2614,7 +2648,7 @@ ${
 ${warning}
 ${pageHead(`Plan: ${name}`, manage)}
 <div class="stats">
-${use('Resources', resources.length, plan?.limits.resources)}
+${use('Resources', resourceCount, plan?.limits.resources)}
 ${use('Active API keys', active.length, plan?.limits.apiKeys)}
 ${webhooks ? use('Webhooks', webhooks.length, plan?.limits.webhookEndpoints) : html``}
 </div>
@@ -2649,6 +2683,13 @@ ${upgrade}
         cancelUrl: `${publicRoot}/plan`,
       });
     } catch (error) {
+      if ((error as { code?: unknown } | null)?.code === 'subscription_exists') {
+        return planPage(
+          session,
+          409,
+          'You pay for a subscription already. Its plan shows here once Stripe confirms it; to change it, use Manage billing.',
+        );
+      }
       ignoreRejection(options.onError?.(error));
       return planPage(session, 502, 'The payment page did not open. Try again in a minute.');
     }
@@ -3156,7 +3197,9 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         return keysPage(
           session,
           409,
-          'You have as many keys as Slotlock allows. Revoke one first.',
+          options.billing
+            ? 'You have as many active keys as your plan allows. Revoke one first, or see Plan.'
+            : 'You have as many keys as Slotlock allows. Revoke one first.',
         );
       }
       throw error;
@@ -3194,10 +3237,13 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
     } catch (error) {
       const code = (error as { code?: unknown }).code;
       if (code === 'resource_limit_reached') {
+        const limit = (error as { limit?: unknown }).limit;
         return resourcesPage(
           session,
           409,
-          `You have ${SLOTLOCK_DASHBOARD_MAX_RESOURCES} resources, as many as the dashboard allows.`,
+          typeof limit === 'number' && limit < SLOTLOCK_DASHBOARD_MAX_RESOURCES
+            ? `You have ${String(limit)} resources, archived ones included, as many as your plan allows. Delete one, or see Plan.`
+            : `You have ${SLOTLOCK_DASHBOARD_MAX_RESOURCES} resources, as many as the dashboard allows.`,
         );
       }
       if (code === 'invalid_timezone') {
@@ -3299,9 +3345,9 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         );
       }
     }
-    // A tenant new to plans is put on one (where billing says so) before it adds what plans limit.
+    // A tenant new to plans is put on the default plan before it adds what plans limit.
     if (route === '/keys' || route === '/resources' || route === '/webhooks') {
-      await options.billing?.plan(tenantOf(session));
+      await options.billing?.enrol?.(tenantOf(session));
     }
     switch (route) {
       case '/sign-out':

@@ -1642,7 +1642,8 @@ public sealed partial class SlotlockClient
     /// tenant's reference (slotlock_get_tenant), or it answers 400 invalid_confirmation. Off
     /// unless the server allows it (403 tenant_erasure_disabled; slotlock serve does not: its
     /// operator runs slotlock tenant erase). A suspended tenant cannot erase itself (403
-    /// tenant_suspended). Erasing again deletes nothing.
+    /// tenant_suspended), nor can one whose hosted plan is still paid for until it is cancelled
+    /// (409 billing_active). Erasing again deletes nothing.
     /// </remarks>
     /// <param name="confirmTenantRef">confirm_tenant_ref</param>
     /// <param name="cancellationToken">Cancels the request.</param>

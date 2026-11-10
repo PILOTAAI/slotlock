@@ -978,7 +978,7 @@ export const pricing = {
       title: 'Custom',
       price: 'Talk to us',
       body: 'Slotlock on your own servers, with support from the people who build it.',
-      link: { label: 'Talk to the founder', href: 'mailto:clever.eziogor@gmail.com' },
+      link: { label: 'Talk to the founder', href: 'mailto:clever.eziogor@pylota.io' },
     },
   ],
   note: `Self-hosting is ${facts.license} with no limits from us. [Plans in detail](/docs/hosted/#plans).`,

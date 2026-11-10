@@ -19,8 +19,39 @@ versioning.
   Payments, Manage billing the customer portal, and a signed webhook at `/stripe/webhook` sets the
   tenant's plan from the subscription Stripe holds.
 - The dashboard serves the Slotlock mark as its favicon.
+- A default plan in the database (`slotlock.plan_defaults`, owner-only): every tenant without a plan
+  of its own is on it from its date, through `slotlock.tenant_plan(text)`, so `slotlock serve` and
+  the dashboard Worker hold a tenant to the same limits whichever one a resource, key or webhook
+  endpoint is added through. Before the date, a new tenant (no API key, nothing in its feed, no
+  webhook) is put on it before it adds its first key, resource or endpoint
+  (`slotlock.enrol_tenant_plan(text)`); existing tenants keep their limits until the date. Set by
+  the schema owner with `slotlock plan default free --from 2026-12-09` (`none` removes it);
+  `slotlock plan status` prints it and `SLOTLOCK_TENANT`'s own plan. `readSlotlockPlanDefault`,
+  `setSlotlockPlanDefault` and `enrolSlotlockTenantPlan` in `plans.ts`. Run `slotlock migrate`.
+- `countResources` on the tenant store: how many resources a tenant has, archived ones included, as
+  a resource limit counts them.
 
 ### Changed
+
+- The dashboard Worker no longer reads `SLOTLOCK_FREE_PLAN_FROM` and answers 503 while it is set,
+  naming `slotlock plan default` instead: the date is the database's now.
+- Erasing a tenant whose plan names a live Stripe subscription is refused with `billing_active`
+  (`slotlock tenant erase` exits 1; `/v1/tenant/erase` answers 409): cancel the subscription, whose
+  webhook moves the tenant to Free, then erase. The privacy notice already promised it.
+- Upgrade on the Plan page opens no second Checkout for a customer that already has an active,
+  trialing or past-due subscription, and points it to Manage billing instead.
+- A Stripe webhook about a subscription that ended no longer moves its tenant to Free while another
+  of the tenant's subscriptions still renews (two Checkouts paid in two tabs): the plan names the
+  live one. A second live subscription is logged as `slotlock billing duplicate subscription`, by
+  Stripe ids only, so it can be refunded.
+- Stripe requests send `Stripe-Version: 2026-04-22.dahlia` (`SLOTLOCK_STRIPE_API_VERSION`) unless
+  `STRIPE_API_VERSION` is set, rather than the account's default: Managed Payments needs
+  2025-03-31.basil or later.
+- The Plan page counts resources as the plan does, archived ones included; the Resources page says
+  "*n* of *limit* on your plan" with the plan's limit, not the dashboard's 100, and a refused add,
+  key or webhook names the plan.
+- Talk to the founder defaults to the founder's Pylota address, on the Plan page, the landing page
+  and the hosted service page.
 
 - Privacy notice: email sent to support@, abuse@ or privacy@pylota.io is held in Google Workspace for
   two years; Google is listed as a recipient, with its transfers. The notice has no owner TODO left.

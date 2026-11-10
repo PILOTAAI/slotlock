@@ -71,7 +71,9 @@ subscription back from Stripe rather than trusting the event, and never lets a l
 old subscription end a newer one; Terms and privacy wording; existing accounts move to Free on 9
 December 2026.
 
-Findings, each checked against the branch:
+Findings, each checked against the branch. Findings 1 to 7 are fixed on
+`claude/inspiring-dijkstra-bfvqif`, which merges PR #161's branch; finding 8 waits on the owner's
+quota numbers.
 
 1. **Free is enforced only where the dashboard is used.** A tenant with no plan row keeps the
    server's limits. The Worker puts such a tenant on Free only when, after `SLOTLOCK_FREE_PLAN_FROM`,

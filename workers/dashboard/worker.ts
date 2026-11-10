@@ -39,7 +39,7 @@ import {
   handleSlotlockStripeWebhook,
   type SlotlockStripe,
 } from '../../src/billing.js';
-import { readSlotlockTenantPlan, setSlotlockTenantPlan } from '../../src/plans.js';
+import { enrolSlotlockTenantPlan, readSlotlockTenantPlan } from '../../src/plans.js';
 import {
   createSlotlockRateLimiter,
   slotlockClientKey,
@@ -119,21 +119,26 @@ export function createSlotlockWorkerAgentLimiter(vars: SlotlockEnv) {
   };
 }
 
+/** Where Talk to the founder goes without SLOTLOCK_PLAN_CONTACT: the founder's Pylota address (MAINTAINERS.md). */
+export const SLOTLOCK_DEFAULT_PLAN_CONTACT = 'mailto:clever.eziogor@pylota.io';
+
 /**
  * Hosted plans and Stripe billing, on when STRIPE_SECRET_KEY and both price ids are set:
  * SLOTLOCK_STRIPE_PRICE_MONTHLY and SLOTLOCK_STRIPE_PRICE_YEARLY (the Developer plan's), and
- * STRIPE_WEBHOOK_SECRET for the webhook at `<base>/stripe/webhook`. From SLOTLOCK_FREE_PLAN_FROM
- * (an ISO date), a tenant with no plan is put on Free when it next adds something plans limit.
+ * STRIPE_WEBHOOK_SECRET for the webhook at `<base>/stripe/webhook`. The plan a tenant without one of
+ * its own is on is the database's (`slotlock plan default`), so both servers apply the same one; a
+ * new tenant is put on it before it adds a key, resource or webhook endpoint.
  */
 function readBilling(vars: SlotlockEnv) {
   const secretKey = vars.STRIPE_SECRET_KEY?.trim();
   const month = vars.SLOTLOCK_STRIPE_PRICE_MONTHLY?.trim();
   const year = vars.SLOTLOCK_STRIPE_PRICE_YEARLY?.trim();
   if (!secretKey || !month || !year) return null;
-  const freeFrom = vars.SLOTLOCK_FREE_PLAN_FROM?.trim();
-  const freeFromMs = freeFrom ? Date.parse(freeFrom) : null;
-  if (freeFromMs !== null && Number.isNaN(freeFromMs)) {
-    throw new SlotlockConfigError('SLOTLOCK_FREE_PLAN_FROM must be an ISO date');
+  // The Worker no longer reads it: a deployment that still sets it would believe it does.
+  if (vars.SLOTLOCK_FREE_PLAN_FROM?.trim()) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_FREE_PLAN_FROM is replaced by the database default plan: remove it and run slotlock plan default free --from <date> as the schema owner',
+    );
   }
   const apiVersion = vars.STRIPE_API_VERSION?.trim();
   return {
@@ -143,8 +148,7 @@ function readBilling(vars: SlotlockEnv) {
       ...(apiVersion ? { apiVersion } : {}),
     }),
     webhookSecret: vars.STRIPE_WEBHOOK_SECRET?.trim() || null,
-    freeFromMs,
-    contact: vars.SLOTLOCK_PLAN_CONTACT?.trim() || 'mailto:clever.eziogor@gmail.com',
+    contact: vars.SLOTLOCK_PLAN_CONTACT?.trim() || SLOTLOCK_DEFAULT_PLAN_CONTACT,
     prices: {
       month: vars.SLOTLOCK_PLAN_PRICE_MONTHLY?.trim() || '$10',
       year: vars.SLOTLOCK_PLAN_PRICE_YEARLY?.trim() || '$100',
@@ -281,14 +285,9 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       ...(billing
         ? {
             billing: {
-              async plan(tenantRef: string) {
-                const { sql } = current();
-                const found = await readSlotlockTenantPlan(sql, tenantRef);
-                if (found || billing.freeFromMs === null || Date.now() < billing.freeFromMs) {
-                  return found;
-                }
-                await setSlotlockTenantPlan(sql, { tenantRef, plan: 'free', status: 'active' });
-                return readSlotlockTenantPlan(sql, tenantRef);
+              plan: (tenantRef: string) => readSlotlockTenantPlan(current().sql, tenantRef),
+              async enrol(tenantRef: string) {
+                await enrolSlotlockTenantPlan(current().sql, tenantRef);
               },
               checkout: (input) => billing.stripe.checkout(input),
               portal: (input) => billing.stripe.portal(input),
@@ -367,6 +366,11 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
                   message: 'slotlock stripe webhook failed',
                   error: error instanceof Error ? `${error.name}: ${error.message}` : 'unknown',
                 }),
+              ),
+            // Stripe ids only: the owner finds the tenant in Stripe and refunds the second purchase.
+            onDuplicate: (subscriptions) =>
+              console.error(
+                JSON.stringify({ message: 'slotlock billing duplicate subscription', subscriptions }),
               ),
           });
         } finally {

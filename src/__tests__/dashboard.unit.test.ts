@@ -2156,6 +2156,7 @@ describe('the plan page', () => {
     const calls: Array<{ kind: string; input: unknown }> = [];
     const billing = {
       plan: vi.fn(async (_tenantRef: string) => plan),
+      enrol: vi.fn(async (_tenantRef: string) => undefined),
       checkout: vi.fn(async (input: unknown) => {
         calls.push({ kind: 'checkout', input });
         return 'https://checkout.stripe.com/c/pay/cs_test_1';
@@ -2264,12 +2265,65 @@ describe('the plan page', () => {
     expect(await failed.text()).toContain('Billing did not open');
   });
 
-  it('puts a tenant on a plan before it adds what plans limit', async () => {
+  it('puts a new tenant on the default plan before it adds what plans limit', async () => {
     const { target, billing } = billed(null);
     const { session } = await signIn(target);
-    billing.plan.mockClear();
+    expect(billing.enrol).not.toHaveBeenCalled();
     await post(target, '/base/dashboard/keys', { csrf: await csrf(target, session), name: 'agent', access: 'read', expires: 'never' }, session);
-    expect(billing.plan).toHaveBeenCalledWith(`github:${GITHUB_USER.id}`);
+    expect(billing.enrol).toHaveBeenCalledWith(`github:${GITHUB_USER.id}`);
+    // Reading the Plan page writes nothing.
+    billing.enrol.mockClear();
+    await get(target, '/base/dashboard/plan', session);
+    expect(billing.enrol).not.toHaveBeenCalled();
+  });
+
+  const free: SlotlockTenantPlan = {
+    plan: 'free',
+    status: 'active',
+    limits: { resources: 10, apiKeys: 10, webhookEndpoints: 2 },
+    stripeCustomer: null,
+    stripeSubscription: null,
+    currentPeriodEnd: null,
+  };
+
+  it('counts resources as the plan does, archived ones included, on the Plan and Resources pages', async () => {
+    const counted = { ...resources.store, count: vi.fn(async (_tenantRef: string) => 7) };
+    const { billing } = billed(free);
+    const target = dashboard({ billing, resources: counted });
+    const { session } = await signIn(target);
+    for (const reference of ['van-1', 'van-2', 'van-3']) {
+      await post(target, '/base/dashboard/resources', { csrf: await csrf(target, session), reference, timezone: 'UTC' }, session);
+    }
+    const plan = await (await get(target, '/base/dashboard/plan', session)).text();
+    expect(plan).toContain('7<span class="meta"> of 10</span>');
+    const listed = await (await get(target, '/base/dashboard/resources', session)).text();
+    expect(listed).toContain('7 of 10 on your plan, 4 of them archived (archived resources count until deleted).');
+    expect(listed).not.toContain('of 100');
+  });
+
+  it("names the plan's limit when an add is refused at it", async () => {
+    const capped = {
+      ...resources.store,
+      add: vi.fn(async () => {
+        throw Object.assign(new Error('cap'), { code: 'resource_limit_reached', limit: 10 });
+      }),
+    };
+    const target = dashboard({ billing: billed(free).billing, resources: capped });
+    const { session } = await signIn(target);
+    const refused = await post(target, '/base/dashboard/resources', { csrf: await csrf(target, session), reference: 'van-11', timezone: 'UTC' }, session);
+    expect(refused.status).toBe(409);
+    expect(await refused.text()).toContain('You have 10 resources, archived ones included, as many as your plan allows.');
+  });
+
+  it('sends a customer who already pays to Manage billing instead of a second Checkout', async () => {
+    const { target, billing } = billed({ ...free, plan: 'free', stripeCustomer: 'cus_Twice1' });
+    billing.checkout.mockRejectedValueOnce(
+      Object.assign(new Error('The customer has a live subscription already'), { code: 'subscription_exists' }),
+    );
+    const { session } = await signIn(target);
+    const refused = await post(target, '/base/dashboard/plan/upgrade', { csrf: await csrf(target, session), interval: 'month' }, session);
+    expect(refused.status).toBe(409);
+    expect(await refused.text()).toContain('You pay for a subscription already.');
   });
 
   it('refuses billing that would loosen the policy', () => {

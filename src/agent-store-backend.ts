@@ -2038,7 +2038,13 @@ export function createSlotlockStoreApplicationBackend(
         if (await tenant.isTenantSuspended({ tenantRef: tenantOf(context) })) {
           throw new SlotlockAgentOperationError('tenant_suspended', 403);
         }
-        const erased = await tenant.eraseTenant({ tenantRef: tenantOf(context) });
+        const erased = await tenant.eraseTenant({ tenantRef: tenantOf(context) }).catch((error: unknown) => {
+          // A paid hosted plan is cancelled first, so it does not renew for an erased tenant.
+          if ((error as { code?: unknown } | null)?.code === 'billing_active') {
+            throw new SlotlockAgentOperationError('billing_active', 409);
+          }
+          throw error;
+        });
         return { total: erased.total, rows: erased.rows };
       }, WRITE);
     },

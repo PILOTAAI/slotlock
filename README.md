@@ -401,10 +401,23 @@ Stripe and set the tenant's plan: `active` or `trialing` gives Developer, `past_
 Stripe retries, anything else returns the tenant to Free. Nothing is deleted when a plan ends; the
 tenant cannot add more until it is under the Free limits.
 
-Optional variables: `SLOTLOCK_FREE_PLAN_FROM` (an ISO date; from then a tenant with no plan is put
-on Free the next time it adds a key, resource or webhook), `SLOTLOCK_PLAN_CONTACT` (where Custom
-enquiries go, an https or mailto URL), `SLOTLOCK_PLAN_PRICE_MONTHLY` and `SLOTLOCK_PLAN_PRICE_YEARLY`
-(the prices as shown, `$10` and `$100` by default) and `STRIPE_API_VERSION`.
+Optional variables: `SLOTLOCK_PLAN_CONTACT` (where Custom enquiries go, an https or mailto URL),
+`SLOTLOCK_PLAN_PRICE_MONTHLY` and `SLOTLOCK_PLAN_PRICE_YEARLY` (the prices as shown, `$10` and `$100`
+by default) and `STRIPE_API_VERSION` (default `2026-04-22.dahlia`, a version that has Managed
+Payments).
+
+The plan a tenant without one of its own is on is kept in the database, so `slotlock serve` and the
+Worker enforce the same limits whichever one a write comes through. Set it once, as the schema owner:
+
+```sh
+slotlock plan default free --from 2026-12-09   # every tenant without a plan is on Free from then
+slotlock plan status                           # the default, and SLOTLOCK_TENANT's own plan
+```
+
+Until `--from`, tenants that already have a key, a resource or a webhook keep the server's limits; a
+new tenant is put on the default plan before it adds its first one. `slotlock plan default none`
+removes the default. A tenant on a paid plan cannot be erased until the subscription is cancelled
+(`billing_active`).
 
 - Each request opens its own database client, at most five connections, and closes it when the
   response is sent; Hyperdrive keeps the pool.

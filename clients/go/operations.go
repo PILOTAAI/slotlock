@@ -1630,7 +1630,8 @@ func (in EraseTenantInput) values() map[string]any {
 // confirm_tenant_ref must be the tenant's reference (slotlock_get_tenant), or it answers 400
 // invalid_confirmation. Off unless the server allows it (403 tenant_erasure_disabled; slotlock
 // serve does not: its operator runs slotlock tenant erase). A suspended tenant cannot erase
-// itself (403 tenant_suspended). Erasing again deletes nothing.
+// itself (403 tenant_suspended), nor can one whose hosted plan is still paid for until it is
+// cancelled (409 billing_active). Erasing again deletes nothing.
 func (c *Client) EraseTenant(ctx context.Context, in EraseTenantInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_erase_tenant", in.values())
 }

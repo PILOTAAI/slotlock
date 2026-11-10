@@ -2282,6 +2282,11 @@ export interface SlotlockStore extends SlotlockEventFeed {
     includeArchived?: boolean;
   }): Promise<SlotlockResource[]>;
   /**
+   * How many resources the tenant has, archived ones included: the count a resource limit (a hosted
+   * plan's, `maxTenantResources`) is checked against.
+   */
+  countResources(params: { tenantRef: string }): Promise<number>;
+  /**
    * Insert a confirmed reservation with the EXCLUDE constraint as the overlap arbiter; expected
    * outcomes (invalid window, lost race) come back structured. Expired holds overlapping the window
    * are reaped in the same transaction, so they never block. On a tenant's resource the booking
@@ -4037,6 +4042,17 @@ function buildSlotlockStore(
          ORDER BY id
          LIMIT ${limit}`;
       return rows.map(toResource);
+    },
+
+    async countResources(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw Object.assign(new Error('Slotlock tenant reference must be 1-500 UTF-8 bytes'), {
+          code: 'invalid_identity' as const,
+        });
+      }
+      const [counted] = await sql<{ count: string }[]>`
+        SELECT count(*) AS count FROM slotlock.resources WHERE tenant_ref = ${params.tenantRef}`;
+      return Number(counted?.count ?? 0);
     },
 
     async archiveResource(params) {
@@ -6875,7 +6891,11 @@ function buildSlotlockStore(
         throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
       }
       const erased = await sql<{ erased_table: string; erased_rows: string | number }[]>`
-        SELECT erased_table, erased_rows FROM slotlock.erase_tenant(${params.tenantRef}::text)`;
+        SELECT erased_table, erased_rows FROM slotlock.erase_tenant(${params.tenantRef}::text)`.catch(
+        (error: unknown) => {
+          throw billingActiveRefusal(error);
+        },
+      );
       const rows: Record<string, number> = {};
       let total = 0;
       for (const row of erased) {
@@ -6893,6 +6913,20 @@ function buildSlotlockStore(
   return Object.assign(
     store,
     Object.fromEntries(SLOTLOCK_TENANT_WRITE_METHODS.map((name) => [name, refuse])),
+  );
+}
+
+/**
+ * erase_tenant refuses a tenant whose plan names a live subscription (`billing_active`): it is
+ * cancelled first, so it does not renew for an erased account.
+ */
+function billingActiveRefusal(error: unknown): unknown {
+  if (pgCode(error) !== '55006' || (error as { hint?: unknown }).hint !== 'billing_active') return error;
+  return Object.assign(
+    new Error('Slotlock tenant has a live subscription: cancel it before erasing the tenant', {
+      cause: error,
+    }),
+    { code: 'billing_active' as const },
   );
 }
 

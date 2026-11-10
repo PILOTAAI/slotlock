@@ -37,7 +37,7 @@ account can sign in. Self-hosting stays fully supported: see
 
 | | Free | Developer | Custom |
 | --- | --- | --- | --- |
-| Price | Free | $10 a month, or $100 a year | [Talk to the founder](mailto:clever.eziogor@gmail.com) |
+| Price | Free | $10 a month, or $100 a year | [Talk to the founder](mailto:clever.eziogor@pylota.io) |
 | Resources | 10 | 100 | On your own servers |
 | Active API keys | 10 | 100 | |
 | Webhook endpoints | 2 | 10 | |
@@ -47,8 +47,11 @@ merchant of record, in your currency, with any sales tax or VAT added. **Manage 
 page shows invoices, changes the payment method, switches between monthly and yearly, and cancels.
 A cancelled plan runs to the end of the period it was paid for. When a plan ends or a payment is not
 made, the account returns to Free: nothing is deleted, but nothing more can be added while it holds
-more than Free allows. Accounts created before 9 November 2026 move to the Free limits on
-9 December 2026. Custom is Slotlock on your own infrastructure, under its own agreement.
+more than Free allows. Archived resources count until they are deleted. The limits hold however you
+add things: in the dashboard, over the API or from the language clients. Accounts created before
+9 November 2026 move to the Free limits on 9 December 2026. An account on Developer is erased only
+once its plan is cancelled, so it is never charged again. Custom is Slotlock on your own
+infrastructure, under its own agreement.
 
 ## How it differs from running it yourself
 

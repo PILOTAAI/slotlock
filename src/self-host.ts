@@ -78,6 +78,12 @@ import {
 } from './node-server.js';
 import { type SlotlockMetrics, createSlotlockMetrics } from './metrics.js';
 import { slotlockPackageVersion } from './package-version.js';
+import {
+  type SlotlockPlan,
+  readSlotlockPlanDefault,
+  readSlotlockTenantPlan,
+  setSlotlockPlanDefault,
+} from './plans.js';
 import { createSlotlockRequestLimits } from './rate-limit.js';
 import {
   type SlotlockSql,
@@ -1417,6 +1423,58 @@ async function runTenantCommand(
   }
 }
 
+/**
+ * `plan status` prints the default plan and SLOTLOCK_TENANT's own; `plan default` sets or removes
+ * the default, as the deployment role (SLOTLOCK_MIGRATE_DATABASE_URL when set), and then prints both.
+ */
+async function runPlanCommand(
+  config: SlotlockDatabaseConfig,
+  out: OutputStream,
+  planDefault: { plan: SlotlockPlan; appliesFrom: Date } | null,
+  set: boolean,
+): Promise<void> {
+  if (set) {
+    const owner = connect(config.migrateDatabaseUrl ?? config.databaseUrl, 1);
+    try {
+      await setSlotlockPlanDefault(owner, planDefault);
+    } finally {
+      await owner.end({ timeout: 5 });
+    }
+  }
+  const sql = connect(config.databaseUrl, 1);
+  try {
+    const fallback = await readSlotlockPlanDefault(sql);
+    const own = await readSlotlockTenantPlan(sql, config.tenantRef);
+    out.write(
+      `${JSON.stringify({
+        default: fallback
+          ? {
+              plan: fallback.plan,
+              applies_from: fallback.appliesFrom.toISOString(),
+              resources: fallback.limits.resources,
+              api_keys: fallback.limits.apiKeys,
+              webhook_endpoints: fallback.limits.webhookEndpoints,
+            }
+          : null,
+        tenant: config.tenantRef,
+        plan: own
+          ? {
+              plan: own.plan,
+              status: own.status,
+              resources: own.limits.resources,
+              api_keys: own.limits.apiKeys,
+              webhook_endpoints: own.limits.webhookEndpoints,
+              paid: own.stripeSubscription !== null,
+              current_period_end: own.currentPeriodEnd?.toISOString() ?? null,
+            }
+          : null,
+      })}\n`,
+    );
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
 /** One key as `key create`, `key list` and `key revoke` print it: never the digest. */
 function apiKeyLine(apiKey: SlotlockApiKey, key?: string): string {
   return `${JSON.stringify({
@@ -1587,7 +1645,13 @@ Commands:
   tenant unsuspend         Lift the tenant's suspension (as the schema owner, likewise)
   tenant erase --confirm <tenant>
                            Delete everything the tenant has, its API keys included, for good;
-                           --confirm repeats SLOTLOCK_TENANT
+                           --confirm repeats SLOTLOCK_TENANT; refused while its hosted plan is
+                           paid for (cancel the subscription first)
+  plan status              Print the deployment's default plan and the tenant's own (hosted)
+  plan default (free | developer | none) [--from <date>]
+                           Put every tenant without a plan of its own on this one from --from
+                           (an ISO date or time; default now), or none for no default; a new
+                           tenant gets it at once (as the schema owner, like tenant suspend)
   healthcheck              Exit 0 when the local server reports ready
 
 Options:
@@ -1702,7 +1766,8 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     command === 'key' ||
     command === 'hours' ||
     command === 'rules' ||
-    command === 'tenant'
+    command === 'tenant' ||
+    command === 'plan'
       ? `${command} ${operands[0] ?? ''}`.trim()
       : command;
   const expectedOperands: Record<string, number> = {
@@ -1719,6 +1784,8 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     'tenant suspend': 1,
     'tenant unsuspend': 1,
     'tenant erase': 1,
+    'plan status': 1,
+    'plan default': 2,
     'key create': 2,
     'key list': 1,
     'key rotate': 2,
@@ -1746,6 +1813,22 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
   }
   if (values.confirm !== undefined && subcommand !== 'tenant erase') {
     return usage('--confirm applies only to tenant erase');
+  }
+  if (values.from !== undefined && subcommand !== 'plan default') {
+    return usage('--from applies only to plan default');
+  }
+  let planDefault: { plan: SlotlockPlan; appliesFrom: Date } | null = null;
+  if (subcommand === 'plan default') {
+    const named = operands[1];
+    if (named !== 'free' && named !== 'developer' && named !== 'none') {
+      return usage('plan default takes free, developer or none');
+    }
+    if (named === 'none' && values.from !== undefined) return usage('--from applies only to a plan');
+    const appliesFrom = values.from === undefined ? new Date() : new Date(values.from);
+    if (Number.isNaN(appliesFrom.getTime()) || !/^\d{4}-\d{2}-\d{2}/.test(values.from ?? '2000-01-01')) {
+      return usage('--from must be an ISO date or time, like 2026-12-09 or 2026-12-09T00:00:00Z');
+    }
+    if (named !== 'none') planDefault = { plan: named, appliesFrom };
   }
   if (subcommand === 'tenant erase' && values.confirm === undefined) {
     return usage('tenant erase needs --confirm <tenant>, the tenant it erases (SLOTLOCK_TENANT)');
@@ -1891,6 +1974,27 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
           if (code === 'invalid_suspension_reason') {
             return usage('--reason must be 1-500 characters without control characters');
           }
+          if (code === 'billing_active') {
+            io.stderr.write(
+              'slotlock: the tenant has a live subscription; cancel it in Stripe first (its webhook moves the tenant to Free), then erase\n',
+            );
+            return 1;
+          }
+          throw error;
+        }
+        return 0;
+      }
+      case 'plan status':
+      case 'plan default': {
+        try {
+          await runPlanCommand(readSlotlockDatabaseConfig(io.env), io.stdout, planDefault, subcommand === 'plan default');
+        } catch (error) {
+          if ((error as { code?: unknown } | null)?.code === 'plan_default_not_permitted') {
+            io.stderr.write(
+              'slotlock: only the schema owner sets the default plan; set SLOTLOCK_MIGRATE_DATABASE_URL to its URL\n',
+            );
+            return 1;
+          }
           throw error;
         }
         return 0;
@@ -2011,6 +2115,7 @@ function parseCliArguments(argv: readonly string[]) {
       all: { type: 'boolean' },
       reason: { type: 'string' },
       confirm: { type: 'string' },
+      from: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
     },

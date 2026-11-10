@@ -302,6 +302,64 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     }
   });
 
+  it('sets the default plan as the schema owner, and keeps a paid tenant from being erased', async () => {
+    const planned = `cli-plan-${randomUUID()}`;
+    const runIn = async (argv: string[], overrides: SlotlockEnv = {}) => {
+      const stdout = output();
+      const stderr = output();
+      const code = await runSlotlockCli(argv, {
+        env: { ...env, SLOTLOCK_TENANT: planned, ...overrides },
+        stdout,
+        stderr,
+        signal: new AbortController().signal,
+      });
+      return { code, stdout, stderr, line: () => JSON.parse(stdout.text()) as Record<string, unknown> };
+    };
+    try {
+      expect((await runIn(['plan', 'status'])).line()).toEqual({ default: null, tenant: planned, plan: null });
+      // The serving role may not: only the schema owner, SLOTLOCK_MIGRATE_DATABASE_URL's.
+      const notOwner = await runIn(['plan', 'default', 'free'], { SLOTLOCK_MIGRATE_DATABASE_URL: '' });
+      expect(notOwner.code).toBe(1);
+      expect(notOwner.stderr.text()).toMatch(/only the schema owner sets the default plan/);
+      const set = await runIn(['plan', 'default', 'free', '--from', '2000-01-01']);
+      expect(set.code).toBe(0);
+      expect(set.line()).toEqual({
+        default: {
+          plan: 'free',
+          applies_from: '2000-01-01T00:00:00.000Z',
+          resources: 10,
+          api_keys: 10,
+          webhook_endpoints: 2,
+        },
+        tenant: planned,
+        plan: {
+          plan: 'free',
+          status: 'active',
+          resources: 10,
+          api_keys: 10,
+          webhook_endpoints: 2,
+          paid: false,
+          current_period_end: null,
+        },
+      });
+      expect((await runIn(['plan', 'default', 'none'])).line()).toMatchObject({ default: null, plan: null });
+
+      await admin`SELECT slotlock.set_tenant_plan(${planned}::text, 'developer', 'active', 100, 100, 10,
+        'cus_Cli1', 'sub_Cli1', NULL)`;
+      const refused = await runIn(['tenant', 'erase', '--confirm', planned]);
+      expect(refused.code).toBe(1);
+      expect(refused.stderr.text()).toMatch(/live subscription; cancel it in Stripe first/);
+      await admin`SELECT slotlock.set_tenant_plan(${planned}::text, 'free', 'canceled', 10, 10, 2,
+        NULL, NULL, NULL)`;
+      expect((await runIn(['tenant', 'erase', '--confirm', planned])).line()).toMatchObject({
+        rows: expect.objectContaining({ tenant_plans: 1 }),
+      });
+    } finally {
+      await admin`DELETE FROM slotlock.plan_defaults`;
+      await admin`DELETE FROM slotlock.tenant_plans WHERE tenant_ref = ${planned}`;
+    }
+  });
+
   it('serves MCP over HTTP as the granted role until its signal aborts', async () => {
     const shutdown = new AbortController();
     const stdout = output();
