@@ -193,6 +193,16 @@ function bookPool(
   return backend.bookPool(context, input);
 }
 
+/** `slotlock_hold_together`, from a backend that holds sets (RFC 0004 B7). */
+function holdTogether(
+  backend: SlotlockAgentCalendarBackend,
+  context: SlotlockAgentInvocationContext,
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  if (!backend.holdTogether) throw new SlotlockAgentOperationError('holds_unavailable', 409);
+  return backend.holdTogether(context, input);
+}
+
 /** `slotlock_find_available_ranges`, from a backend that searches hires (RFC 0004 B3). */
 function findAvailableRanges(
   backend: SlotlockAgentCalendarBackend,
@@ -679,6 +689,7 @@ export type SlotlockAgentOperation =
   | 'slotlock_find_available_slots'
   | 'slotlock_find_available_ranges'
   | 'slotlock_hold_slots'
+  | 'slotlock_hold_together'
   | 'slotlock_release_slots'
   | 'slotlock_confirm_slot'
   | 'slotlock_reschedule'
@@ -732,6 +743,7 @@ const OPERATION_SCOPES: Readonly<Record<SlotlockAgentOperation, SlotlockAgentSco
   slotlock_find_available_slots: 'read',
   slotlock_find_available_ranges: 'read',
   slotlock_hold_slots: 'write',
+  slotlock_hold_together: 'write',
   slotlock_book_together: 'write',
   slotlock_book_pool: 'write',
   slotlock_get_pool_availability: 'read',
@@ -916,6 +928,15 @@ export interface SlotlockAgentCalendarBackend {
    * (`slotlock_hold_slots`); a tool without it answers `holds_unavailable`.
    */
   holdSlots?(
+    context: SlotlockAgentInvocationContext,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+  /**
+   * Optional. Hold one time on 2-20 resources all or nothing, as one group with one time to live
+   * (`slotlock_hold_together`, RFC 0004 B7), else `holds_unavailable`. `slotlock_book_together`
+   * with its `hold_group_id` books the set.
+   */
+  holdTogether?(
     context: SlotlockAgentInvocationContext,
     input: Record<string, unknown>,
   ): Promise<Record<string, unknown>>;
@@ -1713,7 +1734,7 @@ const OPERATION_DEFINITIONS = [
     name: 'slotlock_book_together',
     title: 'Book resources together',
     description:
-      'Book the same time on 2-20 resources at once, all or none: a van with its driver, a room with its projector. If any of them is taken, nothing is booked, and the refusal names that resource_id. Find such a time with slotlock_find_available_slots and require_free. A retry with the same idempotency_key answers the same events.',
+      'Book the same time on 2-20 resources at once, all or none: a van with its driver, a room with its projector. If any of them is taken, nothing is booked, and the refusal names that resource_id. Find such a time with slotlock_find_available_slots and require_free. With hold_group_id, it books the set slotlock_hold_together held, from those holds. A retry with the same idempotency_key answers the same events.',
     input: z
       .object({
         resource_ids: z.array(RESOURCE_ID).min(2).max(MAX_SLOT_RESOURCES),
@@ -1721,6 +1742,8 @@ const OPERATION_DEFINITIONS = [
         ends_at: DATE_TIME,
         timezone: z.string().min(1).max(100),
         title: z.string().trim().min(1).max(500).optional(),
+        /** The set slotlock_hold_together held, booked from its holds (RFC 0004 B7). */
+        hold_group_id: z.string().uuid().optional(),
         idempotency_key: IDEMPOTENCY_KEY,
       })
       .strict()
@@ -1918,6 +1941,45 @@ const OPERATION_DEFINITIONS = [
       ],
       ttl_seconds: 300,
       idempotency_key: 'hold-handover-2027-03-02',
+    },
+  },
+  {
+    name: 'slotlock_hold_together',
+    title: 'Hold resources together',
+    description:
+      'Hold one time on 2-20 resources at once, all or none, such as a car with its driver while a person decides: if any is taken, nothing is held and the refusal names that resource_id. The holds are one group with one time to live (ttl_seconds, the earliest of them). Book the set with slotlock_book_together and its hold_group_id; release them with slotlock_release_slots and any hold_id. A retry with the same idempotency_key answers the same holds.',
+    input: z
+      .object({
+        resource_ids: z.array(RESOURCE_ID).min(2).max(MAX_SLOT_RESOURCES),
+        start: DATE_TIME,
+        end: DATE_TIME,
+        ttl_seconds: z.number().int().min(30).max(900).default(300),
+        idempotency_key: IDEMPOTENCY_KEY,
+      })
+      .strict()
+      .refine(boundedAgentWindow),
+    output: z
+      .object({
+        group_id: z.string().uuid(),
+        holds: z
+          .array(
+            z
+              .object({ hold_id: z.string().uuid(), resource_id: RESOURCE_ID, start: DATE_TIME, end: DATE_TIME, expires_at: DATE_TIME })
+              .strict(),
+          )
+          .min(2)
+          .max(MAX_SLOT_RESOURCES),
+        expires_at: DATE_TIME,
+      })
+      .strict(),
+    risk: { readOnly: false, destructive: false, idempotent: true },
+    invoke: holdTogether,
+    example: {
+      resource_ids: [EXAMPLE_RESOURCE_ID, '3c2d1e0f-9a8b-4c7d-8e6f-5a4b3c2d1e0f'],
+      start: '2027-03-02T09:00:00Z',
+      end: '2027-03-02T17:00:00Z',
+      ttl_seconds: 300,
+      idempotency_key: 'hold-van-and-driver-1',
     },
   },
   {

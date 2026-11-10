@@ -2252,11 +2252,186 @@
         }
       }
     },
+    "/v1/slot-holds/together": {
+      "post": {
+        "operationId": "slotlock_hold_together",
+        "summary": "Hold resources together",
+        "description": "Hold one time on 2-20 resources at once, all or none, such as a car with its driver while a person decides: if any is taken, nothing is held and the refusal names that resource_id. The holds are one group with one time to live (ttl_seconds, the earliest of them). Book the set with slotlock_book_together and its hold_group_id; release them with slotlock_release_slots and any hold_id. A retry with the same idempotency_key answers the same holds.",
+        "tags": [
+          "Agent tools"
+        ],
+        "x-slotlock-scope": "write",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "resource_ids": {
+                    "minItems": 2,
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    }
+                  },
+                  "start": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "end": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "ttl_seconds": {
+                    "default": 300,
+                    "type": "integer",
+                    "minimum": 30,
+                    "maximum": 900
+                  },
+                  "idempotency_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+                  }
+                },
+                "required": [
+                  "resource_ids",
+                  "start",
+                  "end",
+                  "idempotency_key"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Stands in for idempotency_key: a Structured Field String (`\"8e03978e-40d5-43e8-bc93-6894a57f9324\"`, draft-ietf-httpapi-idempotency-key-header-08) or the bare key; when both are sent they must be equal. A retry with the same key and request answers what the first did; the same key with another request is 422 idempotency_conflict. An event write keeps its key for 30 days (maintenance removes it after that), a hold until the hold would have expired, is released or is confirmed. Where the key is required and neither is sent: 400 idempotency_key_required.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 502
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "group_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "holds": {
+                      "minItems": 2,
+                      "maxItems": 20,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "hold_id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "resource_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "start": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "end": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "expires_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        "required": [
+                          "hold_id",
+                          "resource_id",
+                          "start",
+                          "end",
+                          "expires_at"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "expires_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
+                    }
+                  },
+                  "required": [
+                    "group_id",
+                    "holds",
+                    "expires_at"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/v1/bundles": {
       "post": {
         "operationId": "slotlock_book_together",
         "summary": "Book resources together",
-        "description": "Book the same time on 2-20 resources at once, all or none: a van with its driver, a room with its projector. If any of them is taken, nothing is booked, and the refusal names that resource_id. Find such a time with slotlock_find_available_slots and require_free. A retry with the same idempotency_key answers the same events.",
+        "description": "Book the same time on 2-20 resources at once, all or none: a van with its driver, a room with its projector. If any of them is taken, nothing is booked, and the refusal names that resource_id. Find such a time with slotlock_find_available_slots and require_free. With hold_group_id, it books the set slotlock_hold_together held, from those holds. A retry with the same idempotency_key answers the same events.",
         "tags": [
           "Agent tools"
         ],
@@ -2295,6 +2470,10 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 500
+                  },
+                  "hold_group_id": {
+                    "type": "string",
+                    "format": "uuid"
                   },
                   "idempotency_key": {
                     "type": "string",
@@ -20886,6 +21065,847 @@
             "$ref": "#/components/responses/Error"
           },
           "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/tenant/bundles": {
+      "post": {
+        "operationId": "slotlock_tenant_book_together",
+        "summary": "Book resources together, as the tenant",
+        "description": "Book the same time on 2-20 resources at once, all or none, as agents' slotlock_book_together does but for the tenant's own systems (RFC 0004 B7): each is an event the key owns, held to the resources' booking rules. If any is taken, nothing is booked and the refusal names that resource_id. A retry with the same idempotency_key answers the same events. 409 bundles_unavailable where the server books no bundles.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "resource_ids": {
+                    "minItems": 2,
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    }
+                  },
+                  "starts_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "ends_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "timezone": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "idempotency_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500,
+                    "description": "A retry identity, also accepted as the Idempotency-Key header: the same key with the same request answers what the first did; with another request, 422 idempotency_conflict."
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+                  }
+                },
+                "required": [
+                  "resource_ids",
+                  "starts_at",
+                  "ends_at",
+                  "timezone",
+                  "idempotency_key"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Stands in for idempotency_key: a Structured Field String (`\"8e03978e-40d5-43e8-bc93-6894a57f9324\"`, draft-ietf-httpapi-idempotency-key-header-08) or the bare key; when both are sent they must be equal. A retry with the same key and request answers what the first did; the same key with another request is 422 idempotency_conflict. An event write keeps its key for 30 days (maintenance removes it after that), a hold until the hold would have expired, is released or is confirmed. Where the key is required and neither is sent: 400 idempotency_key_required.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 502
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "events": {
+                      "minItems": 2,
+                      "maxItems": 20,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 500
+                          },
+                          "resource_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "starts_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "ends_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "timezone": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 100
+                          },
+                          "title": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 4096
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "description": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 16384
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "location": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 16384
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "organizer": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "address": {
+                                    "type": "string",
+                                    "minLength": 3,
+                                    "maxLength": 320
+                                  },
+                                  "name": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string",
+                                        "maxLength": 1024
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "address",
+                                  "name"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "attendees": {
+                            "maxItems": 100,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "address": {
+                                  "type": "string",
+                                  "minLength": 3,
+                                  "maxLength": 320
+                                },
+                                "name": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "maxLength": 1024
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "role": {
+                                  "type": "string",
+                                  "enum": [
+                                    "chair",
+                                    "required",
+                                    "optional",
+                                    "non_participant"
+                                  ]
+                                },
+                                "participation_status": {
+                                  "type": "string",
+                                  "enum": [
+                                    "needs_action",
+                                    "accepted",
+                                    "declined",
+                                    "tentative",
+                                    "delegated"
+                                  ]
+                                },
+                                "rsvp": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "required": [
+                                "address",
+                                "name",
+                                "role",
+                                "participation_status",
+                                "rsvp"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "reminders": {
+                            "maxItems": 20,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "minutes_before": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 527040
+                                },
+                                "channel": {
+                                  "type": "string",
+                                  "enum": [
+                                    "display",
+                                    "email"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "minutes_before",
+                                "channel"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "tentative",
+                              "confirmed",
+                              "cancelled"
+                            ]
+                          },
+                          "transparency": {
+                            "type": "string",
+                            "enum": [
+                              "opaque",
+                              "transparent"
+                            ]
+                          },
+                          "sequence": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "revision": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "recurrence_rule": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 4096
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "recurrence_exceptions": {
+                            "maxItems": 1000,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "recurrence_id": {
+                                  "type": "string",
+                                  "format": "date-time"
+                                },
+                                "cancelled": {
+                                  "type": "boolean"
+                                },
+                                "starts_at": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "format": "date-time"
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "ends_at": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "format": "date-time"
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "recurrence_id",
+                                "cancelled",
+                                "starts_at",
+                                "ends_at"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "recurrence_id": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "resource_id",
+                          "starts_at",
+                          "ends_at",
+                          "timezone",
+                          "title",
+                          "description",
+                          "location",
+                          "organizer",
+                          "attendees",
+                          "reminders",
+                          "status",
+                          "transparency",
+                          "sequence",
+                          "revision",
+                          "recurrence_rule",
+                          "recurrence_exceptions",
+                          "recurrence_id"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "replayed": {
+                      "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
+                    }
+                  },
+                  "required": [
+                    "events",
+                    "replayed"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/tenant/pool-bookings": {
+      "post": {
+        "operationId": "slotlock_tenant_book_pool",
+        "summary": "Book any member of a pool, as the tenant",
+        "description": "Book any one free member of a pool for a time, as agents' slotlock_book_pool does but for the tenant's own systems (RFC 0004 B7), in the pool's order: the event names the member. 409 pool_full when none is free; 404 pool_not_found. A retry with the same idempotency_key answers the member it booked.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "pool": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                  },
+                  "starts_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "ends_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "timezone": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "idempotency_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500,
+                    "description": "A retry identity, also accepted as the Idempotency-Key header: the same key with the same request answers what the first did; with another request, 422 idempotency_conflict."
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+                  }
+                },
+                "required": [
+                  "pool",
+                  "starts_at",
+                  "ends_at",
+                  "timezone",
+                  "idempotency_key"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Stands in for idempotency_key: a Structured Field String (`\"8e03978e-40d5-43e8-bc93-6894a57f9324\"`, draft-ietf-httpapi-idempotency-key-header-08) or the bare key; when both are sent they must be equal. A retry with the same key and request answers what the first did; the same key with another request is 422 idempotency_conflict. An event write keeps its key for 30 days (maintenance removes it after that), a hold until the hold would have expired, is released or is confirmed. Where the key is required and neither is sent: 400 idempotency_key_required.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 502
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "event": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "resource_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "starts_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "ends_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "timezone": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 100
+                        },
+                        "title": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "description": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 16384
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "location": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 16384
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "organizer": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "address": {
+                                  "type": "string",
+                                  "minLength": 3,
+                                  "maxLength": 320
+                                },
+                                "name": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "maxLength": 1024
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "address",
+                                "name"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "attendees": {
+                          "maxItems": 100,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "address": {
+                                "type": "string",
+                                "minLength": 3,
+                                "maxLength": 320
+                              },
+                              "name": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "maxLength": 1024
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "role": {
+                                "type": "string",
+                                "enum": [
+                                  "chair",
+                                  "required",
+                                  "optional",
+                                  "non_participant"
+                                ]
+                              },
+                              "participation_status": {
+                                "type": "string",
+                                "enum": [
+                                  "needs_action",
+                                  "accepted",
+                                  "declined",
+                                  "tentative",
+                                  "delegated"
+                                ]
+                              },
+                              "rsvp": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "address",
+                              "name",
+                              "role",
+                              "participation_status",
+                              "rsvp"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "reminders": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "minutes_before": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 527040
+                              },
+                              "channel": {
+                                "type": "string",
+                                "enum": [
+                                  "display",
+                                  "email"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "minutes_before",
+                              "channel"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "tentative",
+                            "confirmed",
+                            "cancelled"
+                          ]
+                        },
+                        "transparency": {
+                          "type": "string",
+                          "enum": [
+                            "opaque",
+                            "transparent"
+                          ]
+                        },
+                        "sequence": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "revision": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "recurrence_rule": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "recurrence_exceptions": {
+                          "maxItems": 1000,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "recurrence_id": {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              "cancelled": {
+                                "type": "boolean"
+                              },
+                              "starts_at": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "format": "date-time"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "ends_at": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "format": "date-time"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            "required": [
+                              "recurrence_id",
+                              "cancelled",
+                              "starts_at",
+                              "ends_at"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "recurrence_id": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "resource_id",
+                        "starts_at",
+                        "ends_at",
+                        "timezone",
+                        "title",
+                        "description",
+                        "location",
+                        "organizer",
+                        "attendees",
+                        "reminders",
+                        "status",
+                        "transparency",
+                        "sequence",
+                        "revision",
+                        "recurrence_rule",
+                        "recurrence_exceptions",
+                        "recurrence_id"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "replayed": {
+                      "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
+                    }
+                  },
+                  "required": [
+                    "event",
+                    "replayed"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
             "$ref": "#/components/responses/Error"
           },
           "429": {

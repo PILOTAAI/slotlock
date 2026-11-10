@@ -94,6 +94,8 @@ export type SlotlockApplicationOperation =
   | 'slotlock_list_waitlist'
   | 'slotlock_leave_waitlist'
   | 'slotlock_decline_waitlist_offer'
+  | 'slotlock_tenant_book_together'
+  | 'slotlock_tenant_book_pool'
   | 'slotlock_record_coverage'
   | 'slotlock_list_tenant_events'
   | 'slotlock_get_tenant_event'
@@ -242,6 +244,8 @@ export interface SlotlockApplicationBackend {
   listWaitlist: Handler;
   leaveWaitlist: Handler;
   declineWaitlistOffer: Handler;
+  tenantBookTogether: Handler;
+  tenantBookPool: Handler;
   recordCoverage: Handler;
   listTenantEvents: Handler;
   getTenantEvent: Handler;
@@ -1805,6 +1809,62 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       risk: { readOnly: true, destructive: false, idempotent: true },
       invoke: 'exportTenantEvent',
       example: { event_id: EXAMPLE_EVENT_ID },
+    },
+    {
+      name: 'slotlock_tenant_book_together',
+      title: 'Book resources together, as the tenant',
+      description:
+        "Book the same time on 2-20 resources at once, all or none, as agents' slotlock_book_together does but for the tenant's own systems (RFC 0004 B7): each is an event the key owns, held to the resources' booking rules. If any is taken, nothing is booked and the refusal names that resource_id. A retry with the same idempotency_key answers the same events. 409 bundles_unavailable where the server books no bundles.",
+      method: 'POST',
+      path: '/v1/tenant/bundles',
+      input: z
+        .object({
+          resource_ids: z.array(RESOURCE_ID).min(2).max(20),
+          starts_at: DATE_TIME,
+          ends_at: DATE_TIME,
+          timezone: TIMEZONE,
+          title: z.string().trim().min(1).max(500).optional(),
+          idempotency_key: IDEMPOTENCY_KEY,
+        })
+        .strict(),
+      output: z.object({ events: z.array(SLOTLOCK_EVENT_OUTPUT).min(2).max(20), replayed: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'tenantBookTogether',
+      example: {
+        resource_ids: [EXAMPLE_RESOURCE_ID, '1f8b6c1e-2d4a-4c7e-9b1a-3e5f7a9c2d4b'],
+        starts_at: '2027-03-02T09:00:00Z',
+        ends_at: '2027-03-02T10:00:00Z',
+        timezone: 'Europe/London',
+        idempotency_key: 'desk-bundle-2027-03-02',
+      },
+    },
+    {
+      name: 'slotlock_tenant_book_pool',
+      title: 'Book any member of a pool, as the tenant',
+      description:
+        "Book any one free member of a pool for a time, as agents' slotlock_book_pool does but for the tenant's own systems (RFC 0004 B7), in the pool's order: the event names the member. 409 pool_full when none is free; 404 pool_not_found. A retry with the same idempotency_key answers the member it booked.",
+      method: 'POST',
+      path: '/v1/tenant/pool-bookings',
+      input: z
+        .object({
+          pool: POOL,
+          starts_at: DATE_TIME,
+          ends_at: DATE_TIME,
+          timezone: TIMEZONE,
+          title: z.string().trim().min(1).max(500).optional(),
+          idempotency_key: IDEMPOTENCY_KEY,
+        })
+        .strict(),
+      output: z.object({ event: SLOTLOCK_EVENT_OUTPUT, replayed: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'tenantBookPool',
+      example: {
+        pool: 'van',
+        starts_at: '2027-03-02T09:00:00Z',
+        ends_at: '2027-03-02T10:00:00Z',
+        timezone: 'Europe/London',
+        idempotency_key: 'desk-pool-2027-03-02',
+      },
     },
     {
       name: 'slotlock_cancel_tenant_event',

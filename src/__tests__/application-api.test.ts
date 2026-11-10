@@ -70,6 +70,28 @@ const HOLD = {
   expires_at: '2027-03-29T08:10:00.000Z',
   source: 'checkout',
 };
+/** An agent's event as SLOTLOCK_EVENT_OUTPUT answers it (the tenant's bundle and pool bookings). */
+const AGENT_EVENT = {
+  id: 'event-1',
+  resource_id: '0f8b6c1e-2d4a-4c7e-9b1a-3e5f7a9c2d4b',
+  starts_at: '2027-03-02T09:00:00.000Z',
+  ends_at: '2027-03-02T10:00:00.000Z',
+  timezone: 'Europe/London',
+  title: null,
+  description: null,
+  location: null,
+  organizer: null,
+  attendees: [],
+  reminders: [],
+  status: 'confirmed',
+  transparency: 'opaque',
+  sequence: 0,
+  revision: 1,
+  recurrence_rule: null,
+  recurrence_exceptions: [],
+  recurrence_id: null,
+};
+
 const TENANT_EVENT = {
   id: EVENT_ID,
   event_ref: 'agent:handover',
@@ -182,6 +204,8 @@ const backend = {
   listWaitlist: vi.fn(),
   leaveWaitlist: vi.fn(),
   declineWaitlistOffer: vi.fn(),
+  tenantBookTogether: vi.fn(),
+  tenantBookPool: vi.fn(),
   getUsage: vi.fn(),
   listApprovalPolicies: vi.fn(),
   putApprovalPolicy: vi.fn(),
@@ -442,6 +466,8 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   recordCoverage: { revision: 7, replayed: false },
   listTenantEvents: { events: [TENANT_EVENT], next_cursor: null },
   getTenantEvent: { event: TENANT_EVENT },
+  tenantBookTogether: { events: [AGENT_EVENT, AGENT_EVENT], replayed: false },
+  tenantBookPool: { event: AGENT_EVENT, replayed: false },
   cancelTenantEvent: { event_id: EVENT_ID, revision: 3, cancelled: true, replayed: false, cancellation_fee: null },
   getTenant: { tenant: { ref: 'tenant-a', suspended: false } },
   eraseTenant: { total: 12, rows: { resources: 2, reservations: 10 } },
@@ -836,8 +862,11 @@ describe('the application API over REST', () => {
       'slotlock_create_webhook',
       'slotlock_delete_event',
       'slotlock_hold_slots',
+      'slotlock_hold_together',
       'slotlock_join_waitlist',
       'slotlock_reschedule',
+      'slotlock_tenant_book_pool',
+      'slotlock_tenant_book_together',
       'slotlock_update_event',
     ]);
   });

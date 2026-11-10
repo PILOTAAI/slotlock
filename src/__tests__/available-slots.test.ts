@@ -173,6 +173,7 @@ it('lets a calendar view call reads, and only the model call writes', async () =
     'slotlock_create_event',
     'slotlock_delete_event',
     'slotlock_hold_slots',
+    'slotlock_hold_together',
     'slotlock_release_slots',
     'slotlock_reschedule',
     'slotlock_update_event',

@@ -769,6 +769,76 @@ export function createSlotlockStoreAgentBackend(
       });
     },
 
+    async holdTogether(context, rawInput) {
+      const input = rawInput as {
+        resource_ids: string[];
+        start: string;
+        end: string;
+        ttl_seconds: number;
+        idempotency_key: string;
+      };
+      const holderRef = agentOwnerRef(context);
+      const limits = context.principal.limits;
+      const holderCaps =
+        limits?.maxHolds !== undefined || limits?.maxHeldHours !== undefined
+          ? {
+              ...(limits.maxHolds !== undefined ? { maxHolds: limits.maxHolds } : {}),
+              ...(limits.maxHeldHours !== undefined ? { maxHeldHours: limits.maxHeldHours } : {}),
+            }
+          : undefined;
+      // Sorted, so sets over the same resources lock in one order; one group per agent and key.
+      const resourceIds = [...new Set(input.resource_ids)].sort();
+      if (resourceIds.length < 2) throw new SlotlockAgentOperationError('invalid_arguments', 400);
+      const groupId = uuidFromDigest(`slotlock-hold-together\0${holderRef}\0${input.idempotency_key}`);
+      return withTenant(store, context, async (tenantStore) => {
+        for (const resourceId of resourceIds) {
+          try {
+            await requireAgentResource(tenantStore, context.principal.tenantRef, resourceId);
+          } catch (error) {
+            if (!(error instanceof SlotlockAgentOperationError)) throw error;
+            throw new SlotlockAgentOperationError(error.code, error.status, { resource_id: resourceId });
+          }
+          const result = await tenantStore.acquireHold({
+            tenantRef: context.principal.tenantRef,
+            principalRef: holderRef,
+            holderRef,
+            idempotencyKey: agentCommandIdempotencyKey(context, `${input.idempotency_key}\0together\0${resourceId}`),
+            groupId,
+            resourceId,
+            start: new Date(input.start),
+            end: new Date(input.end),
+            ttlMs: input.ttl_seconds * 1_000,
+            source: 'slotlock:together',
+            ...(holderCaps ? { holderCaps } : {}),
+          });
+          // All or nothing: thrown, so the holds already made roll back with it.
+          if (!result.ok) {
+            const refusal = operationError(result);
+            throw new SlotlockAgentOperationError(refusal.code, refusal.status, { resource_id: resourceId });
+          }
+        }
+        // One time to live for the set: each expires when the earliest does.
+        const holds = await tenantStore.holdGroup({
+          tenantRef: context.principal.tenantRef,
+          holderRef,
+          groupId,
+          alignExpiry: true,
+        });
+        if (holds.length !== resourceIds.length) throw new SlotlockAgentOperationError('store_inconsistent', 503);
+        return {
+          group_id: groupId,
+          holds: holds.map((hold) => ({
+            hold_id: hold.holdId,
+            resource_id: hold.resourceId,
+            start: hold.start.toISOString(),
+            end: hold.end.toISOString(),
+            expires_at: hold.expiresAt.toISOString(),
+          })),
+          expires_at: (holds[0] as { expiresAt: Date }).expiresAt.toISOString(),
+        };
+      });
+    },
+
     async bookPool(context, rawInput) {
       const input = rawInput as {
         pool: string;
@@ -937,6 +1007,7 @@ export function createSlotlockStoreAgentBackend(
         timezone: string;
         title?: string;
         idempotency_key: string;
+        hold_group_id?: string;
       };
       // Sorted, so bundles over the same resources lock in one order and never deadlock.
       const resourceIds = [...new Set(input.resource_ids)].sort();
@@ -960,11 +1031,24 @@ export function createSlotlockStoreAgentBackend(
             throw new SlotlockAgentOperationError(error.code, error.status, { resource_id: resourceId });
           }
         }
+        // A set held together (RFC 0004 B7) is booked from its holds: each must be the agent's, live,
+        // and for exactly this time.
+        const held = new Map<string, string>();
+        if (input.hold_group_id !== undefined) {
+          const holds = await tenantStore.holdGroup({
+            tenantRef: context.principal.tenantRef,
+            holderRef: agentOwnerRef(context),
+            groupId: input.hold_group_id,
+          });
+          for (const hold of holds) held.set(hold.resourceId, hold.holdId);
+        }
         const events: Record<string, unknown>[] = [];
         let replayed = true;
         for (const resourceId of resourceIds) {
           const key = `${input.idempotency_key}\0${resourceId}`;
+          const holdId = held.get(resourceId);
           const result = await tenantStore.putCalendarEvent({
+            ...(holdId !== undefined ? { fromHold: { holdId, holderRef: agentOwnerRef(context) } } : {}),
             tenantRef: context.principal.tenantRef,
             ownerRef: agentOwnerRef(context),
             externalRef: agentExternalRef(context, key),
@@ -3481,6 +3565,23 @@ export function createSlotlockStoreApplicationBackend(
       }));
       if (left.left) await offerFreedTime(store, context);
       return left;
+    },
+
+    async tenantBookTogether(context, input) {
+      if (!options.agentBackend?.bookTogether) throw new SlotlockAgentOperationError('bundles_unavailable', 409);
+      // As the key itself, through the agents' bundle: one transaction, the booking rules applied.
+      return options.agentBackend.bookTogether(
+        { ...context, operation: 'slotlock_book_together' } as unknown as SlotlockAgentInvocationContext,
+        input,
+      );
+    },
+
+    async tenantBookPool(context, input) {
+      if (!options.agentBackend?.bookPool) throw new SlotlockAgentOperationError('pools_unavailable', 409);
+      return options.agentBackend.bookPool(
+        { ...context, operation: 'slotlock_book_pool' } as unknown as SlotlockAgentInvocationContext,
+        input,
+      );
     },
 
     async declineWaitlistOffer(context, input) {

@@ -20,6 +20,8 @@ export const SUMMARIES = {
   slotlock_hold_slots:
     'Hold up to five candidate slots for a few minutes while a person chooses, as one group.',
   slotlock_release_slots: 'Release one of your holds and the rest of its group at once.',
+  slotlock_hold_together:
+    'Hold one time on 2-20 resources at once, all or none, as one group with one time to live.',
   slotlock_book_together: 'Book the same time on 2-20 resources at once, all or none.',
   slotlock_book_pool: 'Book any one member of a pool, such as a vehicle class, for a time.',
   slotlock_get_pool_availability:
@@ -53,6 +55,8 @@ export const DETAILS = {
     'The window is split where the number of free members changes; each part says how many are free, counting only the members you may book, and each only where its booking rules let a booking start (after its notice, within how far ahead it books, inside its hours when it enforces them). A member’s slot step is not counted. The count is certain only when `coverage.certainty` is `certain`. Book one of them with `slotlock_book_pool`.',
   slotlock_book_together:
     'One event per resource, in one transaction: if any resource is taken or breaks its booking rules, nothing is booked and the refusal names that `resource_id`. Bundles take their resources in one order, so two racing over the same ones end with one booked and one refused, never stuck. Find the time first with `slotlock_find_available_slots` and `require_free`.',
+  slotlock_hold_together:
+    'Every resource is held, or none is: a taken one rolls the others back, and the refusal names its `resource_id`. The holds share one group and expire together, when the earliest would. `slotlock_book_together` with `hold_group_id` books the set from them, in one transaction; `slotlock_release_slots` with any `hold_id` lets the whole set go.',
   slotlock_release_slots:
     'Holds expire on their own; release them when the person walks away, so the time is free sooner.',
   slotlock_create_event:
@@ -191,6 +195,7 @@ export const TOOL_ERRORS = {
   slotlock_find_available_ranges: ['resource_not_found', 'pool_not_found', 'ranges_unavailable'],
   slotlock_hold_slots: ['holds_unavailable', 'idempotency_conflict'],
   slotlock_release_slots: ['holds_unavailable'],
+  slotlock_hold_together: ['overlap', 'resource_not_found', 'holds_unavailable', 'hold_limit_reached', 'idempotency_conflict'],
   slotlock_get_pool_availability: ['pool_not_found', 'pools_unavailable'],
   slotlock_book_pool: [
     'pool_full',

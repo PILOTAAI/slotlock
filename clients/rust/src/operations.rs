@@ -58,6 +58,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
+        name: "slotlock_hold_together",
+        method: "POST",
+        path: "/v1/slot-holds/together",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_book_together",
         method: "POST",
         path: "/v1/bundles",
@@ -548,6 +555,20 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
+        name: "slotlock_tenant_book_together",
+        method: "POST",
+        path: "/v1/tenant/bundles",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_tenant_book_pool",
+        method: "POST",
+        path: "/v1/tenant/pool-bookings",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_get_tenant",
         method: "GET",
         path: "/v1/tenant",
@@ -920,6 +941,23 @@ pub struct HoldSlotsInput {
     pub dry_run: Option<bool>,
 }
 
+/// The arguments of [`Client::hold_together`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct HoldTogetherInput {
+    pub resource_ids: Vec<String>,
+    pub start: String,
+    pub end: String,
+    pub idempotency_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<i64>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
 /// The arguments of [`Client::book_together`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct BookTogetherInput {
@@ -930,6 +968,8 @@ pub struct BookTogetherInput {
     pub idempotency_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hold_group_id: Option<String>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -1887,6 +1927,46 @@ pub struct ExportTenantEventInput {
     pub event_id: String,
 }
 
+/// The arguments of [`Client::tenant_book_together`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TenantBookTogetherInput {
+    pub resource_ids: Vec<String>,
+    pub starts_at: String,
+    pub ends_at: String,
+    pub timezone: String,
+    /// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
+    /// request answers what the first did; with another request, 422 idempotency_conflict.
+    pub idempotency_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::tenant_book_pool`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TenantBookPoolInput {
+    pub pool: String,
+    pub starts_at: String,
+    pub ends_at: String,
+    pub timezone: String,
+    /// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
+    /// request answers what the first did; with another request, 422 idempotency_conflict.
+    pub idempotency_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
 /// The arguments of [`Client::get_tenant`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct GetTenantInput {
@@ -2259,11 +2339,24 @@ impl Client {
         self.call("slotlock_hold_slots", serde_json::to_value(input)?)
     }
 
+    /// Hold resources together.
+    ///
+    /// Hold one time on 2-20 resources at once, all or none, such as a car with its driver while
+    /// a person decides: if any is taken, nothing is held and the refusal names that resource_id.
+    /// The holds are one group with one time to live (ttl_seconds, the earliest of them). Book
+    /// the set with slotlock_book_together and its hold_group_id; release them with
+    /// slotlock_release_slots and any hold_id. A retry with the same idempotency_key answers the
+    /// same holds.
+    pub fn hold_together(&self, input: &HoldTogetherInput) -> Result<Value, Error> {
+        self.call("slotlock_hold_together", serde_json::to_value(input)?)
+    }
+
     /// Book resources together.
     ///
     /// Book the same time on 2-20 resources at once, all or none: a van with its driver, a room
     /// with its projector. If any of them is taken, nothing is booked, and the refusal names that
-    /// resource_id. Find such a time with slotlock_find_available_slots and require_free. A retry
+    /// resource_id. Find such a time with slotlock_find_available_slots and require_free. With
+    /// hold_group_id, it books the set slotlock_hold_together held, from those holds. A retry
     /// with the same idempotency_key answers the same events.
     pub fn book_together(&self, input: &BookTogetherInput) -> Result<Value, Error> {
         self.call("slotlock_book_together", serde_json::to_value(input)?)
@@ -2959,6 +3052,27 @@ impl Client {
     /// or unknown one answers 404 event_not_found.
     pub fn export_tenant_event(&self, input: &ExportTenantEventInput) -> Result<Value, Error> {
         self.call("slotlock_export_tenant_event", serde_json::to_value(input)?)
+    }
+
+    /// Book resources together, as the tenant.
+    ///
+    /// Book the same time on 2-20 resources at once, all or none, as agents'
+    /// slotlock_book_together does but for the tenant's own systems (RFC 0004 B7): each is an
+    /// event the key owns, held to the resources' booking rules. If any is taken, nothing is
+    /// booked and the refusal names that resource_id. A retry with the same idempotency_key
+    /// answers the same events. 409 bundles_unavailable where the server books no bundles.
+    pub fn tenant_book_together(&self, input: &TenantBookTogetherInput) -> Result<Value, Error> {
+        self.call("slotlock_tenant_book_together", serde_json::to_value(input)?)
+    }
+
+    /// Book any member of a pool, as the tenant.
+    ///
+    /// Book any one free member of a pool for a time, as agents' slotlock_book_pool does but for
+    /// the tenant's own systems (RFC 0004 B7), in the pool's order: the event names the member.
+    /// 409 pool_full when none is free; 404 pool_not_found. A retry with the same idempotency_key
+    /// answers the member it booked.
+    pub fn tenant_book_pool(&self, input: &TenantBookPoolInput) -> Result<Value, Error> {
+        self.call("slotlock_tenant_book_pool", serde_json::to_value(input)?)
     }
 
     /// Get the tenant.

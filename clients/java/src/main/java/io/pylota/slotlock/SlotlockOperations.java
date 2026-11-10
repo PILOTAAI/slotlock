@@ -19,6 +19,7 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_find_available_slots", new Operation("GET", "/v1/available-slots", List.of(), List.of("resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes", "limit", "require_free"))),
           Map.entry("slotlock_find_available_ranges", new Operation("GET", "/v1/available-ranges", List.of(), List.of("resource_ids", "pool", "pickup_start", "pickup_end", "days", "return_start", "return_end", "limit"))),
           Map.entry("slotlock_hold_slots", new Operation("POST", "/v1/slot-holds", List.of(), List.of())),
+          Map.entry("slotlock_hold_together", new Operation("POST", "/v1/slot-holds/together", List.of(), List.of())),
           Map.entry("slotlock_book_together", new Operation("POST", "/v1/bundles", List.of(), List.of())),
           Map.entry("slotlock_book_pool", new Operation("POST", "/v1/pool-bookings", List.of(), List.of())),
           Map.entry("slotlock_get_pool_availability", new Operation("GET", "/v1/pool-availability", List.of(), List.of("pool", "start", "end"))),
@@ -89,6 +90,8 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_get_tenant_event", new Operation("GET", "/v1/tenant/events/{event_id}", List.of("event_id"), List.of())),
           Map.entry("slotlock_cancel_tenant_event", new Operation("DELETE", "/v1/tenant/events/{event_id}", List.of("event_id"), List.of("expected_revision", "expected_resource_id", "idempotency_key", "override_reason", "dry_run"))),
           Map.entry("slotlock_export_tenant_event", new Operation("GET", "/v1/tenant/events/{event_id}/jscalendar", List.of("event_id"), List.of())),
+          Map.entry("slotlock_tenant_book_together", new Operation("POST", "/v1/tenant/bundles", List.of(), List.of())),
+          Map.entry("slotlock_tenant_book_pool", new Operation("POST", "/v1/tenant/pool-bookings", List.of(), List.of())),
           Map.entry("slotlock_get_tenant", new Operation("GET", "/v1/tenant", List.of(), List.of())),
           Map.entry("slotlock_erase_tenant", new Operation("POST", "/v1/tenant/erase", List.of(), List.of())),
           Map.entry("slotlock_run_maintenance", new Operation("POST", "/v1/maintenance", List.of(), List.of())),
@@ -530,18 +533,65 @@ public abstract class SlotlockOperations {
   }
 
   /**
+   * Hold resources together. Hold one time on 2-20 resources at once, all or none, such as a car
+   * with its driver while a person decides: if any is taken, nothing is held and the refusal
+   * names that resource_id. The holds are one group with one time to live (ttl_seconds, the
+   * earliest of them). Book the set with slotlock_book_together and its hold_group_id; release
+   * them with slotlock_release_slots and any hold_id. A retry with the same idempotency_key
+   * answers the same holds.
+   *
+   * @param resourceIds {@code resource_ids}, list of string
+   * @param start {@code start}, string
+   * @param end {@code end}, string
+   * @param idempotencyKey {@code idempotency_key}, string
+   * @param optional the optional arguments, or null: {@code ttl_seconds} (integer), {@code
+   * dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> holdTogether(List<?> resourceIds, String start, String end, String idempotencyKey, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("resource_ids", resourceIds);
+    values.put("start", start);
+    values.put("end", end);
+    values.put("idempotency_key", idempotencyKey);
+    putOptional(values, optional, Set.of("ttl_seconds", "dry_run"), "slotlock_hold_together");
+    return call("slotlock_hold_together", values);
+  }
+
+  /**
+   * Hold resources together. Hold one time on 2-20 resources at once, all or none, such as a car
+   * with its driver while a person decides: if any is taken, nothing is held and the refusal
+   * names that resource_id. The holds are one group with one time to live (ttl_seconds, the
+   * earliest of them). Book the set with slotlock_book_together and its hold_group_id; release
+   * them with slotlock_release_slots and any hold_id. A retry with the same idempotency_key
+   * answers the same holds.
+   *
+   * @param resourceIds {@code resource_ids}, list of string
+   * @param start {@code start}, string
+   * @param end {@code end}, string
+   * @param idempotencyKey {@code idempotency_key}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> holdTogether(List<?> resourceIds, String start, String end, String idempotencyKey) {
+    return holdTogether(resourceIds, start, end, idempotencyKey, null);
+  }
+
+  /**
    * Book resources together. Book the same time on 2-20 resources at once, all or none: a van
    * with its driver, a room with its projector. If any of them is taken, nothing is booked, and
    * the refusal names that resource_id. Find such a time with slotlock_find_available_slots and
-   * require_free. A retry with the same idempotency_key answers the same events.
+   * require_free. With hold_group_id, it books the set slotlock_hold_together held, from those
+   * holds. A retry with the same idempotency_key answers the same events.
    *
    * @param resourceIds {@code resource_ids}, list of string
    * @param startsAt {@code starts_at}, string
    * @param endsAt {@code ends_at}, string
    * @param timezone {@code timezone}, string
    * @param idempotencyKey {@code idempotency_key}, string
-   * @param optional the optional arguments, or null: {@code title} (string), {@code dry_run}
-   * (boolean)
+   * @param optional the optional arguments, or null: {@code title} (string), {@code
+   * hold_group_id} (string), {@code dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -552,7 +602,7 @@ public abstract class SlotlockOperations {
     values.put("ends_at", endsAt);
     values.put("timezone", timezone);
     values.put("idempotency_key", idempotencyKey);
-    putOptional(values, optional, Set.of("title", "dry_run"), "slotlock_book_together");
+    putOptional(values, optional, Set.of("title", "hold_group_id", "dry_run"), "slotlock_book_together");
     return call("slotlock_book_together", values);
   }
 
@@ -560,7 +610,8 @@ public abstract class SlotlockOperations {
    * Book resources together. Book the same time on 2-20 resources at once, all or none: a van
    * with its driver, a room with its projector. If any of them is taken, nothing is booked, and
    * the refusal names that resource_id. Find such a time with slotlock_find_available_slots and
-   * require_free. A retry with the same idempotency_key answers the same events.
+   * require_free. With hold_group_id, it books the set slotlock_hold_together held, from those
+   * holds. A retry with the same idempotency_key answers the same events.
    *
    * @param resourceIds {@code resource_ids}, list of string
    * @param startsAt {@code starts_at}, string
@@ -2771,6 +2822,106 @@ public abstract class SlotlockOperations {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("event_id", eventId);
     return call("slotlock_export_tenant_event", values);
+  }
+
+  /**
+   * Book resources together, as the tenant. Book the same time on 2-20 resources at once, all or
+   * none, as agents' slotlock_book_together does but for the tenant's own systems (RFC 0004 B7):
+   * each is an event the key owns, held to the resources' booking rules. If any is taken, nothing
+   * is booked and the refusal names that resource_id. A retry with the same idempotency_key
+   * answers the same events. 409 bundles_unavailable where the server books no bundles.
+   *
+   * @param resourceIds {@code resource_ids}, list of string
+   * @param startsAt {@code starts_at}, string
+   * @param endsAt {@code ends_at}, string
+   * @param timezone {@code timezone}, string
+   * @param idempotencyKey A retry identity, also accepted as the Idempotency-Key header: the same
+   * key with the same request answers what the first did; with another request, 422
+   * idempotency_conflict.
+   * @param optional the optional arguments, or null: {@code title} (string), {@code dry_run}
+   * (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> tenantBookTogether(List<?> resourceIds, String startsAt, String endsAt, String timezone, String idempotencyKey, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("resource_ids", resourceIds);
+    values.put("starts_at", startsAt);
+    values.put("ends_at", endsAt);
+    values.put("timezone", timezone);
+    values.put("idempotency_key", idempotencyKey);
+    putOptional(values, optional, Set.of("title", "dry_run"), "slotlock_tenant_book_together");
+    return call("slotlock_tenant_book_together", values);
+  }
+
+  /**
+   * Book resources together, as the tenant. Book the same time on 2-20 resources at once, all or
+   * none, as agents' slotlock_book_together does but for the tenant's own systems (RFC 0004 B7):
+   * each is an event the key owns, held to the resources' booking rules. If any is taken, nothing
+   * is booked and the refusal names that resource_id. A retry with the same idempotency_key
+   * answers the same events. 409 bundles_unavailable where the server books no bundles.
+   *
+   * @param resourceIds {@code resource_ids}, list of string
+   * @param startsAt {@code starts_at}, string
+   * @param endsAt {@code ends_at}, string
+   * @param timezone {@code timezone}, string
+   * @param idempotencyKey A retry identity, also accepted as the Idempotency-Key header: the same
+   * key with the same request answers what the first did; with another request, 422
+   * idempotency_conflict.
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> tenantBookTogether(List<?> resourceIds, String startsAt, String endsAt, String timezone, String idempotencyKey) {
+    return tenantBookTogether(resourceIds, startsAt, endsAt, timezone, idempotencyKey, null);
+  }
+
+  /**
+   * Book any member of a pool, as the tenant. Book any one free member of a pool for a time, as
+   * agents' slotlock_book_pool does but for the tenant's own systems (RFC 0004 B7), in the pool's
+   * order: the event names the member. 409 pool_full when none is free; 404 pool_not_found. A
+   * retry with the same idempotency_key answers the member it booked.
+   *
+   * @param pool {@code pool}, string
+   * @param startsAt {@code starts_at}, string
+   * @param endsAt {@code ends_at}, string
+   * @param timezone {@code timezone}, string
+   * @param idempotencyKey A retry identity, also accepted as the Idempotency-Key header: the same
+   * key with the same request answers what the first did; with another request, 422
+   * idempotency_conflict.
+   * @param optional the optional arguments, or null: {@code title} (string), {@code dry_run}
+   * (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> tenantBookPool(String pool, String startsAt, String endsAt, String timezone, String idempotencyKey, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("pool", pool);
+    values.put("starts_at", startsAt);
+    values.put("ends_at", endsAt);
+    values.put("timezone", timezone);
+    values.put("idempotency_key", idempotencyKey);
+    putOptional(values, optional, Set.of("title", "dry_run"), "slotlock_tenant_book_pool");
+    return call("slotlock_tenant_book_pool", values);
+  }
+
+  /**
+   * Book any member of a pool, as the tenant. Book any one free member of a pool for a time, as
+   * agents' slotlock_book_pool does but for the tenant's own systems (RFC 0004 B7), in the pool's
+   * order: the event names the member. 409 pool_full when none is free; 404 pool_not_found. A
+   * retry with the same idempotency_key answers the member it booked.
+   *
+   * @param pool {@code pool}, string
+   * @param startsAt {@code starts_at}, string
+   * @param endsAt {@code ends_at}, string
+   * @param timezone {@code timezone}, string
+   * @param idempotencyKey A retry identity, also accepted as the Idempotency-Key header: the same
+   * key with the same request answers what the first did; with another request, 422
+   * idempotency_conflict.
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> tenantBookPool(String pool, String startsAt, String endsAt, String timezone, String idempotencyKey) {
+    return tenantBookPool(pool, startsAt, endsAt, timezone, idempotencyKey, null);
   }
 
   /**

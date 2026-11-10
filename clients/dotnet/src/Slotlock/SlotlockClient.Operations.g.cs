@@ -22,6 +22,7 @@ public sealed partial class SlotlockClient
         ["slotlock_find_available_slots"] = new("GET", "/v1/available-slots", [], ["resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes", "limit", "require_free"]),
         ["slotlock_find_available_ranges"] = new("GET", "/v1/available-ranges", [], ["resource_ids", "pool", "pickup_start", "pickup_end", "days", "return_start", "return_end", "limit"]),
         ["slotlock_hold_slots"] = new("POST", "/v1/slot-holds", [], []),
+        ["slotlock_hold_together"] = new("POST", "/v1/slot-holds/together", [], []),
         ["slotlock_book_together"] = new("POST", "/v1/bundles", [], []),
         ["slotlock_book_pool"] = new("POST", "/v1/pool-bookings", [], []),
         ["slotlock_get_pool_availability"] = new("GET", "/v1/pool-availability", [], ["pool", "start", "end"]),
@@ -92,6 +93,8 @@ public sealed partial class SlotlockClient
         ["slotlock_get_tenant_event"] = new("GET", "/v1/tenant/events/{event_id}", ["event_id"], []),
         ["slotlock_cancel_tenant_event"] = new("DELETE", "/v1/tenant/events/{event_id}", ["event_id"], ["expected_revision", "expected_resource_id", "idempotency_key", "override_reason", "dry_run"]),
         ["slotlock_export_tenant_event"] = new("GET", "/v1/tenant/events/{event_id}/jscalendar", ["event_id"], []),
+        ["slotlock_tenant_book_together"] = new("POST", "/v1/tenant/bundles", [], []),
+        ["slotlock_tenant_book_pool"] = new("POST", "/v1/tenant/pool-bookings", [], []),
         ["slotlock_get_tenant"] = new("GET", "/v1/tenant", [], []),
         ["slotlock_erase_tenant"] = new("POST", "/v1/tenant/erase", [], []),
         ["slotlock_run_maintenance"] = new("POST", "/v1/maintenance", [], []),
@@ -520,11 +523,52 @@ public sealed partial class SlotlockClient
         return CallAsync("slotlock_hold_slots", values, cancellationToken);
     }
 
+    /// <summary>Hold resources together.</summary>
+    /// <remarks>
+    /// Hold one time on 2-20 resources at once, all or none, such as a car with its driver while
+    /// a person decides: if any is taken, nothing is held and the refusal names that resource_id.
+    /// The holds are one group with one time to live (ttl_seconds, the earliest of them). Book
+    /// the set with slotlock_book_together and its hold_group_id; release them with
+    /// slotlock_release_slots and any hold_id. A retry with the same idempotency_key answers the
+    /// same holds.
+    /// </remarks>
+    /// <param name="resourceIds">resource_ids</param>
+    /// <param name="start">start</param>
+    /// <param name="end">end</param>
+    /// <param name="idempotencyKey">idempotency_key</param>
+    /// <param name="ttlSeconds">ttl_seconds</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> HoldTogetherAsync(
+        IEnumerable<string> resourceIds,
+        string start,
+        string end,
+        string idempotencyKey,
+        Optional<long> ttlSeconds = default,
+        Optional<bool> dryRun = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_ids"] = Json.ToNode(resourceIds);
+        values["start"] = Json.ToNode(start);
+        values["end"] = Json.ToNode(end);
+        values["idempotency_key"] = Json.ToNode(idempotencyKey);
+        if (ttlSeconds.HasValue) values["ttl_seconds"] = Json.ToNode(ttlSeconds.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
+        return CallAsync("slotlock_hold_together", values, cancellationToken);
+    }
+
     /// <summary>Book resources together.</summary>
     /// <remarks>
     /// Book the same time on 2-20 resources at once, all or none: a van with its driver, a room
     /// with its projector. If any of them is taken, nothing is booked, and the refusal names that
-    /// resource_id. Find such a time with slotlock_find_available_slots and require_free. A retry
+    /// resource_id. Find such a time with slotlock_find_available_slots and require_free. With
+    /// hold_group_id, it books the set slotlock_hold_together held, from those holds. A retry
     /// with the same idempotency_key answers the same events.
     /// </remarks>
     /// <param name="resourceIds">resource_ids</param>
@@ -533,6 +577,7 @@ public sealed partial class SlotlockClient
     /// <param name="timezone">timezone</param>
     /// <param name="idempotencyKey">idempotency_key</param>
     /// <param name="title">title</param>
+    /// <param name="holdGroupId">hold_group_id</param>
     /// <param name="dryRun">Check the write without making it: it runs with every check, the
     /// database's included, and is then undone, so nothing is stored, recorded or sent. The
     /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
@@ -547,6 +592,7 @@ public sealed partial class SlotlockClient
         string timezone,
         string idempotencyKey,
         Optional<string> title = default,
+        Optional<string> holdGroupId = default,
         Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
@@ -557,6 +603,7 @@ public sealed partial class SlotlockClient
         values["timezone"] = Json.ToNode(timezone);
         values["idempotency_key"] = Json.ToNode(idempotencyKey);
         if (title.HasValue) values["title"] = Json.ToNode(title.Value);
+        if (holdGroupId.HasValue) values["hold_group_id"] = Json.ToNode(holdGroupId.Value);
         if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_book_together", values, cancellationToken);
     }
@@ -2886,6 +2933,93 @@ public sealed partial class SlotlockClient
         var values = new JsonObject();
         values["event_id"] = Json.ToNode(eventId);
         return CallAsync("slotlock_export_tenant_event", values, cancellationToken);
+    }
+
+    /// <summary>Book resources together, as the tenant.</summary>
+    /// <remarks>
+    /// Book the same time on 2-20 resources at once, all or none, as agents'
+    /// slotlock_book_together does but for the tenant's own systems (RFC 0004 B7): each is an
+    /// event the key owns, held to the resources' booking rules. If any is taken, nothing is
+    /// booked and the refusal names that resource_id. A retry with the same idempotency_key
+    /// answers the same events. 409 bundles_unavailable where the server books no bundles.
+    /// </remarks>
+    /// <param name="resourceIds">resource_ids</param>
+    /// <param name="startsAt">starts_at</param>
+    /// <param name="endsAt">ends_at</param>
+    /// <param name="timezone">timezone</param>
+    /// <param name="idempotencyKey">A retry identity, also accepted as the Idempotency-Key
+    /// header: the same key with the same request answers what the first did; with another
+    /// request, 422 idempotency_conflict.</param>
+    /// <param name="title">title</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> TenantBookTogetherAsync(
+        IEnumerable<string> resourceIds,
+        string startsAt,
+        string endsAt,
+        string timezone,
+        string idempotencyKey,
+        Optional<string> title = default,
+        Optional<bool> dryRun = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_ids"] = Json.ToNode(resourceIds);
+        values["starts_at"] = Json.ToNode(startsAt);
+        values["ends_at"] = Json.ToNode(endsAt);
+        values["timezone"] = Json.ToNode(timezone);
+        values["idempotency_key"] = Json.ToNode(idempotencyKey);
+        if (title.HasValue) values["title"] = Json.ToNode(title.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
+        return CallAsync("slotlock_tenant_book_together", values, cancellationToken);
+    }
+
+    /// <summary>Book any member of a pool, as the tenant.</summary>
+    /// <remarks>
+    /// Book any one free member of a pool for a time, as agents' slotlock_book_pool does but for
+    /// the tenant's own systems (RFC 0004 B7), in the pool's order: the event names the member.
+    /// 409 pool_full when none is free; 404 pool_not_found. A retry with the same idempotency_key
+    /// answers the member it booked.
+    /// </remarks>
+    /// <param name="pool">pool</param>
+    /// <param name="startsAt">starts_at</param>
+    /// <param name="endsAt">ends_at</param>
+    /// <param name="timezone">timezone</param>
+    /// <param name="idempotencyKey">A retry identity, also accepted as the Idempotency-Key
+    /// header: the same key with the same request answers what the first did; with another
+    /// request, 422 idempotency_conflict.</param>
+    /// <param name="title">title</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> TenantBookPoolAsync(
+        string pool,
+        string startsAt,
+        string endsAt,
+        string timezone,
+        string idempotencyKey,
+        Optional<string> title = default,
+        Optional<bool> dryRun = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["pool"] = Json.ToNode(pool);
+        values["starts_at"] = Json.ToNode(startsAt);
+        values["ends_at"] = Json.ToNode(endsAt);
+        values["timezone"] = Json.ToNode(timezone);
+        values["idempotency_key"] = Json.ToNode(idempotencyKey);
+        if (title.HasValue) values["title"] = Json.ToNode(title.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
+        return CallAsync("slotlock_tenant_book_pool", values, cancellationToken);
     }
 
     /// <summary>Get the tenant.</summary>

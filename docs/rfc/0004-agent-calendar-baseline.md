@@ -432,9 +432,16 @@ Confirmed, or consumed by a booking that names it, is accepted. Expired is lapse
 then is declined. An entry for a length expires when no slot of it can still fit before its
 window's end. Maintenance makes offers whose hold ran out lapse, so their time is offered on.
 
-**B7. Holds across resources (T2).** `hold_together` holds a set (driver and car) all or
+**B7. Holds across resources (T2).** Status: built. `hold_together` holds a set (driver and car) all or
 nothing, under one group with one TTL. Confirming it books the set. The application API gains
 `book_together` and `book_pool`.
+
+As built: confirming is `slotlock_book_together` with the set's `hold_group_id`. It books every
+member from its hold in one transaction, so one refused rolls back all. Booking one member leaves
+the rest of a set held together, unlike a group of alternatives. The application API's operations
+are named `slotlock_tenant_book_together` and `slotlock_tenant_book_pool`, because the agent tools
+already use the plain names. They run the agents' own bundle and pool bookings, approval policies
+included.
 
 **B8. Seats (T2).** `capacity: N` on create makes N seat resources in a pool behind one
 resource. A booking of `seats: k` takes k free seats in one transaction. The guarantee stays the

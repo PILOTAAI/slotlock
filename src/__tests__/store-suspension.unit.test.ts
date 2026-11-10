@@ -18,6 +18,7 @@ const READS = [
   'getBookingRuleDefaults',
   'getAvailabilityDefaults',
   'listAvailabilityExceptions',
+  'holdGroup',
   'availabilityExceptionsFor',
   'listChanges',
   'listWebhookEndpoints',

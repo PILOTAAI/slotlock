@@ -1939,7 +1939,7 @@
   {
     "name": "slotlock_book_together",
     "title": "Book resources together",
-    "description": "Book the same time on 2-20 resources at once, all or none: a van with its driver, a room with its projector. If any of them is taken, nothing is booked, and the refusal names that resource_id. Find such a time with slotlock_find_available_slots and require_free. A retry with the same idempotency_key answers the same events.",
+    "description": "Book the same time on 2-20 resources at once, all or none: a van with its driver, a room with its projector. If any of them is taken, nothing is booked, and the refusal names that resource_id. Find such a time with slotlock_find_available_slots and require_free. With hold_group_id, it books the set slotlock_hold_together held, from those holds. A retry with the same idempotency_key answers the same events.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1970,6 +1970,10 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 500
+        },
+        "hold_group_id": {
+          "type": "string",
+          "format": "uuid"
         },
         "idempotency_key": {
           "type": "string",
@@ -3856,6 +3860,133 @@
     "_meta": {
       "ui": {
         "resourceUri": "ui://slotlock/calendar",
+        "visibility": [
+          "model"
+        ]
+      }
+    }
+  },
+  {
+    "name": "slotlock_hold_together",
+    "title": "Hold resources together",
+    "description": "Hold one time on 2-20 resources at once, all or none, such as a car with its driver while a person decides: if any is taken, nothing is held and the refusal names that resource_id. The holds are one group with one time to live (ttl_seconds, the earliest of them). Book the set with slotlock_book_together and its hold_group_id; release them with slotlock_release_slots and any hold_id. A retry with the same idempotency_key answers the same holds.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "resource_ids": {
+          "minItems": 2,
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "ttl_seconds": {
+          "default": 300,
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 900
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "dry_run": {
+          "type": "boolean",
+          "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+        }
+      },
+      "required": [
+        "resource_ids",
+        "start",
+        "end",
+        "idempotency_key"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "group_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "holds": {
+          "minItems": 2,
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "hold_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "resource_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "start": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "expires_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "hold_id",
+              "resource_id",
+              "start",
+              "end",
+              "expires_at"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "dry_run": {
+          "type": "boolean",
+          "const": true,
+          "description": "Present on a dry run only: nothing was stored."
+        }
+      },
+      "required": [
+        "group_id",
+        "holds",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "Hold resources together",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "ui": {
         "visibility": [
           "model"
         ]

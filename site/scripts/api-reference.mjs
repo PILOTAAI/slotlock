@@ -71,6 +71,7 @@ export const GROUPS = [
     name: 'Events',
     operations: [
       'slotlock_hold_slots',
+      'slotlock_hold_together',
       'slotlock_release_slots',
       'slotlock_confirm_slot',
       'slotlock_book_together',
@@ -86,6 +87,8 @@ export const GROUPS = [
       'slotlock_get_tenant_event',
       'slotlock_export_tenant_event',
       'slotlock_cancel_tenant_event',
+      'slotlock_tenant_book_together',
+      'slotlock_tenant_book_pool',
       'slotlock_get_tenant_event_history',
     ],
   },

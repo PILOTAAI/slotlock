@@ -3427,6 +3427,16 @@ export interface SlotlockStore extends SlotlockEventFeed {
     idempotencyKey?: string;
   }): Promise<JoinWaitlistResult>;
   /**
+   * One holder's live holds in a group, by resource id (RFC 0004 B7). With `alignExpiry`, every one
+   * expires when the earliest does, so the set has one time to live.
+   */
+  holdGroup(params: {
+    tenantRef: string;
+    holderRef: string;
+    groupId: string;
+    alignExpiry?: boolean;
+  }): Promise<{ holdId: string; resourceId: string; start: Date; end: Date; expiresAt: Date; source: string | null }[]>;
+  /**
    * Decline an entry's offer (RFC 0004 B6): its hold is let go and the entry is `declined`, so the
    * time is offered to the next. With `holderRef`, only that holder's. Null when there is no such
    * offer.
@@ -6917,12 +6927,14 @@ function buildSlotlockStore(
               await tx`SELECT set_config('slotlock.ending', 'confirmed', true)`;
               await tx`DELETE FROM slotlock.reservations WHERE id = ${holdId} AND status = 'held' AND holder_ref = ${holderRef}`;
               await tx`SELECT set_config('slotlock.ending', '', true)`;
+              // A set held together (RFC 0004 B7) is booked member by member: its other holds stay.
               await tx`
                 DELETE FROM slotlock.reservations
                  WHERE status = 'held' AND holder_ref = ${holderRef}
                    AND (id = ${holdId}
                         OR (${hold.hold_group_id}::uuid IS NOT NULL
-                            AND hold_group_id = ${hold.hold_group_id}::uuid))`;
+                            AND hold_group_id = ${hold.hold_group_id}::uuid
+                            AND source IS DISTINCT FROM 'slotlock:together'))`;
             }
             let turnaroundMs = 0;
             let bufferBeforeMs = 0;
@@ -8236,6 +8248,38 @@ function buildSlotlockStore(
         }
         return true;
       });
+    },
+
+    async holdGroup(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidIdentity(params.holderRef) || !isValidResourceId(params.groupId)) {
+        return [];
+      }
+      if (params.alignExpiry === true) {
+        await sql`
+          UPDATE slotlock.reservations held
+             SET expires_at = earliest.at
+            FROM (SELECT min(expires_at) AS at FROM slotlock.reservations
+                   WHERE hold_group_id = ${params.groupId}::uuid AND holder_ref = ${params.holderRef}
+                     AND status = 'held') earliest
+           WHERE held.hold_group_id = ${params.groupId}::uuid AND held.holder_ref = ${params.holderRef}
+             AND held.status = 'held' AND held.expires_at <> earliest.at`;
+      }
+      const rows = await sql<{ id: string; resource_id: string; starts_at: Date; ends_at: Date; expires_at: Date; source: string | null }[]>`
+        SELECT held.id, held.resource_id, held.starts_at, held.ends_at, held.expires_at, held.source
+          FROM slotlock.reservations held
+          JOIN slotlock.resources resource ON resource.id = held.resource_id
+         WHERE held.hold_group_id = ${params.groupId}::uuid AND held.holder_ref = ${params.holderRef}
+           AND resource.tenant_ref = ${params.tenantRef} AND held.status = 'held'
+           AND held.expires_at > statement_timestamp()
+         ORDER BY held.resource_id`;
+      return rows.map((row) => ({
+        holdId: row.id,
+        resourceId: row.resource_id,
+        start: row.starts_at,
+        end: row.ends_at,
+        expiresAt: row.expires_at,
+        source: row.source,
+      }));
     },
 
     async declineWaitlistOffer(params) {

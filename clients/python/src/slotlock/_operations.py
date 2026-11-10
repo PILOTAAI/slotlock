@@ -57,6 +57,13 @@ OPERATIONS: dict[str, Operation] = {
         (),
         (),
     ),
+    "slotlock_hold_together": Operation(
+        "slotlock_hold_together",
+        "POST",
+        "/v1/slot-holds/together",
+        (),
+        (),
+    ),
     "slotlock_book_together": Operation(
         "slotlock_book_together",
         "POST",
@@ -545,6 +552,20 @@ OPERATIONS: dict[str, Operation] = {
         "GET",
         "/v1/tenant/events/{event_id}/jscalendar",
         ("event_id",),
+        (),
+    ),
+    "slotlock_tenant_book_together": Operation(
+        "slotlock_tenant_book_together",
+        "POST",
+        "/v1/tenant/bundles",
+        (),
+        (),
+    ),
+    "slotlock_tenant_book_pool": Operation(
+        "slotlock_tenant_book_pool",
+        "POST",
+        "/v1/tenant/pool-bookings",
+        (),
         (),
     ),
     "slotlock_get_tenant": Operation(
@@ -1050,6 +1071,43 @@ class Operations(Transport):
             values["dry_run"] = dry_run
         return self.call("slotlock_hold_slots", values)
 
+    def hold_together(
+        self,
+        *,
+        resource_ids: list[str],
+        start: str,
+        end: str,
+        idempotency_key: str,
+        ttl_seconds: int | None = None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Hold resources together.
+
+        Hold one time on 2-20 resources at once, all or none, such as a car with its driver while
+        a person decides: if any is taken, nothing is held and the refusal names that resource_id.
+        The holds are one group with one time to live (ttl_seconds, the earliest of them). Book
+        the set with slotlock_book_together and its hold_group_id; release them with
+        slotlock_release_slots and any hold_id. A retry with the same idempotency_key answers the
+        same holds.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {
+            "resource_ids": resource_ids,
+            "start": start,
+            "end": end,
+            "idempotency_key": idempotency_key,
+        }
+        if ttl_seconds is not None:
+            values["ttl_seconds"] = ttl_seconds
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_hold_together", values)
+
     def book_together(
         self,
         *,
@@ -1059,13 +1117,15 @@ class Operations(Transport):
         timezone: str,
         idempotency_key: str,
         title: str | None = None,
+        hold_group_id: str | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Book resources together.
 
         Book the same time on 2-20 resources at once, all or none: a van with its driver, a room
         with its projector. If any of them is taken, nothing is booked, and the refusal names that
-        resource_id. Find such a time with slotlock_find_available_slots and require_free. A retry
+        resource_id. Find such a time with slotlock_find_available_slots and require_free. With
+        hold_group_id, it books the set slotlock_hold_together held, from those holds. A retry
         with the same idempotency_key answers the same events.
 
         Args:
@@ -1083,6 +1143,8 @@ class Operations(Transport):
         }
         if title is not None:
             values["title"] = title
+        if hold_group_id is not None:
+            values["hold_group_id"] = hold_group_id
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_book_together", values)
@@ -2821,6 +2883,87 @@ class Operations(Transport):
         """
         values: dict[str, Any] = {"event_id": event_id}
         return self.call("slotlock_export_tenant_event", values)
+
+    def tenant_book_together(
+        self,
+        *,
+        resource_ids: list[str],
+        starts_at: str,
+        ends_at: str,
+        timezone: str,
+        idempotency_key: str,
+        title: str | None = None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Book resources together, as the tenant.
+
+        Book the same time on 2-20 resources at once, all or none, as agents'
+        slotlock_book_together does but for the tenant's own systems (RFC 0004 B7): each is an
+        event the key owns, held to the resources' booking rules. If any is taken, nothing is
+        booked and the refusal names that resource_id. A retry with the same idempotency_key
+        answers the same events. 409 bundles_unavailable where the server books no bundles.
+
+        Args:
+            idempotency_key: A retry identity, also accepted as the Idempotency-Key header: the
+            same key with the same request answers what the first did; with another request, 422
+            idempotency_conflict.
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {
+            "resource_ids": resource_ids,
+            "starts_at": starts_at,
+            "ends_at": ends_at,
+            "timezone": timezone,
+            "idempotency_key": idempotency_key,
+        }
+        if title is not None:
+            values["title"] = title
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_tenant_book_together", values)
+
+    def tenant_book_pool(
+        self,
+        *,
+        pool: str,
+        starts_at: str,
+        ends_at: str,
+        timezone: str,
+        idempotency_key: str,
+        title: str | None = None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Book any member of a pool, as the tenant.
+
+        Book any one free member of a pool for a time, as agents' slotlock_book_pool does but for
+        the tenant's own systems (RFC 0004 B7), in the pool's order: the event names the member.
+        409 pool_full when none is free; 404 pool_not_found. A retry with the same idempotency_key
+        answers the member it booked.
+
+        Args:
+            idempotency_key: A retry identity, also accepted as the Idempotency-Key header: the
+            same key with the same request answers what the first did; with another request, 422
+            idempotency_conflict.
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {
+            "pool": pool,
+            "starts_at": starts_at,
+            "ends_at": ends_at,
+            "timezone": timezone,
+            "idempotency_key": idempotency_key,
+        }
+        if title is not None:
+            values["title"] = title
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_tenant_book_pool", values)
 
     def get_tenant(self) -> dict[str, Any]:
         """Get the tenant.

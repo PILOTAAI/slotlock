@@ -17,6 +17,7 @@ var operations = func() map[string]operation {
 		{name: "slotlock_find_available_slots", method: "GET", path: "/v1/available-slots", pathParams: nil, query: []string{"resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes", "limit", "require_free"}},
 		{name: "slotlock_find_available_ranges", method: "GET", path: "/v1/available-ranges", pathParams: nil, query: []string{"resource_ids", "pool", "pickup_start", "pickup_end", "days", "return_start", "return_end", "limit"}},
 		{name: "slotlock_hold_slots", method: "POST", path: "/v1/slot-holds", pathParams: nil, query: nil},
+		{name: "slotlock_hold_together", method: "POST", path: "/v1/slot-holds/together", pathParams: nil, query: nil},
 		{name: "slotlock_book_together", method: "POST", path: "/v1/bundles", pathParams: nil, query: nil},
 		{name: "slotlock_book_pool", method: "POST", path: "/v1/pool-bookings", pathParams: nil, query: nil},
 		{name: "slotlock_get_pool_availability", method: "GET", path: "/v1/pool-availability", pathParams: nil, query: []string{"pool", "start", "end"}},
@@ -87,6 +88,8 @@ var operations = func() map[string]operation {
 		{name: "slotlock_get_tenant_event", method: "GET", path: "/v1/tenant/events/{event_id}", pathParams: []string{"event_id"}, query: nil},
 		{name: "slotlock_cancel_tenant_event", method: "DELETE", path: "/v1/tenant/events/{event_id}", pathParams: []string{"event_id"}, query: []string{"expected_revision", "expected_resource_id", "idempotency_key", "override_reason", "dry_run"}},
 		{name: "slotlock_export_tenant_event", method: "GET", path: "/v1/tenant/events/{event_id}/jscalendar", pathParams: []string{"event_id"}, query: nil},
+		{name: "slotlock_tenant_book_together", method: "POST", path: "/v1/tenant/bundles", pathParams: nil, query: nil},
+		{name: "slotlock_tenant_book_pool", method: "POST", path: "/v1/tenant/pool-bookings", pathParams: nil, query: nil},
 		{name: "slotlock_get_tenant", method: "GET", path: "/v1/tenant", pathParams: nil, query: nil},
 		{name: "slotlock_erase_tenant", method: "POST", path: "/v1/tenant/erase", pathParams: nil, query: nil},
 		{name: "slotlock_run_maintenance", method: "POST", path: "/v1/maintenance", pathParams: nil, query: nil},
@@ -534,6 +537,50 @@ func (c *Client) HoldSlots(ctx context.Context, in HoldSlotsInput) (map[string]a
 	return c.Call(ctx, "slotlock_hold_slots", in.values())
 }
 
+// HoldTogetherInput holds the arguments of [Client.HoldTogether].
+type HoldTogetherInput struct {
+	ResourceIDs []string
+
+	Start string
+
+	End string
+
+	IdempotencyKey string
+
+	TTLSeconds *int64
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in HoldTogetherInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_ids"] = in.ResourceIDs
+	values["start"] = in.Start
+	values["end"] = in.End
+	values["idempotency_key"] = in.IdempotencyKey
+	if in.TTLSeconds != nil {
+		values["ttl_seconds"] = *in.TTLSeconds
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// HoldTogether: Hold resources together. Hold one time on 2-20 resources at once, all or none,
+// such as a car with its driver while a person decides: if any is taken, nothing is held and the
+// refusal names that resource_id. The holds are one group with one time to live (ttl_seconds, the
+// earliest of them). Book the set with slotlock_book_together and its hold_group_id; release them
+// with slotlock_release_slots and any hold_id. A retry with the same idempotency_key answers the
+// same holds.
+func (c *Client) HoldTogether(ctx context.Context, in HoldTogetherInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_hold_together", in.values())
+}
+
 // BookTogetherInput holds the arguments of [Client.BookTogether].
 type BookTogetherInput struct {
 	ResourceIDs []string
@@ -547,6 +594,8 @@ type BookTogetherInput struct {
 	IdempotencyKey string
 
 	Title *string
+
+	HoldGroupID *string
 
 	// Check the write without making it: it runs with every check, the database's included, and is
 	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
@@ -565,6 +614,9 @@ func (in BookTogetherInput) values() map[string]any {
 	if in.Title != nil {
 		values["title"] = *in.Title
 	}
+	if in.HoldGroupID != nil {
+		values["hold_group_id"] = *in.HoldGroupID
+	}
 	if in.DryRun != nil {
 		values["dry_run"] = *in.DryRun
 	}
@@ -574,7 +626,8 @@ func (in BookTogetherInput) values() map[string]any {
 // BookTogether: Book resources together. Book the same time on 2-20 resources at once, all or
 // none: a van with its driver, a room with its projector. If any of them is taken, nothing is
 // booked, and the refusal names that resource_id. Find such a time with
-// slotlock_find_available_slots and require_free. A retry with the same idempotency_key answers
+// slotlock_find_available_slots and require_free. With hold_group_id, it books the set
+// slotlock_hold_together held, from those holds. A retry with the same idempotency_key answers
 // the same events.
 func (c *Client) BookTogether(ctx context.Context, in BookTogetherInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_book_together", in.values())
@@ -2980,6 +3033,102 @@ func (in ExportTenantEventInput) values() map[string]any {
 // slotlock.pylota.io:rrule). A cancelled or unknown one answers 404 event_not_found.
 func (c *Client) ExportTenantEvent(ctx context.Context, in ExportTenantEventInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_export_tenant_event", in.values())
+}
+
+// TenantBookTogetherInput holds the arguments of [Client.TenantBookTogether].
+type TenantBookTogetherInput struct {
+	ResourceIDs []string
+
+	StartsAt string
+
+	EndsAt string
+
+	Timezone string
+
+	// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
+	// request answers what the first did; with another request, 422 idempotency_conflict.
+	IdempotencyKey string
+
+	Title *string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in TenantBookTogetherInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_ids"] = in.ResourceIDs
+	values["starts_at"] = in.StartsAt
+	values["ends_at"] = in.EndsAt
+	values["timezone"] = in.Timezone
+	values["idempotency_key"] = in.IdempotencyKey
+	if in.Title != nil {
+		values["title"] = *in.Title
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// TenantBookTogether: Book resources together, as the tenant. Book the same time on 2-20
+// resources at once, all or none, as agents' slotlock_book_together does but for the tenant's own
+// systems (RFC 0004 B7): each is an event the key owns, held to the resources' booking rules. If
+// any is taken, nothing is booked and the refusal names that resource_id. A retry with the same
+// idempotency_key answers the same events. 409 bundles_unavailable where the server books no
+// bundles.
+func (c *Client) TenantBookTogether(ctx context.Context, in TenantBookTogetherInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_tenant_book_together", in.values())
+}
+
+// TenantBookPoolInput holds the arguments of [Client.TenantBookPool].
+type TenantBookPoolInput struct {
+	Pool string
+
+	StartsAt string
+
+	EndsAt string
+
+	Timezone string
+
+	// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
+	// request answers what the first did; with another request, 422 idempotency_conflict.
+	IdempotencyKey string
+
+	Title *string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in TenantBookPoolInput) values() map[string]any {
+	values := map[string]any{}
+	values["pool"] = in.Pool
+	values["starts_at"] = in.StartsAt
+	values["ends_at"] = in.EndsAt
+	values["timezone"] = in.Timezone
+	values["idempotency_key"] = in.IdempotencyKey
+	if in.Title != nil {
+		values["title"] = *in.Title
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// TenantBookPool: Book any member of a pool, as the tenant. Book any one free member of a pool
+// for a time, as agents' slotlock_book_pool does but for the tenant's own systems (RFC 0004 B7),
+// in the pool's order: the event names the member. 409 pool_full when none is free; 404
+// pool_not_found. A retry with the same idempotency_key answers the member it booked.
+func (c *Client) TenantBookPool(ctx context.Context, in TenantBookPoolInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_tenant_book_pool", in.values())
 }
 
 // GetTenantInput holds the arguments of [Client.GetTenant].
