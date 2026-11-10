@@ -118,6 +118,8 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_DASHBOARD_USERS',
   'SLOTLOCK_DASHBOARD_ORGS',
   'SLOTLOCK_DASHBOARD_NAME',
+  'SLOTLOCK_DASHBOARD_TERMS_URL',
+  'SLOTLOCK_DASHBOARD_PRIVACY_URL',
   'HOST',
   'PORT',
 ] as const);
@@ -1032,6 +1034,8 @@ export async function startSlotlockServer(
             sessionSecret: config.dashboard.sessionSecret,
             allowedUsers: config.dashboard.allowedUsers,
             ...(config.dashboard.name ? { name: config.dashboard.name } : {}),
+            ...(config.dashboard.termsUrl ? { termsUrl: config.dashboard.termsUrl } : {}),
+            ...(config.dashboard.privacyUrl ? { privacyUrl: config.dashboard.privacyUrl } : {}),
             ...(config.dashboard.organizations
               ? { organizations: config.dashboard.organizations }
               : {}),
@@ -1662,6 +1666,9 @@ Environment:
   SLOTLOCK_DASHBOARD_USERS       * or comma-separated GitHub user ids that may sign in and whose keys work
   SLOTLOCK_DASHBOARD_ORGS        comma-separated GitHub organization ids: each is one shared tenant
   SLOTLOCK_DASHBOARD_NAME        What the dashboard calls this deployment (default Slotlock)
+  SLOTLOCK_DASHBOARD_TERMS_URL   https URL of the terms people accept by signing in, linked on the
+                                 sign-in page (none named without it)
+  SLOTLOCK_DASHBOARD_PRIVACY_URL https URL of the privacy notice the sign-in page links
   HOST                           Listen address (default 127.0.0.1)
   PORT                           Listen port (default 8080)
 

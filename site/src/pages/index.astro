@@ -10,39 +10,30 @@ import Icon from '../components/landing/Icon.astro';
 import Lockup from '../components/Lockup.astro';
 import Rich from '../components/landing/Rich.astro';
 import {
-  capabilities,
+  CLOUD_API_URL,
   closing,
-  cloud,
-  compare,
   dashboard,
-  DDL_URL,
   developers,
   facts,
   faq,
   footer,
   hero,
-  legend,
-  legendCounts,
+  industries,
   meta,
-  model,
-  modelAria,
-  ruleCode,
-  weekWindows,
   nav,
-  openSource,
-  picker,
+  pricing,
   proof,
-  RACE_TEST_URL,
   REPO_URL,
   security,
   signIn,
-  specStrip,
-  steps,
+  source,
+  story,
+  strip,
+  weekWindows,
 } from '../data/landing';
 
-const counts = legendCounts();
 const week = weekWindows();
-const pos = (prefix: "s" | "e", hour: number) => `${prefix}-${String(hour).replace(".", "-")}`;
+const pos = (prefix: 's' | 'e', hour: number) => `${prefix}-${String(hour).replace('.', '-')}`;
 const a2aBody = JSON.stringify(
   {
     jsonrpc: '2.0',
@@ -72,19 +63,17 @@ const a2aBody = JSON.stringify(
   null,
   2,
 );
-const assistant = dashboard.assistant;
 const toolPad = Math.max(...facts.tools.map((tool) => tool.name.length)) + 2;
-const apiBase = facts.composeUp ? 'http://localhost:8080' : 'https://calendar.example.com/slotlock';
-const poolScene = capabilities.scenes.pool;
+const pool = developers.pool;
 const hh = (hour: number) => String(hour).padStart(2, '0');
-const poolAt = (hour: number) => `${poolScene.day}T${hh(hour)}:00:00Z`;
-const poolStart = poolAt(poolScene.intervals[0]?.from ?? 0);
-const poolEnd = poolAt(poolScene.intervals.at(-1)?.to ?? 0);
+const poolAt = (hour: number) => `${pool.day}T${hh(hour)}:00:00Z`;
+const poolStart = poolAt(pool.intervals[0]?.from ?? 0);
+const poolEnd = poolAt(pool.intervals.at(-1)?.to ?? 0);
 const restResponse = JSON.stringify(
   {
     pool: developers.restPool,
-    members: poolScene.members,
-    intervals: poolScene.intervals.map((part) => ({
+    members: pool.members,
+    intervals: pool.intervals.map((part) => ({
       start: poolAt(part.from),
       end: poolAt(part.to),
       free: part.free,
@@ -136,200 +125,163 @@ const canonical = new URL('/', Astro.site).toString();
         <nav class="site-nav" aria-label="Main">
           {nav.map((item) => <a href={item.href}>{item.label}</a>)}
         </nav>
-        <a class="gh-link" href={REPO_URL}>
-          <Icon name="github" />
-          <span>GitHub</span>
-        </a>
-        <a class="btn btn--primary" href={signIn.href}>{signIn.label}</a>
+        <a class="site-header__sign-in" href={signIn.href}>{signIn.label}</a>
+        <a class="btn btn--primary" href={signIn.href}>{signIn.start}</a>
+        <details class="menu">
+          <summary class="menu__button">
+            <Icon name="menu" />
+            <span class="sr-only">Menu</span>
+          </summary>
+          <nav class="menu__panel" aria-label="Menu">
+            {nav.map((item) => <a href={item.href}>{item.label}</a>)}
+            <a href={signIn.href}>{signIn.label}</a>
+          </nav>
+        </details>
       </div>
     </header>
 
     <main id="main">
       <section class="hero" aria-labelledby="hero-title">
         <div class="wrap">
-          <a class="launch" href={hero.pill.href}>
-            <span class="launch__tag">{hero.pill.label}</span>
-            {hero.pill.link}
-            <Icon name="arrow" />
-          </a>
-          <p class="eyebrow">{hero.eyebrow}</p>
           <h1 class="h1" id="hero-title">
             <span class="soft">{hero.heading.soft}</span>
             <span class="strong">{hero.heading.strong}</span>
           </h1>
           <p class="lede">{hero.lede}</p>
           <div class="hero__actions">
-            <div class="hero__ctas">
-              <div class="hero__buttons">
-                <a class="btn btn--primary" href={signIn.href}>
-                  <Icon name="github" />
-                  {signIn.long}
-                </a>
-                <a class="btn btn--ghost" href="#cloud">Cloud or self-host</a>
-              </div>
-              <p class="fine"><Rich text={signIn.terms} /></p>
-            </div>
-            <div class="hero__install">
-              {
-                hero.install.map((target, index) => (
-                  <input
-                    class="sr-only"
-                    type="radio"
-                    name="install"
-                    id={`install-${target.id}`}
-                    checked={index === 0}
-                  />
-                ))
-              }
-              <div class="install">
-                <div class="install__targets" role="presentation">
-                  {hero.install.map((target) => <label for={`install-${target.id}`}>{target.label}</label>)}
-                </div>
-                <div class="install__line">
-                  {
-                    hero.install.map((target) => (
-                      <code
-                        class:list={['install__cmd', { 'install__cmd--shell': target.shell !== false }]}
-                        data-install={target.id}
-                        id={`cmd-${target.id}`}
-                      >
-                        {target.command}
-                      </code>
-                    ))
-                  }
-                  <button class="copy" type="button" data-copy-install hidden>
-                    <Icon name="copy" />
-                    <span>Copy</span>
-                  </button>
-                </div>
-              </div>
-              <div class="install__notes">
-                {
-                  hero.install.map((target) => (
-                    <p class="install__note" data-note={target.id}>
-                      <Rich text={target.note} />
-                    </p>
-                  ))
-                }
-              </div>
-            </div>
+            <a class="btn btn--primary" href={signIn.href}>{signIn.start}</a>
+            <a class="btn btn--ghost" href={hero.docs.href}>{hero.docs.label}</a>
+            <span class="hero__note">{hero.note}</span>
           </div>
           <HeroScene />
         </div>
       </section>
 
-      <section class="spec" aria-label="What is in the box">
+      <section class="strip" aria-label="On every calendar">
         <div class="wrap">
-          <dl>
+          <ul class="strip__items">
             {
-              specStrip.map((item) => (
-                <div>
-                  <dt>{item.label}</dt>
-                  <dd>{item.value}</dd>
-                </div>
+              strip.items.map((item) => (
+                <li>
+                  <Icon name={item.icon} />
+                  <span>{item.text}</span>
+                </li>
               ))
             }
-          </dl>
-        </div>
-      </section>
-
-      <section class="band" id={cloud.id} aria-labelledby="cloud-title">
-        <div class="wrap">
-          <div class="head head--split">
-            <p class="counter">{cloud.counter} / Cloud</p>
-            <h2 class="h2" id="cloud-title">
-              <span class="soft">{cloud.heading.soft}</span>
-              <span class="strong">{cloud.heading.strong}</span>
-            </h2>
-            <p class="lede">{cloud.lede}</p>
-          </div>
-          <div class="choice">
-            <article class="choice__card choice__card--cloud" aria-labelledby="cloud-hosted-title">
-              <p class="eyebrow">{cloud.hosted.eyebrow}</p>
-              <h3 id="cloud-hosted-title">{cloud.hosted.title}</h3>
-              <ol class="cloud-steps">
-                {
-                  cloud.hosted.steps.map((step, index) => (
-                    <li>
-                      <span class="cloud-steps__n" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span>
-                      <div>
-                        <h4>{step.title}</h4>
-                        <p><Rich text={step.body} /></p>
-                      </div>
-                    </li>
-                  ))
-                }
-              </ol>
-              <div class="choice__actions">
-                <a class="btn btn--primary" href={signIn.href}>
-                  <Icon name="github" />
-                  {signIn.long}
-                </a>
-                <a class="arrow-link" href={cloud.hosted.link.href}>{cloud.hosted.link.label} <Icon name="arrow" /></a>
-              </div>
-              <p class="fine"><Rich text={signIn.terms} /></p>
-            </article>
-            <article class="choice__card" aria-labelledby="cloud-self-title">
-              <p class="eyebrow">{cloud.self.eyebrow}</p>
-              <h3 id="cloud-self-title">{cloud.self.title}</h3>
-              <p class="choice__body"><Rich text={cloud.self.body} /></p>
-              <code class="deploy__cmd">{cloud.self.command}</code>
-              <div class="choice__links">
-                {
-                  cloud.self.links.map((link) => (
-                    <a class="arrow-link" href={link.href}>{link.label} <Icon name="arrow" /></a>
-                  ))
-                }
-              </div>
-            </article>
-          </div>
-          <figure class="code endpoints">
-            <figcaption class="code__bar">
-              <span class="grow">{cloud.endpoints.caption}</span>
-            </figcaption>
-            <dl class="endpoints__list">
-              {
-                cloud.endpoints.items.map((item) => (
-                  <div class="endpoints__row">
-                    <dt>{item.label}</dt>
-                    <dd>
-                      <code id={`endpoint-${item.id}`}>{item.value}</code>
-                      <button class="copy" type="button" data-copy={`endpoint-${item.id}`} hidden>
-                        <Icon name="copy" />
-                        <span>Copy</span>
-                        <span class="sr-only"> {item.label} URL</span>
-                      </button>
-                    </dd>
-                  </div>
-                ))
-              }
-            </dl>
-            <div class="endpoints__command">
-              <div class="code__bar">
-                <span class="grow">{cloud.endpoints.commandCaption}</span>
-                <button class="copy" type="button" data-copy="endpoint-command" hidden>
-                  <Icon name="copy" />
-                  <span>Copy</span>
-                  <span class="sr-only"> command</span>
-                </button>
-              </div>
-              <pre><code id="endpoint-command">{cloud.endpoints.command}</code></pre>
-            </div>
-          </figure>
-          <p class="endpoints__links">
-            {
-              cloud.endpoints.links.map((link) => (
-                <a class="arrow-link" href={link.href}>{link.label} <Icon name="arrow" /></a>
-              ))
-            }
+          </ul>
+          <p class="strip__proof">
+            <a href={strip.proof.href}>{strip.proof.name}</a>, {strip.proof.text}
           </p>
         </div>
       </section>
 
-      <section class="band" id={proof.id} aria-labelledby="proof-title">
+      <section class="band" id={story.id} aria-labelledby="story-title">
+        <div class="wrap">
+          <div class="head">
+            <h2 class="h2" id="story-title">
+              <span class="soft">{story.heading.soft}</span>
+              <span class="strong">{story.heading.strong}</span>
+            </h2>
+          </div>
+          <ol class="story">
+            <li class="story__row">
+              <div class="story__text">
+                <span class="story__n">{story.items[0]!.n}</span>
+                <h3>{story.items[0]!.title}</h3>
+                <p><Rich text={story.items[0]!.body} /></p>
+                <a class="arrow-link" href={story.items[0]!.link.href}>{story.items[0]!.link.label} <Icon name="arrow" /></a>
+              </div>
+              <div class="story__visual panel" role="img" aria-label={story.aria[0]}>
+                <div class="resource-card" aria-hidden="true">
+                  <p class="resource-card__name">{story.resource.name}</p>
+                  <p class="resource-card__zone mono">{story.resource.zone}</p>
+                  <code class="resource-card__rule">{story.resource.rule}</code>
+                </div>
+                <div class="week" aria-hidden="true">
+                  <div class="week__axis">
+                    <span></span>
+                    <div class="week__ticks">
+                      <span class="wt-0">00</span><span class="wt-6">06</span><span class="wt-12">12</span><span class="wt-18">18</span><span class="wt-24">24</span>
+                    </div>
+                  </div>
+                  {
+                    week.map((day) => (
+                      <div class="week__row">
+                        <span class="week__day">{day.short}</span>
+                        <div class="week__track">
+                          {day.open ? (
+                            <span class={`block block--open ${pos('s', day.start)} ${pos('e', day.end)}`}>
+                              <span class="block__label">{day.label}</span>
+                            </span>
+                          ) : (
+                            <span class="block block--closed s-0 e-24">
+                              <span class="block__label">closed</span>
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ))
+                  }
+                </div>
+              </div>
+            </li>
+            <li class="story__row">
+              <div class="story__text">
+                <span class="story__n">{story.items[1]!.n}</span>
+                <h3>{story.items[1]!.title}</h3>
+                <p><Rich text={story.items[1]!.body} /></p>
+                <a class="arrow-link" href={story.items[1]!.link.href}>{story.items[1]!.link.label} <Icon name="arrow" /></a>
+              </div>
+              <div class="story__visual" role="img" aria-label={story.aria[1]}>
+                <div class="picker__card" aria-hidden="true">
+                  <p class="eyebrow eyebrow--plain">{story.picker.title}</p>
+                  <p class="picker__resource">{story.resource.name}</p>
+                  <div class="picker__days">
+                    {story.picker.days.map((day, index) => <span class={index === 1 ? 'on' : undefined}>{day}</span>)}
+                  </div>
+                  <div class="picker__times">
+                    {story.picker.times.map((time) => <span class={time === story.picker.picked ? 'on' : undefined}>{time}</span>)}
+                  </div>
+                  <div class="picker__foot">
+                    <span class="picker__held">{story.picker.held}</span>
+                    <span class="picker__book">{story.picker.button}</span>
+                  </div>
+                </div>
+              </div>
+            </li>
+            <li class="story__row">
+              <div class="story__text">
+                <span class="story__n">{story.items[2]!.n}</span>
+                <h3>{story.items[2]!.title}</h3>
+                <p><Rich text={story.items[2]!.body} /></p>
+                <a class="arrow-link" href={story.items[2]!.link.href}>{story.items[2]!.link.label} <Icon name="arrow" /></a>
+              </div>
+              <div class="story__visual panel outcomes" role="img" aria-label={story.aria[2]}>
+                <div class="outcome" aria-hidden="true">
+                  <div class="mini-track">
+                    <span class="block block--confirmed s-10 e-12">
+                      <Icon name="check" />
+                      <span class="block__label">{story.lapse.booked}</span>
+                    </span>
+                  </div>
+                </div>
+                <div class="outcome" aria-hidden="true">
+                  <div class="mini-track">
+                    <span class="block block--hold block--lapsed s-10 e-12">
+                      <span class="block__label">hold</span>
+                    </span>
+                  </div>
+                  <p class="outcome__note mono">{story.lapse.lapsed}</p>
+                </div>
+              </div>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="band band--tint" id={proof.id} aria-labelledby="proof-title">
         <div class="wrap">
           <div class="head head--split">
-            <p class="counter">{proof.counter} / Proof</p>
             <h2 class="h2" id="proof-title">
               <span class="soft">{proof.heading.soft}</span>
               <span class="strong">{proof.heading.strong}</span>
@@ -337,253 +289,39 @@ const canonical = new URL('/', Astro.site).toString();
             <p class="lede">{proof.lede}</p>
           </div>
           <div class="proof-grid">
-            <figure class="code">
-              <figcaption class="code__bar">
-                <span class="grow">{proof.constraintCaption}</span>
-                <a class="copy" href={DDL_URL}>Source</a>
-              </figcaption>
-              <pre><code><span class="k">CREATE TABLE</span> slotlock.reservations (
-  …
-{facts.excludeConstraint.replace(/^/gm, '  ')}
-);
-
-<span class="c">-- two writers, same van, same instant</span>
-{proof.race.map((line) => (
+            <div class="proof-race">
+              <figure class="code">
+                <figcaption class="code__bar"><span class="grow">Two agents, one van, the same instant</span></figcaption>
+                <pre><code>{proof.race.map((line) => (
 <>{line.who}  {line.what}  <span class={line.tone}>{line.result}</span>{'\n'}</>
-))}<span class="c">-- {proof.raceNote}</span></code></pre>
-            </figure>
-            <div class="result-card">
-              <h3>{proof.resultCaption}</h3>
-              <div class="result">
-                <span class="eyebrow">{proof.storeLabel}</span>
-                <div class="code"><pre><code class="r">{proof.storeResult}</code></pre></div>
-              </div>
-              <div class="result">
-                <span class="eyebrow">{proof.mcpLabel}</span>
-                <div class="code"><pre><code class="r">{proof.mcpResult}</code></pre></div>
-              </div>
-              <a class="arrow-link" href={RACE_TEST_URL}>{proof.testLink} <Icon name="arrow" /></a>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="band band--tint" id={steps.id} aria-labelledby="how-title">
-        <div class="wrap">
-          <div class="head">
-            <p class="counter">{steps.counter} / How it works</p>
-            <h2 class="h2" id="how-title">
-              <span class="soft">{steps.heading.soft}</span>
-              <span class="strong">{steps.heading.strong}</span>
-            </h2>
-          </div>
-          <ol class="steps">
-            <li class="step">
-              <div
-                class="step__scene"
-                role="img"
-                aria-label="A resource card: Van AB12 CDE, time zone Europe/London, bookable Monday to Friday from 08:00 for nine hours."
-              >
-                <div class="mini-card" aria-hidden="true">
-                  <dl>
-                    <dt>Resource</dt><dd>vehicle-42 · Van AB12 CDE</dd>
-                    <dt>Zone</dt><dd>Europe/London</dd>
-                    <dt>Rule</dt><dd>FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR</dd>
-                    <dt>Hours</dt><dd>startMinutes 480 · durationMinutes 540</dd>
-                  </dl>
-                </div>
-              </div>
-              <div class="step__body">
-                <span class="step__n">{steps.items[0]!.n}</span>
-                <h3>{steps.items[0]!.title}</h3>
-                <p><Rich text={steps.items[0]!.body} /></p>
-                <a class="arrow-link" href={steps.items[0]!.link.href}>{steps.items[0]!.link.label} <Icon name="arrow" /></a>
-              </div>
-            </li>
-            <li class="step">
-              <div
-                class="step__scene"
-                role="img"
-                aria-label="A two-hour hold from 10:00 to 12:00 drawn as a dashed amber bar, after the slot search answered 10:00 to 12:00, certain."
-              >
-                <div class="mini-line" aria-hidden="true">
-                  <span>slotlock_find_next_available</span><span class="ok">10:00–12:00 · certain</span>
-                </div>
-                <div class="mini-track" aria-hidden="true">
-                  <span class="block block--hold s-10 e-12"><span class="block__label">hold · to 09:51</span></span>
-                </div>
-                <div class="mini-line" aria-hidden="true">
-                  <span>acquireHold · ttl 10 min</span><span class="hold">held</span>
-                </div>
-              </div>
-              <div class="step__body">
-                <span class="step__n">{steps.items[1]!.n}</span>
-                <h3>{steps.items[1]!.title}</h3>
-                <p><Rich text={steps.items[1]!.body} /></p>
-                <a class="arrow-link" href={steps.items[1]!.link.href}>{steps.items[1]!.link.label} <Icon name="arrow" /></a>
-              </div>
-            </li>
-            <li class="step">
-              <div
-                class="step__scene"
-                role="img"
-                aria-label="Two outcomes. Confirmed: the hold becomes a solid green booking. Not confirmed: the hold expires at 09:51 and the next writer that wants the time clears it."
-              >
-                <div class="mini-track" aria-hidden="true">
-                  <span class="block block--confirmed s-10 e-12"><span class="block__label">booked</span></span>
-                </div>
-                <div class="mini-line" aria-hidden="true">
-                  <span>confirmHold</span><span class="ok">ok: confirmed</span>
-                </div>
-                <div class="mini-line" aria-hidden="true">
-                  <span>no confirm by 09:51</span><span class="muted">freed for the next writer</span>
-                </div>
-              </div>
-              <div class="step__body">
-                <span class="step__n">{steps.items[2]!.n}</span>
-                <h3>{steps.items[2]!.title}</h3>
-                <p><Rich text={steps.items[2]!.body} /></p>
-                <a class="arrow-link" href={steps.items[2]!.link.href}>{steps.items[2]!.link.label} <Icon name="arrow" /></a>
-              </div>
-            </li>
-          </ol>
-          <div class="arch" role="img" aria-label={steps.diagram.aria}>
-            <div class="arch__group" aria-hidden="true">
-              {steps.diagram.inputs.map((input) => <span class="arch__node">{input}</span>)}
-            </div>
-            <span class="arch__arrow" aria-hidden="true"><Icon name="arrow" /></span>
-            <div class="arch__core" aria-hidden="true">
-              {steps.diagram.core}
-              <small>{steps.diagram.store}</small>
-            </div>
-            <span class="arch__arrow" aria-hidden="true"><Icon name="arrow" /></span>
-            <div class="arch__group" aria-hidden="true">
-              {steps.diagram.outputs.map((output) => <span class="arch__node">{output}</span>)}
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="band" id={model.id} aria-labelledby="model-title">
-        <div class="wrap">
-          <div class="head head--split">
-            <p class="counter">{model.counter} / Resources</p>
-            <h2 class="h2" id="model-title">
-              <span class="soft">{model.heading.soft}</span>
-              <span class="strong">{model.heading.strong}</span>
-            </h2>
-            <p class="lede"><Rich text={model.lede} /></p>
-          </div>
-          <div class="model-grid" role="img" aria-label={modelAria()}>
-            <div class="panel week-panel" aria-hidden="true">
-              <figure class="code week-code">
-                <figcaption class="code__bar">{model.ruleCaption}</figcaption>
-                <pre><code>{ruleCode()}</code></pre>
+))}</code></pre>
               </figure>
-              <div class="week">
-                <div class="week__axis">
-                  <span></span>
-                  <div class="week__ticks">
-                    <span class="wt-0">00</span><span class="wt-6">06</span><span class="wt-12">12</span><span class="wt-18">18</span><span class="wt-24">24</span>
-                  </div>
-                </div>
-                {
-                  week.map((day) => (
-                    <div class="week__row">
-                      <span class="week__day">{day.short}</span>
-                      <div class="week__track">
-                        {day.open ? (
-                          <span class={`block block--open ${pos('s', day.start)} ${pos('e', day.end)}`}>
-                            <span class="block__label">{day.label}</span>
-                          </span>
-                        ) : (
-                          <span class="block block--closed s-0 e-24">
-                            <span class="block__label">closed by rule</span>
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  ))
-                }
-              </div>
+              <p class="link-row">
+                {proof.links.map((link) => <a class="arrow-link" href={link.href}>{link.label} <Icon name="arrow" /></a>)}
+              </p>
             </div>
-            <div class="model-side" aria-hidden="true">
-              <div class="panel">
-                <div class="panel__head">Legend · the calendar at the top</div>
-                <ul class="legend">
+            <div class="table-wrap">
+              <table class="compare">
+                <caption class="sr-only">{proof.compare.caption}</caption>
+                <thead>
+                  <tr>
+                    <th scope="col"><span class="sr-only">Situation</span></th>
+                    <th scope="col">{proof.compare.columns[1]}</th>
+                    <th scope="col" class="ours">{proof.compare.columns[2]}</th>
+                  </tr>
+                </thead>
+                <tbody>
                   {
-                    legend.map((item) => (
-                      <li>
-                        <span class={`block block--${item.kind}`} />
-                        <span>{item.label}</span>
-                        <span class="legend__count">{counts[item.kind]}</span>
-                      </li>
+                    proof.compare.rows.map(([situation, theirs, ours]) => (
+                      <tr>
+                        <th scope="row">{situation}</th>
+                        <td data-label={proof.compare.columns[1]}><Rich text={theirs ?? ''} /></td>
+                        <td data-label={proof.compare.columns[2]} class="ours"><Rich text={ours ?? ''} /></td>
+                      </tr>
                     ))
                   }
-                </ul>
-              </div>
-              <div class="panel clocks">
-                <div class="clock">
-                  <span class="clock__label">{model.resourceTime.label}</span>
-                  <span class="clock__value">{model.resourceTime.value}</span>
-                  <span class="clock__zone">{model.resourceTime.zone}</span>
-                </div>
-                <div class="clock">
-                  <span class="clock__label">{model.yourTime.label}</span>
-                  <span class="clock__value">{model.yourTime.value}</span>
-                  <span class="clock__zone">{model.yourTime.zone}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="band band--tint" id={picker.id} aria-labelledby="picker-title">
-        <div class="wrap">
-          <div class="head head--split">
-            <p class="counter">{picker.counter} / In the chat</p>
-            <h2 class="h2" id="picker-title">
-              <span class="soft">{picker.heading.soft}</span>
-              <span class="strong">{picker.heading.strong}</span>
-            </h2>
-            <p class="lede">{picker.lede}</p>
-          </div>
-          <div class="security-grid">
-            <div class="picker" role="img" aria-label={picker.aria}>
-              <div class="picker__card" aria-hidden="true">
-                <p class="eyebrow eyebrow--plain">{picker.view.title}</p>
-                <p class="picker__resource">{picker.view.resource}</p>
-                <div class="picker__days">
-                  {picker.view.days.map((day, index) => <span class={index === 1 ? 'on' : undefined}>{day}</span>)}
-                </div>
-                {
-                  picker.view.groups.map((group) => (
-                    <div class="picker__group">
-                      <span class="picker__label">{group.label}</span>
-                      <div class="picker__times">
-                        {group.times.map((time) => (
-                          <span class={time === picker.view.picked ? 'on' : undefined}>{time}</span>
-                        ))}
-                      </div>
-                    </div>
-                  ))
-                }
-                <div class="picker__foot">
-                  <span class="picker__held">{picker.view.held}</span>
-                  <span class="picker__book">{picker.view.button}</span>
-                </div>
-              </div>
-              <div class="receipt" aria-hidden="true">
-                <Icon name="check" />
-                <strong>{picker.view.sent}</strong>
-              </div>
-            </div>
-            <div>
-              <ul class="statements">
-                {picker.points.map((point) => <li><Rich text={point} /></li>)}
-              </ul>
-              <p><a class="arrow-link" href={picker.link.href}>{picker.link.label} <Icon name="arrow" /></a></p>
+                </tbody>
+              </table>
             </div>
           </div>
         </div>
@@ -592,23 +330,21 @@ const canonical = new URL('/', Astro.site).toString();
       <section class="band" id={dashboard.id} aria-labelledby="dashboard-title">
         <div class="wrap">
           <div class="head head--split">
-            <p class="counter">{dashboard.counter} / Dashboard</p>
             <h2 class="h2" id="dashboard-title">
               <span class="soft">{dashboard.heading.soft}</span>
               <span class="strong">{dashboard.heading.strong}</span>
             </h2>
-            <p class="lede"><Rich text={dashboard.lede} /></p>
+            <p class="lede">{dashboard.lede}</p>
           </div>
           <figure class="window dash" role="img" aria-label={dashboard.aria}>
             <div class="window__bar" aria-hidden="true">
               <span class="window__dots"><i></i><i></i><i></i></span>
-              <span class="window__title">slotlock.example.com/dashboard</span>
-              <span class="mono">github-org</span>
+              <span class="window__title">{dashboard.view.path}</span>
             </div>
             <div class="dash__body" aria-hidden="true">
               <div class="dash__side">
                 <p class="dash__brand">{dashboard.view.brand}</p>
-                <p class="dash__org"><span class="dash__avatar">{dashboard.view.org.slice(0, 1).toUpperCase()}</span>{dashboard.view.org}</p>
+                <p class="dash__org"><span class="dash__avatar">{dashboard.view.workspace.slice(0, 1).toUpperCase()}</span>{dashboard.view.workspace}</p>
                 <ul class="dash__nav">
                   {dashboard.view.nav.map((item, index) => <li class={index === 0 ? 'on' : undefined}>{item}</li>)}
                 </ul>
@@ -632,7 +368,7 @@ const canonical = new URL('/', Astro.site).toString();
                       {
                         dashboard.view.upcoming.map((item) => (
                           <li>
-                            <span class="mono dash__time">{item.day} · {item.time}</span>
+                            <span class="mono dash__time">{item.time}</span>
                             <span class="dash__what">{item.what}</span>
                             <span class={`dash__kind dash__kind--${item.kind.toLowerCase()}`}>{item.kind}</span>
                           </li>
@@ -670,165 +406,36 @@ const canonical = new URL('/', Astro.site).toString();
               ))
             }
           </ul>
-          {
-            assistant && (
-              <div class="assist" id="assistant">
-                <h3 class="assist__title">{assistant.heading}</h3>
-                <div class="security-grid">
-                  <figure class="window assist__window" role="img" aria-label={assistant.aria}>
-                    <div class="window__bar" aria-hidden="true">
-                      <span class="window__dots"><i></i><i></i><i></i></span>
-                      <span class="window__title">{assistant.view.path}</span>
-                    </div>
-                    <div class="assist__body" aria-hidden="true">
-                      <div class="assist__head">
-                        <p class="dash__title">{assistant.view.title}</p>
-                        <span class="assist__button">{assistant.view.reset}</span>
-                      </div>
-                      <ol class="assist__thread">
-                        <li class="assist__msg assist__msg--mine">{assistant.view.question}</li>
-                        <li class="assist__tool">{assistant.view.read}</li>
-                        <li class="assist__msg">{assistant.view.answer}</li>
-                        <li class="assist__card">
-                          <div class="assist__card-head">
-                            <span>{assistant.view.card.title}</span>
-                            <span class="dash__kind dash__kind--hold">{assistant.view.card.state}</span>
-                          </div>
-                          <p class="assist__summary">{assistant.view.card.summary}</p>
-                          <dl class="assist__facts">
-                            {assistant.view.card.fields.map(([name, value]) => (
-                              <>
-                                <dt>{name}</dt>
-                                <dd>{value}</dd>
-                              </>
-                            ))}
-                          </dl>
-                          <div class="assist__actions">
-                            <span class="assist__button assist__button--primary">{assistant.view.card.approve}</span>
-                            <span class="assist__button">{assistant.view.card.dismiss}</span>
-                          </div>
-                        </li>
-                      </ol>
-                      <div class="assist__composer">
-                        <span class="assist__input">{assistant.view.composer}</span>
-                        <span class="assist__button assist__button--primary">{assistant.view.send}</span>
-                      </div>
-                    </div>
-                  </figure>
-                  <ul class="statements">
-                    {assistant.statements.map((statement) => <li><Rich text={statement} /></li>)}
-                  </ul>
-                </div>
-              </div>
-            )
-          }
           <p class="section-link"><a class="arrow-link" href={dashboard.link.href}>{dashboard.link.label} <Icon name="arrow" /></a></p>
         </div>
       </section>
 
-      <section class="band band--tint" id={capabilities.id} aria-labelledby="capabilities-title">
+      <section class="band band--tint" id={industries.id} aria-labelledby="industries-title">
         <div class="wrap">
           <div class="head">
-            <p class="counter">{capabilities.counter} / Capabilities</p>
-            <h2 class="h2" id="capabilities-title">
-              <span class="soft">{capabilities.heading.soft}</span>
-              <span class="strong">{capabilities.heading.strong}</span>
+            <h2 class="h2" id="industries-title">
+              <span class="soft">{industries.heading.soft}</span>
+              <span class="strong">{industries.heading.strong}</span>
             </h2>
           </div>
-          <ul class="bento">
+          <ul class="industries">
             {
-              capabilities.items.map((item) => (
-                <li class="bento__card">
-                  {item.visual === 'holds' && (
-                    <div class="bento__scene" role="img" aria-label={capabilities.scenes.holdsAria}>
-                      <ul class="scene-holds" aria-hidden="true">
-                        {capabilities.scenes.holds.map((slot) => (
-                          <li class={`scene-holds__slot scene-holds__slot--${slot.state}`}>
-                            <span class="mono">{slot.time}</span>
-                            <span>{slot.state}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  {item.visual === 'pools' && (
-                    <div class="bento__scene" role="img" aria-label={capabilities.scenes.poolAria}>
-                      <div class="scene-pool" aria-hidden="true">
-                        <p class="mono scene-pool__head">{poolScene.name} · {poolScene.members} members</p>
-                        <div class="scene-pool__bars">
-                          {poolScene.intervals.map((part) => (
-                            <div class="scene-pool__col">
-                              <span class={`scene-pool__bar free-${part.free}`}></span>
-                              <span class="mono scene-pool__free">{part.free} free</span>
-                              <span class="mono scene-pool__when">{hh(part.from)}–{hh(part.to)}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                  {item.visual === 'rules' && (
-                    <div class="bento__scene bento__scene--code" role="img" aria-label={capabilities.scenes.rulesAria}>
-                      <pre aria-hidden="true"><code>{'{\n'}{capabilities.scenes.rules.map(([key, value], index) => (
-<>  <span class="k">"{key}"</span>: <span class={value === 'true' ? 'g' : undefined}>{value}</span>{index < capabilities.scenes.rules.length - 1 ? ',' : ''}{'\n'}</>
-))}{'}'}</code></pre>
-                    </div>
-                  )}
-                  {item.visual === 'waitlist' && (
-                    <div class="bento__scene" role="img" aria-label={capabilities.scenes.waitlistAria}>
-                      <ol class="scene-queue" aria-hidden="true">
-                        {capabilities.scenes.waitlist.map((entry, index) => (
-                          <li class={index === 0 ? 'on' : undefined}>
-                            <span class="scene-queue__n mono">{entry.n}</span>
-                            <span>{entry.who}</span>
-                            <span class="scene-queue__state">{entry.state}</span>
-                          </li>
-                        ))}
-                      </ol>
-                    </div>
-                  )}
-                  {item.visual === 'feed' && (
-                    <div class="bento__scene bento__scene--code" role="img" aria-label={capabilities.scenes.feedAria}>
-                      <pre aria-hidden="true"><code><span class="c">GET /v1/changes?cursor=…</span>{'\n'}{capabilities.scenes.feed.map((type) => (
-<>{type.replace('io.pylota.slotlock.', '')}{'\n'}</>
-))}<span class="c">webhook-signature: v1,…</span></code></pre>
-                    </div>
-                  )}
-                  {item.visual === 'metrics' && (
-                    <div class="bento__scene bento__scene--code" role="img" aria-label={capabilities.scenes.metricsAria}>
-                      <pre aria-hidden="true"><code><span class="c">GET /metrics</span>{'\n'}{capabilities.scenes.metrics.map(([series, value]) => (
-<>{series} <span class="g">{value}</span>{'\n'}</>
-))}</code></pre>
-                    </div>
-                  )}
-                  <div class="bento__body">
-                    <h3>{item.title}</h3>
-                    <p><Rich text={item.body} /></p>
-                    <a class="arrow-link" href={item.href}>Reference <Icon name="arrow" /><span class="sr-only">: {item.title}</span></a>
-                  </div>
+              industries.items.map((item) => (
+                <li class={item.featured ? 'industry industry--featured' : 'industry'}>
+                  <h3>{item.title}</h3>
+                  <p>{item.body}</p>
+                  {item.featured && <a class="industry__proof" href={strip.proof.href}>{strip.proof.name} <Icon name="arrow" /></a>}
                 </li>
               ))
             }
           </ul>
-          <ul class="caps">
-            {
-              capabilities.more.map((item) => (
-                <li>
-                  <a href={item.href}>
-                    <strong>{item.title}</strong>
-                    <span>{item.body}</span>
-                  </a>
-                </li>
-              ))
-            }
-          </ul>
+          <p class="section-link"><a class="arrow-link" href={industries.link.href}>{industries.link.label} <Icon name="arrow" /></a></p>
         </div>
       </section>
 
       <section class="band" id={developers.id} aria-labelledby="dev-title">
         <div class="wrap">
           <div class="head head--split">
-            <p class="counter">{developers.counter} / Developers</p>
             <h2 class="h2" id="dev-title">
               <span class="soft">{developers.heading.soft}</span>
               <span class="strong">{developers.heading.strong}</span>
@@ -851,34 +458,116 @@ const canonical = new URL('/', Astro.site).toString();
                   <Icon name="copy" /><span>Copy</span>
                 </button>
               </div>
-              <pre data-panel="mcp"><code><span class="c"># Claude Code, against your own server</span>
-{facts.claudeMcpAdd}
+              <pre data-panel="mcp"><code><span class="c"># Claude Code, against Slotlock Cloud</span>
+{developers.cloudMcpAdd}
 
 <span class="c"># tools/list: {facts.toolCount} tools</span>
 {facts.tools.map((tool) => (
 <>{tool.name.padEnd(toolPad)}<span class={tool.readOnly ? 'g' : 'a'}>{tool.readOnly ? 'read' : tool.destructive ? 'write, destructive' : 'write'}</span>{'\n'}</>
 ))}</code></pre>
-              <pre data-panel="a2a"><code><span class="c">POST {facts.composeUp ? 'http://localhost:8080/a2a' : 'https://calendar.example.com/slotlock/a2a'}</span>
+              <pre data-panel="a2a"><code><span class="c">POST {CLOUD_API_URL}/a2a</span>
 <span class="c">A2A-Version: {facts.a2a}</span>
-<span class="c">Authorization: Bearer {facts.composeUp ? '$SLOTLOCK_AUTH_TOKEN' : '$SLOTLOCK_TOKEN'}</span>
+<span class="c">Authorization: Bearer $SLOTLOCK_API_KEY</span>
 
 {a2aBody}</code></pre>
               <pre data-panel="rest"><code><span class="c"># How many vans are free, and when</span>
-curl "{apiBase}/v1/pool-availability?pool={developers.restPool}&start={poolStart}&end={poolEnd}" \
+curl "{CLOUD_API_URL}/v1/pool-availability?pool={developers.restPool}&start={poolStart}&end={poolEnd}" \
   -H "Authorization: Bearer $SLOTLOCK_API_KEY"
 
 {restResponse}</code></pre>
               <pre data-panel="ts"><code><span class="c">// No database needed for the availability maths.</span>
 {facts.readmeQuickStart}</code></pre>
             </div>
-            <ul class="rows">
+            <div class="dev-side">
+              <ul class="rows">
+                {
+                  developers.rows.map((row) => (
+                    <li>
+                      <a href={row.href}>
+                        <strong>{row.label}</strong>
+                        <span><Rich text={row.body} /></span>
+                        <Icon name="chevron" />
+                      </a>
+                    </li>
+                  ))
+                }
+              </ul>
+              <div class="dev-install">
+                {
+                  developers.install.map((target) => (
+                    <input
+                      class="sr-only"
+                      type="radio"
+                      name="install"
+                      id={`install-${target.id}`}
+                      checked={target.id === 'python'}
+                    />
+                  ))
+                }
+                <div class="install">
+                  <div class="install__targets" role="presentation">
+                    {developers.install.map((target) => <label for={`install-${target.id}`}>{target.label}</label>)}
+                  </div>
+                  <div class="install__line">
+                    {
+                      developers.install.map((target) => (
+                        <code
+                          class:list={['install__cmd', { 'install__cmd--shell': target.shell !== false }]}
+                          data-install={target.id}
+                          id={`cmd-${target.id}`}
+                        >
+                          {target.command}
+                        </code>
+                      ))
+                    }
+                    <button class="copy" type="button" data-copy-install hidden>
+                      <Icon name="copy" />
+                      <span>Copy</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="install__notes">
+                  {
+                    developers.install.map((target) => (
+                      <p class="install__note" data-note={target.id}>
+                        <Rich text={target.note} />
+                      </p>
+                    ))
+                  }
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="dev-lower">
+            <figure class="code endpoints">
+              <figcaption class="code__bar">
+                <span class="grow">{developers.endpoints.caption}</span>
+              </figcaption>
+              <dl class="endpoints__list">
+                {
+                  developers.endpoints.items.map((item) => (
+                    <div class="endpoints__row">
+                      <dt>{item.label}</dt>
+                      <dd>
+                        <code id={`endpoint-${item.id}`}>{item.value}</code>
+                        <button class="copy" type="button" data-copy={`endpoint-${item.id}`} hidden>
+                          <Icon name="copy" />
+                          <span>Copy</span>
+                          <span class="sr-only"> {item.label} URL</span>
+                        </button>
+                      </dd>
+                    </div>
+                  ))
+                }
+              </dl>
+            </figure>
+            <ul class="caps">
               {
-                developers.rows.map((row) => (
+                developers.capabilities.map((item) => (
                   <li>
-                    <a href={row.href}>
-                      <strong>{row.label}</strong>
-                      <span><Rich text={row.body} /></span>
-                      <Icon name="chevron" />
+                    <a href={item.href}>
+                      <strong>{item.title}</strong>
+                      <span>{item.body}</span>
                     </a>
                   </li>
                 ))
@@ -891,123 +580,100 @@ curl "{apiBase}/v1/pool-availability?pool={developers.restPool}&start={poolStart
       <section class="band band--tint" id={security.id} aria-labelledby="security-title">
         <div class="wrap">
           <div class="head">
-            <p class="counter">{security.counter} / Security</p>
             <h2 class="h2" id="security-title">
               <span class="soft">{security.heading.soft}</span>
               <span class="strong">{security.heading.strong}</span>
             </h2>
           </div>
-          <div class="security-grid">
-            <div class="approval" role="img" aria-label={security.aria}>
-              <div class="approval__card" aria-hidden="true">
-                <p class="eyebrow eyebrow--plain">{security.approval.eyebrow}</p>
-                <p class="approval__msg">{security.approval.message}</p>
-                <div class="approval__check">
-                  <span class="approval__box"><Icon name="check" /></span>
-                  <span>
-                    {security.approval.checkbox}
-                    <span class="approval__help">{security.approval.help}</span>
-                  </span>
-                </div>
-                <div class="approval__actions">
-                  <span>{security.approval.decline}</span>
-                  <span class="accept">{security.approval.accept}</span>
-                </div>
-                <p class="approval__seal">{security.approval.seal}</p>
+          <div class="split">
+            <div class="key-card" role="img" aria-label={security.aria}>
+              <div class="key-card__top" aria-hidden="true">
+                <span class="key-card__name">{security.key.name}</span>
+                <span class="dash__kind">{security.key.state}</span>
               </div>
-              <div class="receipt" aria-hidden="true">
-                <Icon name="check" />
-                <strong>{security.receipt.label}</strong>
-                <span class="mono">{security.receipt.detail}</span>
-              </div>
+              <dl class="key-card__fields" aria-hidden="true">
+                {security.key.fields.map(([name, value]) => (
+                  <>
+                    <dt>{name}</dt>
+                    <dd>{value}</dd>
+                  </>
+                ))}
+              </dl>
+              <span class="key-card__revoke" aria-hidden="true">{security.key.revoke}</span>
             </div>
-            <ul class="statements">
-              {security.statements.map((statement) => <li><Rich text={statement} /></li>)}
-            </ul>
+            <div>
+              <ul class="statements">
+                {security.statements.map((statement) => <li><Rich text={statement} /></li>)}
+              </ul>
+              <p class="section-link"><a class="arrow-link" href={security.link.href}>{security.link.label} <Icon name="arrow" /></a></p>
+            </div>
           </div>
         </div>
       </section>
 
-      <section class="band" id={compare.id} aria-labelledby="compare-title">
+      <section class="band" id={pricing.id} aria-labelledby="pricing-title">
         <div class="wrap">
-          <div class="head">
-            <p class="counter">{compare.counter} / Compare</p>
-            <h2 class="h2" id="compare-title">
-              <span class="soft">{compare.heading.soft}</span>
-              <span class="strong">{compare.heading.strong}</span>
+          <div class="head head--split">
+            <p class="eyebrow">{pricing.eyebrow}</p>
+            <h2 class="h2" id="pricing-title">
+              <span class="soft">{pricing.heading.soft}</span>
+              <span class="strong">{pricing.heading.strong}</span>
             </h2>
+            <p class="lede">{pricing.lede}</p>
           </div>
-          <div class="table-wrap">
-            <table class="compare">
-              <caption class="sr-only">Slotlock compared with a bookings table and a cron job</caption>
-              <thead>
-                <tr>
-                  <th scope="col"><span class="sr-only">Situation</span></th>
-                  <th scope="col">{compare.columns[1]}</th>
-                  <th scope="col" class="ours">{compare.columns[2]}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {
-                  compare.rows.map(([situation, theirs, ours]) => (
-                    <tr>
-                      <th scope="row">{situation}</th>
-                      <td data-label={compare.columns[1]}><Rich text={theirs ?? ""} /></td>
-                      <td data-label={compare.columns[2]} class="ours">
-                        <Rich text={ours ?? ""} />
-                      </td>
-                    </tr>
-                  ))
-                }
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </section>
-
-      <section class="band band--tint" id={openSource.id} aria-labelledby="oss-title">
-        <div class="wrap">
-          <div class="head">
-            <p class="counter">{openSource.counter} / Open source</p>
-            <h2 class="h2" id="oss-title">
-              <span class="soft">{openSource.heading.soft}</span>
-              <span class="strong">{openSource.heading.strong}</span>
-            </h2>
-          </div>
-          <ul class="deploy">
+          <ul class="plans">
             {
-              openSource.deploy.map((option) => (
-                <li>
-                  <h3>{option.title}</h3>
-                  <p><Rich text={option.body} /></p>
-                  {option.command && <code class="deploy__cmd">{option.command}</code>}
-                  <a class="arrow-link" href={option.link.href}>{option.link.label} <Icon name="arrow" /></a>
+              pricing.plans.map((plan) => (
+                <li class={plan.featured ? 'plan plan--featured' : 'plan'}>
+                  <p class="plan__host">{plan.host}</p>
+                  <h3 class="plan__name">{plan.name}</h3>
+                  <p class="plan__tagline">{plan.tagline}</p>
+                  <p class="plan__price">
+                    <strong>{plan.price}</strong> <span>{plan.per}</span>
+                  </p>
+                  <a class={plan.featured ? 'btn btn--primary' : 'btn btn--ghost'} href={plan.cta.href}>{plan.cta.label}</a>
+                  <ul class="plan__features">
+                    {plan.features.map((feature) => <li><Icon name="check" />{feature}</li>)}
+                  </ul>
+                  {plan.more && (
+                    <a class="arrow-link" href={plan.more.href}>{plan.more.label} <Icon name="arrow" /></a>
+                  )}
+                  {plan.terms && <p class="fine"><Rich text={signIn.terms} /></p>}
                 </li>
               ))
             }
           </ul>
-          <div class="security-grid">
+          <p class="plans__note">
+            {pricing.note} <a class="arrow-link" href={pricing.link.href}>{pricing.link.label} <Icon name="arrow" /></a>
+          </p>
+        </div>
+      </section>
+
+      <section class="band band--tint" id={source.id} aria-labelledby="source-title">
+        <div class="wrap">
+          <div class="head">
+            <h2 class="h2" id="source-title">
+              <span class="soft">{source.heading.soft}</span>
+              <span class="strong">{source.heading.strong}</span>
+            </h2>
+          </div>
+          <div class="split">
             <div class="repo">
               <div class="repo__top">
                 <div>
-                  <p class="repo__name">{openSource.repo.name}</p>
-                  <p class="repo__caption">{openSource.repo.caption}</p>
+                  <p class="repo__name">{source.repo.name}</p>
+                  <p class="repo__caption">{source.repo.caption}</p>
                 </div>
                 <span class="badge">{facts.license}</span>
               </div>
-              <dl>
-                <dt>Includes</dt>
-                <dd>{openSource.repo.includes.map((item) => <span class="tag">{item}</span>)}</dd>
-                <dt>Run it</dt>
-                <dd><code>{openSource.repo.run}</code></dd>
-              </dl>
+              <p class="repo__tags">{source.repo.includes.map((item) => <span class="tag">{item}</span>)}</p>
               <a class="btn btn--ghost" href={REPO_URL}>
                 <Icon name="github" />
-                {openSource.repo.cta}
+                {source.repo.cta}
               </a>
             </div>
             <ul class="statements">
-              {openSource.statements.map((statement) => <li><Rich text={statement} /></li>)}
+              {source.statements.map((statement) => <li><Rich text={statement} /></li>)}
             </ul>
           </div>
         </div>
@@ -1041,14 +707,9 @@ curl "{apiBase}/v1/pool-availability?pool={developers.restPool}&start={poolStart
             <span class="strong">{closing.heading.strong}</span>
           </h2>
           <div class="hero__actions">
-            <a class="btn btn--primary" href={signIn.href}>
-              <Icon name="github" />
-              {signIn.long}
-            </a>
-            <a class="btn btn--ghost" href="/docs/quickstart/">Self-host it</a>
-            <a class="btn btn--ghost" href="/docs/specification/">Read the specification</a>
+            <a class="btn btn--primary" href={signIn.href}>{signIn.start}</a>
+            <a class="btn btn--ghost" href={hero.docs.href}>{hero.docs.label}</a>
           </div>
-          <p class="fine"><Rich text={signIn.terms} /></p>
         </div>
       </section>
     </main>
@@ -1084,6 +745,7 @@ curl "{apiBase}/v1/pool-availability?pool={developers.restPool}&start={poolStart
             <a href="/llms.txt">llms.txt</a>
             <a href="/llms-full.txt">llms-full.txt</a>
           </span>
+          <a class="footer-version" href={footer.version.href}>{footer.version.label}</a>
           <button class="theme-toggle" type="button" data-theme-toggle hidden>
             <Icon name="contrast" />
             <span data-theme-label>Theme: system</span>

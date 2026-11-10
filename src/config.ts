@@ -133,6 +133,13 @@ export interface SlotlockServeDashboardConfig {
   /** What the deployment is called in the dashboard (SLOTLOCK_DASHBOARD_NAME). */
   name?: string;
   /**
+   * The terms people accept by signing in (SLOTLOCK_DASHBOARD_TERMS_URL): the sign-in page links
+   * them beside the button. Without it, the page names no terms.
+   */
+  termsUrl?: string;
+  /** What the sign-in page links as the privacy notice (SLOTLOCK_DASHBOARD_PRIVACY_URL). */
+  privacyUrl?: string;
+  /**
    * Seals each tenant's model API key for the dashboard assistant (SLOTLOCK_ASSISTANT_SECRET).
    * Without it the assistant is off.
    */
@@ -231,6 +238,8 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
       'SLOTLOCK_DASHBOARD_NAME must be 1-60 characters, without <, > or control or invisible characters',
     );
   }
+  const termsUrl = readPolicyUrl(env, 'SLOTLOCK_DASHBOARD_TERMS_URL');
+  const privacyUrl = readPolicyUrl(env, 'SLOTLOCK_DASHBOARD_PRIVACY_URL');
   return {
     githubClientId,
     githubClientSecret,
@@ -238,9 +247,30 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
     allowedUsers: users,
     ...(orgs !== undefined ? { organizations: orgs } : {}),
     ...(name !== undefined && name !== '' ? { name } : {}),
+    ...(termsUrl !== undefined ? { termsUrl } : {}),
+    ...(privacyUrl !== undefined ? { privacyUrl } : {}),
     ...(assistantSecret !== undefined ? { assistantSecret } : {}),
     ...(assistantSecret !== undefined && privateUrls === 'on' ? { assistantPrivateUrls: true } : {}),
   };
+}
+
+/** A policy page the sign-in page links: an https URL, or undefined when the setting is empty. */
+function readPolicyUrl(
+  env: SlotlockEnv,
+  name: 'SLOTLOCK_DASHBOARD_TERMS_URL' | 'SLOTLOCK_DASHBOARD_PRIVACY_URL',
+): string | undefined {
+  const value = optional(env, name)?.trim();
+  if (value === undefined || value === '') return undefined;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new SlotlockConfigError(`${name} must be an https URL`);
+  }
+  if (url.protocol !== 'https:' || url.username !== '' || url.password !== '') {
+    throw new SlotlockConfigError(`${name} must be an https URL`);
+  }
+  return url.href;
 }
 
 /**

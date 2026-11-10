@@ -297,6 +297,31 @@ describe('dashboard routes and headers', () => {
 });
 
 describe('GitHub sign-in', () => {
+  it('names the terms beside the button only when the deployment sets them', async () => {
+    const plain = await (await get(dashboard(), '/base/dashboard')).text();
+    expect(plain).toContain('Continue with GitHub');
+    expect(plain).not.toContain('By continuing you agree');
+    const withTerms = await (
+      await get(
+        dashboard({
+          termsUrl: 'https://slotlock.example/terms/',
+          privacyUrl: 'https://slotlock.example/privacy/',
+        }),
+        '/base/dashboard',
+      )
+    ).text();
+    expect(withTerms).toContain(
+      'By continuing you agree to the <a href="https://slotlock.example/terms/">Terms of Service</a>. The <a href="https://slotlock.example/privacy/">Privacy notice</a> says what is kept.',
+    );
+    const termsOnly = await (
+      await get(dashboard({ termsUrl: 'https://slotlock.example/terms/' }), '/base/dashboard')
+    ).text();
+    expect(termsOnly).toContain('<a href="https://slotlock.example/terms/">Terms of Service</a>.</p>');
+    expect(termsOnly).not.toContain('Privacy notice');
+    expect(() => dashboard({ termsUrl: 'http://slotlock.example/terms/' })).toThrow(/termsUrl must be an https URL/);
+    expect(() => dashboard({ privacyUrl: 'https://slotlock.example/"x' })).toThrow(/privacyUrl must be an https URL/);
+  });
+
   it('sends the person to GitHub with state and an S256 challenge, and seals both in a cookie', async () => {
     const { start, location, oauth } = await signIn();
     expect(start.status).toBe(302);

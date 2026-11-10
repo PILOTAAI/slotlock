@@ -5,7 +5,8 @@
 // none of its empty phrases. Code (<pre>, <code>) is not copy and is skipped, as are the pages
 // rendered verbatim from the repository's README/SPEC/CHANGELOG (they are linted where they live).
 //
-// It also counts the landing page's words, the budget the design brief sets (about 1,200).
+// It also counts the landing page's words and fails above WORD_LIMIT: the design brief sets about
+// 1,200, and the count includes the footer and the words drawn inside the product pictures.
 //
 //   npm run check:copy        run after `npm run build`; exits 1 on any finding
 import { readFile } from 'node:fs/promises';
@@ -159,6 +160,7 @@ const PAGES = [
   'index.html',
   'index.md',
   'docs/index.html',
+  'docs/use-cases/index.html',
   'docs/quickstart/index.html',
   'docs/connect/index.html',
   'docs/self-host/index.html',
@@ -183,6 +185,7 @@ const PAGES = [
   'llms.txt',
 ];
 const LANDING_SOURCES = ['../src/data/landing.ts'];
+const WORD_LIMIT = 1300;
 
 let failures = 0;
 for (const page of PAGES) {
@@ -225,5 +228,9 @@ const labels = [...main.matchAll(/aria-label="([^"]*)"/g)].map((m) => m[1]).join
 console.log(
   `Landing page words: ${prose} of visible prose (code samples excluded), ${withCode} including code samples; scene descriptions for screen readers add ${words(labels)}.`,
 );
+if (prose > WORD_LIMIT) {
+  failures += 1;
+  console.log(`index.html: ${prose} words of visible prose, over the limit of ${WORD_LIMIT}.`);
+}
 console.log(failures === 0 ? 'Copy lint: no findings.' : `Copy lint: ${failures} finding(s).`);
 process.exit(failures === 0 ? 0 : 1);
