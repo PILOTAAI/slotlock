@@ -5,8 +5,24 @@ versioning.
 
 ## Unreleased
 
+### Added
+
+- `SLOTLOCK_DASHBOARD_TERMS_URL` and `SLOTLOCK_DASHBOARD_PRIVACY_URL`: with an https URL set, the
+  dashboard's sign-in page names the terms a person accepts by continuing, and links the privacy
+  notice. Without them it names no terms, as before.
+- Docs: a Use cases page, on how to model car and van rental, equipment hire, clinics, courts,
+  garage service bays, salons, meeting rooms and field service, and where Slotlock does not fit.
+
 ### Changed
 
+- Site: the landing page leads with what agents can book and with Slotlock Cloud, in about 1,230
+  words instead of 2,607 and 12 bands instead of 15. It shows the dashboard in its first screen,
+  says Pylota checks every booking with Slotlock, lists the industries it serves, and has a pricing
+  table. The table reads each hosted plan's limits and monthly allowances from `src/plans.ts` and
+  its price from the Plans table in `docs/hosted/README.md`; while a release has no `src/plans.ts`
+  it offers Free (while in preview) and Self-host only. Running it yourself now lives in Pricing, a
+  Source band and the docs; the hero's install card moved to the developers band. Copy lint fails
+  the build above 1,300 words.
 - Privacy notice: email sent to support@, abuse@ or privacy@pylota.io is held in Google Workspace for
   two years; Google is listed as a recipient, with its transfers. The notice has no owner TODO left.
 - README: about 160 lines that say what Slotlock is, how to run it and where each topic is

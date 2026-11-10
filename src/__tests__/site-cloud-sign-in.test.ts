@@ -16,8 +16,10 @@ describe('the site signs people in to Slotlock Cloud', () => {
     expect(landing).toContain(`export const CLOUD_API_URL = '${API}';`);
     expect(landing).toMatch(/export const signIn = \{\n {2}label: 'Sign in',[^}]*href: SIGN_IN_URL,/);
     const page = read('site/src/pages/index.astro');
-    // The header, the hero, the Cloud section and the closing band.
-    expect(page.match(/href=\{signIn\.href\}/g)?.length).toBe(4);
+    // Sign in and Start free in the header, Sign in in the phone menu, Start free in the hero and
+    // the closing band. The Free plan's button takes the same URL from its plan.
+    expect(page.match(/href=\{signIn\.href\}/g)?.length).toBe(5);
+    expect(landing).toMatch(/cta: \{ label: signIn\.start, href: SIGN_IN_URL \}/);
     expect(page).not.toMatch(/target="_blank"/);
     // The docs: beside GitHub in the wide header and the menu (Starlight's SocialIcons), and beside
     // the menu button in the narrow header (Header).
@@ -28,7 +30,9 @@ describe('the site signs people in to Slotlock Cloud', () => {
     }
   });
 
-  it('names the policies beside the button, each a page the site builds', () => {
+  it('names the policies under the Free plan, each a page the site builds', () => {
+    // Once on the page; the dashboard's sign-in page names the terms too (SLOTLOCK_DASHBOARD_TERMS_URL).
+    expect(read('site/src/pages/index.astro').match(/signIn\.terms/g)?.length).toBe(1);
     const terms = /terms:\n\s+'([^']+)'/.exec(landing)?.[1] ?? '';
     expect(terms).toMatch(/^By signing in you agree to the /);
     const docs = readdirSync(path('site/docs-src')).map((file) => file.replace(/\.md$/, ''));
@@ -42,8 +46,8 @@ describe('the site signs people in to Slotlock Cloud', () => {
 
   it('promises Slotlock Cloud no organization tenants, which it does not configure', () => {
     // The hosted dashboard sets no SLOTLOCK_DASHBOARD_ORGS: each account is its own tenant.
-    const cloud = landing.slice(landing.indexOf('export const cloud = {'), landing.indexOf('export const proof = {'));
-    expect(cloud, 'canary: the cloud section').toContain("eyebrow: 'Slotlock Cloud'");
+    const cloud = landing.slice(landing.indexOf('export const pricing = {'), landing.indexOf('export const source = {'));
+    expect(cloud, 'canary: the pricing section').toContain("eyebrow: 'Slotlock Cloud'");
     expect(cloud).not.toMatch(/organi[sz]ation/i);
     expect(read('docs/hosted/README.md')).not.toMatch(/organi[sz]ation/i);
     expect(read('site/src/data/llms.mjs')).not.toMatch(/organi[sz]ation/i);

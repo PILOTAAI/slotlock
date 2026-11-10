@@ -216,6 +216,8 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       allowedUsers: config.allowedUsers,
       ...(config.organizations ? { organizations: config.organizations } : {}),
       ...(config.name ? { name: config.name } : {}),
+      ...(config.termsUrl ? { termsUrl: config.termsUrl } : {}),
+      ...(config.privacyUrl ? { privacyUrl: config.privacyUrl } : {}),
       availability: readAvailability(vars),
       // With SLOTLOCK_ASSISTANT_SECRET, the chat assistant; its tool calls reach Postgres through
       // the request's client like every other page, and are bounded by the client rate limit.
