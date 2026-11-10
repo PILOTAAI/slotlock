@@ -124,6 +124,13 @@ versioning.
   pool's `order`. New tenant table `slotlock.pool_settings`, under the tenant's forced row-level
   security and erased with it; an unknown order is refused `invalid_pool_order`. Run `slotlock
   migrate`.
+- Provider presets and a model list in the assistant's Settings (RFC 0003 A4). Anthropic, OpenAI,
+  OpenRouter, Google, Mistral, Groq, Together and Custom each fill the API and base URL, saving
+  nothing; **Load models** asks the provider for its models (`GET /v1/models` on the Anthropic API,
+  `GET /models` on an OpenAI-compatible one) and offers them for the Model field. It checks the URL
+  as saving does, sends the saved key only to the provider and URL it was saved for, never follows a
+  redirect, and counts against the member's message rate. `SLOTLOCK_ASSISTANT_PRESETS` and
+  `listSlotlockAssistantModels` in `assistant.ts`.
 - Monthly quotas, off unless `SLOTLOCK_QUOTAS=on` (which needs `SLOTLOCK_USAGE=on`; RFC 0003
   part 3). A tenant on a plan may run so many operations and make so many bookings a UTC calendar
   month (`SLOTLOCK_PLAN_QUOTAS`): Free 25,000 and 1,000, refused at 100%; Developer 500,000 and

@@ -166,9 +166,12 @@ Cloud, people on their personal tenants (see [Teams on Cloud](#later)).
 
 ### Plan
 
-A2 and A3 are done on `claude/inspiring-dijkstra-bfvqif` (A2 is T2 and needs its independent
-review); A1 waits on the owner, who holds the Cloudflare credentials (this repository holds none, by
-design).
+A2, A3, A4 and A5 are done on `claude/inspiring-dijkstra-bfvqif` (A2 is T2 and needs its
+independent review); A1 waits on the owner, who holds the Cloudflare credentials (this repository
+holds none, by design). A4 is built as below: **Load models** checks the URL as saving does, sends
+the saved key only to the provider and URL it was saved for (a key typed in the form otherwise),
+never follows a redirect, saves nothing, and counts as one of the member's assistant messages
+against its rate.
 
 | # | Change | Tier |
 | --- | --- | --- |

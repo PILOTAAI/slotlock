@@ -8,12 +8,14 @@ import type {
 import type { SlotlockApiKeyStore } from '../api-keys.js';
 import {
   SLOTLOCK_ASSISTANT_MAX_STORED_BYTES,
+  SLOTLOCK_ASSISTANT_PRESETS,
   SLOTLOCK_ASSISTANT_TOOL_USE,
   type SlotlockAssistantEntry,
   type SlotlockAssistantStore,
   boundSlotlockAssistantEntries,
   pruneSlotlockAssistantActions,
   createSlotlockMemoryAssistantStore,
+  listSlotlockAssistantModels,
   openSlotlockAssistantKey,
   readSlotlockAssistantBaseUrl,
   sealSlotlockAssistantKey,
@@ -440,7 +442,7 @@ describe('assistant settings', () => {
     const bob = await signIn(target, 'bob');
     const settings = await (await get(target, '/dashboard/settings', bob)).text();
     expect(settings).not.toContain('action="/dashboard/settings/assistant"');
-    for (const path of ['/dashboard/settings/assistant', '/dashboard/settings/assistant/test', '/dashboard/settings/assistant/remove']) {
+    for (const path of ['/dashboard/settings/assistant', '/dashboard/settings/assistant/test', '/dashboard/settings/assistant/models', '/dashboard/settings/assistant/remove']) {
       const refused = await post(target, path, { provider: 'openai', base_url: model.baseUrl, model: 'x', api_key: 'stolen-key' }, bob);
       expect(refused.status, path).toBe(403);
     }
@@ -564,6 +566,146 @@ describe('assistant settings', () => {
     expect(tools.map((tool) => tool.name)).not.toEqual(
       expect.arrayContaining([expect.stringMatching(/key|webhook|rule|pool_member|erase|coverage/)]),
     );
+  });
+});
+
+describe('provider presets and model lists (RFC 0003 A4)', () => {
+  let model: FakeModel;
+  beforeAll(async () => {
+    model = await startFakeModel('openai');
+  });
+  afterAll(() => model.close());
+  beforeEach(() => {
+    model.requests.length = 0;
+    model.models(['your-model']);
+  });
+
+  const loadModels = (target: Dashboard, cookie: string, fields: Record<string, string>) =>
+    post(target, '/dashboard/settings/assistant/models', { provider: 'openai', base_url: model.baseUrl, model: '', api_key: '', ...fields }, cookie);
+
+  it('offers presets whose URLs saving accepts, each with its API', () => {
+    expect(SLOTLOCK_ASSISTANT_PRESETS.map((preset) => preset.id)).toEqual([
+      'anthropic', 'openai', 'openrouter', 'google', 'mistral', 'groq', 'together', 'custom',
+    ]);
+    for (const preset of SLOTLOCK_ASSISTANT_PRESETS) {
+      if (preset.id === 'custom') {
+        expect(preset.baseUrl).toBe('');
+        continue;
+      }
+      expect(readSlotlockAssistantBaseUrl(preset.baseUrl), preset.id).toEqual({ ok: true, url: preset.baseUrl });
+      expect(preset.provider, preset.id).toBe(preset.id === 'anthropic' ? 'anthropic' : 'openai');
+    }
+  });
+
+  it('fills the form from a preset and saves nothing; an unknown preset fills nothing', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    const settings = await (await get(target, '/dashboard/settings', alice)).text();
+    expect(settings).toContain('<button type="submit" name="preset" value="openrouter">OpenRouter</button>');
+    const filled = await (await get(target, '/dashboard/settings?preset=openrouter', alice)).text();
+    expect(filled).toContain('name="base_url" required maxlength="2048" value="https://openrouter.ai/api/v1"');
+    expect(filled).toContain('<option value="openai" selected>');
+    const anthropic = await (await get(target, '/dashboard/settings?preset=anthropic', alice)).text();
+    expect(anthropic).toContain('value="https://api.anthropic.com"');
+    expect(anthropic).toContain('<option value="anthropic" selected>');
+    const unknown = await (await get(target, '/dashboard/settings?preset=%3Cscript%3E', alice)).text();
+    expect(unknown).toContain('name="base_url" required maxlength="2048" value=""');
+    expect(unknown).not.toContain('<script>');
+    expect(await assistantStore.getSettings('github-org:91')).toBeNull();
+  });
+
+  it("lists the provider's models for the Model field, with the saved key only for its own provider and URL", async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, 'openai');
+    model.models(['b-model', 'a-model', 'a-model', 'not a model name', 'c/model:latest']);
+    const listed = await loadModels(target, alice, {});
+    expect(listed.status).toBe(200);
+    const html = await listed.text();
+    expect(html).toContain('3 models listed: choose one for Model, then Save.');
+    expect(html).toContain('list="assistant-models"');
+    const options = [...html.matchAll(/<option value="([^"]+)"><\/option>/g)].map((match) => match[1]);
+    expect(options).toEqual(['a-model', 'b-model', 'c/model:latest']);
+    expect(html).not.toContain(API_KEY);
+    expect(model.requests.at(-1)).toMatchObject({ path: '/v1/models', headers: { authorization: `Bearer ${API_KEY}` } });
+
+    // Another URL for the same server: the saved key is not sent there.
+    const elsewhere = model.baseUrl.replace('127.0.0.1', 'localhost');
+    expect((await loadModels(target, alice, { base_url: elsewhere })).status).toBe(200);
+    expect(model.requests.at(-1)?.headers.authorization).toBeUndefined();
+    // Another provider: not sent either. A key typed in the form is sent, and asked for again on Save.
+    expect((await loadModels(target, alice, { provider: 'anthropic' })).status).toBe(502);
+    expect(model.requests.at(-1)?.headers['x-api-key']).toBeUndefined();
+    const typed = await loadModels(target, alice, { base_url: elsewhere, api_key: 'sk-typed-key-0000' });
+    expect(await typed.text()).toContain('Enter the API key again when you save.');
+    expect(model.requests.at(-1)?.headers.authorization).toBe('Bearer sk-typed-key-0000');
+
+    // Nothing was saved by listing.
+    expect(await assistantStore.getSettings('github-org:91')).toMatchObject({ baseUrl: model.baseUrl, model: 'your-model', keyHint: 'wxyz' });
+  });
+
+  it("keeps the form's values and reads a refused list plainly, never with the key or the provider's body", async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    model.models({ status: 401, body: '{"error":"invalid key sk-leaked-SECRET"}' });
+    const refused = await loadModels(target, alice, { model: 'kept-model', api_key: API_KEY });
+    expect(refused.status).toBe(502);
+    const html = await refused.text();
+    expect(html).toContain('The model provider refused the API key.');
+    expect(html).toContain('value="kept-model"');
+    expect(html).not.toContain(API_KEY);
+    expect(html).not.toContain('sk-leaked-SECRET');
+    model.models([]);
+    const none = await loadModels(target, alice, { api_key: API_KEY });
+    expect(await none.text()).toContain('The provider listed no models. Type the model name.');
+    expect(await assistantStore.getSettings('github-org:91')).toBeNull();
+  });
+
+  it('checks the URL as saving does, and counts each list as a message', async () => {
+    const closed = dashboard({ privateUrls: false });
+    const alice = await signIn(closed, 'alice');
+    const refused = await loadModels(closed, alice, {});
+    expect(refused.status).toBe(400);
+    expect(await refused.text()).toContain('local or private network address');
+    const invalid = await loadModels(closed, alice, { base_url: 'http://models.example.com/v1' });
+    expect(invalid.status).toBe(400);
+    expect((await loadModels(closed, alice, { provider: 'other' })).status).toBe(400);
+    expect(model.requests).toHaveLength(0);
+
+    const limited = dashboard({ rate: { perSecond: 1 / 60, burst: 2 } });
+    const owner = await signIn(limited, 'alice');
+    expect((await loadModels(limited, owner, {})).status).toBe(200);
+    expect((await loadModels(limited, owner, {})).status).toBe(200);
+    expect((await loadModels(limited, owner, {})).status).toBe(429);
+    expect(model.requests).toHaveLength(2);
+  });
+
+  it('asks the Anthropic API for its models with its version and the key, never following a redirect', async () => {
+    const anthropic = await startFakeModel('anthropic');
+    try {
+      anthropic.models(['claude-model-b', 'claude-model-a']);
+      const listed = await listSlotlockAssistantModels({
+        provider: 'anthropic',
+        baseUrl: anthropic.baseUrl,
+        apiKey: API_KEY,
+        fetch,
+        timeoutMs: 5_000,
+      });
+      expect(listed).toEqual(['claude-model-a', 'claude-model-b']);
+      expect(anthropic.requests[0]).toMatchObject({
+        path: '/v1/models?limit=1000',
+        headers: { 'x-api-key': API_KEY, 'anthropic-version': expect.any(String) },
+      });
+      expect(anthropic.requests[0]?.headers.authorization).toBeUndefined();
+    } finally {
+      await anthropic.close();
+    }
+    const redirecting = vi.fn(async () => new Response(null, { status: 302, headers: { location: 'https://elsewhere.example.com/' } }));
+    await expect(
+      listSlotlockAssistantModels({ provider: 'openai', baseUrl: 'https://api.example.com/v1', apiKey: API_KEY, fetch: redirecting, timeoutMs: 5_000 }),
+    ).rejects.toMatchObject({ reason: 'unavailable' });
+    expect(redirecting).toHaveBeenCalledTimes(1);
+    expect(redirecting.mock.calls[0]).toMatchObject([expect.any(String), { redirect: 'manual' }]);
   });
 });
 

@@ -759,6 +759,104 @@ export async function callSlotlockAssistantModel(request: ModelRequest): Promise
 }
 
 /**
+ * Providers the Settings form fills in (RFC 0003 A4): each one's API and the base URL it documents
+ * for it. Custom fills nothing, for any other OpenAI-compatible API. Choosing one saves nothing.
+ */
+export const SLOTLOCK_ASSISTANT_PRESETS: readonly {
+  id: string;
+  name: string;
+  provider: SlotlockAssistantProvider;
+  baseUrl: string;
+}[] = Object.freeze([
+  { id: 'anthropic', name: 'Anthropic', provider: 'anthropic', baseUrl: 'https://api.anthropic.com' },
+  { id: 'openai', name: 'OpenAI', provider: 'openai', baseUrl: 'https://api.openai.com/v1' },
+  { id: 'openrouter', name: 'OpenRouter', provider: 'openai', baseUrl: 'https://openrouter.ai/api/v1' },
+  {
+    id: 'google',
+    name: 'Google',
+    provider: 'openai',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+  },
+  { id: 'mistral', name: 'Mistral', provider: 'openai', baseUrl: 'https://api.mistral.ai/v1' },
+  { id: 'groq', name: 'Groq', provider: 'openai', baseUrl: 'https://api.groq.com/openai/v1' },
+  { id: 'together', name: 'Together', provider: 'openai', baseUrl: 'https://api.together.xyz/v1' },
+  { id: 'custom', name: 'Custom', provider: 'openai', baseUrl: '' },
+]);
+
+/** Models one list keeps: a provider may offer hundreds. */
+const MAX_LISTED_MODELS = 500;
+
+/**
+ * The models a provider offers (`GET /v1/models` on the Anthropic API, `GET /models` on an
+ * OpenAI-compatible one), by id, sorted, for the Settings form's Model field. Throws
+ * SlotlockAssistantProviderError as a model call does, never with the key in its message.
+ */
+export async function listSlotlockAssistantModels(args: {
+  provider: SlotlockAssistantProvider;
+  baseUrl: string;
+  apiKey: string | null;
+  fetch: typeof fetch;
+  timeoutMs: number;
+}): Promise<string[]> {
+  const anthropic = args.provider === 'anthropic';
+  const headers: Record<string, string> = { accept: 'application/json', 'user-agent': 'slotlock-dashboard-assistant' };
+  if (anthropic) {
+    headers['anthropic-version'] = SLOTLOCK_ANTHROPIC_VERSION;
+    if (args.apiKey) headers['x-api-key'] = args.apiKey;
+  } else if (args.apiKey) {
+    headers.authorization = `Bearer ${args.apiKey}`;
+  }
+  const signal = AbortSignal.timeout(args.timeoutMs);
+  let response: Response;
+  try {
+    response = await args.fetch(anthropic ? `${args.baseUrl}/v1/models?limit=1000` : `${args.baseUrl}/models`, {
+      method: 'GET',
+      headers,
+      // Never follow a redirect: it would carry the key elsewhere.
+      redirect: 'manual',
+      signal,
+    });
+  } catch (error) {
+    const name = (error as { name?: unknown } | null)?.name;
+    if ((error as { code?: unknown } | null)?.code === 'private_address') {
+      throw new SlotlockAssistantProviderError('private_address');
+    }
+    throw new SlotlockAssistantProviderError(
+      name === 'TimeoutError' || name === 'AbortError' || signal.aborted ? 'timeout' : 'unavailable',
+    );
+  }
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    const status = response.status;
+    throw new SlotlockAssistantProviderError(
+      status === 401 || status === 403
+        ? 'refused_key'
+        : status === 404
+          ? 'not_found'
+          : status === 429
+            ? 'rate_limited'
+            : 'unavailable',
+      status,
+    );
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(await readBounded(response));
+  } catch (error) {
+    if (error instanceof SlotlockAssistantProviderError) throw error;
+    throw new SlotlockAssistantProviderError(signal.aborted ? 'timeout' : 'bad_answer');
+  }
+  const listed = isRecord(body) && Array.isArray(body.data) ? body.data : null;
+  if (!listed) throw new SlotlockAssistantProviderError('bad_answer');
+  const ids = new Set<string>();
+  for (const entry of listed) {
+    const id = isRecord(entry) ? entry.id : undefined;
+    if (typeof id === 'string' && SLOTLOCK_ASSISTANT_MODEL_NAME.test(id)) ids.add(id);
+  }
+  return [...ids].sort().slice(0, MAX_LISTED_MODELS);
+}
+
+/**
  * The connection test: one request offering one read tool the model must call. True when it
  * answers with exactly one call of that tool with object arguments.
  */

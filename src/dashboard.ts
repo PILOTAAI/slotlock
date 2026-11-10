@@ -35,6 +35,7 @@ import {
   SLOTLOCK_ASSISTANT_MAX_PENDING,
   SLOTLOCK_ASSISTANT_MAX_PREVIOUS_SECRETS,
   SLOTLOCK_ASSISTANT_MODEL_NAME,
+  SLOTLOCK_ASSISTANT_PRESETS,
   SLOTLOCK_ASSISTANT_TOOL_USE,
   type SlotlockAssistantAction,
   type SlotlockAssistantEntry,
@@ -54,6 +55,7 @@ import {
   slotlockAssistantProviderMessage,
   slotlockAssistantSystemPrompt,
   testSlotlockAssistantModel,
+  listSlotlockAssistantModels,
 } from './assistant.js';
 import { SLOTLOCK_DASHBOARD_NAME_PATTERN, type SlotlockRate } from './config.js';
 import { createSlotlockRateLimiter } from './rate-limit.js';
@@ -134,6 +136,7 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/assistant/reset',
   '/settings/assistant',
   '/settings/assistant/test',
+  '/settings/assistant/models',
   '/settings/assistant/remove',
   '/plan/upgrade',
   '/plan/manage',
@@ -1693,12 +1696,17 @@ ${
     return respond(status, layout('Resources', content, session, 'resources'));
   }
 
-  async function settingsPage(session: Session, status = 200, notice?: string): Promise<Response> {
+  async function settingsPage(
+    session: Session,
+    status = 200,
+    notice?: string,
+    draft?: AssistantDraft,
+  ): Promise<Response> {
     const rules = options.availability ?? [];
     const current = session.orgs?.find((org) => org.id === session.org);
     const content = html`${noticeOf(notice)}
 ${pageHead('Settings')}
-${await assistantSettingsPanel(session)}
+${await assistantSettingsPanel(session, draft)}
 <section class="panel">
 <h2>Endpoints</h2>
 ${endpoints()}
@@ -2483,7 +2491,16 @@ ${
     return respond(status, layout('Assistant', content, session, 'assistant'));
   }
 
-  async function assistantSettingsPanel(session: Session): Promise<Html> {
+  /** The assistant form as a preset or a model list leaves it, not yet saved. */
+  type AssistantDraft = {
+    provider: 'anthropic' | 'openai';
+    baseUrl: string;
+    model?: string;
+    /** The models the provider listed, offered for the Model field. */
+    models?: readonly string[];
+  };
+
+  async function assistantSettingsPanel(session: Session, draft?: AssistantDraft): Promise<Html> {
     const store = assistantStore();
     if (!store) return html``;
     const settings = await store.getSettings(tenantOf(session));
@@ -2496,21 +2513,33 @@ ${
       }</section>`;
     }
     const token = csrfToken(session);
-    const selected = (provider: string) => (settings?.provider === provider ? html` selected` : html``);
+    // What the form shows: a draft (a preset, or a model list) over what is saved.
+    const provider = draft?.provider ?? settings?.provider;
+    const baseUrl = draft ? draft.baseUrl : (settings?.baseUrl ?? '');
+    const model = draft?.model ?? settings?.model ?? '';
+    const selected = (value: string) => (provider === value ? html` selected` : html``);
+    const models = draft?.models ?? [];
     return html`<section class="panel" id="assistant">
 <h2>Assistant</h2>
+<form class="presets" method="get" action="${root}/settings"><span class="fine">Fill in for</span>${SLOTLOCK_ASSISTANT_PRESETS.map(
+      (preset) => html`<button type="submit" name="preset" value="${preset.id}">${preset.name}</button>`,
+    )}</form>
 <form method="post" action="${root}/settings/assistant">
 <input type="hidden" name="csrf" value="${token}">
 <input type="hidden" name="once" value="${formNonce(session)}">
 <div class="grid-form">
 <label>Provider<select name="provider"><option value="anthropic"${selected('anthropic')}>Anthropic Messages API</option><option value="openai"${selected('openai')}>OpenAI-compatible</option></select></label>
-<label>Base URL<input name="base_url" required maxlength="2048" value="${settings?.baseUrl ?? ''}" placeholder="https://api.anthropic.com"></label>
-<label>Model<input name="model" required maxlength="200" value="${settings?.model ?? ''}" placeholder="your-model"></label>
+<label>Base URL<input name="base_url" required maxlength="2048" value="${baseUrl}" placeholder="https://api.anthropic.com"></label>
+<label>Model<input name="model" required maxlength="200" value="${model}" placeholder="your-model"${models.length > 0 ? html` list="assistant-models"` : html``}></label>${
+      models.length > 0
+        ? html`<datalist id="assistant-models">${models.map((id) => html`<option value="${id}"></option>`)}</datalist>`
+        : html``
+    }
 <label>API key<input name="api_key" type="password" autocomplete="off" maxlength="4096" placeholder="${settings?.keyHint ? 'Leave empty to keep it' : 'Optional for a local model'}"></label>
 </div>
 <p class="fine">Key: ${settings?.keyHint ? html`set, ending in <code>${settings.keyHint}</code>` : 'none'}. OpenAI-compatible covers OpenAI, OpenRouter, vLLM, Ollama and LM Studio; give the URL that ends in <code>/v1</code>.</p>
 ${settings?.keyHint ? html`<label class="choice"><input type="checkbox" name="clear_key" value="1"> Remove the key</label>` : html``}
-<button class="primary" type="submit">Save</button>
+<div class="row-actions"><button class="primary" type="submit">Save</button><button type="submit" formaction="${root}/settings/assistant/models">Load models</button></div>
 </form>
 ${sentTo}
 ${
@@ -2573,6 +2602,78 @@ ${
       );
     }
     return redirect(303, `${root}/settings#assistant`);
+  }
+
+  /**
+   * The provider's models for the Model field (Load models): the form's provider and base URL,
+   * checked as saving checks them, with the key given, or the saved one when it is for that same
+   * provider and URL. Saves nothing; counted as a message to the assistant.
+   */
+  async function loadAssistantModels(session: Session, form: URLSearchParams): Promise<Response> {
+    const store = assistantStore();
+    if (!store || !assistantOptions) return notFound(session);
+    if (!isAdmin(session)) return adminOnly(session);
+    if (!memberMessages.take(`${tenantOf(session)}\0${session.uid}`)) {
+      return tooManyMessages(session, settingsPage);
+    }
+    const provider = form.get('provider');
+    if (provider !== 'anthropic' && provider !== 'openai') {
+      return settingsPage(session, 400, 'Choose a provider from the list.');
+    }
+    const typedModel = (form.get('model') ?? '').trim();
+    const draft: AssistantDraft = {
+      provider,
+      baseUrl: (form.get('base_url') ?? '').trim(),
+      ...(typedModel !== '' ? { model: typedModel } : {}),
+    };
+    const checkedUrl = readSlotlockAssistantBaseUrl(draft.baseUrl, { privateUrls });
+    if (!checkedUrl.ok) {
+      return settingsPage(
+        session,
+        400,
+        checkedUrl.reason === 'private'
+          ? PRIVATE_URL_REFUSAL
+          : 'Give an https base URL (http only for localhost or 127.0.0.1), with no user name, query or #fragment.',
+        draft,
+      );
+    }
+    const baseUrl = checkedUrl.url;
+    if (namesOwnHost(baseUrl)) return settingsPage(session, 400, OWN_HOST_REFUSAL, draft);
+    if (!(await checkSlotlockAssistantHost(baseUrl, { privateUrls, resolve: resolveHost }))) {
+      return settingsPage(session, 400, PRIVATE_URL_REFUSAL, draft);
+    }
+    const typedKey = (form.get('api_key') ?? '').trim();
+    if (typedKey !== '' && !SLOTLOCK_ASSISTANT_API_KEY.test(typedKey)) {
+      return settingsPage(session, 400, 'An API key is up to 4,096 characters without spaces.', draft);
+    }
+    // The saved key only for the provider and URL it was entered for, as a model call sends it.
+    let apiKey: string | null = typedKey !== '' ? typedKey : null;
+    if (apiKey === null) {
+      const found = await assistantModel(session);
+      if (found && !('problem' in found) && found.model.provider === provider && found.model.baseUrl === baseUrl) {
+        apiKey = found.model.apiKey;
+      }
+    }
+    try {
+      const listed = await listSlotlockAssistantModels({
+        provider,
+        baseUrl,
+        apiKey,
+        fetch: assistantFetch,
+        timeoutMs: assistantTimeout,
+      });
+      return settingsPage(
+        session,
+        200,
+        listed.length > 0
+          ? `${listed.length.toLocaleString('en')} model${listed.length === 1 ? '' : 's'} listed: choose one for Model, then Save.${typedKey !== '' ? ' Enter the API key again when you save.' : ''}`
+          : 'The provider listed no models. Type the model name.',
+        { ...draft, baseUrl, models: listed },
+      );
+    } catch (error) {
+      report(error instanceof Error ? error.message : 'assistant model list failed');
+      return settingsPage(session, 502, slotlockAssistantProviderMessage(error), { ...draft, baseUrl });
+    }
   }
 
   async function removeAssistantSettings(session: Session): Promise<Response> {
@@ -3643,6 +3744,8 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         return resetAssistant(session);
       case '/settings/assistant':
         return saveAssistantSettings(session, form);
+      case '/settings/assistant/models':
+        return loadAssistantModels(session, form);
       case '/settings/assistant/test':
         return testAssistant(session);
       case '/settings/assistant/remove':
@@ -3699,7 +3802,16 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
               if (route === '/webhooks') return await webhooksPage(session);
               if (route === '/waitlist') return await waitlistPage(session);
               if (route === '/assistant') return await assistantPage(session);
-              return await settingsPage(session);
+              // A provider preset fills the assistant's form; nothing is saved until Save.
+              const preset = SLOTLOCK_ASSISTANT_PRESETS.find(
+                (candidate) => candidate.id === url.searchParams.get('preset'),
+              );
+              return await settingsPage(
+                session,
+                200,
+                undefined,
+                preset ? { provider: preset.provider, baseUrl: preset.baseUrl } : undefined,
+              );
             }
             case '/style.css':
               return asset(DASHBOARD_CSS, 'text/css; charset=utf-8', url, ASSET_VERSIONS.css);
@@ -3984,6 +4096,8 @@ textarea { padding: 10px var(--space-3); resize: vertical; min-height: 72px; lin
 .create .grow { flex: 1 1 220px; }
 label > input, label > select, label > .unit-input { width: 100%; }
 label > textarea { width: 100%; padding: var(--space-2) var(--space-3); resize: vertical; }
+.presets { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: 0 0 var(--space-3); }
+.presets button { height: 28px; padding: 0 var(--space-3); font-size: var(--text-sm); }
 label.choice > input { width: 16px; }
 .create label:not(.grow) { flex: 0 1 auto; }
 form > label { margin-bottom: var(--space-3); }
