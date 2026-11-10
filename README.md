@@ -424,7 +424,7 @@ resources, so you can give each person API keys without running `slotlock key cr
 - Each form carries a single-use value bound to its session. A person may have 1,000 forms
   recorded at once (12 hours' worth); past that the dashboard answers 429 until the oldest expire.
   Signing out always works.
-- A person may add 100 resources. The database holds the cap, so adds racing on any number of servers
+- A person may add 500 resources (as many as their plan allows, on a hosted server). The database holds the cap, so adds racing on any number of servers
   stop at 100; a resource they already have can still change time zone.
 - Each resource uses the server's bookable hours (`SLOTLOCK_AVAILABILITY`) until its owner sets its
   own on the hours page: two windows a day, overnight or all day, or closed. One form sets them
@@ -537,7 +537,7 @@ Hosted Slotlock sells plans; self-hosted Slotlock writes no plan and keeps the s
 | --- | --- | --- | --- | --- |
 | Free | 10 | 10 | 2 | Free |
 | Developer | 100 | 100 | 10 | $10 a month or $100 a year |
-| Team (an organization's, once offered) | 100 | 100 | 10 | Set by the deployment |
+| Team (an organization's) | 500 | 100 | 25 | $40 a month or $400 a year, for the organization |
 | Custom | Your servers | | | Talk to the founder |
 
 With `STRIPE_SECRET_KEY`, `SLOTLOCK_STRIPE_PRICE_MONTHLY` and `SLOTLOCK_STRIPE_PRICE_YEARLY` (the
@@ -568,11 +568,12 @@ have not been sent, and records the total in `slotlock.overage_reports` first, s
 never billed twice (a run that stops halfway bills too little, and the next run does not catch up
 on it). It exits 1 while an event was not taken; run it again.
 
-The Team plan is an organization's (Teams on Cloud, `SLOTLOCK_DASHBOARD_ORGS=enabled`): Developer's
-limits, which are this release's caps for one tenant, and larger monthly quotas its members share
-(2,000,000 operations and 100,000 bookings, stopping at 110%). It is offered only with all four of
-`SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY` and `SLOTLOCK_STRIPE_PRICE_TEAM_YEARLY` (its price ids) and
-`SLOTLOCK_PLAN_PRICE_TEAM_MONTHLY` and `SLOTLOCK_PLAN_PRICE_TEAM_YEARLY` (its prices as shown); an
+The Team plan is an organization's (Teams on Cloud, `SLOTLOCK_DASHBOARD_ORGS=enabled`): 500
+resources, 100 keys and 25 webhook endpoints, and monthly quotas its members share (2,000,000
+operations and 100,000 bookings, stopping at 110%), for $40 a month or $400 a year whatever the
+number of members. It is offered once `SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY` and
+`SLOTLOCK_STRIPE_PRICE_TEAM_YEARLY` (its price ids) are set; `SLOTLOCK_PLAN_PRICE_TEAM_MONTHLY` and
+`SLOTLOCK_PLAN_PRICE_TEAM_YEARLY` change the prices shown ($40 and $400 by default); an
 organization's owner then sees Upgrade to Team instead of Developer, and a subscription at a Team
 price gives Team, including one changed to it in the customer portal.
 

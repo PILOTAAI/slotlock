@@ -592,23 +592,24 @@ Prices and resource numbers are PR #161's. The quotas are proposed, sized so tha
 Free loop at the rate limit uses its month in about 20 minutes rather than costing us all month.
 The owner sets the final numbers before PR #161 merges (finding 8).
 
-| | Free | Developer | Team (later, proposed) | Partner (wholesale) | Custom |
+| | Free | Developer | Team | Partner (wholesale) | Custom |
 | --- | --- | --- | --- | --- | --- |
-| Price | $0 | $10 a month or $100 a year | The owner sets it | Per active account a month, plus usage above the account's quota, with a monthly minimum (contract) | Agreed in writing |
-| Resources | 10 | 100 | 100 | Per contract plan | Own servers |
+| Price | $0 | $10 a month or $100 a year | $40 a month or $400 a year, per organization | Per active account a month, plus usage above the account's quota, with a monthly minimum (contract) | Agreed in writing |
+| Resources | 10 | 100 | 500 | Per contract plan | Own servers |
 | Active API keys | 10 | 100 | 100 | Per contract plan | |
-| Webhook endpoints | 2 | 10 | 10 | Per contract plan | |
+| Webhook endpoints | 2 | 10 | 25 | Per contract plan | |
 | Operations a month | 25,000 | 500,000 (stops at 110%) | 2,000,000, shared (stops at 110%) | Per contract plan | |
 | Bookings a month | 1,000 | 25,000 (stops at 110%) | 100,000, shared (stops at 110%) | Per contract plan | |
 | Assistant (bring your own model) | Yes | Yes | Yes | No (stackapi's users have no Slotlock dashboard) | |
 | Locations and groups | Yes | Yes | Yes | Yes | |
 | Keys limited to locations or groups (0.8.0) | No | Yes | Yes | Yes | |
 
-Team is an organization's plan (Teams on Cloud). Its resources, keys and webhook endpoints are
-Developer's because those are this release's caps for one tenant (the dashboard lists 100
-resources; a tenant keeps 100 active keys and 10 endpoints); raising them is separate work. It is
-offered only once the owner sets its Stripe prices, and the Terms and the hosted service page need
-it before then.
+Team is an organization's plan (Teams on Cloud), priced flat per organization rather than per seat:
+4 times Developer for 4 times its quotas, so Developer's unit price per operation and booking holds,
+and in line with flat team tiers elsewhere (1.7 to 4 times the individual tier: Acuity, Netlify,
+Cronofy, Railway; per-seat schedulers such as Calendly Teams cost more from three people up). The
+dashboard's resource cap rose to 500 and a tenant's webhook endpoints to 25 to fit it; 100 active
+keys stay the cap. It is offered once the owner sets its two Stripe price ids.
 
 - An *active account* is a sub-tenant with at least one counted operation in the month, so
   stackapi pays nothing for users who signed up and left.
@@ -634,6 +635,13 @@ it before then.
 - [x] The quotas in the Terms (from 10 December 2026, so the 30 days' notice covers every
       account), pending the lawyer's review; turn on `SLOTLOCK_QUOTAS=on` for serve and the Worker
       on that day, not before.
+- [ ] Teams and the Team plan: `SLOTLOCK_DASHBOARD_ORGS=enabled` on the Worker and on serve (the
+      hosted page describes it), a Team product in Stripe with a $40 monthly and $400 yearly price
+      (SaaS tax code, Managed Payments), and their ids in `SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY` and
+      `SLOTLOCK_STRIPE_PRICE_TEAM_YEARLY`.
+- [ ] `slotlock billing daily` in a daily cron job as the schema owner, with `STRIPE_SECRET_KEY`.
+- [x] The privacy notice's draft rows for organizations and Google sign-in: approved by the lawyer.
+- [ ] The Terms' Team paragraph (new in this change, after that approval) seen by the lawyer.
 - [ ] The status probe switched on (`docs/hosted/status.md`: it stays off until the service opens).
 - [ ] A restore from the R2 backups, timed, on a scratch server.
 - [ ] support@, abuse@ and privacy@ watched, with an erasure runbook that cancels Stripe first.

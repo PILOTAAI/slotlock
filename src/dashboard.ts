@@ -110,7 +110,7 @@ import {
 } from './weekly-hours.js';
 
 /** Resources one dashboard tenant may hold. */
-export const SLOTLOCK_DASHBOARD_MAX_RESOURCES = 100;
+export const SLOTLOCK_DASHBOARD_MAX_RESOURCES = 500;
 const SESSION_TTL_MS = 12 * 3_600_000;
 const SIGN_IN_TTL_MS = 10 * 60_000;
 /**

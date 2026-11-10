@@ -259,7 +259,7 @@ describe.skipIf(!url)('the Stripe webhook (real Postgres)', () => {
     expect(response.status).toBe(200);
     expect(await readSlotlockTenantPlan(sql, tenant)).toMatchObject({
       plan: 'team',
-      limits: { resources: 100, apiKeys: 100, webhookEndpoints: 10 },
+      limits: { resources: 500, apiKeys: 100, webhookEndpoints: 25 },
       stripeSubscription: 'sub_T1',
     });
     expect(await readSlotlockTenantQuotas(sql, tenant)).toEqual({ operations: 2_000_000, bookings: 100_000, stopPercent: 110 });

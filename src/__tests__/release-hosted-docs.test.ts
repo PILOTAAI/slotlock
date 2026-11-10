@@ -5,6 +5,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { SLOTLOCK_DASHBOARD_MAX_RESOURCES } from '../dashboard.js';
+import { SLOTLOCK_MAX_WEBHOOK_ENDPOINTS } from '../event-feed.js';
 import { SLOTLOCK_API_KEY_ACTIVE_LIMIT, SLOTLOCK_API_KEY_RETAINED_LIMIT } from '../ddl.js';
 import { SLOTLOCK_API_KEY_MAX_LIFETIME_DAYS } from '../api-keys.js';
 import { SLOTLOCK_PLAN_LIMITS } from '../plans.js';
@@ -256,12 +257,15 @@ describe('the hosted service page', () => {
       `As the [plan](#plans) allows (${thousands(SLOTLOCK_API_KEY_RETAINED_LIMIT)} kept in all`,
     );
     // Every plan fits under the caps that hold without one.
-    const { free, developer } = SLOTLOCK_PLAN_LIMITS;
-    expect(developer.apiKeys).toBeLessThanOrEqual(SLOTLOCK_API_KEY_ACTIVE_LIMIT);
-    expect(developer.resources).toBeLessThanOrEqual(SLOTLOCK_DASHBOARD_MAX_RESOURCES);
-    row('Resources', `${free.resources} | ${developer.resources} |`);
-    row('Active API keys', `${free.apiKeys} | ${developer.apiKeys} |`);
-    row('Webhook endpoints', `${free.webhookEndpoints} | ${developer.webhookEndpoints} |`);
+    const { free, developer, team } = SLOTLOCK_PLAN_LIMITS;
+    for (const plan of [developer, team]) {
+      expect(plan.apiKeys).toBeLessThanOrEqual(SLOTLOCK_API_KEY_ACTIVE_LIMIT);
+      expect(plan.resources).toBeLessThanOrEqual(SLOTLOCK_DASHBOARD_MAX_RESOURCES);
+      expect(plan.webhookEndpoints).toBeLessThanOrEqual(SLOTLOCK_MAX_WEBHOOK_ENDPOINTS);
+    }
+    row('Resources', `${free.resources} | ${developer.resources} | ${team.resources} |`);
+    row('Active API keys', `${free.apiKeys} | ${developer.apiKeys} | ${team.apiKeys} |`);
+    row('Webhook endpoints', `${free.webhookEndpoints} | ${developer.webhookEndpoints} | ${team.webhookEndpoints} |`);
     row(
       'Events one key can hold, active and cancelled',
       `${thousands(SLOTLOCK_AGENT_OWNER_EVENT_QUOTA)} |`,

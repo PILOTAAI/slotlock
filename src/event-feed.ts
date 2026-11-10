@@ -130,7 +130,7 @@ export function slotlockServedChange(
 /** How long the feed keeps a change, and so how far back a cursor may reach. */
 export const SLOTLOCK_CHANGE_RETENTION_DAYS = 30;
 /** Webhook endpoints one tenant may have. */
-export const SLOTLOCK_MAX_WEBHOOK_ENDPOINTS = 10;
+export const SLOTLOCK_MAX_WEBHOOK_ENDPOINTS = 25;
 /** After this long failing, an endpoint is disabled and the feed says so (`webhook.disabled`). */
 export const SLOTLOCK_WEBHOOK_FAILING_LIMIT_MS = 24 * 60 * 60 * 1_000;
 

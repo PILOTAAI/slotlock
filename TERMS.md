@@ -14,7 +14,7 @@ it yourself, and nothing here limits your rights under that licence.
 
 ## The service
 
-- Hosted Slotlock has a Free plan and a paid Developer plan, described under
+- Hosted Slotlock has a Free plan and paid Developer and Team plans, described under
   [Plans and payment](#plans-and-payment). On every plan it is provided on a best-effort basis,
   with no service level agreement: it may be slow, unavailable or changed without notice, and it
   may lose data. Keep your own records of anything you cannot afford to lose.
@@ -34,13 +34,18 @@ it yourself, and nothing here limits your rights under that licence.
   assistant's included) and bookings each calendar month, shown on the
   [hosted service page](docs/hosted/README.md#monthly-allowances). We tell you in your account's
   change feed and on the Plan page when you have used 80% and 100% of either. On Free, calls past an
-  allowance are refused until the month ends; on Developer, calls past 110% of it are. Use past an
-  allowance is never charged for.
+  allowance are refused until the month ends; on Developer and Team, calls past 110% of it are. Use
+  past an allowance is never charged for.
 - **Developer** costs $10 a month or $100 a year, shown at checkout in your currency with any sales
   tax or VAT added. Stripe sells it to you as merchant of record: Stripe takes the payment, charges
   the tax and issues the invoices, under its own terms for buyers, which it shows at checkout. These
   terms cover the service itself.
-- A Developer plan renews at the end of each period until you cancel it, which you can do at any
+- **Team** is for a GitHub organization that an owner has turned Slotlock on for. It costs $40 a
+  month or $400 a year for the whole organization, however many of its owners and members use it,
+  and is bought, sold and taxed as Developer is. Only an owner of the organization can buy, change
+  or cancel it. If Slotlock is turned off for the organization, its plan continues until it is
+  cancelled.
+- A Developer or Team plan renews at the end of each period until you cancel it, which you can do at any
   time from **Manage billing** on the dashboard's Plan page. It then runs to the end of the period
   already paid for. Payments are not refunded for part of a period, except where the law gives you
   a right to a refund or where we end the service.

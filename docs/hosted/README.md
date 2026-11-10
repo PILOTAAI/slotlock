@@ -13,12 +13,13 @@ account can sign in. Self-hosting stays fully supported: see
 | REST | `https://slotlock-api.pylota.io/v1`, described at `/openapi.json` |
 | Dashboard | `https://app.slotlock.pylota.io/dashboard` |
 | Status | [Open `status` issues](https://github.com/PILOTAAI/slotlock/issues?q=is%3Aissue%20label%3Astatus%20is%3Aopen), and [how they are raised](/docs/hosted/status.md) |
-| Price | Free, or Developer at $10 a month or $100 a year: see [Plans](#plans). Best effort, with no service level agreement |
+| Price | Free, Developer at $10 a month or $100 a year, or, for a GitHub organization, Team at $40 a month or $400 a year: see [Plans](#plans). Best effort, with no service level agreement |
 
 ## Start
 
 1. Sign in at `https://app.slotlock.pylota.io/dashboard` with your GitHub account. Slotlock asks
-   GitHub for no permissions and keeps only your user id and login. By signing in you agree to the
+   GitHub only to read which organizations you belong to (`read:org`), so you can work in the ones
+   turned on, and keeps only your user id and login, and those organizations in your session. By signing in you agree to the
    [Terms of Service](/TERMS.md) and the [Acceptable Use Policy](/ACCEPTABLE-USE.md).
 2. Add your resources and their weekly hours, then create an API key: **Read only** for an agent
    that only looks, **Read and write** for an agent that books, **Full** for an application that
@@ -35,14 +36,18 @@ account can sign in. Self-hosting stays fully supported: see
 
 ## Plans
 
-| | Free | Developer | Custom |
-| --- | --- | --- | --- |
-| Price | Free | $10 a month, or $100 a year | [Talk to the founder](mailto:clever.eziogor@pylota.io) |
-| Resources | 10 | 100 | On your own servers |
-| Active API keys | 10 | 100 | |
-| Webhook endpoints | 2 | 10 | |
-| Operations a month | 25,000 | 500,000 | |
-| Bookings a month | 1,000 | 25,000 | |
+| | Free | Developer | Team | Custom |
+| --- | --- | --- | --- | --- |
+| Price | Free | $10 a month, or $100 a year | $40 a month, or $400 a year, for the whole organization | [Talk to the founder](mailto:clever.eziogor@pylota.io) |
+| Resources | 10 | 100 | 500 | On your own servers |
+| Active API keys | 10 | 100 | 100 | |
+| Webhook endpoints | 2 | 10 | 25 | |
+| Operations a month | 25,000 | 500,000 | 2,000,000, shared | |
+| Bookings a month | 1,000 | 25,000 | 100,000, shared | |
+
+**Team** is for a GitHub organization an owner has turned Slotlock on for (the dashboard's Teams
+page): every owner and member shares its resources, keys and history, and its price does not change
+with how many people use it. Only an owner of the organization buys or manages it.
 
 Every account starts on Free. Upgrade on the dashboard's **Plan** page: Stripe takes the payment as
 merchant of record, in your currency, with any sales tax or VAT added. **Manage billing** on the same
@@ -68,7 +73,7 @@ From 10 December 2026, each plan allows so many operations and bookings a calend
 - **On Free**, past an allowance, calls are refused with `429 quota_exceeded` and a `Retry-After`
   header until the month ends: every call once the operations are used up, except reading your
   usage (`GET /v1/usage`) and erasing your account, and only new bookings and holds once the
-  bookings are, so you can still read and cancel. **On Developer** the same
+  bookings are, so you can still read and cancel. **On Developer and Team** the same
   happens at 110% of an allowance. Nothing is charged for use past one.
 - Every answer to an operation lists what is left this month in its `RateLimit` and
   `RateLimit-Policy` headers (`"operations_month"` and `"bookings_month"`), and `GET /v1/usage`

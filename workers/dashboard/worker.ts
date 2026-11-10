@@ -195,9 +195,9 @@ function readBilling(vars: SlotlockEnv) {
   const teamYear = vars.SLOTLOCK_STRIPE_PRICE_TEAM_YEARLY?.trim();
   const teamShownMonth = vars.SLOTLOCK_PLAN_PRICE_TEAM_MONTHLY?.trim();
   const teamShownYear = vars.SLOTLOCK_PLAN_PRICE_TEAM_YEARLY?.trim();
-  if (Boolean(teamMonth) !== Boolean(teamYear) || (teamMonth && (!teamShownMonth || !teamShownYear))) {
+  if (Boolean(teamMonth) !== Boolean(teamYear)) {
     throw new SlotlockConfigError(
-      'the Team plan needs SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY, SLOTLOCK_STRIPE_PRICE_TEAM_YEARLY, SLOTLOCK_PLAN_PRICE_TEAM_MONTHLY and SLOTLOCK_PLAN_PRICE_TEAM_YEARLY together',
+      'the Team plan needs SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY and SLOTLOCK_STRIPE_PRICE_TEAM_YEARLY together',
     );
   }
   const teamPrices = teamMonth && teamYear ? { month: teamMonth, year: teamYear } : undefined;
@@ -215,7 +215,8 @@ function readBilling(vars: SlotlockEnv) {
       ...(overage !== undefined && overagePrice ? { overagePrice } : {}),
       ...(apiVersion ? { apiVersion } : {}),
     }),
-    ...(teamPrices ? { teamPrices: { month: teamShownMonth as string, year: teamShownYear as string } } : {}),
+    // As the Terms and the hosted page name them, unless the deployment shows its own.
+    ...(teamPrices ? { teamPrices: { month: teamShownMonth || '$40', year: teamShownYear || '$400' } } : {}),
     ...(overage !== undefined
       ? { overage: { price: vars.SLOTLOCK_PLAN_PRICE_OVERAGE?.trim() || 'the metered price', stopPercent: overage } }
       : {}),

@@ -6,8 +6,8 @@ import type { SlotlockSql } from './store.js';
 
 /**
  * The plans hosted Slotlock sells. Custom runs on the customer's own servers and needs no row. Team
- * is an organization's (Teams on Cloud): Developer's limits, which are this release's caps for one
- * tenant, with larger monthly quotas its members share.
+ * is an organization's (Teams on Cloud): five times Developer's resources, more webhook endpoints,
+ * and four times its monthly quotas, shared by its members.
  */
 export type SlotlockPlan = 'free' | 'developer' | 'team';
 
@@ -28,7 +28,7 @@ export const SLOTLOCK_PLAN_LIMITS: Readonly<Record<SlotlockPlan, Readonly<Slotlo
   Object.freeze({
     free: Object.freeze({ resources: 10, apiKeys: 10, webhookEndpoints: 2 }),
     developer: Object.freeze({ resources: 100, apiKeys: 100, webhookEndpoints: 10 }),
-    team: Object.freeze({ resources: 100, apiKeys: 100, webhookEndpoints: 10 }),
+    team: Object.freeze({ resources: 500, apiKeys: 100, webhookEndpoints: 25 }),
   });
 
 /**
