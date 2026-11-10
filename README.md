@@ -108,8 +108,8 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
   setting for the assistant's operations.
 - With `SLOTLOCK_QUOTAS=on` too (off by default), a tenant on a hosted plan is held to that plan's
   monthly quotas (`SLOTLOCK_PLAN_QUOTAS` in plans.ts; a tenant on no plan, as on a self-hosted
-  server, has none): past its operations this UTC month every operation is refused, past its
-  bookings only those that can book, with `429 quota_exceeded` and `Retry-After` at the month's end.
+  server, has none): past its operations this UTC month every operation is refused but reading its
+  usage and erasing it, past its bookings only those that can book, with `429 quota_exceeded` and `Retry-After` at the month's end.
   Each operation's answer lists the quotas in `RateLimit` and `RateLimit-Policy`
   (`"operations_month"`, `"bookings_month"`), and the feed records `usage.threshold_reached` once at
   80% and at 100% of each. A server reads the month so far at most every 30 seconds (every 2 near

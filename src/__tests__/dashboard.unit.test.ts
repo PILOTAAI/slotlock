@@ -2354,7 +2354,7 @@ describe('the plan page', () => {
     operations = 25_000;
     bookings = 1_000;
     html = await page();
-    expect(html).toContain("This month's operations are used up: Slotlock refuses every call with quota_exceeded until 2026-11-01 00:00 UTC. Upgrade for more.");
+    expect(html).toContain("This month's operations are used up: Slotlock refuses every call but reading usage with quota_exceeded until 2026-11-01 00:00 UTC. Upgrade for more.");
     expect(html).toContain("This month's bookings are used up: Slotlock refuses new bookings and holds with quota_exceeded until 2026-11-01 00:00 UTC.");
     // Developer: past the quota, refused only a tenth further on.
     const developer = billed({ ...free, plan: 'developer', limits: { resources: 100, apiKeys: 100, webhookEndpoints: 10 } });
@@ -2363,7 +2363,7 @@ describe('the plan page', () => {
     operations = 510_000;
     bookings = 0;
     html = await (await get(paid, '/base/dashboard/plan', signed.session)).text();
-    expect(html).toContain("You have used this month's 500,000 operations. Slotlock refuses every call past 550,000, until 2026-11-01 00:00 UTC.");
+    expect(html).toContain("You have used this month's 500,000 operations. Slotlock refuses every call but reading usage past 550,000, until 2026-11-01 00:00 UTC.");
     // Without the setting, no quota is named.
     const plain = dashboard({ billing, usage: true, resources: { ...resources.store, usage: read } });
     const third = await signIn(plain);

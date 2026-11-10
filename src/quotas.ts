@@ -37,6 +37,15 @@ export const SLOTLOCK_BOOKING_OPERATIONS: readonly (SlotlockAgentOperation | Slo
     'slotlock_put_reservation',
   ]);
 
+/**
+ * Operations a quota never refuses, though each still counts: reading the month's usage, so a
+ * tenant can always see where it stands, and erasing the tenant, which no allowance may hold up.
+ */
+export const SLOTLOCK_QUOTA_EXEMPT_OPERATIONS: readonly SlotlockApplicationOperation[] = Object.freeze([
+  'slotlock_get_usage',
+  'slotlock_erase_tenant',
+]);
+
 /** How long a tenant's plan and counts are trusted, and how long near its stop. */
 const REFRESH_MS = 30_000;
 const NEAR_STOP_REFRESH_MS = 2_000;
@@ -260,7 +269,16 @@ export function createSlotlockQuotas(options: SlotlockQuotasOptions): SlotlockQu
       }
       if (!entry) return { ok: true, standings: [] };
       const standings = standingsOf(tenantRef, entry, resetsAt);
-      notify(tenantRef, standings);
+      // Bookings are noticed as the database last counted them, never on the estimate since.
+      notify(
+        tenantRef,
+        standings.map((standing) =>
+          standing.metric === 'bookings' ? { ...standing, used: entry.used.bookings } : standing,
+        ),
+      );
+      if ((SLOTLOCK_QUOTA_EXEMPT_OPERATIONS as readonly string[]).includes(operation)) {
+        return { ok: true, standings };
+      }
       const [operations, bookings] = standings;
       if (operations && operations.used >= operations.stop) {
         return { ok: false, exceeded: operations, standings };

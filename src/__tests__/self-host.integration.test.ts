@@ -469,16 +469,21 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         status: 429,
         error: { code: 'quota_exceeded' },
       });
+      // Where it stands can always be read, though the read counts.
+      const usage = await fetch(`${origin}/v1/usage`, { headers });
+      expect(usage.status).toBe(200);
+      expect(((await usage.json()) as { totals: { operations: number } }).totals.operations).toBeGreaterThanOrEqual(24_999);
     } finally {
       shutdown.abort();
       expect(await serving).toBe(0);
     }
     try {
-      // The refused request ran nothing and is not counted; the feed says the quota is used up.
+      // The refused request ran nothing and is not counted (the usage read is); the feed says the
+      // quota is used up.
       const [counted] = await admin<{ count: string }[]>`
         SELECT sum(count)::text AS count FROM slotlock.usage_daily
          WHERE tenant_ref = ${quoted} AND metric = 'operations'`;
-      expect(counted?.count).toBe('25000');
+      expect(counted?.count).toBe('25001');
       const notices = await admin<{ data: { metric: string; percent: number } }[]>`
         SELECT data FROM slotlock.outbox WHERE tenant_ref = ${quoted} AND type = 'usage.threshold_reached'
          ORDER BY id`;

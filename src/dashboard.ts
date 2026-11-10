@@ -2705,7 +2705,7 @@ ${
           const stop = Math.floor((quota * quotas.stopPercent) / 100);
           const spent = used.totals[metric];
           const what = metric === 'operations' ? 'operations' : 'bookings';
-          const refused = metric === 'operations' ? 'every call' : 'new bookings and holds';
+          const refused = metric === 'operations' ? 'every call but reading usage' : 'new bookings and holds';
           if (spent >= stop) {
             return [html`<p class="notice warn" role="alert">This month's ${what} are used up: Slotlock refuses ${refused} with quota_exceeded until ${resets}.${paying ? html`` : html` Upgrade for more.`}</p>`];
           }

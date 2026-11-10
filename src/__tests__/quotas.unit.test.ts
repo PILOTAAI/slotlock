@@ -114,6 +114,30 @@ describe('monthly quotas', () => {
     });
   });
 
+  it('never refuses reading the usage or erasing the tenant', async () => {
+    const { quotas } = fixture({ used: { operations: 25_000, bookings: 1_000 } });
+    for (const operation of ['slotlock_get_usage', 'slotlock_erase_tenant'] as const) {
+      expect(await quotas.check({ tenantRef: 'acme', operation }), operation).toMatchObject({
+        ok: true,
+        standings: [{ used: 25_000 }, { used: 1_000 }],
+      });
+    }
+    expect((await quotas.check({ tenantRef: 'acme', operation: 'slotlock_get_tenant' })).ok).toBe(false);
+  });
+
+  it('notes bookings as the database counted them, never on the estimate since', async () => {
+    const { state, quotas } = fixture({ used: { operations: 0, bookings: 799 } });
+    // Booking operations this server let run, which may not all have booked.
+    for (let i = 0; i < 5; i += 1) await quotas.check({ tenantRef: 'acme', operation: 'slotlock_put_reservation' });
+    await Promise.resolve();
+    expect(state.notices).toEqual([]);
+    state.at += 30_000;
+    state.used = { operations: 0, bookings: 800 };
+    await check(quotas);
+    await Promise.resolve();
+    expect(state.notices).toEqual([expect.objectContaining({ metric: 'bookings', percent: 80, used: 800 })]);
+  });
+
   it('refuses only the operations that book once the bookings quota is used up', async () => {
     const { quotas } = fixture({ used: { operations: 10, bookings: 1_000 } });
     expect((await check(quotas)).ok).toBe(true);

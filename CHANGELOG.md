@@ -66,16 +66,17 @@ versioning.
 - Monthly quotas, off unless `SLOTLOCK_QUOTAS=on` (which needs `SLOTLOCK_USAGE=on`; RFC 0003
   part 3). A tenant on a plan may run so many operations and make so many bookings a UTC calendar
   month (`SLOTLOCK_PLAN_QUOTAS`): Free 25,000 and 1,000, refused at 100%; Developer 500,000 and
-  25,000, refused at 110%. Past the operations quota every operation is refused, past the bookings
-  quota only those that can book (`SLOTLOCK_BOOKING_OPERATIONS`), so reads and cancellations still
-  run; the refusal is `429 quota_exceeded`, naming the metric, the quota, the stop, the count and
+  25,000, refused at 110%. Past the operations quota every operation is refused but
+  `slotlock_get_usage` and `slotlock_erase_tenant` (`SLOTLOCK_QUOTA_EXEMPT_OPERATIONS`), past the
+  bookings quota only those that can book (`SLOTLOCK_BOOKING_OPERATIONS`), so reads and
+  cancellations still run; the refusal is `429 quota_exceeded`, naming the metric, the quota, the stop, the count and
   the reset, with `Retry-After` at the month's end. Every operation's answer lists the quotas in
   its `RateLimit` and `RateLimit-Policy` fields (`"operations_month"`, `"bookings_month"`, counting
   down to the stop), after the per-second bucket. `createSlotlockQuotas` reads the month so far
   through `slotlock.tenant_quota_usage` (bookings not yet rolled up included) at most every 30
   seconds, every 2 near a stop, and adds this server's unrecorded operations (the meter's new
   `local`); a count it cannot read lets the operation run. At 80% and 100% of a quota the tenant's
-  feed records the new `usage.threshold_reached` change once (`slotlock.note_usage_threshold`,
+  feed records the new `usage.threshold_reached` change once, bookings as the database counted them, (`slotlock.note_usage_threshold`,
   `slotlock.usage_notices`, erased with the tenant), which its webhooks deliver. The request limits
   take `quotas` and a `quota` check for `authorize`; the dashboard assistant is checked when an
   operation runs, never when one is proposed, on `slotlock serve` and the Worker. The dashboard's
