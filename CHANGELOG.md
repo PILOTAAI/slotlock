@@ -122,6 +122,16 @@ versioning.
   returns quota numbers). A suspended partner suspends every account (`tenant_suspended`) and
   their keys stop authenticating (`authenticate_scoped_api_key`); erasing an account removes the
   partner's record of it. Run `slotlock migrate`.
+- OpenTelemetry trace export and published objectives (RFC 0002 P2-5, RFC 0003 Later). With
+  `OTEL_EXPORTER_OTLP_ENDPOINT` (or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`), `serve` sends a SERVER
+  span for each MCP, A2A and REST call to an OpenTelemetry collector, OTLP over HTTP as JSON, in
+  batches from a bounded queue (a collector that is down drops spans, never a call): its protocol,
+  operation, outcome or HTTP status and duration, in the caller's trace when it sent a
+  `traceparent`, naming no tenant, key, argument or address. `OTEL_EXPORTER_OTLP_HEADERS` and
+  `OTEL_SERVICE_NAME` as the standard says. `createSlotlockOtlpExporter` and `slotlockCallSpan`
+  (`otel.ts`). The status page publishes the hosted service's objectives (99.5% of calls succeed,
+  95% under a second, 99.5% of probe checks up), not an SLA, with Prometheus recording and
+  multiwindow burn-rate alerting rules in `docs/hosted/slo-rules.yml`.
 - Composite resources (RFC 0003 G8, T2): a resource can be a part of another
   (`slotlock_set_resource_parent`, `PUT /v1/resources/{resource_id}/parent`, `setResourceParent`,
   `slotlock resource parent <ref> <parent-ref | none>`), one level deep, at most 50 parts. Each

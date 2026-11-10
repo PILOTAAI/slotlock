@@ -249,6 +249,8 @@ export {
   SLOTLOCK_PARTNER_SCOPE,
 } from './partners.js';
 export { createSlotlockDashboardTeams, createSlotlockOrganizationCheck } from './teams.js';
+export { createSlotlockOtlpExporter, readSlotlockOtlpConfig, slotlockCallSpan } from './otel.js';
+export type { SlotlockOtlpConfig, SlotlockTraceExporter } from './otel.js';
 export type { SlotlockDashboardTeams } from './teams.js';
 export {
   closeSlotlockPartnerMonth,

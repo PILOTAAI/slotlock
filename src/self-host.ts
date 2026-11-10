@@ -81,6 +81,7 @@ import {
 } from './partners.js';
 import { closeSlotlockPartnerMonth, slotlockClientLabel, slotlockPreviousMonth } from './partner-billing.js';
 import { createSlotlockDashboardTeams, createSlotlockOrganizationCheck } from './teams.js';
+import { type SlotlockOtlpConfig, createSlotlockOtlpExporter, readSlotlockOtlpConfig } from './otel.js';
 import { readFile } from 'node:fs/promises';
 import {
   SLOTLOCK_DASHBOARD_FUNCTIONS,
@@ -150,6 +151,10 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_TRUSTED_PROXY_HEADER',
   'SLOTLOCK_TRUSTED_PROXY_SECRET',
   'SLOTLOCK_KNOWN_CLIENTS',
+  'OTEL_EXPORTER_OTLP_ENDPOINT',
+  'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT',
+  'OTEL_EXPORTER_OTLP_HEADERS',
+  'OTEL_SERVICE_NAME',
   'SLOTLOCK_GITHUB_CLIENT_ID',
   'SLOTLOCK_GITHUB_CLIENT_SECRET',
   'SLOTLOCK_GOOGLE_CLIENT_ID',
@@ -297,6 +302,8 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
    * RFC 0003 P5); any other is `other`. Empty: every named client is `other`.
    */
   knownClients?: readonly string[];
+  /** OpenTelemetry trace export (OTEL_EXPORTER_OTLP_ENDPOINT and the other OTEL_* variables). */
+  otlp?: SlotlockOtlpConfig;
   /** The value that must accompany trustedProxyHeader in x-slotlock-proxy-proof; else the socket's. */
   trustedProxySecret?: string;
 }
@@ -493,6 +500,13 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
   if (trustedProxySecret !== undefined) config.trustedProxySecret = trustedProxySecret;
   const knownClients = readKnownClients(env);
   if (knownClients.length > 0) config.knownClients = knownClients;
+  let otlp: SlotlockOtlpConfig | undefined;
+  try {
+    otlp = readSlotlockOtlpConfig(env);
+  } catch (error) {
+    throw new SlotlockConfigError((error as Error).message);
+  }
+  if (otlp !== undefined) config.otlp = otlp;
   if (authToken !== undefined) config.authToken = authToken;
   const metricsToken = readSecret(env, 'SLOTLOCK_METRICS_TOKEN');
   if (metricsToken !== undefined) {
@@ -1066,6 +1080,13 @@ export async function startSlotlockServer(
             ...(process.versions.tz ? { tzdata: process.versions.tz } : {}),
           });
     const knownClients: ReadonlySet<string> = new Set(config.knownClients ?? []);
+    // A span per call to an OpenTelemetry collector, when one is configured.
+    const tracer = config.otlp
+      ? createSlotlockOtlpExporter(config.otlp, {
+          version: slotlockPackageVersion(),
+          onError: (reason) => log.warn('trace_export_failed', { reason }),
+        })
+      : undefined;
     // Teams on Cloud: an organization's keys work while an owner has it turned on.
     const organizationEnabled =
       config.organizations === 'enabled' ? createSlotlockOrganizationCheck(sql) : null;
@@ -1158,6 +1179,7 @@ export async function startSlotlockServer(
       // Outcomes and counts only: the server never reports arguments or identities.
       onEvent: (event) => {
         metrics?.event(event);
+        tracer?.record(event);
         const { type, ...fields } = event;
         log.info(type, snakeCaseKeys(fields));
       },
@@ -1356,6 +1378,7 @@ export async function startSlotlockServer(
         limits.close();
         // What the last requests counted is recorded before the pool closes.
         await usage?.close();
+        await tracer?.shutdown();
         await maintenance?.close();
         await webhooks?.close();
         await sql.end({ timeout: 5 });
@@ -2127,6 +2150,11 @@ Environment:
                                  ignored and the connection's address counts
   SLOTLOCK_KNOWN_CLIENTS         Comma-separated integrator names /metrics counts requests by, from
                                  their Slotlock-Client field (any other: other; none sent: none)
+  OTEL_EXPORTER_OTLP_ENDPOINT    An OpenTelemetry collector (OTLP over HTTP, JSON): a span per
+                                 call is sent to <endpoint>/v1/traces (off without it)
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT The full traces URL instead of <endpoint>/v1/traces
+  OTEL_EXPORTER_OTLP_HEADERS     name=value pairs sent with each export, such as an API key
+  OTEL_SERVICE_NAME              service.name of the spans (default slotlock)
   SLOTLOCK_GITHUB_CLIENT_ID      Serve the dashboard at $SLOTLOCK_PUBLIC_URL/dashboard: the Client ID
                                  of a GitHub OAuth app with callback .../dashboard/callback
   SLOTLOCK_GITHUB_CLIENT_SECRET  That app's client secret (dashboard)
