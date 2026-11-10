@@ -488,6 +488,10 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
       await superuser`
         DELETE FROM slotlock.outbox
          WHERE id = (SELECT min(id) FROM slotlock.outbox WHERE tenant_ref = ${tenantRef})`;
+      // Overage it was billed for, which only the owner's overage report writes.
+      await superuser`
+        INSERT INTO slotlock.overage_reports (tenant_ref, month, reported)
+        VALUES (${tenantRef}, date_trunc('month', now())::date, 1)`;
       // A booking an upgrade set aside, which only the deployment DDL writes.
       await superuser`
         INSERT INTO slotlock.reservation_conflict_archive (

@@ -42,6 +42,11 @@ export interface SlotlockStripeOptions {
   prices: Readonly<Record<SlotlockBillingInterval, string>>;
   /** The Team plan's price ids, monthly and yearly (Teams on Cloud): an organization's checkout. */
   teamPrices?: Readonly<Record<SlotlockBillingInterval, string>>;
+  /**
+   * Metered overage (overage.ts, SLOTLOCK_OVERAGE): a metered price on a Billing Meter, added to a
+   * Developer checkout so operations above the quota can be billed. Off without it.
+   */
+  overagePrice?: string;
   /** Sent as Stripe-Version; SLOTLOCK_STRIPE_API_VERSION when unset. */
   apiVersion?: string;
   apiBase?: string;
@@ -154,6 +159,8 @@ export function createSlotlockStripe(options: SlotlockStripeOptions): SlotlockSt
         mode: 'subscription',
         'line_items[0][price]': price,
         'line_items[0][quantity]': '1',
+        // A metered price takes no quantity: what the meter reports is billed.
+        ...(plan === 'developer' && options.overagePrice ? { 'line_items[1][price]': options.overagePrice } : {}),
         'managed_payments[enabled]': 'true',
         success_url: successUrl,
         cancel_url: cancelUrl,

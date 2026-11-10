@@ -679,6 +679,11 @@ before merge (GOVERNANCE.md).
   allowlist's `google:<subject>` entries, read by `serve` too.
 - **Test environments (G9), composite resources (G8), acting on behalf of a sub-tenant (P3).**
 - **Metered overage for Developer**, once Stripe confirms Managed Payments supports metered prices.
+  Status: built on `claude/inspiring-dijkstra-bfvqif` and off by default (`SLOTLOCK_OVERAGE`): a
+  paying Developer tenant's stop moves to 300% of its operations (or the percent set), checkout adds
+  the metered price, and `slotlock overage report` sends Billing Meter events for what is above the
+  quota, recorded first in `slotlock.overage_reports` so it is billed once. Turning it on waits for
+  Stripe's answer, the owner's price, and the Terms.
 - RFC 0002 P2: OpenTelemetry export and published SLOs first, as a paid service needs them.
   Status: built on `claude/inspiring-dijkstra-bfvqif`: a span per call to an OTLP/HTTP collector
   (`OTEL_EXPORTER_OTLP_ENDPOINT`), joining the caller's trace by its id but not as a child of its

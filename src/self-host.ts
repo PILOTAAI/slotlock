@@ -81,6 +81,7 @@ import {
 } from './partners.js';
 import { closeSlotlockPartnerMonth, slotlockClientLabel, slotlockPreviousMonth } from './partner-billing.js';
 import { createSlotlockDashboardTeams, createSlotlockOrganizationCheck } from './teams.js';
+import { SLOTLOCK_DEFAULT_OVERAGE_STOP_PERCENT, reportSlotlockOverage, slotlockMonthOf } from './overage.js';
 import { type SlotlockOtlpConfig, createSlotlockOtlpExporter, readSlotlockOtlpConfig } from './otel.js';
 import { readFile } from 'node:fs/promises';
 import {
@@ -147,6 +148,7 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_SHARED_LIMITS',
   'SLOTLOCK_USAGE',
   'SLOTLOCK_QUOTAS',
+  'SLOTLOCK_OVERAGE',
   'SLOTLOCK_LIMITS',
   'SLOTLOCK_TRUSTED_PROXY_HEADER',
   'SLOTLOCK_TRUSTED_PROXY_SECRET',
@@ -293,6 +295,11 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
    * a plan is refused `quota_exceeded` past its plan's operations or bookings this month (quotas.ts).
    */
   quotas: boolean;
+  /**
+   * Metered overage (SLOTLOCK_OVERAGE: off, or the percent of its quota a paying Developer tenant
+   * is refused at, 111-1000; needs SLOTLOCK_QUOTAS=on). Off by default: overage.ts.
+   */
+  overageStopPercent?: number;
   /** Request limits (SLOTLOCK_LIMITS over SLOTLOCK_DEFAULT_LIMITS): the server's only rate limit. */
   limits: SlotlockLimits;
   /** The lower-case request field a trusted proxy sets to the client address; else the socket's. */
@@ -494,6 +501,15 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
     limits: readLimits(env),
   };
   config.quotas = readQuotas(env, config.usage);
+  const overage = optional(env, 'SLOTLOCK_OVERAGE') ?? 'off';
+  if (overage !== 'off') {
+    const percent = overage === 'on' ? SLOTLOCK_DEFAULT_OVERAGE_STOP_PERCENT : Number(overage);
+    if (!Number.isSafeInteger(percent) || percent < 111 || percent > 1_000) {
+      throw new SlotlockConfigError('SLOTLOCK_OVERAGE must be off, on, or the percent of its quota a paying Developer tenant is refused at (111-1000)');
+    }
+    if (!config.quotas) throw new SlotlockConfigError('SLOTLOCK_OVERAGE needs SLOTLOCK_QUOTAS=on: overage is what is used past a quota');
+    config.overageStopPercent = percent;
+  }
   const trustedProxyHeader = readTrustedProxyHeader(env);
   if (trustedProxyHeader !== undefined) config.trustedProxyHeader = trustedProxyHeader;
   const trustedProxySecret = readTrustedProxySecret(env, trustedProxyHeader);
@@ -1040,7 +1056,12 @@ export async function startSlotlockServer(
     const quotas =
       config.quotas && usage
         ? createSlotlockQuotas({
-            plan: (tenantRef) => readSlotlockTenantQuotas(sql, tenantRef),
+            plan: (tenantRef) =>
+              readSlotlockTenantQuotas(
+                sql,
+                tenantRef,
+                config.overageStopPercent !== undefined ? { overageStopPercent: config.overageStopPercent } : {},
+              ),
             used: (tenantRef, fromDay) => readSlotlockQuotaUse(sql, tenantRef, fromDay),
             local: (tenantRef, metric, fromDay) => usage.local(tenantRef, metric, fromDay),
             notice: (notice) => noteSlotlockQuotaThreshold(sql, notice),
@@ -2063,6 +2084,11 @@ Commands:
                            The Stripe customer its monthly invoice goes to
   partner webhook <id> <https-url>
                            Where usage.period_closed goes; prints its signing secret once
+  overage report [--month <YYYY-MM>] [--event <name>]
+                           With SLOTLOCK_OVERAGE: send Stripe each paying Developer tenant's
+                           operations above its quota this month (or --month) not yet sent, as
+                           Billing Meter events (--event, default slotlock_operations), once
+                           (as the schema owner, with STRIPE_SECRET_KEY)
   partner close <id> [--month <YYYY-MM>]
                            Close an ended month (default: last month): price its accounts' use
                            with the contract, record the lines once, send usage.period_closed,
@@ -2118,6 +2144,10 @@ Environment:
   SLOTLOCK_QUOTAS                on (needs SLOTLOCK_USAGE=on): refuse a tenant on a plan past its
                                  operations or bookings this month (quota_exceeded, 429); off
                                  (default): no quota
+  SLOTLOCK_OVERAGE               off (default), or on (300) or a percent (111-1000): a paying
+                                 Developer tenant is refused only past that share of its
+                                 operations, and the rest above its quota is billed (overage
+                                 report); needs SLOTLOCK_QUOTAS=on
   SLOTLOCK_SHARED_LIMITS         on: tenant request budgets are shared by every server through the
                                  database, so N servers allow a tenant its rate once; off (default):
                                  each server keeps its own
@@ -2220,7 +2250,8 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     command === 'rules' ||
     command === 'tenant' ||
     command === 'plan' ||
-    command === 'partner'
+    command === 'partner' ||
+    command === 'overage'
       ? `${command} ${operands[0] ?? ''}`.trim()
       : command;
   const expectedOperands: Record<string, number> = {
@@ -2258,6 +2289,7 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     'partner customer': 3,
     'partner webhook': 3,
     'partner close': 2,
+    'overage report': 1,
   };
   const expected = expectedOperands[subcommand];
   if (expected === undefined) return usage(`unknown command "${subcommand}"`);
@@ -2271,8 +2303,11 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
       return usage(`--${option} applies only to key create`);
     }
   }
-  if (values.month !== undefined && subcommand !== 'partner close') {
-    return usage('--month applies only to partner close');
+  if (values.month !== undefined && subcommand !== 'partner close' && subcommand !== 'overage report') {
+    return usage('--month applies only to partner close and overage report');
+  }
+  if (values.event !== undefined && subcommand !== 'overage report') {
+    return usage('--event applies only to overage report');
   }
   if (values.month !== undefined && !/^\d{4}-(0[1-9]|1[0-2])$/.test(values.month)) {
     return usage('--month must be a month, like 2026-10');
@@ -2405,6 +2440,40 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
       case 'resource list':
         await listResources(readSlotlockDatabaseConfig(io.env), io.stdout);
         return 0;
+      case 'overage report': {
+        const secretKey = io.env.STRIPE_SECRET_KEY?.trim();
+        if (!secretKey) {
+          io.stderr.write('slotlock: overage report needs STRIPE_SECRET_KEY, with write access to meter events\n');
+          return 1;
+        }
+        const database = readSlotlockDatabaseConfig(io.env);
+        const owner = connect(database.migrateDatabaseUrl ?? database.databaseUrl, 1);
+        try {
+          const report = await reportSlotlockOverage(owner, {
+            month: values.month ?? slotlockMonthOf(Date.now()),
+            stripe: { secretKey, eventName: values.event ?? 'slotlock_operations' },
+          });
+          io.stdout.write(`${JSON.stringify({ month: report.month, tenants: report.tenants.length, sent: report.sent, failed: report.failed })}\n`);
+          if (report.failed > 0) {
+            io.stderr.write('slotlock: Stripe did not take some events; run overage report again\n');
+            return 1;
+          }
+          return 0;
+        } catch (error) {
+          const code = (error as { code?: unknown } | null)?.code;
+          if (code === 'invalid_meter_event' || code === 'invalid_month') {
+            io.stderr.write(`slotlock: ${(error as Error).message}\n`);
+            return 2;
+          }
+          if (code === '42501') {
+            io.stderr.write('slotlock: only the schema owner reports overage; set SLOTLOCK_MIGRATE_DATABASE_URL to its URL\n');
+            return 1;
+          }
+          throw error;
+        } finally {
+          await owner.end({ timeout: 5 });
+        }
+      }
       case 'resource parent': {
         const changed = await setResourceParent(
           readSlotlockDatabaseConfig(io.env),
@@ -2653,6 +2722,7 @@ function parseCliArguments(argv: readonly string[]) {
       groups: { type: 'string' },
       contract: { type: 'string' },
       month: { type: 'string' },
+      event: { type: 'string' },
       resource: { type: 'string' },
       all: { type: 'boolean' },
       reason: { type: 'string' },

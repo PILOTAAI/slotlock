@@ -277,6 +277,7 @@ export const SLOTLOCK_TENANT_ADMIN_TABLES = Object.freeze([
   'usage_cursors',
   'usage_meter_start',
   'usage_notices',
+  'overage_reports',
   'webhook_tenants',
   'rate_buckets',
   'assistant_tenants',
@@ -1468,6 +1469,22 @@ CREATE TABLE IF NOT EXISTS slotlock.usage_notices (
 ALTER TABLE slotlock.usage_notices ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON slotlock.usage_notices FROM PUBLIC;
 
+-- Metered overage (off unless SLOTLOCK_OVERAGE=on, overage.ts): how many operations above its
+-- quota each tenant's month has been reported to Stripe as, so each is reported once however often
+-- the report runs. Owner-only: \`slotlock overage report\` runs as the schema owner.
+CREATE TABLE IF NOT EXISTS slotlock.overage_reports (
+  tenant_ref text NOT NULL,
+  month date NOT NULL,
+  reported bigint NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_overage_reports_pkey PRIMARY KEY (tenant_ref, month),
+  CONSTRAINT slotlock_overage_reports_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500 AND extract(day FROM month) = 1 AND reported >= 0
+  )
+);
+ALTER TABLE slotlock.overage_reports ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.overage_reports FROM PUBLIC;
+
 -- Adds a server's batch of counts, once per flush id: true when added, false when that batch was
 -- added before. Each row names a tenant, a day within a day of today, a metric a server counts
 -- (operations, webhook deliveries, assistant messages), a key ('' for none), a surface and a count;
@@ -1988,6 +2005,10 @@ BEGIN
   RETURN NEXT;
   erased_table := 'usage_notices';
   DELETE FROM slotlock.usage_notices WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'overage_reports';
+  DELETE FROM slotlock.overage_reports WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
   -- Before the keys, so their count is reported (the key's deletion would take them too).

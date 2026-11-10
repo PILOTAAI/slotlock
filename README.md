@@ -532,6 +532,24 @@ Stripe and set the tenant's plan: `active` or `trialing` gives Developer, `past_
 Stripe retries, anything else returns the tenant to Free. Nothing is deleted when a plan ends; the
 tenant cannot add more until it is under the Free limits.
 
+**Metered overage for Developer** is off, and stays off until Stripe confirms that Managed Payments
+takes metered prices and the Terms say what overage costs. With `SLOTLOCK_OVERAGE=on` (or a percent,
+111-1000; `on` is 300) on the server and the Worker, beside `SLOTLOCK_QUOTAS=on`, a paying Developer
+tenant is refused only past that share of its monthly operations; the Worker adds the metered price
+`SLOTLOCK_STRIPE_PRICE_OVERAGE` (on a Stripe Billing Meter) to a Developer checkout and shows
+`SLOTLOCK_PLAN_PRICE_OVERAGE` on the Plan page. The schema owner then runs, daily and on the 1st for
+the month before:
+
+```sh
+STRIPE_SECRET_KEY=sk_live_… slotlock overage report                 # this month so far
+STRIPE_SECRET_KEY=sk_live_… slotlock overage report --month 2026-10 --event slotlock_operations
+```
+
+It sends Stripe a meter event for each paying Developer tenant's operations above its quota that
+have not been sent, and records the total in `slotlock.overage_reports` first, so an operation is
+never billed twice (a run that stops halfway bills too little, and the next run does not catch up
+on it). It exits 1 while an event was not taken; run it again.
+
 The Team plan is an organization's (Teams on Cloud, `SLOTLOCK_DASHBOARD_ORGS=enabled`): Developer's
 limits, which are this release's caps for one tenant, and larger monthly quotas its members share
 (2,000,000 operations and 100,000 bookings, stopping at 110%). It is offered only with all four of

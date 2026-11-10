@@ -60,6 +60,7 @@ import {
 } from '../../src/rate-limit.js';
 import { createSlotlockStore } from '../../src/store.js';
 import { createSlotlockDashboardTeams } from '../../src/teams.js';
+import { SLOTLOCK_DEFAULT_OVERAGE_STOP_PERCENT } from '../../src/overage.js';
 
 /**
  * A Workers rate limiting binding (developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit,
@@ -166,6 +167,17 @@ export const SLOTLOCK_DEFAULT_PLAN_CONTACT = 'mailto:clever.eziogor@pylota.io';
  * its own is on is the database's (`slotlock plan default`), so both servers apply the same one; a
  * new tenant is put on it before it adds a key, resource or webhook endpoint.
  */
+/** SLOTLOCK_OVERAGE on the Worker, as on serve: off, on (300), or a stop percent of 111-1000. */
+function readWorkerOverage(vars: SlotlockEnv): number | undefined {
+  const value = vars.SLOTLOCK_OVERAGE?.trim() || 'off';
+  if (value === 'off') return undefined;
+  const percent = value === 'on' ? SLOTLOCK_DEFAULT_OVERAGE_STOP_PERCENT : Number(value);
+  if (!Number.isSafeInteger(percent) || percent < 111 || percent > 1_000) {
+    throw new SlotlockConfigError('SLOTLOCK_OVERAGE must be off, on, or a percent of 111-1000');
+  }
+  return percent;
+}
+
 function readBilling(vars: SlotlockEnv) {
   const secretKey = vars.STRIPE_SECRET_KEY?.trim();
   const month = vars.SLOTLOCK_STRIPE_PRICE_MONTHLY?.trim();
@@ -189,14 +201,24 @@ function readBilling(vars: SlotlockEnv) {
     );
   }
   const teamPrices = teamMonth && teamYear ? { month: teamMonth, year: teamYear } : undefined;
+  // Metered overage (overage.ts): off unless SLOTLOCK_OVERAGE is on and its metered price is set.
+  const overage = readWorkerOverage(vars);
+  const overagePrice = vars.SLOTLOCK_STRIPE_PRICE_OVERAGE?.trim();
+  if (overage !== undefined && !overagePrice) {
+    throw new SlotlockConfigError('SLOTLOCK_OVERAGE needs SLOTLOCK_STRIPE_PRICE_OVERAGE, the metered price overage is billed at');
+  }
   return {
     stripe: createSlotlockStripe({
       secretKey,
       prices: { month, year },
       ...(teamPrices ? { teamPrices } : {}),
+      ...(overage !== undefined && overagePrice ? { overagePrice } : {}),
       ...(apiVersion ? { apiVersion } : {}),
     }),
     ...(teamPrices ? { teamPrices: { month: teamShownMonth as string, year: teamShownYear as string } } : {}),
+    ...(overage !== undefined
+      ? { overage: { price: vars.SLOTLOCK_PLAN_PRICE_OVERAGE?.trim() || 'the metered price', stopPercent: overage } }
+      : {}),
     webhookSecret: vars.STRIPE_WEBHOOK_SECRET?.trim() || null,
     contact: vars.SLOTLOCK_PLAN_CONTACT?.trim() || SLOTLOCK_DEFAULT_PLAN_CONTACT,
     prices: {
@@ -388,6 +410,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
               portal: (input) => billing.stripe.portal(input),
               prices: billing.prices,
               ...(billing.teamPrices ? { teamPrices: billing.teamPrices } : {}),
+              ...(billing.overage ? { overage: billing.overage } : {}),
               contact: billing.contact,
               formOrigins: ['https://checkout.stripe.com', 'https://billing.stripe.com'],
             },
@@ -533,7 +556,10 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
           quotas:
             quotas && meter
               ? createSlotlockQuotas({
-                  plan: (tenantRef) => readSlotlockTenantQuotas(sql, tenantRef),
+                  plan: (tenantRef) => {
+                    const overage = readWorkerOverage(variables(env));
+                    return readSlotlockTenantQuotas(sql, tenantRef, overage !== undefined ? { overageStopPercent: overage } : {});
+                  },
                   used: (tenantRef, fromDay) => readSlotlockQuotaUse(sql, tenantRef, fromDay),
                   local: (tenantRef, metric, fromDay) => meter.local(tenantRef, metric, fromDay),
                   notice: (notice) => noteSlotlockQuotaThreshold(sql, notice),

@@ -99,6 +99,27 @@ describe('Stripe signatures and plans', () => {
     expect(slotlockPlanOfSubscription({ id: 'sub_1', status: 'active', customer: 'cus_1', items: { data: [{ price: 'price_team_year' }] } })).toMatchObject({ plan: 'developer' });
   });
 
+  it('adds the metered overage price to a Developer checkout only, when overage is on', async () => {
+    const calls: { url: string; body: string }[] = [];
+    const stripe = createSlotlockStripe({
+      secretKey: 'rk_test_fake',
+      prices: { month: 'price_month', year: 'price_year' },
+      teamPrices: { month: 'price_team_month', year: 'price_team_year' },
+      overagePrice: 'price_overage',
+      fetch: (async (url: string, init: RequestInit) => {
+        calls.push({ url: String(url), body: String(init.body ?? '') });
+        return Response.json({ url: 'https://checkout.stripe.com/c/pay/cs_1' });
+      }) as typeof fetch,
+    });
+    const at = { interval: 'month' as const, customer: null, successUrl: 'https://a.example/ok', cancelUrl: 'https://a.example/no' };
+    await stripe.checkout({ ...at, tenantRef: 'github:42' });
+    await stripe.checkout({ ...at, tenantRef: 'github-org:91', plan: 'team' });
+    const [developer, team] = calls.map((call) => new URLSearchParams(call.body));
+    expect(developer?.get('line_items[1][price]')).toBe('price_overage');
+    expect(developer?.has('line_items[1][quantity]')).toBe(false);
+    expect(team?.has('line_items[1][price]')).toBe(false);
+  });
+
   it("asks Checkout for the Team price for an organization's Team plan", async () => {
     const { stripe, calls } = fakeStripe(new Map());
     await stripe.checkout({

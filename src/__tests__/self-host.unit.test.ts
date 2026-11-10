@@ -119,6 +119,18 @@ describe('slotlock serve configuration', () => {
     );
   });
 
+  it('bills overage only when asked, and only with quotas', () => {
+    expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_USAGE: 'on', SLOTLOCK_QUOTAS: 'on' })).overageStopPercent).toBeUndefined();
+    expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_USAGE: 'on', SLOTLOCK_QUOTAS: 'on', SLOTLOCK_OVERAGE: 'on' })).overageStopPercent).toBe(300);
+    expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_USAGE: 'on', SLOTLOCK_QUOTAS: 'on', SLOTLOCK_OVERAGE: '200' })).overageStopPercent).toBe(200);
+    expect(() => readSlotlockServeConfig(serveEnv({ SLOTLOCK_OVERAGE: 'on' }))).toThrow('SLOTLOCK_OVERAGE needs SLOTLOCK_QUOTAS=on');
+    for (const bad of ['yes', '100', '1001', '150.5']) {
+      expect(() => readSlotlockServeConfig(serveEnv({ SLOTLOCK_USAGE: 'on', SLOTLOCK_QUOTAS: 'on', SLOTLOCK_OVERAGE: bad })), bad).toThrow(
+        'SLOTLOCK_OVERAGE must be',
+      );
+    }
+  });
+
   it('names in metrics only the integrators the deployment lists', () => {
     expect(readSlotlockServeConfig(serveEnv({})).knownClients).toBeUndefined();
     expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_KNOWN_CLIENTS: 'stackapi, n8n,stackapi' })).knownClients).toEqual([
@@ -789,6 +801,9 @@ describe('slotlock command line', () => {
     [['maintain', 'now'], /wrong number of arguments for "maintain"/],
     [['partner', 'close'], /wrong number of arguments for "partner close"/],
     [['resource', 'parent', 'room-1'], /wrong number of arguments for "resource parent"/],
+    [['overage', 'report', 'now'], /wrong number of arguments for "overage report"/],
+    [['overage', 'report', '--month', 'May'], /--month must be a month/],
+    [['key', 'list', '--event', 'x'], /--event applies only to overage report/],
     [['partner', 'close', 'stackapi', '--month', '2026-13'], /--month must be a month/],
     [['partner', 'list', '--month', '2026-10'], /--month applies only to partner close/],
     [['key', 'create', 'agent', '--expires-in-days', '0'], /--expires-in-days must be/],

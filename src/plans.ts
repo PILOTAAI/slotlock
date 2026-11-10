@@ -80,15 +80,28 @@ interface TenantPlanRow {
 export async function readSlotlockTenantQuotas(
   sql: SlotlockSql,
   tenantRef: string,
+  /**
+   * Metered overage (SLOTLOCK_OVERAGE=on, overage.ts): a paying Developer tenant is refused only past
+   * this percent of its quota, and what it uses above the quota is billed.
+   */
+  options: { overageStopPercent?: number } = {},
 ): Promise<SlotlockPlanQuotas | null> {
   const [row] = await sql<
-    { plan: string; operations: string | null; bookings: string | null; stop_percent: number | null }[]
-  >`SELECT plan, operations::text, bookings::text, stop_percent FROM slotlock.tenant_plan_quotas(${tenantRef}::text)`;
+    { plan: string; operations: string | null; bookings: string | null; stop_percent: number | null; paid: boolean | null }[]
+  >`SELECT quotas.plan, quotas.operations::text, quotas.bookings::text, quotas.stop_percent,
+           (SELECT given.stripe_subscription IS NOT NULL AND given.status <> 'canceled'
+              FROM slotlock.tenant_plan(${tenantRef}::text) given) AS paid
+      FROM slotlock.tenant_plan_quotas(${tenantRef}::text) quotas`;
   if (!row) return null;
   if (row.operations !== null && row.bookings !== null && row.stop_percent !== null) {
     return { operations: Number(row.operations), bookings: Number(row.bookings), stopPercent: row.stop_percent };
   }
-  return Object.hasOwn(SLOTLOCK_PLAN_QUOTAS, row.plan) ? SLOTLOCK_PLAN_QUOTAS[row.plan as SlotlockPlan] : null;
+  if (!Object.hasOwn(SLOTLOCK_PLAN_QUOTAS, row.plan)) return null;
+  const quotas = SLOTLOCK_PLAN_QUOTAS[row.plan as SlotlockPlan];
+  if (options.overageStopPercent !== undefined && row.plan === 'developer' && row.paid === true) {
+    return { ...quotas, stopPercent: Math.max(quotas.stopPercent, options.overageStopPercent) };
+  }
+  return quotas;
 }
 
 /** The tenant's plan, or null when it has none (no plan limits apply). */

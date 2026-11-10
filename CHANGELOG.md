@@ -122,6 +122,16 @@ versioning.
   returns quota numbers). A suspended partner suspends every account (`tenant_suspended`) and
   their keys stop authenticating (`authenticate_scoped_api_key`); erasing an account removes the
   partner's record of it. Run `slotlock migrate`.
+- Metered overage for Developer (RFC 0003 Later), off by default: with `SLOTLOCK_OVERAGE=on` (or a
+  stop percent, 111-1000) and `SLOTLOCK_QUOTAS=on`, a paying Developer tenant is refused only past
+  that share of its monthly operations (`readSlotlockTenantQuotas`'s `overageStopPercent`); the
+  Worker adds `SLOTLOCK_STRIPE_PRICE_OVERAGE`, a metered price, to a Developer checkout and shows
+  `SLOTLOCK_PLAN_PRICE_OVERAGE`; and `slotlock overage report [--month] [--event]`, as the schema
+  owner with `STRIPE_SECRET_KEY`, sends Stripe Billing Meter events for what each tenant used above
+  its quota and has not been billed for, recorded first in the new owner-only table
+  `slotlock.overage_reports` (erased with the tenant), so nothing is billed twice
+  (`reportSlotlockOverage`, `overage.ts`). Stays off until Stripe confirms Managed Payments takes
+  metered prices and the Terms name the price. Run `slotlock migrate`.
 - OpenTelemetry trace export and published objectives (RFC 0002 P2-5, RFC 0003 Later). With
   `OTEL_EXPORTER_OTLP_ENDPOINT` (or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`), `serve` sends a SERVER
   span for each MCP, A2A and REST call to an OpenTelemetry collector, OTLP over HTTP as JSON, in

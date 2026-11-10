@@ -466,6 +466,11 @@ export interface SlotlockDashboardBilling {
    * offered Team instead of Developer.
    */
   teamPrices?: { month: string; year: string };
+  /**
+   * Metered overage on Developer (SLOTLOCK_OVERAGE, overage.ts): its price as shown, such as `$2
+   * per 10,000 operations`, and the percent of the quota where use is refused.
+   */
+  overage?: { price: string; stopPercent: number };
   /** Where a Custom (self-hosted) enquiry goes: an https or mailto URL. */
   contact: string;
   /** The https origins Upgrade and Manage redirect to, allowed in the policy's form-action. */
@@ -3486,7 +3491,8 @@ ${
             return [html`<p class="notice warn" role="alert">This month's ${what} are used up: Slotlock refuses ${refused} with quota_exceeded until ${resets}.${paying ? html`` : html` Upgrade for more.`}</p>`];
           }
           if (spent >= quota) {
-            return [html`<p class="notice warn" role="alert">You have used this month's ${counted(quota)} ${what}. Slotlock refuses ${refused} past ${counted(stop)}, until ${resets}.</p>`];
+            const billed = metric === 'operations' && billing.overage && plan?.plan === 'developer' && paying;
+            return [html`<p class="notice warn" role="alert">You have used this month's ${counted(quota)} ${what}.${billed ? ` Those past it are billed at ${billing.overage?.price ?? ''}.` : ''} Slotlock refuses ${refused} past ${counted(stop)}, until ${resets}.</p>`];
           }
           if (spent * 100 >= quota * 80) {
             return [html`<p class="notice warn" role="status">You have used ${String(Math.floor((spent * 100) / quota))}% of this month's ${what}. They start again on ${resets}.</p>`];
@@ -3505,7 +3511,11 @@ ${
       ? html``
       : html`<section class="panel" id="upgrade">
 <h2>${PLAN_NAMES[offered]}</h2>
-<p>${String(developer.resources)} resources, ${String(developer.apiKeys)} API keys and ${String(developer.webhookEndpoints)} webhook endpoints${options.quotas ? html`, with ${counted(SLOTLOCK_PLAN_QUOTAS[offered].operations)} operations and ${counted(SLOTLOCK_PLAN_QUOTAS[offered].bookings)} bookings a month${offered === 'team' ? ' shared by the organization' : ''}` : html``}.</p>
+<p>${String(developer.resources)} resources, ${String(developer.apiKeys)} API keys and ${String(developer.webhookEndpoints)} webhook endpoints${options.quotas ? html`, with ${counted(SLOTLOCK_PLAN_QUOTAS[offered].operations)} operations and ${counted(SLOTLOCK_PLAN_QUOTAS[offered].bookings)} bookings a month${offered === 'team' ? ' shared by the organization' : ''}` : html``}.${
+  offered === 'developer' && billing.overage && options.quotas
+    ? ` Operations past them are billed at ${billing.overage.price}, up to ${String(billing.overage.stopPercent)}% of them.`
+    : ''
+}</p>
 <form method="post" action="${root}/plan/upgrade">
 <input type="hidden" name="csrf" value="${token}">
 <input type="hidden" name="once" value="${formNonce(session)}">
