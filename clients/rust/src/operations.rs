@@ -1230,6 +1230,10 @@ pub struct JoinWaitlistInput {
     pub pool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offer_ttl_seconds: Option<i64>,
+    /// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
+    /// request answers what the first did; with another request, 422 idempotency_conflict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
 }
 
 /// The arguments of [`Client::leave_waitlist`].
@@ -1349,6 +1353,10 @@ pub struct CreateWebhookInput {
     pub locations: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub groups: Option<Vec<String>>,
+    /// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
+    /// request answers what the first did; with another request, 422 idempotency_conflict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
 }
 
 /// The arguments of [`Client::delete_webhook`].
@@ -2012,7 +2020,10 @@ impl Client {
     /// a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so
     /// (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window
     /// starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409
-    /// waitlist_limit_reached); a window is at most 31 days.
+    /// waitlist_limit_reached); a window is at most 31 days. With an idempotency key (the
+    /// Idempotency-Key header or idempotency_key), a retry answers the entry the first request
+    /// made (replayed: true) for as long as it is kept; the same key with another request is 422
+    /// idempotency_conflict.
     pub fn join_waitlist(&self, input: &JoinWaitlistInput) -> Result<Value, Error> {
         self.call("slotlock_join_waitlist", serde_json::to_value(input)?)
     }
@@ -2171,7 +2182,10 @@ impl Client {
     /// resource_ids, pools, locations (each with every location in it) or groups, only changes
     /// about a resource that matches one of them, as it is when the change is delivered: a change
     /// about no resource (a key, a webhook, a usage notice) is not sent. At most 100 resource ids
-    /// and 20 of each other kind (400 invalid_webhook_filter).
+    /// and 20 of each other kind (400 invalid_webhook_filter). With an idempotency key (the
+    /// Idempotency-Key header or idempotency_key), a retry answers the webhook and secret the
+    /// first request made (replayed: true) for as long as the webhook is kept; the same key with
+    /// another request is 422 idempotency_conflict.
     pub fn create_webhook(&self, input: &CreateWebhookInput) -> Result<Value, Error> {
         self.call("slotlock_create_webhook", serde_json::to_value(input)?)
     }

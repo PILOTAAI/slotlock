@@ -344,7 +344,7 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   exportResourceAvailability: { icalendar: 'BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n' },
   importResourceAvailability: { resource: RESOURCE },
   checkInReservation: { reference: 'BK-42', checked_in_at: '2027-03-29T09:05:00.000Z' },
-  joinWaitlist: { entry: WAITLIST_ENTRY },
+  joinWaitlist: { entry: WAITLIST_ENTRY, replayed: false },
   listWaitlist: { entries: [WAITLIST_ENTRY] },
   leaveWaitlist: { left: true },
   exportTenantEvent: {
@@ -393,7 +393,7 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
     ],
     next_cursor: 'MToxOjE6MA',
   },
-  createWebhook: { webhook: WEBHOOK, secret: `whsec_${'A'.repeat(43)}=` },
+  createWebhook: { webhook: WEBHOOK, secret: `whsec_${'A'.repeat(43)}=`, replayed: false },
   listWebhooks: { webhooks: [WEBHOOK] },
   setResourcePool: { resource: { ...RESOURCE, pool: 'van' } },
   setResourceParent: { resource: { ...RESOURCE, parent_id: '0e7c1f9a-3b5d-4c2e-9f81-6a4b2d8c7e10', part_index: 0 } },
@@ -741,8 +741,10 @@ describe('the application API over REST', () => {
       'slotlock_book_together',
       'slotlock_cancel_tenant_event',
       'slotlock_create_event',
+      'slotlock_create_webhook',
       'slotlock_delete_event',
       'slotlock_hold_slots',
+      'slotlock_join_waitlist',
       'slotlock_update_event',
     ]);
   });

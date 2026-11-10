@@ -425,6 +425,7 @@ const BOOKING_RULE_CODES: Readonly<Record<SlotlockBookingRule, string>> = Object
 
 function operationError(
   refusal: string | { code: string; rule?: string },
+  details?: Record<string, string>,
 ): SlotlockAgentOperationError {
   const code =
     typeof refusal === 'string'
@@ -433,11 +434,38 @@ function operationError(
         ? (BOOKING_RULE_CODES[refusal.rule as SlotlockBookingRule] ?? refusal.code)
         : refusal.code;
   const status = slotlockAgentErrorStatus(code);
-  // A gone hold (expired or another holder's) is named, so the agent holds again.
+  // A gone hold (another holder's, released or reaped) is named, so the agent holds again.
   return new SlotlockAgentOperationError(
     status === 404 && code !== 'hold_not_found' ? 'not_found' : code,
     status,
+    details,
   );
+}
+
+/**
+ * What an agent may be told about the booking in the way of its write: when that time is busy
+ * (as free/busy shows anyone who may read the resource), and the booking itself only when it is
+ * the agent's own hold or event, so it can release or move it. Nothing for another refusal, or for
+ * a booking the key may not see (its scope, or another tenant's).
+ */
+async function overlapDetails(
+  tenantStore: SlotlockTenantStore,
+  context: SlotlockAgentInvocationContext,
+  refusal: { code: string; conflictingReservationId?: string | null },
+): Promise<Record<string, string>> {
+  if (refusal.code !== 'overlap' || typeof refusal.conflictingReservationId !== 'string') return {};
+  const booking = await tenantStore.describeBooking({
+    tenantRef: context.principal.tenantRef,
+    id: refusal.conflictingReservationId,
+  });
+  if (!booking) return {};
+  const owner = agentOwnerRef(context);
+  return {
+    busy_start: booking.start.toISOString(),
+    busy_end: booking.end.toISOString(),
+    ...(booking.status === 'held' && booking.holderRef === owner ? { conflicting_hold_id: booking.id } : {}),
+    ...(booking.eventRef !== null && booking.eventOwnerRef === owner ? { conflicting_event_id: booking.eventRef } : {}),
+  };
 }
 
 /** Resource and event ids: the UUIDs the store issues and validates. */
@@ -646,6 +674,7 @@ export function createSlotlockStoreAgentBackend(
           pool: input.pool,
           visibility: 'shared',
           ordered: true,
+          forBooking: true,
         });
         if (members.length === 0) throw new SlotlockAgentOperationError('pool_not_found', 404);
         // Each member in turn, each in its own savepoint: one taken or refused by its rules is
@@ -799,7 +828,10 @@ export function createSlotlockStoreAgentBackend(
           // Thrown, so the whole transaction rolls back with the events already put.
           if (!result.ok) {
             const refusal = operationError(result);
-            throw new SlotlockAgentOperationError(refusal.code, refusal.status, { resource_id: resourceId });
+            throw new SlotlockAgentOperationError(refusal.code, refusal.status, {
+              resource_id: resourceId,
+              ...(await overlapDetails(tenantStore, context, result)),
+            });
           }
           const created = await tenantStore.getCalendarEvent({
             tenantRef: context.principal.tenantRef,
@@ -1097,7 +1129,7 @@ export function createSlotlockStoreAgentBackend(
             ? { fromHold: { holdId: input.hold_id, holderRef: agentOwnerRef(context) } }
             : {}),
         });
-        if (!result.ok) throw operationError(result);
+        if (!result.ok) throw operationError(result, await overlapDetails(tenantStore, context, result));
         const created = await tenantStore.getCalendarEvent({
           tenantRef: context.principal.tenantRef,
           ownerRef: agentOwnerRef(context),
@@ -1248,7 +1280,7 @@ export function createSlotlockStoreAgentBackend(
           // An agent's event is a booking made now: the resource's booking rules apply.
           enforceBookingRules: true,
         });
-        if (!result.ok) throw operationError(result);
+        if (!result.ok) throw operationError(result, await overlapDetails(tenantStore, context, result));
         const updated = await tenantStore.getCalendarEvent({
           tenantRef: context.principal.tenantRef,
           ownerRef: agentOwnerRef(context),
@@ -2257,9 +2289,10 @@ export function createSlotlockStoreApplicationBackend(
           end: new Date(input.end as string),
           holderRef: input.holder_ref as string,
           ...(ttl !== undefined ? { offerTtlMs: ttl * 1000 } : {}),
+          ...(input.idempotency_key !== undefined ? { idempotencyKey: input.idempotency_key as string } : {}),
         });
         if (!result.ok) throw applicationRefusal(result.code);
-        return { entry: waitlistOutput(result.entry) };
+        return { entry: waitlistOutput(result.entry), replayed: result.replayed };
       });
     },
 
@@ -2478,14 +2511,19 @@ export function createSlotlockStoreApplicationBackend(
                 },
               }
             : {}),
+          ...(input.idempotency_key !== undefined ? { idempotencyKey: input.idempotency_key as string } : {}),
         });
         if (!created.ok) {
           throw new SlotlockAgentOperationError(
             created.code,
-            created.code === 'webhook_limit_reached' ? 409 : 400,
+            created.code === 'webhook_limit_reached' || created.code === 'idempotency_conflict' ? 409 : 400,
           );
         }
-        return { webhook: webhookOutput(created.endpoint), secret: created.secret };
+        return {
+          webhook: webhookOutput(created.endpoint),
+          secret: created.secret,
+          replayed: created.replayed === true,
+        };
       }, WRITE);
     },
 

@@ -94,6 +94,14 @@ describe.skipIf(!url)('pools (real Postgres)', () => {
     });
   });
 
+  it('goes round in turn when round-robin bookings come at once', async () => {
+    const scooters = await members('scooter', 3);
+    await store.setPoolOrder({ tenantRef, pool: 'scooter', order: 'round_robin' });
+    // Three bookings at once, at times that do not meet: each takes the next member, not the same one.
+    const taken = await Promise.all([0, 1, 2].map((n) => book('scooter', 500 + n * 2, 501 + n * 2, `turn-${n}`)));
+    expect(taken.map(({ event }) => event.resource_id).sort()).toEqual([...scooters].sort());
+  }, 30_000);
+
   it('sells five vans to six racing bookings exactly five times', async () => {
     const vans = await members('van', 5);
     const outcomes = await Promise.allSettled(

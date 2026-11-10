@@ -1820,6 +1820,10 @@ type JoinWaitlistInput struct {
 	Pool *string
 
 	OfferTTLSeconds *int64
+
+	// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
+	// request answers what the first did; with another request, 422 idempotency_conflict.
+	IdempotencyKey *string
 }
 
 func (in JoinWaitlistInput) values() map[string]any {
@@ -1836,6 +1840,9 @@ func (in JoinWaitlistInput) values() map[string]any {
 	if in.OfferTTLSeconds != nil {
 		values["offer_ttl_seconds"] = *in.OfferTTLSeconds
 	}
+	if in.IdempotencyKey != nil {
+		values["idempotency_key"] = *in.IdempotencyKey
+	}
 	return values
 }
 
@@ -1845,7 +1852,10 @@ func (in JoinWaitlistInput) values() map[string]any {
 // joined: the first gets a hold of it for holder_ref, for offer_ttl_seconds (default 900), and
 // the feed says so (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose
 // window starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409
-// waitlist_limit_reached); a window is at most 31 days.
+// waitlist_limit_reached); a window is at most 31 days. With an idempotency key (the
+// Idempotency-Key header or idempotency_key), a retry answers the entry the first request made
+// (replayed: true) for as long as it is kept; the same key with another request is 422
+// idempotency_conflict.
 func (c *Client) JoinWaitlist(ctx context.Context, in JoinWaitlistInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_join_waitlist", in.values())
 }
@@ -2188,6 +2198,10 @@ type CreateWebhookInput struct {
 	Locations []string
 
 	Groups []string
+
+	// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
+	// request answers what the first did; with another request, 422 idempotency_conflict.
+	IdempotencyKey *string
 }
 
 func (in CreateWebhookInput) values() map[string]any {
@@ -2208,6 +2222,9 @@ func (in CreateWebhookInput) values() map[string]any {
 	if in.Groups != nil {
 		values["groups"] = in.Groups
 	}
+	if in.IdempotencyKey != nil {
+		values["idempotency_key"] = *in.IdempotencyKey
+	}
 	return values
 }
 
@@ -2219,7 +2236,10 @@ func (in CreateWebhookInput) values() map[string]any {
 // With resource_ids, pools, locations (each with every location in it) or groups, only changes
 // about a resource that matches one of them, as it is when the change is delivered: a change
 // about no resource (a key, a webhook, a usage notice) is not sent. At most 100 resource ids and
-// 20 of each other kind (400 invalid_webhook_filter).
+// 20 of each other kind (400 invalid_webhook_filter). With an idempotency key (the
+// Idempotency-Key header or idempotency_key), a retry answers the webhook and secret the first
+// request made (replayed: true) for as long as the webhook is kept; the same key with another
+// request is 422 idempotency_conflict.
 func (c *Client) CreateWebhook(ctx context.Context, in CreateWebhookInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_create_webhook", in.values())
 }

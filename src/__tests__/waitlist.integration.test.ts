@@ -284,6 +284,30 @@ describe.skipIf(!url)('waitlists and check-in (real Postgres)', () => {
     expect(await application.leaveWaitlist(context('slotlock_leave_waitlist'), { entry_id: id })).toEqual({ left: true });
   });
 
+  it('answers a join retried with its idempotency key with the first entry, and refuses another request with it', async () => {
+    const van = await resource();
+    const join = (holder: string, key: string) =>
+      application.joinWaitlist(context('slotlock_join_waitlist'), {
+        resource_id: van,
+        start: at(80).toISOString(),
+        end: at(81).toISOString(),
+        holder_ref: holder,
+        idempotency_key: key,
+      }) as Promise<{ entry: { id: string }; replayed: boolean }>;
+    const key = `join-${randomUUID()}`;
+    const first = await join('ana', key);
+    expect(first.replayed).toBe(false);
+    const again = await join('ana', key);
+    expect(again).toEqual({ ...first, replayed: true });
+    await expect(join('bea', key)).rejects.toMatchObject({ code: 'idempotency_conflict', status: 409 });
+    // One entry, not two.
+    const listed = (await application.listWaitlist(context('slotlock_list_waitlist'), {
+      limit: 100,
+      resource_id: van,
+    })) as { entries: unknown[] };
+    expect(listed.entries).toHaveLength(1);
+  });
+
   it('releases a booking left unclaimed past its check-in window, and only one made once asked', async () => {
     const desk = await resource();
     const now = Date.now();
@@ -317,8 +341,11 @@ describe.skipIf(!url)('waitlists and check-in (real Postgres)', () => {
       expect.objectContaining({
         subject: unclaimed,
         data: expect.objectContaining({ resource_id: desk2, revision: 2, check_in_minutes: 15 }),
+        actor: 'slotlock:maintenance',
       }),
     ]);
+    // One change for the no-show, not a cancellation as well.
+    expect((await changes('reservation.cancelled')).map(({ subject }) => subject)).not.toContain(unclaimed);
     expect((await changes('reservation.checked_in')).map(({ subject }) => subject)).toEqual([claimed]);
     // The reference is retired: a late create cannot bring it back at the old revision.
     expect(

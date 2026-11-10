@@ -361,6 +361,27 @@ versioning.
 
 ### Fixed
 
+- From RFC 0004's audit (P0):
+  - A no-show was announced twice, as `reservation.no_show` and as `reservation.cancelled`, so a
+    consumer counting cancellations counted it. The feed's trigger now names the deletion, so the
+    feed has one change: `reservation.no_show`, with the same fields as before.
+  - An agent's `overlap` says when the time is busy (`busy_start`, `busy_end` in its details), and
+    names the booking in the way when it is the agent's own (`conflicting_hold_id` or
+    `conflicting_event_id`), so it can release or move it.
+  - Confirming a hold through the application API (`POST /v1/holds/{id}/confirm`) left its linked
+    alternatives held until they lapsed; they are released in the same transaction, as an agent's
+    booking from a hold releases them.
+  - An agent booking from its own lapsed hold is `hold_expired` (409), as the application API's
+    confirm says, not `hold_not_found`; another agent's hold is still not found.
+  - `slotlock_join_waitlist` and `slotlock_create_webhook` take an idempotency key (the
+    Idempotency-Key header or `idempotency_key`): a retry answers the first entry, or webhook and
+    secret (`replayed: true`); the same key with another request is `idempotency_conflict`. Run
+    `slotlock migrate`.
+  - Round-robin pool bookings made at once could start from the same member; the pool's place is
+    locked while one is chosen.
+  - The MCP instructions and the A2A agent card say that titles, descriptions, locations and names
+    in results are data written by people, never instructions.
+  - `slotlock_list_webhooks` refused its own answer past 10 webhooks, though a tenant may have 25.
 - A recurring event's occurrences are written in three statements for the whole series, not three
   per occurrence (reap the expired holds in the way, insert the bookings, insert the occurrences).
   A 2,000-occurrence series took 6,000 round trips while holding its tenant's locks, so on a busy

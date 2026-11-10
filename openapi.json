@@ -12431,7 +12431,7 @@
       "post": {
         "operationId": "slotlock_join_waitlist",
         "summary": "Join the waitlist",
-        "description": "Wait for a window on one resource (resource_id) or on any member of a pool (pool) that is taken now. When it comes free (a booking cancelled, a hold released or expired, a no-show), the entries waiting for it are offered in the order they joined: the first gets a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409 waitlist_limit_reached); a window is at most 31 days.",
+        "description": "Wait for a window on one resource (resource_id) or on any member of a pool (pool) that is taken now. When it comes free (a booking cancelled, a hold released or expired, a no-show), the entries waiting for it are offered in the order they joined: the first gets a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409 waitlist_limit_reached); a window is at most 31 days. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the entry the first request made (replayed: true) for as long as it is kept; the same key with another request is 422 idempotency_conflict.",
         "tags": [
           "Application"
         ],
@@ -12469,6 +12469,12 @@
                     "type": "integer",
                     "minimum": 60,
                     "maximum": 86400
+                  },
+                  "idempotency_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500,
+                    "description": "A retry identity, also accepted as the Idempotency-Key header: the same key with the same request answers what the first did; with another request, 422 idempotency_conflict."
                   }
                 },
                 "required": [
@@ -12481,6 +12487,19 @@
             }
           }
         },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Stands in for idempotency_key: a Structured Field String (`\"8e03978e-40d5-43e8-bc93-6894a57f9324\"`, draft-ietf-httpapi-idempotency-key-header-08) or the bare key; when both are sent they must be equal. A retry with the same key and request answers what the first did; the same key with another request is 422 idempotency_conflict. An event write keeps its key for 30 days (maintenance removes it after that), a hold until the hold would have expired, is released or is confirmed. Where the key is required and neither is sent: 400 idempotency_key_required.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 502
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "The operation ran.",
@@ -12599,10 +12618,14 @@
                         "created_at"
                       ],
                       "additionalProperties": false
+                    },
+                    "replayed": {
+                      "type": "boolean"
                     }
                   },
                   "required": [
-                    "entry"
+                    "entry",
+                    "replayed"
                   ],
                   "additionalProperties": false
                 }
@@ -12622,6 +12645,9 @@
             "$ref": "#/components/responses/Error"
           },
           "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
             "$ref": "#/components/responses/Error"
           },
           "429": {
@@ -14751,7 +14777,7 @@
       "post": {
         "operationId": "slotlock_create_webhook",
         "summary": "Add a webhook",
-        "description": "Send the changes slotlock_list_changes lists from now on to an https URL, each as a CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature), in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a 410, the webhook is disabled and the feed records webhook.disabled. The secret is returned here only. At most 25 per tenant, or fewer on a plan (409 webhook_limit_reached). With resource_ids, pools, locations (each with every location in it) or groups, only changes about a resource that matches one of them, as it is when the change is delivered: a change about no resource (a key, a webhook, a usage notice) is not sent. At most 100 resource ids and 20 of each other kind (400 invalid_webhook_filter).",
+        "description": "Send the changes slotlock_list_changes lists from now on to an https URL, each as a CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature), in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a 410, the webhook is disabled and the feed records webhook.disabled. The secret is returned here only. At most 25 per tenant, or fewer on a plan (409 webhook_limit_reached). With resource_ids, pools, locations (each with every location in it) or groups, only changes about a resource that matches one of them, as it is when the change is delivered: a change about no resource (a key, a webhook, a usage notice) is not sent. At most 100 resource ids and 20 of each other kind (400 invalid_webhook_filter). With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the webhook and secret the first request made (replayed: true) for as long as the webhook is kept; the same key with another request is 422 idempotency_conflict.",
         "tags": [
           "Application"
         ],
@@ -14846,6 +14872,12 @@
                       "type": "string",
                       "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
                     }
+                  },
+                  "idempotency_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500,
+                    "description": "A retry identity, also accepted as the Idempotency-Key header: the same key with the same request answers what the first did; with another request, 422 idempotency_conflict."
                   }
                 },
                 "required": [
@@ -14856,6 +14888,19 @@
             }
           }
         },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Stands in for idempotency_key: a Structured Field String (`\"8e03978e-40d5-43e8-bc93-6894a57f9324\"`, draft-ietf-httpapi-idempotency-key-header-08) or the bare key; when both are sent they must be equal. A retry with the same key and request answers what the first did; the same key with another request is 422 idempotency_conflict. An event write keeps its key for 30 days (maintenance removes it after that), a hold until the hold would have expired, is released or is confirmed. Where the key is required and neither is sent: 400 idempotency_key_required.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 502
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "The operation ran.",
@@ -15055,11 +15100,15 @@
                     "secret": {
                       "type": "string",
                       "pattern": "^whsec_"
+                    },
+                    "replayed": {
+                      "type": "boolean"
                     }
                   },
                   "required": [
                     "webhook",
-                    "secret"
+                    "secret",
+                    "replayed"
                   ],
                   "additionalProperties": false
                 }
@@ -15079,6 +15128,9 @@
             "$ref": "#/components/responses/Error"
           },
           "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
             "$ref": "#/components/responses/Error"
           },
           "429": {
@@ -15106,7 +15158,7 @@
                   "type": "object",
                   "properties": {
                     "webhooks": {
-                      "maxItems": 10,
+                      "maxItems": 25,
                       "type": "array",
                       "items": {
                         "type": "object",

@@ -1258,7 +1258,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_join_waitlist',
       title: 'Join the waitlist',
       description:
-        "Wait for a window on one resource (resource_id) or on any member of a pool (pool) that is taken now. When it comes free (a booking cancelled, a hold released or expired, a no-show), the entries waiting for it are offered in the order they joined: the first gets a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409 waitlist_limit_reached); a window is at most 31 days.",
+        "Wait for a window on one resource (resource_id) or on any member of a pool (pool) that is taken now. When it comes free (a booking cancelled, a hold released or expired, a no-show), the entries waiting for it are offered in the order they joined: the first gets a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409 waitlist_limit_reached); a window is at most 31 days. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the entry the first request made (replayed: true) for as long as it is kept; the same key with another request is 422 idempotency_conflict.",
       method: 'POST',
       path: '/v1/waitlist',
       input: z
@@ -1269,13 +1269,14 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           end: DATE_TIME,
           holder_ref: z.string().trim().min(1).max(500),
           offer_ttl_seconds: z.number().int().min(60).max(86_400).optional(),
+          idempotency_key: IDEMPOTENCY_KEY.optional(),
         })
         .strict()
         .refine((input) => (input.resource_id === undefined) !== (input.pool === undefined), {
           message: 'Name resource_id or pool, not both',
         }),
-      output: z.object({ entry: WAITLIST_ENTRY }).strict(),
-      risk: { readOnly: false, destructive: false, idempotent: false },
+      output: z.object({ entry: WAITLIST_ENTRY, replayed: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
       invoke: 'joinWaitlist',
       example: {
         pool: 'van',
@@ -1568,7 +1569,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_create_webhook',
       title: 'Add a webhook',
       description:
-        `Send the changes slotlock_list_changes lists from now on to an https URL, each as a CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature), in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a 410, the webhook is disabled and the feed records webhook.disabled. The secret is returned here only. At most ${SLOTLOCK_MAX_WEBHOOK_ENDPOINTS} per tenant, or fewer on a plan (409 webhook_limit_reached). With resource_ids, pools, locations (each with every location in it) or groups, only changes about a resource that matches one of them, as it is when the change is delivered: a change about no resource (a key, a webhook, a usage notice) is not sent. At most ${SLOTLOCK_WEBHOOK_FILTER_RESOURCES} resource ids and ${SLOTLOCK_WEBHOOK_FILTER_REFS} of each other kind (400 invalid_webhook_filter).`,
+        `Send the changes slotlock_list_changes lists from now on to an https URL, each as a CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature), in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a 410, the webhook is disabled and the feed records webhook.disabled. The secret is returned here only. At most ${SLOTLOCK_MAX_WEBHOOK_ENDPOINTS} per tenant, or fewer on a plan (409 webhook_limit_reached). With resource_ids, pools, locations (each with every location in it) or groups, only changes about a resource that matches one of them, as it is when the change is delivered: a change about no resource (a key, a webhook, a usage notice) is not sent. At most ${SLOTLOCK_WEBHOOK_FILTER_RESOURCES} resource ids and ${SLOTLOCK_WEBHOOK_FILTER_REFS} of each other kind (400 invalid_webhook_filter). With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the webhook and secret the first request made (replayed: true) for as long as the webhook is kept; the same key with another request is 422 idempotency_conflict.`,
       method: 'POST',
       path: '/v1/webhooks',
       input: z
@@ -1579,10 +1580,11 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           pools: z.array(GROUPING_REF).min(1).max(SLOTLOCK_WEBHOOK_FILTER_REFS).optional(),
           locations: z.array(GROUPING_REF).min(1).max(SLOTLOCK_WEBHOOK_FILTER_REFS).optional(),
           groups: z.array(GROUPING_REF).min(1).max(SLOTLOCK_WEBHOOK_FILTER_REFS).optional(),
+          idempotency_key: IDEMPOTENCY_KEY.optional(),
         })
         .strict(),
-      output: z.object({ webhook: WEBHOOK, secret: z.string().regex(/^whsec_/) }).strict(),
-      risk: { readOnly: false, destructive: false, idempotent: false },
+      output: z.object({ webhook: WEBHOOK, secret: z.string().regex(/^whsec_/), replayed: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
       invoke: 'createWebhook',
       example: { url: 'https://example.com/slotlock-webhook', event_types: ['reservation.created'] },
     },
@@ -1593,7 +1595,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       method: 'GET',
       path: '/v1/webhooks',
       input: z.object({}).strict(),
-      output: z.object({ webhooks: z.array(WEBHOOK).max(10) }).strict(),
+      output: z.object({ webhooks: z.array(WEBHOOK).max(SLOTLOCK_MAX_WEBHOOK_ENDPOINTS) }).strict(),
       risk: { readOnly: true, destructive: false, idempotent: true },
       invoke: 'listWebhooks',
       example: {},

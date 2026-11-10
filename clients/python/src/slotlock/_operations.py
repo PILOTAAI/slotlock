@@ -1701,6 +1701,7 @@ class Operations(Transport):
         resource_id: str | None = None,
         pool: str | None = None,
         offer_ttl_seconds: int | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Join the waitlist.
 
@@ -1710,7 +1711,15 @@ class Operations(Transport):
         a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so
         (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window
         starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409
-        waitlist_limit_reached); a window is at most 31 days.
+        waitlist_limit_reached); a window is at most 31 days. With an idempotency key (the
+        Idempotency-Key header or idempotency_key), a retry answers the entry the first request
+        made (replayed: true) for as long as it is kept; the same key with another request is 422
+        idempotency_conflict.
+
+        Args:
+            idempotency_key: A retry identity, also accepted as the Idempotency-Key header: the
+            same key with the same request answers what the first did; with another request, 422
+            idempotency_conflict.
         """
         values: dict[str, Any] = {"start": start, "end": end, "holder_ref": holder_ref}
         if resource_id is not None:
@@ -1719,6 +1728,8 @@ class Operations(Transport):
             values["pool"] = pool
         if offer_ttl_seconds is not None:
             values["offer_ttl_seconds"] = offer_ttl_seconds
+        if idempotency_key is not None:
+            values["idempotency_key"] = idempotency_key
         return self.call("slotlock_join_waitlist", values)
 
     def leave_waitlist(self, entry_id: str) -> dict[str, Any]:
@@ -1947,6 +1958,7 @@ class Operations(Transport):
         pools: list[str] | None = None,
         locations: list[str] | None = None,
         groups: list[str] | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Add a webhook.
 
@@ -1958,7 +1970,15 @@ class Operations(Transport):
         resource_ids, pools, locations (each with every location in it) or groups, only changes
         about a resource that matches one of them, as it is when the change is delivered: a change
         about no resource (a key, a webhook, a usage notice) is not sent. At most 100 resource ids
-        and 20 of each other kind (400 invalid_webhook_filter).
+        and 20 of each other kind (400 invalid_webhook_filter). With an idempotency key (the
+        Idempotency-Key header or idempotency_key), a retry answers the webhook and secret the
+        first request made (replayed: true) for as long as the webhook is kept; the same key with
+        another request is 422 idempotency_conflict.
+
+        Args:
+            idempotency_key: A retry identity, also accepted as the Idempotency-Key header: the
+            same key with the same request answers what the first did; with another request, 422
+            idempotency_conflict.
         """
         values: dict[str, Any] = {"url": url}
         if event_types is not None:
@@ -1971,6 +1991,8 @@ class Operations(Transport):
             values["locations"] = locations
         if groups is not None:
             values["groups"] = groups
+        if idempotency_key is not None:
+            values["idempotency_key"] = idempotency_key
         return self.call("slotlock_create_webhook", values)
 
     def delete_webhook(self, webhook_id: str) -> dict[str, Any]:

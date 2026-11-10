@@ -1815,7 +1815,10 @@ public sealed partial class SlotlockClient
     /// a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so
     /// (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window
     /// starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409
-    /// waitlist_limit_reached); a window is at most 31 days.
+    /// waitlist_limit_reached); a window is at most 31 days. With an idempotency key (the
+    /// Idempotency-Key header or idempotency_key), a retry answers the entry the first request
+    /// made (replayed: true) for as long as it is kept; the same key with another request is 422
+    /// idempotency_conflict.
     /// </remarks>
     /// <param name="start">start</param>
     /// <param name="end">end</param>
@@ -1823,6 +1826,9 @@ public sealed partial class SlotlockClient
     /// <param name="resourceId">resource_id</param>
     /// <param name="pool">pool</param>
     /// <param name="offerTtlSeconds">offer_ttl_seconds</param>
+    /// <param name="idempotencyKey">A retry identity, also accepted as the Idempotency-Key
+    /// header: the same key with the same request answers what the first did; with another
+    /// request, 422 idempotency_conflict.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -1833,6 +1839,7 @@ public sealed partial class SlotlockClient
         Optional<string> resourceId = default,
         Optional<string> pool = default,
         Optional<long> offerTtlSeconds = default,
+        Optional<string> idempotencyKey = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -1842,6 +1849,7 @@ public sealed partial class SlotlockClient
         if (resourceId.HasValue) values["resource_id"] = Json.ToNode(resourceId.Value);
         if (pool.HasValue) values["pool"] = Json.ToNode(pool.Value);
         if (offerTtlSeconds.HasValue) values["offer_ttl_seconds"] = Json.ToNode(offerTtlSeconds.Value);
+        if (idempotencyKey.HasValue) values["idempotency_key"] = Json.ToNode(idempotencyKey.Value);
         return CallAsync("slotlock_join_waitlist", values, cancellationToken);
     }
 
@@ -2177,7 +2185,10 @@ public sealed partial class SlotlockClient
     /// resource_ids, pools, locations (each with every location in it) or groups, only changes
     /// about a resource that matches one of them, as it is when the change is delivered: a change
     /// about no resource (a key, a webhook, a usage notice) is not sent. At most 100 resource ids
-    /// and 20 of each other kind (400 invalid_webhook_filter).
+    /// and 20 of each other kind (400 invalid_webhook_filter). With an idempotency key (the
+    /// Idempotency-Key header or idempotency_key), a retry answers the webhook and secret the
+    /// first request made (replayed: true) for as long as the webhook is kept; the same key with
+    /// another request is 422 idempotency_conflict.
     /// </remarks>
     /// <param name="url">url</param>
     /// <param name="eventTypes">event_types</param>
@@ -2185,6 +2196,9 @@ public sealed partial class SlotlockClient
     /// <param name="pools">pools</param>
     /// <param name="locations">locations</param>
     /// <param name="groups">groups</param>
+    /// <param name="idempotencyKey">A retry identity, also accepted as the Idempotency-Key
+    /// header: the same key with the same request answers what the first did; with another
+    /// request, 422 idempotency_conflict.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -2195,6 +2209,7 @@ public sealed partial class SlotlockClient
         Optional<IEnumerable<string>> pools = default,
         Optional<IEnumerable<string>> locations = default,
         Optional<IEnumerable<string>> groups = default,
+        Optional<string> idempotencyKey = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -2204,6 +2219,7 @@ public sealed partial class SlotlockClient
         if (pools.HasValue) values["pools"] = Json.ToNode(pools.Value);
         if (locations.HasValue) values["locations"] = Json.ToNode(locations.Value);
         if (groups.HasValue) values["groups"] = Json.ToNode(groups.Value);
+        if (idempotencyKey.HasValue) values["idempotency_key"] = Json.ToNode(idempotencyKey.Value);
         return CallAsync("slotlock_create_webhook", values, cancellationToken);
     }
 

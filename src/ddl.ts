@@ -2566,6 +2566,23 @@ CREATE TABLE IF NOT EXISTS slotlock.webhook_endpoints (
     last_error IS NULL OR char_length(last_error) <= 500
   )
 );
+-- A create's retry identity (RFC 0004 P0-5), kept as long as the endpoint: the same key and
+-- request answer the endpoint (and its secret) the first made, another is idempotency_conflict.
+ALTER TABLE slotlock.webhook_endpoints ADD COLUMN IF NOT EXISTS idempotency_key text;
+ALTER TABLE slotlock.webhook_endpoints ADD COLUMN IF NOT EXISTS payload_hash text;
+DO $slotlock_webhook_key$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'slotlock_webhook_endpoints_key_valid'
+                    AND conrelid = 'slotlock.webhook_endpoints'::regclass) THEN
+    ALTER TABLE slotlock.webhook_endpoints ADD CONSTRAINT slotlock_webhook_endpoints_key_valid CHECK (
+      (idempotency_key IS NULL AND payload_hash IS NULL)
+      OR (octet_length(idempotency_key) BETWEEN 1 AND 500 AND payload_hash ~ '^[0-9a-f]{64}$')
+    ) NOT VALID;
+  END IF;
+END
+$slotlock_webhook_key$;
+CREATE UNIQUE INDEX IF NOT EXISTS slotlock_webhook_endpoints_key_idx
+  ON slotlock.webhook_endpoints (tenant_ref, idempotency_key) WHERE idempotency_key IS NOT NULL;
 ALTER TABLE slotlock.webhook_endpoints ADD COLUMN IF NOT EXISTS changes_pruned boolean NOT NULL DEFAULT false;
 -- Which resources' changes an endpoint receives (RFC 0003 G5): with any of these, only changes about
 -- a resource it names, or one in a pool, at a location (or a location in it) or in a group it names,
@@ -2663,6 +2680,23 @@ CREATE TABLE IF NOT EXISTS slotlock.waitlist_entries (
 );
 CREATE INDEX IF NOT EXISTS slotlock_waitlist_entries_queue_idx
   ON slotlock.waitlist_entries (tenant_ref, created_at, id) WHERE status = 'waiting';
+-- A join's retry identity (RFC 0004 P0-5), kept as long as the entry: the same key and request
+-- answer the entry the first made, another request is idempotency_conflict.
+ALTER TABLE slotlock.waitlist_entries ADD COLUMN IF NOT EXISTS idempotency_key text;
+ALTER TABLE slotlock.waitlist_entries ADD COLUMN IF NOT EXISTS payload_hash text;
+DO $slotlock_waitlist_key$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'slotlock_waitlist_entries_key_valid'
+                    AND conrelid = 'slotlock.waitlist_entries'::regclass) THEN
+    ALTER TABLE slotlock.waitlist_entries ADD CONSTRAINT slotlock_waitlist_entries_key_valid CHECK (
+      (idempotency_key IS NULL AND payload_hash IS NULL)
+      OR (octet_length(idempotency_key) BETWEEN 1 AND 500 AND payload_hash ~ '^[0-9a-f]{64}$')
+    ) NOT VALID;
+  END IF;
+END
+$slotlock_waitlist_key$;
+CREATE UNIQUE INDEX IF NOT EXISTS slotlock_waitlist_entries_key_idx
+  ON slotlock.waitlist_entries (tenant_ref, idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS slotlock_waitlist_entries_tenant_idx
   ON slotlock.waitlist_entries (tenant_ref, starts_at);
 
@@ -2811,7 +2845,11 @@ BEGIN
       kind := CASE WHEN NEW.status = 'held' THEN 'hold.updated' ELSE 'reservation.updated' END;
     END IF;
   ELSE
+    -- A no-show release (releaseNoShows) names its deletion, so the feed has one change for it,
+    -- not a cancellation as well. The marker only renames: a deletion is always recorded.
     kind := CASE
+      WHEN OLD.status <> 'held' AND current_setting('slotlock.ending', true) = 'no_show'
+        THEN 'reservation.no_show'
       WHEN OLD.status <> 'held' THEN 'reservation.cancelled'
       WHEN OLD.expires_at <= statement_timestamp() THEN 'hold.expired'
       ELSE 'hold.released'
@@ -2828,7 +2866,12 @@ BEGIN
       'start', changed.starts_at,
       'end', changed.ends_at,
       'buffer_after_ms', changed.buffer_after_ms,
-      'revision', CASE WHEN changed.status = 'held' THEN NULL ELSE changed.revision END,
+      -- A no-show carries the revision its reference is retired at, and the check-in window.
+      'revision', CASE WHEN changed.status = 'held' THEN NULL
+                       WHEN kind = 'reservation.no_show' THEN changed.revision + 1
+                       ELSE changed.revision END,
+      'check_in_minutes', CASE WHEN kind = 'reservation.no_show'
+                               THEN NULLIF(current_setting('slotlock.ending_detail', true), '')::int END,
       'expires_at', CASE WHEN changed.status = 'held' THEN changed.expires_at END,
       -- A move says where it came from.
       'before', CASE WHEN TG_OP = 'UPDATE' THEN jsonb_build_object(

@@ -162,6 +162,11 @@ Each line is one PR with its own red-to-green test, as before. Tiers follow GOVE
 
 ### P0: defects from this audit (now, T1 unless marked)
 
+Status: built on `claude/inspiring-dijkstra-bfvqif`, each with its test.
+- P0-2 says `busy_start` and `busy_end` always, and `conflicting_hold_id` or
+  `conflicting_event_id` for the agent's own.
+- The audit also found `slotlock_list_webhooks`' output capped at 10 entries; it is fixed.
+
 1. **A no-show is announced twice.** `releaseNoShows` writes `reservation.no_show`, and its DELETE
    fires the trigger, which also writes `reservation.cancelled`, so a consumer counting
    cancellations counts no-shows. The trigger should name the deletion from a transaction setting
@@ -175,9 +180,10 @@ Each line is one PR with its own red-to-green test, as before. Tiers follow GOVE
 4. **One name for a lapsed hold.** Agents get `hold_not_found` and the application API
    `hold_expired`. Both should say `hold_expired` while the hold's tombstone or row is known, and
    `hold_not_found` otherwise.
-5. **Idempotency keys** on `join_waitlist`, `create_webhook`, `create_location` and `create_group`
-   (optional `idempotency_key`, kept 24 hours; the same key with another payload is
-   `idempotency_conflict`).
+5. **Idempotency keys** on `join_waitlist` and `create_webhook`. Each takes an optional
+   `idempotency_key`, kept as long as its entry or webhook, and the same key with another payload
+   is `idempotency_conflict`. On a closer read, `create_location` and `create_group` are already
+   create-or-update by reference, so a retry converges and they need no key.
 6. **Round robin under concurrency.** Take the pool's settings row `FOR UPDATE` while choosing and
    noting the member, so two bookings at once do not pick from the same pointer.
 7. **Tool-result hygiene.** The MCP and A2A instructions say that titles, descriptions, locations

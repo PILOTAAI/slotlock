@@ -1633,13 +1633,16 @@ public abstract class SlotlockOperations {
    * first gets a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed
    * says so (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window
    * starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409
-   * waitlist_limit_reached); a window is at most 31 days.
+   * waitlist_limit_reached); a window is at most 31 days. With an idempotency key (the
+   * Idempotency-Key header or idempotency_key), a retry answers the entry the first request made
+   * (replayed: true) for as long as it is kept; the same key with another request is 422
+   * idempotency_conflict.
    *
    * @param start {@code start}, string
    * @param end {@code end}, string
    * @param holderRef {@code holder_ref}, string
    * @param optional the optional arguments, or null: {@code resource_id} (string), {@code pool}
-   * (string), {@code offer_ttl_seconds} (integer)
+   * (string), {@code offer_ttl_seconds} (integer), {@code idempotency_key} (string)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -1648,7 +1651,7 @@ public abstract class SlotlockOperations {
     values.put("start", start);
     values.put("end", end);
     values.put("holder_ref", holderRef);
-    putOptional(values, optional, Set.of("resource_id", "pool", "offer_ttl_seconds"), "slotlock_join_waitlist");
+    putOptional(values, optional, Set.of("resource_id", "pool", "offer_ttl_seconds", "idempotency_key"), "slotlock_join_waitlist");
     return call("slotlock_join_waitlist", values);
   }
 
@@ -1659,7 +1662,10 @@ public abstract class SlotlockOperations {
    * first gets a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed
    * says so (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window
    * starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409
-   * waitlist_limit_reached); a window is at most 31 days.
+   * waitlist_limit_reached); a window is at most 31 days. With an idempotency key (the
+   * Idempotency-Key header or idempotency_key), a retry answers the entry the first request made
+   * (replayed: true) for as long as it is kept; the same key with another request is 422
+   * idempotency_conflict.
    *
    * @param start {@code start}, string
    * @param end {@code end}, string
@@ -1987,19 +1993,22 @@ public abstract class SlotlockOperations {
    * webhook_limit_reached). With resource_ids, pools, locations (each with every location in it)
    * or groups, only changes about a resource that matches one of them, as it is when the change
    * is delivered: a change about no resource (a key, a webhook, a usage notice) is not sent. At
-   * most 100 resource ids and 20 of each other kind (400 invalid_webhook_filter).
+   * most 100 resource ids and 20 of each other kind (400 invalid_webhook_filter). With an
+   * idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the webhook
+   * and secret the first request made (replayed: true) for as long as the webhook is kept; the
+   * same key with another request is 422 idempotency_conflict.
    *
    * @param url {@code url}, string
    * @param optional the optional arguments, or null: {@code event_types} (list of string), {@code
    * resource_ids} (list of string), {@code pools} (list of string), {@code locations} (list of
-   * string), {@code groups} (list of string)
+   * string), {@code groups} (list of string), {@code idempotency_key} (string)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> createWebhook(String url, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("url", url);
-    putOptional(values, optional, Set.of("event_types", "resource_ids", "pools", "locations", "groups"), "slotlock_create_webhook");
+    putOptional(values, optional, Set.of("event_types", "resource_ids", "pools", "locations", "groups", "idempotency_key"), "slotlock_create_webhook");
     return call("slotlock_create_webhook", values);
   }
 
@@ -2012,7 +2021,10 @@ public abstract class SlotlockOperations {
    * webhook_limit_reached). With resource_ids, pools, locations (each with every location in it)
    * or groups, only changes about a resource that matches one of them, as it is when the change
    * is delivered: a change about no resource (a key, a webhook, a usage notice) is not sent. At
-   * most 100 resource ids and 20 of each other kind (400 invalid_webhook_filter).
+   * most 100 resource ids and 20 of each other kind (400 invalid_webhook_filter). With an
+   * idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the webhook
+   * and secret the first request made (replayed: true) for as long as the webhook is kept; the
+   * same key with another request is 422 idempotency_conflict.
    *
    * @param url {@code url}, string
    * @return the response body

@@ -71,6 +71,24 @@ export interface SlotlockResource {
   groups?: string[];
 }
 
+/**
+ * A booking, hold or event occurrence as a refusal can name it (`describeBooking`): the time it
+ * occupies, buffers included, and whose it is, so a caller is told only what it may see.
+ */
+export interface SlotlockBookingDescription {
+  id: string;
+  resourceId: string;
+  status: 'held' | 'confirmed';
+  /** The holder of a hold, as the store was given it; null otherwise. */
+  holderRef: string | null;
+  /** The calendar event this is an occurrence of (its id and reference), and its owner; null for a booking. */
+  eventId: string | null;
+  eventRef: string | null;
+  eventOwnerRef: string | null;
+  start: Date;
+  end: Date;
+}
+
 /** A confirmed occupation of a resource. The DB EXCLUDE constraint is the overlap arbiter. */
 export interface SlotlockReservation {
   id: string;
@@ -388,8 +406,10 @@ export type PutCalendarEventResult =
   | { ok: false; code: 'resource_archived' }
   | { ok: false; code: 'event_cancelled'; currentRevision: number }
   | { ok: false; code: 'revision_conflict'; currentRevision: number }
-  /** `fromHold` names no live hold of that holder's: released, booked, expired, or another's. */
+  /** `fromHold` names no hold of that holder's: released, booked, reaped, or another's. */
   | { ok: false; code: 'hold_not_found' }
+  /** `fromHold`'s hold is the holder's, but it lapsed before it was booked. */
+  | { ok: false; code: 'hold_expired' }
   /** `fromHold`'s hold is on another resource, or does not cover the event. */
   | { ok: false; code: 'hold_mismatch' }
   /**

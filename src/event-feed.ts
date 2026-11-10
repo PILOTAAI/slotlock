@@ -2,7 +2,7 @@
 // delivered to. Rows are appended by triggers in the changing transaction (ddl.ts,
 // SLOTLOCK_OUTBOX_DDL); webhooks.ts signs and sends.
 import { slotlockPlanReadRefusal } from './plans.js';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { Sql, TransactionSql } from 'postgres';
 
 type SlotlockSql = Sql | TransactionSql;
@@ -198,8 +198,11 @@ export interface SlotlockWebhookClaim {
 }
 
 export type CreateWebhookEndpointResult =
-  | { ok: true; endpoint: SlotlockWebhookEndpoint; secret: string }
-  | { ok: false; code: 'invalid_webhook_url' | 'invalid_event_types' | 'invalid_webhook_filter' }
+  | { ok: true; endpoint: SlotlockWebhookEndpoint; secret: string; /** True when an idempotency key answered what an earlier create made. */ replayed?: boolean }
+  | {
+      ok: false;
+      code: 'invalid_webhook_url' | 'invalid_event_types' | 'invalid_webhook_filter' | 'idempotency_conflict' | 'invalid_identity';
+    }
   | { ok: false; code: 'webhook_limit_reached'; limit: number };
 
 export type ListChangesResult =
@@ -234,6 +237,11 @@ export interface SlotlockEventFeed {
     eventTypes?: readonly string[];
     /** Only changes about these resources (`invalid_webhook_filter` past its bounds). */
     filter?: SlotlockWebhookFilter;
+    /**
+     * A retry identity, kept as long as the endpoint: the same key and request answer the endpoint
+     * and secret the first made (`replayed`), another request `idempotency_conflict`.
+     */
+    idempotencyKey?: string;
   }): Promise<CreateWebhookEndpointResult>;
   listWebhookEndpoints(params: { tenantRef: string }): Promise<SlotlockWebhookEndpoint[]>;
   deleteWebhookEndpoint(params: { tenantRef: string; id: string }): Promise<{ deleted: boolean }>;
@@ -576,9 +584,27 @@ export function slotlockEventFeedMethods(
       }
       const filter = parseWebhookFilter(params.filter);
       if (filter === null) return { ok: false, code: 'invalid_webhook_filter' };
+      const key = params.idempotencyKey;
+      if (key !== undefined && !isIdentity(key)) return { ok: false, code: 'invalid_identity' };
+      const payloadHash =
+        key === undefined
+          ? null
+          : createHash('sha256')
+              .update(JSON.stringify([params.url, types === null ? null : [...types].sort(), filter]))
+              .digest('hex');
       const secret = `whsec_${randomBytes(32).toString('base64')}`;
       return inTransaction(sql, async (tx): Promise<CreateWebhookEndpointResult> => {
         await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`slotlock:webhooks:${params.tenantRef}`}, 0))`;
+        if (key !== undefined) {
+          // Under the tenant's webhook lock: a retry racing its first finds what the first made.
+          const [earlier] = await tx<(EndpointRow & { secret: string; payload_hash: string })[]>`
+            SELECT ${ENDPOINT_COLUMNS(tx)}, secret, payload_hash FROM slotlock.webhook_endpoints
+             WHERE tenant_ref = ${params.tenantRef} AND idempotency_key = ${key}`;
+          if (earlier) {
+            if (earlier.payload_hash !== payloadHash) return { ok: false, code: 'idempotency_conflict' };
+            return { ok: true, endpoint: toEndpoint(earlier), secret: earlier.secret, replayed: true };
+          }
+        }
         const [count] = await tx<{ count: number; planned: number | null }[]>`
           SELECT count(*)::int AS count,
                  (SELECT max_webhook_endpoints FROM slotlock.tenant_plan(${params.tenantRef}::text))
@@ -596,16 +622,17 @@ export function slotlockEventFeedMethods(
         const [row] = await tx<EndpointRow[]>`
           INSERT INTO slotlock.webhook_endpoints (
             tenant_ref, url, secret, event_types, cursor_txid,
-            filter_resource_ids, filter_pools, filter_locations, filter_groups
+            filter_resource_ids, filter_pools, filter_locations, filter_groups,
+            idempotency_key, payload_hash
           )
           VALUES (${params.tenantRef}, ${params.url}, ${secret}, ${types}::text[],
                   pg_snapshot_xmin(pg_current_snapshot()),
                   ${filter.resourceIds}::uuid[], ${filter.pools}::text[], ${filter.locations}::text[],
-                  ${filter.groups}::text[])
+                  ${filter.groups}::text[], ${key ?? null}, ${payloadHash})
           RETURNING ${ENDPOINT_COLUMNS(tx)}`;
         if (!row) throw new Error('slotlock: webhook endpoint insert returned no row');
         await tx`SELECT slotlock.register_webhook_tenant(${params.tenantRef}::text)`;
-        return { ok: true, endpoint: toEndpoint(row), secret };
+        return { ok: true, endpoint: toEndpoint(row), secret, replayed: false };
       });
     },
 

@@ -106,6 +106,7 @@ import type {
   SlotlockCalendarEvent,
   SlotlockAgendaEntry,
   SlotlockHold,
+  SlotlockBookingDescription,
   SlotlockReservation,
   SlotlockResource,
   PutCalendarEventCommand,
@@ -2589,6 +2590,11 @@ export interface SlotlockStore extends SlotlockEventFeed {
     visibility?: 'shared';
     /** In the pool's order (`setPoolOrder`) rather than by id. */
     ordered?: boolean;
+    /**
+     * For a booking about to take one (with `ordered`): a round-robin pool's place is locked until
+     * the transaction ends, so bookings at once go round in turn instead of starting from one place.
+     */
+    forBooking?: boolean;
   }): Promise<SlotlockResource[]>;
   /**
    * The tenant's pools by name, with how many members each has that may be booked (its capacity)
@@ -2743,6 +2749,12 @@ export interface SlotlockStore extends SlotlockEventFeed {
    * cancelled, or a calendar event's occupation, which is not a booking.
    */
   getReservation(params: { tenantRef: string; externalRef: string }): Promise<SlotlockReservation | null>;
+  /**
+   * Any booking, hold or event occurrence of the tenant's by its row id (the id a refused write's
+   * `conflictingReservationId` names): the time it occupies, buffers included, and whose it is.
+   * Null when the tenant has none, or the transaction's key may not see it.
+   */
+  describeBooking(params: { tenantRef: string; id: string }): Promise<SlotlockBookingDescription | null>;
   /**
    * The tenant's bookings on one resource whose occupied time meets `window` (at most 367 days),
    * by start then id, keyset-paginated: pass the last one's `{ start, id }` as `after`.
@@ -2948,6 +2960,11 @@ export interface SlotlockStore extends SlotlockEventFeed {
     end: Date;
     holderRef: string;
     offerTtlMs?: number;
+    /**
+     * A retry identity, kept as long as the entry: the same key and request answer the entry the
+     * first made (`replayed`), another request `idempotency_conflict`.
+     */
+    idempotencyKey?: string;
   }): Promise<JoinWaitlistResult>;
   /** The tenant's waitlist entries, oldest first, optionally of one resource, pool or holder. */
   listWaitlist(params: {
@@ -3149,7 +3166,7 @@ export interface SlotlockWaitlistEntry {
 }
 
 export type JoinWaitlistResult =
-  | { ok: true; entry: SlotlockWaitlistEntry }
+  | { ok: true; entry: SlotlockWaitlistEntry; replayed: boolean }
   | {
       ok: false;
       code:
@@ -3160,7 +3177,8 @@ export type JoinWaitlistResult =
         | 'resource_not_found'
         | 'resource_archived'
         | 'pool_not_found'
-        | 'waitlist_limit_reached';
+        | 'waitlist_limit_reached'
+        | 'idempotency_conflict';
     };
 
 export type CheckInReservationResult =
@@ -4740,9 +4758,16 @@ function buildSlotlockStore(
          LIMIT ${SLOTLOCK_MAX_POOL_MEMBERS}`;
       const members = rows.map(toResource);
       if (params.ordered !== true || members.length < 2) return members;
-      const [settings] = await sql<{ member_order: SlotlockPoolOrder; last_member: string | null }[]>`
+      let [settings] = await sql<{ member_order: SlotlockPoolOrder; last_member: string | null }[]>`
         SELECT member_order, last_member::text FROM slotlock.pool_settings
          WHERE tenant_ref = ${params.tenantRef} AND pool_ref = ${params.pool}`;
+      if (settings?.member_order === 'round_robin' && params.forBooking === true) {
+        // Read again under the row's lock, held until the booking commits with the place it noted.
+        [settings] = await sql<{ member_order: SlotlockPoolOrder; last_member: string | null }[]>`
+          SELECT member_order, last_member::text FROM slotlock.pool_settings
+           WHERE tenant_ref = ${params.tenantRef} AND pool_ref = ${params.pool}
+           FOR UPDATE`;
+      }
       if (settings?.member_order === 'round_robin') {
         // From the first member after the one booked last, by id, round to the start.
         const after = settings.last_member;
@@ -5598,6 +5623,46 @@ function buildSlotlockStore(
       }));
     },
 
+    async describeBooking(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      if (!isValidResourceId(params.id)) return null;
+      const [row] = await sql<
+        {
+          resource_id: string;
+          status: 'held' | 'confirmed';
+          holder_ref: string | null;
+          occupied_start: Date;
+          occupied_end: Date;
+          event_id: string | null;
+          event_ref: string | null;
+          event_owner_ref: string | null;
+        }[]
+      >`
+        SELECT booking.resource_id, booking.status, booking.holder_ref,
+               COALESCE(booking.occupied_starts_at, booking.starts_at) AS occupied_start,
+               COALESCE(booking.occupied_ends_at, booking.ends_at) AS occupied_end,
+               event.id AS event_id, event.external_ref AS event_ref, event.owner_ref AS event_owner_ref
+          FROM slotlock.reservations booking
+          JOIN slotlock.resources resource ON resource.id = booking.resource_id
+          LEFT JOIN slotlock.calendar_events event
+            ON event.id = booking.calendar_event_id AND event.tenant_ref = ${params.tenantRef}
+         WHERE booking.id = ${params.id} AND resource.tenant_ref = ${params.tenantRef}`;
+      if (!row) return null;
+      return {
+        id: params.id,
+        resourceId: row.resource_id,
+        status: row.status,
+        holderRef: row.holder_ref,
+        eventId: row.event_id,
+        eventRef: row.event_ref,
+        eventOwnerRef: row.event_owner_ref,
+        start: row.occupied_start,
+        end: row.occupied_end,
+      };
+    },
+
     async getReservation(params) {
       if (!isValidIdentity(params.tenantRef) || !isValidIdentity(params.externalRef)) {
         throw invalidIdentityError('Slotlock booking identity must be 1-500 UTF-8 bytes');
@@ -5659,9 +5724,12 @@ function buildSlotlockStore(
           SELECT archived_at IS NOT NULL AS archived FROM slotlock.resources
            WHERE id = ${owner.resource_id}
            FOR SHARE`;
-        const [row] = await tx<(ReservationRow & { status: string; live: boolean })[]>`
+        const [row] = await tx<
+          (ReservationRow & { status: string; live: boolean; hold_group_id: string | null; holder_ref: string | null })[]
+        >`
           SELECT id, resource_id, tenant_ref, external_ref, starts_at, ends_at, buffer_after_ms,
-                 revision, source, status, (status = 'held' AND expires_at > statement_timestamp()) AS live
+                 revision, source, status, (status = 'held' AND expires_at > statement_timestamp()) AS live,
+                 hold_group_id, holder_ref
             FROM slotlock.reservations
            WHERE id = ${holdId}
            FOR UPDATE`;
@@ -5704,6 +5772,14 @@ function buildSlotlockStore(
           RETURNING id, resource_id, tenant_ref, external_ref, starts_at, ends_at,
                     buffer_after_ms, revision, source`;
         if (!confirmed) throw new Error('slotlock: hold confirmation returned no row');
+        // Its linked alternatives (one group, one holder) are released with it, as booking one
+        // from an agent releases the rest.
+        if (row.hold_group_id !== null && row.holder_ref !== null) {
+          await tx`
+            DELETE FROM slotlock.reservations
+             WHERE status = 'held' AND hold_group_id = ${row.hold_group_id}::uuid
+               AND holder_ref = ${row.holder_ref} AND id <> ${holdId}`;
+        }
         return { ok: true, reservation: toReservation(confirmed) };
       });
     },
@@ -5952,13 +6028,17 @@ function buildSlotlockStore(
                 return { ok: false, code: 'hold_not_found' };
               }
               const [hold] = await tx<
-                { resource_id: string; starts_at: Date; ends_at: Date; hold_group_id: string | null }[]
+                { resource_id: string; starts_at: Date; ends_at: Date; hold_group_id: string | null; live: boolean }[]
               >`
-                SELECT resource_id, starts_at, ends_at, hold_group_id FROM slotlock.reservations
+                SELECT resource_id, starts_at, ends_at, hold_group_id,
+                       expires_at > statement_timestamp() AS live
+                  FROM slotlock.reservations
                  WHERE id = ${holdId} AND status = 'held' AND holder_ref = ${holderRef}
-                   AND expires_at > statement_timestamp()
                  FOR UPDATE`;
               if (!hold) return { ok: false, code: 'hold_not_found' };
+              // The holder's own hold that lapsed and is not yet reaped: named as the application
+              // API's confirm names it. Another holder's stays not found.
+              if (!hold.live) return { ok: false, code: 'hold_expired' };
               const [only] = occurrences;
               if (
                 hold.resource_id !== params.resourceId ||
@@ -7067,14 +7147,15 @@ function buildSlotlockStore(
           await tx`
             INSERT INTO slotlock.reservation_tombstones (tenant_ref, external_ref, revision, stray)
             VALUES (${tenantRef}, ${row.external_ref}, ${revision}, false)`;
+          // The deletion is the change: the feed's trigger names it reservation.no_show (one change,
+          // not a cancellation too), by maintenance, with the check-in window it missed.
+          await tx`
+            SELECT set_config('slotlock.ending', 'no_show', true),
+                   set_config('slotlock.ending_detail', ${String(row.minutes)}, true),
+                   set_config('slotlock.actor', 'slotlock:maintenance', true)`;
           await tx`DELETE FROM slotlock.reservations WHERE id = ${row.id}`;
           await tx`
-            INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
-            VALUES (${tenantRef}, ${row.resource_id}, 'reservation.no_show', ${row.external_ref},
-                    jsonb_build_object('id', ${row.id}::uuid, 'reference', ${row.external_ref}::text,
-                                       'resource_id', ${row.resource_id}::uuid, 'revision', ${revision}::bigint,
-                                       'check_in_minutes', ${row.minutes}::int),
-                    'slotlock:maintenance')`;
+            SELECT set_config('slotlock.ending', '', true), set_config('slotlock.ending_detail', '', true)`;
           return true;
         });
         if (done) released += 1;
@@ -7103,7 +7184,36 @@ function buildSlotlockStore(
       if (!Number.isSafeInteger(offerTtlMs) || offerTtlMs < 60_000 || offerTtlMs > 86_400_000) {
         return { ok: false, code: 'invalid_ttl' };
       }
+      const key = params.idempotencyKey;
+      if (key !== undefined && !isValidIdentity(key)) return { ok: false, code: 'invalid_identity' };
+      const payloadHash =
+        key === undefined
+          ? null
+          : createHash('sha256')
+              .update(
+                JSON.stringify([
+                  params.resourceId ?? null,
+                  params.pool ?? null,
+                  window.start.toISOString(),
+                  window.end.toISOString(),
+                  holderRef,
+                  offerTtlMs,
+                ]),
+              )
+              .digest('hex');
       return inTransaction(sql, async (tx): Promise<JoinWaitlistResult> => {
+        // The tenant's waitlist lock first, which offers and every join take: a retry racing its
+        // first finds the entry the first made.
+        await tx`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify(['slotlock-waitlist', tenantRef])}, 0))`;
+        if (key !== undefined) {
+          const [earlier] = await tx<(WaitlistRow & { payload_hash: string })[]>`
+            SELECT ${tx.unsafe(WAITLIST_COLUMNS)}, payload_hash FROM slotlock.waitlist_entries
+             WHERE tenant_ref = ${tenantRef} AND idempotency_key = ${key}`;
+          if (earlier) {
+            if (earlier.payload_hash !== payloadHash) return { ok: false, code: 'idempotency_conflict' };
+            return { ok: true, entry: toWaitlistEntry(earlier), replayed: true };
+          }
+        }
         if (params.resourceId !== undefined) {
           const [resource] = await tx<{ archived: boolean }[]>`
             SELECT archived_at IS NOT NULL AS archived FROM slotlock.resources
@@ -7117,9 +7227,8 @@ function buildSlotlockStore(
              LIMIT 1`;
           if (!member) return { ok: false, code: 'pool_not_found' };
         }
-        // Counted under the tenant's waitlist lock, which offers take too, so racing joins stop at
-        // the cap.
-        await tx`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify(['slotlock-waitlist', tenantRef])}, 0))`;
+        // Counted under the tenant's waitlist lock (taken above), which offers take too, so racing
+        // joins stop at the cap.
         const [counts] = await tx<{ tenant: number; holder: number }[]>`
           SELECT count(*)::int AS tenant, count(*) FILTER (WHERE holder_ref = ${holderRef})::int AS holder
             FROM slotlock.waitlist_entries WHERE tenant_ref = ${tenantRef} AND status = 'waiting'`;
@@ -7131,11 +7240,12 @@ function buildSlotlockStore(
         }
         const [row] = await tx<WaitlistRow[]>`
           INSERT INTO slotlock.waitlist_entries
-            (tenant_ref, resource_id, pool_ref, starts_at, ends_at, holder_ref, offer_ttl_ms)
+            (tenant_ref, resource_id, pool_ref, starts_at, ends_at, holder_ref, offer_ttl_ms,
+             idempotency_key, payload_hash)
           VALUES (${tenantRef}, ${params.resourceId ?? null}, ${params.pool ?? null}, ${window.start},
-                  ${window.end}, ${holderRef}, ${offerTtlMs})
+                  ${window.end}, ${holderRef}, ${offerTtlMs}, ${key ?? null}, ${payloadHash})
           RETURNING ${tx.unsafe(WAITLIST_COLUMNS)}`;
-        return { ok: true, entry: toWaitlistEntry(row as WaitlistRow) };
+        return { ok: true, entry: toWaitlistEntry(row as WaitlistRow), replayed: false };
       });
     },
 

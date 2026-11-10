@@ -385,6 +385,7 @@ export type {
   SlotlockAgendaEntry,
   SlotlockHold,
   SlotlockCalendarEvent,
+  SlotlockBookingDescription,
   SlotlockReservation,
   SlotlockResource,
   SlotlockTenantErasure,
