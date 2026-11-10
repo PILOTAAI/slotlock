@@ -32,6 +32,9 @@ export const SLOTLOCK_CHANGE_TYPES = Object.freeze([
   'event.cancelled',
   'event.timezone_shifted',
   'event.timezone_conflict',
+  // A reservation that carries its wall time, which now falls at another instant (RFC 0004 B9).
+  'reservation.timezone_shifted',
+  'reservation.timezone_conflict',
   'coverage.stale',
   'waitlist.offered',
   'waitlist.expired',

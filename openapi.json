@@ -18163,7 +18163,7 @@
       "put": {
         "operationId": "slotlock_put_reservation",
         "summary": "Book or move a reservation",
-        "description": "Book the reservation with this reference (revision 1), or move it (the next revision: the current one plus 1). Sending the same reservation at its current revision again changes nothing (replayed: true). A taken window answers 409 overlap and leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as well. A move past the resource's reschedule cutoff answers 409 booking_rule_reschedule_cutoff unless override_reason says why, which the feed keeps.",
+        "description": "Book the reservation with this reference (revision 1), or move it (the next revision: the current one plus 1). Sending the same reservation at its current revision again changes nothing (replayed: true). A taken window answers 409 overlap and leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as well. A move past the resource's reschedule cutoff answers 409 booking_rule_reschedule_cutoff unless override_reason says why, which the feed keeps. local_start (YYYY-MM-DDTHH:MM in the resource's zone) records the wall time it is booked for: it must name start, and if time zone rules later move that wall time to another instant, maintenance says so (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise.",
         "tags": [
           "Application"
         ],
@@ -18208,6 +18208,10 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 500
+                  },
+                  "local_start": {
+                    "type": "string",
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2})?$"
                   },
                   "dry_run": {
                     "type": "boolean",
@@ -22368,7 +22372,7 @@
                   },
                   "event_types": {
                     "minItems": 1,
-                    "maxItems": 44,
+                    "maxItems": 46,
                     "type": "array",
                     "items": {
                       "type": "string",
@@ -22390,6 +22394,8 @@
                         "event.cancelled",
                         "event.timezone_shifted",
                         "event.timezone_conflict",
+                        "reservation.timezone_shifted",
+                        "reservation.timezone_conflict",
                         "coverage.stale",
                         "waitlist.offered",
                         "waitlist.expired",
@@ -22531,6 +22537,8 @@
                                   "event.cancelled",
                                   "event.timezone_shifted",
                                   "event.timezone_conflict",
+                                  "reservation.timezone_shifted",
+                                  "reservation.timezone_conflict",
                                   "coverage.stale",
                                   "waitlist.offered",
                                   "waitlist.expired",
@@ -22798,6 +22806,8 @@
                                     "event.cancelled",
                                     "event.timezone_shifted",
                                     "event.timezone_conflict",
+                                    "reservation.timezone_shifted",
+                                    "reservation.timezone_conflict",
                                     "coverage.stale",
                                     "waitlist.offered",
                                     "waitlist.expired",
@@ -23152,6 +23162,8 @@
                                   "event.cancelled",
                                   "event.timezone_shifted",
                                   "event.timezone_conflict",
+                                  "reservation.timezone_shifted",
+                                  "reservation.timezone_conflict",
                                   "coverage.stale",
                                   "waitlist.offered",
                                   "waitlist.expired",

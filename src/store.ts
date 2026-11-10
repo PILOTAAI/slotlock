@@ -122,6 +122,7 @@ import type {
 } from './types.js';
 import { parseAvailabilityRules } from './weekly-hours.js';
 import { applicableHours, exceptionQueryDays } from './hours.js';
+import { zonedDateTimeToUtc } from './timezone.js';
 import {
   type SlotlockAvailabilityDefaults,
   type SlotlockAvailabilityDefaultsResult,
@@ -1666,6 +1667,34 @@ async function bookingRuling(
     turnaroundMs: judge.turnaroundMs,
     bufferBeforeMs: judge.bufferBeforeMs,
   };
+}
+
+/**
+ * The wall time a reservation says it starts at (RFC 0004 B9), when it names `start` in the
+ * resource's zone; `undefined` when none was given; null when it is not one or names another
+ * instant.
+ */
+async function localStartFor(
+  tx: StoreSql,
+  resourceId: string,
+  localStart: string | undefined,
+  start: Date,
+): Promise<string | null | undefined> {
+  if (localStart === undefined) return undefined;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(localStart);
+  if (!match) return null;
+  const [row] = await tx<{ timezone: string }[]>`SELECT timezone FROM slotlock.resources WHERE id = ${resourceId}`;
+  if (!row) return null;
+  try {
+    const [, year, month, day, hour, minute, second] = match.map((part) => (part === undefined ? 0 : Number(part)));
+    const named = zonedDateTimeToUtc(
+      { year: year as number, month: month as number, day: day as number, hour: hour as number, minute: minute as number, second: second as number },
+      row.timezone,
+    );
+    return named.getTime() === start.getTime() ? `${localStart.length === 16 ? `${localStart}:00` : localStart}` : null;
+  } catch {
+    return null;
+  }
 }
 
 /** An entry's offer: the hold made for it, said on the entry and the feed. */
@@ -5682,6 +5711,8 @@ function buildSlotlockStore(
             ) {
               return { ok: false, code: 'recurrence_not_materialized' };
             }
+            const wall = await localStartFor(tx, params.resourceId, params.localStart, params.start);
+            if (wall === null) return { ok: false, code: 'invalid_local_start' };
             // Writers to this resource take turns from here to the insert (lockResourceForWrite).
             const locked = await lockResourceForWrite(tx, params.resourceId, params.tenantRef);
             if (!locked) return { ok: false, code: 'resource_tenant_mismatch' };
@@ -5690,11 +5721,11 @@ function buildSlotlockStore(
             const rows = await tx<ReservationRow[]>`
               INSERT INTO slotlock.reservations (
                 resource_id, tenant_ref, external_ref, starts_at, ends_at, buffer_after_ms,
-                buffer_before_ms, revision, source
+                buffer_before_ms, revision, source, wall_starts_at
               ) VALUES (
                 ${params.resourceId}, ${params.tenantRef}, ${params.externalRef}, ${params.start},
                 ${params.end}, ${bufferAfterMs}, ${writtenBefore}, ${params.revision},
-                ${params.source ?? null}
+                ${params.source ?? null}, ${wall ?? null}::timestamp
               )
               RETURNING id, resource_id, tenant_ref, external_ref, starts_at, ends_at,
                         buffer_after_ms, revision, source`;
@@ -5790,6 +5821,8 @@ function buildSlotlockStore(
             if (resourceState === 'archived') return { ok: false, code: 'resource_archived' };
             if (ruling.rule) return { ok: false, code: 'booking_rule_violated', rule: ruling.rule };
             if (overrideNote !== null) await noteEnding(tx, null, overrideNote);
+            const wall = await localStartFor(tx, params.resourceId, params.localStart, params.start);
+            if (wall === null) return { ok: false, code: 'invalid_local_start' };
             bufferAfterMs = Math.max(params.bufferAfterMs, ruling.turnaroundMs);
             bufferBeforeMs = ruling.bufferBeforeMs;
             const occupied = occupiedTime({ ...params, bufferBeforeMs, bufferAfterMs });
@@ -5816,6 +5849,9 @@ function buildSlotlockStore(
                      buffer_before_ms = ${bufferBeforeMs},
                      revision = ${params.revision},
                      source = ${params.source ?? null},
+                     -- The wall time it now says it starts at, if any (RFC 0004 B9).
+                     wall_starts_at = ${wall ?? null}::timestamp,
+                     zone_shift_reported_at = NULL,
                      -- A check-in is for the time it was made for: a move to another start clears it.
                      checked_in_at = CASE
                        WHEN starts_at = ${params.start} AND resource_id = ${params.resourceId}
@@ -7597,7 +7633,110 @@ function buildSlotlockStore(
           conflicts++;
         }
       }
-      return { shifted: shifted.length, moved, conflicts };
+      // A series' occurrences to come (RFC 0004 B9): said on the feed, once each; the series moves
+      // when it is written again.
+      const occurrences = await sql<{
+        event_id: string;
+        recurrence_id: string;
+        resource_id: string;
+        starts_at: Date;
+        ends_at: Date;
+        moved_start: Date;
+      }[]>`
+        SELECT occurrence.event_id, occurrence.recurrence_id, event.resource_id, occurrence.starts_at,
+               occurrence.ends_at, slotlock.zoned_instant(occurrence.wall_starts_at, event.timezone) AS moved_start
+          FROM slotlock.calendar_event_occurrences occurrence
+          JOIN slotlock.calendar_events event ON event.id = occurrence.event_id
+         WHERE event.tenant_ref = ${params.tenantRef} AND event.recurrence_rule IS NOT NULL
+           AND occurrence.starts_at > now() AND occurrence.zone_shift_reported_at IS NULL
+           AND occurrence.wall_starts_at IS NOT NULL
+           AND slotlock.zoned_instant(occurrence.wall_starts_at, event.timezone) IS NOT NULL
+           AND slotlock.zoned_instant(occurrence.wall_starts_at, event.timezone) <> occurrence.starts_at
+         ORDER BY occurrence.starts_at, occurrence.event_id
+         LIMIT ${limit}`;
+      for (const occurrence of occurrences) {
+        await sql`
+          UPDATE slotlock.calendar_event_occurrences SET zone_shift_reported_at = now()
+           WHERE event_id = ${occurrence.event_id} AND recurrence_id = ${occurrence.recurrence_id}`;
+        const shift = occurrence.moved_start.getTime() - occurrence.starts_at.getTime();
+        await sql`
+          INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+          VALUES (${params.tenantRef}, ${occurrence.resource_id}, 'event.timezone_shifted', ${occurrence.event_id},
+                  ${sql.json({
+                    id: occurrence.event_id,
+                    recurrence_id: occurrence.recurrence_id,
+                    resource_id: occurrence.resource_id,
+                    start: occurrence.starts_at.toISOString(),
+                    end: occurrence.ends_at.toISOString(),
+                    zone_start: occurrence.moved_start.toISOString(),
+                    zone_end: new Date(occurrence.ends_at.getTime() + shift).toISOString(),
+                  })}, 'slotlock:tzdata')`;
+      }
+      // Reservations that carry the wall time they were booked for (RFC 0004 B9).
+      const reservations = await sql<{
+        id: string;
+        external_ref: string;
+        resource_id: string;
+        starts_at: Date;
+        ends_at: Date;
+        moved_start: Date;
+      }[]>`
+        SELECT booking.id, booking.external_ref, booking.resource_id, booking.starts_at, booking.ends_at,
+               slotlock.zoned_instant(booking.wall_starts_at, resource.timezone) AS moved_start
+          FROM slotlock.reservations booking
+          JOIN slotlock.resources resource ON resource.id = booking.resource_id
+         WHERE booking.tenant_ref = ${params.tenantRef} AND resource.tenant_ref = ${params.tenantRef}
+           AND booking.status = 'confirmed' AND booking.calendar_event_id IS NULL
+           AND booking.starts_at > now() AND booking.wall_starts_at IS NOT NULL
+           AND booking.zone_shift_reported_at IS NULL
+           AND slotlock.zoned_instant(booking.wall_starts_at, resource.timezone) IS NOT NULL
+           AND slotlock.zoned_instant(booking.wall_starts_at, resource.timezone) <> booking.starts_at
+         ORDER BY booking.starts_at, booking.id
+         LIMIT ${limit}`;
+      const reportReservation = async (
+        booking: (typeof reservations)[number],
+        type: 'reservation.timezone_shifted' | 'reservation.timezone_conflict',
+      ) => {
+        await sql`UPDATE slotlock.reservations SET zone_shift_reported_at = now() WHERE id = ${booking.id}`;
+        const shift = booking.moved_start.getTime() - booking.starts_at.getTime();
+        await sql`
+          INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+          VALUES (${params.tenantRef}, ${booking.resource_id}, ${type}, ${booking.external_ref},
+                  ${sql.json({
+                    id: booking.id,
+                    reference: booking.external_ref,
+                    resource_id: booking.resource_id,
+                    start: booking.starts_at.toISOString(),
+                    end: booking.ends_at.toISOString(),
+                    zone_start: booking.moved_start.toISOString(),
+                    zone_end: new Date(booking.ends_at.getTime() + shift).toISOString(),
+                  })}, 'slotlock:tzdata')`;
+      };
+      for (const booking of reservations) {
+        if (!params.move) {
+          await reportReservation(booking, 'reservation.timezone_shifted');
+          continue;
+        }
+        try {
+          await inTransaction(sql, async (tx) => {
+            await tx`SELECT set_config('slotlock.actor', 'slotlock:tzdata', true)`;
+            const shift = booking.moved_start.getTime() - booking.starts_at.getTime();
+            // The wall time it was booked for, at the instant the rules now give it: a move at the
+            // next revision, on the feed as any move.
+            await tx`
+              UPDATE slotlock.reservations
+                 SET starts_at = ${booking.moved_start}, ends_at = ${new Date(booking.ends_at.getTime() + shift)},
+                     revision = revision + 1
+               WHERE id = ${booking.id}`;
+          });
+          moved++;
+        } catch (error) {
+          if (pgCode(error) !== EXCLUSION_VIOLATION) throw error;
+          await reportReservation(booking, 'reservation.timezone_conflict');
+          conflicts++;
+        }
+      }
+      return { shifted: shifted.length + occurrences.length + reservations.length, moved, conflicts };
     },
 
     async pruneBookingRetention(params) {

@@ -443,12 +443,20 @@ are named `slotlock_tenant_book_together` and `slotlock_tenant_book_pool`, becau
 already use the plain names. They run the agents' own bundle and pool bookings, approval policies
 included.
 
-**B8. Seats (T2).** `capacity: N` on create makes N seat resources in a pool behind one
+**B8. Seats (T2).** Status: not built, waiting on decision D4 (seat spans under one constraint, or N
+seat resources as written here). `capacity: N` on create makes N seat resources in a pool behind one
 resource. A booking of `seats: k` takes k free seats in one transaction. The guarantee stays the
 exclusion constraint; the API shows one resource with capacity.
 
-**B9. Zone rule changes reach everything (T1).** `followZoneRules` also re-checks stored series
+**B9. Zone rule changes reach everything (T1).** Status: built. `followZoneRules` also re-checks stored series
 occurrences, and reservations that carry a wall time (a new optional `local_start`).
+
+As built: an occurrence keeps its wall time when it is written, by a trigger, and occurrences to
+come from before were given theirs as the rules read at upgrade. Shifted occurrences are reported
+once, each. A series is not moved occurrence by occurrence; it moves when it is written again. A
+reservation's `local_start` must name its start when written (`invalid_local_start`). With `move`,
+a shifted reservation is moved at the next revision, on the feed as any move, or reported as a
+conflict when the constraint refuses.
 
 ### P3: integrations (0.9.0, the owner's decision)
 

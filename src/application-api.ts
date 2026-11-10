@@ -1534,7 +1534,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_put_reservation',
       title: 'Book or move a reservation',
       description:
-        'Book the reservation with this reference (revision 1), or move it (the next revision: the current one plus 1). Sending the same reservation at its current revision again changes nothing (replayed: true). A taken window answers 409 overlap and leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as well. A move past the resource\'s reschedule cutoff answers 409 booking_rule_reschedule_cutoff unless override_reason says why, which the feed keeps.',
+        'Book the reservation with this reference (revision 1), or move it (the next revision: the current one plus 1). Sending the same reservation at its current revision again changes nothing (replayed: true). A taken window answers 409 overlap and leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as well. A move past the resource\'s reschedule cutoff answers 409 booking_rule_reschedule_cutoff unless override_reason says why, which the feed keeps. local_start (YYYY-MM-DDTHH:MM in the resource\'s zone) records the wall time it is booked for: it must name start, and if time zone rules later move that wall time to another instant, maintenance says so (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise.',
       method: 'PUT',
       path: '/v1/reservations/{reservation_ref}',
       input: z
@@ -1548,6 +1548,8 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           source: SOURCE.optional(),
           /** An admin's reason for moving it past its reschedule cutoff (RFC 0004 B5). */
           override_reason: OVERRIDE_REASON.optional(),
+          /** The wall time it starts at in the resource's zone, kept across zone rule changes (RFC 0004 B9). */
+          local_start: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/).optional(),
         })
         .strict()
         .refine(boundedSpan, SPAN_MESSAGE),

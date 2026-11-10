@@ -2374,7 +2374,10 @@ public sealed partial class SlotlockClient
     /// nothing (replayed: true). A taken window answers 409 overlap and leaves a moved
     /// reservation where it was. buffer_after_minutes keeps the time after it busy as well. A
     /// move past the resource's reschedule cutoff answers 409 booking_rule_reschedule_cutoff
-    /// unless override_reason says why, which the feed keeps.
+    /// unless override_reason says why, which the feed keeps. local_start (YYYY-MM-DDTHH:MM in
+    /// the resource's zone) records the wall time it is booked for: it must name start, and if
+    /// time zone rules later move that wall time to another instant, maintenance says so
+    /// (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise.
     /// </remarks>
     /// <param name="reservationRef">reservation_ref</param>
     /// <param name="resourceId">resource_id</param>
@@ -2384,6 +2387,7 @@ public sealed partial class SlotlockClient
     /// <param name="bufferAfterMinutes">buffer_after_minutes</param>
     /// <param name="source">source</param>
     /// <param name="overrideReason">override_reason</param>
+    /// <param name="localStart">local_start</param>
     /// <param name="dryRun">Check the write without making it: it runs with every check, the
     /// database's included, and is then undone, so nothing is stored, recorded or sent. The
     /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
@@ -2400,6 +2404,7 @@ public sealed partial class SlotlockClient
         Optional<long> bufferAfterMinutes = default,
         Optional<string> source = default,
         Optional<string> overrideReason = default,
+        Optional<string> localStart = default,
         Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
@@ -2412,6 +2417,7 @@ public sealed partial class SlotlockClient
         if (bufferAfterMinutes.HasValue) values["buffer_after_minutes"] = Json.ToNode(bufferAfterMinutes.Value);
         if (source.HasValue) values["source"] = Json.ToNode(source.Value);
         if (overrideReason.HasValue) values["override_reason"] = Json.ToNode(overrideReason.Value);
+        if (localStart.HasValue) values["local_start"] = Json.ToNode(localStart.Value);
         if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_put_reservation", values, cancellationToken);
     }
@@ -2438,6 +2444,7 @@ public sealed partial class SlotlockClient
             source: source,
             cancellationToken: cancellationToken,
             overrideReason: default,
+            localStart: default,
             dryRun: default);
 
     /// <summary>Cancel a reservation.</summary>

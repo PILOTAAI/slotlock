@@ -2267,7 +2267,10 @@ public abstract class SlotlockOperations {
    * revision again changes nothing (replayed: true). A taken window answers 409 overlap and
    * leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as
    * well. A move past the resource's reschedule cutoff answers 409 booking_rule_reschedule_cutoff
-   * unless override_reason says why, which the feed keeps.
+   * unless override_reason says why, which the feed keeps. local_start (YYYY-MM-DDTHH:MM in the
+   * resource's zone) records the wall time it is booked for: it must name start, and if time zone
+   * rules later move that wall time to another instant, maintenance says so
+   * (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise.
    *
    * @param reservationRef {@code reservation_ref}, string
    * @param resourceId {@code resource_id}, string
@@ -2275,7 +2278,8 @@ public abstract class SlotlockOperations {
    * @param end {@code end}, string
    * @param revision {@code revision}, integer
    * @param optional the optional arguments, or null: {@code buffer_after_minutes} (integer),
-   * {@code source} (string), {@code override_reason} (string), {@code dry_run} (boolean)
+   * {@code source} (string), {@code override_reason} (string), {@code local_start} (string),
+   * {@code dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -2286,7 +2290,7 @@ public abstract class SlotlockOperations {
     values.put("start", start);
     values.put("end", end);
     values.put("revision", revision);
-    putOptional(values, optional, Set.of("buffer_after_minutes", "source", "override_reason", "dry_run"), "slotlock_put_reservation");
+    putOptional(values, optional, Set.of("buffer_after_minutes", "source", "override_reason", "local_start", "dry_run"), "slotlock_put_reservation");
     return call("slotlock_put_reservation", values);
   }
 
@@ -2296,7 +2300,10 @@ public abstract class SlotlockOperations {
    * revision again changes nothing (replayed: true). A taken window answers 409 overlap and
    * leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as
    * well. A move past the resource's reschedule cutoff answers 409 booking_rule_reschedule_cutoff
-   * unless override_reason says why, which the feed keeps.
+   * unless override_reason says why, which the feed keeps. local_start (YYYY-MM-DDTHH:MM in the
+   * resource's zone) records the wall time it is booked for: it must name start, and if time zone
+   * rules later move that wall time to another instant, maintenance says so
+   * (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise.
    *
    * @param reservationRef {@code reservation_ref}, string
    * @param resourceId {@code resource_id}, string

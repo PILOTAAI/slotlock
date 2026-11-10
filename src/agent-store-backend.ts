@@ -3486,6 +3486,7 @@ export function createSlotlockStoreApplicationBackend(
           revision: input.revision as number,
           ...(input.source !== undefined ? { source: input.source as string } : {}),
           ...(input.override_reason !== undefined ? { overrideReason: input.override_reason as string } : {}),
+          ...(input.local_start !== undefined ? { localStart: input.local_start as string } : {}),
         };
         const result =
           command.revision === 1

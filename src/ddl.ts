@@ -5691,6 +5691,46 @@ CREATE TABLE IF NOT EXISTS slotlock.calendar_event_occurrences (
   )
 );
 
+-- Zone rule changes reach everything (RFC 0004 B9): a series' occurrences, and reservations that
+-- carry the wall time they were booked for, keep it, so maintenance finds those whose wall time now
+-- falls at another instant. An occurrence's is its series' zone's wall time when written; a
+-- reservation's is what the writer gave (local_start), in its resource's zone.
+ALTER TABLE slotlock.calendar_event_occurrences ADD COLUMN IF NOT EXISTS wall_starts_at timestamp;
+ALTER TABLE slotlock.calendar_event_occurrences ADD COLUMN IF NOT EXISTS zone_shift_reported_at timestamptz;
+CREATE OR REPLACE FUNCTION slotlock.calendar_event_occurrence_wall_time()
+RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_occurrence_wall_time$
+BEGIN
+  IF TG_OP = 'INSERT' OR NEW.starts_at IS DISTINCT FROM OLD.starts_at THEN
+    NEW.wall_starts_at := slotlock.zoned_wall(
+      NEW.starts_at, (SELECT event.timezone FROM slotlock.calendar_events event WHERE event.id = NEW.event_id));
+    NEW.zone_shift_reported_at := NULL;
+  END IF;
+  RETURN NEW;
+END
+$slotlock_occurrence_wall_time$;
+DROP TRIGGER IF EXISTS slotlock_calendar_event_occurrence_wall_time ON slotlock.calendar_event_occurrences;
+CREATE TRIGGER slotlock_calendar_event_occurrence_wall_time
+  BEFORE INSERT OR UPDATE ON slotlock.calendar_event_occurrences
+  FOR EACH ROW EXECUTE FUNCTION slotlock.calendar_event_occurrence_wall_time();
+-- Occurrences to come written before this release: their wall time as the rules read now. A new
+-- database has none, and may not have slotlock.zoned_wall yet at this point.
+DO $slotlock_occurrence_wall_backfill$
+BEGIN
+  IF to_regprocedure('slotlock.zoned_wall(timestamptz, text)') IS NOT NULL THEN
+    EXECUTE $backfill$
+      UPDATE slotlock.calendar_event_occurrences occurrence
+         SET wall_starts_at = slotlock.zoned_wall(occurrence.starts_at, event.timezone)
+        FROM slotlock.calendar_events event
+       WHERE event.id = occurrence.event_id AND occurrence.wall_starts_at IS NULL
+         AND occurrence.starts_at > now()
+    $backfill$;
+  END IF;
+END
+$slotlock_occurrence_wall_backfill$;
+ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS wall_starts_at timestamp;
+ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS zone_shift_reported_at timestamptz;
+
 -- A cancelled UID remains terminal. This blocks delayed create delivery after the event row and
 -- its derived reservations have been removed.
 CREATE TABLE IF NOT EXISTS slotlock.calendar_event_tombstones (

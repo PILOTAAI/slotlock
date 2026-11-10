@@ -2471,6 +2471,7 @@ class Operations(Transport):
         buffer_after_minutes: int | None = None,
         source: str | None = None,
         override_reason: str | None = None,
+        local_start: str | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Book or move a reservation.
@@ -2480,7 +2481,10 @@ class Operations(Transport):
         nothing (replayed: true). A taken window answers 409 overlap and leaves a moved
         reservation where it was. buffer_after_minutes keeps the time after it busy as well. A
         move past the resource's reschedule cutoff answers 409 booking_rule_reschedule_cutoff
-        unless override_reason says why, which the feed keeps.
+        unless override_reason says why, which the feed keeps. local_start (YYYY-MM-DDTHH:MM in
+        the resource's zone) records the wall time it is booked for: it must name start, and if
+        time zone rules later move that wall time to another instant, maintenance says so
+        (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise.
 
         Args:
             dry_run: Check the write without making it: it runs with every check, the database's
@@ -2501,6 +2505,8 @@ class Operations(Transport):
             values["source"] = source
         if override_reason is not None:
             values["override_reason"] = override_reason
+        if local_start is not None:
+            values["local_start"] = local_start
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_put_reservation", values)

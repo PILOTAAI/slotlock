@@ -2485,6 +2485,8 @@ type PutReservationInput struct {
 
 	OverrideReason *string
 
+	LocalStart *string
+
 	// Check the write without making it: it runs with every check, the database's included, and is
 	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
 	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -2508,6 +2510,9 @@ func (in PutReservationInput) values() map[string]any {
 	if in.OverrideReason != nil {
 		values["override_reason"] = *in.OverrideReason
 	}
+	if in.LocalStart != nil {
+		values["local_start"] = *in.LocalStart
+	}
 	if in.DryRun != nil {
 		values["dry_run"] = *in.DryRun
 	}
@@ -2519,7 +2524,10 @@ func (in PutReservationInput) values() map[string]any {
 // current revision again changes nothing (replayed: true). A taken window answers 409 overlap and
 // leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as
 // well. A move past the resource's reschedule cutoff answers 409 booking_rule_reschedule_cutoff
-// unless override_reason says why, which the feed keeps.
+// unless override_reason says why, which the feed keeps. local_start (YYYY-MM-DDTHH:MM in the
+// resource's zone) records the wall time it is booked for: it must name start, and if time zone
+// rules later move that wall time to another instant, maintenance says so
+// (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise.
 func (c *Client) PutReservation(ctx context.Context, in PutReservationInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_put_reservation", in.values())
 }

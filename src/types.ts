@@ -177,6 +177,12 @@ export interface ExternalReservationCommand {
    * feed. Without it, a move past the cutoff is refused.
    */
   overrideReason?: string;
+  /**
+   * The wall time the booking starts at in its resource's zone, `YYYY-MM-DDTHH:MM[:SS]` (RFC 0004
+   * B9): it must name `start` now, and if zone rules later move it, maintenance says so or follows
+   * it (`followZoneRules`). Left out, the booking keeps its instant only.
+   */
+  localStart?: string;
 }
 
 /** What a cancellation records for the integrator to charge (RFC 0004 B5). Slotlock moves no money. */
@@ -188,6 +194,8 @@ export interface SlotlockRecordedFee {
 export type ExternalReservationResult =
   | { ok: true; reservation: SlotlockReservation; idempotent: boolean }
   | { ok: false; code: 'invalid_window' }
+  /** `localStart` is not a wall time, or does not name `start` in the resource's zone. */
+  | { ok: false; code: 'invalid_local_start' }
   | { ok: false; code: 'invalid_buffer' }
   | { ok: false; code: 'invalid_identity' }
   | { ok: false; code: 'invalid_revision' }
