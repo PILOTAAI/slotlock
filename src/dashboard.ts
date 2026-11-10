@@ -110,6 +110,7 @@ import type {
   Interval,
   SlotlockAgendaEntry,
   SlotlockApproval,
+  SlotlockContact,
   SlotlockResource,
   SlotlockBookingRuleDefaults,
   WeeklyAvailabilityRule,
@@ -127,6 +128,8 @@ import {
 export const SLOTLOCK_DASHBOARD_MAX_RESOURCES = 500;
 /** Closures the Closures page shows. */
 const SLOTLOCK_DASHBOARD_MAX_EXCEPTIONS = 200;
+/** Contacts the Contacts page shows at once. */
+const SLOTLOCK_DASHBOARD_CONTACTS_PAGE = 100;
 const SESSION_TTL_MS = 12 * 3_600_000;
 const SIGN_IN_TTL_MS = 10 * 60_000;
 /**
@@ -178,6 +181,7 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/closures',
   '/closures/delete',
   '/closures/import',
+  '/contacts/forget',
   '/organization',
   '/environment',
   '/teams/enable',
@@ -284,6 +288,11 @@ export interface SlotlockDashboardResources {
     actor?: string,
     override?: boolean,
   ): Promise<number>;
+  /** The people the tenant keeps to tell about bookings (RFC 0004 P3), and forgetting one. */
+  contacts?: {
+    list(tenantRef: string, limit: number, after?: string): Promise<SlotlockContact[]>;
+    forget(tenantRef: string, ref: string, actor?: string): Promise<{ deleted: boolean; bookings: number }>;
+  };
   /** The tenant's stored hours and its closures and special hours (RFC 0004 B1, B2). */
   hours?: {
     defaults(tenantRef: string): Promise<SlotlockAvailabilityDefaults>;
@@ -771,6 +780,12 @@ export function createSlotlockDashboardResources(
         },
         by(actor),
       ),
+    contacts: {
+      list: (tenantRef, limit, after) =>
+        store.withTenant(tenantRef, (tenant) => tenant.listContacts({ tenantRef, limit, ...(after ? { after } : {}) })),
+      forget: (tenantRef, ref, actor) =>
+        store.withTenant(tenantRef, (tenant) => tenant.deleteContact({ tenantRef, ref }), { isolation: 'read committed', ...by(actor) }),
+    },
     hours: {
       defaults: (tenantRef) =>
         store.withTenant(tenantRef, (tenant) => tenant.getAvailabilityDefaults({ tenantRef })),
@@ -2336,7 +2351,7 @@ ${
     const content = html`${noticeOf(notice)}
 ${pageHead(
   'Resources',
-  html`<div class="row-actions">${options.resources.grouping ? html`<a class="button" href="${root}/locations">Locations and groups</a>` : html``}<a class="button" href="${root}/hours">Your hours</a>${options.resources.hours ? html`<a class="button" href="${root}/closures">Closures</a>` : html``}</div>`,
+  html`<div class="row-actions">${options.resources.grouping ? html`<a class="button" href="${root}/locations">Locations and groups</a>` : html``}<a class="button" href="${root}/hours">Your hours</a>${options.resources.hours ? html`<a class="button" href="${root}/closures">Closures</a>` : html``}${options.resources.contacts ? html`<a class="button" href="${root}/contacts">Contacts</a>` : html``}</div>`,
 )}
 <section class="panel" id="add-resource">
 <h2>Add a resource</h2>
@@ -4154,6 +4169,7 @@ ${upgrade}
       return locationsPage;
     }
     if (route.startsWith('/closures') && options.resources.hours) return closuresPage;
+    if (route.startsWith('/contacts') && options.resources.contacts) return contactsPage;
     if (route.startsWith('/resources') || route === '/hours') return resourcesPage;
     if (route.startsWith('/assistant') && assistantStore()) return assistantPage;
     if (route.startsWith('/settings')) return settingsPage;
@@ -4422,6 +4438,57 @@ ${exceptions.length > SLOTLOCK_DASHBOARD_MAX_EXCEPTIONS ? html`<p class="fine">T
 </form>
 </section>`;
     return respond(status, layout('Closures', content, session, 'resources'));
+  }
+
+  /**
+   * The people the tenant keeps to tell about bookings (RFC 0004 P3): how to reach each, what they
+   * agreed to and when, and a button that forgets one (their reference leaves every booking too).
+   * Contacts are added by the tenant's own systems, through the API.
+   */
+  async function contactsPage(session: Session, status = 200, notice?: string, after?: string): Promise<Response> {
+    const contacts = options.resources.contacts;
+    if (!contacts) return nothingHere(session);
+    const listed = await contacts.list(tenantOf(session), SLOTLOCK_DASHBOARD_CONTACTS_PAGE + 1, after);
+    const shown = listed.slice(0, SLOTLOCK_DASHBOARD_CONTACTS_PAGE);
+    const token = csrfToken(session);
+    const reach = (contact: SlotlockContact) =>
+      [contact.email, contact.phone ? `SMS ${contact.phone}` : null, contact.whatsapp ? `WhatsApp ${contact.whatsapp}` : null]
+        .filter(Boolean)
+        .join(', ') || 'No way to reach them';
+    const agreed = (contact: SlotlockContact) =>
+      (['email', 'sms', 'whatsapp'] as const)
+        .filter((channel) => contact.consent[channel] !== undefined)
+        .map((channel) => `${channel === 'sms' ? 'SMS' : channel === 'whatsapp' ? 'WhatsApp' : 'Email'}: ${contact.consent[channel] ? 'yes' : 'no'}${contact.consentAt[channel] ? ` (${contact.consentAt[channel]?.toISOString().slice(0, 10)})` : ''}`)
+        .join('; ') || 'Not asked';
+    const content = html`${noticeOf(notice)}
+<section>
+<p><a class="back" href="${root}/resources">Resources</a></p>
+<h1>Contacts</h1>
+<p>The people your bookings name to be told about them, kept by your own systems through the API (<code>PUT /v1/contacts/{contact_ref}</code>). Forgetting one deletes them and takes their reference off every booking, for an erasure request.</p>
+<table><thead><tr><th>Reference</th><th>Name</th><th>Reach by</th><th>Agreed to</th><th></th></tr></thead><tbody>${
+      shown.length === 0
+        ? html`<tr><td colspan="5" class="muted">No contacts yet.</td></tr>`
+        : shown.map(
+            (contact) => html`<tr><td data-label="Reference"><code>${contact.ref}</code></td><td data-label="Name">${contact.name ?? ''}</td><td data-label="Reach by" class="wrap">${reach(contact)}</td><td data-label="Agreed to" class="wrap">${agreed(contact)}</td><td class="actions"><form method="post" action="${root}/contacts/forget"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="ref" value="${contact.ref}"><button type="submit" class="danger">Forget</button></form></td></tr>`,
+          )
+    }</tbody></table>
+${listed.length > SLOTLOCK_DASHBOARD_CONTACTS_PAGE ? html`<p><a class="button" href="${root}/contacts?after=${encodeURIComponent(shown.at(-1)?.ref ?? '')}">More</a></p>` : html``}
+</section>`;
+    return respond(status, layout('Contacts', content, session, 'resources'));
+  }
+
+  async function forgetContact(session: Session, form: URLSearchParams): Promise<Response> {
+    const contacts = options.resources.contacts;
+    if (!contacts) return nothingHere(session);
+    const ref = form.get('ref') ?? '';
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(ref)) return contactsPage(session, 400, 'That is not a contact reference.');
+    const forgotten = await contacts.forget(tenantOf(session), ref, personOf(session));
+    if (!forgotten.deleted) return contactsPage(session, 404, 'That contact is not one of yours.');
+    return contactsPage(
+      session,
+      200,
+      `Forgotten. ${forgotten.bookings} booking${forgotten.bookings === 1 ? '' : 's'} no longer name them.`,
+    );
   }
 
   /** `location:<ref>` or `resource:<id>` from a closures form, checked against the tenant's. */
@@ -5302,6 +5369,8 @@ ${
         return deleteClosure(session, form);
       case '/closures/import':
         return importClosures(session, form);
+      case '/contacts/forget':
+        return forgetContact(session, form);
       case '/organization':
         return switchOrganization(session, form);
       case '/environment':
@@ -5446,6 +5515,11 @@ ${
             case '/closures': {
               const session = await readSession(request);
               return session ? await closuresPage(session) : redirect(303, root);
+            }
+            case '/contacts': {
+              const session = await readSession(request);
+              const after = url.searchParams.get('after') ?? undefined;
+              return session ? await contactsPage(session, 200, undefined, after) : redirect(303, root);
             }
             case '/locations': {
               const session = await readSession(request);

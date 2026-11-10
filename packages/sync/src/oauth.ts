@@ -34,14 +34,19 @@ export class OAuthError extends Error {
   }
 }
 
-/** What each provider is asked for: read free/busy, and with write-back, write events. */
+/**
+ * What each provider is asked for: the list of calendars (to choose one) and free/busy, and with
+ * write-back, events. Microsoft needs User.Read for the account's address.
+ */
 export function oauthScopes(provider: OAuthProvider, writeBack: boolean): string[] {
   if (provider === 'google') {
-    return writeBack
-      ? ['https://www.googleapis.com/auth/calendar.freebusy', 'https://www.googleapis.com/auth/calendar.events']
-      : ['https://www.googleapis.com/auth/calendar.freebusy'];
+    return [
+      'https://www.googleapis.com/auth/calendar.calendarlist.readonly',
+      'https://www.googleapis.com/auth/calendar.freebusy',
+      ...(writeBack ? ['https://www.googleapis.com/auth/calendar.events'] : []),
+    ];
   }
-  return ['offline_access', writeBack ? 'Calendars.ReadWrite' : 'Calendars.Read'];
+  return ['offline_access', 'User.Read', writeBack ? 'Calendars.ReadWrite' : 'Calendars.Read'];
 }
 
 function endpoints(client: OAuthClient): { authorize: string; token: string } {

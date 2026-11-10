@@ -2293,6 +2293,41 @@ describe('resource detail, webhooks and the waitlist', () => {
     expect((await post(target, '/base/dashboard/webhooks/delete', { csrf: token, id: endpoint.id }, session)).status).toBe(404);
   });
 
+  it('lists contacts with their consent, and forgets one', async () => {
+    const people = [
+      {
+        ref: 'cust-1',
+        name: 'Ada <A>',
+        email: 'ada@example.com',
+        phone: '+447700900123',
+        whatsapp: null,
+        consent: { email: true, sms: false },
+        consentAt: { email: new Date('2026-11-01T09:00:00Z'), sms: new Date('2026-11-02T09:00:00Z') },
+        locale: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ];
+    const contacts = {
+      list: vi.fn(async () => people),
+      forget: vi.fn(async (_tenant: string, ref: string) => ({ deleted: ref === 'cust-1', bookings: ref === 'cust-1' ? 2 : 0 })),
+    };
+    const target = dashboard({ resources: { ...resources.store, contacts } });
+    const { session } = await signIn(target);
+    const page = await (await get(target, '/base/dashboard/contacts', session)).text();
+    expect(page).toContain('Ada &lt;A&gt;');
+    expect(page).toContain('SMS: no (2026-11-02)');
+    expect(page).toContain('/base/dashboard/contacts/forget');
+    const forgotten = await post(target, '/base/dashboard/contacts/forget', { csrf: await csrf(target, session), ref: 'cust-1' }, session);
+    expect(await forgotten.text()).toContain('2 bookings no longer name them');
+    expect(contacts.forget).toHaveBeenCalledWith('github:4242', 'cust-1', 'github:4242');
+    expect((await post(target, '/base/dashboard/contacts/forget', { csrf: await csrf(target, session), ref: 'nobody' }, session)).status).toBe(404);
+    expect((await post(target, '/base/dashboard/contacts/forget', { csrf: 'wrong', ref: 'cust-1' }, session)).status).toBe(403);
+    // Without a contacts adapter there is no page.
+    const plain = dashboard();
+    expect((await get(plain, '/base/dashboard/contacts', (await signIn(plain)).session)).status).toBe(404);
+  });
+
   it('lists the waitlist and removes an entry', async () => {
     const { target, store, entries } = full();
     const { session } = await signIn(target);

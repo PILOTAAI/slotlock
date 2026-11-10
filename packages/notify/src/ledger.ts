@@ -2,9 +2,12 @@
 // D1). Every send is recorded under its key (the change's id, the channel, the recipient) before it
 // is made, so however often a change is read or delivered, each person is sent each message once.
 // A send whose outcome is unknown (the process stopped mid-send) is never made again: a message
-// missed is better than one sent twice. Recipients are kept as digests, never their addresses.
+// missed is better than one sent twice. The send ledger and opt-outs keep recipients as digests.
+// An event's attendees are kept only so a cancellation can reach them once the event is gone:
+// sealed (AES-256-GCM), until a day after the event ends, and deleted once told.
 import { createHash } from 'node:crypto';
 import type { Sql } from 'postgres';
+import { type SealKeys, open, seal } from './seal.js';
 
 export type NotifyChannelKind = 'email' | 'sms' | 'whatsapp';
 
@@ -35,7 +38,8 @@ export interface NotifyLedger {
   /** A person said stop on a channel (an unsubscribe link, STOP by SMS). */
   optOut(tenantRef: string, channel: NotifyChannelKind, address: string): Promise<void>;
   isOptedOut(tenantRef: string, channel: NotifyChannelKind, address: string): Promise<boolean>;
-  rememberRecipients(tenantRef: string, eventId: string, recipients: RememberedRecipient[]): Promise<void>;
+  /** Keep an event's attendees until `until` (a day after it ends), for its cancellation. */
+  rememberRecipients(tenantRef: string, eventId: string, recipients: RememberedRecipient[], until: Date): Promise<void>;
   recallRecipients(tenantRef: string, eventId: string): Promise<RememberedRecipient[]>;
   forgetRecipients(tenantRef: string, eventId: string): Promise<void>;
 }
@@ -50,7 +54,7 @@ export function createMemoryLedger(): NotifyLedger & { sends: Map<string, { stat
   const sends = new Map<string, { status: string; attempts: number; providerId?: string | null; error?: string }>();
   const cursors = new Map<string, string>();
   const optOuts = new Set<string>();
-  const recipients = new Map<string, RememberedRecipient[]>();
+  const recipients = new Map<string, { list: RememberedRecipient[]; until: Date }>();
   const id = (key: SendKey) => [key.tenantRef, key.changeId, key.channel, recipientDigest(key.channel, key.recipient)].join('\n');
   return {
     sends,
@@ -82,11 +86,12 @@ export function createMemoryLedger(): NotifyLedger & { sends: Map<string, { stat
     async isOptedOut(tenantRef, channel, address) {
       return optOuts.has(`${tenantRef}\n${recipientDigest(channel, address)}`);
     },
-    async rememberRecipients(tenantRef, eventId, list) {
-      recipients.set(`${tenantRef}\n${eventId}`, list.map((each) => ({ ...each })));
+    async rememberRecipients(tenantRef, eventId, list, until) {
+      recipients.set(`${tenantRef}\n${eventId}`, { list: list.map((each) => ({ ...each })), until });
     },
     async recallRecipients(tenantRef, eventId) {
-      return recipients.get(`${tenantRef}\n${eventId}`) ?? [];
+      const kept = recipients.get(`${tenantRef}\n${eventId}`);
+      return kept && kept.until > new Date() ? kept.list : [];
     },
     async forgetRecipients(tenantRef, eventId) {
       recipients.delete(`${tenantRef}\n${eventId}`);
@@ -124,25 +129,40 @@ CREATE TABLE IF NOT EXISTS slotlock_notify.opt_outs (
 CREATE TABLE IF NOT EXISTS slotlock_notify.event_recipients (
   tenant_ref text NOT NULL,
   event_id text NOT NULL,
-  recipients jsonb NOT NULL CHECK (jsonb_typeof(recipients) = 'array'),
+  -- The attendees, sealed for 'recipients:<tenant_ref>:<event_id>': never kept readable.
+  sealed text NOT NULL,
+  expires_at timestamptz NOT NULL,
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (tenant_ref, event_id)
 );
+CREATE INDEX IF NOT EXISTS event_recipients_expiry_idx ON slotlock_notify.event_recipients (expires_at);
 `;
 
 
-/** A ledger in PostgreSQL (postgres.js), in schema slotlock_notify: apply SLOTLOCK_NOTIFY_DDL first. */
-export function createPostgresLedger(sql: Sql): NotifyLedger & { applySchema(): Promise<void>; prune(days?: number): Promise<number> } {
+/**
+ * A ledger in PostgreSQL (postgres.js), in schema slotlock_notify: apply SLOTLOCK_NOTIFY_DDL first.
+ * `keys` seal the attendees kept for cancellations.
+ */
+export function createPostgresLedger(
+  sql: Sql,
+  options: { keys: SealKeys },
+): NotifyLedger & { applySchema(): Promise<void>; prune(days?: number): Promise<number> } {
+  const context = (tenantRef: string, eventId: string) => `recipients:${tenantRef}:${eventId}`;
   const key = (send: SendKey) => [send.tenantRef, send.changeId, send.channel, recipientDigest(send.channel, send.recipient)] as const;
   return {
     async applySchema() {
       await sql.unsafe(SLOTLOCK_NOTIFY_DDL);
     },
-    /** Forget sends older than `days` (default 90): the feed keeps changes 30 days, so none comes back. */
+    /**
+     * Forget sends older than `days` (default 90; the feed keeps changes 30 days, so none comes
+     * back), and attendees kept for events that have ended.
+     */
     async prune(days = 90) {
-      const rows = await sql<{ change_id: string }[]>`
+      const sends = await sql<{ change_id: string }[]>`
         DELETE FROM slotlock_notify.sends WHERE created_at < now() - make_interval(days => ${days}) RETURNING change_id`;
-      return rows.length;
+      const kept = await sql<{ event_id: string }[]>`
+        DELETE FROM slotlock_notify.event_recipients WHERE expires_at < now() RETURNING event_id`;
+      return sends.length + kept.length;
     },
     async claim(send, maxAttempts = 5) {
       const [tenantRef, changeId, channel, recipient] = key(send);
@@ -184,16 +204,28 @@ export function createPostgresLedger(sql: Sql): NotifyLedger & { applySchema(): 
         SELECT 1 FROM slotlock_notify.opt_outs WHERE tenant_ref = ${tenantRef} AND recipient = ${recipientDigest(channel, address)}`;
       return rows.length > 0;
     },
-    async rememberRecipients(tenantRef, eventId, recipients) {
+    async rememberRecipients(tenantRef, eventId, recipients, until) {
+      const sealed = seal(
+        options.keys,
+        JSON.stringify(recipients.map((each) => ({ address: each.address, name: each.name }))),
+        context(tenantRef, eventId),
+      );
       await sql`
-        INSERT INTO slotlock_notify.event_recipients (tenant_ref, event_id, recipients)
-        VALUES (${tenantRef}, ${eventId}, ${sql.json(recipients.map((each) => ({ address: each.address, name: each.name })))})
-        ON CONFLICT (tenant_ref, event_id) DO UPDATE SET recipients = EXCLUDED.recipients, updated_at = now()`;
+        INSERT INTO slotlock_notify.event_recipients (tenant_ref, event_id, sealed, expires_at)
+        VALUES (${tenantRef}, ${eventId}, ${sealed}, ${until})
+        ON CONFLICT (tenant_ref, event_id) DO UPDATE
+           SET sealed = EXCLUDED.sealed, expires_at = EXCLUDED.expires_at, updated_at = now()`;
     },
     async recallRecipients(tenantRef, eventId) {
-      const [row] = await sql<{ recipients: RememberedRecipient[] }[]>`
-        SELECT recipients FROM slotlock_notify.event_recipients WHERE tenant_ref = ${tenantRef} AND event_id = ${eventId}`;
-      return row?.recipients ?? [];
+      const [row] = await sql<{ sealed: string }[]>`
+        SELECT sealed FROM slotlock_notify.event_recipients
+         WHERE tenant_ref = ${tenantRef} AND event_id = ${eventId} AND expires_at > now()`;
+      if (!row) return [];
+      try {
+        return JSON.parse(open(options.keys, row.sealed, context(tenantRef, eventId))) as RememberedRecipient[];
+      } catch {
+        return [];
+      }
     },
     async forgetRecipients(tenantRef, eventId) {
       await sql`DELETE FROM slotlock_notify.event_recipients WHERE tenant_ref = ${tenantRef} AND event_id = ${eventId}`;

@@ -8,9 +8,19 @@
   "author": "TREFT LTD",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "default": "./src/index.ts"
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
     }
+  },
+  "bin": {
+    "slotlock-payments-stripe": "./dist/bin.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
   },
   "engines": {
     "node": ">=22.12.0"

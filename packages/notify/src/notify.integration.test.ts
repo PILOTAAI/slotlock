@@ -3,13 +3,14 @@
 // however often the feed is read; an event's attendees are told, reminded and told of its
 // cancellation; notify: false tells no one; a test tenant's messages never reach a real channel.
 // Skipped without DATABASE_URL.
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type SlotlockAgentPrincipal, createSlotlockAgentServer } from '../../../src/agent-server.js';
 import { createSlotlockStoreAgentBackend, createSlotlockStoreApplicationBackend } from '../../../src/agent-store-backend.js';
 import { type SlotlockStore, createSlotlockStore } from '../../../src/store.js';
-import { captureChannel, createNotifier, createPostgresLedger } from './index.js';
+import { signSlotlockWebhook } from '../../../src/webhooks.js';
+import { captureChannel, createNotifier, createNotifyHttpHandler, createPostgresLedger, parseSealKeys } from './index.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
 const BASE = 'http://localhost/slotlock';
@@ -26,8 +27,14 @@ describe.skipIf(!url)('@slotlock/notify with Slotlock (real Postgres)', () => {
     live: { subject: 'api_key:notify', tenantRef, scopes: ['read', 'write', 'admin'] },
     test: { subject: 'api_key:notify-test', tenantRef: testTenant, scopes: ['read', 'write', 'admin'] },
   };
-  const send = (async (input: string | URL | Request, init?: RequestInit) =>
-    server.fetch(new Request(String(input instanceof Request ? input.url : input), init))) as typeof fetch;
+  const send = (async (input: string | URL | Request, init?: RequestInit) => {
+    const target = String(input instanceof Request ? input.url : input);
+    // A cursor the feed no longer keeps, as Slotlock answers one.
+    if (target.includes('cursor=expired-cursor')) {
+      return new Response(JSON.stringify({ error: { code: 'cursor_expired' } }), { status: 410, headers: { 'content-type': 'application/json' } });
+    }
+    return server.fetch(new Request(target, init));
+  }) as typeof fetch;
   const call = async (key: string, method: string, path: string, body?: unknown) => {
     const response = await server.fetch(
       new Request(`${BASE}${path}`, {
@@ -69,7 +76,7 @@ describe.skipIf(!url)('@slotlock/notify with Slotlock (real Postgres)', () => {
   });
 
   it('tells each person once, on the channels they agreed to, and no one when told not to', async () => {
-    const ledger = createPostgresLedger(sql);
+    const ledger = createPostgresLedger(sql, { keys: parseSealKeys(`k1:${randomBytes(32).toString('base64')}`) });
     await ledger.applySchema();
     const notifier = createNotifier({
       ledger,
@@ -144,6 +151,20 @@ describe.skipIf(!url)('@slotlock/notify with Slotlock (real Postgres)', () => {
     const [stored] = await sql<{ rows: string }[]>`SELECT string_agg(recipient, ',') AS rows FROM slotlock_notify.sends WHERE tenant_ref = ${tenantRef}`;
     expect(stored?.rows).not.toContain('@');
 
+    // A booking's own reminders reach its contact, on the channels they agreed to.
+    await call('live', 'PUT', '/v1/reservations/bk-remind', {
+      resource_id: van,
+      start: new Date(soon + 2 * HOUR).toISOString(),
+      end: new Date(soon + 3 * HOUR).toISOString(),
+      revision: 1,
+      contact_ref: 'ada',
+      reminder_minutes: [180],
+    });
+    await call('live', 'POST', '/v1/maintenance', {});
+    await notifier.poll(tenantRef);
+    expect(live.email.messages.at(-1)?.subject).toMatch(/^Reminder: Van 42/);
+    expect(live.sms.messages.at(-1)?.text).toMatch(/^Reminder: Van 42/);
+
     // A test tenant's messages go to its inbox only.
     const testVan = ((await call('test', 'POST', '/v1/resources', { external_ref: 'van-t', timezone: 'UTC' })).body.resource as { id: string }).id;
     await call('test', 'PUT', '/v1/contacts/ada', { email: 'ada@example.com' });
@@ -152,5 +173,86 @@ describe.skipIf(!url)('@slotlock/notify with Slotlock (real Postgres)', () => {
     expect((await notifier.poll(testTenant)).sent).toBe(1);
     expect(inbox.email.messages).toHaveLength(1);
     expect(live.email.messages).toHaveLength(before);
+  });
+
+  it('takes signed deliveries, keeps attendees sealed, and sends nothing stale after a gap', async () => {
+    const keys = parseSealKeys(`k1:${randomBytes(32).toString('base64')}`);
+    const ledger = createPostgresLedger(sql, { keys });
+    const mail = captureChannel('email');
+    let clock = new Date();
+    const notifier = createNotifier({
+      ledger,
+      slotlockUrl: BASE,
+      fetch: send,
+      channels: { email: mail },
+      testChannels: {},
+      now: () => clock,
+      tenant: async (ref) => (ref === tenantRef ? { apiKey: 'live', name: 'Fleet Co', from: { email: 'bookings@fleet.example' } } : null),
+    });
+    const desk = ((await call('live', 'POST', '/v1/resources', { external_ref: 'desk-9', timezone: 'UTC' })).body.resource as { id: string }).id;
+    const start = Math.floor(Date.now() / 1_000) * 1_000 + 3 * 24 * HOUR;
+    // Made before the notifier first looks: its attendees are kept for its cancellation, sealed.
+    expect(
+      (
+        await store.withTenant(tenantRef, (tenant) =>
+          tenant.putCalendarEvent({
+            tenantRef,
+            externalRef: 'early',
+            resourceId: desk,
+            expectedRevision: 0,
+            idempotencyKey: 'early-1',
+            start: new Date(start),
+            end: new Date(start + HOUR),
+            timezone: 'UTC',
+            summary: 'Review',
+            attendees: [{ email: 'cy@example.com' }],
+          }),
+        )
+      ).ok,
+    ).toBe(true);
+    expect(await notifier.rememberUpcoming(tenantRef)).toBeGreaterThan(0);
+    const [kept] = await sql<{ sealed: string; expires_at: Date }[]>`
+      SELECT sealed, expires_at FROM slotlock_notify.event_recipients WHERE tenant_ref = ${tenantRef}`;
+    expect(kept?.sealed).not.toContain('@');
+    expect(kept?.expires_at.getTime()).toBe(start + HOUR + 24 * HOUR);
+
+    // A webhook delivery, signed with the tenant's secret: the cancellation reaches the attendee.
+    const secret = `whsec_${randomBytes(32).toString('base64')}`;
+    const http = createNotifyHttpHandler({ notifier, webhookSecret: async (ref) => (ref === tenantRef ? secret : null) });
+    await store.withTenant(tenantRef, (tenant) =>
+      tenant.cancelCalendarEvent({ tenantRef, externalRef: 'early', idempotencyKey: 'early-cancel', expectedRevision: 1 }),
+    );
+    const [cancelled] = await sql<{ id: string; type: string; subject: string; data: Record<string, unknown> }[]>`
+      SELECT id::text, type, subject, data FROM slotlock.outbox
+       WHERE tenant_ref = ${tenantRef} AND type = 'event.cancelled' ORDER BY id DESC LIMIT 1`;
+    const body = JSON.stringify({
+      id: `msg_${cancelled?.id}`,
+      type: 'io.pylota.slotlock.event.cancelled',
+      subject: cancelled?.subject,
+      time: new Date().toISOString(),
+      data: cancelled?.data,
+    });
+    const timestamp = Math.floor(Date.now() / 1_000);
+    const deliver = (signature: string) =>
+      http(
+        new Request(`https://notify.example/webhooks/${encodeURIComponent(tenantRef)}`, {
+          method: 'POST',
+          headers: { 'webhook-id': `msg_${cancelled?.id}`, 'webhook-timestamp': String(timestamp), 'webhook-signature': signature },
+          body,
+        }),
+      );
+    expect((await deliver('v1,AAAA')).status).toBe(401);
+    expect((await deliver(signSlotlockWebhook({ secret, id: `msg_${cancelled?.id}`, timestamp, body }))).status).toBe(200);
+    expect(mail.messages.map((message) => [message.to, message.subject.split(':')[0]])).toEqual([['cy@example.com', 'Cancelled']]);
+    expect((await http(new Request('https://notify.example/webhooks/someone-else', { method: 'POST', body: '{}' }))).status).toBe(401);
+
+    // The cursor expired while the notifier was away: read again from what the feed keeps, and
+    // nothing older than a day is sent.
+    await ledger.setCursor(tenantRef, 'expired-cursor');
+    clock = new Date(Date.now() + 2 * 24 * HOUR);
+    const caughtUp = await notifier.poll(tenantRef);
+    expect(caughtUp).toMatchObject({ gap: true, sent: 0 });
+    expect(caughtUp.skipped).toBeGreaterThan(0);
+    expect(mail.messages).toHaveLength(1);
   });
 });

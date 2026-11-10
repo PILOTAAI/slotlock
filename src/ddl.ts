@@ -2020,6 +2020,10 @@ BEGIN
   DELETE FROM slotlock.reminder_dispatches WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  erased_table := 'reservation_reminder_dispatches';
+  DELETE FROM slotlock.reservation_reminder_dispatches WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'source_busy';
   DELETE FROM slotlock.source_busy WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
@@ -2275,8 +2279,8 @@ BEGIN
   FOREACH emptied IN ARRAY ARRAY[
     'calendar_event_attendees', 'calendar_event_reminders', 'calendar_event_exceptions',
     'calendar_event_occurrences', 'composite_claims', 'approvals', 'approval_policies',
-    'availability_exceptions', 'availability_defaults', 'contacts', 'reminder_dispatches', 'source_busy',
-    'calendar_events', 'calendar_event_tombstones', 'calendar_event_commands',
+    'availability_exceptions', 'availability_defaults', 'contacts', 'reminder_dispatches', 'reservation_reminder_dispatches',
+    'source_busy', 'calendar_events', 'calendar_event_tombstones', 'calendar_event_commands',
     'reservation_tombstones', 'reservation_conflict_archive', 'calendar_coverage', 'hold_commands',
     'waitlist_entries', 'booking_rule_defaults', 'pool_settings', 'resource_group_members',
     'resources', 'resource_groups', 'outbox'
@@ -5756,6 +5760,11 @@ ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS notify boolean NOT NU
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS payment_required boolean NOT NULL DEFAULT false;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS payment_ref text;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS paid_at timestamptz;
+-- What a hold's payment must be, and what was received (RFC 0004 C3), in the currency's minor unit.
+ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS payment_amount_minor bigint;
+ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS payment_currency text;
+ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS paid_amount_minor bigint;
+ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS paid_currency text;
 ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS notify boolean NOT NULL DEFAULT true;
 DO $slotlock_integration_columns$
 BEGIN
@@ -5769,6 +5778,21 @@ BEGIN
   END IF;
 END
 $slotlock_integration_columns$;
+DO $slotlock_payment_amounts$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'slotlock_reservations_payment_amounts_valid'
+                    AND conrelid = 'slotlock.reservations'::regclass) THEN
+    ALTER TABLE slotlock.reservations ADD CONSTRAINT slotlock_reservations_payment_amounts_valid CHECK (
+      (payment_amount_minor IS NULL) = (payment_currency IS NULL)
+      AND (paid_amount_minor IS NULL) = (paid_currency IS NULL)
+      AND (payment_amount_minor IS NULL OR payment_amount_minor BETWEEN 0 AND 1000000000000)
+      AND (paid_amount_minor IS NULL OR paid_amount_minor BETWEEN 0 AND 1000000000000)
+      AND (payment_currency IS NULL OR payment_currency ~ '^[A-Z]{3}$')
+      AND (paid_currency IS NULL OR paid_currency ~ '^[A-Z]{3}$')
+    ) NOT VALID;
+  END IF;
+END
+$slotlock_payment_amounts$;
 -- Forgetting a person finds the bookings that name them.
 CREATE INDEX IF NOT EXISTS slotlock_reservations_contact_idx
   ON slotlock.reservations (tenant_ref, contact_ref) WHERE contact_ref IS NOT NULL;
@@ -5814,6 +5838,36 @@ CREATE TABLE IF NOT EXISTS slotlock.reminder_dispatches (
 );
 CREATE INDEX IF NOT EXISTS slotlock_reminder_dispatches_tenant_idx
   ON slotlock.reminder_dispatches (tenant_ref, due_at);
+
+-- A booking's reminders (RFC 0004 P3): minutes before its start, at most five; each said once on
+-- the feed as reminder.due, and again if the booking moves.
+ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS reminder_minutes integer[];
+DO $slotlock_reservation_reminders$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'slotlock_reservations_reminders_valid'
+                    AND conrelid = 'slotlock.reservations'::regclass) THEN
+    ALTER TABLE slotlock.reservations ADD CONSTRAINT slotlock_reservations_reminders_valid CHECK (
+      reminder_minutes IS NULL
+      OR (cardinality(reminder_minutes) BETWEEN 1 AND 5
+          AND 0 <= ALL (reminder_minutes) AND 527040 >= ALL (reminder_minutes))
+    ) NOT VALID;
+  END IF;
+END
+$slotlock_reservation_reminders$;
+CREATE TABLE IF NOT EXISTS slotlock.reservation_reminder_dispatches (
+  tenant_ref text NOT NULL,
+  reservation_id uuid NOT NULL,
+  ordinal integer NOT NULL CHECK (ordinal BETWEEN 0 AND 4),
+  due_at timestamptz NOT NULL,
+  dispatched_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  PRIMARY KEY (reservation_id, ordinal),
+  CONSTRAINT slotlock_reservation_reminder_dispatches_fkey FOREIGN KEY (reservation_id, tenant_ref)
+    REFERENCES slotlock.reservations (id, tenant_ref) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS slotlock_reservation_reminder_dispatches_tenant_idx
+  ON slotlock.reservation_reminder_dispatches (tenant_ref, due_at);
+-- When each channel's consent was last given or withdrawn, as proof of it.
+ALTER TABLE slotlock.contacts ADD COLUMN IF NOT EXISTS consent_at jsonb NOT NULL DEFAULT '{}'::jsonb;
 
 -- Busy time a calendar reports without its events (Google freeBusy, Microsoft getSchedule), for one
 -- resource and source (RFC 0004 C1): replaced window by window with the source's coverage, counted
@@ -6200,6 +6254,7 @@ export const SLOTLOCK_TENANT_TABLES = Object.freeze([
   'availability_exceptions',
   'contacts',
   'reminder_dispatches',
+  'reservation_reminder_dispatches',
   'source_busy',
 ] as const);
 
@@ -6364,6 +6419,8 @@ ALTER TABLE slotlock.contacts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.contacts FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.reminder_dispatches ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.reminder_dispatches FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.reservation_reminder_dispatches ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.reservation_reminder_dispatches FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.source_busy ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.source_busy FORCE ROW LEVEL SECURITY;
 
@@ -6409,6 +6466,7 @@ BEGIN
          'availability_exceptions',
          'contacts',
          'reminder_dispatches',
+         'reservation_reminder_dispatches',
          'source_busy'
        )
   LOOP
@@ -6763,6 +6821,16 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'reservation_reminder_dispatches'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.reservation_reminder_dispatches
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
      WHERE schemaname = 'slotlock' AND tablename = 'source_busy'
        AND policyname = 'tenant_isolation_v1'
   ) THEN
@@ -6835,6 +6903,8 @@ COMMENT ON POLICY tenant_isolation_v1 ON slotlock.contacts
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.reminder_dispatches
   IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.reservation_reminder_dispatches
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.source_busy
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 ${SLOTLOCK_RESOURCE_SCOPE_POLICIES}
@@ -6892,6 +6962,7 @@ WHERE schemaname = 'slotlock'
     'availability_exceptions',
     'contacts',
     'reminder_dispatches',
+    'reservation_reminder_dispatches',
     'source_busy'
   )
   AND policyname = 'tenant_isolation_v1'

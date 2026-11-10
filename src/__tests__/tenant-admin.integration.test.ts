@@ -529,7 +529,18 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
           reminders: [{ action: 'display', minutesBeforeStart: 30 }],
         });
         if (!reminded.ok) throw new Error(reminded.code);
-        expect(await tenant.dueReminders({ tenantRef })).toBe(1);
+        const remindedBooking = await tenant.createExternalReservation({
+          tenantRef,
+          externalRef: 'soon-booking',
+          resourceId,
+          start: new Date(soon + 2 * HOUR),
+          end: new Date(soon + 3 * HOUR),
+          bufferAfterMs: 0,
+          revision: 1,
+          reminderMinutes: [180],
+        });
+        if (!remindedBooking.ok) throw new Error(remindedBooking.code);
+        expect(await tenant.dueReminders({ tenantRef })).toBe(2);
         return resourceId;
       });
       const resourceId = (

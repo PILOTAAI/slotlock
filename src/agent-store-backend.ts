@@ -755,6 +755,9 @@ export function createSlotlockStoreAgentBackend(
             source: 'agent-server',
             // The key's own caps, below the server's (RFC 0004 A5).
             ...(holderCaps ? { holderCaps } : {}),
+            // Booked only once your system records its payment (RFC 0004 C3).
+            ...(input.payment_required === true ? { paymentRequired: true } : {}),
+            ...(input.payment !== undefined ? { payment: amountInput(input.payment) as { amountMinor: number; currency: string } } : {}),
           });
           if (result.ok) {
             holds.push({
@@ -763,6 +766,7 @@ export function createSlotlockStoreAgentBackend(
               start: result.hold.start.toISOString(),
               end: result.hold.end.toISOString(),
               expires_at: result.hold.expiresAt.toISOString(),
+              ...(result.hold.paymentRequired ? { payment_required: true, payment_amount: amountOutput(result.hold.paymentAmount) } : {}),
             });
           } else {
             refused.push({ index, code: operationError(result).code });
@@ -2673,9 +2677,20 @@ function holdOutput(hold: SlotlockHold) {
           payment_required: true as const,
           payment_ref: hold.paymentRef ?? null,
           paid_at: hold.paidAt?.toISOString() ?? null,
+          payment_amount: amountOutput(hold.paymentAmount),
+          paid_amount: amountOutput(hold.paidAmount),
         }
       : {}),
   };
+}
+
+function amountOutput(amount: { amountMinor: number; currency: string } | null | undefined) {
+  return amount ? { amount_minor: amount.amountMinor, currency: amount.currency } : null;
+}
+
+function amountInput(value: unknown): { amountMinor: number; currency: string } | undefined {
+  const amount = value as { amount_minor: number; currency: string } | undefined;
+  return amount ? { amountMinor: amount.amount_minor, currency: amount.currency } : undefined;
 }
 
 function contactOutput(contact: SlotlockContact) {
@@ -2686,6 +2701,7 @@ function contactOutput(contact: SlotlockContact) {
     phone: contact.phone,
     whatsapp: contact.whatsapp,
     consent: contact.consent,
+    consent_at: Object.fromEntries(Object.entries(contact.consentAt).map(([channel, at]) => [channel, (at as Date).toISOString()])),
     locale: contact.locale,
     created_at: contact.createdAt.toISOString(),
     updated_at: contact.updatedAt.toISOString(),
@@ -2705,6 +2721,7 @@ function reservationOutput(reservation: SlotlockReservation) {
     source: reservation.source,
     ...(reservation.contactRef ? { contact_ref: reservation.contactRef } : {}),
     ...(reservation.notify === false ? { notify: false as const } : {}),
+    ...(reservation.reminderMinutes ? { reminder_minutes: reservation.reminderMinutes } : {}),
   };
 }
 
@@ -3411,6 +3428,7 @@ export function createSlotlockStoreApplicationBackend(
             ? { bufferAfterMs: (input.buffer_after_minutes as number) * 60_000 }
             : {}),
           ...(input.payment_required === true ? { paymentRequired: true } : {}),
+          ...(input.payment !== undefined ? { payment: amountInput(input.payment) as { amountMinor: number; currency: string } } : {}),
           // A retried request with the caller's key answers the hold the first one made.
           ...(input.idempotency_key !== undefined
             ? {
@@ -3470,6 +3488,7 @@ export function createSlotlockStoreApplicationBackend(
           tenantRef: tenantOf(context),
           holdId: id,
           paymentRef: input.payment_ref as string,
+          ...(input.received !== undefined ? { received: amountInput(input.received) as { amountMinor: number; currency: string } } : {}),
         });
         if (!result.ok) throw applicationRefusal(result.code);
         return { hold: holdOutput(result.hold), replayed: result.idempotent };
@@ -3498,6 +3517,22 @@ export function createSlotlockStoreApplicationBackend(
         const contact = await tenant.getContact({ tenantRef: tenantOf(context), ref: input.contact_ref as string });
         if (!contact) throw new SlotlockAgentOperationError('contact_not_found', 404);
         return { contact: contactOutput(contact) };
+      });
+    },
+
+    async listContacts(context, input) {
+      const limit = input.limit as number;
+      return withTenant(store, context, async (tenant) => {
+        const contacts = await tenant.listContacts({
+          tenantRef: tenantOf(context),
+          limit: limit + 1,
+          ...(input.cursor !== undefined ? { after: input.cursor as string } : {}),
+        });
+        const shown = contacts.slice(0, limit);
+        return {
+          contacts: shown.map(contactOutput),
+          next_cursor: contacts.length > limit ? (shown.at(-1)?.ref ?? null) : null,
+        };
       });
     },
 
@@ -3563,6 +3598,7 @@ export function createSlotlockStoreApplicationBackend(
           ...(input.local_start !== undefined ? { localStart: input.local_start as string } : {}),
           ...(input.contact_ref !== undefined ? { contactRef: input.contact_ref as string } : {}),
           ...(input.notify !== undefined ? { notify: input.notify as boolean } : {}),
+          ...(input.reminder_minutes !== undefined ? { reminderMinutes: input.reminder_minutes as number[] } : {}),
         };
         const result =
           command.revision === 1
@@ -3752,7 +3788,28 @@ export function createSlotlockStoreApplicationBackend(
       }, WRITE);
     },
 
-    async listTenantEvents(context, input) {
+    async reportCoverageConflict(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const resource = await requireResource(tenant, tenantOf(context), input.resource_id as string);
+        const result = await tenant.reportCoverageConflict({
+          tenantRef: tenantOf(context),
+          resourceId: resource.id,
+          source: input.source as string,
+          booking:
+            input.event_id !== undefined
+              ? { eventId: input.event_id as string }
+              : { reservationRef: input.reservation_ref as string },
+          reason: input.reason as 'changed_in_calendar' | 'removed_from_calendar',
+          ...(input.calendar_start !== undefined
+            ? { calendar: interval({ start: input.calendar_start as string, end: input.calendar_end as string }) }
+            : {}),
+        });
+        if (!result.ok) throw applicationRefusal(result.code);
+        return { reported: true };
+      }, WRITE);
+    },
+
+        async listTenantEvents(context, input) {
       const limit = input.limit as number;
       const after = parseEventCursor(input.cursor);
       return withTenant(store, context, async (tenant) => {

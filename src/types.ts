@@ -165,6 +165,8 @@ export interface SlotlockReservation {
   contactRef?: string;
   /** Present, and false, when no one should be notified about it. */
   notify?: false;
+  /** Minutes before its start it is reminded, latest first, when it is. */
+  reminderMinutes?: number[];
 }
 
 export interface ExternalReservationCommand {
@@ -194,6 +196,11 @@ export interface ExternalReservationCommand {
   contactRef?: string;
   /** False: no sender should notify anyone about it (default true). On the feed only when false. */
   notify?: boolean;
+  /**
+   * Minutes before its start to remind whom it names (RFC 0004 P3): up to five, each 0 to a year,
+   * said on the feed once each as `reminder.due` by maintenance, and again if the booking moves.
+   */
+  reminderMinutes?: number[];
 }
 
 /** What a cancellation records for the integrator to charge (RFC 0004 B5). Slotlock moves no money. */
@@ -207,7 +214,7 @@ export type ExternalReservationResult =
   | { ok: false; code: 'invalid_window' }
   /** `localStart` is not a wall time, or does not name `start` in the resource's zone. */
   | { ok: false; code: 'invalid_local_start' }
-  | { ok: false; code: 'invalid_contact_ref' | 'invalid_notify' }
+  | { ok: false; code: 'invalid_contact_ref' | 'invalid_notify' | 'invalid_reminders' }
   | { ok: false; code: 'invalid_buffer' }
   | { ok: false; code: 'invalid_identity' }
   | { ok: false; code: 'invalid_revision' }
@@ -293,6 +300,10 @@ export interface SlotlockHold {
   /** The payment's reference at the integrator's processor, once paid. */
   paymentRef?: string | null;
   paidAt?: Date | null;
+  /** What the payment must be, when the hold names it. */
+  paymentAmount?: { amountMinor: number; currency: string } | null;
+  /** What was received, once paid and when the payer said. */
+  paidAmount?: { amountMinor: number; currency: string } | null;
 }
 
 /** One entry of a tenant's agenda (`listAgenda`): what occupies a resource, and from when. */
@@ -316,6 +327,8 @@ export type AcquireHoldResult =
   | { ok: true; hold: SlotlockHold; idempotent: boolean }
   | { ok: false; code: 'invalid_window' }
   | { ok: false; code: 'invalid_ttl' }
+  /** `payment` without `paymentRequired`, or not an amount and an ISO 4217 currency. */
+  | { ok: false; code: 'invalid_payment' }
   | { ok: false; code: 'invalid_buffer' }
   /** A tenant, principal or idempotency key that is malformed, or a key without both of the others. */
   | { ok: false; code: 'invalid_identity' }
@@ -372,6 +385,8 @@ export interface SlotlockContact {
   whatsapp: string | null;
   /** Each channel the person said yes or no to; a channel left out has no answer recorded. */
   consent: SlotlockContactConsent;
+  /** When each answer in `consent` was given (kept while it stands): the proof of it. */
+  consentAt: Partial<Record<keyof SlotlockContactConsent, Date>>;
   /** BCP 47, for the language of what is sent. */
   locale: string | null;
   createdAt: Date;
@@ -392,7 +407,9 @@ export type PutContactResult =
 /** Recording a hold's payment (RFC 0004 C3); `idempotent` when it was recorded already. */
 export type MarkHoldPaidResult =
   | { ok: true; hold: SlotlockHold; idempotent: boolean }
-  | { ok: false; code: 'invalid_identity' | 'invalid_payment_ref' }
+  | { ok: false; code: 'invalid_identity' | 'invalid_payment_ref' | 'invalid_payment' }
+  /** Less than the hold's payment, in another currency, or not said when the hold names one. */
+  | { ok: false; code: 'payment_amount_mismatch' }
   | { ok: false; code: 'hold_not_found' | 'hold_expired' }
   /** The hold does not wait for payment. */
   | { ok: false; code: 'payment_not_required' }

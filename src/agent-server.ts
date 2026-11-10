@@ -1888,7 +1888,7 @@ const OPERATION_DEFINITIONS = [
     name: 'slotlock_hold_slots',
     title: 'Hold candidate slots',
     description:
-      'Hold up to five candidate slots for a short time (30-900 seconds) while a person chooses, as alternatives in one group: each free one is held, the others are listed with why not. Book one by passing its hold_id to slotlock_create_event, which releases the rest; unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at once. A candidate refused for its time comes with alternatives (the earliest free times of its length). slotlock_confirm_slot books a held time.',
+      'Hold up to five candidate slots for a short time (30-900 seconds) while a person chooses, as alternatives in one group: each free one is held, the others are listed with why not. Book one by passing its hold_id to slotlock_create_event, which releases the rest; unbooked holds expire on their own. With payment_required, a hold is booked only once the system you book for records its payment (the person pays there): booking it before then answers payment_required, so send the person to pay and try again. A hold is yours alone, and you may have 20 live at once. A candidate refused for its time comes with alternatives (the earliest free times of its length). slotlock_confirm_slot books a held time.',
     input: z
       .object({
         slots: z
@@ -1902,8 +1902,19 @@ const OPERATION_DEFINITIONS = [
           .max(5),
         ttl_seconds: z.number().int().min(30).max(900).default(300),
         idempotency_key: IDEMPOTENCY_KEY,
+        /** Booked only once the integrator records its payment (RFC 0004 C3). */
+        payment_required: z.boolean().optional(),
+        /** What that payment must be, in the currency's minor unit. */
+        payment: z
+          .object({ amount_minor: z.number().int().min(0).max(1_000_000_000_000), currency: z.string().regex(/^[A-Z]{3}$/) })
+          .strict()
+          .optional(),
       })
-      .strict(),
+      .strict()
+      .refine((value) => value.payment === undefined || value.payment_required === true, {
+        message: 'payment needs payment_required',
+        path: ['payment'],
+      }),
     output: z
       .object({
         group_id: HOLD_ID,
@@ -1916,6 +1927,12 @@ const OPERATION_DEFINITIONS = [
                 start: DATE_TIME,
                 end: DATE_TIME,
                 expires_at: DATE_TIME,
+                payment_required: z.literal(true).optional(),
+                payment_amount: z
+                  .object({ amount_minor: z.number().int().min(0), currency: z.string().regex(/^[A-Z]{3}$/) })
+                  .strict()
+                  .nullable()
+                  .optional(),
               })
               .strict(),
           )

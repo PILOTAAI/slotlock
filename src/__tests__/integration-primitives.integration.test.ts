@@ -4,7 +4,7 @@
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { type SlotlockAgentPrincipal, createSlotlockAgentServer } from '../agent-server.js';
+import { type SlotlockAgentPrincipal, createSlotlockAgentServer, invokeSlotlockAgentOperation } from '../agent-server.js';
 import { createSlotlockStoreAgentBackend, createSlotlockStoreApplicationBackend } from '../agent-store-backend.js';
 import { type SlotlockStore, createSlotlockStore } from '../store.js';
 
@@ -17,6 +17,7 @@ describe.skipIf(!url)('integration primitives (real Postgres)', () => {
   let sql: ReturnType<typeof postgres>;
   let store: SlotlockStore;
   let server: ReturnType<typeof createSlotlockAgentServer>;
+  let agentBackend: ReturnType<typeof createSlotlockStoreAgentBackend>;
   const tenantRef = `primitives-${randomUUID()}`;
   const principals: Record<string, SlotlockAgentPrincipal> = {
     admin: { subject: 'person-admin', tenantRef, scopes: ['read', 'write', 'admin'] },
@@ -43,7 +44,7 @@ describe.skipIf(!url)('integration primitives (real Postgres)', () => {
     sql = postgres(url as string, { max: 8, onnotice: () => {} });
     store = createSlotlockStore(sql, { defaultAvailabilityRules: ALL_DAY });
     await store.applySchema();
-    const agentBackend = createSlotlockStoreAgentBackend(store, { availabilityRules: async () => ALL_DAY });
+    agentBackend = createSlotlockStoreAgentBackend(store, { availabilityRules: async () => ALL_DAY });
     server = createSlotlockAgentServer({
       publicBaseUrl: BASE,
       allowInsecureLocalhost: true,
@@ -94,6 +95,27 @@ describe.skipIf(!url)('integration primitives (real Postgres)', () => {
       [at(8), at(9)],
       [at(12), at(14)],
     ]);
+    // So does every other read: the application API's busy list, the library's search, and the
+    // waitlist, which offers only time a hold can take.
+    const listed = (await call('GET', `/v1/resources/${van}/busy?start=${at(0)}&end=${at(24)}`)).body.busy as { start: string }[];
+    expect(listed.map((busy) => Date.parse(busy.start))).toContain(Date.parse(at(12)));
+    const searched = await store.withTenant(tenantRef, (tenant) =>
+      tenant.findNextAvailableFor({
+        tenantRef,
+        resourceId: van,
+        rules: ALL_DAY,
+        searchWindow: { start: new Date(at(11)), end: new Date(at(24)) },
+        durationMs: 2 * HOUR,
+      }),
+    );
+    expect(searched?.start.toISOString()).toBe(at(14));
+    const waiting = (await call('POST', '/v1/waitlist', { resource_id: van, start: at(12), end: at(16), holder_ref: 'w-1', duration_minutes: 60 })).body
+      .entry as { id: string };
+    await call('POST', '/v1/maintenance', {});
+    const offered = ((await call('GET', '/v1/waitlist')).body.entries as { id: string; hold_id: string | null }[]).find((entry) => entry.id === waiting.id);
+    const offeredHold = (await call('GET', `/v1/holds/${offered?.hold_id as string}`)).body.hold as { start: string };
+    expect(Date.parse(offeredHold.start)).toBe(Date.parse(at(14)));
+    await call('DELETE', `/v1/waitlist/${waiting.id}`);
     expect((await call('PUT', '/v1/reservations/clash', { resource_id: van, start: at(13), end: at(15), revision: 1 })).body).toMatchObject({
       error: { code: 'overlap' },
     });
@@ -152,6 +174,21 @@ describe.skipIf(!url)('integration primitives (real Postgres)', () => {
     // Moved without them: as sent, it names no one and may be told.
     await call('PUT', '/v1/reservations/bk-tell', { resource_id: room, start: at(10), end: at(11), revision: 2, contact_ref: 'customer-42' });
     expect((await call('GET', '/v1/reservations/bk-tell')).body.reservation).not.toHaveProperty('notify');
+
+    // When each channel's answer was given is kept while it stands, and changes when it does.
+    await call('PUT', '/v1/contacts/consent-1', { email: 'c1@example.com', phone: '+447700900321', consent: { email: true, sms: false } });
+    const first = (await call('GET', '/v1/contacts/consent-1')).body.contact as { consent_at: Record<string, string> };
+    expect(Object.keys(first.consent_at).sort()).toEqual(['email', 'sms']);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const second = (await call('PUT', '/v1/contacts/consent-1', { email: 'c1@example.com', phone: '+447700900321', consent: { email: true, sms: true } }))
+      .body.contact as { consent_at: Record<string, string> };
+    expect(second.consent_at.email).toBe(first.consent_at.email);
+    expect(Date.parse(second.consent_at.sms as string)).toBeGreaterThan(Date.parse(first.consent_at.sms as string));
+    // Listed by reference, a page at a time.
+    const pageOne = (await call('GET', '/v1/contacts?limit=1')).body as { contacts: { contact_ref: string }[]; next_cursor: string | null };
+    expect(pageOne.contacts.map((contact) => contact.contact_ref)).toEqual(['consent-1']);
+    const pageTwo = (await call('GET', `/v1/contacts?limit=1&cursor=${pageOne.next_cursor}`)).body as { contacts: { contact_ref: string }[] };
+    expect(pageTwo.contacts.map((contact) => contact.contact_ref)).toEqual(['customer-42']);
 
     expect((await call('DELETE', '/v1/contacts/customer-42')).body).toEqual({ deleted: true, bookings: 1 });
     expect((await call('GET', '/v1/contacts/customer-42')).status).toBe(404);
@@ -227,5 +264,68 @@ describe.skipIf(!url)('integration primitives (real Postgres)', () => {
     expect((await write('session', 1, 40)).ok).toBe(true);
     expect(await maintain()).toBe(1);
     expect(await feed('reminder.due')).toHaveLength(2);
+
+    // A booking's reminders too, naming whom to tell; not for one that says to tell no one.
+    const book = (ref: string, startIn: number, extra: Record<string, unknown> = {}) =>
+      call('PUT', `/v1/reservations/${ref}`, {
+        resource_id: studio.id,
+        start: soon(startIn).toISOString(),
+        end: soon(startIn + 30).toISOString(),
+        revision: 1,
+        contact_ref: 'guest-1',
+        ...extra,
+      });
+    expect((await book('bk-remind', 200, { reminder_minutes: [240, 15] })).body.reservation).toMatchObject({ reminder_minutes: [240, 15] });
+    expect((await book('bk-quiet', 300, { reminder_minutes: [360], notify: false })).status).toBe(200);
+    expect((await book('bk-bad', 400, { reminder_minutes: [10, 10] })).status).toBe(400);
+    expect(await maintain()).toBe(1);
+    expect(await maintain()).toBe(0);
+    const [booked] = (await feed('reminder.due')).filter((change) => change.subject === 'bk-remind');
+    expect(booked?.data).toMatchObject({ reference: 'bk-remind', contact_ref: 'guest-1', minutes_before_start: 240, ordinal: 0 });
+  });
+  it('checks what a hold is paid, and lets an agent hold time that waits for payment', async () => {
+    const bay = await resource('bay-pay');
+    const priced = (await call('POST', '/v1/holds', {
+      resource_id: bay,
+      start: at(9),
+      end: at(10),
+      ttl_seconds: 900,
+      payment_required: true,
+      payment: { amount_minor: 4500, currency: 'GBP' },
+    })).body.hold as { id: string };
+    expect(priced).toMatchObject({ payment_amount: { amount_minor: 4500, currency: 'GBP' }, paid_amount: null });
+    const pay = (received?: unknown) =>
+      call('POST', `/v1/holds/${priced.id}/paid`, { payment_ref: 'pi_x', ...(received ? { received } : {}) });
+    expect((await pay()).body).toMatchObject({ error: { code: 'payment_amount_mismatch' } });
+    expect((await pay({ amount_minor: 4499, currency: 'GBP' })).body).toMatchObject({ error: { code: 'payment_amount_mismatch' } });
+    expect((await pay({ amount_minor: 4500, currency: 'EUR' })).body).toMatchObject({ error: { code: 'payment_amount_mismatch' } });
+    expect((await pay({ amount_minor: 4500, currency: 'GBP' })).body).toMatchObject({ hold: { paid_amount: { amount_minor: 4500, currency: 'GBP' } } });
+    expect((await call('POST', '/v1/holds', { resource_id: bay, start: at(11), end: at(12), ttl_seconds: 60, payment: { amount_minor: 1, currency: 'GBP' } })).status).toBe(400);
+
+    const agent = (operation: string, input: Record<string, unknown>) =>
+      invokeSlotlockAgentOperation({
+        operation: operation as never,
+        input,
+        request: new Request(BASE),
+        options: {
+          backend: agentBackend,
+          authenticate: async () => ({ subject: 'agent-pay', tenantRef, scopes: ['read', 'write'] }),
+          authorize: async () => true,
+        },
+      }) as Promise<{ ok: boolean; code?: string; data?: Record<string, unknown> }>;
+    const held = await agent('slotlock_hold_slots', {
+      slots: [{ resource_id: bay, start: at(13), end: at(14) }],
+      ttl_seconds: 600,
+      idempotency_key: 'agent-pay-1',
+      payment_required: true,
+      payment: { amount_minor: 2000, currency: 'GBP' },
+    });
+    const hold = (held.data?.holds as { hold_id: string }[])[0];
+    expect(hold).toMatchObject({ payment_required: true, payment_amount: { amount_minor: 2000, currency: 'GBP' } });
+    const book = () => agent('slotlock_confirm_slot', { hold_id: hold?.hold_id, idempotency_key: 'agent-pay-book' });
+    expect(await book()).toMatchObject({ ok: false, code: 'payment_required' });
+    // The system the agent books for records the payment; the agent books it.
+    expect((await call('POST', `/v1/holds/${hold?.hold_id}/paid`, { payment_ref: 'pi_y', received: { amount_minor: 2000, currency: 'GBP' } })).status).toBe(200);
+    expect(await book()).toMatchObject({ ok: true });
   });
 });

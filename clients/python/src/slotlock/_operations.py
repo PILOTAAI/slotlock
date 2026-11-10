@@ -498,6 +498,13 @@ OPERATIONS: dict[str, Operation] = {
         ("contact_ref",),
         ("dry_run",),
     ),
+    "slotlock_list_contacts": Operation(
+        "slotlock_list_contacts",
+        "GET",
+        "/v1/contacts",
+        (),
+        ("limit", "cursor"),
+    ),
     "slotlock_list_waitlist": Operation(
         "slotlock_list_waitlist",
         "GET",
@@ -544,6 +551,13 @@ OPERATIONS: dict[str, Operation] = {
         "slotlock_put_source_busy",
         "PUT",
         "/v1/resources/{resource_id}/coverage/{source}/busy",
+        ("resource_id", "source"),
+        (),
+    ),
+    "slotlock_report_coverage_conflict": Operation(
+        "slotlock_report_coverage_conflict",
+        "POST",
+        "/v1/resources/{resource_id}/coverage/{source}/conflicts",
         ("resource_id", "source"),
         (),
     ),
@@ -1082,6 +1096,8 @@ class Operations(Transport):
         slots: list[dict[str, Any]],
         idempotency_key: str,
         ttl_seconds: int | None = None,
+        payment_required: bool | None = None,
+        payment: dict[str, Any] | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Hold candidate slots.
@@ -1089,9 +1105,11 @@ class Operations(Transport):
         Hold up to five candidate slots for a short time (30-900 seconds) while a person chooses,
         as alternatives in one group: each free one is held, the others are listed with why not.
         Book one by passing its hold_id to slotlock_create_event, which releases the rest;
-        unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at
-        once. A candidate refused for its time comes with alternatives (the earliest free times of
-        its length). slotlock_confirm_slot books a held time.
+        unbooked holds expire on their own. With payment_required, a hold is booked only once the
+        system you book for records its payment (the person pays there): booking it before then
+        answers payment_required, so send the person to pay and try again. A hold is yours alone,
+        and you may have 20 live at once. A candidate refused for its time comes with alternatives
+        (the earliest free times of its length). slotlock_confirm_slot books a held time.
 
         Args:
             dry_run: Check the write without making it: it runs with every check, the database's
@@ -1102,6 +1120,10 @@ class Operations(Transport):
         values: dict[str, Any] = {"slots": slots, "idempotency_key": idempotency_key}
         if ttl_seconds is not None:
             values["ttl_seconds"] = ttl_seconds
+        if payment_required is not None:
+            values["payment_required"] = payment_required
+        if payment is not None:
+            values["payment"] = payment
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_hold_slots", values)
@@ -2387,6 +2409,7 @@ class Operations(Transport):
         idempotency_key: str | None = None,
         buffer_after_minutes: int | None = None,
         payment_required: bool | None = None,
+        payment: dict[str, Any] | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Hold time.
@@ -2395,11 +2418,12 @@ class Operations(Transport):
         every other booking until it expires (the database clock, ttl_seconds from now), is
         confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and
         a confirmed hold keeps it. With payment_required (ttl_seconds at most 1800), it cannot be
-        confirmed until slotlock_mark_hold_paid records the payment: Slotlock records payment
-        state and never moves money. A taken window answers 409 overlap. With an idempotency key
-        (the Idempotency-Key header or idempotency_key), a retry answers the hold the first
-        request made, until that hold would have expired, is released or is confirmed; the same
-        key with another request is 422 idempotency_conflict.
+        confirmed until slotlock_mark_hold_paid records the payment, which must be at least
+        payment (amount_minor in the minor unit of its currency, and the currency) when given:
+        Slotlock records payment state and never moves money. A taken window answers 409 overlap.
+        With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers
+        the hold the first request made, until that hold would have expired, is released or is
+        confirmed; the same key with another request is 422 idempotency_conflict.
 
         Args:
             idempotency_key: A retry identity, also accepted as the Idempotency-Key header: the
@@ -2424,6 +2448,8 @@ class Operations(Transport):
             values["buffer_after_minutes"] = buffer_after_minutes
         if payment_required is not None:
             values["payment_required"] = payment_required
+        if payment is not None:
+            values["payment"] = payment
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_acquire_hold", values)
@@ -2499,6 +2525,7 @@ class Operations(Transport):
         hold_id: str,
         *,
         payment_ref: str,
+        received: dict[str, Any] | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Record a hold as paid.
@@ -2506,10 +2533,12 @@ class Operations(Transport):
         Record that a hold made with payment_required is paid, by the payment's reference at your
         processor (a Stripe PaymentIntent id, say), once you have verified it: the hold may then
         be confirmed. Slotlock records payment state and never moves money. The same reference
-        again answers the same hold (replayed: true); another answers 409 payment_conflict. The
-        feed says so (hold.paid). A hold that does not wait for payment answers 409
-        payment_not_required; one that expired, 409 hold_expired (refund the payment: its time may
-        be someone else's); a confirmed, released or unknown one, 404 hold_not_found.
+        again answers the same hold (replayed: true); another answers 409 payment_conflict. When
+        the hold names its payment, received must be at least that amount in that currency (409
+        payment_amount_mismatch). The feed says so (hold.paid). A hold that does not wait for
+        payment answers 409 payment_not_required; one that expired, 409 hold_expired (refund the
+        payment: its time may be someone else's); a confirmed, released or unknown one, 404
+        hold_not_found.
 
         Args:
             dry_run: Check the write without making it: it runs with every check, the database's
@@ -2518,6 +2547,8 @@ class Operations(Transport):
             refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"hold_id": hold_id, "payment_ref": payment_ref}
+        if received is not None:
+            values["received"] = received
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_mark_hold_paid", values)
@@ -2546,6 +2577,7 @@ class Operations(Transport):
         local_start: str | None = None,
         contact_ref: str | None = None,
         notify: bool | None = None,
+        reminder_minutes: list[int] | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Book or move a reservation.
@@ -2561,6 +2593,8 @@ class Operations(Transport):
         (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise.
         contact_ref names whom to tell about it (slotlock_put_contact) and notify: false says to
         tell no one; both are on the feed with each change, as sent with each revision.
+        reminder_minutes (up to five, distinct) puts reminder.due on the feed that long before its
+        start, once each, and again if it moves.
 
         Args:
             dry_run: Check the write without making it: it runs with every check, the database's
@@ -2587,6 +2621,8 @@ class Operations(Transport):
             values["contact_ref"] = contact_ref
         if notify is not None:
             values["notify"] = notify
+        if reminder_minutes is not None:
+            values["reminder_minutes"] = reminder_minutes
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_put_reservation", values)
@@ -2742,6 +2778,24 @@ class Operations(Transport):
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_delete_contact", values)
+
+    def list_contacts(
+        self,
+        *,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """List contacts.
+
+        The people the tenant keeps to tell about bookings, by reference, a page at a time: pass
+        next_cursor as cursor for the next page, until it is null.
+        """
+        values: dict[str, Any] = {}
+        if limit is not None:
+            values["limit"] = limit
+        if cursor is not None:
+            values["cursor"] = cursor
+        return self.call("slotlock_list_contacts", values)
 
     def list_waitlist(
         self,
@@ -2961,6 +3015,47 @@ class Operations(Transport):
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_put_source_busy", values)
+
+    def report_coverage_conflict(
+        self,
+        resource_id: str,
+        source: str,
+        *,
+        reason: str,
+        reservation_ref: str | None = None,
+        event_id: str | None = None,
+        calendar_start: str | None = None,
+        calendar_end: str | None = None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Report a booking changed in a calendar.
+
+        For a calendar sync that writes bookings to a calendar: report that one (by
+        reservation_ref or event_id) was changed (changed_in_calendar, with where the calendar now
+        has it) or removed (removed_from_calendar) there. It is put on the change feed as
+        coverage.conflict, named by the source's source_id, with the booking and the calendar's
+        times; the booking is left as it is, for someone to decide. 404 coverage_not_found for a
+        source that has not recorded coverage of the resource; reservation_not_found or
+        event_not_found for a booking not on it.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id, "source": source, "reason": reason}
+        if reservation_ref is not None:
+            values["reservation_ref"] = reservation_ref
+        if event_id is not None:
+            values["event_id"] = event_id
+        if calendar_start is not None:
+            values["calendar_start"] = calendar_start
+        if calendar_end is not None:
+            values["calendar_end"] = calendar_end
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_report_coverage_conflict", values)
 
     def get_coverage(self, resource_id: str) -> dict[str, Any]:
         """A resource's coverage and its health.

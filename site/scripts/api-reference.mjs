@@ -66,6 +66,7 @@ export const GROUPS = [
       'slotlock_record_coverage_failure',
       'slotlock_delete_coverage',
       'slotlock_put_source_busy',
+      'slotlock_report_coverage_conflict',
     ],
   },
   {
@@ -121,7 +122,7 @@ export const GROUPS = [
   },
   {
     name: 'Contacts',
-    operations: ['slotlock_put_contact', 'slotlock_get_contact', 'slotlock_delete_contact'],
+    operations: ['slotlock_put_contact', 'slotlock_get_contact', 'slotlock_list_contacts', 'slotlock_delete_contact'],
   },
   {
     name: 'Changes and webhooks',

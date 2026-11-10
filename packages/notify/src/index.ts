@@ -22,7 +22,10 @@ export {
   createPostgresLedger,
   recipientDigest,
 } from './ledger.js';
-export { type HandleResult, type NotifierOptions, type NotifyTenant, contactRecipients, createNotifier } from './notifier.js';
+export { type HandleResult, type Notifier, type NotifierOptions, type NotifyTenant, contactRecipients, createNotifier } from './notifier.js';
+export { type NotifyHttpOptions, createNotifyHttpHandler } from './http.js';
+export { type SealKeys, open, parseSealKeys, seal } from './seal.js';
+export { serveFetchHandler } from './node-http.js';
 export {
   SLOTLOCK_CHANGE_TYPE_PREFIX,
   SlotlockApiError,

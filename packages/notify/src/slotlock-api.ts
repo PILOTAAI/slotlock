@@ -65,6 +65,10 @@ export interface SlotlockNotifyApi {
   /** Null when there is none (cancelled). */
   getEvent(id: string): Promise<SlotlockEvent | null>;
   getResource(id: string): Promise<SlotlockResource | null>;
+  /** Up to `limit` of the tenant's resources. */
+  listResources(limit?: number): Promise<SlotlockResource[]>;
+  /** A resource's events that meet a window, every page (up to 50). */
+  listEvents(resourceId: string, window: { start: Date; end: Date }): Promise<SlotlockEvent[]>;
 }
 
 /** Slotlock at `baseUrl` (its REST root, without /v1), as the key's tenant. */
@@ -99,6 +103,38 @@ export function createSlotlockNotifyApi(options: { baseUrl: string; apiKey: stri
     },
     async getResource(id) {
       return ((await get(`/v1/resources/${encodeURIComponent(id)}`))?.resource as SlotlockResource | undefined) ?? null;
+    },
+    async listResources(limit = 500) {
+      const all: SlotlockResource[] = [];
+      let cursor: string | null = null;
+      for (let page = 0; page < 50 && all.length < limit; page++) {
+        const body = (await get(`/v1/resources?${new URLSearchParams({ limit: '100', ...(cursor ? { cursor } : {}) })}`)) as {
+          resources?: SlotlockResource[];
+          next_cursor?: string | null;
+        } | null;
+        all.push(...(body?.resources ?? []));
+        cursor = body?.next_cursor ?? null;
+        if (!cursor) break;
+      }
+      return all.slice(0, limit);
+    },
+    async listEvents(resourceId, window) {
+      const all: SlotlockEvent[] = [];
+      let cursor: string | null = null;
+      for (let page = 0; page < 50; page++) {
+        const query = new URLSearchParams({
+          resource_id: resourceId,
+          start: window.start.toISOString(),
+          end: window.end.toISOString(),
+          limit: '100',
+          ...(cursor ? { cursor } : {}),
+        });
+        const body = (await get(`/v1/tenant/events?${query}`)) as { events?: SlotlockEvent[]; next_cursor?: string | null } | null;
+        all.push(...(body?.events ?? []));
+        cursor = body?.next_cursor ?? null;
+        if (!cursor) break;
+      }
+      return all;
     },
   };
 }

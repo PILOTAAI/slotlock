@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type SlotlockAgentPrincipal, createSlotlockAgentServer } from '../../../src/agent-server.js';
 import { createSlotlockStoreAgentBackend, createSlotlockStoreApplicationBackend } from '../../../src/agent-store-backend.js';
 import { type SlotlockStore, createSlotlockStore } from '../../../src/store.js';
-import { createStripePayments, verifyStripeSignature } from './index.js';
+import { createPaymentsHttpHandler, createStripePayments, verifyStripeSignature } from './index.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
 const BASE = 'http://localhost/slotlock';
@@ -100,14 +100,28 @@ describe.skipIf(!url)('@slotlock/payments-stripe with Slotlock (real Postgres)',
     const at = (hour: number) => new Date(day + hour * HOUR).toISOString();
     const room = ((await call('POST', '/v1/resources', { external_ref: 'room-pay', timezone: 'UTC' })).body.resource as { id: string }).id;
     const hold = (start: number) =>
-      call('POST', '/v1/holds', { resource_id: room, start: at(start), end: at(start + 1), ttl_seconds: 900, payment_required: true }).then(
+      call('POST', '/v1/holds', {
+        resource_id: room,
+        start: at(start),
+        end: at(start + 1),
+        ttl_seconds: 900,
+        payment_required: true,
+        payment: { amount_minor: 4500, currency: 'GBP' },
+      }).then(
         (answer) => (answer.body.hold as { id: string }).id,
       );
 
     const held = await hold(9);
-    intents.set('pi_ok', { object: 'payment_intent', id: 'pi_ok', status: 'processing', metadata: payments.metadataFor(held) });
+    const paying = { object: 'payment_intent', amount_received: 4500, currency: 'gbp', metadata: payments.metadataFor(held) };
+    intents.set('pi_ok', { ...paying, id: 'pi_ok', status: 'processing' });
     expect(await payments.confirmPaymentIntent('pi_ok')).toEqual({ status: 'not_paid', reason: 'not_succeeded' });
     expect((await call('POST', `/v1/holds/${held}/confirm`, {})).body).toMatchObject({ error: { code: 'payment_required' } });
+
+    // Less than the hold asks for, or in another currency: refused, and refunded.
+    intents.set('pi_cheap', { ...paying, id: 'pi_cheap', status: 'succeeded', amount_received: 100 });
+    expect(await payments.confirmPaymentIntent('pi_cheap')).toMatchObject({ status: 'refused', code: 'payment_amount_mismatch', refunded: true });
+    intents.set('pi_euro', { ...paying, id: 'pi_euro', status: 'succeeded', currency: 'eur' });
+    expect(await payments.confirmPaymentIntent('pi_euro')).toMatchObject({ status: 'refused', code: 'payment_amount_mismatch' });
 
     // Stripe says it succeeded: the webhook is read back from Stripe, and the hold marked paid.
     intents.set('pi_ok', { ...intents.get('pi_ok'), status: 'succeeded' });
@@ -119,6 +133,10 @@ describe.skipIf(!url)('@slotlock/payments-stripe with Slotlock (real Postgres)',
       replayed: false,
     });
     expect(await payments.confirmPaymentIntent('pi_ok')).toMatchObject({ status: 'paid', replayed: true });
+    expect((await call('GET', `/v1/holds/${held}`)).body.hold).toMatchObject({
+      payment_amount: { amount_minor: 4500, currency: 'GBP' },
+      paid_amount: { amount_minor: 4500, currency: 'GBP' },
+    });
     expect((await call('POST', `/v1/holds/${held}/confirm`, {})).status).toBe(200);
     await expect(payments.handleWebhook({ payload, signatureHeader: signed(payload, undefined, 'whsec_x'), webhookSecret: SECRET })).rejects.toThrow();
     expect(
@@ -128,7 +146,7 @@ describe.skipIf(!url)('@slotlock/payments-stripe with Slotlock (real Postgres)',
     // Paid after the hold lapsed: refused, and refunded.
     const lapsed = await hold(13);
     await sql`UPDATE slotlock.reservations SET expires_at = statement_timestamp() - interval '1 second' WHERE id = ${lapsed}`;
-    intents.set('pi_late', { object: 'payment_intent', id: 'pi_late', status: 'succeeded', metadata: payments.metadataFor(lapsed) });
+    intents.set('pi_late', { ...paying, id: 'pi_late', status: 'succeeded', metadata: payments.metadataFor(lapsed) });
     expect(await payments.confirmPaymentIntent('pi_late')).toEqual({
       status: 'refused',
       holdId: lapsed,
@@ -136,7 +154,24 @@ describe.skipIf(!url)('@slotlock/payments-stripe with Slotlock (real Postgres)',
       code: 'hold_expired',
       refunded: true,
     });
-    expect(refunds).toEqual(['pi_late']);
+    expect(refunds).toEqual(['pi_cheap', 'pi_euro', 'pi_late']);
+
+    // Through its HTTP surface: one URL per tenant, each checked with that tenant's secret.
+    const http = createPaymentsHttpHandler({
+      slotlockUrl: BASE,
+      fetch: send,
+      tenant: async (ref) => (ref === tenantRef ? { stripeSecretKey: 'sk_test_tenant', webhookSecret: SECRET, slotlockApiKey: 'admin' } : null),
+    });
+    const viaHttp = await hold(15);
+    intents.set('pi_http', { ...paying, id: 'pi_http', status: 'succeeded', metadata: payments.metadataFor(viaHttp) });
+    const delivery = JSON.stringify({ type: 'payment_intent.succeeded', data: { object: { id: 'pi_http' } } });
+    const post = (path: string, signature: string) =>
+      http(new Request(`https://payments.example${path}`, { method: 'POST', headers: { 'stripe-signature': signature }, body: delivery }));
+    expect((await post(`/stripe/webhook/${encodeURIComponent(tenantRef)}`, signed(delivery, undefined, 'whsec_other'))).status).toBe(400);
+    expect((await post('/stripe/webhook/someone-else', signed(delivery))).status).toBe(400);
+    const accepted = await post(`/stripe/webhook/${encodeURIComponent(tenantRef)}`, signed(delivery));
+    expect(await accepted.json()).toEqual({ status: 'paid' });
+    expect((await call('POST', `/v1/holds/${viaHttp}/confirm`, {})).status).toBe(200);
 
     // A PaymentIntent for no hold, or none at all.
     intents.set('pi_other', { object: 'payment_intent', id: 'pi_other', status: 'succeeded', metadata: {} });

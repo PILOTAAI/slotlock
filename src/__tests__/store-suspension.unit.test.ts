@@ -30,6 +30,7 @@ const READS = [
   'readUsage',
   'getHold',
   'getContact',
+  'listContacts',
   'listHolds',
   'listAgenda',
   'listRecentChanges',

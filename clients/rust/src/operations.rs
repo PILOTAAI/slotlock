@@ -499,6 +499,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &["dry_run"],
     },
     Operation {
+        name: "slotlock_list_contacts",
+        method: "GET",
+        path: "/v1/contacts",
+        path_params: &[],
+        query: &["limit", "cursor"],
+    },
+    Operation {
         name: "slotlock_list_waitlist",
         method: "GET",
         path: "/v1/waitlist",
@@ -544,6 +551,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         name: "slotlock_put_source_busy",
         method: "PUT",
         path: "/v1/resources/{resource_id}/coverage/{source}/busy",
+        path_params: &["resource_id", "source"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_report_coverage_conflict",
+        method: "POST",
+        path: "/v1/resources/{resource_id}/coverage/{source}/conflicts",
         path_params: &["resource_id", "source"],
         query: &[],
     },
@@ -968,6 +982,10 @@ pub struct HoldSlotsInput {
     pub idempotency_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl_seconds: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payment_required: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payment: Option<Value>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -1695,6 +1713,8 @@ pub struct AcquireHoldInput {
     pub buffer_after_minutes: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payment_required: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payment: Option<Value>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -1748,6 +1768,8 @@ pub struct ConfirmHoldInput {
 pub struct MarkHoldPaidInput {
     pub hold_id: String,
     pub payment_ref: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub received: Option<Value>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -1782,6 +1804,8 @@ pub struct PutReservationInput {
     pub contact_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notify: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reminder_minutes: Option<Vec<i64>>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -1874,6 +1898,15 @@ pub struct DeleteContactInput {
     /// alternatives included. Charged as a read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::list_contacts`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ListContactsInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
 /// The arguments of [`Client::list_waitlist`].
@@ -1977,6 +2010,28 @@ pub struct PutSourceBusyInput {
     pub end: String,
     pub revision: i64,
     pub busy: Vec<Value>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::report_coverage_conflict`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ReportCoverageConflictInput {
+    pub resource_id: String,
+    pub source: String,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reservation_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calendar_start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calendar_end: Option<String>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -2454,9 +2509,11 @@ impl Client {
     /// Hold up to five candidate slots for a short time (30-900 seconds) while a person chooses,
     /// as alternatives in one group: each free one is held, the others are listed with why not.
     /// Book one by passing its hold_id to slotlock_create_event, which releases the rest;
-    /// unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at
-    /// once. A candidate refused for its time comes with alternatives (the earliest free times of
-    /// its length). slotlock_confirm_slot books a held time.
+    /// unbooked holds expire on their own. With payment_required, a hold is booked only once the
+    /// system you book for records its payment (the person pays there): booking it before then
+    /// answers payment_required, so send the person to pay and try again. A hold is yours alone,
+    /// and you may have 20 live at once. A candidate refused for its time comes with alternatives
+    /// (the earliest free times of its length). slotlock_confirm_slot books a held time.
     pub fn hold_slots(&self, input: &HoldSlotsInput) -> Result<Value, Error> {
         self.call("slotlock_hold_slots", serde_json::to_value(input)?)
     }
@@ -2952,11 +3009,12 @@ impl Client {
     /// every other booking until it expires (the database clock, ttl_seconds from now), is
     /// confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and
     /// a confirmed hold keeps it. With payment_required (ttl_seconds at most 1800), it cannot be
-    /// confirmed until slotlock_mark_hold_paid records the payment: Slotlock records payment
-    /// state and never moves money. A taken window answers 409 overlap. With an idempotency key
-    /// (the Idempotency-Key header or idempotency_key), a retry answers the hold the first
-    /// request made, until that hold would have expired, is released or is confirmed; the same
-    /// key with another request is 422 idempotency_conflict.
+    /// confirmed until slotlock_mark_hold_paid records the payment, which must be at least
+    /// payment (amount_minor in the minor unit of its currency, and the currency) when given:
+    /// Slotlock records payment state and never moves money. A taken window answers 409 overlap.
+    /// With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers
+    /// the hold the first request made, until that hold would have expired, is released or is
+    /// confirmed; the same key with another request is 422 idempotency_conflict.
     pub fn acquire_hold(&self, input: &AcquireHoldInput) -> Result<Value, Error> {
         self.call("slotlock_acquire_hold", serde_json::to_value(input)?)
     }
@@ -3002,10 +3060,12 @@ impl Client {
     /// Record that a hold made with payment_required is paid, by the payment's reference at your
     /// processor (a Stripe PaymentIntent id, say), once you have verified it: the hold may then
     /// be confirmed. Slotlock records payment state and never moves money. The same reference
-    /// again answers the same hold (replayed: true); another answers 409 payment_conflict. The
-    /// feed says so (hold.paid). A hold that does not wait for payment answers 409
-    /// payment_not_required; one that expired, 409 hold_expired (refund the payment: its time may
-    /// be someone else's); a confirmed, released or unknown one, 404 hold_not_found.
+    /// again answers the same hold (replayed: true); another answers 409 payment_conflict. When
+    /// the hold names its payment, received must be at least that amount in that currency (409
+    /// payment_amount_mismatch). The feed says so (hold.paid). A hold that does not wait for
+    /// payment answers 409 payment_not_required; one that expired, 409 hold_expired (refund the
+    /// payment: its time may be someone else's); a confirmed, released or unknown one, 404
+    /// hold_not_found.
     pub fn mark_hold_paid(&self, input: &MarkHoldPaidInput) -> Result<Value, Error> {
         self.call("slotlock_mark_hold_paid", serde_json::to_value(input)?)
     }
@@ -3032,6 +3092,8 @@ impl Client {
     /// (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise.
     /// contact_ref names whom to tell about it (slotlock_put_contact) and notify: false says to
     /// tell no one; both are on the feed with each change, as sent with each revision.
+    /// reminder_minutes (up to five, distinct) puts reminder.due on the feed that long before its
+    /// start, once each, and again if it moves.
     pub fn put_reservation(&self, input: &PutReservationInput) -> Result<Value, Error> {
         self.call("slotlock_put_reservation", serde_json::to_value(input)?)
     }
@@ -3099,6 +3161,14 @@ impl Client {
     /// never the person.
     pub fn delete_contact(&self, input: &DeleteContactInput) -> Result<Value, Error> {
         self.call("slotlock_delete_contact", serde_json::to_value(input)?)
+    }
+
+    /// List contacts.
+    ///
+    /// The people the tenant keeps to tell about bookings, by reference, a page at a time: pass
+    /// next_cursor as cursor for the next page, until it is null.
+    pub fn list_contacts(&self, input: &ListContactsInput) -> Result<Value, Error> {
+        self.call("slotlock_list_contacts", serde_json::to_value(input)?)
     }
 
     /// List the waitlist.
@@ -3180,6 +3250,19 @@ impl Client {
     /// true).
     pub fn put_source_busy(&self, input: &PutSourceBusyInput) -> Result<Value, Error> {
         self.call("slotlock_put_source_busy", serde_json::to_value(input)?)
+    }
+
+    /// Report a booking changed in a calendar.
+    ///
+    /// For a calendar sync that writes bookings to a calendar: report that one (by
+    /// reservation_ref or event_id) was changed (changed_in_calendar, with where the calendar now
+    /// has it) or removed (removed_from_calendar) there. It is put on the change feed as
+    /// coverage.conflict, named by the source's source_id, with the booking and the calendar's
+    /// times; the booking is left as it is, for someone to decide. 404 coverage_not_found for a
+    /// source that has not recorded coverage of the resource; reservation_not_found or
+    /// event_not_found for a booking not on it.
+    pub fn report_coverage_conflict(&self, input: &ReportCoverageConflictInput) -> Result<Value, Error> {
+        self.call("slotlock_report_coverage_conflict", serde_json::to_value(input)?)
     }
 
     /// A resource's coverage and its health.

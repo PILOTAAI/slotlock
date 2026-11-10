@@ -5,7 +5,13 @@ import { describe, expect, it } from 'vitest';
 import {
   PROVIDER_WINDOW_MS,
   ProviderError,
+  backoffMs,
   beginAuthorization,
+  createMemorySyncStore,
+  createSyncHttpHandler,
+  createSyncer,
+  readMicrosoftCalendarBusy,
+  retryAfterMs,
   exchangeCode,
   googleWriter,
   open,
@@ -57,11 +63,13 @@ describe('OAuth', () => {
     expect(url.origin + url.pathname).toBe('https://accounts.google.com/o/oauth2/v2/auth');
     expect(url.searchParams.get('code_challenge_method')).toBe('S256');
     expect(url.searchParams.get('state')).toBe(read.state);
-    expect(url.searchParams.get('scope')).toBe('https://www.googleapis.com/auth/calendar.freebusy');
+    expect(url.searchParams.get('scope')).toBe(
+      'https://www.googleapis.com/auth/calendar.calendarlist.readonly https://www.googleapis.com/auth/calendar.freebusy',
+    );
     expect(url.searchParams.get('code_challenge')).not.toBe(read.verifier);
     const write = new URL(beginAuthorization({ ...google, provider: 'microsoft', directory: 'org-1' }, { writeBack: true }).url);
     expect(write.pathname).toBe('/org-1/oauth2/v2.0/authorize');
-    expect(write.searchParams.get('scope')).toBe('offline_access Calendars.ReadWrite');
+    expect(write.searchParams.get('scope')).toBe('offline_access User.Read Calendars.ReadWrite');
   });
 
   it('exchanges the code with its verifier', async () => {
@@ -160,5 +168,106 @@ describe('writing back', () => {
       { start: at('2027-03-01T11:00:00Z'), end: at('2027-03-01T12:00:00Z') },
     ]);
     expect(withoutOwn(busy, [{ start: at('2027-03-01T08:00:00Z'), end: at('2027-03-01T13:00:00Z') }])).toEqual([]);
+  });
+});
+
+describe("Microsoft calendars and providers' limits", () => {
+  const window = { start: at('2027-03-01T00:00:00Z'), end: at('2027-03-02T00:00:00Z') };
+
+  it("reads one of the account's calendars, every page, times only", async () => {
+    const { send, calls } = fakeFetch((call) =>
+      call.url.includes('skiptoken')
+        ? json({ value: [{ showAs: 'oof', isCancelled: false, start: { dateTime: '2027-03-01T13:00:00.0000000' }, end: { dateTime: '2027-03-01T14:00:00.0000000' } }] })
+        : json({
+            value: [
+              { showAs: 'busy', isCancelled: false, start: { dateTime: '2027-03-01T09:00:00.0000000' }, end: { dateTime: '2027-03-01T10:00:00.0000000' } },
+              { showAs: 'busy', isCancelled: true, start: { dateTime: '2027-03-01T10:00:00.0000000' }, end: { dateTime: '2027-03-01T11:00:00.0000000' } },
+              { showAs: 'free', isCancelled: false, start: { dateTime: '2027-03-01T11:00:00.0000000' }, end: { dateTime: '2027-03-01T12:00:00.0000000' } },
+            ],
+            '@odata.nextLink': 'https://graph.microsoft.com/v1.0/me/calendar/calendarView?$skiptoken=2',
+          }),
+    );
+    expect(await readMicrosoftCalendarBusy({ accessToken: 't', calendarId: 'primary', window, fetch: send })).toEqual([
+      { start: at('2027-03-01T09:00:00Z'), end: at('2027-03-01T10:00:00Z') },
+      { start: at('2027-03-01T13:00:00Z'), end: at('2027-03-01T14:00:00Z') },
+    ]);
+    expect(calls[0]?.url).toContain('/me/calendar/calendarView?');
+    expect(calls[0]?.url).toContain('%24select=start%2Cend%2CshowAs%2CisCancelled');
+    // A next link elsewhere than Graph is not followed.
+    const elsewhere = fakeFetch(() => json({ value: [], '@odata.nextLink': 'https://evil.example/steal' }));
+    await readMicrosoftCalendarBusy({ accessToken: 't', calendarId: 'AAMk1', window, fetch: elsewhere.send });
+    expect(elsewhere.calls).toHaveLength(1);
+    expect(elsewhere.calls[0]?.url).toContain('/me/calendars/AAMk1/calendarView?');
+    await expect(readMicrosoftBusy({ accessToken: 't', schedule: 'me', window, fetch: elsewhere.send })).rejects.toThrow('mailbox address');
+  });
+
+  it('waits as long as a provider asks, and backs off on its own otherwise', async () => {
+    expect(retryAfterMs('120')).toBe(120_000);
+    expect(retryAfterMs(new Date(Date.now() + 30_000).toUTCString())).toBeGreaterThan(20_000);
+    expect(retryAfterMs('soon')).toBeNull();
+    const slow = fakeFetch(() => new Response('{}', { status: 429, headers: { 'retry-after': '90' } }));
+    await expect(readGoogleBusy({ accessToken: 't', calendarId: 'primary', window, fetch: slow.send })).rejects.toMatchObject({ retryAfterMs: 90_000 });
+    expect([1, 2, 3, 20].map(backoffMs)).toEqual([60_000, 120_000, 240_000, 6 * 60 * 60 * 1_000]);
+  });
+});
+
+describe('the HTTP surface', () => {
+  const keys = parseSealKeys(`k1:${key()}`);
+  const setup = () => {
+    const store = createMemorySyncStore();
+    const { send } = fakeFetch(() => json({}));
+    const syncer = createSyncer({
+      store,
+      keys,
+      slotlockUrl: 'http://slotlock.test',
+      clients: { google: { provider: 'google', clientId: 'id', clientSecret: 'secret', redirectUri: 'https://sync.example/oauth/callback' } },
+      fetch: send,
+    });
+    const handler = createSyncHttpHandler({ syncer, store, adminToken: 'a'.repeat(40), linkSecret: 'l'.repeat(40), publicUrl: 'https://sync.example' });
+    const call = (method: string, path: string, body?: unknown, token = 'a'.repeat(40)) =>
+      handler(
+        new Request(`https://sync.example${path}`, {
+          method,
+          headers: { authorization: `Bearer ${token}`, ...(body ? { 'content-type': 'application/json' } : {}) },
+          ...(body ? { body: JSON.stringify(body) } : {}),
+        }),
+      );
+    return { store, handler, call };
+  };
+
+  it("keeps the operator's routes behind its token", async () => {
+    const { call } = setup();
+    expect((await call('PUT', '/v1/tenants/fleet', { api_key: 'slk_0123456789abcdef' }, 'wrong')).status).toBe(401);
+    expect((await call('PUT', '/v1/tenants/fleet', { api_key: 'slk_0123456789abcdef' })).status).toBe(200);
+    expect((await call('POST', '/v1/tenants/nobody/connect-links', { provider: 'google', write_back: true })).status).toBe(404);
+    expect(() => createSyncHttpHandler({ syncer: {} as never, store: {} as never, adminToken: 'short', linkSecret: 'l'.repeat(40), publicUrl: 'https://x' })).toThrow();
+  });
+
+  it('sends a person with a signed link to the provider, and refuses a changed or old link', async () => {
+    const { call, handler, store } = setup();
+    await call('PUT', '/v1/tenants/fleet', { api_key: 'slk_0123456789abcdef' });
+    const link = (await (await call('POST', '/v1/tenants/fleet/connect-links', { provider: 'google', write_back: false })).json()) as { url: string };
+    const followed = await handler(new Request(link.url));
+    expect(followed.status).toBe(302);
+    const provider = new URL(followed.headers.get('location') as string);
+    expect(provider.origin).toBe('https://accounts.google.com');
+    expect(provider.searchParams.get('redirect_uri')).toBe('https://sync.example/oauth/callback');
+    // The state is kept as a digest, used once.
+    const state = provider.searchParams.get('state') as string;
+    expect(await store.takeOAuthState(state, new Date())).toBeNull();
+    const tampered = link.url.replace(/link=([^.]+)\./, (_, payload: string) => `link=${payload.slice(0, -2)}AA.`);
+    expect((await handler(new Request(tampered))).status).toBe(400);
+    const page = await handler(new Request('https://sync.example/oauth/callback?state=unknown&code=c'));
+    expect(page.status).toBe(400);
+    expect(page.headers.get('content-security-policy')).toContain("default-src 'none'");
+    expect(page.headers.get('referrer-policy')).toBe('no-referrer');
+    const forged = await handler(
+      new Request(`https://sync.example/connections/${'0'.repeat(8)}-0000-4000-8000-${'0'.repeat(12)}/choose`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: 'expires=9999999999999&token=x&calendar_0=primary&resource_0=r',
+      }),
+    );
+    expect(forged.status).toBe(400);
   });
 });

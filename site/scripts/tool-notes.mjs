@@ -228,6 +228,7 @@ export const TOOL_ERRORS = {
     'hold_not_found',
     'hold_expired',
     'hold_mismatch',
+    'payment_required',
     'invalid_event',
     'owner_event_quota_exceeded',
     'owner_command_quota_exceeded',
@@ -276,6 +277,7 @@ export const TOOL_ERRORS = {
   slotlock_confirm_slot: [
     'hold_not_found',
     'hold_expired',
+    'payment_required',
     'holds_unavailable',
     'idempotency_conflict',
     'resource_not_found',
@@ -356,6 +358,10 @@ export const CONFIRMATION_ERRORS = [
  * no entry matches fails the build, so a new rule gets a sentence before it ships.
  */
 export const REFINEMENTS = [
+  {
+    matches: (text) => text.includes('value.payment === undefined || value.payment_required === true'),
+    note: () => '`payment` is given only with `payment_required: true`.',
+  },
   {
     matches: (text) => text.startsWith('selectsOrNames'),
     note: () =>

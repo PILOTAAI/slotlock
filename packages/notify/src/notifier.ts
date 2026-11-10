@@ -1,15 +1,25 @@
 // The notifier (RFC 0004 C2): reads a tenant's changes (polled, or delivered by webhook) and tells
-// the people they concern. A booking that names a contact tells them on the channels they agreed
-// to; an event tells its attendees by email; a reminder that came due (`reminder.due`, action
-// email) reminds them. `notify: false` on a booking or event tells no one. Each send is claimed in
-// the ledger under the change's id, its channel and its recipient before it is made, so it is made
-// once, however often the change is read.
+// the people they concern.
+//
+// - A booking that names a contact tells them when it is booked, moved and cancelled, and reminds
+//   them at its reminder_minutes, on the channels they agreed to.
+// - An event tells its attendees by email when it is booked, moved and cancelled, and reminds them
+//   when an email reminder comes due.
+// - `notify: false` on a booking or event tells no one.
+//
+// Each send is claimed in the ledger under the change's id, its channel and its recipient before it
+// is made, so it is made once, however often the change is read. A change older than `maxAgeMs`
+// (default a day) is not sent at all, nor a reminder for what has started: a notifier back from a
+// long stop, or one reading the feed from its start, never sends stale news. A feed cursor that
+// expired is dropped and the feed read again from what it keeps.
 import { type NotifyChannel, ChannelError } from './channels.js';
 import type { NotifyChannelKind, NotifyLedger, RememberedRecipient } from './ledger.js';
 import {
   type SlotlockChange,
   type SlotlockContact,
+  type SlotlockEvent,
   type SlotlockNotifyApi,
+  SlotlockApiError,
   createSlotlockNotifyApi,
 } from './slotlock-api.js';
 import {
@@ -47,11 +57,14 @@ export interface NotifierOptions {
   fetch?: typeof fetch;
   /** Tries of a send that failed (default 5). */
   maxAttempts?: number;
+  /** A change older than this is not sent (default a day). */
+  maxAgeMs?: number;
+  now?: () => Date;
 }
 
 export interface HandleResult {
   sent: number;
-  /** Already sent, being sent, opted out, or with no channel or sender for it. */
+  /** Already sent, being sent, stale, opted out, or with no channel or sender for it. */
   skipped: number;
   failed: number;
 }
@@ -74,11 +87,25 @@ export function contactRecipients(contact: SlotlockContact): Recipient[] {
 }
 
 const isTestTenant = (tenantRef: string) => tenantRef.endsWith('~test');
-
 const date = (value: unknown) => new Date(String(value));
+/** Attendees are kept until a day after their event ends. */
+const KEEP_AFTER_END_MS = 24 * 60 * 60 * 1_000;
+
+const attendeesOf = (event: Pick<SlotlockEvent, 'attendees'>): RememberedRecipient[] =>
+  event.attendees.map((attendee) => ({ address: attendee.address, name: attendee.name ?? null }));
 
 export function createNotifier(options: NotifierOptions) {
   const maxAttempts = options.maxAttempts ?? 5;
+  const maxAgeMs = options.maxAgeMs ?? 24 * 60 * 60 * 1_000;
+  const now = options.now ?? (() => new Date());
+  const apiFor = (tenant: NotifyTenant) =>
+    createSlotlockNotifyApi({ baseUrl: options.slotlockUrl, apiKey: tenant.apiKey, ...(options.fetch ? { fetch: options.fetch } : {}) });
+
+  async function remember(tenantRef: string, event: SlotlockEvent): Promise<void> {
+    const attendees = attendeesOf(event);
+    if (attendees.length === 0) return options.ledger.forgetRecipients(tenantRef, event.id);
+    await options.ledger.rememberRecipients(tenantRef, event.id, attendees, new Date(date(event.ends_at).getTime() + KEEP_AFTER_END_MS));
+  }
 
   async function messageFor(
     api: SlotlockNotifyApi,
@@ -89,9 +116,10 @@ export function createNotifier(options: NotifierOptions) {
     const data = change.data;
     if (data.notify === false) return null;
     const before = data.before as { start?: unknown; end?: unknown } | undefined;
-    const moved =
-      before !== undefined && (String(before.start) !== String(data.start) || String(before.end) !== String(data.end));
-    if (change.type.startsWith('reservation.')) {
+    const moved = before !== undefined && (String(before.start) !== String(data.start) || String(before.end) !== String(data.end));
+    // A booking's own: it names whom to tell.
+    const forBooking = change.type.startsWith('reservation.') || (change.type === 'reminder.due' && typeof data.reservation_id === 'string');
+    if (forBooking) {
       const kind: NotifyMessageKind | null =
         change.type === 'reservation.created'
           ? 'confirmed'
@@ -99,7 +127,9 @@ export function createNotifier(options: NotifierOptions) {
             ? 'rescheduled'
             : change.type === 'reservation.cancelled'
               ? 'cancelled'
-              : null;
+              : change.type === 'reminder.due'
+                ? 'reminder'
+                : null;
       if (!kind || typeof data.contact_ref !== 'string' || typeof data.resource_id !== 'string') return null;
       const contact = await api.getContact(data.contact_ref);
       if (!contact) return null;
@@ -114,19 +144,19 @@ export function createNotifier(options: NotifierOptions) {
     }
     const eventId = typeof data.event_id === 'string' ? data.event_id : typeof data.id === 'string' ? data.id : null;
     if (!eventId || tenant.notifyAttendees === false) return null;
-    const attendees = (event: { attendees: { address: string; name?: string | null }[] }): RememberedRecipient[] =>
-      event.attendees.map((attendee) => ({ address: attendee.address, name: attendee.name ?? null }));
+    const byEmail = (people: RememberedRecipient[]) =>
+      people.map((person) => ({ channel: 'email' as const, address: person.address, name: person.name, locale: null }));
     if (change.type === 'event.cancelled') {
       // The event is gone: tell those it had when last read, then forget them.
-      const remembered = await options.ledger.recallRecipients(tenantRef, eventId);
       return {
         kind: 'cancelled',
-        recipients: remembered.map((person) => ({ channel: 'email' as const, address: person.address, name: person.name, locale: null })),
+        recipients: byEmail(await options.ledger.recallRecipients(tenantRef, eventId)),
         what: 'Your booking',
         zone: typeof data.timezone === 'string' ? data.timezone : 'UTC',
         reference: eventId,
       };
     }
+    if (change.type !== 'event.updated' && change.type !== 'event.created' && change.type !== 'reminder.due') return null;
     const kind: NotifyMessageKind | null =
       change.type === 'event.created'
         ? 'confirmed'
@@ -135,19 +165,19 @@ export function createNotifier(options: NotifierOptions) {
           : change.type === 'reminder.due' && data.action === 'email'
             ? 'reminder'
             : null;
-    if (change.type !== 'event.updated' && change.type !== 'event.created' && change.type !== 'reminder.due') return null;
     const event = await api.getEvent(eventId);
     if (!event) return null;
     // Kept for a cancellation, which no longer reads the event.
-    await options.ledger.rememberRecipients(tenantRef, eventId, attendees(event));
+    await remember(tenantRef, event);
     if (!kind) return null;
-    return {
-      kind,
-      recipients: attendees(event).map((person) => ({ channel: 'email' as const, address: person.address, name: person.name, locale: null })),
-      what: event.title ?? 'Your booking',
-      zone: event.timezone,
-      reference: eventId,
-    };
+    return { kind, recipients: byEmail(attendeesOf(event)), what: event.title ?? 'Your booking', zone: event.timezone, reference: eventId };
+  }
+
+  /** Whether a change is too old to send: older than maxAgeMs, or a reminder for what has started. */
+  function stale(change: SlotlockChange): boolean {
+    const at = Date.parse(change.time);
+    if (Number.isFinite(at) && now().getTime() - at > maxAgeMs) return true;
+    return change.type === 'reminder.due' && date(change.data.start).getTime() <= now().getTime();
   }
 
   /** Tell the people one change concerns. */
@@ -155,8 +185,16 @@ export function createNotifier(options: NotifierOptions) {
     const result: HandleResult = { sent: 0, skipped: 0, failed: 0 };
     const tenant = await options.tenant(tenantRef);
     if (!tenant) return result;
-    const api = createSlotlockNotifyApi({ baseUrl: options.slotlockUrl, apiKey: tenant.apiKey, ...(options.fetch ? { fetch: options.fetch } : {}) });
-    const message = await messageFor(api, tenantRef, tenant, change);
+    if (stale(change)) {
+      // Still kept for a later cancellation, though too old to announce.
+      if ((change.type === 'event.created' || change.type === 'event.updated') && typeof change.data.id === 'string') {
+        const event = await apiFor(tenant).getEvent(change.data.id);
+        if (event) await remember(tenantRef, event);
+      }
+      result.skipped += 1;
+      return result;
+    }
+    const message = await messageFor(apiFor(tenant), tenantRef, tenant, change);
     if (!message) return result;
     const channels = isTestTenant(tenantRef) ? options.testChannels : options.channels;
     const template = { ...DEFAULT_TEMPLATES, ...tenant.templates }[message.kind];
@@ -211,15 +249,25 @@ export function createNotifier(options: NotifierOptions) {
     /**
      * Read a tenant's feed on from where the ledger says it stopped, a page at a time, and handle
      * each change. A page that fails is read again next time; its sends already made are skipped.
+     * A cursor the feed no longer keeps (410: stopped past its 30 days) is dropped, and the feed
+     * read from what it keeps, stale changes skipped; `gap` says it happened.
      */
-    async poll(tenantRef: string, pages = 20): Promise<HandleResult> {
-      const total: HandleResult = { sent: 0, skipped: 0, failed: 0 };
+    async poll(tenantRef: string, pages = 20): Promise<HandleResult & { gap: boolean }> {
+      const total = { sent: 0, skipped: 0, failed: 0, gap: false };
       const tenant = await options.tenant(tenantRef);
       if (!tenant) return total;
-      const api = createSlotlockNotifyApi({ baseUrl: options.slotlockUrl, apiKey: tenant.apiKey, ...(options.fetch ? { fetch: options.fetch } : {}) });
+      const api = apiFor(tenant);
       let cursor = await options.ledger.getCursor(tenantRef);
       for (let page = 0; page < pages; page++) {
-        const read = await api.listChanges(cursor);
+        let read: Awaited<ReturnType<SlotlockNotifyApi['listChanges']>>;
+        try {
+          read = await api.listChanges(cursor);
+        } catch (error) {
+          if (!(error instanceof SlotlockApiError) || error.status !== 410 || cursor === null) throw error;
+          cursor = null;
+          total.gap = true;
+          continue;
+        }
         for (const change of read.changes) {
           const done = await handle(tenantRef, change);
           total.sent += done.sent;
@@ -232,5 +280,26 @@ export function createNotifier(options: NotifierOptions) {
       }
       return total;
     },
+
+    /**
+     * Keep the attendees of each event to come (the next `days`, default 30) for its cancellation,
+     * so events made before the notifier started, or while it was away, reach theirs too.
+     */
+    async rememberUpcoming(tenantRef: string, days = 30): Promise<number> {
+      const tenant = await options.tenant(tenantRef);
+      if (!tenant || tenant.notifyAttendees === false) return 0;
+      const api = apiFor(tenant);
+      const window = { start: now(), end: new Date(now().getTime() + days * 24 * 60 * 60 * 1_000) };
+      let kept = 0;
+      for (const resource of await api.listResources()) {
+        for (const event of await api.listEvents(resource.id, window)) {
+          await remember(tenantRef, event);
+          kept += 1;
+        }
+      }
+      return kept;
+    },
   };
 }
+
+export type Notifier = ReturnType<typeof createNotifier>;

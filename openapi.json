@@ -2019,7 +2019,7 @@
       "post": {
         "operationId": "slotlock_hold_slots",
         "summary": "Hold candidate slots",
-        "description": "Hold up to five candidate slots for a short time (30-900 seconds) while a person chooses, as alternatives in one group: each free one is held, the others are listed with why not. Book one by passing its hold_id to slotlock_create_event, which releases the rest; unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at once. A candidate refused for its time comes with alternatives (the earliest free times of its length). slotlock_confirm_slot books a held time.",
+        "description": "Hold up to five candidate slots for a short time (30-900 seconds) while a person chooses, as alternatives in one group: each free one is held, the others are listed with why not. Book one by passing its hold_id to slotlock_create_event, which releases the rest; unbooked holds expire on their own. With payment_required, a hold is booked only once the system you book for records its payment (the person pays there): booking it before then answers payment_required, so send the person to pay and try again. A hold is yours alone, and you may have 20 live at once. A candidate refused for its time comes with alternatives (the earliest free times of its length). slotlock_confirm_slot books a held time.",
         "tags": [
           "Agent tools"
         ],
@@ -2070,6 +2070,28 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 200
+                  },
+                  "payment_required": {
+                    "type": "boolean"
+                  },
+                  "payment": {
+                    "type": "object",
+                    "properties": {
+                      "amount_minor": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1000000000000
+                      },
+                      "currency": {
+                        "type": "string",
+                        "pattern": "^[A-Z]{3}$"
+                      }
+                    },
+                    "required": [
+                      "amount_minor",
+                      "currency"
+                    ],
+                    "additionalProperties": false
                   },
                   "dry_run": {
                     "type": "boolean",
@@ -2136,6 +2158,36 @@
                           "expires_at": {
                             "type": "string",
                             "format": "date-time"
+                          },
+                          "payment_required": {
+                            "type": "boolean",
+                            "const": true
+                          },
+                          "payment_amount": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "amount_minor": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "currency": {
+                                    "type": "string",
+                                    "pattern": "^[A-Z]{3}$"
+                                  }
+                                },
+                                "required": [
+                                  "amount_minor",
+                                  "currency"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -17393,7 +17445,7 @@
       "post": {
         "operationId": "slotlock_acquire_hold",
         "summary": "Hold time",
-        "description": "Occupy a window without booking it, for example while a customer pays. The hold blocks every other booking until it expires (the database clock, ttl_seconds from now), is confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and a confirmed hold keeps it. With payment_required (ttl_seconds at most 1800), it cannot be confirmed until slotlock_mark_hold_paid records the payment: Slotlock records payment state and never moves money. A taken window answers 409 overlap. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the hold the first request made, until that hold would have expired, is released or is confirmed; the same key with another request is 422 idempotency_conflict.",
+        "description": "Occupy a window without booking it, for example while a customer pays. The hold blocks every other booking until it expires (the database clock, ttl_seconds from now), is confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and a confirmed hold keeps it. With payment_required (ttl_seconds at most 1800), it cannot be confirmed until slotlock_mark_hold_paid records the payment, which must be at least payment (amount_minor in the minor unit of its currency, and the currency) when given: Slotlock records payment state and never moves money. A taken window answers 409 overlap. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the hold the first request made, until that hold would have expired, is released or is confirmed; the same key with another request is 422 idempotency_conflict.",
         "tags": [
           "Application"
         ],
@@ -17441,6 +17493,25 @@
                   },
                   "payment_required": {
                     "type": "boolean"
+                  },
+                  "payment": {
+                    "type": "object",
+                    "properties": {
+                      "amount_minor": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1000000000000
+                      },
+                      "currency": {
+                        "type": "string",
+                        "pattern": "^[A-Z]{3}$"
+                      }
+                    },
+                    "required": [
+                      "amount_minor",
+                      "currency"
+                    ],
+                    "additionalProperties": false
                   },
                   "dry_run": {
                     "type": "boolean",
@@ -17535,6 +17606,58 @@
                             {
                               "type": "string",
                               "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "payment_amount": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "amount_minor": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1000000000000
+                                },
+                                "currency": {
+                                  "type": "string",
+                                  "pattern": "^[A-Z]{3}$"
+                                }
+                              },
+                              "required": [
+                                "amount_minor",
+                                "currency"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "paid_amount": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "amount_minor": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1000000000000
+                                },
+                                "currency": {
+                                  "type": "string",
+                                  "pattern": "^[A-Z]{3}$"
+                                }
+                              },
+                              "required": [
+                                "amount_minor",
+                                "currency"
+                              ],
+                              "additionalProperties": false
                             },
                             {
                               "type": "null"
@@ -17678,6 +17801,58 @@
                             {
                               "type": "string",
                               "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "payment_amount": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "amount_minor": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1000000000000
+                                },
+                                "currency": {
+                                  "type": "string",
+                                  "pattern": "^[A-Z]{3}$"
+                                }
+                              },
+                              "required": [
+                                "amount_minor",
+                                "currency"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "paid_amount": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "amount_minor": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1000000000000
+                                },
+                                "currency": {
+                                  "type": "string",
+                                  "pattern": "^[A-Z]{3}$"
+                                }
+                              },
+                              "required": [
+                                "amount_minor",
+                                "currency"
+                              ],
+                              "additionalProperties": false
                             },
                             {
                               "type": "null"
@@ -17916,6 +18091,58 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "payment_amount": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "amount_minor": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 1000000000000
+                                  },
+                                  "currency": {
+                                    "type": "string",
+                                    "pattern": "^[A-Z]{3}$"
+                                  }
+                                },
+                                "required": [
+                                  "amount_minor",
+                                  "currency"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "paid_amount": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "amount_minor": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 1000000000000
+                                  },
+                                  "currency": {
+                                    "type": "string",
+                                    "pattern": "^[A-Z]{3}$"
+                                  }
+                                },
+                                "required": [
+                                  "amount_minor",
+                                  "currency"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -18077,6 +18304,15 @@
                         "notify": {
                           "type": "boolean",
                           "const": false
+                        },
+                        "reminder_minutes": {
+                          "maxItems": 5,
+                          "type": "array",
+                          "items": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 527040
+                          }
                         }
                       },
                       "required": [
@@ -18133,7 +18369,7 @@
       "post": {
         "operationId": "slotlock_mark_hold_paid",
         "summary": "Record a hold as paid",
-        "description": "Record that a hold made with payment_required is paid, by the payment's reference at your processor (a Stripe PaymentIntent id, say), once you have verified it: the hold may then be confirmed. Slotlock records payment state and never moves money. The same reference again answers the same hold (replayed: true); another answers 409 payment_conflict. The feed says so (hold.paid). A hold that does not wait for payment answers 409 payment_not_required; one that expired, 409 hold_expired (refund the payment: its time may be someone else's); a confirmed, released or unknown one, 404 hold_not_found.",
+        "description": "Record that a hold made with payment_required is paid, by the payment's reference at your processor (a Stripe PaymentIntent id, say), once you have verified it: the hold may then be confirmed. Slotlock records payment state and never moves money. The same reference again answers the same hold (replayed: true); another answers 409 payment_conflict. When the hold names its payment, received must be at least that amount in that currency (409 payment_amount_mismatch). The feed says so (hold.paid). A hold that does not wait for payment answers 409 payment_not_required; one that expired, 409 hold_expired (refund the payment: its time may be someone else's); a confirmed, released or unknown one, 404 hold_not_found.",
         "tags": [
           "Application"
         ],
@@ -18148,6 +18384,25 @@
                   "payment_ref": {
                     "type": "string",
                     "pattern": "^[\\x21-\\x7e]{1,255}$"
+                  },
+                  "received": {
+                    "type": "object",
+                    "properties": {
+                      "amount_minor": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1000000000000
+                      },
+                      "currency": {
+                        "type": "string",
+                        "pattern": "^[A-Z]{3}$"
+                      }
+                    },
+                    "required": [
+                      "amount_minor",
+                      "currency"
+                    ],
+                    "additionalProperties": false
                   },
                   "dry_run": {
                     "type": "boolean",
@@ -18238,6 +18493,58 @@
                             {
                               "type": "string",
                               "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "payment_amount": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "amount_minor": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1000000000000
+                                },
+                                "currency": {
+                                  "type": "string",
+                                  "pattern": "^[A-Z]{3}$"
+                                }
+                              },
+                              "required": [
+                                "amount_minor",
+                                "currency"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "paid_amount": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "amount_minor": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1000000000000
+                                },
+                                "currency": {
+                                  "type": "string",
+                                  "pattern": "^[A-Z]{3}$"
+                                }
+                              },
+                              "required": [
+                                "amount_minor",
+                                "currency"
+                              ],
+                              "additionalProperties": false
                             },
                             {
                               "type": "null"
@@ -18385,6 +18692,15 @@
                         "notify": {
                           "type": "boolean",
                           "const": false
+                        },
+                        "reminder_minutes": {
+                          "maxItems": 5,
+                          "type": "array",
+                          "items": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 527040
+                          }
                         }
                       },
                       "required": [
@@ -18431,7 +18747,7 @@
       "put": {
         "operationId": "slotlock_put_reservation",
         "summary": "Book or move a reservation",
-        "description": "Book the reservation with this reference (revision 1), or move it (the next revision: the current one plus 1). Sending the same reservation at its current revision again changes nothing (replayed: true). A taken window answers 409 overlap and leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as well. A move past the resource's reschedule cutoff answers 409 booking_rule_reschedule_cutoff unless override_reason says why, which the feed keeps. local_start (YYYY-MM-DDTHH:MM in the resource's zone) records the wall time it is booked for: it must name start, and if time zone rules later move that wall time to another instant, maintenance says so (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise. contact_ref names whom to tell about it (slotlock_put_contact) and notify: false says to tell no one; both are on the feed with each change, as sent with each revision.",
+        "description": "Book the reservation with this reference (revision 1), or move it (the next revision: the current one plus 1). Sending the same reservation at its current revision again changes nothing (replayed: true). A taken window answers 409 overlap and leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as well. A move past the resource's reschedule cutoff answers 409 booking_rule_reschedule_cutoff unless override_reason says why, which the feed keeps. local_start (YYYY-MM-DDTHH:MM in the resource's zone) records the wall time it is booked for: it must name start, and if time zone rules later move that wall time to another instant, maintenance says so (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise. contact_ref names whom to tell about it (slotlock_put_contact) and notify: false says to tell no one; both are on the feed with each change, as sent with each revision. reminder_minutes (up to five, distinct) puts reminder.due on the feed that long before its start, once each, and again if it moves.",
         "tags": [
           "Application"
         ],
@@ -18487,6 +18803,15 @@
                   },
                   "notify": {
                     "type": "boolean"
+                  },
+                  "reminder_minutes": {
+                    "maxItems": 5,
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 527040
+                    }
                   },
                   "dry_run": {
                     "type": "boolean",
@@ -18583,6 +18908,15 @@
                         "notify": {
                           "type": "boolean",
                           "const": false
+                        },
+                        "reminder_minutes": {
+                          "maxItems": 5,
+                          "type": "array",
+                          "items": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 527040
+                          }
                         }
                       },
                       "required": [
@@ -18899,6 +19233,15 @@
                           "notify": {
                             "type": "boolean",
                             "const": false
+                          },
+                          "reminder_minutes": {
+                            "maxItems": 5,
+                            "type": "array",
+                            "items": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 527040
+                            }
                           }
                         },
                         "required": [
@@ -19237,6 +19580,24 @@
                           },
                           "additionalProperties": false
                         },
+                        "consent_at": {
+                          "type": "object",
+                          "properties": {
+                            "email": {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            "sms": {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            "whatsapp": {
+                              "type": "string",
+                              "format": "date-time"
+                            }
+                          },
+                          "additionalProperties": false
+                        },
                         "locale": {
                           "anyOf": [
                             {
@@ -19264,6 +19625,7 @@
                         "phone",
                         "whatsapp",
                         "consent",
+                        "consent_at",
                         "locale",
                         "created_at",
                         "updated_at"
@@ -19404,6 +19766,24 @@
                           },
                           "additionalProperties": false
                         },
+                        "consent_at": {
+                          "type": "object",
+                          "properties": {
+                            "email": {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            "sms": {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            "whatsapp": {
+                              "type": "string",
+                              "format": "date-time"
+                            }
+                          },
+                          "additionalProperties": false
+                        },
                         "locale": {
                           "anyOf": [
                             {
@@ -19431,6 +19811,7 @@
                         "phone",
                         "whatsapp",
                         "consent",
+                        "consent_at",
                         "locale",
                         "created_at",
                         "updated_at"
@@ -19538,6 +19919,209 @@
             "$ref": "#/components/responses/Error"
           },
           "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/contacts": {
+      "get": {
+        "operationId": "slotlock_list_contacts",
+        "summary": "List contacts",
+        "description": "The people the tenant keeps to tell about bookings, by reference, a page at a time: pass next_cursor as cursor for the next page, until it is null.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "contacts": {
+                      "maxItems": 100,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "contact_ref": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+                          },
+                          "name": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 200
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "email": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 320
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "phone": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "pattern": "^\\+[1-9][0-9]{6,14}$"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "whatsapp": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "pattern": "^\\+[1-9][0-9]{6,14}$"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "consent": {
+                            "type": "object",
+                            "properties": {
+                              "email": {
+                                "type": "boolean"
+                              },
+                              "sms": {
+                                "type": "boolean"
+                              },
+                              "whatsapp": {
+                                "type": "boolean"
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          "consent_at": {
+                            "type": "object",
+                            "properties": {
+                              "email": {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              "sms": {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              "whatsapp": {
+                                "type": "string",
+                                "format": "date-time"
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          "locale": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 35
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "created_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "updated_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        "required": [
+                          "contact_ref",
+                          "name",
+                          "email",
+                          "phone",
+                          "whatsapp",
+                          "consent",
+                          "consent_at",
+                          "locale",
+                          "created_at",
+                          "updated_at"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "next_cursor": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "contacts",
+                    "next_cursor"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
             "$ref": "#/components/responses/Error"
           },
           "429": {
@@ -20689,6 +21273,131 @@
                     "replayed",
                     "busy",
                     "conflicts"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/resources/{resource_id}/coverage/{source}/conflicts": {
+      "post": {
+        "operationId": "slotlock_report_coverage_conflict",
+        "summary": "Report a booking changed in a calendar",
+        "description": "For a calendar sync that writes bookings to a calendar: report that one (by reservation_ref or event_id) was changed (changed_in_calendar, with where the calendar now has it) or removed (removed_from_calendar) there. It is put on the change feed as coverage.conflict, named by the source's source_id, with the booking and the calendar's times; the booking is left as it is, for someone to decide. 404 coverage_not_found for a source that has not recorded coverage of the resource; reservation_not_found or event_not_found for a booking not on it.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reservation_ref": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "event_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "enum": [
+                      "changed_in_calendar",
+                      "removed_from_calendar"
+                    ]
+                  },
+                  "calendar_start": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "calendar_end": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+                  }
+                },
+                "required": [
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "resource_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          {
+            "name": "source",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "reported": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
+                    }
+                  },
+                  "required": [
+                    "reported"
                   ],
                   "additionalProperties": false
                 }
