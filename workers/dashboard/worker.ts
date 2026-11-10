@@ -40,7 +40,8 @@ import {
   handleSlotlockStripeWebhook,
   type SlotlockStripe,
 } from '../../src/billing.js';
-import { enrolSlotlockTenantPlan, readSlotlockTenantPlan, readSlotlockTenantQuotas } from '../../src/plans.js';
+import { enrolSlotlockTenantPlan, readSlotlockPlanDefault,
+  readSlotlockTenantPlan, readSlotlockTenantQuotas } from '../../src/plans.js';
 import {
   type SlotlockQuotas,
   createSlotlockQuotas,
@@ -332,6 +333,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
     }
     const agentLimiter = createSlotlockWorkerAgentLimiter(vars);
     const billing = readBilling(vars);
+    const planContact = billing?.contact ?? (vars.SLOTLOCK_PLAN_CONTACT?.trim() || undefined);
     const metering = readWorkerUsage(vars);
     const quotaMode = readWorkerQuotas(vars, metering);
     // Read once, with the rest of the configuration: a bad value stops the build, not a request.
@@ -405,6 +407,17 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
         : {}),
       ...(metering ? { usage: true } : {}),
       ...(quotaMode ? { quotas: true } : {}),
+      // Plans whether or not Stripe sells them: the Usage page, and a new tenant enrolled on the
+      // default plan before its first key, resource or webhook. Asking for another plan goes to
+      // billing's contact, or SLOTLOCK_PLAN_CONTACT when nothing sells plans here.
+      plans: {
+        plan: (tenantRef: string) => readSlotlockTenantPlan(current().sql, tenantRef),
+        async enrol(tenantRef: string) {
+          await enrolSlotlockTenantPlan(current().sql, tenantRef);
+        },
+        planDefault: () => readSlotlockPlanDefault(current().sql),
+        ...(planContact ? { contact: planContact } : {}),
+      },
       ...(billing
         ? {
             billing: {

@@ -500,9 +500,28 @@ export interface SlotlockDashboardAssistantOptions {
 }
 
 /**
- * Hosted Slotlock's plans (plans.ts) and their billing: a Plan page with the tenant's plan and use,
+ * Hosted Slotlock's plans (plans.ts) and their billing: a Usage page with the tenant's plan and use,
  * Upgrade (to a checkout page) and Manage (to a billing portal). Off unless set.
  */
+/**
+ * The tenant's plan and the deployment's default, read whether or not anything sells plans: with it
+ * the dashboard shows a Usage page (plan, limits and this month's use) and puts a tenant new to
+ * plans on the default before it adds what plans limit.
+ */
+export interface SlotlockDashboardPlans {
+  /** The tenant's plan (its own, or the default once it applies), or null (the server's limits apply). */
+  plan(tenantRef: string): Promise<SlotlockTenantPlan | null>;
+  /** Puts a tenant new to plans on the default plan before it adds a key, resource or webhook endpoint. */
+  enrol?(tenantRef: string): Promise<void>;
+  /** The deployment's default plan and the date it applies to every tenant, or null. */
+  planDefault?(): Promise<{ plan: SlotlockPlan; limits: SlotlockTenantPlan['limits']; appliesFrom: Date } | null>;
+  /**
+   * Where asking for another plan goes (an https or mailto URL) when nothing sells plans here: with
+   * it, the Usage page offers Developer or Team by asking.
+   */
+  contact?: string;
+}
+
 export interface SlotlockDashboardBilling {
   /** The tenant's plan (its own, or the default), or null when it has none (the server's limits apply). */
   plan(tenantRef: string): Promise<SlotlockTenantPlan | null>;
@@ -615,15 +634,17 @@ export interface SlotlockDashboardOptions {
   availability?: readonly WeeklyAvailabilityRule[];
   /** The chat assistant; off unless set. */
   assistant?: SlotlockDashboardAssistantOptions;
-  /** Plans and billing (hosted Slotlock); off unless set. */
+  /** Plans (hosted Slotlock): a Usage page, and enrolment on the default plan. Off unless set. */
+  plans?: SlotlockDashboardPlans;
+  /** Paying for plans through Stripe (hosted Slotlock); off unless set. Implies `plans` from its own. */
   billing?: SlotlockDashboardBilling;
   /**
-   * The deployment meters usage (SLOTLOCK_USAGE=on): the Plan page shows this month's, from the
+   * The deployment meters usage (SLOTLOCK_USAGE=on): the Usage page shows this month's, from the
    * resources adapter's `usage`.
    */
   usage?: boolean;
   /**
-   * The deployment holds tenants to their plans' monthly quotas (SLOTLOCK_QUOTAS=on): the Plan page
+   * The deployment holds tenants to their plans' monthly quotas (SLOTLOCK_QUOTAS=on): the Usage page
    * shows this month's use against them, and warns from 80%. Needs `usage`.
    */
   quotas?: boolean;
@@ -1302,6 +1323,20 @@ const CHANGE_LABELS: Readonly<Record<string, { text: string; tone: Tone }>> = Ob
   'approval.expired': { text: 'Approval not decided in time', tone: 'bad' },
   'webhook.disabled': { text: 'Webhook disabled', tone: 'bad' },
   'usage.threshold_reached': { text: 'Monthly quota nearly or fully used', tone: 'bad' },
+  'usage.period_closed': { text: 'Month of use closed', tone: 'neutral' },
+  'resource.created': { text: 'Resource added', tone: 'good' },
+  'resource.updated': { text: 'Resource changed', tone: 'neutral' },
+  'resource.archived': { text: 'Resource archived', tone: 'neutral' },
+  'resource.restored': { text: 'Resource restored', tone: 'good' },
+  'resource.deleted': { text: 'Resource deleted', tone: 'bad' },
+  'key.created': { text: 'API key created', tone: 'good' },
+  'key.rotated': { text: 'API key rotated', tone: 'neutral' },
+  'key.revoked': { text: 'API key revoked', tone: 'bad' },
+  'webhook.created': { text: 'Webhook added', tone: 'good' },
+  'webhook.enabled': { text: 'Webhook enabled', tone: 'good' },
+  'webhook.deleted': { text: 'Webhook deleted', tone: 'neutral' },
+  'coverage.recorded': { text: 'Calendar synced', tone: 'neutral' },
+  'coverage.deleted': { text: 'Calendar sync removed', tone: 'neutral' },
 });
 
 const zoned = (zone: string, parts: Intl.DateTimeFormatOptions) => {
@@ -1405,6 +1440,11 @@ function asset(body: string, type: string, url: URL, version: string): Response 
 function formatDate(date: Date | null): string {
   if (!date) return '—';
   return `${date.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+}
+
+/** A UTC day as people write it: `9 Dec 2026`. */
+function dayOf(date: Date): string {
+  return zoned('UTC', { day: 'numeric', month: 'short', year: 'numeric' }).format(date);
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const;
@@ -1571,6 +1611,20 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   }
   // Teams on Cloud: organizations turned on in the database, beside every person's own tenant.
   const teams = options.organizations === 'enabled' ? (options.teams ?? null) : null;
+  // Plans whether or not billing sells them; billing's own reader when only it is given.
+  const plans: SlotlockDashboardPlans | undefined =
+    options.plans ??
+    (options.billing
+      ? {
+          plan: options.billing.plan,
+          ...(options.billing.enrol ? { enrol: options.billing.enrol } : {}),
+          contact: options.billing.contact,
+        }
+      : undefined);
+  if (plans?.contact) {
+    const protocol = new URL(plans.contact).protocol;
+    if (protocol !== 'https:' && protocol !== 'mailto:') throw new Error('plans.contact must be an https or mailto URL');
+  }
   if (options.organizations === 'enabled' && !teams) {
     throw new Error('Slotlock dashboard organizations "enabled" needs the teams store');
   }
@@ -1790,9 +1844,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     ...(assistantStore()
       ? [{ section: 'assistant' as const, label: 'Assistant', path: '/assistant', icon: ICONS.assistant }]
       : []),
-    ...(options.billing
-      ? [{ section: 'plan' as const, label: 'Plan', path: '/plan', icon: ICONS.plan }]
-      : []),
+    ...(plans ? [{ section: 'plan' as const, label: 'Usage', path: '/plan', icon: ICONS.plan }] : []),
     ...(teams ? [{ section: 'teams' as const, label: 'Teams', path: '/teams', icon: ICONS.teams }] : []),
     { section: 'settings', label: 'Settings', path: '/settings', icon: ICONS.settings },
   ];
@@ -2008,6 +2060,53 @@ ${
     )}${more ? html`<p class="fine">Showing the first ${String(AGENDA_SHOWN)}.</p>` : html``}`;
   }
 
+  /**
+   * What each change says in the feed, as a sentence: who did it (`verb` then the resource), or what
+   * happened (`passive`, the resource in place of {X}). Every change type the feed records has one,
+   * so the feed never shows a raw type such as resource.updated.
+   */
+  const ACTIVITY: Readonly<Record<string, { verb?: string; after?: string; passive?: string }>> = Object.freeze({
+    'hold.created': { verb: 'held' },
+    'hold.updated': { verb: 'changed the hold on' },
+    'hold.confirmed': { verb: 'booked', after: ' from a hold' },
+    'hold.released': { verb: 'released the hold on' },
+    'hold.expired': { passive: 'The hold on {X} expired' },
+    'reservation.created': { verb: 'booked' },
+    'reservation.updated': { verb: 'moved a booking on' },
+    'reservation.cancelled': { verb: 'cancelled a booking on' },
+    'reservation.checked_in': { verb: 'checked in to' },
+    'reservation.no_show': { passive: '{X} was released after a no-show' },
+    'event.created': { verb: 'added an event on' },
+    'event.updated': { verb: 'changed an event on' },
+    'event.cancelled': { verb: 'cancelled an event on' },
+    'event.timezone_shifted': { passive: 'An event on {X} moved with a time zone change' },
+    'event.timezone_conflict': { passive: 'An event on {X} clashes after a time zone change' },
+    'coverage.stale': { passive: 'The calendar sync for {X} is behind' },
+    'coverage.recorded': { passive: 'The calendar for {X} synced' },
+    'coverage.deleted': { verb: 'removed the calendar sync for' },
+    'waitlist.offered': { passive: 'A waitlist offer went out for {X}' },
+    'waitlist.expired': { passive: 'A waitlist offer for {X} lapsed' },
+    'approval.requested': { passive: 'A booking on {X} waits for approval' },
+    'approval.granted': { verb: 'approved a booking on' },
+    'approval.declined': { verb: 'declined a booking on' },
+    'approval.expired': { passive: 'A booking on {X} was not approved in time' },
+    'resource.created': { verb: 'added' },
+    'resource.updated': { verb: 'edited' },
+    'resource.archived': { verb: 'archived' },
+    'resource.restored': { verb: 'restored' },
+    'resource.deleted': { verb: 'deleted' },
+    'key.created': { verb: 'created an API key' },
+    'key.rotated': { verb: 'rotated an API key' },
+    'key.revoked': { verb: 'revoked an API key' },
+    'webhook.created': { verb: 'added a webhook' },
+    'webhook.enabled': { verb: 'turned a webhook back on' },
+    'webhook.disabled': { passive: 'A webhook was turned off' },
+    'webhook.deleted': { verb: 'deleted a webhook' },
+    'usage.period_closed': { passive: 'A month of use closed' },
+  });
+  /** Changes about a resource, which name it; the rest stand alone. */
+  const ABOUT_A_RESOURCE = /^(hold|reservation|event|coverage|waitlist|approval|resource)\./;
+
   function activityPanel(
     changes: readonly SlotlockChange[],
     byId: ReadonlyMap<string, SlotlockResource>,
@@ -2018,44 +2117,81 @@ ${
       return html`<p class="empty">No activity yet. What agents book, move and cancel shows here.</p>`;
     }
     const keyNames = new Map(keys.map((key) => [`api_key:${key.id}`, key.name]));
-    return html`<ol class="feed">${changes.map((change) => {
-      const label = CHANGE_LABELS[change.type] ?? { text: change.type, tone: 'neutral' };
-      const who =
-        change.actor === null
-          ? brandName
-          : change.actor === personOf(session)
-            ? 'You'
-            : (keyNames.get(change.actor) ??
-              (change.actor.startsWith('api_key:')
-                ? 'A deleted key'
-                : /^github:\d+$/.test(change.actor)
-                  ? `GitHub user ${change.actor.slice(7)}`
-                  : /^google:/.test(change.actor)
-                    ? 'A Google user'
-                  : /^dashboard-assistant:(github|google):/.test(change.actor)
-                    ? change.actor === assistantActor(session)
+    const whoOf = (actor: string | null) =>
+      actor === null
+        ? brandName
+        : actor === personOf(session)
+          ? 'You'
+          : (keyNames.get(actor) ??
+            (actor.startsWith('api_key:')
+              ? 'A deleted key'
+              : /^github:\d+$/.test(actor)
+                ? `GitHub user ${actor.slice(7)}`
+                : /^google:/.test(actor)
+                  ? 'A Google user'
+                  : /^dashboard-assistant:(github|google):/.test(actor)
+                    ? actor === assistantActor(session)
                       ? `Assistant for ${shownAs(session)}`
-                      : change.actor.startsWith('dashboard-assistant:google:')
+                      : actor.startsWith('dashboard-assistant:google:')
                         ? 'Assistant for a Google user'
-                        : `Assistant for GitHub user ${change.actor.slice(27)}`
-                    : change.actor.slice(0, 60)));
-      const where = change.resourceId
-        ? resourceName(byId.get(change.resourceId), change.resourceId)
-        : null;
-      return html`<li class="event"><span class="dot ${label.tone}" aria-hidden="true"></span><span class="what" title="${where ? `${label.text} on ${where}` : label.text}"><span class="title">${label.text}${where ? html` <span class="on">on</span> ${where}` : html``}</span><span class="meta">${who} · <time datetime="${change.occurredAt.toISOString()}" title="${formatDate(change.occurredAt)}">${ago(change.occurredAt, now())}</time></span></span></li>`;
+                        : `Assistant for GitHub user ${actor.slice(27)}`
+                    : actor.slice(0, 60)));
+    // Repeats in a row (one actor, one change, one resource) read as one line with a count.
+    const runs: { change: SlotlockChange; times: number }[] = [];
+    for (const change of changes) {
+      const last = runs.at(-1);
+      if (last && last.change.actor === change.actor && last.change.type === change.type && last.change.resourceId === change.resourceId) {
+        last.times += 1;
+      } else {
+        runs.push({ change, times: 1 });
+      }
+    }
+    return html`<ol class="feed">${runs.map(({ change, times }) => {
+      const tone = CHANGE_LABELS[change.type]?.tone ?? 'neutral';
+      const where = change.resourceId ? resourceName(byId.get(change.resourceId), change.resourceId) : null;
+      const object = where ?? (ABOUT_A_RESOURCE.test(change.type) ? 'a resource' : null);
+      const words = ACTIVITY[change.type];
+      let sentence: Html;
+      if (change.type === 'usage.threshold_reached') {
+        const metric = typeof change.data.metric === 'string' ? change.data.metric : 'use';
+        const percent = typeof change.data.percent === 'number' ? change.data.percent : null;
+        sentence = html`${percent === null ? 'A monthly quota' : `${String(percent)}% of this month's ${metric}`} used`;
+      } else if (words?.verb) {
+        sentence = html`<strong>${whoOf(change.actor)}</strong> ${words.verb}${object ? html` <strong>${object}</strong>` : html``}${words.after ?? ''}`;
+      } else if (words?.passive) {
+        const [before, rest] = words.passive.split('{X}') as [string, string | undefined];
+        sentence = rest === undefined ? html`${before}` : html`${before}<strong>${object ?? 'a resource'}</strong>${rest}`;
+      } else {
+        // A change type this dashboard does not know yet: its label, or its name in words.
+        const label = CHANGE_LABELS[change.type]?.text ?? change.type.replace(/[._]/g, ' ').replace(/^./, (first) => first.toUpperCase());
+        sentence = html`${label}${object ? html` <span class="on">on</span> <strong>${object}</strong>` : html``}`;
+      }
+      return html`<li class="event"><span class="dot ${tone}" aria-hidden="true"></span><span class="what"><span class="title">${sentence}${
+        times > 1 ? html` <span class="times">${times === 2 ? 'twice' : `${String(times)} times`}</span>` : html``
+      }</span></span><time class="when" datetime="${change.occurredAt.toISOString()}" title="${formatDate(change.occurredAt)}">${ago(change.occurredAt, now())}</time></li>`;
     })}</ol>`;
   }
+
+  /** The MCP and A2A endpoints with Copy, and the command that adds Slotlock to an MCP client. */
+  const connectAgent = () =>
+    html`${endpoints()}<details class="command"><summary>Claude Code command</summary><div class="copy-block"><pre><code id="mcp-command">claude mcp add --transport http slotlock ${mcpUrl} --header "Authorization: Bearer YOUR_KEY"</code></pre><button class="quiet" type="button" data-copy="mcp-command">Copy</button></div></details>`;
 
   async function overviewPage(session: Session, status = 200, notice?: string): Promise<Response> {
     const tenantRef = tenantOf(session);
     const start = new Date(now());
     const window = { start, end: new Date(start.getTime() + AGENDA_DAYS * DAY_MS) };
-    const [keys, resources, agenda, changes] = await Promise.all([
+    const assistant = assistantStore();
+    const [keys, resources, agenda, changes, approvals, waitlist, model] = await Promise.all([
       options.keys.list({ tenantRef }),
       options.resources.list(tenantRef),
       options.resources.agenda?.(tenantRef, window, AGENDA_LIMIT),
       options.resources.recentChanges?.(tenantRef, ACTIVITY_LIMIT),
+      options.resources.approvals?.list(tenantRef, APPROVALS_SHOWN),
+      options.resources.waitlist?.list(tenantRef, WAITLIST_SHOWN),
+      assistant?.getSettings(tenantRef),
     ]);
+    // The plan is Live's: the test environment has none of its own.
+    const standing = plans && session.env !== 'test' ? await planStanding(session, 'overview', keys) : null;
     const byId = new Map(resources.map((resource) => [resource.id, resource]));
     const active = keys.filter(
       (key) => !key.revokedAt && (key.expiresAt === null || key.expiresAt.getTime() > now()),
@@ -2064,34 +2200,90 @@ ${
       agenda && agenda.length >= AGENDA_LIMIT ? `${count}+` : String(count);
     const booked = agenda?.filter((entry) => entry.kind !== 'hold').length ?? 0;
     const held = agenda?.filter((entry) => entry.kind === 'hold').length ?? 0;
-    const stat = (label: string, value: string, href: string) =>
-      html`<a class="stat" href="${href}"><span class="stat-label">${label}</span><span class="stat-value">${value}</span></a>`;
-    const steps = [
-      { done: resources.length > 0, text: 'Add what your agents book', href: `${root}/resources` },
-      { done: active.length > 0, text: 'Create a key for an agent', href: `${root}/keys` },
-      { done: (changes?.length ?? 0) > 0, text: 'Connect the agent and book', href: `${root}/keys` },
+    const waiting = approvals?.filter((approval) => approval.status === 'pending').length ?? 0;
+    const attention = [
+      ...(standing?.attention ?? []),
+      ...(waiting > 0
+        ? [
+            attentionItem('info', `${String(waiting)} ${waiting === 1 ? 'booking waits' : 'bookings wait'} for your approval.`, {
+              href: `${root}/approvals`,
+              label: 'Review',
+            }),
+          ]
+        : []),
     ];
-    const content = html`${noticeOf(notice, status)}
-${pageHead('Overview')}
-${
-  steps.every((step) => step.done)
-    ? html``
-    : html`<section class="panel setup"><h2>Get started</h2><ol class="steps">${steps.map(
-        (step) =>
-          html`<li class="${step.done ? 'done' : ''}"><span class="check" aria-hidden="true">${step.done ? ICONS.check : html``}</span>${step.done ? html`<span>${step.text}</span>` : html`<a href="${step.href}">${step.text}</a>`}${step.done ? html`<span class="visually-hidden">(done)</span>` : html``}</li>`,
-      )}</ol></section>`
-}
-<div class="stats">
-${agenda ? stat(`Booked, next ${AGENDA_DAYS} days`, counted(booked), `${root}#upcoming`) : html``}
-${agenda ? stat('Live holds', counted(held), `${root}#upcoming`) : html``}
-${stat('Resources', String(resources.length), `${root}/resources`)}
-${stat('Active keys', String(active.length), `${root}/keys`)}
-</div>
+    const admin = isAdmin(session);
+    const steps: { done: boolean; title: string; action: { href: string; label: string } }[] = [
+      { done: resources.length > 0, title: 'Add a resource', action: { href: `${root}/resources`, label: 'Add resource' } },
+      { done: active.length > 0, title: 'Create an API key', action: { href: `${root}/keys#new-key`, label: 'Create key' } },
+      // Done once an agent has used a key.
+      { done: active.some((key) => key.lastUsedAt !== null), title: 'Connect an agent', action: { href: `${root}#connect`, label: 'Connect' } },
+      ...(assistant
+        ? [
+            admin
+              ? { done: Boolean(model), title: 'Connect a model to the assistant', action: { href: `${root}/settings`, label: 'Connect' } }
+              : { done: Boolean(model), title: 'Try the assistant', action: { href: `${root}/assistant`, label: 'Open' } },
+          ]
+        : []),
+    ];
+    const done = steps.filter((step) => step.done).length;
+    const next = steps.findIndex((step) => !step.done);
+    // Nothing made and nothing happened yet: only the way in.
+    const fresh = resources.length === 0 && active.length === 0 && (changes?.length ?? 0) === 0;
+    const setupCard =
+      next === -1
+        ? html``
+        : html`<section class="panel setup-card"><div class="panel-head"><h2>Get started</h2><span class="meta">${String(done)} of ${String(steps.length)}</span></div><div class="segments" aria-hidden="true">${steps.map(
+            (step) => html`<span${step.done ? html` class="done"` : html``}></span>`,
+          )}</div><ol class="setup-steps">${steps.map(
+            (step, index) =>
+              html`<li class="${step.done ? 'done' : index === next ? 'next' : ''}"><span class="check" aria-hidden="true">${step.done ? ICONS.check : html``}</span><span class="step-title">${step.title}${
+                step.done ? html`<span class="visually-hidden"> (done)</span>` : html``
+              }</span>${index === next ? html`<a class="button primary" href="${step.action.href}">${step.action.label}</a>` : html``}</li>`,
+          )}</ol></section>`;
+    // Mostly set up: one line that leads to the next step.
+    const setupRow =
+      next === -1
+        ? html``
+        : html`<a class="setup-row" href="${steps[next]?.action.href ?? root}"><span class="segments" aria-hidden="true">${steps.map(
+            (step) => html`<span${step.done ? html` class="done"` : html``}></span>`,
+          )}</span><span>Get started · ${String(done)} of ${String(steps.length)} · <strong>${steps[next]?.title ?? ''}</strong></span></a>`;
+    const stat = (label: string, value: string, href: string, tone = '') =>
+      html`<a class="stat${tone}" href="${href}"><span class="stat-label">${label}</span><span class="stat-value">${value}</span></a>`;
+    const tiles: Html[] = [
+      ...(agenda ? [stat(`Bookings, next ${AGENDA_DAYS} days`, counted(booked), `${root}#upcoming`), stat('Live holds', counted(held), `${root}#upcoming`)] : []),
+      ...(approvals ? [stat('Waiting for approval', String(waiting), `${root}/approvals`, waiting > 0 ? ' attention-stat' : '')] : []),
+      ...(waitlist ? [stat('On the waitlist', String(waitlist.filter((entry) => entry.status !== 'expired').length), `${root}/waitlist`)] : []),
+      stat('Resources', String(resources.length), `${root}/resources`),
+      stat('Active keys', String(active.length), `${root}/keys`),
+    ].slice(0, 4);
+    const planCard = standing
+      ? html`<section class="panel plan-card"><div class="panel-head"><h2>${standing.name}</h2><a href="${root}/plan">Usage</a></div><div class="meters stacked">${standing.meters}</div>${
+          standing.canUpgrade && standing.pressing
+            ? html`<a class="button primary" href="${root}/plan#upgrade">Upgrade</a>`
+            : html``
+        }</section>`
+      : html``;
+    const connectCard = html`<section class="panel" id="connect"><h2>Connect an agent</h2>${connectAgent()}</section>`;
+    const body = fresh
+      ? standing
+        ? html`<div class="split">${setupCard}<div class="column">${planCard}</div></div>`
+        : setupCard
+      : html`${done * 2 >= steps.length ? setupRow : setupCard}
+<div class="stats">${tiles}</div>
 ${session.env === 'test' && options.resources.sandbox ? sandboxPanel(session, resources.length) : html``}
 <div class="split">
+<div class="column">
 ${agenda ? html`<section class="panel" id="upcoming"><h2>Upcoming</h2>${agendaPanel(agenda, byId, agenda.length > AGENDA_SHOWN)}</section>` : html``}
-${changes ? html`<section class="panel"><h2>Agent activity</h2>${activityPanel(changes, byId, keys, session)}</section>` : html``}
+${changes ? html`<section class="panel"><h2>Activity</h2>${activityPanel(changes, byId, keys, session)}</section>` : html``}
+</div>
+<div class="column">${planCard}${connectCard}</div>
 </div>`;
+    const content = html`${noticeOf(notice, status)}
+${pageHead('Overview')}
+${attentionList(attention)}
+${fresh && session.env === 'test' && options.resources.sandbox ? sandboxPanel(session, resources.length) : html``}
+${body}`;
     return respond(status, layout('Overview', content, session, 'overview'));
   }
 
@@ -2205,7 +2397,7 @@ ${
     tenantRef: string,
     resources: readonly SlotlockResource[],
   ): Promise<{ used: number; limit: number; planned: boolean; archived: number }> {
-    const plan = options.billing ? await options.billing.plan(tenantRef) : null;
+    const plan = plans ? await plans.plan(tenantRef) : null;
     if (!plan || plan.limits.resources >= SLOTLOCK_DASHBOARD_MAX_RESOURCES) {
       return { used: resources.length, limit: SLOTLOCK_DASHBOARD_MAX_RESOURCES, planned: false, archived: 0 };
     }
@@ -2891,7 +3083,7 @@ ${
     if (!created.ok) {
       const message =
         created.code === 'webhook_limit_reached'
-          ? `You have ${String(created.limit)} webhooks, as many as ${options.billing ? 'your plan' : 'Slotlock'} allows. Delete one first${options.billing ? ', or see Plan' : ''}.`
+          ? `You have ${String(created.limit)} webhooks, as many as ${plans ? 'your plan' : 'Slotlock'} allows. Delete one first${plans ? ', or see Usage' : ''}.`
           : created.code === 'invalid_webhook_url'
             ? 'Give an https URL, with no user name, password or #fragment.'
             : 'Choose events from the list.';
@@ -4168,45 +4360,24 @@ ${
     return redirect(303, `${root}/assistant`);
   }
 
-  async function planPage(
-    session: Session,
-    status = 200,
-    notice?: string,
-    thanks = false,
-  ): Promise<Response> {
+  /**
+   * A workspace's plan as both the Usage page and the overview show it: the plan (or the default it
+   * moves to), what it has against the limits, this month's use against the quotas, and what needs a
+   * person: a failed payment, a quota used up or nearly, more than the coming plan allows.
+   * `here` is the page asking, so an item's action points to the page that resolves it.
+   */
+  async function planStanding(session: Session, here: 'usage' | 'overview', given?: readonly SlotlockApiKey[]) {
+    const active = plans as SlotlockDashboardPlans;
     const billing = options.billing;
-    if (!billing) return notFound(session);
-    if (session.env === 'test') {
-      // Its own use, counted apart from Live's and never billed.
-      const range = slotlockUsageMonthToDate(now());
-      const tested =
-        options.usage && options.resources.usage
-          ? summarizeSlotlockUsage(await options.resources.usage(tenantOf(session), range.from, range.to))
-          : null;
-      const stat = (label: string, value: number) =>
-        html`<div class="stat"><span class="stat-label">${label}</span><span class="stat-value">${value.toLocaleString('en-GB')}</span></div>`;
-      return respond(
-        status,
-        layout(
-          'Plan',
-          html`${pageHead('Plan')}${noticeOf(notice, status)}<p>The test environment is on your live plan's limits and is never billed. Switch to Live to see your plan, or to change it.</p>${
-            tested
-              ? html`<section class="panel" id="usage"><h2>Test usage this month</h2><div class="stats">${stat('Operations', tested.totals.operations)}${stat('Bookings', tested.totals.bookings)}${stat('Holds', tested.totals.holds)}</div><p class="fine">Since ${range.from}, in UTC, counted apart from Live, against the same monthly quotas.</p></section>`
-              : html``
-          }`,
-          session,
-          'plan',
-        ),
-      );
-    }
     const tenantRef = tenantOf(session);
-    const [plan, resourceCount, keys, webhooks] = await Promise.all([
-      billing.plan(tenantRef),
+    const [plan, planDefault, resourceCount, keys, webhooks] = await Promise.all([
+      active.plan(tenantRef),
+      active.planDefault ? active.planDefault() : Promise.resolve(null),
       // As the limit counts them: archived resources included.
       options.resources.count
         ? options.resources.count(tenantRef)
         : options.resources.list(tenantRef).then((listed) => listed.length),
-      options.keys.list({ tenantRef }),
+      given ?? options.keys.list({ tenantRef }),
       options.resources.webhooks?.list(tenantRef),
     ]);
     const month = slotlockUsageMonthToDate(now());
@@ -4214,58 +4385,215 @@ ${
       options.usage && options.resources.usage
         ? summarizeSlotlockUsage(await options.resources.usage(tenantRef, month.from, month.to))
         : null;
-    const keyName = new Map(keys.map((key) => [key.id, key.name]));
-    const active = keys.filter(
+    const keyCount = keys.filter(
       (key) => !key.revokedAt && (key.expiresAt === null || key.expiresAt.getTime() > now()),
-    );
-    const token = csrfToken(session);
+    ).length;
+    const admin = isAdmin(session);
     const paying = plan !== null && plan.plan !== 'free';
-    const name = plan ? PLAN_NAMES[plan.plan] : 'No plan';
-    // An organization is offered Team where the deployment sells it; a person, Developer.
-    const offered: 'developer' | 'team' = session.org !== undefined && billing.teamPrices ? 'team' : 'developer';
-    const offeredPrices = offered === 'team' ? (billing.teamPrices as { month: string; year: string }) : billing.prices;
-    const counted = (value: number) => value.toLocaleString('en-GB');
-    const use = (label: string, used: number, limit: number | undefined) =>
-      html`<div class="stat"><span class="stat-label">${label}</span><span class="stat-value">${counted(used)}${limit === undefined ? html`` : html`<span class="meta"> of ${counted(limit)}</span>`}</span></div>`;
-    // This month's quotas, when the deployment holds tenants to them.
+    const upcoming = !plan && planDefault && planDefault.appliesFrom.getTime() > now() ? planDefault : null;
+    const limits = plan?.limits ?? upcoming?.limits;
     const quotas = options.quotas && plan ? SLOTLOCK_PLAN_QUOTAS[plan.plan] : null;
     const resets = formatDate(slotlockQuotaPeriod(now()).resetsAt);
-    const quotaWarnings = quotas && used
-      ? (['operations', 'bookings'] as const).flatMap((metric) => {
-          const quota = quotas[metric];
-          const stop = Math.floor((quota * quotas.stopPercent) / 100);
-          const spent = used.totals[metric];
-          const what = metric === 'operations' ? 'operations' : 'bookings';
-          const refused = metric === 'operations' ? 'every call but reading usage' : 'new bookings and holds';
-          if (spent >= stop) {
-            return [html`<p class="notice warn" role="alert">This month's ${what} are used up: Slotlock refuses ${refused} with quota_exceeded until ${resets}.${paying ? html`` : html` Upgrade for more.`}</p>`];
-          }
-          if (spent >= quota) {
-            const billed = metric === 'operations' && billing.overage && plan?.plan === 'developer' && paying;
-            return [html`<p class="notice warn" role="alert">You have used this month's ${counted(quota)} ${what}.${billed ? ` Those past it are billed at ${billing.overage?.price ?? ''}.` : ''} Slotlock refuses ${refused} past ${counted(stop)}, until ${resets}.</p>`];
-          }
-          if (spent * 100 >= quota * 80) {
-            return [html`<p class="notice warn" role="status">You have used ${String(Math.floor((spent * 100) / quota))}% of this month's ${what}. They start again on ${resets}.</p>`];
-          }
-          return [];
-        })
-      : [];
-    const warning = html`${
-      plan?.status === 'past_due'
-        ? html`<p class="notice warn" role="alert">Your last payment failed. Update your payment method to keep the ${name} plan.</p>`
+    const counted = (value: number) => value.toLocaleString('en-GB');
+    const usagePage = `${root}/plan`;
+    const upgradeAt = here === 'usage' ? '#upgrade' : `${usagePage}#upgrade`;
+    const canUpgrade = !paying && admin && Boolean(billing || active.contact);
+    const upgradeHint = paying ? '' : admin ? ' Upgrade for more.' : ' An owner of this organization can upgrade.';
+    const attention: Html[] = [];
+    // Whether anything is near or past a limit: the overview then offers the upgrade.
+    let pressing = false;
+    if (plan?.status === 'past_due') {
+      attention.push(
+        attentionItem(
+          'bad',
+          `Your last payment failed. ${admin && billing && plan.stripeCustomer ? 'Update your payment method in Manage billing' : 'An owner updates the payment method'} to keep the ${PLAN_NAMES[plan.plan]} plan.`,
+          here === 'overview' ? { href: usagePage, label: 'Usage' } : undefined,
+        ),
+      );
+    }
+    if (quotas && used) {
+      for (const metric of ['operations', 'bookings'] as const) {
+        const quota = quotas[metric];
+        const stop = Math.floor((quota * quotas.stopPercent) / 100);
+        const spent = used.totals[metric];
+        const refused = metric === 'operations' ? 'every call but reading usage' : 'new bookings and holds';
+        const upgrade = canUpgrade ? { href: upgradeAt, label: 'Upgrade' } : here === 'overview' ? { href: usagePage, label: 'Usage' } : undefined;
+        if (spent * 100 >= quota * 80) pressing = true;
+        if (spent >= stop) {
+          attention.push(attentionItem('bad', `This month's ${metric} are used up: Slotlock refuses ${refused} with quota_exceeded until ${resets}.${upgradeHint}`, upgrade));
+        } else if (spent >= quota) {
+          const billed = metric === 'operations' && billing?.overage && plan?.plan === 'developer' && paying;
+          attention.push(
+            attentionItem(
+              'warn',
+              `You have used this month's ${counted(quota)} ${metric}.${billed ? ` Those past it are billed at ${billing?.overage?.price ?? ''}.` : ''} Slotlock refuses ${refused} past ${counted(stop)}, until ${resets}.${billed ? '' : upgradeHint}`,
+              billed ? undefined : upgrade,
+            ),
+          );
+        } else if (spent * 100 >= quota * 80) {
+          attention.push(
+            attentionItem(
+              'warn',
+              `You have used ${String(Math.floor((spent * 100) / quota))}% of this month's ${metric}. They start again on ${resets}.`,
+              here === 'overview' ? { href: usagePage, label: 'Usage' } : undefined,
+            ),
+          );
+        }
+      }
+    }
+    if (upcoming) {
+      // What the workspace has that its coming plan will not allow: nothing is removed; adding stops.
+      const over = (
+        [
+          ['resources', resourceCount, upcoming.limits.resources],
+          ['active API keys', keyCount, upcoming.limits.apiKeys],
+          ['webhooks', webhooks?.length ?? 0, upcoming.limits.webhookEndpoints],
+        ] as const
+      ).filter(([, have, allowed]) => have > allowed);
+      if (over.length > 0) pressing = true;
+      attention.push(
+        attentionItem(
+          over.length > 0 ? 'warn' : 'info',
+          `From ${formatDate(upcoming.appliesFrom)}, this workspace is on ${PLAN_NAMES[upcoming.plan]}: ${String(upcoming.limits.resources)} resources, ${String(upcoming.limits.apiKeys)} API keys and ${String(upcoming.limits.webhookEndpoints)} webhooks.${
+            over.length > 0
+              ? ` You have ${over.map(([what, have]) => `${String(have)} ${what}`).join(', ')}: nothing is removed, but you cannot add more until you have fewer${paying || !admin ? '' : ', or upgrade'}.`
+              : ''
+          }`,
+          canUpgrade && over.length > 0 ? { href: upgradeAt, label: 'See plans' } : undefined,
+        ),
+      );
+    }
+    /** One use against its allowance: a bar, amber from 80%, red at the limit. */
+    const meter = (label: string, value: number, limit: number | undefined) => {
+      if (limit === undefined) {
+        return html`<div class="meter"><div class="meter-head"><span>${label}</span><span class="meter-value">${counted(value)}</span></div></div>`;
+      }
+      const tone = value >= limit ? ' bad' : value * 100 >= limit * 80 ? ' warn' : '';
+      return html`<div class="meter${tone}"><div class="meter-head"><span>${label}</span><span class="meter-value">${counted(value)}<span class="meta"> of ${counted(limit)}</span></span></div><progress value="${String(Math.min(value, limit))}" max="${String(limit)}" aria-label="${label}: ${counted(value)} of ${counted(limit)}"></progress></div>`;
+    };
+    const limitMeters = html`${meter('Resources', resourceCount, limits?.resources)}${meter('Active API keys', keyCount, limits?.apiKeys)}${
+      webhooks ? meter('Webhooks', webhooks.length, limits?.webhookEndpoints) : html``
+    }`;
+    // Under a "This month" heading, or beside the limits with the month in each label.
+    const monthMeters = (suffix: string) =>
+      used
+        ? html`${meter(`Operations${suffix}`, used.totals.operations, quotas?.operations)}${meter(`Bookings${suffix}`, used.totals.bookings, quotas?.bookings)}${meter(`Holds${suffix}`, used.totals.holds, undefined)}`
+        : html``;
+    const name = plan
+      ? PLAN_NAMES[plan.plan]
+      : upcoming
+        ? `${PLAN_NAMES[upcoming.plan]} from ${dayOf(upcoming.appliesFrom)}`
+        : 'No plan';
+    return {
+      plan,
+      upcoming,
+      paying,
+      admin,
+      used,
+      month,
+      resets,
+      keys,
+      name,
+      limitMeters,
+      monthMeters,
+      meters: html`${limitMeters}${monthMeters(' this month')}`,
+      attention,
+      canUpgrade,
+      pressing,
+    };
+  }
+
+  /** One thing that needs a person: a sentence, its tone, and what resolves it. */
+  const attentionItem = (tone: 'bad' | 'warn' | 'info', text: string, action?: { href: string; label: string }) =>
+    html`<li class="attention ${tone}"><span class="attention-text">${text}</span>${
+      action ? html`<a class="attention-action" href="${action.href}">${action.label}</a>` : html``
+    }</li>`;
+
+  /** The list of things that need a person, or nothing. */
+  const attentionList = (items: readonly Html[]) =>
+    items.length > 0 ? html`<ul class="attention-list" aria-label="Needs attention">${items}</ul>` : html``;
+
+  async function planPage(
+    session: Session,
+    status = 200,
+    notice?: string,
+    thanks = false,
+  ): Promise<Response> {
+    if (!plans) return notFound(session);
+    const billing = options.billing;
+    const counted = (value: number) => value.toLocaleString('en-GB');
+    if (session.env === 'test') {
+      // Its own use, counted apart from Live's and never billed.
+      const range = slotlockUsageMonthToDate(now());
+      const tested =
+        options.usage && options.resources.usage
+          ? summarizeSlotlockUsage(await options.resources.usage(tenantOf(session), range.from, range.to))
+          : null;
+      const meter = (label: string, value: number) =>
+        html`<div class="meter"><div class="meter-head"><span>${label}</span><span class="meter-value">${counted(value)}</span></div></div>`;
+      return respond(
+        status,
+        layout(
+          'Usage',
+          html`${pageHead('Usage')}${noticeOf(notice, status)}<p>The test environment is on your live plan's limits and is never billed. Switch to Live to see your plan, or to change it.</p>${
+            tested
+              ? html`<section class="panel" id="usage"><h2>This month, in Test</h2><div class="meters">${meter('Operations', tested.totals.operations)}${meter('Bookings', tested.totals.bookings)}${meter('Holds', tested.totals.holds)}</div><p class="fine">Since ${range.from}, in UTC, counted apart from Live, against the same monthly quotas.</p></section>`
+              : html``
+          }`,
+          session,
+          'plan',
+        ),
+      );
+    }
+    const standing = await planStanding(session, 'usage');
+    const { plan, paying, admin, used, month, resets, keys } = standing;
+    const token = csrfToken(session);
+    const keyName = new Map(keys.map((key) => [key.id, key.name]));
+    // An organization is offered Team (where billing sells it, or by asking); a person, Developer.
+    const offered: 'developer' | 'team' =
+      session.org !== undefined && (billing ? Boolean(billing.teamPrices) : true) ? 'team' : 'developer';
+    const contact = plans.contact ?? billing?.contact;
+    const manage =
+      billing && plan?.stripeCustomer && admin
+        ? html`<form class="inline" method="post" action="${root}/plan/manage"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><button type="submit">Manage billing</button></form>`
+        : html``;
+    const renews =
+      paying && plan?.currentPeriodEnd
+        ? html`<span class="meta">${plan.status === 'past_due' ? 'Payment due since' : 'Renews'} ${formatDate(plan.currentPeriodEnd)}</span>`
+        : html``;
+    const planCard = html`<section class="panel plan-card" id="plan"><div class="plan-head"><h2>${standing.name}</h2>${renews}</div><div class="meters">${standing.limitMeters}</div>${
+      used ? html`` : html`<p class="fine">This server does not count use yet.</p>`
+    }</section>${
+      used
+        ? html`<section class="panel" id="month"><h2>This month</h2><div class="meters">${standing.monthMeters('')}</div><p class="fine">Since ${month.from} (UTC); the month starts again on ${resets}. An operation is a call that reached Slotlock, whatever it answered.</p></section>`
         : html``
-    }${quotaWarnings}`;
-    const free = SLOTLOCK_PLAN_LIMITS.free;
-    const developer = SLOTLOCK_PLAN_LIMITS[offered];
-    const upgrade = paying || !isAdmin(session)
-      ? html``
-      : html`<section class="panel" id="upgrade">
+    }`;
+    const byKey =
+      used && used.keys.length > 0
+        ? html`<section class="panel" id="usage"><h2>Used by</h2><div class="table"><table><thead><tr><th>Key</th><th>Operations</th><th>Bookings</th><th>Holds</th></tr></thead><tbody>${used.keys.map(
+            (row) =>
+              html`<tr><td data-label="Key">${row.keyId === null ? 'The dashboard and its assistant' : (keyName.get(row.keyId) ?? 'A deleted key')}</td><td data-label="Operations">${counted(row.operations)}</td><td data-label="Bookings">${counted(row.bookings)}</td><td data-label="Holds">${counted(row.holds)}</td></tr>`,
+          )}</tbody></table></div><p class="fine">Webhook deliveries ${counted(used.totals.webhook_deliveries)} · assistant messages ${counted(used.totals.assistant_messages)}.</p></section>`
+        : html``;
+    const offeredLimits = SLOTLOCK_PLAN_LIMITS[offered];
+    const offeredText = html`${String(offeredLimits.resources)} resources, ${String(offeredLimits.apiKeys)} API keys and ${String(offeredLimits.webhookEndpoints)} webhook endpoints${
+      options.quotas
+        ? html`, with ${counted(SLOTLOCK_PLAN_QUOTAS[offered].operations)} operations and ${counted(SLOTLOCK_PLAN_QUOTAS[offered].bookings)} bookings a month${offered === 'team' ? ' shared by the organization' : ''}`
+        : html``
+    }.`;
+    let upgrade: Html = html``;
+    if (!paying) {
+      if (!admin) {
+        upgrade = html`<p class="fine">An owner of this organization can change its plan.</p>`;
+      } else if (billing) {
+        const offeredPrices = offered === 'team' ? (billing.teamPrices as { month: string; year: string }) : billing.prices;
+        upgrade = html`<section class="panel" id="upgrade">
 <h2>${PLAN_NAMES[offered]}</h2>
-<p>${String(developer.resources)} resources, ${String(developer.apiKeys)} API keys and ${String(developer.webhookEndpoints)} webhook endpoints${options.quotas ? html`, with ${counted(SLOTLOCK_PLAN_QUOTAS[offered].operations)} operations and ${counted(SLOTLOCK_PLAN_QUOTAS[offered].bookings)} bookings a month${offered === 'team' ? ' shared by the organization' : ''}` : html``}.${
-  offered === 'developer' && billing.overage && options.quotas
-    ? ` Operations past them are billed at ${billing.overage.price}, up to ${String(billing.overage.stopPercent)}% of them.`
-    : ''
-}</p>
+<p>${offeredText}${
+          offered === 'developer' && billing.overage && options.quotas
+            ? ` Operations past them are billed at ${billing.overage.price}, up to ${String(billing.overage.stopPercent)}% of them.`
+            : ''
+        }</p>
 <form method="post" action="${root}/plan/upgrade">
 <input type="hidden" name="csrf" value="${token}">
 <input type="hidden" name="once" value="${formNonce(session)}">
@@ -4277,52 +4605,23 @@ ${
 </form>
 <p class="fine">Paid through Stripe, in your currency, with tax added where it applies. Cancel at any time.</p>
 </section>`;
-    const manage = plan?.stripeCustomer && isAdmin(session)
-      ? html`<form class="inline" method="post" action="${root}/plan/manage"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><button type="submit">Manage billing</button></form>`
-      : html``;
-    const renews =
-      paying && plan?.currentPeriodEnd
-        ? html`<p class="fine">${plan.status === 'past_due' ? 'Payment due since' : 'Renews'} ${formatDate(plan.currentPeriodEnd)}.</p>`
-        : html``;
-    const usageSection = used
-      ? html`<section class="panel" id="usage">
-<h2>Usage this month</h2>
-<div class="stats">
-${use('Operations', used.totals.operations, quotas?.operations)}
-${use('Bookings', used.totals.bookings, quotas?.bookings)}
-${use('Holds', used.totals.holds, undefined)}
-${use('Webhook deliveries', used.totals.webhook_deliveries, undefined)}
-${use('Assistant messages', used.totals.assistant_messages, undefined)}
-</div>
-<p class="fine">Since ${month.from}, in UTC. An operation is a call that reached Slotlock, whatever it answered; it shows here within 15 seconds. A booking is a reservation, a calendar event or a confirmed hold, and with holds shows within the hour.</p>
-${
-  used.keys.length === 0
-    ? html``
-    : html`<div class="table"><table><thead><tr><th>Used by</th><th>Operations</th><th>Bookings</th><th>Holds</th></tr></thead><tbody>${used.keys.map(
-        (row) =>
-          html`<tr><td data-label="Used by">${row.keyId === null ? 'The dashboard and its assistant' : (keyName.get(row.keyId) ?? 'A deleted key')}</td><td data-label="Operations">${String(row.operations)}</td><td data-label="Bookings">${String(row.bookings)}</td><td data-label="Holds">${String(row.holds)}</td></tr>`,
-      )}</tbody></table></div>`
-}
-</section>`
-      : html``;
-    const content = html`${thanks ? html`<p class="notice">${notice ?? ''}</p>` : noticeOf(notice, status)}
-${warning}
-${pageHead(`Plan: ${name}`, manage)}
-<div class="stats">
-${use('Resources', resourceCount, plan?.limits.resources)}
-${use('Active API keys', active.length, plan?.limits.apiKeys)}
-${webhooks ? use('Webhooks', webhooks.length, plan?.limits.webhookEndpoints) : html``}
-</div>
-${renews}
-${usageSection}
-${plan ? html`` : html`<p class="fine">Free allows ${String(free.resources)} resources, ${String(free.apiKeys)} API keys and ${String(free.webhookEndpoints)} webhook endpoints${options.quotas ? html`, with ${counted(SLOTLOCK_PLAN_QUOTAS.free.operations)} operations and ${counted(SLOTLOCK_PLAN_QUOTAS.free.bookings)} bookings a month` : html``}.</p>`}
+      } else if (contact) {
+        // No payment here yet: the plan is arranged by asking.
+        upgrade = html`<section class="panel" id="upgrade"><h2>${PLAN_NAMES[offered]}</h2><p>${offeredText}</p><a class="button primary" href="${contact}">Talk to us about ${PLAN_NAMES[offered]}</a></section>`;
+      }
+    }
+    const content = html`${thanks ? html`<p class="notice done" role="status">${notice ?? ''}</p>` : noticeOf(notice, status)}
+${pageHead('Usage', manage)}
+${attentionList(standing.attention)}
+${planCard}
+${byKey}
 ${upgrade}
-<section class="panel" id="custom">
-<h2>Custom</h2>
-<p>Slotlock on your own servers, with support from the people who build it.</p>
-<a class="button" href="${billing.contact}">Talk to the founder</a>
-</section>`;
-    return respond(status, layout('Plan', content, session, 'plan'));
+${
+  contact
+    ? html`<section class="panel" id="custom"><h2>Custom</h2><p>Slotlock on your own servers, with support from the people who build it.</p><a class="button" href="${contact}">Talk to the founder</a></section>`
+    : html``
+}`;
+    return respond(status, layout('Usage', content, session, 'plan'));
   }
 
   async function upgradePlan(session: Session, form: URLSearchParams): Promise<Response> {
@@ -4389,7 +4688,7 @@ ${upgrade}
     if (route.startsWith('/resources') || route === '/hours') return resourcesPage;
     if (route.startsWith('/assistant') && assistantStore()) return assistantPage;
     if (route.startsWith('/settings')) return settingsPage;
-    if (route.startsWith('/plan') && options.billing) return planPage;
+    if (route.startsWith('/plan') && plans) return planPage;
     if (route.startsWith('/teams') && teams) return teamsPage;
     return overviewPage;
   }
@@ -5101,9 +5400,9 @@ ${
       }
       // Keys limited to part of the tenant come with Developer (RFC 0003 pricing); a server without
       // plans allows them.
-      const plan = options.billing ? await options.billing.plan(tenantOf(session)) : null;
+      const plan = plans ? await plans.plan(tenantOf(session)) : null;
       if (plan?.plan === 'free') {
-        return keysPage(session, 403, 'Keys limited to locations or groups come with the Developer and Team plans. See Plan.');
+        return keysPage(session, 403, 'Keys limited to locations or groups come with the Developer and Team plans. See Usage.');
       }
     }
     try {
@@ -5130,8 +5429,8 @@ ${
         return keysPage(
           session,
           409,
-          options.billing
-            ? 'You have as many active keys as your plan allows. Revoke one first, or see Plan.'
+          plans
+            ? 'You have as many active keys as your plan allows. Revoke one first, or see Usage.'
             : 'You have as many keys as Slotlock allows. Revoke one first.',
         );
       }
@@ -5208,7 +5507,7 @@ ${
           session,
           409,
           typeof limit === 'number' && limit < SLOTLOCK_DASHBOARD_MAX_RESOURCES
-            ? `You have ${String(limit)} resources, archived ones included, as many as your plan allows. Delete one, or see Plan.`
+            ? `You have ${String(limit)} resources, archived ones included, as many as your plan allows. Delete one, or see Usage.`
             : `You have ${SLOTLOCK_DASHBOARD_MAX_RESOURCES} resources, as many as the dashboard allows.`,
         );
       }
@@ -5318,7 +5617,7 @@ ${
     }
     // A tenant new to plans is put on the default plan before it adds what plans limit.
     if (route === '/keys' || route === '/resources' || route === '/webhooks') {
-      await options.billing?.enrol?.(tenantOf(session));
+      await plans?.enrol?.(tenantOf(session));
     }
     switch (route) {
       case '/sign-out':
@@ -5700,13 +5999,44 @@ a.stat:hover { background: var(--surface-2); text-decoration: none; }
 a.stat::after { content: ""; position: absolute; top: 18px; right: 18px; width: 6px; height: 6px; border-top: 1.5px solid var(--ink-3); border-right: 1.5px solid var(--ink-3); transform: rotate(45deg); opacity: 0; transition: opacity var(--fast) var(--ease); }
 a.stat:hover::after, a.stat:focus-visible::after { opacity: 1; }
 a.stat:focus-visible { outline-offset: -2px; border-radius: 0; }
-.stat-label { font: 500 var(--text-xs)/1.4 var(--mono); color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.06em; }
+.stat-label { font-size: var(--text-sm); line-height: 1.4; color: var(--ink-3); }
+.attention-stat .stat-value { color: var(--accent); }
 .stat-value { font-size: var(--text-2xl); line-height: 1.1; font-weight: 500; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
 
-/* Setup checklist */
-.setup .steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; counter-reset: step; }
-.steps li { display: flex; align-items: center; gap: var(--space-3); min-height: 36px; color: var(--ink); font-weight: 500; }
-.steps li.done { color: var(--ink-3); font-weight: 400; text-decoration: line-through; text-decoration-color: var(--line-strong); }
+/* Overview: what needs a person, getting started, the side column */
+.column { display: grid; gap: var(--space-5); align-content: start; min-width: 0; }
+.panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-3); }
+.panel-head h2 { margin: 0; }
+.panel-head .meta { flex: none; }
+.attention-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+.attention { display: flex; align-items: center; gap: var(--space-4); padding: 10px var(--space-4); border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); font-size: var(--text-md); color: var(--ink); box-shadow: inset 3px 0 0 var(--ink-3); }
+.attention.bad { border-color: var(--bad-line); background: var(--bad-wash); box-shadow: inset 3px 0 0 var(--bad); }
+.attention.warn { border-color: var(--warn-line); background: var(--warn-wash); box-shadow: inset 3px 0 0 var(--warn); }
+.attention.info { box-shadow: inset 3px 0 0 var(--accent); }
+.attention-text { flex: 1; min-width: 0; }
+.attention-action { flex: none; font-weight: 600; white-space: nowrap; }
+.segments { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 4px; }
+.segments span { height: 4px; border-radius: var(--radius-full); background: var(--sunken); }
+.segments span.done { background: var(--good); }
+.setup-card .segments { margin-bottom: var(--space-3); }
+.setup-steps { list-style: none; margin: 0; padding: 0; display: grid; }
+.setup-steps li { display: flex; align-items: center; gap: var(--space-3); min-height: 44px; border-top: 1px solid var(--line-soft); color: var(--ink-3); }
+.setup-steps li:first-child { border-top: 0; }
+.setup-steps li.next { color: var(--ink); font-weight: 500; }
+.setup-steps li.done .step-title { text-decoration: line-through; text-decoration-color: var(--line-strong); }
+.setup-steps .step-title { flex: 1; min-width: 0; }
+.setup-row { display: flex; align-items: center; gap: var(--space-4); padding: 10px var(--space-4); border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); color: var(--ink-2); font-size: var(--text-md); }
+.setup-row:hover { background: var(--surface-2); text-decoration: none; }
+.setup-row .segments { width: 96px; flex: none; }
+.plan-card .panel-head h2 { font-size: var(--text-lg); }
+.meters.stacked { grid-template-columns: minmax(0, 1fr); gap: var(--space-4); margin: 0 0 var(--space-4); }
+.plan-card > .button { width: 100%; justify-content: center; }
+details.command { margin-top: var(--space-4); }
+details.command > summary { cursor: pointer; font-size: var(--text-md); color: var(--ink-2); }
+details.command[open] > summary { margin-bottom: var(--space-2); }
+.copy-block { position: relative; }
+.copy-block pre { padding-right: 72px; font-size: var(--text-sm); }
+.copy-block button { position: absolute; top: 6px; right: 6px; }
 .check { display: inline-grid; place-items: center; width: 20px; height: 20px; flex: none; border-radius: var(--radius-full); border: 1.5px dashed var(--line-strong); color: var(--surface); }
 .done .check { background: var(--good); border: 0; }
 .check .icon { width: 12px; height: 12px; stroke-width: 3; }
@@ -5724,7 +6054,11 @@ a.stat:focus-visible { outline-offset: -2px; border-radius: 0; }
 .on { color: var(--ink-3); font-weight: 400; }
 .meta { font-size: var(--text-sm); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .feed { position: relative; }
-.event { position: relative; display: grid; grid-template-columns: 12px minmax(0, 1fr); gap: var(--space-3); align-items: start; padding: 7px 0; }
+.event { position: relative; display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: var(--space-3); align-items: start; padding: 7px 0; }
+.event .title { font-weight: 400; color: var(--ink-2); white-space: normal; overflow-wrap: anywhere; }
+.event .title strong { font-weight: 600; color: var(--ink); }
+.event .when { font-size: var(--text-sm); font-weight: 400; color: var(--ink-3); white-space: nowrap; padding-top: 1px; }
+.times { font-size: var(--text-sm); color: var(--ink-3); }
 .event:not(:last-child)::before { content: ""; position: absolute; left: 5.5px; top: 22px; bottom: -8px; width: 1px; background: var(--line); }
 .dot { position: relative; width: 12px; height: 12px; margin-top: 4px; border-radius: var(--radius-full); background: var(--surface); box-shadow: inset 0 0 0 3px var(--ink-3); }
 .dot.good { box-shadow: inset 0 0 0 3px var(--good); }
@@ -5853,6 +6187,21 @@ form > .table { margin-bottom: var(--space-3); }
 /* Notices and empty states */
 .notice { display: block; border: 1px solid var(--line); border-radius: var(--radius); padding: var(--space-3) var(--space-4); background: var(--surface); color: var(--ink); margin: 0; font-size: var(--text-md); }
 .notice[role="alert"] { border-color: var(--bad-line); background: var(--bad-wash); color: var(--ink); box-shadow: inset 3px 0 0 var(--bad); }
+.meters { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-5) var(--space-6); margin: var(--space-4) 0; }
+.meter { display: grid; gap: 6px; min-width: 0; }
+.meter-head { display: flex; justify-content: space-between; align-items: baseline; gap: var(--space-2); font-size: var(--text-md); color: var(--ink-2); }
+.meter-value { color: var(--ink); font-weight: 500; font-variant-numeric: tabular-nums; }
+.meter progress { appearance: none; -webkit-appearance: none; width: 100%; height: 6px; border: 0; border-radius: var(--radius-full); background: var(--sunken); overflow: hidden; }
+.meter progress::-webkit-progress-bar { background: var(--sunken); border-radius: var(--radius-full); }
+.meter progress::-webkit-progress-value { background: var(--ink-2); border-radius: var(--radius-full); }
+.meter progress::-moz-progress-bar { background: var(--ink-2); border-radius: var(--radius-full); }
+.meter.warn progress::-webkit-progress-value { background: var(--warn); }
+.meter.warn progress::-moz-progress-bar { background: var(--warn); }
+.meter.bad progress::-webkit-progress-value { background: var(--bad); }
+.meter.bad progress::-moz-progress-bar { background: var(--bad); }
+.meter.bad .meter-value { color: var(--bad); }
+.plan-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); }
+.plan-head h2 { margin: 0; }
 .notice.done { border-color: color-mix(in srgb, var(--good) 35%, var(--line)); background: var(--good-wash); color: var(--ink); box-shadow: inset 3px 0 0 var(--good); }
 .notice.warn, .notice.warn[role="alert"] { border-color: var(--warn-line); background: var(--warn-wash); color: var(--warn); box-shadow: inset 3px 0 0 var(--warn); }
 .notice p { color: inherit; margin: 0 0 var(--space-2); }
@@ -5919,6 +6268,8 @@ pre { background: var(--surface-2); border: 1px solid var(--line); border-radius
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .stat { padding: 14px var(--space-4); box-shadow: -1px 0 0 var(--line), 0 -1px 0 var(--line); }
   .stat-value { font-size: 22px; }
+  .attention { flex-wrap: wrap; gap: var(--space-1) var(--space-4); }
+  .setup-row .segments { width: 56px; }
   .create > * { flex: 1 1 100%; }
   .create button { width: 100%; }
   .endpoints { grid-template-columns: minmax(0, 1fr); gap: var(--space-1); }
@@ -5967,7 +6318,7 @@ const COMPOSITE_PROBLEMS: Readonly<Record<string, string>> = Object.freeze({
   composite_busy: 'One of them has a booking or hold still to come. A composite changes only while neither does.',
 });
 
-/** What the Plan page calls each plan. */
+/** What the Usage page calls each plan. */
 const PLAN_NAMES: Readonly<Record<SlotlockPlan, string>> = Object.freeze({ free: 'Free', developer: 'Developer', team: 'Team' });
 
 const DASHBOARD_ASSETS = Object.freeze({

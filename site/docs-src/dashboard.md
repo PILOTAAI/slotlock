@@ -33,8 +33,12 @@ the server, see [Dashboard on Cloudflare Workers](/docs/dashboard-workers/).
 
 ## What people can do
 
-- Its pages: an Overview with the coming week's bookings, events and live holds across every
-  resource (each in its resource's time zone) and the latest changes agents made, named by key;
+- Its pages: an Overview that leads with what needs a person (bookings waiting for approval, a
+  failed payment, a monthly quota nearly or fully used, a plan about to start), then the coming
+  week's bookings, events and live holds across every resource (each in its resource's time zone)
+  and the latest changes as sentences ("Booking agent booked room-3", repeats counted on one line),
+  with Get started until an agent has used a key, the plan's use beside it, and the MCP and A2A
+  endpoints;
   Resources, each with its own page for bookable hours, booking rules, profile, pool, location and
   groups, coming bookings and activity; Locations and groups, to add, move and delete them; Waitlist, to see who waits and remove an entry; API keys, with the MCP and A2A
   endpoints; Webhooks, to add, delete and re-enable endpoints and see which are failing; and
@@ -104,12 +108,14 @@ gains an **Assistant** page where every member chats with a model their organiza
 ("what's free tomorrow on van-7?", "book it for Ana") instead of clicking. Each organization brings
 its own model.
 
-- **Connect it** in Settings, Assistant (owners only; with personal tenants, each person): the
-  provider (`Anthropic Messages API`, or `OpenAI-compatible`, which covers OpenAI, OpenRouter,
-  vLLM, Ollama and LM Studio), the base URL (`https://api.anthropic.com`, or the one ending in
-  `/v1`: `https://api.openai.com/v1`, `http://localhost:11434/v1`; https, or http only on
-  `localhost` or `127.0.0.1`), the model name (`your-model`) and the API key, which a local model
-  may not need.
+- **Connect it** in Settings, Assistant (owners only; with personal tenants, each person): a
+  provider (Anthropic, OpenAI, OpenRouter, Google, Mistral, Groq or Together, each bringing its own
+  URL and API format), or Custom with its API format (`Anthropic Messages`, or
+  `OpenAI-compatible`, which covers OpenAI, OpenRouter, vLLM, Ollama and LM Studio), and its base
+  URL (the one ending in `/v1`, like `http://localhost:11434/v1`; https, or http only on `localhost`
+  or `127.0.0.1`); then the model
+  name (`your-model`, or one from **Load models**) and the API key, which a local model may not
+  need. **Test** makes one real request and shows the result in place.
 - **Private addresses are refused.** As with webhooks, a URL whose host is, or resolves to, a
   loopback, private, link-local, shared (CGNAT), unique-local or metadata address
   (`169.254.169.254`) is refused, when it is saved and at each connection (the address the socket
@@ -165,12 +171,16 @@ its own model.
 - A provider's failure is shown as a plain message, never with the key or the provider's answer.
 - It works as plain forms: no script is needed.
 
-## Plan
+## Usage
 
-On hosted Slotlock, **Plan** shows the workspace's plan and how much of it is used, with
-**Upgrade to Developer** (paid through Stripe, in your currency, with tax added where it applies) and
-**Manage billing** for invoices, the payment method and cancelling. Free allows 10 resources, 10 API
-keys and 2 webhook endpoints; Developer 100, 100 and 10. A self-hosted dashboard has no Plan page.
+On hosted Slotlock, **Usage** shows the workspace's plan (or the plan it moves to, and when) against
+its limits, this month's operations, bookings and holds against its quotas, and which key used what.
+It says what needs doing first: a failed payment, a quota at 80%, at 100% or used up, or more
+resources, keys or webhooks than the coming plan allows (nothing is removed; adding stops). An owner
+can move up: **Upgrade** where Stripe sells plans (paid through Stripe, in your currency, with tax
+added where it applies; **Manage billing** for invoices, the payment method and cancelling), else
+**Talk to us**. Free allows 10 resources, 10 API keys and 2 webhook endpoints; Developer 100, 100
+and 10. In Test, it shows Test's own use. A self-hosted dashboard has no Usage page.
 
 ## Before you go live
 

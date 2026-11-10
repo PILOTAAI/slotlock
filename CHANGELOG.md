@@ -5,7 +5,23 @@ versioning.
 
 ## Unreleased
 
+### Added
+
+- **Usage** in the dashboard's navigation on hosted Slotlock, with or without Stripe: the plan (or
+  the default it moves to, and when) against its limits, this month's operations, bookings and
+  holds against the quotas, and which key used what. Without Stripe, an owner asks for another plan
+  at `SLOTLOCK_PLAN_CONTACT`. `createSlotlockDashboard` takes `plans` (`plan`, `enrol`,
+  `planDefault`, `contact`); `billing` still brings its own.
+
 ### Changed
+
+- The Overview leads with what needs a person (approvals waiting, a failed payment, a quota nearly
+  or fully used, a coming plan the workspace is over), then the week ahead and the activity as
+  sentences ("Booking agent booked room-3", passive for what Slotlock did, repeats counted on one
+  line), never a change's type. Get started walks a new workspace from its first resource to an
+  agent that has used a key, folds to one line half way and goes once done. The plan's use and the
+  MCP and A2A endpoints (with the Claude Code command) sit beside the activity.
+- The Plan page is Usage, and a limit refused says "see Usage".
 
 - The dashboard assistant is a chat. A reply streams into the page as the model writes it (the
   dashboard's own script reads `POST <root>/assistant/stream`, one JSON object a line; the CSP
