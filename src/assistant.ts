@@ -74,6 +74,8 @@ export const SLOTLOCK_ASSISTANT_MAX_STORED_BYTES = 160_000;
 const MAX_ACTIONS_BYTES = 80_000;
 /** UTF-8 bytes of one proposed change's arguments as JSON; a larger one is not proposed. */
 export const SLOTLOCK_ASSISTANT_MAX_ACTION_BYTES = 16_000;
+/** Previous secrets a deployment may keep while keys are sealed again under its current one. */
+export const SLOTLOCK_ASSISTANT_MAX_PREVIOUS_SECRETS = 3;
 /** Proposed changes one conversation may have waiting at once (4 of the largest fit the bound). */
 export const SLOTLOCK_ASSISTANT_MAX_PENDING = 4;
 /** Characters of one tool result the model is shown. */
@@ -139,6 +141,12 @@ export interface SlotlockAssistantStore {
     actor?: string,
   ): Promise<{ saved: boolean }>;
   deleteSettings(tenantRef: string, actor?: string): Promise<boolean>;
+  /**
+   * Replace the sealed key `from` with `to` (the same key under the current secret) only while `from`
+   * is the one stored (store.ts resealAssistantKey). Without it, a key sealed under a previous secret
+   * still opens, and is opened that way each time.
+   */
+  resealKey?(tenantRef: string, from: string, to: string): Promise<boolean>;
   getConversation(tenantRef: string, memberRef: string): Promise<SlotlockAssistantConversationRecord | null>;
   /**
    * Replace a member's messages; keep the stored actions `keep` names, as they stand, and add the
@@ -184,6 +192,8 @@ export function createSlotlockAssistantStore(store: SlotlockStore): SlotlockAssi
       ),
     deleteSettings: (tenantRef, actor) =>
       store.withTenant(tenantRef, (tenant) => tenant.deleteAssistantSettings({ tenantRef }), by(actor)),
+    resealKey: (tenantRef, from, to) =>
+      store.withTenant(tenantRef, (tenant) => tenant.resealAssistantKey({ tenantRef, from, to }), by(undefined)),
     // Each read deletes the tenant's expired conversations first, for deployments whose maintenance
     // never meets the tenant (a Worker's).
     getConversation: (tenantRef, memberRef) =>
@@ -251,6 +261,12 @@ export function createSlotlockMemoryAssistantStore(
     },
     async deleteSettings(tenantRef) {
       return settings.delete(tenantRef);
+    },
+    async resealKey(tenantRef, from, to) {
+      const stored = settings.get(tenantRef);
+      if (!stored || stored.sealedKey !== from || to.length === 0 || to === from) return false;
+      settings.set(tenantRef, { ...stored, sealedKey: to });
+      return true;
     },
     async getConversation(tenantRef, memberRef) {
       const found = live(tenantRef, memberRef);
@@ -331,6 +347,23 @@ export async function sealSlotlockAssistantKey(
     encoder.encode(apiKey),
   );
   return `${SEAL_VERSION}.${Buffer.from(iv).toString('base64url')}.${Buffer.from(sealed).toString('base64url')}`;
+}
+
+/**
+ * The key a seal holds, tried with each secret in turn (the current one first, then
+ * SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS), and which one opened it: 0 for the current secret. Null when
+ * none of them sealed it for this tenant.
+ */
+export async function openSlotlockAssistantKeyWithAny(
+  secrets: readonly string[],
+  tenantRef: string,
+  sealed: string,
+): Promise<{ apiKey: string; secretIndex: number } | null> {
+  for (const [secretIndex, secret] of secrets.entries()) {
+    const apiKey = await openSlotlockAssistantKey(secret, tenantRef, sealed);
+    if (apiKey !== null) return { apiKey, secretIndex };
+  }
+  return null;
 }
 
 /** The key a seal holds, or null when it is not one this secret sealed for this tenant. */

@@ -32,6 +32,7 @@ import {
   SLOTLOCK_ASSISTANT_MAX_ACTION_BYTES,
   SLOTLOCK_ASSISTANT_MAX_MESSAGE,
   SLOTLOCK_ASSISTANT_MAX_PENDING,
+  SLOTLOCK_ASSISTANT_MAX_PREVIOUS_SECRETS,
   SLOTLOCK_ASSISTANT_MODEL_NAME,
   SLOTLOCK_ASSISTANT_TOOL_USE,
   type SlotlockAssistantAction,
@@ -40,7 +41,7 @@ import {
   type SlotlockAssistantStore,
   boundSlotlockAssistantEntries,
   createSlotlockAssistantStore,
-  openSlotlockAssistantKey,
+  openSlotlockAssistantKeyWithAny,
   pendingSlotlockAssistantActions,
   pruneSlotlockAssistantActions,
   checkSlotlockAssistantHost,
@@ -293,6 +294,14 @@ export interface SlotlockDashboardState {
 export interface SlotlockDashboardAssistantOptions {
   /** Seals each tenant's API key (SLOTLOCK_ASSISTANT_SECRET): 32+ random characters. */
   secret: string;
+  /**
+   * Secrets keys may still be sealed under (SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS), newest first, at
+   * most SLOTLOCK_ASSISTANT_MAX_PREVIOUS_SECRETS: a key one of them opens is used, and sealed again
+   * under `secret` in the same request, so changing the secret makes no owner enter a key again.
+   * Drop an old secret once every tenant has used the assistant since the change, or keys still
+   * sealed under it stop opening.
+   */
+  previousSecrets?: readonly string[];
   backend: SlotlockAgentCalendarBackend;
   /**
    * As the agent server's: false refuses an operation. Every offered operation by default. It also
@@ -2014,6 +2023,27 @@ ${
   if (assistantOptions && assistantOptions.secret === options.sessionSecret) {
     throw new Error('Slotlock dashboard assistant secret must differ from the session secret');
   }
+  const previousSecrets = [...(assistantOptions?.previousSecrets ?? [])];
+  if (previousSecrets.length > SLOTLOCK_ASSISTANT_MAX_PREVIOUS_SECRETS) {
+    throw new Error(
+      `Slotlock dashboard assistant takes at most ${String(SLOTLOCK_ASSISTANT_MAX_PREVIOUS_SECRETS)} previous secrets`,
+    );
+  }
+  for (const previous of previousSecrets) {
+    if (Buffer.byteLength(previous, 'utf8') < 32) {
+      throw new Error('Slotlock dashboard assistant previous secrets must each be at least 32 bytes');
+    }
+    if (previous === assistantOptions?.secret || previous === options.sessionSecret) {
+      throw new Error(
+        'Slotlock dashboard assistant previous secrets must differ from the assistant and session secrets',
+      );
+    }
+  }
+  if (new Set(previousSecrets).size !== previousSecrets.length) {
+    throw new Error('Slotlock dashboard assistant previous secrets must differ from each other');
+  }
+  /** The current secret, then the previous ones: a stored key is tried with each in turn. */
+  const assistantSecrets = assistantOptions ? [assistantOptions.secret, ...previousSecrets] : [];
   const memberMessages = createSlotlockRateLimiter(
     assistantOptions?.rate ?? { perSecond: 10 / 60, burst: 10 },
     now,
@@ -2161,12 +2191,27 @@ ${
     }
     let apiKey: string | null = null;
     if (settings.sealedKey !== null) {
-      apiKey = await openSlotlockAssistantKey(assistantOptions.secret, tenantOf(session), settings.sealedKey);
-      if (apiKey === null) {
+      const tenantRef = tenantOf(session);
+      const opened = await openSlotlockAssistantKeyWithAny(assistantSecrets, tenantRef, settings.sealedKey);
+      if (opened === null) {
         return {
           problem:
             'The stored API key cannot be opened: the server’s assistant secret changed. An admin can enter the key again in Settings.',
         };
+      }
+      apiKey = opened.apiKey;
+      // Sealed under a previous secret: sealed again under the current one, unless an owner saved
+      // another key meanwhile. Best effort: the key opened either way.
+      if (opened.secretIndex > 0 && store?.resealKey) {
+        try {
+          const resealed = await sealSlotlockAssistantKey(assistantOptions.secret, tenantRef, apiKey);
+          await store.resealKey(tenantRef, settings.sealedKey, resealed);
+        } catch (error) {
+          // A suspended tenant reads and writes nothing, this included: it opens the old way.
+          if ((error as { code?: unknown } | null)?.code !== 'tenant_suspended') {
+            ignoreRejection(options.onError?.(error));
+          }
+        }
       }
     }
     return {

@@ -119,6 +119,7 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_GITHUB_CLIENT_SECRET',
   'SLOTLOCK_SESSION_SECRET',
   'SLOTLOCK_ASSISTANT_SECRET',
+  'SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS',
   'SLOTLOCK_ASSISTANT_PRIVATE_URLS',
   'SLOTLOCK_DASHBOARD_USERS',
   'SLOTLOCK_DASHBOARD_ORGS',
@@ -404,6 +405,7 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
       env.SLOTLOCK_SESSION_SECRET?.trim(),
       env.SLOTLOCK_GITHUB_CLIENT_SECRET?.trim(),
       env.SLOTLOCK_ASSISTANT_SECRET?.trim(),
+      ...(env.SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS?.split(',').map((part) => part.trim()) ?? []),
     ];
     if (others.includes(metricsToken)) {
       throw new SlotlockConfigError('SLOTLOCK_METRICS_TOKEN must differ from every other secret');
@@ -503,6 +505,12 @@ function secretsIn(env: SlotlockEnv): string[] {
   ]) {
     const value = env[name]?.trim();
     if (value) secrets.push(value);
+  }
+  // A list: each secret in it, as well as the whole.
+  const previous = env.SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS?.trim();
+  if (previous) {
+    secrets.push(previous);
+    for (const part of previous.split(',')) if (part.trim()) secrets.push(part.trim());
   }
   for (const name of ['DATABASE_URL', 'SLOTLOCK_MIGRATE_DATABASE_URL']) {
     const value = env[name]?.trim();
@@ -1050,6 +1058,9 @@ export async function startSlotlockServer(
                   // operations, rate limits and series-write slots as an API key's.
                   assistant: {
                     secret: config.dashboard.assistantSecret,
+                    ...(config.dashboard.assistantPreviousSecrets
+                      ? { previousSecrets: config.dashboard.assistantPreviousSecrets }
+                      : {}),
                     ...(config.dashboard.assistantPrivateUrls ? { privateUrls: true } : {}),
                     backend: agentBackend,
                     consumeRateLimit: limits.consumeRateLimit,
@@ -1718,6 +1729,9 @@ Environment:
   SLOTLOCK_ASSISTANT_SECRET      Turns on the dashboard assistant and seals each organization's
                                  model API key with it, 32+ random characters (dashboard; off
                                  without it)
+  SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS Up to three earlier SLOTLOCK_ASSISTANT_SECRET values,
+                                 comma-separated, newest first: keys sealed under one still open
+                                 and are sealed again under the current secret when next used
   SLOTLOCK_ASSISTANT_PRIVATE_URLS off (default): refuse an assistant model URL whose host is, or
                                  resolves to, a loopback, private, link-local, CGNAT, unique-local
                                  or metadata address; on: allow them, for a self-hosted model

@@ -311,8 +311,13 @@ of clicking. Each organization brings its own model:
   reads, are sent to the provider it configures.
 - **The key** is stored sealed with AES-256-GCM under a key derived from `SLOTLOCK_ASSISTANT_SECRET`,
   bound to the organization, in `slotlock.assistant_settings` (forced row-level security, erased
-  with the tenant). The dashboard shows only that it is set and its last four characters. Changing
-  the secret makes stored keys unreadable: owners enter them again.
+  with the tenant). The dashboard shows only that it is set and its last four characters.
+- **Changing the secret** without losing the keys: set the new value as `SLOTLOCK_ASSISTANT_SECRET`
+  and the old one in `SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS` (up to three, comma-separated, newest
+  first). A key sealed under an old secret still opens, and is sealed again under the new one the
+  next time its organization uses the assistant, only if no owner has saved another key since.
+  Remove an old secret once every organization has used the assistant since; a key still sealed
+  under a secret no longer listed cannot be opened, and its owners enter it again.
 - **Reads run, writes wait.** The server runs the tool loop, up to 8 model calls a message, with a
   fixed list of the agent tools (the reads: resources, free-busy, next free time, slots, pool
   availability, events; the writes: holds, bookings, pool and bundle bookings, changes and

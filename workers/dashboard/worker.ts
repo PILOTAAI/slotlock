@@ -269,6 +269,9 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
         ? {
             assistant: {
               secret: config.assistantSecret,
+              ...(config.assistantPreviousSecrets
+                ? { previousSecrets: config.assistantPreviousSecrets }
+                : {}),
               backend: perRequest(() => current().agent),
               // A Worker's fetch reaches no private network (nor this isolate's loopback), so the
               // literal URL check is the one that applies; names are not resolved here.

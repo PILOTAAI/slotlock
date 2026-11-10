@@ -138,6 +138,12 @@ export interface SlotlockServeDashboardConfig {
    */
   assistantSecret?: string;
   /**
+   * Secrets model keys may still be sealed under, newest first (SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS,
+   * comma-separated): each key one opens is sealed again under SLOTLOCK_ASSISTANT_SECRET when next
+   * used.
+   */
+  assistantPreviousSecrets?: string[];
+  /**
    * Let the assistant reach a model at a local or private network address
    * (SLOTLOCK_ASSISTANT_PRIVATE_URLS=on): a self-hosted model on the same machine or network.
    */
@@ -220,6 +226,7 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
   ) {
     throw new SlotlockConfigError('SLOTLOCK_ASSISTANT_SECRET must differ from every other secret');
   }
+  const previousSecrets = readAssistantPreviousSecrets(env, assistantSecret, [sessionSecret, ...others]);
   const privateUrls = optional(env, 'SLOTLOCK_ASSISTANT_PRIVATE_URLS') ?? 'off';
   if (privateUrls !== 'on' && privateUrls !== 'off') {
     throw new SlotlockConfigError('SLOTLOCK_ASSISTANT_PRIVATE_URLS must be on or off');
@@ -239,8 +246,46 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
     ...(orgs !== undefined ? { organizations: orgs } : {}),
     ...(name !== undefined && name !== '' ? { name } : {}),
     ...(assistantSecret !== undefined ? { assistantSecret } : {}),
+    ...(previousSecrets.length > 0 ? { assistantPreviousSecrets: previousSecrets } : {}),
     ...(assistantSecret !== undefined && privateUrls === 'on' ? { assistantPrivateUrls: true } : {}),
   };
+}
+
+/** Previous assistant secrets a deployment may keep (assistant.ts SLOTLOCK_ASSISTANT_MAX_PREVIOUS_SECRETS). */
+const MAX_ASSISTANT_PREVIOUS_SECRETS = 3;
+
+/**
+ * SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS: up to three earlier values of SLOTLOCK_ASSISTANT_SECRET,
+ * comma-separated, newest first, each as strong as a secret must be and unlike every other secret.
+ * Only with SLOTLOCK_ASSISTANT_SECRET: without a current secret nothing would seal the keys again.
+ */
+function readAssistantPreviousSecrets(
+  env: SlotlockEnv,
+  current: string | undefined,
+  others: readonly (string | undefined)[],
+): string[] {
+  const name = 'SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS';
+  const value = env[name];
+  if (value === undefined || value.trim() === '') return [];
+  if (current === undefined) {
+    throw new SlotlockConfigError(
+      `${name} needs SLOTLOCK_ASSISTANT_SECRET: the secret keys are sealed again under`,
+    );
+  }
+  const secrets = value.split(',').map((part) => readSecret({ [name]: part }, name));
+  if (secrets.some((secret) => secret === undefined)) {
+    throw new SlotlockConfigError(`${name} must be comma-separated secrets, with no empty one`);
+  }
+  const listed = secrets as string[];
+  if (listed.length > MAX_ASSISTANT_PREVIOUS_SECRETS) {
+    throw new SlotlockConfigError(`${name} takes at most ${String(MAX_ASSISTANT_PREVIOUS_SECRETS)} secrets`);
+  }
+  if (new Set(listed).size !== listed.length || listed.some((secret) => secret === current || others.includes(secret))) {
+    throw new SlotlockConfigError(
+      `${name} must differ from each other, from SLOTLOCK_ASSISTANT_SECRET and from every other secret`,
+    );
+  }
+  return listed;
 }
 
 /**

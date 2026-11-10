@@ -30,6 +30,14 @@ versioning.
   `setSlotlockPlanDefault` and `enrolSlotlockTenantPlan` in `plans.ts`. Run `slotlock migrate`.
 - `countResources` on the tenant store: how many resources a tenant has, archived ones included, as
   a resource limit counts them.
+- `SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS`: up to three earlier values of `SLOTLOCK_ASSISTANT_SECRET`,
+  comma-separated, newest first, for `slotlock serve` and the dashboard Worker. A model key sealed
+  under one of them still opens, and is sealed again under the current secret the next time its
+  organization uses the assistant, by `resealAssistantKey` on the tenant store, which replaces the
+  stored seal only while it is still the one that was read, so a key an owner saved meanwhile is
+  never overwritten. Each must be as strong as a secret, and differ from the others, from the
+  current secret and from every other secret; the log redacts each one. Changing the assistant
+  secret no longer makes owners enter their keys again.
 
 ### Changed
 

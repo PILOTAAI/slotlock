@@ -547,6 +547,37 @@ describe('slotlock serve configuration', () => {
         /SLOTLOCK_ASSISTANT_PRIVATE_URLS must be on or off/,
       );
     });
+
+    it('keeps up to three previous assistant secrets, each strong and unlike every other secret', () => {
+      const own = secret();
+      const [first, second] = [secret(), secret()];
+      const read = (previous: string, extra: SlotlockEnv = {}) =>
+        readSlotlockServeConfig(
+          dashboardEnv({ SLOTLOCK_ASSISTANT_SECRET: own, SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS: previous, ...extra }),
+        ).dashboard;
+      expect(read('')).not.toHaveProperty('assistantPreviousSecrets');
+      expect(read(`${first},${second}`)?.assistantPreviousSecrets).toEqual([first, second]);
+      const refused = (previous: string, extra: SlotlockEnv = {}) =>
+        refusal(dashboardEnv({ SLOTLOCK_ASSISTANT_SECRET: own, SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS: previous, ...extra }))
+          .message;
+      // Never with the secret it names in the message.
+      for (const message of [
+        refused(own),
+        refused(`${first},${first}`),
+        refused(first, { SLOTLOCK_SESSION_SECRET: first }),
+      ]) {
+        expect(message).toMatch(/SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS must differ/);
+        expect(message).not.toContain(first);
+        expect(message).not.toContain(own);
+      }
+      expect(refused(`${first},`)).toMatch(/no empty one/);
+      expect(refused('z'.repeat(40))).toMatch(/SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS is too weak/);
+      expect(refused([secret(), secret(), secret(), secret()].join(','))).toMatch(/at most 3/);
+      // Without a current secret, nothing would seal the keys again.
+      expect(refusal(dashboardEnv({ SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS: first })).message).toMatch(
+        /needs SLOTLOCK_ASSISTANT_SECRET/,
+      );
+    });
   });
 
   it('reads how many days of history to keep', () => {
@@ -769,6 +800,24 @@ describe('slotlock command line', () => {
     expect(result).toBe(1);
     expect(logged.join('')).toContain('[redacted].invalid');
     expect(logged.join('')).not.toContain(proof);
+  });
+
+  it('keeps each previous assistant secret out of the log', async () => {
+    const [older, oldest] = [randomBytes(16).toString('hex'), randomBytes(16).toString('hex')];
+    const logged: string[] = [];
+    const result = await runSlotlockCli(['serve'], {
+      env: serveEnv({
+        DATABASE_URL: `postgresql://slotlock_app:pass@${oldest}.invalid:5432/slotlock`,
+        SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS: `${older},${oldest}`,
+        PORT: '0',
+      }),
+      stdout: { write: () => {} },
+      stderr: { write: (chunk: string) => logged.push(chunk) },
+      signal: new AbortController().signal,
+    });
+    expect(result).toBe(1);
+    expect(logged.join('')).toContain('[redacted].invalid');
+    expect(logged.join('')).not.toContain(oldest);
   });
 
   it('refuses a weak token without printing it', async () => {

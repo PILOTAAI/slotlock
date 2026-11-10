@@ -12,8 +12,10 @@
 //       SLOTLOCK_SESSION_SECRET        32+ random characters (openssl rand -hex 32)
 //     and, to turn on the chat assistant (optional; Slotlock Cloud sets it):
 //       SLOTLOCK_ASSISTANT_SECRET      32+ random characters; seals each organization's model key.
-//                                      Set it once and keep it: a new value makes every saved model
-//                                      key unopenable until its owner enters it again.
+//                                      Keep it. To change it, put the old value in
+//       SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS  (a secret too; up to three, comma-separated, newest
+//                                      first): keys sealed under it still open and are sealed
+//                                      again under the new one when next used.
 //     (SLOTLOCK_ASSISTANT_PRIVATE_URLS=on, a var, allows localhost and private-address model URLs;
 //     a Worker cannot reach a private network anyway, so it is for a model behind a public name.)
 //

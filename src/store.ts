@@ -2610,6 +2610,13 @@ export interface SlotlockStore extends SlotlockEventFeed {
   }): Promise<{ saved: boolean }>;
   /** Remove the tenant's assistant settings, its key with them. False when it had none. */
   deleteAssistantSettings(params: { tenantRef: string }): Promise<boolean>;
+  /**
+   * Replace the tenant's sealed assistant key `from` with `to`, the same key sealed under a newer
+   * secret (SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS), only while `from` is still the one stored: a key an
+   * owner saved since is never overwritten. Nothing else changes, its hint and who set it included.
+   * True when it was replaced.
+   */
+  resealAssistantKey(params: { tenantRef: string; from: string; to: string }): Promise<boolean>;
   /** A member's live assistant conversation, or null when none is (or it expired). */
   getAssistantConversation(params: {
     tenantRef: string;
@@ -3293,6 +3300,7 @@ export const SLOTLOCK_TENANT_WRITE_METHODS = Object.freeze([
   'leaveWaitlist',
   'putAssistantSettings',
   'deleteAssistantSettings',
+  'resealAssistantKey',
   'putAssistantConversation',
   'settleAssistantAction',
   'deleteAssistantConversation',
@@ -6364,6 +6372,16 @@ function buildSlotlockStore(
       if (!isValidIdentity(params.tenantRef)) return false;
       const rows = await sql`
         DELETE FROM slotlock.assistant_settings WHERE tenant_ref = ${params.tenantRef} RETURNING 1`;
+      return rows.length > 0;
+    },
+
+    async resealAssistantKey(params) {
+      if (!isValidIdentity(params.tenantRef)) return false;
+      if (params.to.length === 0 || params.to === params.from) return false;
+      const rows = await sql`
+        UPDATE slotlock.assistant_settings SET sealed_key = ${params.to}
+         WHERE tenant_ref = ${params.tenantRef} AND sealed_key = ${params.from}
+        RETURNING 1`;
       return rows.length > 0;
     },
 

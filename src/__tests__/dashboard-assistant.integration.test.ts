@@ -310,6 +310,26 @@ describe.skipIf(!url)('assistant records (real Postgres)', () => {
     }
   });
 
+  it('seals a key again under a new secret only while it is still the one stored, and only in its tenant', async () => {
+    const adapter = createSlotlockDashboardResources(store).assistant;
+    if (!adapter?.resealKey) throw new Error('the store adapter re-seals keys');
+    const next = randomBytes(32).toString('hex');
+    const settings = { provider: 'openai' as const, baseUrl: 'https://api.example.com/v1', model: 'm' };
+    const old = await sealSlotlockAssistantKey(SECRET, tenant, 'sk-rotate-key-5678');
+    await adapter.putSettings(tenant, { ...settings, key: { sealed: old, hint: '5678' } }, 'github:1');
+    const resealed = await sealSlotlockAssistantKey(next, tenant, 'sk-rotate-key-5678');
+    // Another tenant cannot touch it, even naming the stored seal.
+    expect(await adapter.resealKey(other, old, resealed)).toBe(false);
+    expect((await adapter.getSettings(tenant))?.sealedKey).toBe(old);
+    expect(await adapter.resealKey(tenant, old, resealed)).toBe(true);
+    const stored = await adapter.getSettings(tenant);
+    expect(stored).toMatchObject({ sealedKey: resealed, keyHint: '5678', updatedBy: 'github:1' });
+    await expect(openSlotlockAssistantKey(next, tenant, stored?.sealedKey as string)).resolves.toBe('sk-rotate-key-5678');
+    // A stale re-seal (the key an owner saved since is not `from`) changes nothing.
+    expect(await adapter.resealKey(tenant, old, await sealSlotlockAssistantKey(next, tenant, 'sk-stale'))).toBe(false);
+    expect((await adapter.getSettings(tenant))?.sealedKey).toBe(resealed);
+  });
+
   it("erases a tenant's settings and conversations, and no other tenant's", async () => {
     const adapter = createSlotlockDashboardResources(store).assistant;
     if (!adapter) throw new Error('the store adapter keeps assistant records');

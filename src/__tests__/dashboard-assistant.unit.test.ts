@@ -477,6 +477,56 @@ describe('assistant settings', () => {
     await expect(openSlotlockAssistantKey(`${ASSISTANT_SECRET}x`, 'github-org:91', sealed)).resolves.toBeNull();
   });
 
+  it('rotates the secret: a key sealed under a previous one opens, and is sealed again under the new one', async () => {
+    const NEW_SECRET = 'e8b2d4f6a1c3e5b7d9f0a2c4e6b8d1f3a5c7e9b0d2f4a6c8e1b3d5f7a9c0e2b4';
+    const before = dashboard();
+    await connect(before, await signIn(before, 'alice'), model, 'openai');
+    const sealedBefore = (await assistantStore.getSettings('github-org:91'))?.sealedKey as string;
+    await expect(openSlotlockAssistantKey(ASSISTANT_SECRET, 'github-org:91', sealedBefore)).resolves.toBe(API_KEY);
+
+    // The secret changed with no previous one listed: the key cannot be opened, and the page says so.
+    const lost = dashboard({ secret: NEW_SECRET });
+    const lostAlice = await signIn(lost, 'alice');
+    const refused = await chat(lost, lostAlice, 'Hello?');
+    expect(refused.status).toBe(409);
+    expect(await refused.text()).toContain('The stored API key cannot be opened');
+    expect((await assistantStore.getSettings('github-org:91'))?.sealedKey).toBe(sealedBefore);
+
+    // Listed as previous: the key opens, the model gets it, and it is sealed again under the new one.
+    const rotated = dashboard({ secret: NEW_SECRET, previousSecrets: [ASSISTANT_SECRET] });
+    const alice = await signIn(rotated, 'alice');
+    model.requests.length = 0;
+    model.script({ text: 'Hello.' });
+    expect((await chat(rotated, alice, 'Hello?')).status).toBe(303);
+    expect(model.requests[0]?.headers.authorization).toBe(`Bearer ${API_KEY}`);
+    expect(await page(rotated, alice)).toContain('Hello.');
+    const resealed = await assistantStore.getSettings('github-org:91');
+    expect(resealed?.sealedKey).not.toBe(sealedBefore);
+    expect(resealed?.keyHint).toBe('wxyz');
+    await expect(openSlotlockAssistantKey(NEW_SECRET, 'github-org:91', resealed?.sealedKey as string)).resolves.toBe(API_KEY);
+    await expect(openSlotlockAssistantKey(ASSISTANT_SECRET, 'github-org:91', resealed?.sealedKey as string)).resolves.toBeNull();
+    // So the new secret alone opens it from now on.
+    const after = dashboard({ secret: NEW_SECRET });
+    const afterAlice = await signIn(after, 'alice');
+    model.script({ text: 'Still here.' });
+    await chat(after, afterAlice, 'Again?');
+    expect(await page(after, afterAlice)).toContain('Still here.');
+
+    // A re-seal never overwrites a key an owner saved since the old one was read.
+    expect(await assistantStore.resealKey?.('github-org:91', sealedBefore, 'v1.stale.stale')).toBe(false);
+    expect((await assistantStore.getSettings('github-org:91'))?.sealedKey).toBe(resealed?.sealedKey);
+    expect(reported).toEqual([]);
+  });
+
+  it('refuses previous secrets that are short, repeated, the current one, or too many', () => {
+    const other = (n: number) => `${String(n)}d4f6a1c3e5b7d9f0a2c4e6b8d1f3a5c7e9b0d2f4a6c8e1b3d5f7a9c0e2b4`;
+    expect(() => dashboard({ previousSecrets: [ASSISTANT_SECRET] })).toThrow('must differ');
+    expect(() => dashboard({ previousSecrets: ['too-short'] })).toThrow('at least 32 bytes');
+    expect(() => dashboard({ previousSecrets: [other(1), other(1)] })).toThrow('differ from each other');
+    expect(() => dashboard({ previousSecrets: [other(1), other(2), other(3), other(4)] })).toThrow('at most 3');
+    expect(() => dashboard({ previousSecrets: [other(1), other(2), other(3)] })).not.toThrow();
+  });
+
   it('offers reads to run and writes to propose, and nothing else', () => {
     const tools = slotlockAssistantTools();
     expect(tools.filter((tool) => tool.use === 'read').map((tool) => tool.name).sort()).toEqual([

@@ -166,8 +166,9 @@ Cloud, people on their personal tenants (see [Teams on Cloud](#later)).
 
 ### Plan
 
-A3 is done on `claude/inspiring-dijkstra-bfvqif`; A1 waits on the owner, who holds the Cloudflare
-credentials (this repository holds none, by design).
+A2 and A3 are done on `claude/inspiring-dijkstra-bfvqif` (A2 is T2 and needs its independent
+review); A1 waits on the owner, who holds the Cloudflare credentials (this repository holds none, by
+design).
 
 | # | Change | Tier |
 | --- | --- | --- |
