@@ -360,6 +360,52 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     }
   });
 
+  it('meters each operation a key runs with SLOTLOCK_USAGE=on, and records it as the server stops', async () => {
+    const metered = `cli-usage-${randomUUID()}`;
+    const meteredEnv: SlotlockEnv = { ...env, SLOTLOCK_TENANT: metered, SLOTLOCK_USAGE: 'on' };
+    expect((await run(['migrate'])).code).toBe(0);
+    const stdout = output();
+    const stderr = output();
+    const created = output();
+    expect(
+      await runSlotlockCli(['key', 'create', 'metered agent', '--scope', 'read,admin'], {
+        env: meteredEnv,
+        stdout: created,
+        stderr: output(),
+        signal: new AbortController().signal,
+      }),
+    ).toBe(0);
+    const { id, key } = JSON.parse(created.text()) as { id: string; key: string };
+    const shutdown = new AbortController();
+    const serving = runSlotlockCli(['serve', '--migrate'], { env: meteredEnv, stdout, stderr, signal: shutdown.signal });
+    try {
+      const listening = await eventually(() => stdout.events().find(({ event }) => event === 'listening'));
+      expect(listening).toMatchObject({ usage: true });
+      const origin = listening.address as string;
+      const listed = await fetch(`${origin}/v1/resources`, { headers: { Authorization: `Bearer ${key}` } });
+      expect(listed.status).toBe(200);
+      // The application API counts too, as its own surface.
+      expect((await fetch(`${origin}/v1/tenant`, { headers: { Authorization: `Bearer ${key}` } })).status).toBe(200);
+      // A request refused before its operation runs is not counted.
+      const refused = await fetch(`${origin}/v1/resources?limit=0`, { headers: { Authorization: `Bearer ${key}` } });
+      expect(refused.status).toBe(400);
+    } finally {
+      shutdown.abort();
+      expect(await serving).toBe(0);
+    }
+    try {
+      const rows = await admin<{ metric: string; key_id: string; origin: string; count: string }[]>`
+        SELECT metric, key_id, origin, count FROM slotlock.usage_daily WHERE tenant_ref = ${metered}
+         ORDER BY origin`;
+      expect(rows).toEqual([
+        { metric: 'operations', key_id: id, origin: 'application', count: '1' },
+        { metric: 'operations', key_id: id, origin: 'rest', count: '1' },
+      ]);
+    } finally {
+      await admin`SELECT * FROM slotlock.erase_tenant(${metered}::text)`;
+    }
+  });
+
   it('serves MCP over HTTP as the granted role until its signal aborts', async () => {
     const shutdown = new AbortController();
     const stdout = output();

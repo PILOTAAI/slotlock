@@ -62,7 +62,7 @@ import {
 } from './config.js';
 import { type SlotlockBookingRules, parseBookingRules } from './booking-rules.js';
 import { SLOTLOCK_APPLICATION_SCOPE } from './application-api.js';
-import { SLOTLOCK_DASHBOARD_FUNCTIONS, SLOTLOCK_TENANT_TABLES } from './ddl.js';
+import { SLOTLOCK_DASHBOARD_FUNCTIONS, SLOTLOCK_TENANT_TABLES, SLOTLOCK_USAGE_FUNCTIONS } from './ddl.js';
 import {
   type SlotlockMaintenanceResult,
   type SlotlockMaintenanceScheduler,
@@ -85,6 +85,7 @@ import {
   setSlotlockPlanDefault,
 } from './plans.js';
 import { createSlotlockRequestLimits } from './rate-limit.js';
+import { createSlotlockUsageMeter, recordSlotlockUsage } from './usage.js';
 import {
   type SlotlockSql,
   type SlotlockStore,
@@ -112,6 +113,7 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_RETENTION_DAYS',
   'SLOTLOCK_WEBHOOKS',
   'SLOTLOCK_SHARED_LIMITS',
+  'SLOTLOCK_USAGE',
   'SLOTLOCK_LIMITS',
   'SLOTLOCK_TRUSTED_PROXY_HEADER',
   'SLOTLOCK_TRUSTED_PROXY_SECRET',
@@ -240,6 +242,11 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
   webhooks: 'on' | 'off' | 'private';
   /** Tenant request budgets shared with every server through PostgreSQL (SLOTLOCK_SHARED_LIMITS=on). */
   sharedLimits: boolean;
+  /**
+   * Usage metering (SLOTLOCK_USAGE=on; off by default): each tenant's operations, bookings and
+   * holds counted by day, key and surface in slotlock.usage_daily (usage.ts).
+   */
+  usage: boolean;
   /** Request limits (SLOTLOCK_LIMITS over SLOTLOCK_DEFAULT_LIMITS): the server's only rate limit. */
   limits: SlotlockLimits;
   /** The lower-case request field a trusted proxy sets to the client address; else the socket's. */
@@ -352,6 +359,15 @@ function readSharedLimits(env: SlotlockEnv): boolean {
   return value === 'on';
 }
 
+/** SLOTLOCK_USAGE: on to meter each tenant's use (usage.ts); off, the default, records nothing. */
+function readUsageMetering(env: SlotlockEnv): boolean {
+  const value = optional(env, 'SLOTLOCK_USAGE') ?? 'off';
+  if (value !== 'on' && value !== 'off') {
+    throw new SlotlockConfigError('SLOTLOCK_USAGE must be on or off');
+  }
+  return value === 'on';
+}
+
 function readRestApi(env: SlotlockEnv): boolean {
   const value = optional(env, 'SLOTLOCK_REST_API') ?? 'on';
   if (value !== 'on' && value !== 'off') {
@@ -390,6 +406,7 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
     restApi: readRestApi(env),
     webhooks: readWebhooks(env),
     sharedLimits: readSharedLimits(env),
+    usage: readUsageMetering(env),
     limits: readLimits(env),
   };
   const trustedProxyHeader = readTrustedProxyHeader(env);
@@ -895,6 +912,31 @@ export async function startSlotlockServer(
         );
       }
     }
+    if (config.usage) {
+      for (const signature of SLOTLOCK_USAGE_FUNCTIONS) {
+        const [granted] = await sql<{ ready: boolean }[]>`
+          SELECT CASE WHEN to_regprocedure(${signature}) IS NULL THEN false
+                      ELSE has_function_privilege(to_regprocedure(${signature}), 'EXECUTE') END AS ready`;
+        if (!granted?.ready) {
+          throw Object.assign(
+            new Error(
+              `SLOTLOCK_USAGE needs ${signature}, which this database role cannot run: run \`slotlock migrate\` (or \`slotlock serve --migrate\`) with this release`,
+            ),
+            { code: 'schema_outdated' },
+          );
+        }
+      }
+    }
+    // Each tenant's operations, recorded every 15 seconds and when the server stops (usage.ts).
+    const usage = config.usage
+      ? createSlotlockUsageMeter({
+          record: (flushId, rows) => recordSlotlockUsage(sql, flushId, rows),
+          onError: (error) =>
+            log.error('usage_record_failed', {
+              error: error instanceof Error ? error.message : 'unknown',
+            }),
+        })
+      : undefined;
     const { caps } = config.limits;
     const store = createSlotlockServeStore(sql, caps, config.availability, config.retentionDays);
     const retention = config.retentionDays !== undefined ? { retentionDays: config.retentionDays } : {};
@@ -969,6 +1011,7 @@ export async function startSlotlockServer(
       availabilityRules: async () => config.availability.map((rule) => ({ ...rule })),
     });
     const agentServer = createSlotlockAgentServer({
+      ...(usage ? { onUsage: usage.count } : {}),
       publicBaseUrl: config.publicUrl,
       // readPublicUrl admits plain HTTP only on a loopback host, which is all this permits anyway.
       allowInsecureLocalhost: publicUrl.protocol === 'http:',
@@ -1058,6 +1101,7 @@ export async function startSlotlockServer(
                   // operations, rate limits and series-write slots as an API key's.
                   assistant: {
                     secret: config.dashboard.assistantSecret,
+                    ...(usage ? { onUsage: usage.count } : {}),
                     ...(config.dashboard.assistantPreviousSecrets
                       ? { previousSecrets: config.dashboard.assistantPreviousSecrets }
                       : {}),
@@ -1104,6 +1148,7 @@ export async function startSlotlockServer(
         pageTenants((after) => sql<{ tenant: string }[]>`
           SELECT slotlock.maintenance_tenants(${after}::text) AS tenant`),
       intervalMs: SERVE_MAINTENANCE_INTERVAL_MS,
+      ...(config.usage ? { usage: true } : {}),
       // Counts only, never the tenant.
       onPass: (result) => {
         metrics?.maintenance(result);
@@ -1152,6 +1197,7 @@ export async function startSlotlockServer(
       rest: config.restApi ? `${config.publicUrl}/openapi.json` : null,
       webhooks: config.webhooks,
       shared_limits: config.sharedLimits,
+      usage: config.usage,
       tzdata: process.versions.tz ?? null,
       maintenance_interval_minutes: SERVE_MAINTENANCE_INTERVAL_MS / 60_000,
       limits: {
@@ -1170,6 +1216,8 @@ export async function startSlotlockServer(
       async close() {
         const result = await listener.close();
         limits.close();
+        // What the last requests counted is recorded before the pool closes.
+        await usage?.close();
         await maintenance?.close();
         await webhooks?.close();
         await sql.end({ timeout: 5 });
@@ -1692,6 +1740,9 @@ Environment:
   SLOTLOCK_RETENTION_DAYS        Days of history kept: the change feed, ended waitlist entries,
                                  and retired answers (never under 30) (1-3650, default 30;
                                  serve and maintain)
+  SLOTLOCK_USAGE                 on: count each tenant's operations, bookings and holds by day, API
+                                 key and surface (slotlock.usage_daily, kept 400 days); off
+                                 (default): record nothing
   SLOTLOCK_SHARED_LIMITS         on: tenant request budgets are shared by every server through the
                                  database, so N servers allow a tenant its rate once; off (default):
                                  each server keeps its own

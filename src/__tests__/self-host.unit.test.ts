@@ -94,8 +94,17 @@ describe('slotlock serve configuration', () => {
       restApi: true,
       webhooks: 'on',
       sharedLimits: false,
+      usage: false,
       limits: SLOTLOCK_DEFAULT_LIMITS,
     });
+  });
+
+  it('meters usage only when asked', () => {
+    expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_USAGE: 'on' })).usage).toBe(true);
+    expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_USAGE: 'off' })).usage).toBe(false);
+    expect(() => readSlotlockServeConfig(serveEnv({ SLOTLOCK_USAGE: 'yes' }))).toThrow(
+      'SLOTLOCK_USAGE must be on or off',
+    );
   });
 
   it('shares tenant budgets through the database only when asked', () => {

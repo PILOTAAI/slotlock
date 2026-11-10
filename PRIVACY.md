@@ -42,6 +42,7 @@ protection officer.
 | The sign-in in progress, in a cookie | The service | 10 minutes |
 | Dashboard assistant settings, if the dashboard offers the assistant and you set it up: the provider, its address, the model, and your provider key, stored only encrypted (AES-256-GCM) with its last four characters to show; and your conversation with it | You | Settings while your account exists or until you remove them; a conversation 2 hours after its last message |
 | Your plan: which plan, its status and renewal date, and the Stripe customer and subscription ids that link your account to its purchase. Your name, email, billing address, tax id and payment details go to Stripe directly and never reach us | The service and Stripe, if you upgrade | While your account exists |
+| How much your account uses the service: for each day (UTC), how many operations your keys and the dashboard assistant ran, and how many bookings and holds you made, by API key and by interface (MCP, A2A, REST, the assistant). Counts only: never what was asked or answered | The service | 400 days, then deleted |
 | Connection details at Cloudflare: IP addresses, request times, paths and headers | Your browser or client, through Cloudflare | Cloudflare's dashboard request logs: at most 7 days |
 | Connection details at our server: IP address, time, path and user agent of each API request, in the log of the proxy in front of it | Your client, through Cloudflare | One file of at most 10 MB, overwritten as it fills |
 | The API server's own logs | The service | See below |
@@ -74,6 +75,7 @@ our mailboxes, hosted by Google Workspace, for two years and then delete them.
 | --- | --- | --- |
 | Running your account and the service you signed up for: storing your calendars, answering your agents, sending your webhooks, keeping your activity history | Account, keys, calendar content, webhooks, history, write records, sessions, assistant settings | (b) contract: the Terms of Service |
 | Applying your plan: its limits, upgrading and managing it through Stripe | Account, plan | (b) contract: the Terms of Service |
+| Measuring use: counting each account's operations, bookings and holds, to show you your usage and to apply your plan's allowances | Account, usage counts | (b) contract: the Terms of Service |
 | Keeping the service secure and available: authenticating requests, rate limiting, stopping abuse, investigating faults, and restoring from backups | Account, keys, connection details, logs, backups | (f) legitimate interests: a service anyone with a GitHub account can use must be protected from misuse and recoverable after a failure, and the logs hold no request content |
 | Answering you when you write to us | What you send | (b) contract, or (f) legitimate interests when you are not a user |
 | Meeting a legal obligation, such as a lawful request from an authority | What the request covers | (c) legal obligation |
@@ -131,7 +133,7 @@ time.
 To erase your account and everything in it, write to [privacy@pylota.io](mailto:privacy@pylota.io)
 naming your GitHub login. We reply with a word; sign in to the dashboard and create an API key with
 that word as its name, which shows us the account is yours. We then erase every resource, booking,
-event, hold, waitlist entry, webhook, history entry, assistant setting, plan and key in the account, in one
+event, hold, waitlist entry, webhook, history entry, assistant setting, plan, usage count and key in the account, in one
 step, and tell you when it is done. What stays: the digests of your erased keys, with nothing about
 you, so those keys are never accepted again; a record that the account was suspended, with the reason we gave, if it was; log
 lines until they age out as described above; and backups, until they are replaced within about five

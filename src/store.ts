@@ -2287,6 +2287,12 @@ export interface SlotlockStore extends SlotlockEventFeed {
    */
   countResources(params: { tenantRef: string }): Promise<number>;
   /**
+   * Roll the tenant's committed bookings and holds up from its feed into its daily usage
+   * (usage.ts, `slotlock.roll_up_usage`), up to `limit` changes (1-100,000, default 5,000): how
+   * many it read. Fewer than `limit` means it has caught up.
+   */
+  rollUpUsage(params: { tenantRef: string; limit?: number }): Promise<number>;
+  /**
    * Insert a confirmed reservation with the EXCLUDE constraint as the overlap arbiter; expected
    * outcomes (invalid window, lost race) come back structured. Expired holds overlapping the window
    * are reaped in the same transaction, so they never block. On a tenant's resource the booking
@@ -4050,6 +4056,21 @@ function buildSlotlockStore(
          ORDER BY id
          LIMIT ${limit}`;
       return rows.map(toResource);
+    },
+
+    async rollUpUsage(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const limit = params.limit ?? 5_000;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100_000) {
+        throw Object.assign(new Error('Slotlock usage roll-up limit must be 1-100,000'), {
+          code: 'invalid_limit' as const,
+        });
+      }
+      const [result] = await sql<{ read: number }[]>`
+        SELECT slotlock.roll_up_usage(${params.tenantRef}::text, ${limit}::integer) AS read`;
+      return result?.read ?? 0;
     },
 
     async countResources(params) {

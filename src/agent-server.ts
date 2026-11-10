@@ -844,6 +844,12 @@ export interface SlotlockAgentServerOptions {
    */
   onEvent?: (event: SlotlockAgentServerEvent) => void;
   /**
+   * Called for each operation a principal ran (MCP, A2A or REST, the application API included), as
+   * it reaches the backend, with the principal: for metering a tenant's use (usage.ts). Unlike
+   * `onEvent`, it names the tenant and key, so it must not feed a public metric. A throw is ignored.
+   */
+  onUsage?: (usage: SlotlockAgentUsage) => void;
+  /**
    * Called with a failure no client is told about: an operation's backend threw something other
    * than a `SlotlockAgentOperationError`, or returned a result outside the operation's schema. The
    * client gets `internal_error` and nothing more, so log it here to find out why. It receives the
@@ -857,6 +863,28 @@ export interface SlotlockAgentServerOptions {
 export interface SlotlockAgentErrorContext {
   /** The operation that failed; `null` when the failure came before one was resolved. */
   operation: SlotlockAgentOperation | SlotlockApplicationOperation | null;
+}
+
+/**
+ * One operation a principal ran, for usage metering (`onUsage`): reported as it reaches the backend,
+ * once its arguments, scopes, authorization, rate limit and any confirmation have passed, whatever it
+ * then returns. Never its arguments or its result.
+ */
+export interface SlotlockAgentUsage {
+  principal: SlotlockAgentPrincipal;
+  operation: SlotlockAgentOperation | SlotlockApplicationOperation;
+  /** The surface it came through (`library` when the caller named none). */
+  origin: SlotlockChangeOrigin;
+}
+
+/** Report usage without letting the reporter change the call: a throw or rejection is dropped. */
+function reportUsage(onUsage: ((usage: SlotlockAgentUsage) => void) | undefined, usage: SlotlockAgentUsage) {
+  if (!onUsage) return;
+  try {
+    ignoreRejection(onUsage(usage));
+  } catch {
+    // Metering must never change what a client receives.
+  }
 }
 
 export interface SlotlockAgentOperationDispatchOptions {
@@ -883,6 +911,8 @@ export interface SlotlockAgentOperationDispatchOptions {
   }) => Promise<{ status: number; code: string } | null>;
   /** As `SlotlockAgentServerOptions.onError`: a failure the result reports only as internal. */
   onError?: (error: unknown, context: SlotlockAgentErrorContext) => void;
+  /** As `SlotlockAgentServerOptions.onUsage`: each operation that reaches the backend. */
+  onUsage?: (usage: SlotlockAgentUsage) => void;
 }
 
 /** One reason `invalid_arguments` refused a call: where in the arguments, and what is wrong there. */
@@ -1874,6 +1904,11 @@ export async function invokeSlotlockAgentOperation(args: {
     };
     if (args.trace) context.trace = args.trace;
     if (args.origin) context.origin = args.origin;
+    reportUsage(args.options.onUsage, {
+      principal,
+      operation: operation.name,
+      origin: args.origin ?? 'library',
+    });
     const data = await method.call(backend, context, parsed.data);
     if (!operation.output.safeParse(data).success) {
       // Neither the result nor the schema's complaint about it: either may hold tenant data.
@@ -3245,6 +3280,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     authorize: options.authorize,
     ...(options.consumeRateLimit ? { consumeRateLimit: options.consumeRateLimit } : {}),
     ...(options.onError ? { onError: options.onError } : {}),
+    ...(options.onUsage ? { onUsage: options.onUsage } : {}),
   });
   /**
    * The 2025 revisions and A2A cannot carry a confirmation round, so a guarded write there fails
@@ -4207,6 +4243,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
         origin: 'application',
       };
       if (trace) context.trace = trace;
+      reportUsage(options.onUsage, { principal, operation: definition.name, origin: 'application' });
       const data = await served.backend[definition.invoke].call(served.backend, context, parsed.data);
       if (!definition.output.safeParse(data).success) {
         reportUnexpected(

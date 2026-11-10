@@ -91,6 +91,16 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
   the proxy set `X-Slotlock-Proxy-Proof` to it on every request (a Cloudflare request header
   transform rule): the field is then believed only beside that exact value, and any other request
   is counted by its connection's address.
+- With `SLOTLOCK_USAGE=on` (off by default) the server meters each tenant's use in
+  `slotlock.usage_daily`, by UTC day, API key and surface: every operation that runs (MCP, A2A,
+  REST, the application API and the dashboard assistant), counted in memory and recorded every 15
+  seconds and when the server stops, each batch once however often it is sent; and the bookings
+  (`reservation.created`, `event.created`, `hold.confirmed`) and holds (`hold.created`) its feed
+  shows committed, rolled up by maintenance before the feed is pruned, so a write that rolled back
+  is never counted and maintenance's own changes never are. Counts only, never what was asked; kept
+  400 days, erased with the tenant; read back with `readSlotlockTenantUsage` (usage.ts). Writes from
+  before the release that created the tables are not counted. The dashboard Worker takes the same
+  setting for the assistant's operations.
 - The server also bounds what one tenant may store, whichever key, agent or application writes
   it: 10,000 holds, and 100,000 each of bookings, calendar events and coverage rows, counted as
   the store's `tenantLimits` count them, besides 10,000 resources. A write past one answers 409

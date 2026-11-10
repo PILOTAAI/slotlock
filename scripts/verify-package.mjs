@@ -157,6 +157,8 @@ const expectedFiles = new Set([
   'timezone.d.ts',
   'types.js',
   'types.d.ts',
+  'usage.js',
+  'usage.d.ts',
   'webhooks.js',
   'webhooks.d.ts',
   'interop.js',

@@ -30,6 +30,21 @@ versioning.
   `setSlotlockPlanDefault` and `enrolSlotlockTenantPlan` in `plans.ts`. Run `slotlock migrate`.
 - `countResources` on the tenant store: how many resources a tenant has, archived ones included, as
   a resource limit counts them.
+- Usage metering, off unless `SLOTLOCK_USAGE=on` (RFC 0003 part 3). `slotlock.usage_daily` counts
+  each tenant's use by UTC day, API key and surface: every operation that reaches the backend (MCP,
+  A2A, REST, the application API, the dashboard assistant), reported by the agent server's new
+  `onUsage` and the dispatch's, counted in memory by `createSlotlockUsageMeter` and recorded every
+  15 seconds and on shutdown through `slotlock.record_usage`, once per batch id however often it is
+  sent; and the bookings (`reservation.created`, `event.created`, `hold.confirmed`) and holds
+  (`hold.created`) committed on the tenant's feed, rolled up by maintenance
+  (`slotlock.roll_up_usage`, the store's `rollUpUsage`) before the feed is pruned, in the feed's
+  committed order, so nothing is counted twice and a rolled-back write never is; maintenance's own
+  changes are not counted, nor writes from before the release. Read with `slotlock.tenant_usage`
+  (`readSlotlockTenantUsage`). Kept 400 days, erased with the tenant; recording skips a tenant with
+  no key and no feed, so counts flushed after an erasure recreate nothing. The dashboard Worker
+  takes the same setting for the assistant's operations, recording each request's when it ends.
+  `serve` refuses to start with it on against a schema without the functions. The privacy notice
+  lists the counts. Run `slotlock migrate`.
 - `SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS`: up to three earlier values of `SLOTLOCK_ASSISTANT_SECRET`,
   comma-separated, newest first, for `slotlock serve` and the dashboard Worker. A model key sealed
   under one of them still opens, and is sealed again under the current secret the next time its

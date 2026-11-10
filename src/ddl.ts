@@ -247,6 +247,10 @@ export const SLOTLOCK_TENANT_ADMIN_TABLES = Object.freeze([
   'tenant_suspensions',
   'tenant_plans',
   'plan_defaults',
+  'usage_daily',
+  'usage_flushes',
+  'usage_cursors',
+  'usage_meter_start',
   'webhook_tenants',
   'rate_buckets',
   'assistant_tenants',
@@ -272,7 +276,22 @@ export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.set_tenant_plan(text, text, text, integer, integer, integer, text, text, timestamptz)',
   'slotlock.plan_default()',
   'slotlock.enrol_tenant_plan(text)',
+  'slotlock.record_usage(uuid, jsonb)',
+  'slotlock.roll_up_usage(text, integer)',
+  'slotlock.tenant_usage(text, date, date)',
 ] as const);
+
+/** The functions usage metering runs (SLOTLOCK_USAGE=on): serve checks it may, before it starts. */
+export const SLOTLOCK_USAGE_FUNCTIONS = Object.freeze([
+  'slotlock.record_usage(uuid, jsonb)',
+  'slotlock.roll_up_usage(text, integer)',
+  'slotlock.tenant_usage(text, date, date)',
+] as const);
+
+/** What usage.ts meters, per tenant and day: operations run, and bookings and holds committed. */
+export const SLOTLOCK_USAGE_METRICS = Object.freeze(['operations', 'bookings', 'holds'] as const);
+/** Days a tenant's daily usage is kept: a yearly plan, and a month for disputes after it. */
+export const SLOTLOCK_USAGE_RETENTION_DAYS = 400;
 
 /**
  * Functions only the deployment role runs: suspending and lifting a suspension, and setting the
@@ -1038,6 +1057,225 @@ END
 $slotlock_set_tenant_plan$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[11]} FROM PUBLIC;
 
+-- A tenant's use of the service (usage.ts), by UTC day: operations its keys and the assistant ran
+-- (recorded by the servers), and the bookings and holds it committed (rolled up from its feed). By
+-- API key ('' for none) and surface. Counts only, never what was asked; owner-only, read and written
+-- through the functions below, erased with the tenant, kept ${SLOTLOCK_USAGE_RETENTION_DAYS} days.
+CREATE TABLE IF NOT EXISTS slotlock.usage_daily (
+  tenant_ref text NOT NULL,
+  day date NOT NULL,
+  metric text NOT NULL,
+  key_id text NOT NULL DEFAULT '',
+  origin text NOT NULL,
+  count bigint NOT NULL,
+  CONSTRAINT slotlock_usage_daily_pkey PRIMARY KEY (tenant_ref, day, metric, key_id, origin),
+  CONSTRAINT slotlock_usage_daily_tenant_ref_valid CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500),
+  CONSTRAINT slotlock_usage_daily_metric_valid
+    CHECK (metric IN (${SLOTLOCK_USAGE_METRICS.map((metric) => `'${metric}'`).join(', ')})),
+  CONSTRAINT slotlock_usage_daily_key_id_valid
+    CHECK (key_id = '' OR key_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'),
+  CONSTRAINT slotlock_usage_daily_origin_valid CHECK (origin ~ '^[a-z][a-z-]{0,39}$'),
+  CONSTRAINT slotlock_usage_daily_count_valid CHECK (count > 0)
+);
+ALTER TABLE slotlock.usage_daily ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.usage_daily FROM PUBLIC;
+
+-- Each batch of operation counts a server recorded, by the id it chose for it, so a batch sent again
+-- (its answer lost) adds nothing. Kept a week.
+CREATE TABLE IF NOT EXISTS slotlock.usage_flushes (
+  flush_id uuid PRIMARY KEY,
+  at timestamptz NOT NULL DEFAULT statement_timestamp()
+);
+ALTER TABLE slotlock.usage_flushes ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.usage_flushes FROM PUBLIC;
+
+-- How far each tenant's feed has been rolled up into usage_daily, as a feed position (txid, id).
+CREATE TABLE IF NOT EXISTS slotlock.usage_cursors (
+  tenant_ref text PRIMARY KEY,
+  txid xid8 NOT NULL,
+  id bigint NOT NULL,
+  CONSTRAINT slotlock_usage_cursors_tenant_ref_valid CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500)
+);
+ALTER TABLE slotlock.usage_cursors ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.usage_cursors FROM PUBLIC;
+
+-- Where metering began: a tenant with no cursor yet starts its roll-up here, so the feed written
+-- before this release is never counted. Recorded once, as the oldest transaction still running when
+-- the table is created: a change at or after it is counted, one before it never.
+CREATE TABLE IF NOT EXISTS slotlock.usage_meter_start (
+  only_row boolean PRIMARY KEY DEFAULT true,
+  txid xid8 NOT NULL,
+  CONSTRAINT slotlock_usage_meter_start_one_row CHECK (only_row)
+);
+-- The one row, written the first time and never moved by a later migration.
+INSERT INTO slotlock.usage_meter_start (txid)
+VALUES (pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot()))
+ON CONFLICT (only_row) DO NOTHING;
+ALTER TABLE slotlock.usage_meter_start ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.usage_meter_start FROM PUBLIC;
+
+-- Adds a server's batch of operation counts, once per flush id: true when added, false when that
+-- batch was added before. Each row names a tenant, a day within a day of today, the metric
+-- 'operations', a key ('' for none), a surface and a count; rows for the same day, key and surface
+-- are summed first.
+CREATE OR REPLACE FUNCTION slotlock.record_usage(requested_flush_id uuid, requested_rows jsonb)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_record_usage$
+BEGIN
+  IF requested_flush_id IS NULL OR requested_rows IS NULL OR jsonb_typeof(requested_rows) <> 'array'
+     OR jsonb_array_length(requested_rows) NOT BETWEEN 1 AND 10000 THEN
+    RAISE EXCEPTION 'Slotlock usage batch must be 1-10,000 rows with a flush id'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM jsonb_array_elements(requested_rows) given
+     WHERE jsonb_typeof(given) <> 'object'
+        OR given ->> 'metric' IS DISTINCT FROM 'operations'
+        OR (given ->> 'day') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+        OR (given ->> 'day')::date NOT BETWEEN current_date - 1 AND current_date + 1
+        OR jsonb_typeof(given -> 'count') <> 'number'
+        OR (given ->> 'count')::numeric NOT BETWEEN 1 AND 1000000000
+  ) THEN
+    RAISE EXCEPTION 'Slotlock usage rows must be operations counts of 1-1,000,000,000 within a day of today'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  INSERT INTO slotlock.usage_flushes (flush_id) VALUES (requested_flush_id) ON CONFLICT DO NOTHING;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+  -- Each tenant's shared lock, as withTenant takes it: an erasure in flight commits first, and the
+  -- check below then sees it.
+  PERFORM pg_advisory_xact_lock_shared(hashtextextended('slotlock:tenant:' || named.tenant_ref, 0))
+     FROM (SELECT DISTINCT given ->> 'tenant_ref' AS tenant_ref
+             FROM jsonb_array_elements(requested_rows) given
+            ORDER BY 1) named;
+  -- Only for a tenant that still exists, one with an API key or a feed: counts a server held while
+  -- the tenant was erased are dropped rather than recreate rows for it.
+  INSERT INTO slotlock.usage_daily AS kept (tenant_ref, day, metric, key_id, origin, count)
+  SELECT given ->> 'tenant_ref', (given ->> 'day')::date, 'operations',
+         COALESCE(given ->> 'key_id', ''), given ->> 'origin', sum((given ->> 'count')::bigint)
+    FROM jsonb_array_elements(requested_rows) given
+   WHERE EXISTS (SELECT 1 FROM slotlock.api_keys issued WHERE issued.tenant_ref = given ->> 'tenant_ref')
+      OR EXISTS (SELECT 1 FROM slotlock.maintenance_tenants listed
+                  WHERE listed.tenant_ref = given ->> 'tenant_ref')
+   GROUP BY 1, 2, 4, 5
+  ON CONFLICT (tenant_ref, day, metric, key_id, origin) DO UPDATE SET count = kept.count + EXCLUDED.count;
+  -- Now and then, batches older than a week (never sent again by then) are forgotten.
+  IF random() < 0.01 THEN
+    DELETE FROM slotlock.usage_flushes WHERE at < statement_timestamp() - interval '7 days';
+  END IF;
+  RETURN true;
+END
+$slotlock_record_usage$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[14]} FROM PUBLIC;
+
+-- Rolls up to max_rows of the tenant's feed past its cursor into usage_daily: each committed
+-- reservation.created, event.created (a whole series is one) and hold.confirmed is a booking, each
+-- hold.created a hold, and maintenance's own changes count for nothing. The feed is read as its readers read it, in (txid, id) order and
+-- only from transactions below this snapshot's xmin, every one of which has ended, so no change is
+-- counted twice or skipped, and one that rolled back is never counted. The counts and the cursor
+-- move in one transaction. Also deletes the tenant's usage older than the retention. Returns how
+-- many changes it read: fewer than max_rows means it has caught up.
+CREATE OR REPLACE FUNCTION slotlock.roll_up_usage(requested_tenant_ref text, max_rows integer)
+RETURNS integer
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_roll_up_usage$
+DECLARE
+  setting text;
+  previous jsonb := '{}'::jsonb;
+  from_txid xid8;
+  from_id bigint;
+  horizon xid8 := pg_snapshot_xmin(pg_current_snapshot());
+  last_txid xid8;
+  last_id bigint;
+  scanned integer;
+BEGIN
+  IF requested_tenant_ref IS NULL OR octet_length(requested_tenant_ref) NOT BETWEEN 1 AND 500
+     OR max_rows IS NULL OR max_rows NOT BETWEEN 1 AND 100000 THEN
+    RAISE EXCEPTION 'Slotlock usage roll-up arguments are invalid' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  -- As every tenant transaction does (withTenant): an erasure waits for it, and it for an erasure,
+  -- so it never counts into a tenant just erased. Then one roll-up of a tenant at a time.
+  PERFORM pg_advisory_xact_lock_shared(hashtextextended('slotlock:tenant:' || requested_tenant_ref, 0));
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:usage:' || requested_tenant_ref, 0));
+  SELECT cursor.txid, cursor.id INTO from_txid, from_id
+    FROM slotlock.usage_cursors cursor WHERE cursor.tenant_ref = requested_tenant_ref;
+  IF NOT FOUND THEN
+    SELECT start.txid, 0 INTO from_txid, from_id FROM slotlock.usage_meter_start start;
+  END IF;
+  -- The feed has forced row-level security, its owner bound too: read it in the tenant's context.
+  FOR setting IN
+    SELECT DISTINCT contract.tenant_context_setting FROM slotlock.rls_policy_contracts contract
+  LOOP
+    previous := previous || jsonb_build_object(setting, current_setting(setting, true));
+    PERFORM set_config(setting, requested_tenant_ref, true);
+  END LOOP;
+  WITH batch AS MATERIALIZED (
+    SELECT change.txid, change.id, change.type, change.origin, change.key_id, change.occurred_at
+      FROM slotlock.outbox change
+     WHERE change.tenant_ref = requested_tenant_ref
+       AND (change.txid, change.id) > (from_txid, from_id)
+       AND change.txid < horizon
+     ORDER BY change.txid, change.id
+     LIMIT max_rows
+  ), counted AS (
+    INSERT INTO slotlock.usage_daily AS kept (tenant_ref, day, metric, key_id, origin, count)
+    SELECT requested_tenant_ref, (batch.occurred_at AT TIME ZONE 'UTC')::date,
+           CASE batch.type WHEN 'hold.created' THEN 'holds' ELSE 'bookings' END,
+           COALESCE(batch.key_id::text, ''), COALESCE(batch.origin, 'library'), count(*)
+      FROM batch
+     WHERE batch.type IN ('reservation.created', 'event.created', 'hold.confirmed', 'hold.created')
+       AND COALESCE(batch.origin, 'library') <> 'maintenance'
+     GROUP BY 1, 2, 3, 4, 5
+    ON CONFLICT (tenant_ref, day, metric, key_id, origin) DO UPDATE SET count = kept.count + EXCLUDED.count
+  )
+  SELECT (SELECT batch.txid FROM batch ORDER BY batch.txid DESC, batch.id DESC LIMIT 1),
+         (SELECT batch.id FROM batch ORDER BY batch.txid DESC, batch.id DESC LIMIT 1),
+         (SELECT count(*) FROM batch)::integer
+    INTO last_txid, last_id, scanned;
+  IF scanned > 0 THEN
+    INSERT INTO slotlock.usage_cursors AS kept (tenant_ref, txid, id)
+    VALUES (requested_tenant_ref, last_txid, last_id)
+    ON CONFLICT (tenant_ref) DO UPDATE SET txid = EXCLUDED.txid, id = EXCLUDED.id;
+  END IF;
+  DELETE FROM slotlock.usage_daily
+   WHERE tenant_ref = requested_tenant_ref
+     AND day < current_date - ${SLOTLOCK_USAGE_RETENTION_DAYS};
+  FOR setting IN SELECT jsonb_object_keys(previous) LOOP
+    PERFORM set_config(setting, coalesce(previous ->> setting, ''), true);
+  END LOOP;
+  RETURN scanned;
+END
+$slotlock_roll_up_usage$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[15]} FROM PUBLIC;
+
+-- The tenant's usage from from_day to to_day (inclusive, at most 400 days), by day, metric, key and
+-- surface.
+CREATE OR REPLACE FUNCTION slotlock.tenant_usage(
+  requested_tenant_ref text, from_day date, to_day date
+)
+RETURNS TABLE (day date, metric text, key_id text, origin text, count bigint)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_tenant_usage$
+  SELECT used.day, used.metric, used.key_id, used.origin, used.count
+    FROM slotlock.usage_daily used
+   WHERE used.tenant_ref = requested_tenant_ref
+     AND used.day BETWEEN from_day AND to_day
+     AND to_day - from_day BETWEEN 0 AND ${SLOTLOCK_USAGE_RETENTION_DAYS}
+   ORDER BY used.day, used.metric, used.key_id, used.origin;
+$slotlock_tenant_usage$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[16]} FROM PUBLIC;
+
 -- True when the tenant was not suspended already; a second suspension keeps the first's reason.
 CREATE OR REPLACE FUNCTION slotlock.suspend_tenant(requested_tenant_ref text, requested_reason text)
 RETURNS boolean
@@ -1214,6 +1452,14 @@ BEGIN
   RETURN NEXT;
   erased_table := 'maintenance_tenants';
   DELETE FROM slotlock.maintenance_tenants WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'usage_daily';
+  DELETE FROM slotlock.usage_daily WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'usage_cursors';
+  DELETE FROM slotlock.usage_cursors WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
   erased_table := 'api_keys';

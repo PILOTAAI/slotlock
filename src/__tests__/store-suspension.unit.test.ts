@@ -52,6 +52,8 @@ const UPKEEP = [
   'offerWaitlist',
   'pruneAssistantConversations',
   'sweepAssistantConversations',
+  // Counting what was written already: a suspension stops new writes, not the count of old ones.
+  'rollUpUsage',
 ];
 const ADMINISTRATION = [
   'applySchema',

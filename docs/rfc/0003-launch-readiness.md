@@ -317,10 +317,14 @@ reconciliation all need per-tenant counts, so one meter serves all three.
 
 ### What is counted
 
+Status: `operations`, `bookings` and `holds` are built on `claude/inspiring-dijkstra-bfvqif`, off
+unless `SLOTLOCK_USAGE=on` (a self-hoster may not want per-tenant counts kept; Cloud sets it). The
+other three metrics, quotas, the response fields and the usage API follow.
+
 | Metric | One unit is | Counted from | Exact? |
 | --- | --- | --- | --- |
-| `operations` | A named operation that ran (REST, an MCP `tools/call`, an A2A message, an approved or read assistant call), whatever its outcome. Protocol messages (`initialize`, `tools/list`), and requests refused before an operation runs (401, 413, 429), are not counted | The server, in memory, flushed every 15 s | At most 15 s lost on a crash; never counted twice |
-| `bookings` | A committed `reservation.created` or `event.created` (a bundle of five resources is five) | The outbox, in the transaction that wrote it | Exact |
+| `operations` | A named operation that reached the backend (REST, the application API, an MCP `tools/call`, an A2A message, an approved or read assistant call), whatever it then returned. Protocol messages (`initialize`, `tools/list`), and calls refused before they run (401, 400 arguments, 403, 413, 429, a declined confirmation), are not counted | The server, in memory, recorded every 15 s and on shutdown | At most 15 s lost on a crash; never counted twice |
+| `bookings` | A committed `reservation.created`, `event.created` (a recurring series is one) or `hold.confirmed` (a bundle of five resources is five) | The outbox, in the transaction that wrote it | Exact |
 | `holds` | A committed `hold.created` | The outbox | Exact |
 | `webhook_deliveries` | A delivery the endpoint accepted | The webhook pass | Exact |
 | `resources` | Resources at the end of each day, archived included | A daily count | Exact |

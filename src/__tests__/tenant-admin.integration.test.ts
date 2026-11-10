@@ -9,6 +9,7 @@ import { createSlotlockApiKeyStore } from '../api-keys.js';
 import { createSlotlockDashboardState } from '../dashboard.js';
 import { setSlotlockTenantPlan } from '../plans.js';
 import { type SlotlockStore, createSlotlockStore } from '../store.js';
+import { recordSlotlockUsage, slotlockUsageDay } from '../usage.js';
 
 const url = process.env.DATABASE_URL?.trim();
 const HOUR = 60 * 60 * 1000;
@@ -489,6 +490,11 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
         id: (await keys.create({ tenantRef, name: 'Old key', scopes: ['read'] })).apiKey.id,
       });
       await setSlotlockTenantPlan(application, { tenantRef, plan: 'developer', status: 'active' });
+      // Its usage: operations a server counted, and its feed rolled up (which writes its cursor).
+      await recordSlotlockUsage(application, randomUUID(), [
+        { tenantRef, day: slotlockUsageDay(Date.now()), keyId: '', origin: 'rest', count: 1 },
+      ]);
+      await app.withTenant(tenantRef, (tenant) => tenant.rollUpUsage({ tenantRef }));
       const dashboard = createSlotlockDashboardState(application);
       expect(await dashboard.use('form', `form-${randomUUID()}`, Date.now() + HOUR, uid)).toBe(
         true,

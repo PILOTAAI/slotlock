@@ -77,6 +77,9 @@
     "SLOTLOCK_SERVICE_URL": "https://slotlock.example.com",
     // Who may sign in: "*" for every GitHub account (each gets its own tenant), or GitHub ids.
     "SLOTLOCK_DASHBOARD_USERS": "*"
+    // Meter the assistant's operations in each tenant's usage, as slotlock serve does (off by
+    // default). Uncomment and set:
+    // "SLOTLOCK_USAGE": "on",
     // For organizations instead of people: GitHub organization ids, each one tenant its members
     // share (gh api orgs/<login> --jq .id). Uncomment and set:
     // "SLOTLOCK_DASHBOARD_ORGS": "123456",

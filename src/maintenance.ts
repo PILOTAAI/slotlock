@@ -54,7 +54,17 @@ export interface SlotlockMaintenanceResult {
 export async function maintainSlotlockTenant(
   store: SlotlockStore,
   tenantRef: string,
-  options: { batches?: number; signal?: AbortSignal; followZoneRules?: boolean } = {},
+  options: {
+    batches?: number;
+    signal?: AbortSignal;
+    followZoneRules?: boolean;
+    /**
+     * Roll the tenant's committed bookings and holds up into its usage first (usage.ts), before
+     * pruning can delete feed changes it has not counted. For a deployment that meters
+     * (SLOTLOCK_USAGE=on).
+     */
+    usage?: boolean;
+  } = {},
 ): Promise<SlotlockMaintenanceResult> {
   const batches = options.batches ?? 10;
   if (!(Number.isSafeInteger(batches) && batches >= 1 && batches <= 100)) {
@@ -62,6 +72,13 @@ export async function maintainSlotlockTenant(
   }
   const withTenant = <T>(callback: (tenant: SlotlockTenantStore) => Promise<T>) =>
     store.withTenant(tenantRef, callback, { origin: 'maintenance' });
+  if (options.usage) {
+    for (let batch = 0; batch < batches; batch++) {
+      options.signal?.throwIfAborted();
+      const read = await withTenant((tenant) => tenant.rollUpUsage({ tenantRef, limit: USAGE_ROLL_UP_BATCH }));
+      if (read < USAGE_ROLL_UP_BATCH) break;
+    }
+  }
   const window = calendarEventRollingHorizon();
   let extended = 0;
   let conflicts = 0;
@@ -168,6 +185,9 @@ const SWEEP_INTERVAL_MS = 15 * 60_000;
 /** Feed changes past the retention deleted per batch. */
 const CHANGE_PRUNE_BATCH = 1_000;
 
+/** Feed changes rolled up into usage per batch. */
+const USAGE_ROLL_UP_BATCH = 5_000;
+
 /** The advisory lock key for one tenant's maintenance (64-bit, from the tenant reference). */
 const LOCK_NAMESPACE = 'slotlock.maintenance:';
 
@@ -223,6 +243,8 @@ export interface SlotlockMaintenanceSchedulerOptions {
   maxTenants?: number;
   /** Batches of each task per pass (maintainSlotlockTenant). */
   batches?: number;
+  /** Roll each tenant's bookings and holds up into its usage, first (maintainSlotlockTenant `usage`). */
+  usage?: boolean;
   /** A pass that ran: counts only, never the tenant. Not awaited; what it throws is ignored. */
   onPass?: (result: SlotlockMaintenanceResult) => void;
   /**
@@ -274,6 +296,7 @@ export function startSlotlockMaintenance(
           const result = await withSlotlockMaintenanceLock(options.sql, tenantRef, () =>
             maintainSlotlockTenant(options.store, tenantRef, {
               ...(options.batches !== undefined ? { batches: options.batches } : {}),
+              ...(options.usage ? { usage: true } : {}),
               signal: controller.signal,
             }),
           );

@@ -14,6 +14,7 @@ import {
   type SlotlockAgentCalendarBackend,
   type SlotlockAgentOperation,
   type SlotlockAgentPrincipal,
+  type SlotlockAgentUsage,
   slotlockAgentOperationScope,
 } from '../../src/agent-server.js';
 import { createSlotlockStoreAgentBackend } from '../../src/agent-store-backend.js';
@@ -40,6 +41,11 @@ import {
   type SlotlockStripe,
 } from '../../src/billing.js';
 import { enrolSlotlockTenantPlan, readSlotlockTenantPlan } from '../../src/plans.js';
+import {
+  type SlotlockUsageMeter,
+  createSlotlockUsageMeter,
+  recordSlotlockUsage,
+} from '../../src/usage.js';
 import {
   createSlotlockRateLimiter,
   slotlockClientKey,
@@ -90,6 +96,8 @@ interface RequestScope {
   agent: SlotlockAgentCalendarBackend;
   /** Agent operations this request has run, for the per-request cap. */
   agentCalls: { count: number };
+  /** The assistant's operations this request ran, recorded as it ends (SLOTLOCK_USAGE=on). */
+  usage: SlotlockUsageMeter | null;
   resources: SlotlockDashboardResources;
   state: SlotlockDashboardState;
 }
@@ -117,6 +125,13 @@ export function createSlotlockWorkerAgentLimiter(vars: SlotlockEnv) {
     const bucket = slotlockAgentOperationScope(args.operation) === 'write' ? writes : reads;
     return bucket ? bucket.take(args.principal.tenantRef) : true;
   };
+}
+
+/** SLOTLOCK_USAGE: on to record the assistant's operations in each tenant's usage, as serve does. */
+function readWorkerUsage(vars: SlotlockEnv): boolean {
+  const value = vars.SLOTLOCK_USAGE?.trim() || 'off';
+  if (value !== 'on' && value !== 'off') throw new SlotlockConfigError('SLOTLOCK_USAGE must be on or off');
+  return value === 'on';
 }
 
 /** Where Talk to the founder goes without SLOTLOCK_PLAN_CONTACT: the founder's Pylota address (MAINTAINERS.md). */
@@ -211,6 +226,8 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
         availability: ReturnType<typeof readAvailability>;
         signInPaths: Set<string>;
         stripeWebhook: { path: string; secret: string; stripe: SlotlockStripe } | null;
+        /** SLOTLOCK_USAGE=on: the assistant's operations are recorded (usage.ts). */
+        usage: boolean;
         limits: {
           client: SlotlockRateLimit;
           signIn: SlotlockRateLimit;
@@ -254,6 +271,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
     }
     const agentLimiter = createSlotlockWorkerAgentLimiter(vars);
     const billing = readBilling(vars);
+    const metering = readWorkerUsage(vars);
     const dashboard = createSlotlockDashboard({
       publicUrl,
       serviceUrl,
@@ -281,6 +299,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
                 principal: SlotlockAgentPrincipal;
                 operation: SlotlockAgentOperation;
               }) => agentLimiter(current().agentCalls, args),
+              ...(metering ? { onUsage: (usage: SlotlockAgentUsage) => current().usage?.count(usage) } : {}),
               ...(config.assistantPrivateUrls ? { privateUrls: true } : {}),
             },
           }
@@ -329,6 +348,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
               stripe: billing.stripe,
             }
           : null,
+      usage: metering,
       limits: { client, signIn, signInCeiling },
     };
   }
@@ -352,7 +372,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
           headers: { 'content-type': 'text/plain; charset=utf-8' },
         });
       }
-      const { dashboard, root, signInPaths, limits, availability, stripeWebhook } = built;
+      const { dashboard, root, signInPaths, limits, availability, stripeWebhook, usage } = built;
       const path = new URL(request.url).pathname;
       if (path === '/') return Response.redirect(root, 302);
       // Stripe's deliveries: the client connects only once the signature has been checked.
@@ -412,12 +432,27 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
         max: MAX_CONNECTIONS,
         onnotice: () => {},
       });
+      let requestScope: RequestScope | undefined;
       try {
         const store = createSlotlockStore(sql);
-        const requestScope: RequestScope = {
+        requestScope = {
           sql,
           keys: createSlotlockApiKeyStore(sql),
           agentCalls: { count: 0 },
+          // Recorded once, when the response is sent: a Worker keeps nothing between requests.
+          usage: usage
+            ? createSlotlockUsageMeter({
+                intervalMs: 0,
+                record: (flushId, rows) => recordSlotlockUsage(sql, flushId, rows),
+                onError: (error) =>
+                  console.error(
+                    JSON.stringify({
+                      message: 'slotlock usage record failed',
+                      error: error instanceof Error ? error.message : 'unknown',
+                    }),
+                  ),
+              })
+            : null,
           agent: createSlotlockStoreAgentBackend(store, {
             availabilityRules: async () => availability.map((rule) => ({ ...rule })),
           }),
@@ -426,7 +461,10 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
         };
         return await scope.run(requestScope, () => dashboard.fetch(request));
       } finally {
-        ctx.waitUntil(sql.end({ timeout: 5 }));
+        const counted = requestScope?.usage;
+        ctx.waitUntil(
+          (counted ? counted.close() : Promise.resolve()).finally(() => sql.end({ timeout: 5 })),
+        );
       }
     },
   };

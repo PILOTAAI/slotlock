@@ -22,6 +22,7 @@ import {
   type SlotlockAgentOperationDispatchOptions,
   type SlotlockAgentOperationDispatchResult,
   type SlotlockAgentPrincipal,
+  type SlotlockAgentUsage,
   type SlotlockAgentWriteOperation,
   describeSlotlockAgentWrite,
   invokeSlotlockAgentOperation,
@@ -302,6 +303,8 @@ export interface SlotlockDashboardAssistantOptions {
    * sealed under it stop opening.
    */
   previousSecrets?: readonly string[];
+  /** Each operation the assistant runs, for usage metering (the agent server's `onUsage`). */
+  onUsage?: (usage: SlotlockAgentUsage) => void;
   backend: SlotlockAgentCalendarBackend;
   /**
    * As the agent server's: false refuses an operation. Every offered operation by default. It also
@@ -2165,6 +2168,8 @@ ${
           ? { consumeRateLimit: assistant.consumeRateLimit }
           : {}),
         ...(confirm ? { confirm } : {}),
+        // A proposal halts at `confirm` and never reaches the backend, so only what runs counts.
+        ...(assistant.onUsage ? { onUsage: assistant.onUsage } : {}),
         onError: (error) => {
           try {
             ignoreRejection(options.onError?.(error));
