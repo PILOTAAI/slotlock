@@ -28,6 +28,9 @@ export const SUMMARIES = {
   slotlock_list_events: 'List the events this caller created in a window, one page at a time.',
   slotlock_update_event: 'Change an event at the revision you last read.',
   slotlock_delete_event: 'Cancel an event at the revision you last read.',
+  slotlock_confirm_slot: 'Book a time you hold: the held resource and time exactly.',
+  slotlock_reschedule: 'Move one of your events to a new time, and resource, at the revision you last read.',
+  slotlock_cancel: 'Cancel one of your events at the revision you last read.',
 };
 
 /** A paragraph after the summary, where the schema alone would mislead. */
@@ -49,7 +52,7 @@ export const DETAILS = {
   slotlock_release_slots:
     'Holds expire on their own; release them when the person walks away, so the time is free sooner.',
   slotlock_create_event:
-    'An opaque event goes through the database’s overlap check; a transparent one stays visible and blocks nothing. A retry with the same `idempotency_key` and arguments returns the first result with `replayed: true`.',
+    'An opaque event goes through the database’s overlap check; a transparent one stays visible and blocks nothing. A refused time (`overlap`, or a `booking_rule_…` other than `booking_rule_uncertain`) comes with `alternatives`: up to three free times of the same length from the time asked for, within seven days, found as `slotlock_find_available_slots` finds them. An `overlap` says when the booking in the way makes the time busy (`busy_start`, `busy_end`), and names it when it is yours (`conflicting_hold_id`, `conflicting_event_id`). A retry with the same `idempotency_key` and arguments returns the first result with `replayed: true`.',
   slotlock_get_event:
     'Only events this caller created are visible. Other bookings on the resource still count as busy time.',
   slotlock_list_events:
@@ -57,6 +60,12 @@ export const DETAILS = {
   slotlock_update_event:
     'Send only the fields you change; the others keep their values. The result is the event at its new `revision`.',
   slotlock_delete_event: 'The event becomes a tombstone, so a delayed create cannot bring it back.',
+  slotlock_confirm_slot:
+    'The event is made exactly as `slotlock_create_event` with `hold_id` makes it, in the resource’s time zone unless you give one, and the other holds of its group are released in the same transaction. A hold that lapsed first is `hold_expired`; one released, booked or not yours is `hold_not_found`. Without an `idempotency_key` the hold is the retry identity: confirming it again returns the same event with `replayed: true`.',
+  slotlock_reschedule:
+    'The same change `slotlock_update_event` makes with only a new time (and resource). A time already taken is `overlap`, with `alternatives`. Without an `idempotency_key` the event, revision and new time are the retry identity: a retry returns the same move, and a different move from the same revision is `revision_conflict`.',
+  slotlock_cancel:
+    'The same cancellation `slotlock_delete_event` makes. Without an `idempotency_key` the event and revision are the retry identity, so a retry after it succeeded returns it again with `replayed: true`.',
 };
 
 /**
@@ -166,6 +175,7 @@ export const OBJECTS = {
   ATTENDEE_INPUT: { name: 'Attendee input', role: 'input' },
   REMINDER_INPUT: { name: 'Reminder input', role: 'input' },
   RECURRENCE_EXCEPTION_INPUT: { name: 'Recurrence exception input', role: 'input' },
+  ALTERNATIVE_SCHEMA: { name: 'Alternative', role: 'output' },
 };
 
 /** Codes a tool returns besides the ones every tool can (COMMON_ERRORS), most likely first. */
@@ -201,6 +211,7 @@ export const TOOL_ERRORS = {
     'idempotency_conflict',
     'resource_not_found',
     'hold_not_found',
+    'hold_expired',
     'hold_mismatch',
     'invalid_event',
     'owner_event_quota_exceeded',
@@ -237,10 +248,66 @@ export const TOOL_ERRORS = {
     'event_not_found',
     'owner_command_quota_exceeded',
   ],
+  slotlock_confirm_slot: [
+    'hold_not_found',
+    'hold_expired',
+    'holds_unavailable',
+    'idempotency_conflict',
+    'resource_not_found',
+    'owner_event_quota_exceeded',
+    'owner_command_quota_exceeded',
+    'booking_rule_slot_step',
+    'booking_rule_outside_hours',
+    'booking_rule_uncertain',
+    'store_inconsistent',
+  ],
+  slotlock_reschedule: [
+    'revision_conflict',
+    'overlap',
+    'idempotency_conflict',
+    'event_not_found',
+    'resource_not_found',
+    'invalid_event',
+    'owner_command_quota_exceeded',
+    'booking_rule_min_notice',
+    'booking_rule_max_advance',
+    'booking_rule_slot_step',
+    'booking_rule_outside_hours',
+    'booking_rule_uncertain',
+    'store_inconsistent',
+  ],
+  slotlock_cancel: [
+    'revision_conflict',
+    'idempotency_conflict',
+    'event_not_found',
+    'owner_command_quota_exceeded',
+  ],
 };
 
 /** Every tool: schema validation, `authorize`, `consumeRateLimit`, a request that went away. */
 export const COMMON_ERRORS = ['invalid_arguments', 'forbidden', 'rate_limited', 'request_aborted'];
+
+/** The bookings an approval policy can hold for a person (RFC 0004 A4). */
+export const APPROVAL_TOOLS = [
+  'slotlock_create_event',
+  'slotlock_confirm_slot',
+  'slotlock_book_pool',
+  'slotlock_book_together',
+  'slotlock_update_event',
+  'slotlock_reschedule',
+];
+
+/** What those answer when a policy covers them. */
+export const APPROVAL_ERRORS = [
+  'approval_pending',
+  'approval_declined',
+  'approval_expired',
+  'approval_policy_refused',
+  'approval_required',
+  'approval_too_late',
+  'approval_series_unsupported',
+  'approval_limit_reached',
+];
 
 /** Write tools, when the server asks a person to confirm them (`confirmation`). */
 export const CONFIRMATION_ERRORS = [
@@ -254,6 +321,11 @@ export const CONFIRMATION_ERRORS = [
  * no entry matches fails the build, so a new rule gets a sentence before it ships.
  */
 export const REFINEMENTS = [
+  {
+    matches: (text) => text.startsWith('selectsOrNames'),
+    note: () =>
+      'Name the resources with `resource_ids`, or select them with any of `location`, `group`, `labels`, `kind` and `pool`: one or the other, not both.',
+  },
   {
     matches: (text) => text === 'boundedAgentWindow',
     note: (facts) => `\`end\` must be after \`start\`, at most ${facts.horizonDays} days later.`,

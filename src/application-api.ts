@@ -8,15 +8,49 @@
 //
 // Contract only (names, schemas, routes); nothing from the agent server at runtime. The
 // store-backed implementation is createSlotlockStoreApplicationBackend.
-import { SLOTLOCK_CHANGE_ORIGINS, SLOTLOCK_CHANGE_TYPES, type SlotlockChangeOrigin } from './event-feed.js';
+import {
+  SLOTLOCK_CHANGE_ORIGINS,
+  SLOTLOCK_CHANGE_TYPES,
+  SLOTLOCK_WEBHOOK_FILTER_REFS,
+  SLOTLOCK_WEBHOOK_FILTER_RESOURCES,
+  type SlotlockChangeOrigin,
+  SLOTLOCK_MAX_WEBHOOK_ENDPOINTS,
+} from './event-feed.js';
 import { z } from 'zod';
+import {
+  SLOTLOCK_APPROVAL_KINDS,
+  SLOTLOCK_MAX_APPROVAL_MINUTES,
+  SLOTLOCK_MAX_APPROVAL_POLICIES,
+} from './approvals.js';
+import { SLOTLOCK_PARTNER_ACCOUNT, SLOTLOCK_PARTNER_PLAN } from './partner-names.js';
 import type { SlotlockAgentPrincipal } from './agent-server.js';
 import { SLOTLOCK_EVENT_OUTPUT } from './event-schema.js';
 import type { SlotlockTraceContext } from './mcp-modern.js';
 import { SLOTLOCK_CALENDAR_HORIZON_DAYS } from './rules.js';
+import {
+  SLOTLOCK_GROUPING_REF,
+  SLOTLOCK_MAX_GROUPS_PER_RESOURCE,
+  SLOTLOCK_MAX_LOCATION_DEPTH,
+  SLOTLOCK_MAX_LOCATIONS,
+  SLOTLOCK_MAX_RESOURCE_GROUPS,
+  SLOTLOCK_POOL_ORDERS,
+  SLOTLOCK_RESOURCE_KINDS,
+  SLOTLOCK_RESOURCE_LABEL,
+  SLOTLOCK_RESOURCE_PROFILE_LIMITS,
+} from './resource-profile.js';
 
 export type SlotlockApplicationOperation =
   | 'slotlock_create_resource'
+  | 'slotlock_update_resource'
+  | 'slotlock_list_locations'
+  | 'slotlock_create_location'
+  | 'slotlock_update_location'
+  | 'slotlock_delete_location'
+  | 'slotlock_list_groups'
+  | 'slotlock_create_group'
+  | 'slotlock_delete_group'
+  | 'slotlock_add_group_member'
+  | 'slotlock_remove_group_member'
   | 'slotlock_get_resource'
   | 'slotlock_archive_resource'
   | 'slotlock_restore_resource'
@@ -28,7 +62,9 @@ export type SlotlockApplicationOperation =
   | 'slotlock_import_resource_availability'
   | 'slotlock_set_resource_booking_rules'
   | 'slotlock_set_resource_pool'
+  | 'slotlock_set_resource_parent'
   | 'slotlock_list_pools'
+  | 'slotlock_set_pool_order'
   | 'slotlock_get_booking_rule_defaults'
   | 'slotlock_set_tenant_booking_rules'
   | 'slotlock_set_pool_booking_rules'
@@ -63,10 +99,38 @@ export type SlotlockApplicationOperation =
   | 'slotlock_create_webhook'
   | 'slotlock_list_webhooks'
   | 'slotlock_delete_webhook'
-  | 'slotlock_enable_webhook';
+  | 'slotlock_enable_webhook'
+  | 'slotlock_get_usage'
+  | 'slotlock_list_approval_policies'
+  | 'slotlock_put_approval_policy'
+  | 'slotlock_delete_approval_policy'
+  | 'slotlock_list_approvals'
+  | 'slotlock_get_approval'
+  | 'slotlock_decide_approval'
+  | 'slotlock_sandbox_seed'
+  | 'slotlock_sandbox_reset'
+  | 'slotlock_sandbox_fast_forward'
+  | 'slotlock_sandbox_race'
+  | 'slotlock_partner_put_account'
+  | 'slotlock_partner_list_accounts'
+  | 'slotlock_partner_get_account'
+  | 'slotlock_partner_list_keys'
+  | 'slotlock_partner_create_key'
+  | 'slotlock_partner_rotate_key'
+  | 'slotlock_partner_revoke_key'
+  | 'slotlock_partner_suspend_account'
+  | 'slotlock_partner_unsuspend_account'
+  | 'slotlock_partner_erase_account'
+  | 'slotlock_partner_get_usage'
+  | 'slotlock_partner_reconcile_usage';
 
-/** The scope an application operation needs, whichever operation it is. */
+/** The scope an application operation needs, but the partner API's (`slotlockApplicationScope`). */
 export const SLOTLOCK_APPLICATION_SCOPE = 'admin';
+
+/** The scope one application operation needs: `partner` for the partner API's, else `admin`. */
+export function slotlockApplicationScope(definition: { scope?: 'partner' }): string {
+  return definition.scope ?? SLOTLOCK_APPLICATION_SCOPE;
+}
 
 export interface SlotlockApplicationInvocationContext {
   principal: SlotlockAgentPrincipal;
@@ -76,6 +140,34 @@ export interface SlotlockApplicationInvocationContext {
   trace?: SlotlockTraceContext;
   /** The surface the call came through: `application` when the agent server dispatches it. */
   origin?: SlotlockChangeOrigin;
+  /** A dry run (RFC 0004 A3): every check, then rolled back (SlotlockAgentInvocationContext). */
+  dryRun?: boolean;
+}
+
+/**
+ * Writes that cannot be a dry run: they do not run in one tenant transaction that can be undone
+ * (erasure, maintenance's passes, the partner store's).
+ */
+const NOT_DRY_RUNNABLE: ReadonlySet<string> = new Set([
+  'slotlock_erase_tenant',
+  'slotlock_run_maintenance',
+  'slotlock_sandbox_seed',
+  'slotlock_sandbox_reset',
+  'slotlock_sandbox_fast_forward',
+  'slotlock_sandbox_race',
+  'slotlock_partner_put_account',
+  'slotlock_partner_create_key',
+  'slotlock_partner_rotate_key',
+  'slotlock_partner_revoke_key',
+  'slotlock_partner_suspend_account',
+  'slotlock_partner_unsuspend_account',
+  'slotlock_partner_erase_account',
+  'slotlock_partner_reconcile_usage',
+]);
+
+/** Whether an application operation takes `dry_run` (RFC 0004 A3): a write that can be undone. */
+export function slotlockApplicationDryRunnable(definition: { name: string; risk: { readOnly: boolean } }): boolean {
+  return !definition.risk.readOnly && !NOT_DRY_RUNNABLE.has(definition.name);
 }
 
 type Handler = (
@@ -90,6 +182,16 @@ type Handler = (
  */
 export interface SlotlockApplicationBackend {
   createResource: Handler;
+  updateResource: Handler;
+  listLocations: Handler;
+  createLocation: Handler;
+  updateLocation: Handler;
+  deleteLocation: Handler;
+  listGroups: Handler;
+  createGroup: Handler;
+  deleteGroup: Handler;
+  addGroupMember: Handler;
+  removeGroupMember: Handler;
   getResource: Handler;
   archiveResource: Handler;
   restoreResource: Handler;
@@ -101,7 +203,9 @@ export interface SlotlockApplicationBackend {
   importResourceAvailability: Handler;
   setResourceBookingRules: Handler;
   setResourcePool: Handler;
+  setResourceParent: Handler;
   listPools: Handler;
+  setPoolOrder: Handler;
   getBookingRuleDefaults: Handler;
   setTenantBookingRules: Handler;
   setPoolBookingRules: Handler;
@@ -137,24 +241,109 @@ export interface SlotlockApplicationBackend {
   listWebhooks: Handler;
   deleteWebhook: Handler;
   enableWebhook: Handler;
+  getUsage: Handler;
+  listApprovalPolicies: Handler;
+  putApprovalPolicy: Handler;
+  deleteApprovalPolicy: Handler;
+  listApprovals: Handler;
+  getApproval: Handler;
+  decideApproval: Handler;
+  sandboxSeed: Handler;
+  sandboxReset: Handler;
+  sandboxFastForward: Handler;
+  sandboxRace: Handler;
+  partnerPutAccount: Handler;
+  partnerListAccounts: Handler;
+  partnerGetAccount: Handler;
+  partnerListKeys: Handler;
+  partnerCreateKey: Handler;
+  partnerRotateKey: Handler;
+  partnerRevokeKey: Handler;
+  partnerSuspendAccount: Handler;
+  partnerUnsuspendAccount: Handler;
+  partnerEraseAccount: Handler;
+  partnerGetUsage: Handler;
+  partnerReconcileUsage: Handler;
 }
 
 export interface SlotlockApplicationOperationDefinition {
   name: SlotlockApplicationOperation;
   title: string;
   description: string;
-  method: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   /** Relative to the server's base URL; `{name}` is one path segment, an input of that name. */
   path: string;
   input: z.ZodType<Record<string, unknown>>;
   output: z.ZodType<Record<string, unknown>>;
   risk: { readOnly: boolean; destructive: boolean; idempotent: boolean };
   invoke: keyof SlotlockApplicationBackend;
+  /**
+   * The scope the operation needs: `admin` (SLOTLOCK_APPLICATION_SCOPE) unless it is the partner
+   * API's, which needs a partner key's `partner` (RFC 0003 P3) and nothing else reaches.
+   */
+  scope?: 'partner';
   /** Valid input, path parameters included (a test runs each against the schema). */
   example: Record<string, unknown>;
 }
 
 const DATE_TIME = z.string().datetime({ offset: true });
+/** A UTC day, `YYYY-MM-DD`, that is a real date. */
+const USAGE_DAY = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .refine((day) => new Date(`${day}T00:00:00Z`).toISOString().startsWith(day), 'not a date');
+const USAGE_COUNT = z.number().int().min(0);
+const USAGE_TOTALS = {
+  operations: USAGE_COUNT,
+  bookings: USAGE_COUNT,
+  holds: USAGE_COUNT,
+  webhook_deliveries: USAGE_COUNT,
+  assistant_messages: USAGE_COUNT,
+  resources: USAGE_COUNT,
+};
+const PARTNER_ACCOUNT = z.string().regex(SLOTLOCK_PARTNER_ACCOUNT);
+const PARTNER_PLAN_NAME = z.string().regex(SLOTLOCK_PARTNER_PLAN);
+const PARTNER_ACCOUNT_OUTPUT = z
+  .object({
+    account: PARTNER_ACCOUNT,
+    plan: PARTNER_PLAN_NAME,
+    status: z.enum(['active', 'suspended']),
+    created_at: z.string().datetime(),
+    updated_at: z.string().datetime(),
+    resources: z.number().int().min(0).optional(),
+    api_keys: z.number().int().min(0).optional(),
+  })
+  .strict();
+/**
+ * Which of an account's environments a key call acts in (RFC 0003 G9): `live`, the default, or
+ * `test`, the account's test environment, whose keys start `slk_test_` and are never billed.
+ */
+const PARTNER_ENVIRONMENT = z.enum(['live', 'test']).optional();
+const ACCOUNT_KEY = z.string().regex(/^slk_(test_)?[0-9A-Za-z]{46}$/);
+
+/** An agent key held below the server's limits (RFC 0004 A5): each field only lowers. */
+const KEY_LIMITS = z
+  .object({
+    max_holds: z.number().int().min(1).max(10_000).optional(),
+    max_held_hours: z.number().int().min(1).max(876_000).optional(),
+    requests_per_minute: z.number().int().min(1).max(100_000).optional(),
+    requires_approval: z.boolean().optional(),
+  })
+  .strict();
+const PARTNER_KEY_OUTPUT = z
+  .object({
+    id: z.string().uuid(),
+    name: z.string().min(1).max(100),
+    prefix: z.string().min(1).max(20),
+    scopes: z.array(z.enum(['read', 'write', 'admin'])),
+    created_at: z.string().datetime(),
+    expires_at: z.string().datetime().nullable(),
+    last_used_at: z.string().datetime().nullable(),
+    revoked_at: z.string().datetime().nullable(),
+    /** What the key may do below the server's limits (RFC 0004 A5); null for the server's. */
+    limits: KEY_LIMITS.nullable(),
+  })
+  .strict();
 const RESOURCE_ID = z.string().trim().min(1).max(200);
 const HOLD_ID = z.string().trim().min(1).max(200);
 const EVENT_ID = z.string().trim().min(1).max(200);
@@ -244,6 +433,114 @@ const BOOKING_RULES = z
 const DEFAULT_BOOKING_RULES = BOOKING_RULES.omit({ check_in_minutes: true }).strict();
 
 const POOL = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,99}$/);
+/** The order slotlock_book_pool tries a pool's members in (RFC 0003 G7). */
+const POOL_ORDER = z.enum(SLOTLOCK_POOL_ORDERS);
+
+const PROFILE = SLOTLOCK_RESOURCE_PROFILE_LIMITS;
+/** What a resource is: a hint for filtering and display that changes no booking. */
+const RESOURCE_KIND = z.enum(SLOTLOCK_RESOURCE_KINDS);
+const RESOURCE_LABEL = z.string().regex(SLOTLOCK_RESOURCE_LABEL);
+const RESOURCE_ATTRIBUTES = z.record(
+  z.string().min(1).max(PROFILE.attributeKey),
+  z.union([z.string().max(PROFILE.attributeValue), z.number(), z.boolean()]),
+);
+/**
+ * A resource's profile, each field optional (resource-profile.ts): a field left out is kept, `null`
+ * clears a name, description or capacity, and `[]` and `{}` clear labels and attributes. The store
+ * also refuses attributes over 4 KiB, or with more than 50 keys (400 invalid_resource_profile).
+ */
+const PROFILE_INPUT = {
+  /** Shown to agents and people instead of the reference. */
+  name: z.string().min(1).max(PROFILE.name).nullable().optional(),
+  description: z.string().min(1).max(PROFILE.description).nullable().optional(),
+  kind: RESOURCE_KIND.optional(),
+  /** People or seats it holds: informational, never enforced as bookings at once. */
+  capacity: z.number().int().min(1).max(PROFILE.capacity).nullable().optional(),
+  /** Replaces its labels; sorted and without repeats when stored. */
+  labels: z.array(RESOURCE_LABEL).max(PROFILE.labels).optional(),
+  /** Replaces its attributes: text, numbers and true or false. */
+  attributes: RESOURCE_ATTRIBUTES.optional(),
+};
+
+/** A location's or a group's reference: as a pool's. */
+const GROUPING_REF = z.string().regex(SLOTLOCK_GROUPING_REF);
+
+/** An approval policy's reference (RFC 0004 A4). */
+const APPROVAL_POLICY_REF = z.string().regex(/^[a-z0-9][a-z0-9_-]{0,62}$/);
+const APPROVAL_APPLIES_TO = z
+  .object({
+    resource_ids: z.array(z.string().uuid()).max(50).optional(),
+    pools: z.array(GROUPING_REF).max(50).optional(),
+    locations: z.array(GROUPING_REF).max(50).optional(),
+    groups: z.array(GROUPING_REF).max(50).optional(),
+  })
+  .strict();
+const APPROVAL_CONDITIONS = z
+  .object({
+    longer_than_minutes: z.number().int().min(0).max(5_270_400).optional(),
+    outside_hours: z.boolean().optional(),
+    kinds: z.array(z.enum(SLOTLOCK_APPROVAL_KINDS as unknown as ['single', 'pool', 'bundle', 'move'])).min(1).max(4).optional(),
+  })
+  .strict();
+const APPROVAL_POLICY = z
+  .object({
+    policy_ref: APPROVAL_POLICY_REF,
+    name: z.string().min(1).max(200),
+    applies_to: APPROVAL_APPLIES_TO,
+    conditions: APPROVAL_CONDITIONS,
+    outcome: z.enum(['require_approval', 'refuse']),
+    approval_ttl_minutes: z.number().int().min(1).max(SLOTLOCK_MAX_APPROVAL_MINUTES),
+    lead_minutes: z.number().int().min(0).max(SLOTLOCK_MAX_APPROVAL_MINUTES),
+    created_at: DATE_TIME,
+    updated_at: DATE_TIME,
+  })
+  .strict();
+const APPROVAL_STATUS = z.enum(['pending', 'granted', 'declined', 'expired']);
+/** A write waiting for a person, or decided. */
+const APPROVAL = z
+  .object({
+    approval_id: z.string().uuid(),
+    policy_ref: APPROVAL_POLICY_REF,
+    status: APPROVAL_STATUS,
+    /** The agent operation it runs when granted, with its arguments as the agent sent them. */
+    operation: z.enum(['slotlock_create_event', 'slotlock_book_together', 'slotlock_update_event']),
+    request: z.record(z.string(), z.unknown()),
+    requested_by: z.string().max(200).nullable(),
+    resource_ids: z.array(z.string().uuid()).min(1).max(20),
+    starts_at: DATE_TIME,
+    ends_at: DATE_TIME,
+    expires_at: DATE_TIME,
+    decided_by: z.string().max(500).nullable(),
+    decided_at: DATE_TIME.nullable(),
+    reason: z.string().max(500).nullable(),
+    created_at: DATE_TIME,
+  })
+  .strict();
+
+/** A place a tenant's resources are at (RFC 0003 G2). */
+const LOCATION = z
+  .object({
+    ref: GROUPING_REF,
+    name: z.string().max(PROFILE.name),
+    /** The location it is in; `null` at the top. */
+    parent_ref: GROUPING_REF.nullable(),
+    /** What a resource created here without a time zone takes; `null` to take its parent's. */
+    timezone: TIMEZONE.nullable(),
+    /** Resources at it, not counting those under it. */
+    resources: z.number().int().min(0),
+  })
+  .strict();
+
+/** A set of a tenant's resources (RFC 0003 G3). */
+const GROUP = z
+  .object({
+    ref: GROUPING_REF,
+    name: z.string().max(PROFILE.name),
+    description: z.string().max(PROFILE.description).nullable(),
+    /** Resources in it. */
+    members: z.number().int().min(0),
+  })
+  .strict();
 
 const RESOURCE = z
   .object({
@@ -264,6 +561,23 @@ const RESOURCE = z
     archived_at: DATE_TIME.nullable(),
     /** The pool it is a member of (a vehicle class, a room type); `null` when none. */
     pool: POOL.nullable(),
+    /** Its name; `null` when it has none, and agents and people see the reference. */
+    name: z.string().max(PROFILE.name).nullable(),
+    description: z.string().max(PROFILE.description).nullable(),
+    /** What it is; `other` when not said. */
+    kind: RESOURCE_KIND,
+    /** People or seats it holds; `null` when not said. */
+    capacity: z.number().int().nullable(),
+    labels: z.array(RESOURCE_LABEL).max(PROFILE.labels),
+    attributes: RESOURCE_ATTRIBUTES,
+    /** The location it is at; `null` when not said. */
+    location: GROUPING_REF.nullable(),
+    /** The groups it is in, by reference. */
+    groups: z.array(GROUPING_REF).max(SLOTLOCK_MAX_GROUPS_PER_RESOURCE),
+    /** The composite it is a part of (a room of a hall), by id; `null` when it is no part. */
+    parent_id: z.string().uuid().nullable(),
+    /** Its place among its parent's parts, from 0; `null` when it is no part. */
+    part_index: z.number().int().min(0).nullable(),
   })
   .strict();
 
@@ -321,6 +635,16 @@ const WEBHOOK = z
     last_error: z.string().max(500).nullable(),
     disabled_at: DATE_TIME.nullable(),
     disabled_reason: z.enum(['gone', 'failing']).nullable(),
+    /** Only changes about these resources; `null` when it has no such filter. */
+    filter: z
+      .object({
+        resource_ids: z.array(z.string().uuid()).max(SLOTLOCK_WEBHOOK_FILTER_RESOURCES).optional(),
+        pools: z.array(GROUPING_REF).max(SLOTLOCK_WEBHOOK_FILTER_REFS).optional(),
+        locations: z.array(GROUPING_REF).max(SLOTLOCK_WEBHOOK_FILTER_REFS).optional(),
+        groups: z.array(GROUPING_REF).max(SLOTLOCK_WEBHOOK_FILTER_REFS).optional(),
+      })
+      .strict()
+      .nullable(),
   })
   .strict();
 
@@ -404,20 +728,183 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_create_resource',
       title: 'Create or update a resource',
       description:
-        'Create the resource with this external reference, or update its time zone if the tenant already has it. Repeating the call changes nothing more. visibility is shared (the default: agents list and book it) or private (agents never see it), fixed at creation: naming another for an existing resource answers 409 resource_visibility_conflict.',
+        'Create the resource with this external reference, or update its time zone, and the profile fields and location given, if the tenant already has it. Without a time zone, a new resource takes the nearest one its location, or a location above it, has, else UTC; a location the tenant does not have answers 404 location_not_found. Repeating the call changes nothing more. visibility is shared (the default: agents list and book it) or private (agents never see it), fixed at creation: naming another for an existing resource answers 409 resource_visibility_conflict. Its profile is optional: a name agents and people see instead of the reference, a description, its kind (person, room, desk, space, vehicle, machine, equipment, service or other: a hint, never a rule), its capacity (informational), up to 20 labels to find it by, and attributes you want back.',
       method: 'POST',
       path: '/v1/resources',
       input: z
         .object({
           external_ref: IDENTITY,
-          timezone: TIMEZONE.default('UTC'),
+          /** UTC, or its location's, when not given. */
+          timezone: TIMEZONE.optional(),
           visibility: VISIBILITY.optional(),
+          ...PROFILE_INPUT,
+          /** The location it is at, by reference. */
+          location: GROUPING_REF.optional(),
         })
         .strict(),
       output: z.object({ resource: RESOURCE }).strict(),
       risk: { readOnly: false, destructive: false, idempotent: true },
       invoke: 'createResource',
-      example: { external_ref: 'vehicle-42', timezone: 'Europe/London' },
+      example: {
+        external_ref: 'room-3',
+        timezone: 'Europe/London',
+        name: 'Room 3',
+        kind: 'room',
+        capacity: 10,
+        labels: ['video', 'whiteboard'],
+      },
+    },
+    {
+      name: 'slotlock_update_resource',
+      title: "Change a resource's profile",
+      description:
+        "Change a resource's name, description, kind, capacity, labels, attributes or location: the fields given, keeping the rest. null clears a name, description, capacity or location; [] and {} clear labels and attributes. A location the tenant does not have answers 404 location_not_found. The feed's resource.updated names the fields that changed (profile_changed), never their values. 400 invalid_resource_profile outside the bounds, naming the field.",
+      method: 'PATCH',
+      path: '/v1/resources/{resource_id}',
+      input: z
+        .object({ resource_id: RESOURCE_ID, ...PROFILE_INPUT, location: GROUPING_REF.nullable().optional() })
+        .strict()
+        .refine(
+          (input) => Object.keys(input).some((key) => key !== 'resource_id'),
+          'Give at least one profile field to change',
+        ),
+      output: z.object({ resource: RESOURCE }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'updateResource',
+      example: { resource_id: EXAMPLE_RESOURCE_ID, name: 'Board room', labels: ['video'] },
+    },
+    {
+      name: 'slotlock_list_locations',
+      title: 'List locations',
+      description: `The tenant's locations, each after the one it is in (depth first), with how many resources are at each. A tree of at most ${SLOTLOCK_MAX_LOCATION_DEPTH} levels and ${SLOTLOCK_MAX_LOCATIONS} locations: a region, a site, a building, a floor, a zone, or whatever yours are.`,
+      method: 'GET',
+      path: '/v1/locations',
+      input: z.object({}).strict(),
+      output: z.object({ locations: z.array(LOCATION).max(SLOTLOCK_MAX_LOCATIONS) }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'listLocations',
+      example: {},
+    },
+    {
+      name: 'slotlock_create_location',
+      title: 'Create or update a location',
+      description: `Create the location with this reference, or change its name, and the parent and time zone given. 404 location_not_found for a parent the tenant does not have; 409 location_too_deep past ${SLOTLOCK_MAX_LOCATION_DEPTH} levels, location_cycle under itself, location_limit_reached past ${SLOTLOCK_MAX_LOCATIONS}.`,
+      method: 'POST',
+      path: '/v1/locations',
+      input: z
+        .object({
+          ref: GROUPING_REF,
+          name: z.string().min(1).max(PROFILE.name),
+          parent_ref: GROUPING_REF.nullable().optional(),
+          timezone: TIMEZONE.nullable().optional(),
+        })
+        .strict(),
+      output: z.object({ location: LOCATION }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'createLocation',
+      example: { ref: 'leeds', name: 'Leeds clinic', timezone: 'Europe/London' },
+    },
+    {
+      name: 'slotlock_update_location',
+      title: 'Change a location',
+      description: "Change a location's name, parent or time zone: the fields given. Refused as creating one is.",
+      method: 'PATCH',
+      path: '/v1/locations/{location_ref}',
+      input: z
+        .object({
+          location_ref: GROUPING_REF,
+          name: z.string().min(1).max(PROFILE.name).optional(),
+          parent_ref: GROUPING_REF.nullable().optional(),
+          timezone: TIMEZONE.nullable().optional(),
+        })
+        .strict()
+        .refine(
+          (input) => Object.keys(input).some((key) => key !== 'location_ref'),
+          'Give at least one field to change',
+        ),
+      output: z.object({ location: LOCATION }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'updateLocation',
+      example: { location_ref: 'leeds', name: 'Leeds city clinic' },
+    },
+    {
+      name: 'slotlock_delete_location',
+      title: 'Delete a location',
+      description:
+        'Delete a location. Refused with 409 location_in_use while a resource is at it or a location is in it: move them first. deleted is false when the tenant has no such location.',
+      method: 'DELETE',
+      path: '/v1/locations/{location_ref}',
+      input: z.object({ location_ref: GROUPING_REF }).strict(),
+      output: z.object({ deleted: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'deleteLocation',
+      example: { location_ref: 'leeds' },
+    },
+    {
+      name: 'slotlock_list_groups',
+      title: 'List groups',
+      description: `The tenant's groups, by reference, with how many resources are in each: any sets you want (a team, a department, a contract), at most ${SLOTLOCK_MAX_RESOURCE_GROUPS}. A group changes nothing about how its resources are booked; a pool does that.`,
+      method: 'GET',
+      path: '/v1/groups',
+      input: z.object({}).strict(),
+      output: z.object({ groups: z.array(GROUP).max(SLOTLOCK_MAX_RESOURCE_GROUPS) }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'listGroups',
+      example: {},
+    },
+    {
+      name: 'slotlock_create_group',
+      title: 'Create or update a group',
+      description: `Create the group with this reference, or change its name, and its description when given. 409 group_limit_reached past ${SLOTLOCK_MAX_RESOURCE_GROUPS}.`,
+      method: 'POST',
+      path: '/v1/groups',
+      input: z
+        .object({
+          ref: GROUPING_REF,
+          name: z.string().min(1).max(PROFILE.name),
+          description: z.string().min(1).max(PROFILE.description).nullable().optional(),
+        })
+        .strict(),
+      output: z.object({ group: GROUP }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'createGroup',
+      example: { ref: 'physio', name: 'Physiotherapy team' },
+    },
+    {
+      name: 'slotlock_delete_group',
+      title: 'Delete a group',
+      description: 'Delete a group; its resources stay as they are. deleted is false when the tenant has no such group.',
+      method: 'DELETE',
+      path: '/v1/groups/{group_ref}',
+      input: z.object({ group_ref: GROUPING_REF }).strict(),
+      output: z.object({ deleted: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'deleteGroup',
+      example: { group_ref: 'physio' },
+    },
+    {
+      name: 'slotlock_add_group_member',
+      title: 'Put a resource in a group',
+      description: `Put one of the tenant's resources in a group. added is false when it was in it already. 404 group_not_found or resource_not_found; 409 resource_group_limit_reached past ${SLOTLOCK_MAX_GROUPS_PER_RESOURCE} groups a resource.`,
+      method: 'PUT',
+      path: '/v1/groups/{group_ref}/members/{resource_id}',
+      input: z.object({ group_ref: GROUPING_REF, resource_id: RESOURCE_ID }).strict(),
+      output: z.object({ added: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'addGroupMember',
+      example: { group_ref: 'physio', resource_id: EXAMPLE_RESOURCE_ID },
+    },
+    {
+      name: 'slotlock_remove_group_member',
+      title: 'Take a resource out of a group',
+      description: 'Take a resource out of a group. removed is false when it was not in it.',
+      method: 'DELETE',
+      path: '/v1/groups/{group_ref}/members/{resource_id}',
+      input: z.object({ group_ref: GROUPING_REF, resource_id: RESOURCE_ID }).strict(),
+      output: z.object({ removed: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'removeGroupMember',
+      example: { group_ref: 'physio', resource_id: EXAMPLE_RESOURCE_ID },
     },
     {
       name: 'slotlock_get_resource',
@@ -560,18 +1047,49 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       example: { resource_id: EXAMPLE_RESOURCE_ID, pool: 'van' },
     },
     {
+      name: 'slotlock_set_resource_parent',
+      title: "Make a resource part of another",
+      description:
+        "Make a resource a part of a composite (a room of a hall, a half of a court), or no part (`null`). A booking of the composite as a whole then conflicts with a booking of any of its parts, and two parts never conflict with each other; each part's free/busy shows the whole's bookings, and the whole's shows its parts'. One level deep, at most 50 parts; refused while either side has a booking or live hold still to come (`composite_busy`).",
+      method: 'PUT',
+      path: '/v1/resources/{resource_id}/parent',
+      input: z.object({ resource_id: RESOURCE_ID, parent_id: RESOURCE_ID.nullable() }).strict(),
+      output: z.object({ resource: RESOURCE }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'setResourceParent',
+      example: { resource_id: EXAMPLE_RESOURCE_ID, parent_id: '0e7c1f9a-3b5d-4c2e-9f81-6a4b2d8c7e10' },
+    },
+    {
       name: 'slotlock_list_pools',
       title: 'List pools',
-      description: "The tenant's pools by name, each with its capacity: how many members it has that are not archived.",
+      description:
+        "The tenant's pools by name, each with its capacity (how many members it has that are not archived) and the order slotlock_book_pool tries them in.",
       method: 'GET',
       path: '/v1/pools',
       input: z.object({}).strict(),
       output: z
-        .object({ pools: z.array(z.object({ pool: POOL, capacity: z.number().int().min(1) }).strict()).max(1000) })
+        .object({
+          pools: z
+            .array(z.object({ pool: POOL, capacity: z.number().int().min(1), order: POOL_ORDER }).strict())
+            .max(1000),
+        })
         .strict(),
       risk: { readOnly: true, destructive: false, idempotent: true },
       invoke: 'listPools',
       example: {},
+    },
+    {
+      name: 'slotlock_set_pool_order',
+      title: "Set a pool's order",
+      description:
+        "The order slotlock_book_pool tries a pool's members in: stable (by id, the default), least_booked (fewest bookings made on each in the last 30 days first, to share them out) or round_robin (from the member after the one booked last). At most 1,000 pools have one: one more is 409 pool_order_limit_reached.",
+      method: 'PUT',
+      path: '/v1/pools/{pool}/order',
+      input: z.object({ pool: POOL, order: POOL_ORDER }).strict(),
+      output: z.object({ pool: POOL, order: POOL_ORDER }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'setPoolOrder',
+      example: { pool: 'van', order: 'least_booked' },
     },
     {
       name: 'slotlock_get_booking_rule_defaults',
@@ -856,7 +1374,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_join_waitlist',
       title: 'Join the waitlist',
       description:
-        "Wait for a window on one resource (resource_id) or on any member of a pool (pool) that is taken now. When it comes free (a booking cancelled, a hold released or expired, a no-show), the entries waiting for it are offered in the order they joined: the first gets a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409 waitlist_limit_reached); a window is at most 31 days.",
+        "Wait for a window on one resource (resource_id) or on any member of a pool (pool) that is taken now. When it comes free (a booking cancelled, a hold released or expired, a no-show), the entries waiting for it are offered in the order they joined: the first gets a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409 waitlist_limit_reached); a window is at most 31 days. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the entry the first request made (replayed: true) for as long as it is kept; the same key with another request is 422 idempotency_conflict.",
       method: 'POST',
       path: '/v1/waitlist',
       input: z
@@ -867,13 +1385,14 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           end: DATE_TIME,
           holder_ref: z.string().trim().min(1).max(500),
           offer_ttl_seconds: z.number().int().min(60).max(86_400).optional(),
+          idempotency_key: IDEMPOTENCY_KEY.optional(),
         })
         .strict()
         .refine((input) => (input.resource_id === undefined) !== (input.pool === undefined), {
           message: 'Name resource_id or pool, not both',
         }),
-      output: z.object({ entry: WAITLIST_ENTRY }).strict(),
-      risk: { readOnly: false, destructive: false, idempotent: false },
+      output: z.object({ entry: WAITLIST_ENTRY, replayed: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
       invoke: 'joinWaitlist',
       example: {
         pool: 'van',
@@ -1107,7 +1626,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_erase_tenant',
       title: 'Erase the tenant',
       description:
-        "Delete everything the key's tenant has, at once and for good: resources, holds, bookings, events, coverage and every API key, this one included. confirm_tenant_ref must be the tenant's reference (slotlock_get_tenant), or it answers 400 invalid_confirmation. Off unless the server allows it (403 tenant_erasure_disabled; slotlock serve does not: its operator runs slotlock tenant erase). A suspended tenant cannot erase itself (403 tenant_suspended). Erasing again deletes nothing.",
+        "Delete everything the key's tenant has, at once and for good: resources, holds, bookings, events, coverage and every API key, this one included. confirm_tenant_ref must be the tenant's reference (slotlock_get_tenant), or it answers 400 invalid_confirmation. Off unless the server allows it (403 tenant_erasure_disabled; slotlock serve does not: its operator runs slotlock tenant erase). A suspended tenant cannot erase itself (403 tenant_suspended), nor can one whose hosted plan is still paid for until it is cancelled (409 billing_active). Erasing again deletes nothing.",
       method: 'POST',
       path: '/v1/tenant/erase',
       input: z.object({ confirm_tenant_ref: IDENTITY }).strict(),
@@ -1140,6 +1659,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           stale_sources: z.number().int().min(0),
           no_shows: z.number().int().min(0),
           waitlist_offers: z.number().int().min(0),
+          approvals_expired: z.number().int().min(0),
           capped: z.boolean(),
         })
         .strict(),
@@ -1166,17 +1686,22 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_create_webhook',
       title: 'Add a webhook',
       description:
-        'Send the changes slotlock_list_changes lists from now on to an https URL, each as a CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature), in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a 410, the webhook is disabled and the feed records webhook.disabled. The secret is returned here only. At most 10 per tenant.',
+        `Send the changes slotlock_list_changes lists from now on to an https URL, each as a CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature), in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a 410, the webhook is disabled and the feed records webhook.disabled. The secret is returned here only. At most ${SLOTLOCK_MAX_WEBHOOK_ENDPOINTS} per tenant, or fewer on a plan (409 webhook_limit_reached). With resource_ids, pools, locations (each with every location in it) or groups, only changes about a resource that matches one of them, as it is when the change is delivered: a change about no resource (a key, a webhook, a usage notice) is not sent. At most ${SLOTLOCK_WEBHOOK_FILTER_RESOURCES} resource ids and ${SLOTLOCK_WEBHOOK_FILTER_REFS} of each other kind (400 invalid_webhook_filter). With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the webhook and secret the first request made (replayed: true) for as long as the webhook is kept; the same key with another request is 422 idempotency_conflict.`,
       method: 'POST',
       path: '/v1/webhooks',
       input: z
         .object({
           url: z.string().url().max(2048),
           event_types: z.array(z.enum(SLOTLOCK_CHANGE_TYPES)).min(1).max(SLOTLOCK_CHANGE_TYPES.length).optional(),
+          resource_ids: z.array(z.string().uuid()).min(1).max(SLOTLOCK_WEBHOOK_FILTER_RESOURCES).optional(),
+          pools: z.array(GROUPING_REF).min(1).max(SLOTLOCK_WEBHOOK_FILTER_REFS).optional(),
+          locations: z.array(GROUPING_REF).min(1).max(SLOTLOCK_WEBHOOK_FILTER_REFS).optional(),
+          groups: z.array(GROUPING_REF).min(1).max(SLOTLOCK_WEBHOOK_FILTER_REFS).optional(),
+          idempotency_key: IDEMPOTENCY_KEY.optional(),
         })
         .strict(),
-      output: z.object({ webhook: WEBHOOK, secret: z.string().regex(/^whsec_/) }).strict(),
-      risk: { readOnly: false, destructive: false, idempotent: false },
+      output: z.object({ webhook: WEBHOOK, secret: z.string().regex(/^whsec_/), replayed: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
       invoke: 'createWebhook',
       example: { url: 'https://example.com/slotlock-webhook', event_types: ['reservation.created'] },
     },
@@ -1187,7 +1712,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       method: 'GET',
       path: '/v1/webhooks',
       input: z.object({}).strict(),
-      output: z.object({ webhooks: z.array(WEBHOOK).max(10) }).strict(),
+      output: z.object({ webhooks: z.array(WEBHOOK).max(SLOTLOCK_MAX_WEBHOOK_ENDPOINTS) }).strict(),
       risk: { readOnly: true, destructive: false, idempotent: true },
       invoke: 'listWebhooks',
       example: {},
@@ -1215,6 +1740,434 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       risk: { readOnly: false, destructive: false, idempotent: true },
       invoke: 'enableWebhook',
       example: { webhook_id: '9b2f4c1e-6d3a-4e8b-a1c7-5f0e2d4b6a8c' },
+    },
+    {
+      name: 'slotlock_get_usage',
+      title: 'Read usage',
+      description:
+        "How much the tenant used the service from one UTC day to another (inclusive, at most 400 days apart; by default the first of this month to today): operations its keys and the dashboard assistant ran (each call that reached its operation, whatever it returned), bookings (bookings, events and confirmed holds) and holds it made, webhook deliveries its endpoints accepted, messages to the dashboard assistant, and the resources it held (each day's count, archived ones included; in totals, the last day's, not a sum). Totals, then by day, by API key (key_id null for none) and by surface (mcp, a2a, rest, application, dashboard-assistant, webhooks); resources are by day only. Counts only, never what was asked. Empty unless the server meters usage (SLOTLOCK_USAGE=on); operations, deliveries and messages appear within 15 seconds; bookings, holds and resources within the hour. 400 invalid_usage_range when to is before from, the range is longer than 400 days, or to is after today.",
+      method: 'GET',
+      path: '/v1/usage',
+      input: z.object({ from: USAGE_DAY.optional(), to: USAGE_DAY.optional() }).strict(),
+      output: z
+        .object({
+          from: USAGE_DAY,
+          to: USAGE_DAY,
+          totals: z.object(USAGE_TOTALS).strict(),
+          days: z.array(z.object({ day: USAGE_DAY, ...USAGE_TOTALS }).strict()).max(401),
+          keys: z
+            .array(z.object({ key_id: z.string().uuid().nullable(), ...USAGE_TOTALS }).strict())
+            .max(1001),
+          surfaces: z.array(z.object({ origin: z.string().min(1).max(40), ...USAGE_TOTALS }).strict()).max(20),
+        })
+        .strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'getUsage',
+      example: { from: '2026-11-01', to: '2026-11-30' },
+    },
+    // Approval policies (RFC 0004 A4): writes a person approves before they are made.
+    {
+      name: 'slotlock_list_approval_policies',
+      title: 'List approval policies',
+      description:
+        "The tenant's approval policies, by reference: which agent bookings wait for a person (require_approval) or are refused (refuse).",
+      method: 'GET',
+      path: '/v1/approval-policies',
+      input: z.object({}).strict(),
+      output: z.object({ policies: z.array(APPROVAL_POLICY).max(SLOTLOCK_MAX_APPROVAL_POLICIES) }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'listApprovalPolicies',
+      example: {},
+    },
+    {
+      name: 'slotlock_put_approval_policy',
+      title: 'Create or replace an approval policy',
+      description:
+        "Which agent bookings (slotlock_create_event, slotlock_confirm_slot, slotlock_book_pool, slotlock_book_together, and moves by slotlock_update_event or slotlock_reschedule) a person approves first, or are refused. applies_to names resources, pools, locations (with the locations in them) and groups; empty, every resource. conditions narrow it: longer_than_minutes, outside_hours (outside the resource's bookable hours), kinds (single, pool, bundle, move); a booking meets the policy when it meets every condition given. outcome require_approval holds the exact time the booking would take, under the approval, and answers the agent 409 approval_pending; refuse answers 403 approval_policy_refused. A person has approval_ttl_minutes to decide (default 1,440; at most 43,200, and the server's ceiling), and must decide lead_minutes before the booking starts: the wait is the earlier of the two. Where several apply, refuse wins, then the one that must be decided soonest. At most 50 policies: one more is 409 approval_policy_limit_reached.",
+      method: 'PUT',
+      path: '/v1/approval-policies/{policy_ref}',
+      input: z
+        .object({
+          policy_ref: APPROVAL_POLICY_REF,
+          name: z.string().trim().min(1).max(200),
+          applies_to: APPROVAL_APPLIES_TO.optional(),
+          conditions: APPROVAL_CONDITIONS.optional(),
+          outcome: z.enum(['require_approval', 'refuse']),
+          approval_ttl_minutes: z.number().int().min(1).max(SLOTLOCK_MAX_APPROVAL_MINUTES).optional(),
+          lead_minutes: z.number().int().min(0).max(SLOTLOCK_MAX_APPROVAL_MINUTES).optional(),
+        })
+        .strict(),
+      output: z.object({ policy: APPROVAL_POLICY }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'putApprovalPolicy',
+      example: {
+        policy_ref: 'long-van-hires',
+        name: 'Van hires over a day',
+        applies_to: { pools: ['van'] },
+        conditions: { longer_than_minutes: 1440 },
+        outcome: 'require_approval',
+        approval_ttl_minutes: 240,
+        lead_minutes: 60,
+      },
+    },
+    {
+      name: 'slotlock_delete_approval_policy',
+      title: 'Delete an approval policy',
+      description:
+        'Stop applying a policy to new bookings. Approvals it already asked for stay as they are, to be decided.',
+      method: 'DELETE',
+      path: '/v1/approval-policies/{policy_ref}',
+      input: z.object({ policy_ref: APPROVAL_POLICY_REF }).strict(),
+      output: z.object({ deleted: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'deleteApprovalPolicy',
+      example: { policy_ref: 'long-van-hires' },
+    },
+    {
+      name: 'slotlock_list_approvals',
+      title: 'List approvals',
+      description:
+        "The tenant's approvals, newest first: bookings an agent asked for that a policy holds for a person (pending, holding their time until expires_at), and those decided (granted, declined, expired). Filter by status.",
+      method: 'GET',
+      path: '/v1/approvals',
+      input: z
+        .object({
+          status: APPROVAL_STATUS.optional(),
+          limit: z.coerce.number().int().min(1).max(200).default(50),
+        })
+        .strict(),
+      output: z.object({ approvals: z.array(APPROVAL).max(200) }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'listApprovals',
+      example: { status: 'pending', limit: 50 },
+    },
+    {
+      name: 'slotlock_get_approval',
+      title: 'Get an approval',
+      description: 'One approval by id, with the booking it would make. 404 approval_not_found.',
+      method: 'GET',
+      path: '/v1/approvals/{approval_id}',
+      input: z.object({ approval_id: z.string().uuid() }).strict(),
+      output: z.object({ approval: APPROVAL }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'getApproval',
+      example: { approval_id: '3f6b2a1c-8d4e-4b7a-9c2f-1e5d7a9b3c4d' },
+    },
+    {
+      name: 'slotlock_decide_approval',
+      title: 'Grant or decline an approval',
+      description:
+        "Decide a pending approval. grant makes the booking as the agent asked for it, as that agent, in one transaction with letting the approval's hold go, and answers it under booking; the agent's retry with its idempotency key then answers the same booking. A write refused now (a booking rule changed, say) is refused with its own code and the approval stays pending. decline frees the time; the agent's retry answers 403 approval_declined with the reason. 404 approval_not_found; 409 approval_not_pending when already decided; 409 approval_expired after its wait.",
+      method: 'POST',
+      path: '/v1/approvals/{approval_id}/decision',
+      input: z
+        .object({
+          approval_id: z.string().uuid(),
+          decision: z.enum(['grant', 'decline']),
+          reason: z.string().trim().min(1).max(500).optional(),
+        })
+        .strict(),
+      output: z.object({ approval: APPROVAL, booking: z.record(z.string(), z.unknown()).nullable() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: false },
+      invoke: 'decideApproval',
+      example: { approval_id: '3f6b2a1c-8d4e-4b7a-9c2f-1e5d7a9b3c4d', decision: 'grant' },
+    },
+    // The sandbox (RFC 0004 A6): a test environment's only (`sandbox_test_only` elsewhere).
+    {
+      name: 'slotlock_sandbox_seed',
+      title: 'Seed the test environment',
+      description:
+        "Fill an empty test environment (a key starting slk_test_) with a scenario to try an agent against: car-rental (cars and vans in pools at two branches, 30-minute turnaround), clinic (practitioners and treatment rooms, half-hour slots on weekdays) or desks (desks on two floors, and a hall that splits in two). Locations, groups, resources with profiles, hours and booking rules, and three bookings tomorrow. 409 sandbox_not_empty when it has resources: reset it first. 403 sandbox_test_only for a live key.",
+      method: 'POST',
+      path: '/v1/sandbox/seed',
+      input: z.object({ scenario: z.enum(['car-rental', 'clinic', 'desks']) }).strict(),
+      output: z
+        .object({
+          scenario: z.enum(['car-rental', 'clinic', 'desks']),
+          resources: z.number().int().min(0),
+          locations: z.number().int().min(0),
+          groups: z.number().int().min(0),
+          pools: z.number().int().min(0),
+          bookings: z.number().int().min(0),
+        })
+        .strict(),
+      risk: { readOnly: false, destructive: false, idempotent: false },
+      invoke: 'sandboxSeed',
+      example: { scenario: 'car-rental' },
+    },
+    {
+      name: 'slotlock_sandbox_reset',
+      title: 'Empty the test environment',
+      description:
+        "Empty the test environment as if new: its resources, locations, groups, bookings, events, holds, waitlist, approval policies and feed. Its API keys, webhooks, plan and usage stay. Rows removed, by table. 403 sandbox_test_only for a live key.",
+      method: 'POST',
+      path: '/v1/sandbox/reset',
+      input: z.object({}).strict(),
+      output: z.object({ removed: z.record(z.string(), z.number().int().min(0)) }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'sandboxReset',
+      example: {},
+    },
+    {
+      name: 'slotlock_sandbox_fast_forward',
+      title: "Move the test environment's waiting forward",
+      description:
+        "Make what would lapse in the test environment within minutes (1-525,600) lapse now: holds (a waitlist offer's and an approval's among them) and pending approvals; then a maintenance pass reaps them as it would have, releasing holds, passing offers on and expiring approvals, on the feed as usual. Bookings and events keep their times; no-shows and series follow the real clock. 403 sandbox_test_only for a live key.",
+      method: 'POST',
+      path: '/v1/sandbox/fast-forward',
+      input: z.object({ minutes: z.number().int().min(1).max(525_600) }).strict(),
+      output: z
+        .object({
+          minutes: z.number().int(),
+          holds: z.number().int().min(0),
+          approvals: z.number().int().min(0),
+          maintenance: z.record(z.string(), z.unknown()),
+        })
+        .strict(),
+      risk: { readOnly: false, destructive: false, idempotent: false },
+      invoke: 'sandboxFastForward',
+      example: { minutes: 60 },
+    },
+    {
+      name: 'slotlock_sandbox_race',
+      title: 'Race agents for one slot in the test environment',
+      description:
+        "Race agents (2-200, default 100), each an agent of its own, for one time on one resource of the test environment, through the same path MCP, A2A and REST use: how many booked (one), how many were refused and why (overlap, with alternatives), any server errors, and how long the answers took. 403 sandbox_test_only for a live key.",
+      method: 'POST',
+      path: '/v1/sandbox/race',
+      input: z
+        .object({
+          resource_id: RESOURCE_ID,
+          starts_at: DATE_TIME,
+          ends_at: DATE_TIME,
+          agents: z.number().int().min(2).max(200).optional(),
+        })
+        .strict()
+        .refine((value) => Date.parse(value.ends_at) > Date.parse(value.starts_at)),
+      output: z
+        .object({
+          agents: z.number().int(),
+          booked: z.number().int().min(0),
+          refused: z.record(z.string(), z.number().int().min(0)),
+          with_alternatives: z.number().int().min(0),
+          server_errors: z.number().int().min(0),
+          p50_ms: z.number().min(0),
+          p99_ms: z.number().min(0),
+          max_ms: z.number().min(0),
+        })
+        .strict(),
+      risk: { readOnly: false, destructive: false, idempotent: false },
+      invoke: 'sandboxRace',
+      example: { resource_id: '00000000-0000-4000-8000-000000000001', starts_at: '2027-03-02T09:00:00Z', ends_at: '2027-03-02T10:00:00Z', agents: 100 },
+    },
+    // The partner API (RFC 0003 P3): a partner key's, for that partner's own accounts only.
+    {
+      name: 'slotlock_partner_put_account',
+      title: 'Create or update an account',
+      description:
+        "Create the partner's account with this id (your own id for your user, 1-128 letters, digits, dots, dashes or underscores), or put it on another plan: one of your contract's, whose limits and monthly quotas the account then has. Its tenant is partner:<partner>:<account>, an ordinary Slotlock tenant of its own. Repeating the call changes nothing more. 400 invalid_partner_plan for a plan your contract does not have.",
+      method: 'PUT',
+      path: '/v1/partner/accounts/{account}',
+      input: z.object({ account: PARTNER_ACCOUNT, plan: PARTNER_PLAN_NAME }).strict(),
+      output: z.object({ account: PARTNER_ACCOUNT_OUTPUT, created: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'partnerPutAccount',
+      scope: 'partner',
+      example: { account: 'user-4821', plan: 'partner_pro' },
+    },
+    {
+      name: 'slotlock_partner_list_accounts',
+      title: 'List accounts',
+      description: "The partner's accounts, by id: plan, whether suspended, and when made and last changed.",
+      method: 'GET',
+      path: '/v1/partner/accounts',
+      input: z.object({}).strict(),
+      output: z.object({ accounts: z.array(PARTNER_ACCOUNT_OUTPUT).max(10000) }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'partnerListAccounts',
+      scope: 'partner',
+      example: {},
+    },
+    {
+      name: 'slotlock_partner_get_account',
+      title: 'Read an account',
+      description:
+        'One of the partner\'s accounts, with how many resources (archived ones included) and active API keys it holds. 404 account_not_found for an account the partner does not have.',
+      method: 'GET',
+      path: '/v1/partner/accounts/{account}',
+      input: z.object({ account: PARTNER_ACCOUNT }).strict(),
+      output: z.object({ account: PARTNER_ACCOUNT_OUTPUT }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'partnerGetAccount',
+      scope: 'partner',
+      example: { account: 'user-4821' },
+    },
+    {
+      name: 'slotlock_partner_list_keys',
+      title: "List an account's keys",
+      description: "The account's API keys, revoked and expired ones included, newest first; never the keys themselves.",
+      method: 'GET',
+      path: '/v1/partner/accounts/{account}/keys',
+      input: z.object({ account: PARTNER_ACCOUNT, environment: PARTNER_ENVIRONMENT }).strict(),
+      output: z.object({ keys: z.array(PARTNER_KEY_OUTPUT).max(1000) }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'partnerListKeys',
+      scope: 'partner',
+      example: { account: 'user-4821' },
+    },
+    {
+      name: 'slotlock_partner_create_key',
+      title: 'Create a key for an account',
+      description:
+        "An API key for the account, shown once in key and never again; only its SHA-256 is kept. Give it to your user's calls: it acts in the account's tenant, over MCP, A2A and REST, as any key. environment: test makes it in the account's test environment instead (a tenant of its own, on the same plan, never billed; its keys start slk_test_). scopes: some of the ones your contract allows (read and write unless it says), by default all of them; expires_in_days: 1-3650, or none. limits hold the key's agent below the server's limits: max_holds live at once, max_held_hours they hold together, requests_per_minute, and requires_approval to make every booking it asks for wait for a person (the account's Approvals). 403 scope_not_in_contract for another scope; 409 api_key_limit_reached past the account plan's keys.",
+      method: 'POST',
+      path: '/v1/partner/accounts/{account}/keys',
+      input: z
+        .object({
+          account: PARTNER_ACCOUNT,
+          name: z.string().trim().min(1).max(100),
+          scopes: z.array(z.enum(['read', 'write', 'admin'])).min(1).max(3).optional(),
+          expires_in_days: z.number().int().min(1).max(3650).optional(),
+          environment: PARTNER_ENVIRONMENT,
+          limits: KEY_LIMITS.optional(),
+        })
+        .strict(),
+      output: z.object({ key: ACCOUNT_KEY, api_key: PARTNER_KEY_OUTPUT }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: false },
+      invoke: 'partnerCreateKey',
+      scope: 'partner',
+      example: { account: 'user-4821', name: 'Booking agent' },
+    },
+    {
+      name: 'slotlock_partner_rotate_key',
+      title: "Rotate an account's key",
+      description:
+        'A new secret for one of the account\'s active keys, shown once; the old one stops at once. The key keeps its id and what it booked. 404 key_not_found otherwise.',
+      method: 'POST',
+      path: '/v1/partner/accounts/{account}/keys/{key_id}/rotate',
+      input: z.object({ account: PARTNER_ACCOUNT, key_id: z.string().uuid(), environment: PARTNER_ENVIRONMENT }).strict(),
+      output: z.object({ key: ACCOUNT_KEY, api_key: PARTNER_KEY_OUTPUT }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: false },
+      invoke: 'partnerRotateKey',
+      scope: 'partner',
+      example: { account: 'user-4821', key_id: '7d1e4f8a-2b3c-4d5e-8f90-123456789abc' },
+    },
+    {
+      name: 'slotlock_partner_revoke_key',
+      title: "Revoke an account's key",
+      description: "Revoke one of the account's keys at once; revoking it again changes nothing. 404 key_not_found otherwise.",
+      method: 'DELETE',
+      path: '/v1/partner/accounts/{account}/keys/{key_id}',
+      input: z.object({ account: PARTNER_ACCOUNT, key_id: z.string().uuid(), environment: PARTNER_ENVIRONMENT }).strict(),
+      output: z.object({ api_key: PARTNER_KEY_OUTPUT }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'partnerRevokeKey',
+      scope: 'partner',
+      example: { account: 'user-4821', key_id: '7d1e4f8a-2b3c-4d5e-8f90-123456789abc' },
+    },
+    {
+      name: 'slotlock_partner_suspend_account',
+      title: 'Suspend an account',
+      description:
+        'Suspend the account, as slotlock tenant suspend: it may read, and writes nothing; its keys get no new secret. suspended says whether it was not suspended already.',
+      method: 'POST',
+      path: '/v1/partner/accounts/{account}/suspend',
+      input: z.object({ account: PARTNER_ACCOUNT, reason: z.string().trim().min(1).max(200).optional() }).strict(),
+      output: z.object({ suspended: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'partnerSuspendAccount',
+      scope: 'partner',
+      example: { account: 'user-4821', reason: 'unpaid' },
+    },
+    {
+      name: 'slotlock_partner_unsuspend_account',
+      title: 'Lift a suspension',
+      description:
+        'Lift a suspension the partner made. One Pylota made stays: unsuspended is false then, as when the account was not suspended.',
+      method: 'POST',
+      path: '/v1/partner/accounts/{account}/unsuspend',
+      input: z.object({ account: PARTNER_ACCOUNT }).strict(),
+      output: z.object({ unsuspended: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'partnerUnsuspendAccount',
+      scope: 'partner',
+      example: { account: 'user-4821' },
+    },
+    {
+      name: 'slotlock_partner_erase_account',
+      title: 'Erase an account',
+      description:
+        "Erase the account's tenant, every row it owns, as /v1/tenant/erase, and the partner's record of it. confirm repeats the account. Cannot be undone.",
+      method: 'POST',
+      path: '/v1/partner/accounts/{account}/erase',
+      input: z.object({ account: PARTNER_ACCOUNT, confirm: PARTNER_ACCOUNT }).strict(),
+      output: z.object({ erased: z.boolean(), rows: z.number().int().min(0) }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'partnerEraseAccount',
+      scope: 'partner',
+      example: { account: 'user-4821', confirm: 'user-4821' },
+    },
+    {
+      name: 'slotlock_partner_get_usage',
+      title: "Read the accounts' usage",
+      description:
+        "The partner's accounts' usage, the counts Pylota invoices from, by account, UTC day and metric (operations, bookings, holds, webhook_deliveries, resources: each day's count), from one UTC day to another (inclusive, at most 400 days apart; by default this month); one account, or all. 400 invalid_usage_range otherwise.",
+      method: 'GET',
+      path: '/v1/partner/usage',
+      input: z.object({ from: USAGE_DAY.optional(), to: USAGE_DAY.optional(), account: PARTNER_ACCOUNT.optional() }).strict(),
+      output: z
+        .object({
+          from: USAGE_DAY,
+          to: USAGE_DAY,
+          usage: z
+            .array(z.object({ account: PARTNER_ACCOUNT, day: USAGE_DAY, metric: z.string().min(1).max(40), count: USAGE_COUNT }).strict())
+            .max(500000),
+        })
+        .strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'partnerGetUsage',
+      scope: 'partner',
+      example: { from: '2026-11-01', to: '2026-11-30' },
+    },
+    {
+      name: 'slotlock_partner_reconcile_usage',
+      title: 'Compare your counts with ours',
+      description:
+        "Send your count of each account's operations (and, if you keep them, bookings) on one ended UTC day, as your daily cross-check: the answer gives ours beside yours for every account either of us counted, the difference in percent, and whether every one is within 0.5%. A day outside that is recorded as a mismatch, which Pylota looks into. Sending the same day again replaces its record.",
+      method: 'POST',
+      path: '/v1/partner/usage/reconcile',
+      input: z
+        .object({
+          day: USAGE_DAY,
+          accounts: z
+            .array(z.object({ account: PARTNER_ACCOUNT, operations: USAGE_COUNT, bookings: USAGE_COUNT.optional() }).strict())
+            .max(10000),
+        })
+        .strict(),
+      output: z
+        .object({
+          day: USAGE_DAY,
+          within_tolerance: z.boolean(),
+          tolerance_percent: z.number(),
+          accounts: z
+            .array(
+              z
+                .object({
+                  account: PARTNER_ACCOUNT,
+                  metric: z.enum(['operations', 'bookings']),
+                  ours: USAGE_COUNT,
+                  theirs: USAGE_COUNT.nullable(),
+                  difference_percent: z.number().nullable(),
+                })
+                .strict(),
+            )
+            .max(20000),
+        })
+        .strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'partnerReconcileUsage',
+      scope: 'partner',
+      example: { day: '2026-11-09', accounts: [{ account: 'user-4821', operations: 1204 }] },
     },
   ]);
 

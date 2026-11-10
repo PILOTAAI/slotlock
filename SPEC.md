@@ -341,7 +341,7 @@ at most 100 active keys and 1,000 in all. The digest of a rotated or erased key 
 is never valid again. A server's own bearer token is never `admin`.
 
 A dashboard signs a person in with GitHub, asking for no scope, to the tenant `github:<user id>`,
-and manages that tenant's keys, resources (at most 100) and weekly hours.
+and manages that tenant's keys, resources (at most 500) and weekly hours.
 
 ### Maintenance
 

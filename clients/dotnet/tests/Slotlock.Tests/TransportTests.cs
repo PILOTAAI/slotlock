@@ -23,7 +23,7 @@ public sealed class TransportTests : IDisposable
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     /// <summary>What a stub saw of one request.</summary>
-    private sealed record Seen(string Target, string Authorization, string Body);
+    private sealed record Seen(string Target, string Authorization, string? Account, string Body);
 
     public void Dispose()
     {
@@ -57,17 +57,19 @@ public sealed class TransportTests : IDisposable
                     }
                     var lines = Encoding.UTF8.GetString(head.ToArray()).Split("\r\n");
                     var (authorization, length) = ("", 0);
+                    string? account = null;
                     foreach (var line in lines.Skip(1))
                     {
                         var colon = line.IndexOf(':');
                         if (colon < 0) continue;
                         var name = line[..colon].Trim().ToLowerInvariant();
                         if (name == "authorization") authorization = line[(colon + 1)..].Trim();
+                        if (name == "slotlock-account") account = line[(colon + 1)..].Trim();
                         if (name == "content-length") length = int.Parse(line[(colon + 1)..].Trim(), CultureInfo.InvariantCulture);
                     }
                     var body = new byte[length];
                     if (length > 0) await stream.ReadExactlyAsync(body);
-                    seen.Enqueue(new Seen(lines[0].Split(' ')[1], authorization, Encoding.UTF8.GetString(body)));
+                    seen.Enqueue(new Seen(lines[0].Split(' ')[1], authorization, account, Encoding.UTF8.GetString(body)));
                     try { await respond(stream); } catch (Exception) { /* the client hung up */ }
                 });
             }
@@ -136,6 +138,21 @@ public sealed class TransportTests : IDisposable
             Assert.Contains("needs resource_id", error.Message, StringComparison.Ordinal);
         }
         Assert.Empty(seen);
+    }
+
+    [Fact]
+    public async Task APartnerKeyActsForAnAccountOnlyWhenAsked()
+    {
+        var (port, seen) = Stub();
+        using (var plain = Client(port)) await plain.GetEventAsync("e1", Ct);
+        using (var acting = new SlotlockClient($"http://127.0.0.1:{port}", "slk_secret", new SlotlockClientOptions { Account = "user-4821" }))
+        {
+            await acting.GetEventAsync("e1", Ct);
+        }
+        var requests = seen.ToArray();
+        Assert.Null(requests[0].Account);
+        Assert.Equal("user-4821", requests[1].Account);
+        Assert.Throws<ArgumentException>(() => new SlotlockClient($"http://127.0.0.1:{port}", "slk_secret", new SlotlockClientOptions { Account = "not ok" }));
     }
 
     [Fact]

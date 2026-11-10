@@ -70,6 +70,10 @@ class SlotlockError(Exception):
         self.retry_after = retry_after
 
 
+# A partner's account reference, as the server takes it in Slotlock-Account.
+_ACCOUNT = re.compile(r"[A-Za-z0-9._-]{1,128}")
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Follows no redirect: the 3xx is raised as it came, and the key goes nowhere else."""
 
@@ -89,6 +93,8 @@ class Transport:
         allow_insecure: Send the key over plain HTTP to a host other than this machine. Never
             needed for `http://localhost`, which is reached without the environment's proxy.
         user_agent: Sent as User-Agent; `slotlock-python/<version>` unless given.
+        account: With a partner key (`slk_partner_...`), one of the partner's accounts to act for,
+            sent as `Slotlock-Account` (where the partner's contract allows it). None by default.
     """
 
     def __init__(
@@ -99,6 +105,7 @@ class Transport:
         timeout: float = 30.0,
         allow_insecure: bool = False,
         user_agent: str | None = None,
+        account: str | None = None,
     ) -> None:
         parsed = urllib.parse.urlsplit(base_url)
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
@@ -116,6 +123,9 @@ class Transport:
         self._api_key = api_key
         self._timeout = timeout
         self._user_agent = user_agent or f"slotlock-python/{__version__}"
+        if account is not None and not _ACCOUNT.fullmatch(account):
+            raise ValueError("account must be 1-128 letters, digits, dots, dashes or underscores")
+        self._account = account
         # This machine is reached directly: a proxy from the environment would carry the key off it.
         direct = [urllib.request.ProxyHandler({})] if parsed.hostname in _LOOPBACK else []
         self._opener = urllib.request.build_opener(_NoRedirect(), *direct)
@@ -165,6 +175,8 @@ class Transport:
             "Accept": "application/json",
             "User-Agent": self._user_agent,
         }
+        if self._account is not None:
+            headers["Slotlock-Account"] = self._account
         if body is not None:
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(

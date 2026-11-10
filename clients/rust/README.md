@@ -33,6 +33,7 @@ let hold = client.acquire_hold(&AcquireHoldInput {
   clears it.
 - A refusal is `Error::Refused { status, code, retry_after }`; `error.code()` and `error.status()`
   read it.
-- `Client::with_options(url, key, Options { timeout, allow_insecure, user_agent })`.
+- `Client::with_options(url, key, Options { timeout, allow_insecure, user_agent, account })`:
+  `account` makes a partner key act for one of its accounts (`Slotlock-Account`).
 
 The [clients overview](../README.md) covers keys, errors and testing.

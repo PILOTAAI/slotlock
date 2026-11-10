@@ -9,8 +9,10 @@ import { Webhook } from 'standardwebhooks';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { SLOTLOCK_MCP_LEGACY_PROTOCOL_VERSION } from '../agent-server.js';
 import { SLOTLOCK_DASHBOARD_FUNCTIONS } from '../ddl.js';
+import { setSlotlockTenantPlan } from '../plans.js';
 import { type SlotlockEnv, runSlotlockCli } from '../self-host.js';
 import { createSlotlockStore } from '../store.js';
+import { recordSlotlockUsage } from '../usage.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
 const packageVersion = (
@@ -89,6 +91,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
   });
 
   afterAll(async () => {
+    await admin`SELECT * FROM slotlock.erase_tenant(${`${tenantRef}~test`}::text)`;
     await admin`DELETE FROM slotlock.resources WHERE tenant_ref IN (${tenantRef}, ${otherTenantRef})`;
     await admin`DELETE FROM slotlock.api_keys WHERE tenant_ref IN (${tenantRef}, ${otherTenantRef}, 'github:4242', 'github:999', 'github-org:91', 'github-org:92')`;
     await admin.unsafe(`DROP OWNED BY ${role}`).catch(() => undefined);
@@ -302,6 +305,199 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     }
   });
 
+  it('sets the default plan as the schema owner, and keeps a paid tenant from being erased', async () => {
+    const planned = `cli-plan-${randomUUID()}`;
+    const runIn = async (argv: string[], overrides: SlotlockEnv = {}) => {
+      const stdout = output();
+      const stderr = output();
+      const code = await runSlotlockCli(argv, {
+        env: { ...env, SLOTLOCK_TENANT: planned, ...overrides },
+        stdout,
+        stderr,
+        signal: new AbortController().signal,
+      });
+      return { code, stdout, stderr, line: () => JSON.parse(stdout.text()) as Record<string, unknown> };
+    };
+    try {
+      expect((await runIn(['plan', 'status'])).line()).toEqual({ default: null, tenant: planned, plan: null });
+      // The serving role may not: only the schema owner, SLOTLOCK_MIGRATE_DATABASE_URL's.
+      const notOwner = await runIn(['plan', 'default', 'free'], { SLOTLOCK_MIGRATE_DATABASE_URL: '' });
+      expect(notOwner.code).toBe(1);
+      expect(notOwner.stderr.text()).toMatch(/only the schema owner sets the default plan/);
+      const set = await runIn(['plan', 'default', 'free', '--from', '2000-01-01']);
+      expect(set.code).toBe(0);
+      expect(set.line()).toEqual({
+        default: {
+          plan: 'free',
+          applies_from: '2000-01-01T00:00:00.000Z',
+          resources: 10,
+          api_keys: 10,
+          webhook_endpoints: 2,
+        },
+        tenant: planned,
+        plan: {
+          plan: 'free',
+          status: 'active',
+          resources: 10,
+          api_keys: 10,
+          webhook_endpoints: 2,
+          paid: false,
+          current_period_end: null,
+        },
+      });
+      expect((await runIn(['plan', 'default', 'none'])).line()).toMatchObject({ default: null, plan: null });
+
+      await admin`SELECT slotlock.set_tenant_plan(${planned}::text, 'developer', 'active', 100, 100, 10,
+        'cus_Cli1', 'sub_Cli1', NULL)`;
+      const refused = await runIn(['tenant', 'erase', '--confirm', planned]);
+      expect(refused.code).toBe(1);
+      expect(refused.stderr.text()).toMatch(/live subscription; cancel it in Stripe first/);
+      await admin`SELECT slotlock.set_tenant_plan(${planned}::text, 'free', 'canceled', 10, 10, 2,
+        NULL, NULL, NULL)`;
+      expect((await runIn(['tenant', 'erase', '--confirm', planned])).line()).toMatchObject({
+        rows: expect.objectContaining({ tenant_plans: 1 }),
+      });
+    } finally {
+      await admin`DELETE FROM slotlock.plan_defaults`;
+      await admin`DELETE FROM slotlock.tenant_plans WHERE tenant_ref = ${planned}`;
+    }
+  });
+
+  it('meters each operation a key runs with SLOTLOCK_USAGE=on, and records it as the server stops', async () => {
+    const metered = `cli-usage-${randomUUID()}`;
+    const meteredEnv: SlotlockEnv = { ...env, SLOTLOCK_TENANT: metered, SLOTLOCK_USAGE: 'on' };
+    expect((await run(['migrate'])).code).toBe(0);
+    const stdout = output();
+    const stderr = output();
+    const created = output();
+    expect(
+      await runSlotlockCli(['key', 'create', 'metered agent', '--scope', 'read,admin'], {
+        env: meteredEnv,
+        stdout: created,
+        stderr: output(),
+        signal: new AbortController().signal,
+      }),
+    ).toBe(0);
+    const { id, key } = JSON.parse(created.text()) as { id: string; key: string };
+    const shutdown = new AbortController();
+    const serving = runSlotlockCli(['serve', '--migrate'], { env: meteredEnv, stdout, stderr, signal: shutdown.signal });
+    try {
+      const listening = await eventually(() => stdout.events().find(({ event }) => event === 'listening'));
+      expect(listening).toMatchObject({ usage: true });
+      const origin = listening.address as string;
+      const listed = await fetch(`${origin}/v1/resources`, { headers: { Authorization: `Bearer ${key}` } });
+      expect(listed.status).toBe(200);
+      // The application API counts too, as its own surface.
+      expect((await fetch(`${origin}/v1/tenant`, { headers: { Authorization: `Bearer ${key}` } })).status).toBe(200);
+      // A request refused before its operation runs is not counted.
+      const refused = await fetch(`${origin}/v1/resources?limit=0`, { headers: { Authorization: `Bearer ${key}` } });
+      expect(refused.status).toBe(400);
+    } finally {
+      shutdown.abort();
+      expect(await serving).toBe(0);
+    }
+    try {
+      const rows = await admin<{ metric: string; key_id: string; origin: string; count: string }[]>`
+        SELECT metric, key_id, origin, count FROM slotlock.usage_daily WHERE tenant_ref = ${metered}
+         ORDER BY origin`;
+      expect(rows).toEqual([
+        { metric: 'operations', key_id: id, origin: 'application', count: '1' },
+        { metric: 'operations', key_id: id, origin: 'rest', count: '1' },
+      ]);
+    } finally {
+      await admin`SELECT * FROM slotlock.erase_tenant(${metered}::text)`;
+    }
+  });
+
+  it('holds a tenant on a plan to its monthly quota with SLOTLOCK_QUOTAS=on', async () => {
+    const quoted = `cli-quota-${randomUUID()}`;
+    const quotedEnv: SlotlockEnv = { ...env, SLOTLOCK_TENANT: quoted, SLOTLOCK_USAGE: 'on', SLOTLOCK_QUOTAS: 'on' };
+    expect((await run(['migrate'])).code).toBe(0);
+    const created = output();
+    expect(
+      await runSlotlockCli(['key', 'create', 'quoted agent', '--scope', 'read,admin'], {
+        env: quotedEnv,
+        stdout: created,
+        stderr: output(),
+        signal: new AbortController().signal,
+      }),
+    ).toBe(0);
+    const { key } = JSON.parse(created.text()) as { key: string };
+    await setSlotlockTenantPlan(admin, { tenantRef: quoted, plan: 'free', status: 'active' });
+    // One operation short of Free's 25,000 this month.
+    await recordSlotlockUsage(admin, randomUUID(), [
+      {
+        tenantRef: quoted,
+        day: new Date().toISOString().slice(0, 10),
+        metric: 'operations',
+        keyId: '',
+        origin: 'rest',
+        count: 24_999,
+      },
+    ]);
+    const stdout = output();
+    const shutdown = new AbortController();
+    const serving = runSlotlockCli(['serve', '--migrate'], {
+      env: quotedEnv,
+      stdout,
+      stderr: output(),
+      signal: shutdown.signal,
+    });
+    const reset = new Date();
+    reset.setUTCHours(0, 0, 0, 0);
+    reset.setUTCDate(1);
+    reset.setUTCMonth(reset.getUTCMonth() + 1);
+    try {
+      const listening = await eventually(() => stdout.events().find(({ event }) => event === 'listening'));
+      expect(listening).toMatchObject({ usage: true, quotas: true });
+      const origin = listening.address as string;
+      const headers = { Authorization: `Bearer ${key}` };
+      const last = await fetch(`${origin}/v1/resources`, { headers });
+      expect(last.status).toBe(200);
+      // The tightest bucket, then the month's quotas, counting down to the stop.
+      expect(last.headers.get('ratelimit')).toMatch(/, "operations_month";r=1;t=\d+, "bookings_month";r=1000;t=\d+$/);
+      expect(last.headers.get('ratelimit-policy')).toMatch(
+        /, "operations_month";q=25000;w=\d+, "bookings_month";q=1000;w=\d+$/,
+      );
+      const refused = await fetch(`${origin}/v1/resources`, { headers });
+      expect(refused.status).toBe(429);
+      const seconds = Number(refused.headers.get('retry-after'));
+      expect(Math.abs(seconds - (reset.getTime() - Date.now()) / 1_000)).toBeLessThan(60);
+      expect(refused.headers.get('ratelimit')).toMatch(/^"operations_month";r=0;t=\d+$/);
+      expect(await refused.json()).toMatchObject({
+        code: 'quota_exceeded',
+        title: 'The monthly quota is used up',
+        status: 429,
+        error: { code: 'quota_exceeded' },
+      });
+      // Where it stands can always be read, though the read counts.
+      const usage = await fetch(`${origin}/v1/usage`, { headers });
+      expect(usage.status).toBe(200);
+      expect(((await usage.json()) as { totals: { operations: number } }).totals.operations).toBeGreaterThanOrEqual(24_999);
+    } finally {
+      shutdown.abort();
+      expect(await serving).toBe(0);
+    }
+    try {
+      // The refused request ran nothing and is not counted (the usage read is); the feed says the
+      // quota is used up.
+      const [counted] = await admin<{ count: string }[]>`
+        SELECT sum(count)::text AS count FROM slotlock.usage_daily
+         WHERE tenant_ref = ${quoted} AND metric = 'operations'`;
+      expect(counted?.count).toBe('25001');
+      const notices = await admin<{ data: { metric: string; percent: number } }[]>`
+        SELECT data FROM slotlock.outbox WHERE tenant_ref = ${quoted} AND type = 'usage.threshold_reached'
+         ORDER BY id`;
+      expect(notices.map(({ data }) => [data.metric, data.percent])).toEqual([
+        ['operations', 80],
+        ['operations', 100],
+      ]);
+    } finally {
+      await admin`DELETE FROM slotlock.tenant_plans WHERE tenant_ref = ${quoted}`;
+      await admin`SELECT * FROM slotlock.erase_tenant(${quoted}::text)`;
+    }
+  });
+
   it('serves MCP over HTTP as the granted role until its signal aborts', async () => {
     const shutdown = new AbortController();
     const stdout = output();
@@ -345,6 +541,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         staleSources: 0,
         noShows: 0,
         waitlistOffers: 0,
+        approvalsExpired: 0,
         extended: 0,
         conflicts: 0,
         refused: 0,
@@ -405,6 +602,8 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       expect(toolNames.sort()).toEqual([
         'slotlock_book_pool',
         'slotlock_book_together',
+        'slotlock_cancel',
+        'slotlock_confirm_slot',
         'slotlock_create_event',
         'slotlock_delete_event',
         'slotlock_find_available_slots',
@@ -416,6 +615,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         'slotlock_list_events',
         'slotlock_list_resources',
         'slotlock_release_slots',
+        'slotlock_reschedule',
         'slotlock_update_event',
       ]);
 
@@ -509,6 +709,31 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     }
   });
 
+  it('seeds, races, fast-forwards and resets a test environment from the command line, and no other', async () => {
+    const test = { ...env, SLOTLOCK_TENANT: `${tenantRef}~test` };
+    const sandbox = async (argv: string[], on: SlotlockEnv = test) => {
+      const stdout = output();
+      const stderr = output();
+      const code = await runSlotlockCli(argv, { env: on, stdout, stderr, signal: new AbortController().signal });
+      return { code, stdout, stderr };
+    };
+    const live = await sandbox(['sandbox', 'seed', 'clinic'], env);
+    expect(live.code).toBe(2);
+    expect(live.stderr.text()).toMatch(/only in a test environment/);
+    const seeded = await sandbox(['sandbox', 'seed', 'car-rental']);
+    expect(seeded.code).toBe(0);
+    expect(JSON.parse(seeded.stdout.text())).toMatchObject({ scenario: 'car-rental', resources: 5, bookings: 3 });
+    expect((await sandbox(['sandbox', 'seed', 'car-rental'])).stderr.text()).toMatch(/sandbox reset first/);
+    const raced = await sandbox(['sandbox', 'race', 'car-1', '--agents', '20', '--start', `${new Date().getUTCFullYear() + 1}-03-02T10:00:00Z`]);
+    expect(raced.code).toBe(0);
+    expect(JSON.parse(raced.stdout.text())).toMatchObject({ agents: 20, booked: 1, refused: { overlap: 19 }, server_errors: 0 });
+    expect(JSON.parse((await sandbox(['sandbox', 'fast-forward', '60'])).stdout.text())).toMatchObject({ minutes: 60, holds: 0 });
+    const reset = await sandbox(['sandbox', 'reset']);
+    expect(reset.code).toBe(0);
+    expect(JSON.parse(reset.stdout.text()).removed).toMatchObject({ resources: 5 });
+    expect((await sandbox(['sandbox', 'seed', 'unknown'])).code).toBe(2);
+  });
+
   it("manages API keys from the command line and serves each as its key's tenant and scopes", async () => {
     const created = await run(['key', 'create', 'Booking agent']);
     expect(created.code).toBe(0);
@@ -531,10 +756,17 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     expect(expiresIn).toBeGreaterThan(30 * 86_400_000 - 60_000);
     expect(expiresIn).toBeLessThan(30 * 86_400_000 + 60_000);
 
+    // Held below the server's limits (RFC 0004 A5), then changed.
+    const bounded = await run(['key', 'limits', reader.id as string, '--max-holds', '2', '--requires-approval']);
+    expect(bounded.code).toBe(0);
+    expect(JSON.parse(bounded.stdout.text())).toEqual({ id: reader.id, limits: { max_holds: 2, requires_approval: true } });
+    expect((await run(['key', 'limits', reader.id as string, '--max-holds', '0'])).code).toBe(2);
+
     const listed = await run(['key', 'list']);
     expect(listed.code).toBe(0);
     const rows = listed.stdout.events();
     expect(rows.map(({ id }) => id)).toEqual([reader.id, writer.id]);
+    expect(rows[0]?.limits).toEqual({ max_holds: 2, requires_approval: true });
     expect(rows.every((row) => !('key' in row))).toBe(true);
     expect(listed.stdout.text()).not.toContain(writer.key as string);
 
@@ -610,6 +842,19 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
 
       expect(await resourcesOf(reader.key as string)).toEqual(['vehicle-42']);
       expect(await resourcesOf(writer.key as string)).toEqual(['vehicle-42']);
+      // Slotlock-Account is a partner key's alone: with a tenant's key the request is refused.
+      const elsewhere = await fetch(`${origin}/mcp`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${writer.key as string}`,
+          'Slotlock-Account': 'someone-else',
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          ...versioned,
+        },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'slotlock_list_resources', arguments: { limit: 1 } } }),
+      });
+      expect(elsewhere.status).toBe(401);
       // A read key cannot write; a write key reaches the confirmation every write needs here.
       expect(await toolError(await call(reader.key as string, 'slotlock_create_event', write))).toBe(
         'forbidden',
@@ -703,7 +948,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         tags: { name: string }[];
         paths: Record<string, unknown>;
       };
-      expect(document.tags.map(({ name }) => name)).toEqual(['Agent tools', 'Application']);
+      expect(document.tags.map(({ name }) => name)).toEqual(['Agent tools', 'Application', 'Partner']);
       expect(document.paths).toHaveProperty(['/v1/holds/{hold_id}/confirm']);
 
       const created = await rest(application.key, 'POST', '/v1/resources', {
@@ -753,7 +998,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       });
       expect(await rest(application.key, 'POST', '/v1/maintenance', {})).toEqual({
         status: 200,
-        body: { extended: 0, conflicts: 0, refused: 0, pruned: 0, zone_shifts: 0, stale_sources: 0, no_shows: 0, waitlist_offers: 0, capped: false },
+        body: { extended: 0, conflicts: 0, refused: 0, pruned: 0, zone_shifts: 0, stale_sources: 0, no_shows: 0, waitlist_offers: 0, approvals_expired: 0, capped: false },
       });
 
       expect((await run(['key', 'revoke', application.id])).code).toBe(0);
@@ -945,6 +1190,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       staleSources: 0,
       noShows: 0,
       waitlistOffers: 0,
+      approvalsExpired: 0,
       extended: 0,
       conflicts: 0,
       refused: 0,

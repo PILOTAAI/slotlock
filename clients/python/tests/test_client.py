@@ -85,6 +85,7 @@ class Stub:
                     {
                         "path": self.path,
                         "authorization": self.headers.get("Authorization", ""),
+                        "account": self.headers.get("Slotlock-Account"),
                         "body": self.rfile.read(length) if length else b"",
                     }
                 )
@@ -128,6 +129,14 @@ class AgainstAStub(unittest.TestCase):
         with self.assertRaises(SlotlockError) as caught:
             self.client(self.stub(respond)).list_resources()
         return caught.exception
+
+    def test_a_partner_key_acts_for_an_account_only_when_asked(self) -> None:
+        stub = self.stub()
+        self.client(stub).list_resources()
+        self.client(stub, account="user-4821").list_resources()
+        self.assertEqual([request["account"] for request in stub.requests], [None, "user-4821"])
+        with self.assertRaises(ValueError):
+            self.client(stub, account="not ok\r\n")
 
     def test_a_redirect_is_a_refusal_and_the_key_stays(self) -> None:
         elsewhere = self.stub()
@@ -283,7 +292,7 @@ class AgainstAServer(unittest.TestCase):
         coverage = client.record_coverage(resource_id, source, start=self.at(0), end=self.at(24), revision=1)
         self.assertEqual(coverage, {"revision": 1, "replayed": False})
         maintenance = client.run_maintenance()
-        self.assertEqual(set(maintenance), {"extended", "conflicts", "refused", "pruned", "zone_shifts", "stale_sources", "no_shows", "waitlist_offers", "capped"})
+        self.assertEqual(set(maintenance), {"extended", "conflicts", "refused", "pruned", "zone_shifts", "stale_sources", "no_shows", "waitlist_offers", "approvals_expired", "capped"})
 
         found, cursor = False, None
         while not found:

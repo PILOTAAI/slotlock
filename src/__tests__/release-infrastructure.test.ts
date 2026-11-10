@@ -172,6 +172,7 @@ describe('Compose quickstart', () => {
       'SLOTLOCK_GITHUB_CLIENT_SECRET',
       'SLOTLOCK_SESSION_SECRET',
       'SLOTLOCK_ASSISTANT_SECRET',
+      'SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS',
     ]) {
       expect(exampleKeys.get(secret), secret).toBe('');
     }

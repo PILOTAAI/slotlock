@@ -2,12 +2,15 @@
 // and bench.md for each release) and site/scripts/sync-content.mjs (reads the latest release's
 // bench.json). bench/baseline.json is RFC 0002's run in the same format.
 
-/** Every workload, in table order: its bench/<id>-{range,slots}.sql pair and how it runs. */
+/**
+ * Every workload, in table order: its bench/<id>-{range,slots}.sql pair and how it runs. `real`
+ * ones also run as bench/<id>-real.sql on Slotlock's own schema (RFC 0004 A7) where it is applied.
+ */
 export const WORKLOADS = [
   { id: 'nonoverlap-one', label: 'Non-overlapping, 1 resource', durable: true },
-  { id: 'nonoverlap-many', label: 'Non-overlapping, 1,000 resources', durable: true },
-  { id: 'saturated-one', label: 'Saturated single resource (mostly refused)', durable: true },
-  { id: 'contended-many', label: 'Contended, 1,000 resources', durable: true },
+  { id: 'nonoverlap-many', label: 'Non-overlapping, 1,000 resources', durable: true, real: true },
+  { id: 'saturated-one', label: 'Saturated single resource (mostly refused)', durable: true, real: true },
+  { id: 'contended-many', label: 'Contended, 1,000 resources', durable: true, real: true },
   // nonoverlap-one with synchronous_commit off: the design's cost without the WAL flush wait.
   { id: 'nonoverlap-one-async', files: 'nonoverlap-one', label: 'Non-overlapping, 1 resource', durable: false },
   // Reads, not writes: one resource's busy times over a day, from 50,000 bookings (bench/freebusy-seed.sql).
@@ -49,6 +52,10 @@ export function validateReport(report) {
         fail(`${row.workload}.${key} is not a positive number`);
       }
     }
+    // Slotlock's own schema, where the run had it (RFC 0004 A7); older runs have none.
+    if (row.real !== undefined && (typeof row.real !== 'number' || !Number.isFinite(row.real) || row.real <= 0)) {
+      fail(`${row.workload}.real is not a positive number`);
+    }
   }
   return report;
 }
@@ -66,16 +73,24 @@ export function renderMarkdown(report) {
     `${report.seconds} s a run`,
     report.date ? plain(report.date.slice(0, 10)) : null,
   ].filter(Boolean);
+  const real = report.results.some((row) => row.real !== undefined);
   const lines = [
     `${conditions.join(', ')}. Transactions a second:`,
     '',
-    '| Workload | Durable commits | Range constraint | Slot rows | Slots ÷ range |',
-    '| --- | --- | --- | --- | --- |',
+    real
+      ? '| Workload | Durable commits | Range constraint | Slot rows | Slots ÷ range | Slotlock schema |'
+      : '| Workload | Durable commits | Range constraint | Slot rows | Slots ÷ range |',
+    real ? '| --- | --- | --- | --- | --- | --- |' : '| --- | --- | --- | --- | --- |',
   ];
   for (const row of report.results) {
     const workload = BY_ID.get(row.workload);
+    const cells = `| ${workload.label} | ${workload.durable ? 'on' : 'off'} | ${count(row.range)} | ${count(row.slots)} | ${(row.slots / row.range).toFixed(2)}× |`;
+    lines.push(real ? `${cells} ${row.real !== undefined ? count(row.real) : '—'} |` : cells);
+  }
+  if (real) {
     lines.push(
-      `| ${workload.label} | ${workload.durable ? 'on' : 'off'} | ${count(row.range)} | ${count(row.slots)} | ${(row.slots / row.range).toFixed(2)}× |`,
+      '',
+      'Slotlock schema: the same bookings into Slotlock’s own reservations table, with its exclusion constraint, triggers (occupied time, composite claims, the change feed) and indexes.',
     );
   }
   return `${lines.join('\n')}\n`;

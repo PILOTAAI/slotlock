@@ -12,17 +12,34 @@ export const GROUPS = [
     operations: [
       'slotlock_list_resources',
       'slotlock_create_resource',
+      'slotlock_update_resource',
       'slotlock_get_resource',
       'slotlock_archive_resource',
       'slotlock_restore_resource',
       'slotlock_delete_resource',
       'slotlock_set_resource_booking_rules',
       'slotlock_set_resource_pool',
+      'slotlock_set_resource_parent',
       'slotlock_list_pools',
+      'slotlock_set_pool_order',
       'slotlock_get_booking_rule_defaults',
       'slotlock_set_tenant_booking_rules',
       'slotlock_set_pool_booking_rules',
       'slotlock_get_resource_history',
+    ],
+  },
+  {
+    name: 'Locations and groups',
+    operations: [
+      'slotlock_list_locations',
+      'slotlock_create_location',
+      'slotlock_update_location',
+      'slotlock_delete_location',
+      'slotlock_list_groups',
+      'slotlock_create_group',
+      'slotlock_add_group_member',
+      'slotlock_remove_group_member',
+      'slotlock_delete_group',
     ],
   },
   {
@@ -48,13 +65,16 @@ export const GROUPS = [
     operations: [
       'slotlock_hold_slots',
       'slotlock_release_slots',
+      'slotlock_confirm_slot',
       'slotlock_book_together',
       'slotlock_book_pool',
       'slotlock_create_event',
       'slotlock_list_events',
       'slotlock_get_event',
       'slotlock_update_event',
+      'slotlock_reschedule',
       'slotlock_delete_event',
+      'slotlock_cancel',
       'slotlock_list_tenant_events',
       'slotlock_get_tenant_event',
       'slotlock_export_tenant_event',
@@ -98,8 +118,40 @@ export const GROUPS = [
     ],
   },
   {
+    name: 'Approvals',
+    operations: [
+      'slotlock_list_approval_policies',
+      'slotlock_put_approval_policy',
+      'slotlock_delete_approval_policy',
+      'slotlock_list_approvals',
+      'slotlock_get_approval',
+      'slotlock_decide_approval',
+    ],
+  },
+  {
+    name: 'Sandbox',
+    operations: ['slotlock_sandbox_seed', 'slotlock_sandbox_race', 'slotlock_sandbox_fast_forward', 'slotlock_sandbox_reset'],
+  },
+  {
     name: 'Tenant',
-    operations: ['slotlock_get_tenant', 'slotlock_run_maintenance', 'slotlock_erase_tenant'],
+    operations: ['slotlock_get_tenant', 'slotlock_get_usage', 'slotlock_run_maintenance', 'slotlock_erase_tenant'],
+  },
+  {
+    name: 'Partner accounts',
+    operations: [
+      'slotlock_partner_put_account',
+      'slotlock_partner_list_accounts',
+      'slotlock_partner_get_account',
+      'slotlock_partner_list_keys',
+      'slotlock_partner_create_key',
+      'slotlock_partner_rotate_key',
+      'slotlock_partner_revoke_key',
+      'slotlock_partner_suspend_account',
+      'slotlock_partner_unsuspend_account',
+      'slotlock_partner_erase_account',
+      'slotlock_partner_get_usage',
+      'slotlock_partner_reconcile_usage',
+    ],
   },
 ];
 
@@ -333,6 +385,7 @@ function withRunVariables(operationId, args) {
  */
 const CLEAN_UP = new Set([
   'slotlock_delete_event',
+  'slotlock_cancel',
   'slotlock_delete_resource',
   'slotlock_erase_tenant',
 ]);

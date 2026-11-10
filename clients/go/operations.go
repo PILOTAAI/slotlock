@@ -10,23 +10,36 @@ import "context"
 // operations is every operation, by name: its method, path, path parameters and query parameters.
 var operations = func() map[string]operation {
 	list := []operation{
-		{name: "slotlock_list_resources", method: "GET", path: "/v1/resources", pathParams: nil, query: []string{"cursor", "limit", "pool"}},
+		{name: "slotlock_list_resources", method: "GET", path: "/v1/resources", pathParams: nil, query: []string{"cursor", "limit", "pool", "kind", "labels", "location", "group"}},
 		{name: "slotlock_create_resource", method: "POST", path: "/v1/resources", pathParams: nil, query: nil},
-		{name: "slotlock_get_free_busy", method: "GET", path: "/v1/free-busy", pathParams: nil, query: []string{"resource_ids", "start", "end"}},
-		{name: "slotlock_find_next_available", method: "GET", path: "/v1/next-available", pathParams: nil, query: []string{"resource_ids", "start", "end", "duration_minutes"}},
-		{name: "slotlock_find_available_slots", method: "GET", path: "/v1/available-slots", pathParams: nil, query: []string{"resource_ids", "start", "end", "duration_minutes", "limit", "require_free"}},
+		{name: "slotlock_get_free_busy", method: "GET", path: "/v1/free-busy", pathParams: nil, query: []string{"resource_ids", "location", "group", "labels", "kind", "pool", "start", "end"}},
+		{name: "slotlock_find_next_available", method: "GET", path: "/v1/next-available", pathParams: nil, query: []string{"resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes"}},
+		{name: "slotlock_find_available_slots", method: "GET", path: "/v1/available-slots", pathParams: nil, query: []string{"resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes", "limit", "require_free"}},
 		{name: "slotlock_hold_slots", method: "POST", path: "/v1/slot-holds", pathParams: nil, query: nil},
 		{name: "slotlock_book_together", method: "POST", path: "/v1/bundles", pathParams: nil, query: nil},
 		{name: "slotlock_book_pool", method: "POST", path: "/v1/pool-bookings", pathParams: nil, query: nil},
 		{name: "slotlock_get_pool_availability", method: "GET", path: "/v1/pool-availability", pathParams: nil, query: []string{"pool", "start", "end"}},
-		{name: "slotlock_release_slots", method: "DELETE", path: "/v1/slot-holds/{hold_id}", pathParams: []string{"hold_id"}, query: nil},
+		{name: "slotlock_release_slots", method: "DELETE", path: "/v1/slot-holds/{hold_id}", pathParams: []string{"hold_id"}, query: []string{"dry_run"}},
+		{name: "slotlock_confirm_slot", method: "POST", path: "/v1/slot-holds/{hold_id}/confirm", pathParams: []string{"hold_id"}, query: nil},
 		{name: "slotlock_list_events", method: "GET", path: "/v1/events", pathParams: nil, query: []string{"resource_ids", "start", "end", "cursor", "limit"}},
 		{name: "slotlock_create_event", method: "POST", path: "/v1/events", pathParams: nil, query: nil},
 		{name: "slotlock_get_event", method: "GET", path: "/v1/events/{event_id}", pathParams: []string{"event_id"}, query: nil},
 		{name: "slotlock_update_event", method: "PATCH", path: "/v1/events/{event_id}", pathParams: []string{"event_id"}, query: nil},
-		{name: "slotlock_delete_event", method: "DELETE", path: "/v1/events/{event_id}", pathParams: []string{"event_id"}, query: []string{"expected_revision", "idempotency_key"}},
+		{name: "slotlock_delete_event", method: "DELETE", path: "/v1/events/{event_id}", pathParams: []string{"event_id"}, query: []string{"expected_revision", "idempotency_key", "dry_run"}},
+		{name: "slotlock_reschedule", method: "POST", path: "/v1/events/{event_id}/reschedule", pathParams: []string{"event_id"}, query: nil},
+		{name: "slotlock_cancel", method: "POST", path: "/v1/events/{event_id}/cancel", pathParams: []string{"event_id"}, query: nil},
 		{name: "slotlock_get_resource", method: "GET", path: "/v1/resources/{resource_id}", pathParams: []string{"resource_id"}, query: nil},
-		{name: "slotlock_delete_resource", method: "DELETE", path: "/v1/resources/{resource_id}", pathParams: []string{"resource_id"}, query: nil},
+		{name: "slotlock_update_resource", method: "PATCH", path: "/v1/resources/{resource_id}", pathParams: []string{"resource_id"}, query: nil},
+		{name: "slotlock_delete_resource", method: "DELETE", path: "/v1/resources/{resource_id}", pathParams: []string{"resource_id"}, query: []string{"dry_run"}},
+		{name: "slotlock_list_locations", method: "GET", path: "/v1/locations", pathParams: nil, query: nil},
+		{name: "slotlock_create_location", method: "POST", path: "/v1/locations", pathParams: nil, query: nil},
+		{name: "slotlock_update_location", method: "PATCH", path: "/v1/locations/{location_ref}", pathParams: []string{"location_ref"}, query: nil},
+		{name: "slotlock_delete_location", method: "DELETE", path: "/v1/locations/{location_ref}", pathParams: []string{"location_ref"}, query: []string{"dry_run"}},
+		{name: "slotlock_list_groups", method: "GET", path: "/v1/groups", pathParams: nil, query: nil},
+		{name: "slotlock_create_group", method: "POST", path: "/v1/groups", pathParams: nil, query: nil},
+		{name: "slotlock_delete_group", method: "DELETE", path: "/v1/groups/{group_ref}", pathParams: []string{"group_ref"}, query: []string{"dry_run"}},
+		{name: "slotlock_add_group_member", method: "PUT", path: "/v1/groups/{group_ref}/members/{resource_id}", pathParams: []string{"group_ref", "resource_id"}, query: nil},
+		{name: "slotlock_remove_group_member", method: "DELETE", path: "/v1/groups/{group_ref}/members/{resource_id}", pathParams: []string{"group_ref", "resource_id"}, query: []string{"dry_run"}},
 		{name: "slotlock_archive_resource", method: "POST", path: "/v1/resources/{resource_id}/archive", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_restore_resource", method: "POST", path: "/v1/resources/{resource_id}/restore", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_list_busy", method: "GET", path: "/v1/resources/{resource_id}/busy", pathParams: []string{"resource_id"}, query: []string{"start", "end"}},
@@ -35,7 +48,9 @@ var operations = func() map[string]operation {
 		{name: "slotlock_import_resource_availability", method: "PUT", path: "/v1/resources/{resource_id}/availability/ical", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_set_resource_booking_rules", method: "PUT", path: "/v1/resources/{resource_id}/booking-rules", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_set_resource_pool", method: "PUT", path: "/v1/resources/{resource_id}/pool", pathParams: []string{"resource_id"}, query: nil},
+		{name: "slotlock_set_resource_parent", method: "PUT", path: "/v1/resources/{resource_id}/parent", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_list_pools", method: "GET", path: "/v1/pools", pathParams: nil, query: nil},
+		{name: "slotlock_set_pool_order", method: "PUT", path: "/v1/pools/{pool}/order", pathParams: []string{"pool"}, query: nil},
 		{name: "slotlock_get_booking_rule_defaults", method: "GET", path: "/v1/booking-rules", pathParams: nil, query: nil},
 		{name: "slotlock_set_tenant_booking_rules", method: "PUT", path: "/v1/booking-rules", pathParams: nil, query: nil},
 		{name: "slotlock_set_pool_booking_rules", method: "PUT", path: "/v1/pools/{pool}/booking-rules", pathParams: []string{"pool"}, query: nil},
@@ -45,24 +60,24 @@ var operations = func() map[string]operation {
 		{name: "slotlock_set_tenant_availability", method: "PUT", path: "/v1/availability", pathParams: nil, query: nil},
 		{name: "slotlock_acquire_hold", method: "POST", path: "/v1/holds", pathParams: nil, query: nil},
 		{name: "slotlock_get_hold", method: "GET", path: "/v1/holds/{hold_id}", pathParams: []string{"hold_id"}, query: nil},
-		{name: "slotlock_release_hold", method: "DELETE", path: "/v1/holds/{hold_id}", pathParams: []string{"hold_id"}, query: nil},
+		{name: "slotlock_release_hold", method: "DELETE", path: "/v1/holds/{hold_id}", pathParams: []string{"hold_id"}, query: []string{"dry_run"}},
 		{name: "slotlock_list_holds", method: "GET", path: "/v1/resources/{resource_id}/holds", pathParams: []string{"resource_id"}, query: []string{"limit", "cursor"}},
 		{name: "slotlock_confirm_hold", method: "POST", path: "/v1/holds/{hold_id}/confirm", pathParams: []string{"hold_id"}, query: nil},
 		{name: "slotlock_get_reservation", method: "GET", path: "/v1/reservations/{reservation_ref}", pathParams: []string{"reservation_ref"}, query: nil},
 		{name: "slotlock_put_reservation", method: "PUT", path: "/v1/reservations/{reservation_ref}", pathParams: []string{"reservation_ref"}, query: nil},
-		{name: "slotlock_cancel_reservation", method: "DELETE", path: "/v1/reservations/{reservation_ref}", pathParams: []string{"reservation_ref"}, query: []string{"revision"}},
+		{name: "slotlock_cancel_reservation", method: "DELETE", path: "/v1/reservations/{reservation_ref}", pathParams: []string{"reservation_ref"}, query: []string{"revision", "dry_run"}},
 		{name: "slotlock_list_reservations", method: "GET", path: "/v1/resources/{resource_id}/reservations", pathParams: []string{"resource_id"}, query: []string{"start", "end", "limit", "cursor"}},
 		{name: "slotlock_check_in_reservation", method: "POST", path: "/v1/reservations/{reservation_ref}/check-in", pathParams: []string{"reservation_ref"}, query: nil},
 		{name: "slotlock_list_waitlist", method: "GET", path: "/v1/waitlist", pathParams: nil, query: []string{"resource_id", "pool", "holder_ref", "limit"}},
 		{name: "slotlock_join_waitlist", method: "POST", path: "/v1/waitlist", pathParams: nil, query: nil},
-		{name: "slotlock_leave_waitlist", method: "DELETE", path: "/v1/waitlist/{entry_id}", pathParams: []string{"entry_id"}, query: nil},
+		{name: "slotlock_leave_waitlist", method: "DELETE", path: "/v1/waitlist/{entry_id}", pathParams: []string{"entry_id"}, query: []string{"dry_run"}},
 		{name: "slotlock_record_coverage", method: "PUT", path: "/v1/resources/{resource_id}/coverage/{source}", pathParams: []string{"resource_id", "source"}, query: nil},
-		{name: "slotlock_delete_coverage", method: "DELETE", path: "/v1/resources/{resource_id}/coverage/{source}", pathParams: []string{"resource_id", "source"}, query: nil},
+		{name: "slotlock_delete_coverage", method: "DELETE", path: "/v1/resources/{resource_id}/coverage/{source}", pathParams: []string{"resource_id", "source"}, query: []string{"dry_run"}},
 		{name: "slotlock_get_coverage", method: "GET", path: "/v1/resources/{resource_id}/coverage", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_record_coverage_failure", method: "POST", path: "/v1/resources/{resource_id}/coverage/{source}/failure", pathParams: []string{"resource_id", "source"}, query: nil},
 		{name: "slotlock_list_tenant_events", method: "GET", path: "/v1/tenant/events", pathParams: nil, query: []string{"resource_id", "start", "end", "limit", "cursor"}},
 		{name: "slotlock_get_tenant_event", method: "GET", path: "/v1/tenant/events/{event_id}", pathParams: []string{"event_id"}, query: nil},
-		{name: "slotlock_cancel_tenant_event", method: "DELETE", path: "/v1/tenant/events/{event_id}", pathParams: []string{"event_id"}, query: []string{"expected_revision", "expected_resource_id", "idempotency_key"}},
+		{name: "slotlock_cancel_tenant_event", method: "DELETE", path: "/v1/tenant/events/{event_id}", pathParams: []string{"event_id"}, query: []string{"expected_revision", "expected_resource_id", "idempotency_key", "dry_run"}},
 		{name: "slotlock_export_tenant_event", method: "GET", path: "/v1/tenant/events/{event_id}/jscalendar", pathParams: []string{"event_id"}, query: nil},
 		{name: "slotlock_get_tenant", method: "GET", path: "/v1/tenant", pathParams: nil, query: nil},
 		{name: "slotlock_erase_tenant", method: "POST", path: "/v1/tenant/erase", pathParams: nil, query: nil},
@@ -70,8 +85,31 @@ var operations = func() map[string]operation {
 		{name: "slotlock_list_changes", method: "GET", path: "/v1/changes", pathParams: nil, query: []string{"cursor", "limit"}},
 		{name: "slotlock_list_webhooks", method: "GET", path: "/v1/webhooks", pathParams: nil, query: nil},
 		{name: "slotlock_create_webhook", method: "POST", path: "/v1/webhooks", pathParams: nil, query: nil},
-		{name: "slotlock_delete_webhook", method: "DELETE", path: "/v1/webhooks/{webhook_id}", pathParams: []string{"webhook_id"}, query: nil},
+		{name: "slotlock_delete_webhook", method: "DELETE", path: "/v1/webhooks/{webhook_id}", pathParams: []string{"webhook_id"}, query: []string{"dry_run"}},
 		{name: "slotlock_enable_webhook", method: "POST", path: "/v1/webhooks/{webhook_id}/enable", pathParams: []string{"webhook_id"}, query: nil},
+		{name: "slotlock_get_usage", method: "GET", path: "/v1/usage", pathParams: nil, query: []string{"from", "to"}},
+		{name: "slotlock_list_approval_policies", method: "GET", path: "/v1/approval-policies", pathParams: nil, query: nil},
+		{name: "slotlock_put_approval_policy", method: "PUT", path: "/v1/approval-policies/{policy_ref}", pathParams: []string{"policy_ref"}, query: nil},
+		{name: "slotlock_delete_approval_policy", method: "DELETE", path: "/v1/approval-policies/{policy_ref}", pathParams: []string{"policy_ref"}, query: []string{"dry_run"}},
+		{name: "slotlock_list_approvals", method: "GET", path: "/v1/approvals", pathParams: nil, query: []string{"status", "limit"}},
+		{name: "slotlock_get_approval", method: "GET", path: "/v1/approvals/{approval_id}", pathParams: []string{"approval_id"}, query: nil},
+		{name: "slotlock_decide_approval", method: "POST", path: "/v1/approvals/{approval_id}/decision", pathParams: []string{"approval_id"}, query: nil},
+		{name: "slotlock_sandbox_seed", method: "POST", path: "/v1/sandbox/seed", pathParams: nil, query: nil},
+		{name: "slotlock_sandbox_reset", method: "POST", path: "/v1/sandbox/reset", pathParams: nil, query: nil},
+		{name: "slotlock_sandbox_fast_forward", method: "POST", path: "/v1/sandbox/fast-forward", pathParams: nil, query: nil},
+		{name: "slotlock_sandbox_race", method: "POST", path: "/v1/sandbox/race", pathParams: nil, query: nil},
+		{name: "slotlock_partner_get_account", method: "GET", path: "/v1/partner/accounts/{account}", pathParams: []string{"account"}, query: nil},
+		{name: "slotlock_partner_put_account", method: "PUT", path: "/v1/partner/accounts/{account}", pathParams: []string{"account"}, query: nil},
+		{name: "slotlock_partner_list_accounts", method: "GET", path: "/v1/partner/accounts", pathParams: nil, query: nil},
+		{name: "slotlock_partner_list_keys", method: "GET", path: "/v1/partner/accounts/{account}/keys", pathParams: []string{"account"}, query: []string{"environment"}},
+		{name: "slotlock_partner_create_key", method: "POST", path: "/v1/partner/accounts/{account}/keys", pathParams: []string{"account"}, query: nil},
+		{name: "slotlock_partner_rotate_key", method: "POST", path: "/v1/partner/accounts/{account}/keys/{key_id}/rotate", pathParams: []string{"account", "key_id"}, query: nil},
+		{name: "slotlock_partner_revoke_key", method: "DELETE", path: "/v1/partner/accounts/{account}/keys/{key_id}", pathParams: []string{"account", "key_id"}, query: []string{"environment"}},
+		{name: "slotlock_partner_suspend_account", method: "POST", path: "/v1/partner/accounts/{account}/suspend", pathParams: []string{"account"}, query: nil},
+		{name: "slotlock_partner_unsuspend_account", method: "POST", path: "/v1/partner/accounts/{account}/unsuspend", pathParams: []string{"account"}, query: nil},
+		{name: "slotlock_partner_erase_account", method: "POST", path: "/v1/partner/accounts/{account}/erase", pathParams: []string{"account"}, query: nil},
+		{name: "slotlock_partner_get_usage", method: "GET", path: "/v1/partner/usage", pathParams: nil, query: []string{"from", "to", "account"}},
+		{name: "slotlock_partner_reconcile_usage", method: "POST", path: "/v1/partner/usage/reconcile", pathParams: nil, query: nil},
 	}
 	byName := make(map[string]operation, len(list))
 	for _, op := range list {
@@ -87,6 +125,14 @@ type ListResourcesInput struct {
 	Limit *int64
 
 	Pool *string
+
+	Kind *string
+
+	Labels []string
+
+	Location *string
+
+	Group *string
 }
 
 func (in ListResourcesInput) values() map[string]any {
@@ -100,12 +146,28 @@ func (in ListResourcesInput) values() map[string]any {
 	if in.Pool != nil {
 		values["pool"] = *in.Pool
 	}
+	if in.Kind != nil {
+		values["kind"] = *in.Kind
+	}
+	if in.Labels != nil {
+		values["labels"] = in.Labels
+	}
+	if in.Location != nil {
+		values["location"] = *in.Location
+	}
+	if in.Group != nil {
+		values["group"] = *in.Group
+	}
 	return values
 }
 
 // ListResources: List calendar resources. List resources visible to the authenticated tenant
-// principal, with the pool each belongs to (a vehicle class, a room type). With pool, only that
-// pool's members, in the order slotlock_book_pool tries them.
+// principal, with what each says about itself: its name (show it rather than the reference),
+// description, kind, capacity and labels, where it is (location), the groups it is in (a team, a
+// department), and the pool it belongs to (a vehicle class, a room type). With kind, only
+// resources of that kind; with labels, only those with every label given; with location, only
+// those there or at a location in it; with group, only that group's. With pool, only that pool's
+// members, in the order slotlock_book_pool tries them.
 func (c *Client) ListResources(ctx context.Context, in ListResourcesInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_list_resources", in.values())
 }
@@ -117,6 +179,26 @@ type CreateResourceInput struct {
 	Timezone *string
 
 	Visibility *string
+
+	Name Nullable[string]
+
+	Description Nullable[string]
+
+	Kind *string
+
+	Capacity Nullable[int64]
+
+	Labels []string
+
+	Attributes map[string]any
+
+	Location *string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in CreateResourceInput) values() map[string]any {
@@ -128,77 +210,175 @@ func (in CreateResourceInput) values() map[string]any {
 	if in.Visibility != nil {
 		values["visibility"] = *in.Visibility
 	}
+	if value, ok := in.Name.get(); ok {
+		values["name"] = value
+	}
+	if value, ok := in.Description.get(); ok {
+		values["description"] = value
+	}
+	if in.Kind != nil {
+		values["kind"] = *in.Kind
+	}
+	if value, ok := in.Capacity.get(); ok {
+		values["capacity"] = value
+	}
+	if in.Labels != nil {
+		values["labels"] = in.Labels
+	}
+	if in.Attributes != nil {
+		values["attributes"] = in.Attributes
+	}
+	if in.Location != nil {
+		values["location"] = *in.Location
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
 	return values
 }
 
 // CreateResource: Create or update a resource. Create the resource with this external reference,
-// or update its time zone if the tenant already has it. Repeating the call changes nothing more.
-// visibility is shared (the default: agents list and book it) or private (agents never see it),
-// fixed at creation: naming another for an existing resource answers 409
-// resource_visibility_conflict.
+// or update its time zone, and the profile fields and location given, if the tenant already has
+// it. Without a time zone, a new resource takes the nearest one its location, or a location above
+// it, has, else UTC; a location the tenant does not have answers 404 location_not_found.
+// Repeating the call changes nothing more. visibility is shared (the default: agents list and
+// book it) or private (agents never see it), fixed at creation: naming another for an existing
+// resource answers 409 resource_visibility_conflict. Its profile is optional: a name agents and
+// people see instead of the reference, a description, its kind (person, room, desk, space,
+// vehicle, machine, equipment, service or other: a hint, never a rule), its capacity
+// (informational), up to 20 labels to find it by, and attributes you want back.
 func (c *Client) CreateResource(ctx context.Context, in CreateResourceInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_create_resource", in.values())
 }
 
 // GetFreeBusyInput holds the arguments of [Client.GetFreeBusy].
 type GetFreeBusyInput struct {
-	ResourceIDs []string
-
 	Start string
 
 	End string
+
+	ResourceIDs []string
+
+	Location *string
+
+	Group *string
+
+	Labels []string
+
+	Kind *string
+
+	Pool *string
 }
 
 func (in GetFreeBusyInput) values() map[string]any {
 	values := map[string]any{}
-	values["resource_ids"] = in.ResourceIDs
 	values["start"] = in.Start
 	values["end"] = in.End
+	if in.ResourceIDs != nil {
+		values["resource_ids"] = in.ResourceIDs
+	}
+	if in.Location != nil {
+		values["location"] = *in.Location
+	}
+	if in.Group != nil {
+		values["group"] = *in.Group
+	}
+	if in.Labels != nil {
+		values["labels"] = in.Labels
+	}
+	if in.Kind != nil {
+		values["kind"] = *in.Kind
+	}
+	if in.Pool != nil {
+		values["pool"] = *in.Pool
+	}
 	return values
 }
 
-// GetFreeBusy: Get free-busy. Return privacy-minimized busy intervals and explicit coverage
-// certainty.
+// GetFreeBusy: Get free-busy. When each resource is busy in a window, as busy intervals only
+// (never whose or what), and whether that is certain (coverage: "uncertain" where a calendar
+// feeding it has not been read lately). Name the resources with resource_ids, or select them
+// instead by location (and every location in it), group, labels (every one), kind or pool: at
+// most 100 (more answers selection_too_large, none selection_empty), named in
+// selected_resource_ids.
 func (c *Client) GetFreeBusy(ctx context.Context, in GetFreeBusyInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_get_free_busy", in.values())
 }
 
 // FindNextAvailableInput holds the arguments of [Client.FindNextAvailable].
 type FindNextAvailableInput struct {
-	ResourceIDs []string
-
 	Start string
 
 	End string
 
 	DurationMinutes int64
+
+	ResourceIDs []string
+
+	Location *string
+
+	Group *string
+
+	Labels []string
+
+	Kind *string
+
+	Pool *string
 }
 
 func (in FindNextAvailableInput) values() map[string]any {
 	values := map[string]any{}
-	values["resource_ids"] = in.ResourceIDs
 	values["start"] = in.Start
 	values["end"] = in.End
 	values["duration_minutes"] = in.DurationMinutes
+	if in.ResourceIDs != nil {
+		values["resource_ids"] = in.ResourceIDs
+	}
+	if in.Location != nil {
+		values["location"] = *in.Location
+	}
+	if in.Group != nil {
+		values["group"] = *in.Group
+	}
+	if in.Labels != nil {
+		values["labels"] = in.Labels
+	}
+	if in.Kind != nil {
+		values["kind"] = *in.Kind
+	}
+	if in.Pool != nil {
+		values["pool"] = *in.Pool
+	}
 	return values
 }
 
 // FindNextAvailable: Find next available interval. Find the earliest certain interval that
 // satisfies the requested duration (up to the 367-day search window, so a multi-month rental slot
-// can be found).
+// can be found). Name the resources with resource_ids, or select them as slotlock_get_free_busy
+// does: at most 100.
 func (c *Client) FindNextAvailable(ctx context.Context, in FindNextAvailableInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_find_next_available", in.values())
 }
 
 // FindAvailableSlotsInput holds the arguments of [Client.FindAvailableSlots].
 type FindAvailableSlotsInput struct {
-	ResourceIDs []string
-
 	Start string
 
 	End string
 
 	DurationMinutes int64
+
+	ResourceIDs []string
+
+	Location *string
+
+	Group *string
+
+	Labels []string
+
+	Kind *string
+
+	Pool *string
 
 	Limit *int64
 
@@ -207,10 +387,27 @@ type FindAvailableSlotsInput struct {
 
 func (in FindAvailableSlotsInput) values() map[string]any {
 	values := map[string]any{}
-	values["resource_ids"] = in.ResourceIDs
 	values["start"] = in.Start
 	values["end"] = in.End
 	values["duration_minutes"] = in.DurationMinutes
+	if in.ResourceIDs != nil {
+		values["resource_ids"] = in.ResourceIDs
+	}
+	if in.Location != nil {
+		values["location"] = *in.Location
+	}
+	if in.Group != nil {
+		values["group"] = *in.Group
+	}
+	if in.Labels != nil {
+		values["labels"] = in.Labels
+	}
+	if in.Kind != nil {
+		values["kind"] = *in.Kind
+	}
+	if in.Pool != nil {
+		values["pool"] = *in.Pool
+	}
 	if in.Limit != nil {
 		values["limit"] = *in.Limit
 	}
@@ -225,7 +422,8 @@ func (in FindAvailableSlotsInput) values() map[string]any {
 // resource's hours, to offer a person a choice. With require_free, only times when at least that
 // many of the resources are free together, each slot naming them in resource_ids: every resource
 // for a booking that needs them all (book it with slotlock_book_together), or any n of them. No
-// slot is listed unless every resource's coverage is certain.
+// slot is listed unless every resource's coverage is certain. Name the resources with
+// resource_ids, or select them as slotlock_get_free_busy does: at most 20.
 func (c *Client) FindAvailableSlots(ctx context.Context, in FindAvailableSlotsInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_find_available_slots", in.values())
 }
@@ -237,6 +435,12 @@ type HoldSlotsInput struct {
 	IdempotencyKey string
 
 	TTLSeconds *int64
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in HoldSlotsInput) values() map[string]any {
@@ -246,6 +450,9 @@ func (in HoldSlotsInput) values() map[string]any {
 	if in.TTLSeconds != nil {
 		values["ttl_seconds"] = *in.TTLSeconds
 	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
 	return values
 }
 
@@ -253,7 +460,8 @@ func (in HoldSlotsInput) values() map[string]any {
 // seconds) while a person chooses, as alternatives in one group: each free one is held, the
 // others are listed with why not. Book one by passing its hold_id to slotlock_create_event, which
 // releases the rest; unbooked holds expire on their own. A hold is yours alone, and you may have
-// 20 live at once.
+// 20 live at once. A candidate refused for its time comes with alternatives (the earliest free
+// times of its length). slotlock_confirm_slot books a held time.
 func (c *Client) HoldSlots(ctx context.Context, in HoldSlotsInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_hold_slots", in.values())
 }
@@ -271,6 +479,12 @@ type BookTogetherInput struct {
 	IdempotencyKey string
 
 	Title *string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in BookTogetherInput) values() map[string]any {
@@ -282,6 +496,9 @@ func (in BookTogetherInput) values() map[string]any {
 	values["idempotency_key"] = in.IdempotencyKey
 	if in.Title != nil {
 		values["title"] = *in.Title
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
 	}
 	return values
 }
@@ -308,6 +525,12 @@ type BookPoolInput struct {
 	IdempotencyKey string
 
 	Title *string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in BookPoolInput) values() map[string]any {
@@ -320,14 +543,18 @@ func (in BookPoolInput) values() map[string]any {
 	if in.Title != nil {
 		values["title"] = *in.Title
 	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
 	return values
 }
 
 // BookPool: Book from a pool. Book any one member of a pool (a vehicle class, a room type) for a
-// time: members are tried in a fixed order and the first that is free and allows the booking is
-// booked, in one transaction, so a class sells out exactly at its number of members. The event
-// names the member booked. 409 pool_full when none is free; 404 pool_not_found when the pool has
-// no member you may book. A retry with the same idempotency_key answers the same event.
+// time: members are tried in the pool's order (by id, fewest bookings in the last 30 days first,
+// or in turn, as the tenant sets it) and the first that is free and allows the booking is booked,
+// in one transaction, so a class sells out exactly at its number of members. The event names the
+// member booked. 409 pool_full when none is free; 404 pool_not_found when the pool has no member
+// you may book. A retry with the same idempotency_key answers the same event.
 func (c *Client) BookPool(ctx context.Context, in BookPoolInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_book_pool", in.values())
 }
@@ -361,11 +588,20 @@ func (c *Client) GetPoolAvailability(ctx context.Context, in GetPoolAvailability
 // ReleaseSlotsInput holds the arguments of [Client.ReleaseSlots].
 type ReleaseSlotsInput struct {
 	HoldID string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in ReleaseSlotsInput) values() map[string]any {
 	values := map[string]any{}
 	values["hold_id"] = in.HoldID
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
 	return values
 }
 
@@ -373,6 +609,59 @@ func (in ReleaseSlotsInput) values() map[string]any {
 // instead of letting them expire. `released` is false when it was already gone.
 func (c *Client) ReleaseSlots(ctx context.Context, in ReleaseSlotsInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_release_slots", in.values())
+}
+
+// ConfirmSlotInput holds the arguments of [Client.ConfirmSlot].
+type ConfirmSlotInput struct {
+	HoldID string
+
+	Title *string
+
+	Description *string
+
+	Location *string
+
+	Timezone *string
+
+	IdempotencyKey *string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in ConfirmSlotInput) values() map[string]any {
+	values := map[string]any{}
+	values["hold_id"] = in.HoldID
+	if in.Title != nil {
+		values["title"] = *in.Title
+	}
+	if in.Description != nil {
+		values["description"] = *in.Description
+	}
+	if in.Location != nil {
+		values["location"] = *in.Location
+	}
+	if in.Timezone != nil {
+		values["timezone"] = *in.Timezone
+	}
+	if in.IdempotencyKey != nil {
+		values["idempotency_key"] = *in.IdempotencyKey
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// ConfirmSlot: Confirm a held slot. Book a time you hold (a hold_id from slotlock_hold_slots):
+// the held resource and time exactly, with the title and details you give, and the rest of its
+// group released. 409 hold_expired when the hold lapsed first; 404 hold_not_found when it was
+// released, booked or is not yours. A retry answers the same event (replayed).
+func (c *Client) ConfirmSlot(ctx context.Context, in ConfirmSlotInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_confirm_slot", in.values())
 }
 
 // ListEventsInput holds the arguments of [Client.ListEvents].
@@ -402,7 +691,7 @@ func (in ListEventsInput) values() map[string]any {
 	return values
 }
 
-// ListEvents: List resource events. List bounded events intersecting a time window.
+// ListEvents: List resource events. List your events that meet a time window, earliest first.
 func (c *Client) ListEvents(ctx context.Context, in ListEventsInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_list_events", in.values())
 }
@@ -440,6 +729,12 @@ type CreateEventInput struct {
 	RecurrenceExceptions []map[string]any
 
 	HoldID *string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in CreateEventInput) values() map[string]any {
@@ -482,11 +777,18 @@ func (in CreateEventInput) values() map[string]any {
 	if in.HoldID != nil {
 		values["hold_id"] = *in.HoldID
 	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
 	return values
 }
 
-// CreateEvent: Create resource event. Create an event of up to 3,660 days (a booking, lease or
-// long rental); opaque occurrences use the database overlap arbiter.
+// CreateEvent: Create resource event. Book a resource for a time, as an event of up to 3,660 days
+// (a booking, lease or long rental). The database refuses a time already taken: 409 overlap, with
+// alternatives (the earliest free times of the same length) and, when the booking in the way is
+// yours, its id. A booking rule that refuses the time answers booking_rule_… with alternatives
+// too. To book a time you hold, pass its hold_id, or use slotlock_confirm_slot. A retry with the
+// same idempotency_key answers the same event.
 func (c *Client) CreateEvent(ctx context.Context, in CreateEventInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_create_event", in.values())
 }
@@ -502,7 +804,8 @@ func (in GetEventInput) values() map[string]any {
 	return values
 }
 
-// GetEvent: Get resource event. Read one tenant-scoped event by stable identifier.
+// GetEvent: Get resource event. Read one of your events by its id, with its revision (pass it as
+// expected_revision to change or cancel it).
 func (c *Client) GetEvent(ctx context.Context, in GetEventInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_get_event", in.values())
 }
@@ -544,6 +847,12 @@ type UpdateEventInput struct {
 	RecurrenceExceptions []map[string]any
 
 	ExpectedResourceID *string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in UpdateEventInput) values() map[string]any {
@@ -596,12 +905,17 @@ func (in UpdateEventInput) values() map[string]any {
 	if in.ExpectedResourceID != nil {
 		values["expected_resource_id"] = *in.ExpectedResourceID
 	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
 	return values
 }
 
-// UpdateEvent: Update resource event. Apply an expected-revision event patch and rematerialize
-// occupancy atomically. With expected_resource_id, the resource you read the event on, an event
-// since moved elsewhere is not found.
+// UpdateEvent: Update resource event. Change one of your events at the revision you last read
+// (expected_revision): its time, resource or details, all or nothing. A time already taken is 409
+// overlap with alternatives; a stale revision is 409 revision_conflict (read the event again).
+// With expected_resource_id, the resource you read it on, an event since moved elsewhere is not
+// found. To change only the time, slotlock_reschedule is simpler.
 func (c *Client) UpdateEvent(ctx context.Context, in UpdateEventInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_update_event", in.values())
 }
@@ -613,6 +927,12 @@ type DeleteEventInput struct {
 	ExpectedRevision int64
 
 	IdempotencyKey string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in DeleteEventInput) values() map[string]any {
@@ -620,13 +940,100 @@ func (in DeleteEventInput) values() map[string]any {
 	values["event_id"] = in.EventID
 	values["expected_revision"] = in.ExpectedRevision
 	values["idempotency_key"] = in.IdempotencyKey
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
 	return values
 }
 
-// DeleteEvent: Delete resource event. Tombstone an event at an expected revision so stale sync
-// cannot resurrect it.
+// DeleteEvent: Delete resource event. Cancel one of your events at the revision you last read
+// (expected_revision); a stale one is 409 revision_conflict. It cannot come back at that
+// revision, so an old copy synced later does not restore it. slotlock_cancel does the same with
+// fewer fields.
 func (c *Client) DeleteEvent(ctx context.Context, in DeleteEventInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_delete_event", in.values())
+}
+
+// RescheduleInput holds the arguments of [Client.Reschedule].
+type RescheduleInput struct {
+	EventID string
+
+	ExpectedRevision int64
+
+	StartsAt string
+
+	EndsAt string
+
+	ResourceID *string
+
+	IdempotencyKey *string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in RescheduleInput) values() map[string]any {
+	values := map[string]any{}
+	values["event_id"] = in.EventID
+	values["expected_revision"] = in.ExpectedRevision
+	values["starts_at"] = in.StartsAt
+	values["ends_at"] = in.EndsAt
+	if in.ResourceID != nil {
+		values["resource_id"] = *in.ResourceID
+	}
+	if in.IdempotencyKey != nil {
+		values["idempotency_key"] = *in.IdempotencyKey
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// Reschedule: Reschedule an event. Move one of your events to a new time, and to another resource
+// if you give one, at the revision you last read (expected_revision). A time already taken is 409
+// overlap with alternatives; a stale revision 409 revision_conflict. A retry answers the same
+// move (replayed).
+func (c *Client) Reschedule(ctx context.Context, in RescheduleInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_reschedule", in.values())
+}
+
+// CancelInput holds the arguments of [Client.Cancel].
+type CancelInput struct {
+	EventID string
+
+	ExpectedRevision int64
+
+	IdempotencyKey *string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in CancelInput) values() map[string]any {
+	values := map[string]any{}
+	values["event_id"] = in.EventID
+	values["expected_revision"] = in.ExpectedRevision
+	if in.IdempotencyKey != nil {
+		values["idempotency_key"] = *in.IdempotencyKey
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// Cancel: Cancel an event. Cancel one of your events at the revision you last read
+// (expected_revision); a stale one is 409 revision_conflict. Its time is free at once. A retry
+// answers the same cancellation (replayed).
+func (c *Client) Cancel(ctx context.Context, in CancelInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_cancel", in.values())
 }
 
 // GetResourceInput holds the arguments of [Client.GetResource].
@@ -646,14 +1053,88 @@ func (c *Client) GetResource(ctx context.Context, in GetResourceInput) (map[stri
 	return c.Call(ctx, "slotlock_get_resource", in.values())
 }
 
+// UpdateResourceInput holds the arguments of [Client.UpdateResource].
+type UpdateResourceInput struct {
+	ResourceID string
+
+	Name Nullable[string]
+
+	Description Nullable[string]
+
+	Kind *string
+
+	Capacity Nullable[int64]
+
+	Labels []string
+
+	Attributes map[string]any
+
+	Location Nullable[string]
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in UpdateResourceInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_id"] = in.ResourceID
+	if value, ok := in.Name.get(); ok {
+		values["name"] = value
+	}
+	if value, ok := in.Description.get(); ok {
+		values["description"] = value
+	}
+	if in.Kind != nil {
+		values["kind"] = *in.Kind
+	}
+	if value, ok := in.Capacity.get(); ok {
+		values["capacity"] = value
+	}
+	if in.Labels != nil {
+		values["labels"] = in.Labels
+	}
+	if in.Attributes != nil {
+		values["attributes"] = in.Attributes
+	}
+	if value, ok := in.Location.get(); ok {
+		values["location"] = value
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// UpdateResource: Change a resource's profile. Change a resource's name, description, kind,
+// capacity, labels, attributes or location: the fields given, keeping the rest. null clears a
+// name, description, capacity or location; [] and {} clear labels and attributes. A location the
+// tenant does not have answers 404 location_not_found. The feed's resource.updated names the
+// fields that changed (profile_changed), never their values. 400 invalid_resource_profile outside
+// the bounds, naming the field.
+func (c *Client) UpdateResource(ctx context.Context, in UpdateResourceInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_update_resource", in.values())
+}
+
 // DeleteResourceInput holds the arguments of [Client.DeleteResource].
 type DeleteResourceInput struct {
 	ResourceID string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in DeleteResourceInput) values() map[string]any {
 	values := map[string]any{}
 	values["resource_id"] = in.ResourceID
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
 	return values
 }
 
@@ -666,14 +1147,283 @@ func (c *Client) DeleteResource(ctx context.Context, in DeleteResourceInput) (ma
 	return c.Call(ctx, "slotlock_delete_resource", in.values())
 }
 
+// ListLocationsInput holds the arguments of [Client.ListLocations].
+type ListLocationsInput struct {
+}
+
+func (in ListLocationsInput) values() map[string]any {
+	values := map[string]any{}
+	return values
+}
+
+// ListLocations: List locations. The tenant's locations, each after the one it is in (depth
+// first), with how many resources are at each. A tree of at most 5 levels and 1000 locations: a
+// region, a site, a building, a floor, a zone, or whatever yours are.
+func (c *Client) ListLocations(ctx context.Context, in ListLocationsInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_list_locations", in.values())
+}
+
+// CreateLocationInput holds the arguments of [Client.CreateLocation].
+type CreateLocationInput struct {
+	Ref string
+
+	Name string
+
+	ParentRef Nullable[string]
+
+	Timezone Nullable[string]
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in CreateLocationInput) values() map[string]any {
+	values := map[string]any{}
+	values["ref"] = in.Ref
+	values["name"] = in.Name
+	if value, ok := in.ParentRef.get(); ok {
+		values["parent_ref"] = value
+	}
+	if value, ok := in.Timezone.get(); ok {
+		values["timezone"] = value
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// CreateLocation: Create or update a location. Create the location with this reference, or change
+// its name, and the parent and time zone given. 404 location_not_found for a parent the tenant
+// does not have; 409 location_too_deep past 5 levels, location_cycle under itself,
+// location_limit_reached past 1000.
+func (c *Client) CreateLocation(ctx context.Context, in CreateLocationInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_create_location", in.values())
+}
+
+// UpdateLocationInput holds the arguments of [Client.UpdateLocation].
+type UpdateLocationInput struct {
+	LocationRef string
+
+	Name *string
+
+	ParentRef Nullable[string]
+
+	Timezone Nullable[string]
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in UpdateLocationInput) values() map[string]any {
+	values := map[string]any{}
+	values["location_ref"] = in.LocationRef
+	if in.Name != nil {
+		values["name"] = *in.Name
+	}
+	if value, ok := in.ParentRef.get(); ok {
+		values["parent_ref"] = value
+	}
+	if value, ok := in.Timezone.get(); ok {
+		values["timezone"] = value
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// UpdateLocation: Change a location. Change a location's name, parent or time zone: the fields
+// given. Refused as creating one is.
+func (c *Client) UpdateLocation(ctx context.Context, in UpdateLocationInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_update_location", in.values())
+}
+
+// DeleteLocationInput holds the arguments of [Client.DeleteLocation].
+type DeleteLocationInput struct {
+	LocationRef string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in DeleteLocationInput) values() map[string]any {
+	values := map[string]any{}
+	values["location_ref"] = in.LocationRef
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// DeleteLocation: Delete a location. Delete a location. Refused with 409 location_in_use while a
+// resource is at it or a location is in it: move them first. deleted is false when the tenant has
+// no such location.
+func (c *Client) DeleteLocation(ctx context.Context, in DeleteLocationInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_delete_location", in.values())
+}
+
+// ListGroupsInput holds the arguments of [Client.ListGroups].
+type ListGroupsInput struct {
+}
+
+func (in ListGroupsInput) values() map[string]any {
+	values := map[string]any{}
+	return values
+}
+
+// ListGroups: List groups. The tenant's groups, by reference, with how many resources are in
+// each: any sets you want (a team, a department, a contract), at most 500. A group changes
+// nothing about how its resources are booked; a pool does that.
+func (c *Client) ListGroups(ctx context.Context, in ListGroupsInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_list_groups", in.values())
+}
+
+// CreateGroupInput holds the arguments of [Client.CreateGroup].
+type CreateGroupInput struct {
+	Ref string
+
+	Name string
+
+	Description Nullable[string]
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in CreateGroupInput) values() map[string]any {
+	values := map[string]any{}
+	values["ref"] = in.Ref
+	values["name"] = in.Name
+	if value, ok := in.Description.get(); ok {
+		values["description"] = value
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// CreateGroup: Create or update a group. Create the group with this reference, or change its
+// name, and its description when given. 409 group_limit_reached past 500.
+func (c *Client) CreateGroup(ctx context.Context, in CreateGroupInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_create_group", in.values())
+}
+
+// DeleteGroupInput holds the arguments of [Client.DeleteGroup].
+type DeleteGroupInput struct {
+	GroupRef string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in DeleteGroupInput) values() map[string]any {
+	values := map[string]any{}
+	values["group_ref"] = in.GroupRef
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// DeleteGroup: Delete a group. Delete a group; its resources stay as they are. deleted is false
+// when the tenant has no such group.
+func (c *Client) DeleteGroup(ctx context.Context, in DeleteGroupInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_delete_group", in.values())
+}
+
+// AddGroupMemberInput holds the arguments of [Client.AddGroupMember].
+type AddGroupMemberInput struct {
+	GroupRef string
+
+	ResourceID string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in AddGroupMemberInput) values() map[string]any {
+	values := map[string]any{}
+	values["group_ref"] = in.GroupRef
+	values["resource_id"] = in.ResourceID
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// AddGroupMember: Put a resource in a group. Put one of the tenant's resources in a group. added
+// is false when it was in it already. 404 group_not_found or resource_not_found; 409
+// resource_group_limit_reached past 20 groups a resource.
+func (c *Client) AddGroupMember(ctx context.Context, in AddGroupMemberInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_add_group_member", in.values())
+}
+
+// RemoveGroupMemberInput holds the arguments of [Client.RemoveGroupMember].
+type RemoveGroupMemberInput struct {
+	GroupRef string
+
+	ResourceID string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in RemoveGroupMemberInput) values() map[string]any {
+	values := map[string]any{}
+	values["group_ref"] = in.GroupRef
+	values["resource_id"] = in.ResourceID
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// RemoveGroupMember: Take a resource out of a group. Take a resource out of a group. removed is
+// false when it was not in it.
+func (c *Client) RemoveGroupMember(ctx context.Context, in RemoveGroupMemberInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_remove_group_member", in.values())
+}
+
 // ArchiveResourceInput holds the arguments of [Client.ArchiveResource].
 type ArchiveResourceInput struct {
 	ResourceID string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in ArchiveResourceInput) values() map[string]any {
 	values := map[string]any{}
 	values["resource_id"] = in.ResourceID
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
 	return values
 }
 
@@ -687,11 +1437,20 @@ func (c *Client) ArchiveResource(ctx context.Context, in ArchiveResourceInput) (
 // RestoreResourceInput holds the arguments of [Client.RestoreResource].
 type RestoreResourceInput struct {
 	ResourceID string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in RestoreResourceInput) values() map[string]any {
 	values := map[string]any{}
 	values["resource_id"] = in.ResourceID
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
 	return values
 }
 
@@ -732,6 +1491,12 @@ type SetResourceAvailabilityInput struct {
 	ResourceID string
 
 	Rules Nullable[[]map[string]any]
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in SetResourceAvailabilityInput) values() map[string]any {
@@ -739,6 +1504,9 @@ func (in SetResourceAvailabilityInput) values() map[string]any {
 	values["resource_id"] = in.ResourceID
 	if value, ok := in.Rules.get(); ok {
 		values["rules"] = value
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
 	}
 	return values
 }
@@ -775,12 +1543,21 @@ type ImportResourceAvailabilityInput struct {
 	ResourceID string
 
 	Icalendar string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in ImportResourceAvailabilityInput) values() map[string]any {
 	values := map[string]any{}
 	values["resource_id"] = in.ResourceID
 	values["icalendar"] = in.Icalendar
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
 	return values
 }
 
@@ -799,6 +1576,12 @@ type SetResourceBookingRulesInput struct {
 	ResourceID string
 
 	Rules Nullable[map[string]any]
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in SetResourceBookingRulesInput) values() map[string]any {
@@ -806,6 +1589,9 @@ func (in SetResourceBookingRulesInput) values() map[string]any {
 	values["resource_id"] = in.ResourceID
 	if value, ok := in.Rules.get(); ok {
 		values["rules"] = value
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
 	}
 	return values
 }
@@ -827,6 +1613,12 @@ type SetResourcePoolInput struct {
 	ResourceID string
 
 	Pool Nullable[string]
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in SetResourcePoolInput) values() map[string]any {
@@ -834,6 +1626,9 @@ func (in SetResourcePoolInput) values() map[string]any {
 	values["resource_id"] = in.ResourceID
 	if value, ok := in.Pool.get(); ok {
 		values["pool"] = value
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
 	}
 	return values
 }
@@ -847,6 +1642,41 @@ func (c *Client) SetResourcePool(ctx context.Context, in SetResourcePoolInput) (
 	return c.Call(ctx, "slotlock_set_resource_pool", in.values())
 }
 
+// SetResourceParentInput holds the arguments of [Client.SetResourceParent].
+type SetResourceParentInput struct {
+	ResourceID string
+
+	ParentID Nullable[string]
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in SetResourceParentInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_id"] = in.ResourceID
+	if value, ok := in.ParentID.get(); ok {
+		values["parent_id"] = value
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// SetResourceParent: Make a resource part of another. Make a resource a part of a composite (a
+// room of a hall, a half of a court), or no part (`null`). A booking of the composite as a whole
+// then conflicts with a booking of any of its parts, and two parts never conflict with each
+// other; each part's free/busy shows the whole's bookings, and the whole's shows its parts'. One
+// level deep, at most 50 parts; refused while either side has a booking or live hold still to
+// come (`composite_busy`).
+func (c *Client) SetResourceParent(ctx context.Context, in SetResourceParentInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_set_resource_parent", in.values())
+}
+
 // ListPoolsInput holds the arguments of [Client.ListPools].
 type ListPoolsInput struct {
 }
@@ -856,10 +1686,41 @@ func (in ListPoolsInput) values() map[string]any {
 	return values
 }
 
-// ListPools: List pools. The tenant's pools by name, each with its capacity: how many members it
-// has that are not archived.
+// ListPools: List pools. The tenant's pools by name, each with its capacity (how many members it
+// has that are not archived) and the order slotlock_book_pool tries them in.
 func (c *Client) ListPools(ctx context.Context, in ListPoolsInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_list_pools", in.values())
+}
+
+// SetPoolOrderInput holds the arguments of [Client.SetPoolOrder].
+type SetPoolOrderInput struct {
+	Pool string
+
+	Order string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in SetPoolOrderInput) values() map[string]any {
+	values := map[string]any{}
+	values["pool"] = in.Pool
+	values["order"] = in.Order
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// SetPoolOrder: Set a pool's order. The order slotlock_book_pool tries a pool's members in:
+// stable (by id, the default), least_booked (fewest bookings made on each in the last 30 days
+// first, to share them out) or round_robin (from the member after the one booked last). At most
+// 1,000 pools have one: one more is 409 pool_order_limit_reached.
+func (c *Client) SetPoolOrder(ctx context.Context, in SetPoolOrderInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_set_pool_order", in.values())
 }
 
 // GetBookingRuleDefaultsInput holds the arguments of [Client.GetBookingRuleDefaults].
@@ -882,12 +1743,21 @@ func (c *Client) GetBookingRuleDefaults(ctx context.Context, in GetBookingRuleDe
 // SetTenantBookingRulesInput holds the arguments of [Client.SetTenantBookingRules].
 type SetTenantBookingRulesInput struct {
 	Rules Nullable[map[string]any]
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in SetTenantBookingRulesInput) values() map[string]any {
 	values := map[string]any{}
 	if value, ok := in.Rules.get(); ok {
 		values["rules"] = value
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
 	}
 	return values
 }
@@ -904,6 +1774,12 @@ type SetPoolBookingRulesInput struct {
 	Pool string
 
 	Rules Nullable[map[string]any]
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in SetPoolBookingRulesInput) values() map[string]any {
@@ -911,6 +1787,9 @@ func (in SetPoolBookingRulesInput) values() map[string]any {
 	values["pool"] = in.Pool
 	if value, ok := in.Rules.get(); ok {
 		values["rules"] = value
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
 	}
 	return values
 }
@@ -1011,12 +1890,21 @@ func (c *Client) GetTenantEventHistory(ctx context.Context, in GetTenantEventHis
 // SetTenantAvailabilityInput holds the arguments of [Client.SetTenantAvailability].
 type SetTenantAvailabilityInput struct {
 	Rules Nullable[[]map[string]any]
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in SetTenantAvailabilityInput) values() map[string]any {
 	values := map[string]any{}
 	if value, ok := in.Rules.get(); ok {
 		values["rules"] = value
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
 	}
 	return values
 }
@@ -1045,6 +1933,12 @@ type AcquireHoldInput struct {
 	IdempotencyKey *string
 
 	BufferAfterMinutes *int64
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in AcquireHoldInput) values() map[string]any {
@@ -1061,6 +1955,9 @@ func (in AcquireHoldInput) values() map[string]any {
 	}
 	if in.BufferAfterMinutes != nil {
 		values["buffer_after_minutes"] = *in.BufferAfterMinutes
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
 	}
 	return values
 }
@@ -1097,11 +1994,20 @@ func (c *Client) GetHold(ctx context.Context, in GetHoldInput) (map[string]any, 
 // ReleaseHoldInput holds the arguments of [Client.ReleaseHold].
 type ReleaseHoldInput struct {
 	HoldID string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in ReleaseHoldInput) values() map[string]any {
 	values := map[string]any{}
 	values["hold_id"] = in.HoldID
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
 	return values
 }
 
@@ -1141,11 +2047,20 @@ func (c *Client) ListHolds(ctx context.Context, in ListHoldsInput) (map[string]a
 // ConfirmHoldInput holds the arguments of [Client.ConfirmHold].
 type ConfirmHoldInput struct {
 	HoldID string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in ConfirmHoldInput) values() map[string]any {
 	values := map[string]any{}
 	values["hold_id"] = in.HoldID
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
 	return values
 }
 
@@ -1191,6 +2106,12 @@ type PutReservationInput struct {
 	BufferAfterMinutes *int64
 
 	Source *string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in PutReservationInput) values() map[string]any {
@@ -1205,6 +2126,9 @@ func (in PutReservationInput) values() map[string]any {
 	}
 	if in.Source != nil {
 		values["source"] = *in.Source
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
 	}
 	return values
 }
@@ -1223,12 +2147,21 @@ type CancelReservationInput struct {
 	ReservationRef string
 
 	Revision int64
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in CancelReservationInput) values() map[string]any {
 	values := map[string]any{}
 	values["reservation_ref"] = in.ReservationRef
 	values["revision"] = in.Revision
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
 	return values
 }
 
@@ -1278,11 +2211,20 @@ func (c *Client) ListReservations(ctx context.Context, in ListReservationsInput)
 // CheckInReservationInput holds the arguments of [Client.CheckInReservation].
 type CheckInReservationInput struct {
 	ReservationRef string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in CheckInReservationInput) values() map[string]any {
 	values := map[string]any{}
 	values["reservation_ref"] = in.ReservationRef
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
 	return values
 }
 
@@ -1344,6 +2286,16 @@ type JoinWaitlistInput struct {
 	Pool *string
 
 	OfferTTLSeconds *int64
+
+	// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
+	// request answers what the first did; with another request, 422 idempotency_conflict.
+	IdempotencyKey *string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in JoinWaitlistInput) values() map[string]any {
@@ -1360,6 +2312,12 @@ func (in JoinWaitlistInput) values() map[string]any {
 	if in.OfferTTLSeconds != nil {
 		values["offer_ttl_seconds"] = *in.OfferTTLSeconds
 	}
+	if in.IdempotencyKey != nil {
+		values["idempotency_key"] = *in.IdempotencyKey
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
 	return values
 }
 
@@ -1369,7 +2327,10 @@ func (in JoinWaitlistInput) values() map[string]any {
 // joined: the first gets a hold of it for holder_ref, for offer_ttl_seconds (default 900), and
 // the feed says so (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose
 // window starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409
-// waitlist_limit_reached); a window is at most 31 days.
+// waitlist_limit_reached); a window is at most 31 days. With an idempotency key (the
+// Idempotency-Key header or idempotency_key), a retry answers the entry the first request made
+// (replayed: true) for as long as it is kept; the same key with another request is 422
+// idempotency_conflict.
 func (c *Client) JoinWaitlist(ctx context.Context, in JoinWaitlistInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_join_waitlist", in.values())
 }
@@ -1377,11 +2338,20 @@ func (c *Client) JoinWaitlist(ctx context.Context, in JoinWaitlistInput) (map[st
 // LeaveWaitlistInput holds the arguments of [Client.LeaveWaitlist].
 type LeaveWaitlistInput struct {
 	EntryID string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in LeaveWaitlistInput) values() map[string]any {
 	values := map[string]any{}
 	values["entry_id"] = in.EntryID
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
 	return values
 }
 
@@ -1403,6 +2373,12 @@ type RecordCoverageInput struct {
 	End string
 
 	Revision int64
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in RecordCoverageInput) values() map[string]any {
@@ -1412,6 +2388,9 @@ func (in RecordCoverageInput) values() map[string]any {
 	values["start"] = in.Start
 	values["end"] = in.End
 	values["revision"] = in.Revision
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
 	return values
 }
 
@@ -1428,12 +2407,21 @@ type DeleteCoverageInput struct {
 	ResourceID string
 
 	Source string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in DeleteCoverageInput) values() map[string]any {
 	values := map[string]any{}
 	values["resource_id"] = in.ResourceID
 	values["source"] = in.Source
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
 	return values
 }
 
@@ -1473,6 +2461,12 @@ type RecordCoverageFailureInput struct {
 	Source string
 
 	Error string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in RecordCoverageFailureInput) values() map[string]any {
@@ -1480,6 +2474,9 @@ func (in RecordCoverageFailureInput) values() map[string]any {
 	values["resource_id"] = in.ResourceID
 	values["source"] = in.Source
 	values["error"] = in.Error
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
 	return values
 }
 
@@ -1555,6 +2552,12 @@ type CancelTenantEventInput struct {
 	IdempotencyKey string
 
 	ExpectedResourceID *string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in CancelTenantEventInput) values() map[string]any {
@@ -1564,6 +2567,9 @@ func (in CancelTenantEventInput) values() map[string]any {
 	values["idempotency_key"] = in.IdempotencyKey
 	if in.ExpectedResourceID != nil {
 		values["expected_resource_id"] = *in.ExpectedResourceID
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
 	}
 	return values
 }
@@ -1630,7 +2636,8 @@ func (in EraseTenantInput) values() map[string]any {
 // confirm_tenant_ref must be the tenant's reference (slotlock_get_tenant), or it answers 400
 // invalid_confirmation. Off unless the server allows it (403 tenant_erasure_disabled; slotlock
 // serve does not: its operator runs slotlock tenant erase). A suspended tenant cannot erase
-// itself (403 tenant_suspended). Erasing again deletes nothing.
+// itself (403 tenant_suspended), nor can one whose hosted plan is still paid for until it is
+// cancelled (409 billing_active). Erasing again deletes nothing.
 func (c *Client) EraseTenant(ctx context.Context, in EraseTenantInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_erase_tenant", in.values())
 }
@@ -1703,6 +2710,24 @@ type CreateWebhookInput struct {
 	URL string
 
 	EventTypes []string
+
+	ResourceIDs []string
+
+	Pools []string
+
+	Locations []string
+
+	Groups []string
+
+	// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
+	// request answers what the first did; with another request, 422 idempotency_conflict.
+	IdempotencyKey *string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in CreateWebhookInput) values() map[string]any {
@@ -1711,6 +2736,24 @@ func (in CreateWebhookInput) values() map[string]any {
 	if in.EventTypes != nil {
 		values["event_types"] = in.EventTypes
 	}
+	if in.ResourceIDs != nil {
+		values["resource_ids"] = in.ResourceIDs
+	}
+	if in.Pools != nil {
+		values["pools"] = in.Pools
+	}
+	if in.Locations != nil {
+		values["locations"] = in.Locations
+	}
+	if in.Groups != nil {
+		values["groups"] = in.Groups
+	}
+	if in.IdempotencyKey != nil {
+		values["idempotency_key"] = *in.IdempotencyKey
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
 	return values
 }
 
@@ -1718,7 +2761,14 @@ func (in CreateWebhookInput) values() map[string]any {
 // https URL, each as a CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp,
 // webhook-signature), in order, until a 2xx. A failure is retried with backoff; after 24 hours of
 // failures, or a 410, the webhook is disabled and the feed records webhook.disabled. The secret
-// is returned here only. At most 10 per tenant.
+// is returned here only. At most 25 per tenant, or fewer on a plan (409 webhook_limit_reached).
+// With resource_ids, pools, locations (each with every location in it) or groups, only changes
+// about a resource that matches one of them, as it is when the change is delivered: a change
+// about no resource (a key, a webhook, a usage notice) is not sent. At most 100 resource ids and
+// 20 of each other kind (400 invalid_webhook_filter). With an idempotency key (the
+// Idempotency-Key header or idempotency_key), a retry answers the webhook and secret the first
+// request made (replayed: true) for as long as the webhook is kept; the same key with another
+// request is 422 idempotency_conflict.
 func (c *Client) CreateWebhook(ctx context.Context, in CreateWebhookInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_create_webhook", in.values())
 }
@@ -1726,11 +2776,20 @@ func (c *Client) CreateWebhook(ctx context.Context, in CreateWebhookInput) (map[
 // DeleteWebhookInput holds the arguments of [Client.DeleteWebhook].
 type DeleteWebhookInput struct {
 	WebhookID string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in DeleteWebhookInput) values() map[string]any {
 	values := map[string]any{}
 	values["webhook_id"] = in.WebhookID
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
 	return values
 }
 
@@ -1743,11 +2802,20 @@ func (c *Client) DeleteWebhook(ctx context.Context, in DeleteWebhookInput) (map[
 // EnableWebhookInput holds the arguments of [Client.EnableWebhook].
 type EnableWebhookInput struct {
 	WebhookID string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
 }
 
 func (in EnableWebhookInput) values() map[string]any {
 	values := map[string]any{}
 	values["webhook_id"] = in.WebhookID
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
 	return values
 }
 
@@ -1757,4 +2825,603 @@ func (in EnableWebhookInput) values() map[string]any {
 // delete it, add it again, and read what it missed from slotlock_list_changes.
 func (c *Client) EnableWebhook(ctx context.Context, in EnableWebhookInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_enable_webhook", in.values())
+}
+
+// GetUsageInput holds the arguments of [Client.GetUsage].
+type GetUsageInput struct {
+	From *string
+
+	To *string
+}
+
+func (in GetUsageInput) values() map[string]any {
+	values := map[string]any{}
+	if in.From != nil {
+		values["from"] = *in.From
+	}
+	if in.To != nil {
+		values["to"] = *in.To
+	}
+	return values
+}
+
+// GetUsage: Read usage. How much the tenant used the service from one UTC day to another
+// (inclusive, at most 400 days apart; by default the first of this month to today): operations
+// its keys and the dashboard assistant ran (each call that reached its operation, whatever it
+// returned), bookings (bookings, events and confirmed holds) and holds it made, webhook
+// deliveries its endpoints accepted, messages to the dashboard assistant, and the resources it
+// held (each day's count, archived ones included; in totals, the last day's, not a sum). Totals,
+// then by day, by API key (key_id null for none) and by surface (mcp, a2a, rest, application,
+// dashboard-assistant, webhooks); resources are by day only. Counts only, never what was asked.
+// Empty unless the server meters usage (SLOTLOCK_USAGE=on); operations, deliveries and messages
+// appear within 15 seconds; bookings, holds and resources within the hour. 400
+// invalid_usage_range when to is before from, the range is longer than 400 days, or to is after
+// today.
+func (c *Client) GetUsage(ctx context.Context, in GetUsageInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_get_usage", in.values())
+}
+
+// ListApprovalPoliciesInput holds the arguments of [Client.ListApprovalPolicies].
+type ListApprovalPoliciesInput struct {
+}
+
+func (in ListApprovalPoliciesInput) values() map[string]any {
+	values := map[string]any{}
+	return values
+}
+
+// ListApprovalPolicies: List approval policies. The tenant's approval policies, by reference:
+// which agent bookings wait for a person (require_approval) or are refused (refuse).
+func (c *Client) ListApprovalPolicies(ctx context.Context, in ListApprovalPoliciesInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_list_approval_policies", in.values())
+}
+
+// PutApprovalPolicyInput holds the arguments of [Client.PutApprovalPolicy].
+type PutApprovalPolicyInput struct {
+	PolicyRef string
+
+	Name string
+
+	Outcome string
+
+	AppliesTo map[string]any
+
+	Conditions map[string]any
+
+	ApprovalTTLMinutes *int64
+
+	LeadMinutes *int64
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in PutApprovalPolicyInput) values() map[string]any {
+	values := map[string]any{}
+	values["policy_ref"] = in.PolicyRef
+	values["name"] = in.Name
+	values["outcome"] = in.Outcome
+	if in.AppliesTo != nil {
+		values["applies_to"] = in.AppliesTo
+	}
+	if in.Conditions != nil {
+		values["conditions"] = in.Conditions
+	}
+	if in.ApprovalTTLMinutes != nil {
+		values["approval_ttl_minutes"] = *in.ApprovalTTLMinutes
+	}
+	if in.LeadMinutes != nil {
+		values["lead_minutes"] = *in.LeadMinutes
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// PutApprovalPolicy: Create or replace an approval policy. Which agent bookings
+// (slotlock_create_event, slotlock_confirm_slot, slotlock_book_pool, slotlock_book_together, and
+// moves by slotlock_update_event or slotlock_reschedule) a person approves first, or are refused.
+// applies_to names resources, pools, locations (with the locations in them) and groups; empty,
+// every resource. conditions narrow it: longer_than_minutes, outside_hours (outside the
+// resource's bookable hours), kinds (single, pool, bundle, move); a booking meets the policy when
+// it meets every condition given. outcome require_approval holds the exact time the booking would
+// take, under the approval, and answers the agent 409 approval_pending; refuse answers 403
+// approval_policy_refused. A person has approval_ttl_minutes to decide (default 1,440; at most
+// 43,200, and the server's ceiling), and must decide lead_minutes before the booking starts: the
+// wait is the earlier of the two. Where several apply, refuse wins, then the one that must be
+// decided soonest. At most 50 policies: one more is 409 approval_policy_limit_reached.
+func (c *Client) PutApprovalPolicy(ctx context.Context, in PutApprovalPolicyInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_put_approval_policy", in.values())
+}
+
+// DeleteApprovalPolicyInput holds the arguments of [Client.DeleteApprovalPolicy].
+type DeleteApprovalPolicyInput struct {
+	PolicyRef string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in DeleteApprovalPolicyInput) values() map[string]any {
+	values := map[string]any{}
+	values["policy_ref"] = in.PolicyRef
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// DeleteApprovalPolicy: Delete an approval policy. Stop applying a policy to new bookings.
+// Approvals it already asked for stay as they are, to be decided.
+func (c *Client) DeleteApprovalPolicy(ctx context.Context, in DeleteApprovalPolicyInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_delete_approval_policy", in.values())
+}
+
+// ListApprovalsInput holds the arguments of [Client.ListApprovals].
+type ListApprovalsInput struct {
+	Status *string
+
+	Limit *int64
+}
+
+func (in ListApprovalsInput) values() map[string]any {
+	values := map[string]any{}
+	if in.Status != nil {
+		values["status"] = *in.Status
+	}
+	if in.Limit != nil {
+		values["limit"] = *in.Limit
+	}
+	return values
+}
+
+// ListApprovals: List approvals. The tenant's approvals, newest first: bookings an agent asked
+// for that a policy holds for a person (pending, holding their time until expires_at), and those
+// decided (granted, declined, expired). Filter by status.
+func (c *Client) ListApprovals(ctx context.Context, in ListApprovalsInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_list_approvals", in.values())
+}
+
+// GetApprovalInput holds the arguments of [Client.GetApproval].
+type GetApprovalInput struct {
+	ApprovalID string
+}
+
+func (in GetApprovalInput) values() map[string]any {
+	values := map[string]any{}
+	values["approval_id"] = in.ApprovalID
+	return values
+}
+
+// GetApproval: Get an approval. One approval by id, with the booking it would make. 404
+// approval_not_found.
+func (c *Client) GetApproval(ctx context.Context, in GetApprovalInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_get_approval", in.values())
+}
+
+// DecideApprovalInput holds the arguments of [Client.DecideApproval].
+type DecideApprovalInput struct {
+	ApprovalID string
+
+	Decision string
+
+	Reason *string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in DecideApprovalInput) values() map[string]any {
+	values := map[string]any{}
+	values["approval_id"] = in.ApprovalID
+	values["decision"] = in.Decision
+	if in.Reason != nil {
+		values["reason"] = *in.Reason
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// DecideApproval: Grant or decline an approval. Decide a pending approval. grant makes the
+// booking as the agent asked for it, as that agent, in one transaction with letting the
+// approval's hold go, and answers it under booking; the agent's retry with its idempotency key
+// then answers the same booking. A write refused now (a booking rule changed, say) is refused
+// with its own code and the approval stays pending. decline frees the time; the agent's retry
+// answers 403 approval_declined with the reason. 404 approval_not_found; 409 approval_not_pending
+// when already decided; 409 approval_expired after its wait.
+func (c *Client) DecideApproval(ctx context.Context, in DecideApprovalInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_decide_approval", in.values())
+}
+
+// SandboxSeedInput holds the arguments of [Client.SandboxSeed].
+type SandboxSeedInput struct {
+	Scenario string
+}
+
+func (in SandboxSeedInput) values() map[string]any {
+	values := map[string]any{}
+	values["scenario"] = in.Scenario
+	return values
+}
+
+// SandboxSeed: Seed the test environment. Fill an empty test environment (a key starting
+// slk_test_) with a scenario to try an agent against: car-rental (cars and vans in pools at two
+// branches, 30-minute turnaround), clinic (practitioners and treatment rooms, half-hour slots on
+// weekdays) or desks (desks on two floors, and a hall that splits in two). Locations, groups,
+// resources with profiles, hours and booking rules, and three bookings tomorrow. 409
+// sandbox_not_empty when it has resources: reset it first. 403 sandbox_test_only for a live key.
+func (c *Client) SandboxSeed(ctx context.Context, in SandboxSeedInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_sandbox_seed", in.values())
+}
+
+// SandboxResetInput holds the arguments of [Client.SandboxReset].
+type SandboxResetInput struct {
+}
+
+func (in SandboxResetInput) values() map[string]any {
+	values := map[string]any{}
+	return values
+}
+
+// SandboxReset: Empty the test environment. Empty the test environment as if new: its resources,
+// locations, groups, bookings, events, holds, waitlist, approval policies and feed. Its API keys,
+// webhooks, plan and usage stay. Rows removed, by table. 403 sandbox_test_only for a live key.
+func (c *Client) SandboxReset(ctx context.Context, in SandboxResetInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_sandbox_reset", in.values())
+}
+
+// SandboxFastForwardInput holds the arguments of [Client.SandboxFastForward].
+type SandboxFastForwardInput struct {
+	Minutes int64
+}
+
+func (in SandboxFastForwardInput) values() map[string]any {
+	values := map[string]any{}
+	values["minutes"] = in.Minutes
+	return values
+}
+
+// SandboxFastForward: Move the test environment's waiting forward. Make what would lapse in the
+// test environment within minutes (1-525,600) lapse now: holds (a waitlist offer's and an
+// approval's among them) and pending approvals; then a maintenance pass reaps them as it would
+// have, releasing holds, passing offers on and expiring approvals, on the feed as usual. Bookings
+// and events keep their times; no-shows and series follow the real clock. 403 sandbox_test_only
+// for a live key.
+func (c *Client) SandboxFastForward(ctx context.Context, in SandboxFastForwardInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_sandbox_fast_forward", in.values())
+}
+
+// SandboxRaceInput holds the arguments of [Client.SandboxRace].
+type SandboxRaceInput struct {
+	ResourceID string
+
+	StartsAt string
+
+	EndsAt string
+
+	Agents *int64
+}
+
+func (in SandboxRaceInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_id"] = in.ResourceID
+	values["starts_at"] = in.StartsAt
+	values["ends_at"] = in.EndsAt
+	if in.Agents != nil {
+		values["agents"] = *in.Agents
+	}
+	return values
+}
+
+// SandboxRace: Race agents for one slot in the test environment. Race agents (2-200, default
+// 100), each an agent of its own, for one time on one resource of the test environment, through
+// the same path MCP, A2A and REST use: how many booked (one), how many were refused and why
+// (overlap, with alternatives), any server errors, and how long the answers took. 403
+// sandbox_test_only for a live key.
+func (c *Client) SandboxRace(ctx context.Context, in SandboxRaceInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_sandbox_race", in.values())
+}
+
+// PartnerGetAccountInput holds the arguments of [Client.PartnerGetAccount].
+type PartnerGetAccountInput struct {
+	Account string
+}
+
+func (in PartnerGetAccountInput) values() map[string]any {
+	values := map[string]any{}
+	values["account"] = in.Account
+	return values
+}
+
+// PartnerGetAccount: Read an account. One of the partner's accounts, with how many resources
+// (archived ones included) and active API keys it holds. 404 account_not_found for an account the
+// partner does not have.
+func (c *Client) PartnerGetAccount(ctx context.Context, in PartnerGetAccountInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_get_account", in.values())
+}
+
+// PartnerPutAccountInput holds the arguments of [Client.PartnerPutAccount].
+type PartnerPutAccountInput struct {
+	Account string
+
+	Plan string
+}
+
+func (in PartnerPutAccountInput) values() map[string]any {
+	values := map[string]any{}
+	values["account"] = in.Account
+	values["plan"] = in.Plan
+	return values
+}
+
+// PartnerPutAccount: Create or update an account. Create the partner's account with this id (your
+// own id for your user, 1-128 letters, digits, dots, dashes or underscores), or put it on another
+// plan: one of your contract's, whose limits and monthly quotas the account then has. Its tenant
+// is partner:<partner>:<account>, an ordinary Slotlock tenant of its own. Repeating the call
+// changes nothing more. 400 invalid_partner_plan for a plan your contract does not have.
+func (c *Client) PartnerPutAccount(ctx context.Context, in PartnerPutAccountInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_put_account", in.values())
+}
+
+// PartnerListAccountsInput holds the arguments of [Client.PartnerListAccounts].
+type PartnerListAccountsInput struct {
+}
+
+func (in PartnerListAccountsInput) values() map[string]any {
+	values := map[string]any{}
+	return values
+}
+
+// PartnerListAccounts: List accounts. The partner's accounts, by id: plan, whether suspended, and
+// when made and last changed.
+func (c *Client) PartnerListAccounts(ctx context.Context, in PartnerListAccountsInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_list_accounts", in.values())
+}
+
+// PartnerListKeysInput holds the arguments of [Client.PartnerListKeys].
+type PartnerListKeysInput struct {
+	Account string
+
+	Environment *string
+}
+
+func (in PartnerListKeysInput) values() map[string]any {
+	values := map[string]any{}
+	values["account"] = in.Account
+	if in.Environment != nil {
+		values["environment"] = *in.Environment
+	}
+	return values
+}
+
+// PartnerListKeys: List an account's keys. The account's API keys, revoked and expired ones
+// included, newest first; never the keys themselves.
+func (c *Client) PartnerListKeys(ctx context.Context, in PartnerListKeysInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_list_keys", in.values())
+}
+
+// PartnerCreateKeyInput holds the arguments of [Client.PartnerCreateKey].
+type PartnerCreateKeyInput struct {
+	Account string
+
+	Name string
+
+	Scopes []string
+
+	ExpiresInDays *int64
+
+	Environment *string
+
+	Limits map[string]any
+}
+
+func (in PartnerCreateKeyInput) values() map[string]any {
+	values := map[string]any{}
+	values["account"] = in.Account
+	values["name"] = in.Name
+	if in.Scopes != nil {
+		values["scopes"] = in.Scopes
+	}
+	if in.ExpiresInDays != nil {
+		values["expires_in_days"] = *in.ExpiresInDays
+	}
+	if in.Environment != nil {
+		values["environment"] = *in.Environment
+	}
+	if in.Limits != nil {
+		values["limits"] = in.Limits
+	}
+	return values
+}
+
+// PartnerCreateKey: Create a key for an account. An API key for the account, shown once in key
+// and never again; only its SHA-256 is kept. Give it to your user's calls: it acts in the
+// account's tenant, over MCP, A2A and REST, as any key. environment: test makes it in the
+// account's test environment instead (a tenant of its own, on the same plan, never billed; its
+// keys start slk_test_). scopes: some of the ones your contract allows (read and write unless it
+// says), by default all of them; expires_in_days: 1-3650, or none. limits hold the key's agent
+// below the server's limits: max_holds live at once, max_held_hours they hold together,
+// requests_per_minute, and requires_approval to make every booking it asks for wait for a person
+// (the account's Approvals). 403 scope_not_in_contract for another scope; 409
+// api_key_limit_reached past the account plan's keys.
+func (c *Client) PartnerCreateKey(ctx context.Context, in PartnerCreateKeyInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_create_key", in.values())
+}
+
+// PartnerRotateKeyInput holds the arguments of [Client.PartnerRotateKey].
+type PartnerRotateKeyInput struct {
+	Account string
+
+	KeyID string
+
+	Environment *string
+}
+
+func (in PartnerRotateKeyInput) values() map[string]any {
+	values := map[string]any{}
+	values["account"] = in.Account
+	values["key_id"] = in.KeyID
+	if in.Environment != nil {
+		values["environment"] = *in.Environment
+	}
+	return values
+}
+
+// PartnerRotateKey: Rotate an account's key. A new secret for one of the account's active keys,
+// shown once; the old one stops at once. The key keeps its id and what it booked. 404
+// key_not_found otherwise.
+func (c *Client) PartnerRotateKey(ctx context.Context, in PartnerRotateKeyInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_rotate_key", in.values())
+}
+
+// PartnerRevokeKeyInput holds the arguments of [Client.PartnerRevokeKey].
+type PartnerRevokeKeyInput struct {
+	Account string
+
+	KeyID string
+
+	Environment *string
+}
+
+func (in PartnerRevokeKeyInput) values() map[string]any {
+	values := map[string]any{}
+	values["account"] = in.Account
+	values["key_id"] = in.KeyID
+	if in.Environment != nil {
+		values["environment"] = *in.Environment
+	}
+	return values
+}
+
+// PartnerRevokeKey: Revoke an account's key. Revoke one of the account's keys at once; revoking
+// it again changes nothing. 404 key_not_found otherwise.
+func (c *Client) PartnerRevokeKey(ctx context.Context, in PartnerRevokeKeyInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_revoke_key", in.values())
+}
+
+// PartnerSuspendAccountInput holds the arguments of [Client.PartnerSuspendAccount].
+type PartnerSuspendAccountInput struct {
+	Account string
+
+	Reason *string
+}
+
+func (in PartnerSuspendAccountInput) values() map[string]any {
+	values := map[string]any{}
+	values["account"] = in.Account
+	if in.Reason != nil {
+		values["reason"] = *in.Reason
+	}
+	return values
+}
+
+// PartnerSuspendAccount: Suspend an account. Suspend the account, as slotlock tenant suspend: it
+// may read, and writes nothing; its keys get no new secret. suspended says whether it was not
+// suspended already.
+func (c *Client) PartnerSuspendAccount(ctx context.Context, in PartnerSuspendAccountInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_suspend_account", in.values())
+}
+
+// PartnerUnsuspendAccountInput holds the arguments of [Client.PartnerUnsuspendAccount].
+type PartnerUnsuspendAccountInput struct {
+	Account string
+}
+
+func (in PartnerUnsuspendAccountInput) values() map[string]any {
+	values := map[string]any{}
+	values["account"] = in.Account
+	return values
+}
+
+// PartnerUnsuspendAccount: Lift a suspension. Lift a suspension the partner made. One Pylota made
+// stays: unsuspended is false then, as when the account was not suspended.
+func (c *Client) PartnerUnsuspendAccount(ctx context.Context, in PartnerUnsuspendAccountInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_unsuspend_account", in.values())
+}
+
+// PartnerEraseAccountInput holds the arguments of [Client.PartnerEraseAccount].
+type PartnerEraseAccountInput struct {
+	Account string
+
+	Confirm string
+}
+
+func (in PartnerEraseAccountInput) values() map[string]any {
+	values := map[string]any{}
+	values["account"] = in.Account
+	values["confirm"] = in.Confirm
+	return values
+}
+
+// PartnerEraseAccount: Erase an account. Erase the account's tenant, every row it owns, as
+// /v1/tenant/erase, and the partner's record of it. confirm repeats the account. Cannot be
+// undone.
+func (c *Client) PartnerEraseAccount(ctx context.Context, in PartnerEraseAccountInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_erase_account", in.values())
+}
+
+// PartnerGetUsageInput holds the arguments of [Client.PartnerGetUsage].
+type PartnerGetUsageInput struct {
+	From *string
+
+	To *string
+
+	Account *string
+}
+
+func (in PartnerGetUsageInput) values() map[string]any {
+	values := map[string]any{}
+	if in.From != nil {
+		values["from"] = *in.From
+	}
+	if in.To != nil {
+		values["to"] = *in.To
+	}
+	if in.Account != nil {
+		values["account"] = *in.Account
+	}
+	return values
+}
+
+// PartnerGetUsage: Read the accounts' usage. The partner's accounts' usage, the counts Pylota
+// invoices from, by account, UTC day and metric (operations, bookings, holds, webhook_deliveries,
+// resources: each day's count), from one UTC day to another (inclusive, at most 400 days apart;
+// by default this month); one account, or all. 400 invalid_usage_range otherwise.
+func (c *Client) PartnerGetUsage(ctx context.Context, in PartnerGetUsageInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_get_usage", in.values())
+}
+
+// PartnerReconcileUsageInput holds the arguments of [Client.PartnerReconcileUsage].
+type PartnerReconcileUsageInput struct {
+	Day string
+
+	Accounts []map[string]any
+}
+
+func (in PartnerReconcileUsageInput) values() map[string]any {
+	values := map[string]any{}
+	values["day"] = in.Day
+	values["accounts"] = in.Accounts
+	return values
+}
+
+// PartnerReconcileUsage: Compare your counts with ours. Send your count of each account's
+// operations (and, if you keep them, bookings) on one ended UTC day, as your daily cross-check:
+// the answer gives ours beside yours for every account either of us counted, the difference in
+// percent, and whether every one is within 0.5%. A day outside that is recorded as a mismatch,
+// which Pylota looks into. Sending the same day again replaces its record.
+func (c *Client) PartnerReconcileUsage(ctx context.Context, in PartnerReconcileUsageInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_reconcile_usage", in.values())
 }

@@ -50,6 +50,9 @@ export const SLOTLOCK_ASSISTANT_TOOL_USE: Readonly<Record<SlotlockAgentOperation
     slotlock_create_event: 'propose',
     slotlock_update_event: 'propose',
     slotlock_delete_event: 'propose',
+    slotlock_confirm_slot: 'propose',
+    slotlock_reschedule: 'propose',
+    slotlock_cancel: 'propose',
   });
 
 for (const [operation, use] of Object.entries(SLOTLOCK_ASSISTANT_TOOL_USE)) {
@@ -74,6 +77,8 @@ export const SLOTLOCK_ASSISTANT_MAX_STORED_BYTES = 160_000;
 const MAX_ACTIONS_BYTES = 80_000;
 /** UTF-8 bytes of one proposed change's arguments as JSON; a larger one is not proposed. */
 export const SLOTLOCK_ASSISTANT_MAX_ACTION_BYTES = 16_000;
+/** Previous secrets a deployment may keep while keys are sealed again under its current one. */
+export const SLOTLOCK_ASSISTANT_MAX_PREVIOUS_SECRETS = 3;
 /** Proposed changes one conversation may have waiting at once (4 of the largest fit the bound). */
 export const SLOTLOCK_ASSISTANT_MAX_PENDING = 4;
 /** Characters of one tool result the model is shown. */
@@ -139,6 +144,12 @@ export interface SlotlockAssistantStore {
     actor?: string,
   ): Promise<{ saved: boolean }>;
   deleteSettings(tenantRef: string, actor?: string): Promise<boolean>;
+  /**
+   * Replace the sealed key `from` with `to` (the same key under the current secret) only while `from`
+   * is the one stored (store.ts resealAssistantKey). Without it, a key sealed under a previous secret
+   * still opens, and is opened that way each time.
+   */
+  resealKey?(tenantRef: string, from: string, to: string): Promise<boolean>;
   getConversation(tenantRef: string, memberRef: string): Promise<SlotlockAssistantConversationRecord | null>;
   /**
    * Replace a member's messages; keep the stored actions `keep` names, as they stand, and add the
@@ -184,6 +195,8 @@ export function createSlotlockAssistantStore(store: SlotlockStore): SlotlockAssi
       ),
     deleteSettings: (tenantRef, actor) =>
       store.withTenant(tenantRef, (tenant) => tenant.deleteAssistantSettings({ tenantRef }), by(actor)),
+    resealKey: (tenantRef, from, to) =>
+      store.withTenant(tenantRef, (tenant) => tenant.resealAssistantKey({ tenantRef, from, to }), by(undefined)),
     // Each read deletes the tenant's expired conversations first, for deployments whose maintenance
     // never meets the tenant (a Worker's).
     getConversation: (tenantRef, memberRef) =>
@@ -251,6 +264,12 @@ export function createSlotlockMemoryAssistantStore(
     },
     async deleteSettings(tenantRef) {
       return settings.delete(tenantRef);
+    },
+    async resealKey(tenantRef, from, to) {
+      const stored = settings.get(tenantRef);
+      if (!stored || stored.sealedKey !== from || to.length === 0 || to === from) return false;
+      settings.set(tenantRef, { ...stored, sealedKey: to });
+      return true;
     },
     async getConversation(tenantRef, memberRef) {
       const found = live(tenantRef, memberRef);
@@ -331,6 +350,23 @@ export async function sealSlotlockAssistantKey(
     encoder.encode(apiKey),
   );
   return `${SEAL_VERSION}.${Buffer.from(iv).toString('base64url')}.${Buffer.from(sealed).toString('base64url')}`;
+}
+
+/**
+ * The key a seal holds, tried with each secret in turn (the current one first, then
+ * SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS), and which one opened it: 0 for the current secret. Null when
+ * none of them sealed it for this tenant.
+ */
+export async function openSlotlockAssistantKeyWithAny(
+  secrets: readonly string[],
+  tenantRef: string,
+  sealed: string,
+): Promise<{ apiKey: string; secretIndex: number } | null> {
+  for (const [secretIndex, secret] of secrets.entries()) {
+    const apiKey = await openSlotlockAssistantKey(secret, tenantRef, sealed);
+    if (apiKey !== null) return { apiKey, secretIndex };
+  }
+  return null;
 }
 
 /** The key a seal holds, or null when it is not one this secret sealed for this tenant. */
@@ -723,6 +759,107 @@ export async function callSlotlockAssistantModel(request: ModelRequest): Promise
   }
   const turn = anthropic ? readAnthropic(body) : readOpenai(body);
   return { text: turn.text.slice(0, MAX_MODEL_TEXT), calls: turn.calls };
+}
+
+/**
+ * Providers the Settings form fills in (RFC 0003 A4): each one's API and the base URL it documents
+ * for it. Custom fills nothing, for any other OpenAI-compatible API. Choosing one saves nothing.
+ */
+export const SLOTLOCK_ASSISTANT_PRESETS: readonly {
+  id: string;
+  name: string;
+  provider: SlotlockAssistantProvider;
+  baseUrl: string;
+}[] = Object.freeze([
+  { id: 'anthropic', name: 'Anthropic', provider: 'anthropic', baseUrl: 'https://api.anthropic.com' },
+  { id: 'openai', name: 'OpenAI', provider: 'openai', baseUrl: 'https://api.openai.com/v1' },
+  { id: 'openrouter', name: 'OpenRouter', provider: 'openai', baseUrl: 'https://openrouter.ai/api/v1' },
+  {
+    id: 'google',
+    name: 'Google',
+    provider: 'openai',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+  },
+  { id: 'mistral', name: 'Mistral', provider: 'openai', baseUrl: 'https://api.mistral.ai/v1' },
+  { id: 'groq', name: 'Groq', provider: 'openai', baseUrl: 'https://api.groq.com/openai/v1' },
+  { id: 'together', name: 'Together', provider: 'openai', baseUrl: 'https://api.together.xyz/v1' },
+  { id: 'custom', name: 'Custom', provider: 'openai', baseUrl: '' },
+]);
+
+/** Models one list keeps: a provider may offer hundreds. */
+const MAX_LISTED_MODELS = 500;
+
+/**
+ * The models a provider offers (`GET /v1/models` on the Anthropic API, `GET /models` on an
+ * OpenAI-compatible one, listed under `data` or as a bare array), by id, sorted, for the Settings
+ * form's Model field. Throws
+ * SlotlockAssistantProviderError as a model call does, never with the key in its message.
+ */
+export async function listSlotlockAssistantModels(args: {
+  provider: SlotlockAssistantProvider;
+  baseUrl: string;
+  apiKey: string | null;
+  fetch: typeof fetch;
+  timeoutMs: number;
+}): Promise<string[]> {
+  const anthropic = args.provider === 'anthropic';
+  const headers: Record<string, string> = { accept: 'application/json', 'user-agent': 'slotlock-dashboard-assistant' };
+  if (anthropic) {
+    headers['anthropic-version'] = SLOTLOCK_ANTHROPIC_VERSION;
+    if (args.apiKey) headers['x-api-key'] = args.apiKey;
+  } else if (args.apiKey) {
+    headers.authorization = `Bearer ${args.apiKey}`;
+  }
+  const signal = AbortSignal.timeout(args.timeoutMs);
+  let response: Response;
+  try {
+    response = await args.fetch(anthropic ? `${args.baseUrl}/v1/models?limit=1000` : `${args.baseUrl}/models`, {
+      method: 'GET',
+      headers,
+      // Never follow a redirect: it would carry the key elsewhere.
+      redirect: 'manual',
+      signal,
+    });
+  } catch (error) {
+    const name = (error as { name?: unknown } | null)?.name;
+    if ((error as { code?: unknown } | null)?.code === 'private_address') {
+      throw new SlotlockAssistantProviderError('private_address');
+    }
+    throw new SlotlockAssistantProviderError(
+      name === 'TimeoutError' || name === 'AbortError' || signal.aborted ? 'timeout' : 'unavailable',
+    );
+  }
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    const status = response.status;
+    throw new SlotlockAssistantProviderError(
+      status === 401 || status === 403
+        ? 'refused_key'
+        : status === 404
+          ? 'not_found'
+          : status === 429
+            ? 'rate_limited'
+            : 'unavailable',
+      status,
+    );
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(await readBounded(response));
+  } catch (error) {
+    if (error instanceof SlotlockAssistantProviderError) throw error;
+    throw new SlotlockAssistantProviderError(signal.aborted ? 'timeout' : 'bad_answer');
+  }
+  // `{ data: [...] }` as OpenAI and Anthropic answer, or the bare array some OpenAI-compatible
+  // providers (Together) answer instead.
+  const listed = Array.isArray(body) ? body : isRecord(body) && Array.isArray(body.data) ? body.data : null;
+  if (!listed) throw new SlotlockAssistantProviderError('bad_answer');
+  const ids = new Set<string>();
+  for (const entry of listed) {
+    const id = isRecord(entry) ? entry.id : undefined;
+    if (typeof id === 'string' && SLOTLOCK_ASSISTANT_MODEL_NAME.test(id)) ids.add(id);
+  }
+  return [...ids].sort().slice(0, MAX_LISTED_MODELS);
 }
 
 /**

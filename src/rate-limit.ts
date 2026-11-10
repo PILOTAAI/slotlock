@@ -10,6 +10,9 @@
 // draft-ietf-httpapi-ratelimit-headers-11 (23 May 2026, read 2026-10-24): `"<policy>";r=<remaining>;
 // t=<seconds>` and `"<policy>";q=<quota>;w=<window seconds>`, or `qu="concurrent-requests"` for a
 // cap on requests at once. Retry-After is never earlier than the end of the effective window (§6).
+// With monthly quotas (quotas.ts), each operation's answer also lists them, `"operations_month"` and
+// `"bookings_month"`, counting down to the stop, and one over its quota is refused `quota_exceeded`
+// with Retry-After at the month's end.
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
@@ -30,6 +33,7 @@ import {
   type SlotlockRateName,
 } from './config.js';
 import type { SlotlockNodeServerConnection, SlotlockNodeServerFetchTarget } from './node-server.js';
+import { type SlotlockQuotas, slotlockQuotaFields, slotlockQuotaRefusal } from './quotas.js';
 import { SLOTLOCK_APPLICATION_REST_ROUTES, matchSlotlockRestRoute } from './rest-api.js';
 
 /** Keys one policy remembers; past this, the least recently used tenth is dropped at once. */
@@ -68,7 +72,8 @@ export type SlotlockRefusalReason =
   | 'lookup_overflow'
   | 'series_writes_busy'
   | 'maintenance_busy'
-  | 'request_too_large';
+  | 'request_too_large'
+  | 'quota_exceeded';
 
 /** One `refusals` log line: counts since the last one, and the most refused clients as pseudonyms. */
 export interface SlotlockRefusalCounts extends Record<SlotlockRefusalReason, number> {
@@ -108,6 +113,14 @@ export interface SlotlockRequestLimitsOptions {
    * through on this process's buckets alone, which still apply.
    */
   shared?: { take(bucket: string, rate: SlotlockRate): Promise<boolean> };
+  /**
+   * Monthly quotas (quotas.ts, SLOTLOCK_QUOTAS=on), checked by `quota`: an operation over its
+   * tenant's quota is refused `quota_exceeded` (429), with Retry-After at the month's end, and
+   * every operation's answer lists the tenant's quotas in its RateLimit fields.
+   */
+  quotas?: SlotlockQuotas;
+  /** Milliseconds since the epoch, for the quotas' reset; defaults to `Date.now`. */
+  clock?: () => number;
 }
 
 export interface SlotlockRequestLimits {
@@ -117,6 +130,8 @@ export interface SlotlockRequestLimits {
   consumeRateLimit(args: {
     principal: SlotlockAgentPrincipal;
     operation: SlotlockAgentOperation | 'protocol';
+    /** A dry run of a write, charged as a read. */
+    dryRun?: boolean;
   }): Promise<boolean>;
   /**
    * For `authorize`: when the operation may expand a recurring series, or runs maintenance, take its
@@ -129,6 +144,15 @@ export interface SlotlockRequestLimits {
     operation: SlotlockAgentOperation | SlotlockApplicationOperation;
     input: Record<string, unknown>;
   }): Promise<void>;
+  /**
+   * For `authorize`: with `quotas`, refuse an operation over its tenant's monthly quota, throwing a
+   * `SlotlockAgentOperationError` (`quota_exceeded`, 429) that names the metric, the quota, the stop
+   * and when the month resets. Without `quotas`, or for a tenant on no plan, nothing.
+   */
+  quota(args: {
+    principal: SlotlockAgentPrincipal;
+    operation: SlotlockAgentOperation | SlotlockApplicationOperation;
+  }): Promise<void>;
   /** Put the limits in front of `target`: the listener's fetch target. */
   serve(target: SlotlockNodeServerFetchTarget): SlotlockNodeServerFetchTarget;
   /** The client address a request reaching `serve`'s target was counted as (the dashboard's). */
@@ -138,6 +162,9 @@ export interface SlotlockRequestLimits {
 }
 
 type Route = 'mcp' | 'a2a' | 'rest' | 'sign_in' | 'health' | 'other';
+
+/** Distinct per-key rates (RFC 0004 A5) one server keeps buckets for; past this the oldest goes. */
+const MAX_KEY_LIMIT_RATES = 1_000;
 
 interface Policy {
   name: string;
@@ -168,8 +195,12 @@ interface RequestState {
   /** Aborted when the client goes, which ends a wait for a slot. */
   signal: AbortSignal;
   charged: { read: boolean; write: boolean };
+  /** The key's own rate (RFC 0004 A5) taken, once for the request. */
+  chargedKeyLimit?: boolean;
   refusal?: { reason: SlotlockRefusalReason; fields: Record<string, string> };
   tightest?: Verdict;
+  /** The tenant's quotas as its last operation found them, for the answer's RateLimit fields. */
+  quota?: { rateLimit: string[]; policy: string[] };
   release: Array<() => void>;
 }
 
@@ -573,11 +604,25 @@ export function createSlotlockRequestLimits(
   options: SlotlockRequestLimitsOptions,
 ): SlotlockRequestLimits {
   const now = options.now ?? (() => performance.now());
+  const clock = options.clock ?? Date.now;
   const { rates, caps } = options.limits;
   const policies = new Map<SlotlockRateName, { policy: Policy; buckets: ReturnType<typeof bucketsFor> }>();
   for (const [name, rate] of Object.entries(rates) as [SlotlockRateName, SlotlockRate | null][]) {
     if (rate !== null) policies.set(name, { policy: { name, rate }, buckets: bucketsFor(rate) });
   }
+  // Keys' own rates (RFC 0004 A5), one set of buckets for each rate in use; a key's bucket is keyed
+  // by key and rate, so a changed rate starts a fresh bucket.
+  const keyLimits = new Map<number, { policy: Policy; buckets: ReturnType<typeof bucketsFor> }>();
+  const keyLimitEntry = (perMinute: number) => {
+    let entry = keyLimits.get(perMinute);
+    if (!entry) {
+      if (keyLimits.size >= MAX_KEY_LIMIT_RATES) keyLimits.delete(keyLimits.keys().next().value as number);
+      const rate = { perSecond: perMinute / 60, burst: perMinute };
+      entry = { policy: { name: 'key_limit', rate }, buckets: bucketsFor(rate) };
+      keyLimits.set(perMinute, entry);
+    }
+    return entry;
+  };
   const states = new AsyncLocalStorage<RequestState>();
   const looked = new WeakMap<Request, SlotlockAgentPrincipal | null>();
   const addresses = new WeakMap<Request, string>();
@@ -616,6 +661,7 @@ export function createSlotlockRequestLimits(
       series_writes_busy: 0,
       maintenance_busy: 0,
       request_too_large: 0,
+      quota_exceeded: 0,
     };
   }
   const count = (reason: SlotlockRefusalReason, address: string) => {
@@ -654,13 +700,15 @@ export function createSlotlockRequestLimits(
    * Take a token from every bucket named, or from none: one with less than a token refuses the
    * request, and the one that frees soonest is not the answer, the one that frees last is.
    */
-  function charge(checks: Array<{ name: SlotlockRateName; key: string }>): {
+  function charge(
+    checks: Array<{ name: SlotlockRateName; key: string; entry?: { policy: Policy; buckets: ReturnType<typeof bucketsFor> } }>,
+  ): {
     ok: boolean;
     verdict?: Verdict;
   } {
     const at = now();
-    const found = checks.flatMap(({ name, key }) => {
-      const entry = policies.get(name);
+    const found = checks.flatMap(({ name, key, entry: given }) => {
+      const entry = given ?? policies.get(name);
       return entry ? [{ policy: entry.policy, bucket: entry.buckets.get(key, at) }] : [];
     });
     if (found.length === 0) return { ok: true };
@@ -705,7 +753,14 @@ export function createSlotlockRequestLimits(
     const application =
       state.application &&
       (principal.scopes === undefined || principal.scopes.includes(SLOTLOCK_APPLICATION_SCOPE));
-    const checks = due.flatMap((kind) => [
+    // A key's own rate (RFC 0004 A5): a minute's requests, reads and writes alike, as a bucket of
+    // its own beside the server's, so it only ever lowers what the key may do.
+    const own = principal.limits?.requestsPerMinute;
+    const keyLimit =
+      own !== undefined && Number.isSafeInteger(own) && own >= 1 && !state.chargedKeyLimit
+        ? [{ name: 'key_limit' as SlotlockRateName, key: `${keyOf}\0${own}`, entry: keyLimitEntry(own) }]
+        : [];
+    const checks = [...keyLimit, ...due.flatMap((kind) => [
       ...(application
         ? [{ name: `app_${kind}` as SlotlockRateName, key: principal.tenantRef }]
         : [
@@ -713,7 +768,7 @@ export function createSlotlockRequestLimits(
             { name: `tenant_${kind}` as SlotlockRateName, key: principal.tenantRef },
           ]),
       { name: `global_${kind}` as SlotlockRateName, key: '' },
-    ]);
+    ])];
     const outcome = charge(checks);
     if (!outcome.ok) {
       state.refusal = {
@@ -743,6 +798,7 @@ export function createSlotlockRequestLimits(
       }
     }
     for (const kind of due) state.charged[kind] = true;
+    if (keyLimit.length > 0) state.chargedKeyLimit = true;
     if (outcome.verdict) state.tightest = outcome.verdict;
     return true;
   }
@@ -774,14 +830,15 @@ export function createSlotlockRequestLimits(
       return options.authenticate(request);
     },
 
-    async consumeRateLimit({ principal, operation }) {
+    async consumeRateLimit({ principal, operation, dryRun }) {
       const state = states.getStore();
       if (!state) return true;
       const classes: Array<'read' | 'write'> = [];
       if (operation === 'protocol') {
         classes.push('read');
-        if (state.write) classes.push('write');
-      } else if (slotlockAgentOperationScope(operation) === 'write') {
+        if (state.write && dryRun !== true) classes.push('write');
+      } else if (slotlockAgentOperationScope(operation) === 'write' && dryRun !== true) {
+        // A dry run writes nothing: the request's read token is its charge (RFC 0004 A3).
         classes.push('write');
       }
       return chargeRequest(state, principal, classes);
@@ -818,6 +875,33 @@ export function createSlotlockRequestLimits(
         fields: concurrencyFields(slots.server.name, slots.server.cap),
       };
       throw new SlotlockAgentOperationError('server_busy', 503);
+    },
+
+    async quota({ principal, operation }) {
+      if (!options.quotas) return;
+      const state = states.getStore();
+      const verdict = await options.quotas.check({ tenantRef: principal.tenantRef, operation });
+      const at = clock();
+      if (verdict.ok) {
+        if (state && verdict.standings.length > 0) {
+          const { rateLimit, policy } = slotlockQuotaFields(verdict.standings, at);
+          state.quota = { rateLimit, policy };
+        }
+        return;
+      }
+      const { exceeded } = verdict;
+      const { rateLimit, policy, retryAfter } = slotlockQuotaFields([exceeded], at);
+      if (state) {
+        state.refusal = {
+          reason: 'quota_exceeded',
+          fields: {
+            'Retry-After': String(retryAfter),
+            RateLimit: rateLimit.join(', '),
+            'RateLimit-Policy': policy.join(', '),
+          },
+        };
+      }
+      throw slotlockQuotaRefusal(exceeded);
     },
 
     serve(target) {
@@ -882,11 +966,21 @@ export function createSlotlockRequestLimits(
           if (response.status === 401) count('auth_refused', address);
           if (response.status === 413) count('request_too_large', address);
           if (state.refusal) count(state.refusal.reason, address);
-          const fields =
+          let fields =
             state.refusal?.fields ??
             (state.tightest && (route === 'mcp' || route === 'a2a' || route === 'rest')
               ? fieldsOf(state.tightest, false)
               : undefined);
+          // The tenant's monthly quotas follow the bucket the answer reports, when nothing refused.
+          if (state.quota && !state.refusal) {
+            const join = (first: string | undefined, rest: string[]) =>
+              [...(first ? [first] : []), ...rest].join(', ');
+            fields = {
+              ...fields,
+              RateLimit: join(fields?.RateLimit, state.quota.rateLimit),
+              'RateLimit-Policy': join(fields?.['RateLimit-Policy'], state.quota.policy),
+            };
+          }
           if (!fields) return response;
           // A response's own headers may be immutable (Response.redirect): answer with a copy.
           const headers = new Headers(response.headers);

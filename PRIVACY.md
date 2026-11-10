@@ -1,6 +1,6 @@
 # Privacy notice for hosted Slotlock
 
-Last updated: 8 November 2026.
+Last updated: 10 November 2026.
 
 This notice covers hosted Slotlock (Slotlock Cloud): the API at `https://slotlock-api.pylota.io`
 (MCP, A2A and REST) and the dashboard at `https://app.slotlock.pylota.io`. Any GitHub account can
@@ -31,8 +31,11 @@ protection officer.
 | --- | --- | --- |
 | Your GitHub user id, which names your account (`github:<id>`) | GitHub, when you sign in to the dashboard | While your account exists |
 | Your GitHub login | GitHub, when you sign in | Only in your session cookie, never in the database |
+| Once Google sign-in is offered, if you use it: your Google account's id, which names your account (`google:<id>`), and its email address once Google has verified it | Google, when you sign in | The id while your account exists; the email only in your session cookie, never in the database |
+| Once teams are offered: the GitHub organizations you are an owner or member of (up to 20: their ids, logins and your role) | GitHub, when you sign in | Only in your session cookie, never in the database |
+| Once teams are offered: each organization turned on for Slotlock, by its GitHub id and login, whether it is on, and the GitHub user id of the owner who last turned it on or off, and when | An owner of the organization, on the Teams page | Until the organization's account is erased |
 | Your API keys: name, scopes, expiry, the first characters and a SHA-256 digest of each key (never the key itself), who created it (a GitHub user id), and when it was created, last used and revoked | You, in the dashboard or the API | While your account exists; a revoked or expired key stays listed until your account is erased |
-| Calendar content: resources with their names, time zones, weekly hours, booking rules and pools; holds, bookings and waitlist entries with their times, references and the holder names your agents give; events with their titles, descriptions, locations, organisers, attendees' names and email addresses, reminders and recurrence; and the outside calendars you record coverage from, by the source name you give (which can be a calendar address) with the last error reported for it | You and your agents | While your account exists, or until you delete it. Holds end when they expire and are then deleted; finished waitlist entries are deleted 30 days after their window |
+| Calendar content: resources with their names, descriptions, labels, the attributes you give them, time zones, weekly hours, booking rules and pools, and the locations and groups you put them in, with their names; holds, bookings and waitlist entries with their times, references and the holder names your agents give; events with their titles, descriptions, locations, organisers, attendees' names and email addresses, reminders and recurrence; and the outside calendars you record coverage from, by the source name you give (which can be a calendar address) with the last error reported for it | You and your agents | While your account exists, or until you delete it. Holds end when they expire and are then deleted; finished waitlist entries are deleted 30 days after their window |
 | Webhooks: each endpoint's address, its signing secret, the change types it receives, and its delivery state and last error | You | While your account exists, or until you delete the endpoint |
 | Activity history: each change to your resources, holds, bookings, events, coverage and waitlist, with ids, times, references, which key or GitHub user made it and through which interface. It never holds titles, descriptions or attendees | The service | 30 days |
 | A record of each event write, so a retried request returns the first result | The service | 30 days |
@@ -41,6 +44,8 @@ protection officer.
 | Your dashboard session, in a cookie | The service | 12 hours |
 | The sign-in in progress, in a cookie | The service | 10 minutes |
 | Dashboard assistant settings, if the dashboard offers the assistant and you set it up: the provider, its address, the model, and your provider key, stored only encrypted (AES-256-GCM) with its last four characters to show; and your conversation with it | You | Settings while your account exists or until you remove them; a conversation 2 hours after its last message |
+| Your plan: which plan, its status and renewal date, and the Stripe customer and subscription ids that link your account to its purchase. Your name, email, billing address, tax id and payment details go to Stripe directly and never reach us | The service and Stripe, if you upgrade | While your account exists |
+| How much your account uses the service: for each day (UTC), how many operations your keys and the dashboard assistant ran, how many bookings and holds you made, how many changes your webhooks accepted, how many messages were sent to the assistant, and how many resources you held, by API key and by interface (MCP, A2A, REST, the assistant), and which notices of a monthly allowance used (80%, 100%) your account was sent this month. Counts only: never what was asked or answered | The service | 400 days, then deleted; the notices, until the next month's first |
 | Connection details at Cloudflare: IP addresses, request times, paths and headers | Your browser or client, through Cloudflare | Cloudflare's dashboard request logs: at most 7 days |
 | Connection details at our server: IP address, time, path and user agent of each API request, in the log of the proxy in front of it | Your client, through Cloudflare | One file of at most 10 MB, overwritten as it fills |
 | The API server's own logs | The service | See below |
@@ -48,7 +53,8 @@ protection officer.
 
 The API server's logs record each call's operation and outcome, never its arguments or who made it.
 For each minute in which the server refused requests, they also record how many it refused (over a
-rate limit, while too busy, too large, or with a credential it did not accept) and list the ten
+rate limit or a monthly allowance, while too busy, too large, or with a credential it did not
+accept) and list the ten
 clients refused most, each named only by a pseudonym: a hash of its IP address, keyed by a secret
 held only in the running server's memory and replaced when it restarts. The server keeps a rotating
 copy of these logs of at most 100 MB, and sends them to a log store we run on the same server, which
@@ -58,8 +64,11 @@ Expired holds, finished waitlist entries and the records kept for 30 days are de
 maintenance job that runs every hour for every account that has data, whether or not its keys are
 in use.
 
-Sign-in asks GitHub for no permissions beyond your public profile. GitHub's token is used once, to
-read your user id and login, and is then dropped. The dashboard sets two cookies, both needed for
+Sign-in asks GitHub for no permissions beyond your public profile; once teams are offered, it also
+asks to read which organizations you belong to (`read:org`), so you can work in the ones turned on.
+GitHub's token is used once, to read your user id and login (and those organizations), and is then
+dropped. Once Google sign-in is offered, signing in with Google asks only for your account's id and
+email address (`openid email`); Google's tokens are not kept. The dashboard sets two cookies, both needed for
 sign-in to work: `__Host-slotlock-oauth` for the ten minutes a sign-in takes, and
 `__Host-slotlock-session` for your session. Both are secure, HTTP-only and limited to the dashboard's
 own site. We use no analytics or advertising cookies, so there is nothing to consent to or turn off.
@@ -72,6 +81,8 @@ our mailboxes, hosted by Google Workspace, for two years and then delete them.
 | Purpose | Data | Lawful basis (UK GDPR Article 6(1)) |
 | --- | --- | --- |
 | Running your account and the service you signed up for: storing your calendars, answering your agents, sending your webhooks, keeping your activity history | Account, keys, calendar content, webhooks, history, write records, sessions, assistant settings | (b) contract: the Terms of Service |
+| Applying your plan: its limits, upgrading and managing it through Stripe | Account, plan | (b) contract: the Terms of Service |
+| Measuring use: counting what each account uses (operations, bookings, holds, webhook deliveries, assistant messages, resources), to show you your usage and to apply your plan's allowances | Account, usage counts | (b) contract: the Terms of Service |
 | Keeping the service secure and available: authenticating requests, rate limiting, stopping abuse, investigating faults, and restoring from backups | Account, keys, connection details, logs, backups | (f) legitimate interests: a service anyone with a GitHub account can use must be protected from misuse and recoverable after a failure, and the logs hold no request content |
 | Answering you when you write to us | What you send | (b) contract, or (f) legitimate interests when you are not a user |
 | Meeting a legal obligation, such as a lawful request from an authority | What the request covers | (c) legal obligation |
@@ -89,6 +100,7 @@ not use your data for marketing, and we do not use your calendar content to trai
 | Cloudflare, Inc. | DNS, TLS and the network path to the API, including the tunnel to our server; it runs the dashboard and keeps its request logs, connects the dashboard to the database (Hyperdrive), and stores our encrypted backups (R2) | Its global network; the dashboard is placed near the London server; backups in its European Union jurisdiction |
 | GitHub, Inc. | Signs you in. GitHub is a separate controller of your GitHub account and learns that you signed in to Slotlock | United States |
 | Google LLC (Google Workspace) | Hosts the support, abuse and privacy mailboxes, so it holds the email you send us | Its global data centres, including the United States |
+| Stripe (the Stripe company named on your invoice) | Sells the Developer plan as merchant of record: takes the payment, calculates and pays sales tax or VAT, and issues invoices. We send it your account's id (`github:<id>`) with each purchase; Stripe is a separate controller of the purchase and keeps its records under [its own privacy policy](https://stripe.com/privacy) | Ireland, the United States and its other locations |
 
 Our uptime monitor, healthchecks.io, receives only whether the service is up, how many errors it
 served, and how much space the database and its disk use: no personal data.
@@ -108,7 +120,8 @@ process connection details and dashboard requests outside the United Kingdom, in
 United States; Cloudflare's data processing agreement relies on its certification under the Data
 Privacy Framework for transfers to the United States. Google Workspace, which holds the email you
 send us, can also process it outside the United Kingdom; Google's data processing terms provide the
-safeguards for those transfers. Write to us for a copy of the safeguards.
+safeguards for those transfers. Stripe receives your account's id with each purchase, including in
+the United States, under the safeguards in its own terms. Write to us for a copy of the safeguards.
 
 ## Security
 
@@ -127,11 +140,12 @@ time.
 To erase your account and everything in it, write to [privacy@pylota.io](mailto:privacy@pylota.io)
 naming your GitHub login. We reply with a word; sign in to the dashboard and create an API key with
 that word as its name, which shows us the account is yours. We then erase every resource, booking,
-event, hold, waitlist entry, webhook, history entry, assistant setting and key in the account, in one
+event, hold, waitlist entry, webhook, history entry, assistant setting, plan, usage count and key in the account, in one
 step, and tell you when it is done. What stays: the digests of your erased keys, with nothing about
 you, so those keys are never accepted again; a record that the account was suspended, with the reason we gave, if it was; log
 lines until they age out as described above; and backups, until they are replaced within about five
-weeks.
+weeks. A Developer plan is cancelled before the account is erased; Stripe keeps its own records of the
+purchase, as its privacy policy says.
 
 We answer every request within one month.
 

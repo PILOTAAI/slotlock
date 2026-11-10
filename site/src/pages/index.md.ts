@@ -80,7 +80,7 @@ export const GET: APIRoute = () => {
           `**${plan.name}** (${plan.host.toLowerCase()}): ${plan.price}${plan.per ? `, ${plan.per}` : ''}. ${plan.tagline} ${plan.features.join('; ')}. ${link(plan.cta)}`,
       ),
     ),
-    `${siteLinks(signIn.terms)} ${pricing.note} ${link(pricing.link)}`,
+    `${siteLinks(signIn.terms)} ${pricing.note} [${pricing.contact.label}](${pricing.contact.href}) ${link(pricing.link)}`,
     heading(source.heading),
     `[${source.repo.name}](${REPO_URL}), ${facts.license}.`,
     list(source.statements),

@@ -15,6 +15,7 @@ const REFUSAL_REASONS: readonly SlotlockRefusalReason[] = [
   'series_writes_busy',
   'maintenance_busy',
   'request_too_large',
+  'quota_exceeded',
 ];
 const MAINTENANCE_COUNTS = [
   'extended',
@@ -25,11 +26,13 @@ const MAINTENANCE_COUNTS = [
   'staleSources',
   'noShows',
   'waitlistOffers',
+  'approvalsExpired',
 ] as const;
 /** A label value: an operation, protocol or outcome code. Anything else is counted as `other`. */
 const LABEL = /^[a-z0-9_.]{1,64}$/;
 
-type Labels = Readonly<Record<string, string>>;
+/** A metric's labels, by name. */
+export type Labels = Readonly<Record<string, string>>;
 
 export interface SlotlockMetrics {
   /** Count what the agent server reports (its `onEvent`). */
@@ -42,8 +45,29 @@ export interface SlotlockMetrics {
   webhooks(result: SlotlockWebhookPassResult): void;
   /** Count a scrape refused for its credential. */
   refusedScrape(): void;
+  /**
+   * Count an authenticated request by the integrator its `Slotlock-Client` field names (RFC 0003
+   * P5): a name from the deployment's known list, `other` or `none` (slotlockClientLabel).
+   */
+  client(name: string): void;
   /** Everything counted so far, as a scrape answers it. */
   render(): string;
+  /** Everything counted so far, as data: for an OpenTelemetry metrics export (otel.ts). */
+  collect(): SlotlockMetricsSnapshot;
+}
+
+/** The counters and histograms of one server since it started (cumulative). */
+export interface SlotlockMetricsSnapshot {
+  startedAtMs: number;
+  counters: { name: string; help: string; points: { labels: Labels; value: number }[] }[];
+  histograms: {
+    name: string;
+    help: string;
+    /** Upper bounds, in seconds; each point's buckets count what fell at or under each one. */
+    bounds: readonly number[];
+    points: { labels: Labels; cumulative: number[]; sum: number; count: number }[];
+  }[];
+  gauges: { name: string; help: string; points: { labels: Labels; value: number }[] }[];
 }
 
 const label = (value: string) => (LABEL.test(value) ? value : 'other');
@@ -70,6 +94,9 @@ class Counter {
     const current = this.values.get(id) ?? { labels, value: 0 };
     current.value += amount;
     this.values.set(id, current);
+  }
+  points(): { labels: Labels; value: number }[] {
+    return [...this.values.values()].map(({ labels, value }) => ({ labels, value }));
   }
   render(type = 'counter'): string[] {
     const lines = [`# HELP ${this.name} ${this.help}`, `# TYPE ${this.name} ${type}`];
@@ -103,6 +130,9 @@ class Histogram {
     current.sum += seconds;
     current.count += 1;
     this.series.set(id, current);
+  }
+  points(): { labels: Labels; cumulative: number[]; sum: number; count: number }[] {
+    return [...this.series.values()].map(({ labels, buckets, sum, count }) => ({ labels, cumulative: [...buckets], sum, count }));
   }
   render(): string[] {
     const lines = [`# HELP ${this.name} ${this.help}`, `# TYPE ${this.name} histogram`];
@@ -153,6 +183,10 @@ export function createSlotlockMetrics(info: {
     'slotlock_maintenance_items_total',
     'What maintenance did, by kind: series extended, holds pruned, no-shows released, waitlist offers made, and so on.',
   );
+  const clients = new Counter(
+    'slotlock_requests_by_client_total',
+    'Authenticated requests by the integrator their Slotlock-Client field names (known ones, other or none).',
+  );
   const deliveries = new Counter(
     'slotlock_webhook_deliveries_total',
     'Webhook changes delivered, and deliveries that failed and will be retried.',
@@ -188,6 +222,9 @@ export function createSlotlockMetrics(info: {
     refusedScrape() {
       refused.add({ reason: 'metrics_auth_refused' });
     },
+    client(name) {
+      clients.add({ client: label(name) });
+    },
     webhooks(result) {
       if (result.delivered > 0) deliveries.add({ result: 'delivered' }, result.delivered);
       if (result.failed > 0) deliveries.add({ result: 'failed' }, result.failed);
@@ -211,8 +248,18 @@ export function createSlotlockMetrics(info: {
         ...passes.render(),
         ...upkeep.render(),
         ...deliveries.render(),
+        ...clients.render(),
       ];
       return `${lines.join('\n')}\n`;
+    },
+    collect() {
+      const counter = (metric: Counter) => ({ name: metric.name, help: metric.help, points: metric.points() });
+      return {
+        startedAtMs: started * 1000,
+        counters: [calls, confirmations, subscriptions, refused, passes, upkeep, deliveries, clients].map(counter),
+        histograms: [{ name: duration.name, help: duration.help, bounds: BUCKETS, points: duration.points() }],
+        gauges: [{ name: 'slotlock_subscriptions_open', help: 'MCP subscriptions open now.', points: [{ labels: {}, value: open }] }],
+      };
     },
   };
 }

@@ -6,6 +6,8 @@ import {
   SLOTLOCK_CORE_DDL,
   SLOTLOCK_DASHBOARD_FORM_LIMIT,
   SLOTLOCK_DASHBOARD_FUNCTIONS,
+  SLOTLOCK_PARTNER_FUNCTIONS,
+  SLOTLOCK_PARTNER_TABLES,
   SLOTLOCK_DASHBOARD_TABLES,
   SLOTLOCK_DEFINER_FUNCTIONS,
   SLOTLOCK_DEFINER_TABLES,
@@ -165,6 +167,7 @@ describe('deployment DDL name resolution', () => {
   it('defines the API key, dashboard, schema version and tenant functions as SECURITY DEFINER, executable by no one by default', () => {
     expect([...SLOTLOCK_DEFINER_FUNCTIONS]).toEqual([
       ...SLOTLOCK_API_KEY_FUNCTIONS,
+      ...SLOTLOCK_PARTNER_FUNCTIONS,
       ...SLOTLOCK_DASHBOARD_FUNCTIONS,
       ...SLOTLOCK_SCHEMA_FUNCTIONS,
       ...SLOTLOCK_TENANT_ADMIN_FUNCTIONS,
@@ -204,6 +207,7 @@ describe('deployment DDL name resolution', () => {
   it('keeps API keys, dashboard records, the schema version and suspensions in tables no role but their owner reads or writes', () => {
     expect([...SLOTLOCK_DEFINER_TABLES]).toEqual([
       ...SLOTLOCK_API_KEY_TABLES,
+      ...SLOTLOCK_PARTNER_TABLES,
       ...SLOTLOCK_DASHBOARD_TABLES,
       ...SLOTLOCK_SCHEMA_TABLES,
       ...SLOTLOCK_TENANT_ADMIN_TABLES,

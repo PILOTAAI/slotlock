@@ -595,7 +595,12 @@ export const pricing = {
       more: { label: 'GitHub', href: REPO_URL },
     },
   ] satisfies Plan[],
-  note: `Your own servers, support and a contract: write to ${SUPPORT_EMAIL}.`,
+  note: 'Your own servers, support and a contract?',
+  /** The Custom column's link on the hosted service page, else the support address. */
+  contact: (facts as { planContact?: { label: string; href: string } | null }).planContact ?? {
+    label: `Write to ${SUPPORT_EMAIL}`,
+    href: `mailto:${SUPPORT_EMAIL}`,
+  },
   link: freePlan
     ? { label: 'Plans in detail', href: '/docs/hosted/#plans' }
     : { label: 'Hosted Slotlock', href: '/docs/hosted/' },

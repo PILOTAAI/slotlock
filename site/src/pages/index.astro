@@ -644,7 +644,8 @@ curl "{CLOUD_API_URL}/v1/pool-availability?pool={developers.restPool}&start={poo
             }
           </ul>
           <p class="plans__note">
-            {pricing.note} <a class="arrow-link" href={pricing.link.href}>{pricing.link.label} <Icon name="arrow" /></a>
+            {pricing.note} <a href={pricing.contact.href}>{pricing.contact.label}</a>
+            <a class="arrow-link" href={pricing.link.href}>{pricing.link.label} <Icon name="arrow" /></a>
           </p>
         </div>
       </section>

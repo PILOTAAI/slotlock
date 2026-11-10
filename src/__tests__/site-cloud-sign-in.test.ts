@@ -44,13 +44,16 @@ describe('the site signs people in to Slotlock Cloud', () => {
     }
   });
 
-  it('promises Slotlock Cloud no organization tenants, which it does not configure', () => {
-    // The hosted dashboard sets no SLOTLOCK_DASHBOARD_ORGS: each account is its own tenant.
+  it('promises Slotlock Cloud organizations only as owners turn them on (SLOTLOCK_DASHBOARD_ORGS=enabled)', () => {
+    // Each account is its own tenant; an organization is one only once an owner turns it on, on the
+    // Teams page: never a fixed list the service would have to configure.
     const cloud = landing.slice(landing.indexOf('export const pricing = {'), landing.indexOf('export const source = {'));
     expect(cloud, 'canary: the pricing section').toContain("eyebrow: 'Slotlock Cloud'");
     expect(cloud).not.toMatch(/organi[sz]ation/i);
-    expect(read('docs/hosted/README.md')).not.toMatch(/organi[sz]ation/i);
     expect(read('site/src/data/llms.mjs')).not.toMatch(/organi[sz]ation/i);
+    const hosted = read('docs/hosted/README.md');
+    expect(hosted).toContain('an owner has turned Slotlock on for (the dashboard\'s Teams\npage)');
+    expect(hosted).toContain('`read:org`');
   });
 
   it('lists the endpoints the hosted service page publishes', () => {

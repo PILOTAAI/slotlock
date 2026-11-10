@@ -56,6 +56,7 @@ type Client struct {
 	apiKey     string
 	httpClient *http.Client
 	userAgent  string
+	account    string
 }
 
 // Option changes how New builds a Client.
@@ -65,6 +66,7 @@ type options struct {
 	httpClient    *http.Client
 	userAgent     string
 	allowInsecure bool
+	account       string
 }
 
 // WithHTTPClient sends requests with the given client (timeouts, proxies, transports), less its
@@ -73,6 +75,10 @@ func WithHTTPClient(client *http.Client) Option { return func(o *options) { o.ht
 
 // WithUserAgent replaces the User-Agent, slotlock-go/<version> by default.
 func WithUserAgent(userAgent string) Option { return func(o *options) { o.userAgent = userAgent } }
+
+// WithAccount makes a partner key (slk_partner_...) act for one of the partner's accounts, sent as
+// Slotlock-Account, where the partner's contract allows it.
+func WithAccount(account string) Option { return func(o *options) { o.account = account } }
 
 // AllowInsecure lets New send the key over plain HTTP to a host other than this machine.
 func AllowInsecure() Option { return func(o *options) { o.allowInsecure = true } }
@@ -99,6 +105,9 @@ func New(baseURL, apiKey string, opts ...Option) (*Client, error) {
 	if apiKey == "" || strings.IndexFunc(apiKey, func(r rune) bool { return r < 0x21 || r > 0x7e }) >= 0 {
 		return nil, errors.New("slotlock: apiKey must be a Slotlock API key or the server token")
 	}
+	if o.account != "" && !accountPattern.MatchString(o.account) {
+		return nil, errors.New("slotlock: account must be 1-128 letters, digits, dots, dashes or underscores")
+	}
 	// A copy, so the caller's client keeps its own policy. A redirect is answered as it came: the key
 	// never goes with another request. (The default transport's proxy already skips this machine.)
 	httpClient := *o.httpClient
@@ -108,6 +117,7 @@ func New(baseURL, apiKey string, opts ...Option) (*Client, error) {
 		apiKey:     apiKey,
 		httpClient: &httpClient,
 		userAgent:  o.userAgent,
+		account:    o.account,
 	}, nil
 }
 
@@ -166,6 +176,9 @@ func (c *Client) Call(ctx context.Context, name string, values map[string]any) (
 	request.Header.Set("Authorization", "Bearer "+c.apiKey)
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("User-Agent", c.userAgent)
+	if c.account != "" {
+		request.Header.Set("Slotlock-Account", c.account)
+	}
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
@@ -243,6 +256,8 @@ func refusal(response *http.Response, payload []byte) error {
 
 // maxRetryAfter is the longest wait a Retry-After is read as.
 const maxRetryAfter = 24 * time.Hour
+
+var accountPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 
 var retryAfterSeconds = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?$`)
 

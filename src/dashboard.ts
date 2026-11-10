@@ -15,13 +15,21 @@
 // is held in the database too.
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Sql } from 'postgres';
-import type { SlotlockApiKey, SlotlockApiKeyScope, SlotlockApiKeyStore } from './api-keys.js';
+import type { SlotlockDashboardTeams } from './teams.js';
+import {
+  SLOTLOCK_TEST_TENANT_SUFFIX,
+  type SlotlockApiKey,
+  type SlotlockApiKeyLimits,
+  type SlotlockApiKeyScope,
+  type SlotlockApiKeyStore,
+} from './api-keys.js';
 import {
   type SlotlockAgentCalendarBackend,
   type SlotlockAgentOperation,
   type SlotlockAgentOperationDispatchOptions,
   type SlotlockAgentOperationDispatchResult,
   type SlotlockAgentPrincipal,
+  type SlotlockAgentUsage,
   type SlotlockAgentWriteOperation,
   describeSlotlockAgentWrite,
   invokeSlotlockAgentOperation,
@@ -32,7 +40,9 @@ import {
   SLOTLOCK_ASSISTANT_MAX_ACTION_BYTES,
   SLOTLOCK_ASSISTANT_MAX_MESSAGE,
   SLOTLOCK_ASSISTANT_MAX_PENDING,
+  SLOTLOCK_ASSISTANT_MAX_PREVIOUS_SECRETS,
   SLOTLOCK_ASSISTANT_MODEL_NAME,
+  SLOTLOCK_ASSISTANT_PRESETS,
   SLOTLOCK_ASSISTANT_TOOL_USE,
   type SlotlockAssistantAction,
   type SlotlockAssistantEntry,
@@ -40,7 +50,7 @@ import {
   type SlotlockAssistantStore,
   boundSlotlockAssistantEntries,
   createSlotlockAssistantStore,
-  openSlotlockAssistantKey,
+  openSlotlockAssistantKeyWithAny,
   pendingSlotlockAssistantActions,
   pruneSlotlockAssistantActions,
   checkSlotlockAssistantHost,
@@ -52,6 +62,7 @@ import {
   slotlockAssistantProviderMessage,
   slotlockAssistantSystemPrompt,
   testSlotlockAssistantModel,
+  listSlotlockAssistantModels,
 } from './assistant.js';
 import { SLOTLOCK_DASHBOARD_NAME_PATTERN, type SlotlockRate } from './config.js';
 import { createSlotlockRateLimiter } from './rate-limit.js';
@@ -60,6 +71,22 @@ import { lookup as dnsLookup } from 'node:dns/promises';
 import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from './ddl.js';
 import { ignoreRejection } from './hooks.js';
 import { SLOTLOCK_BOOKING_RULE_LIMITS, type SlotlockBookingRules } from './booking-rules.js';
+import { SLOTLOCK_DASHBOARD_ICON_SVG } from './dashboard-icon.js';
+import { SLOTLOCK_PLAN_LIMITS, SLOTLOCK_PLAN_QUOTAS, type SlotlockPlan, type SlotlockTenantPlan } from './plans.js';
+import {
+  SLOTLOCK_MAX_GROUPS_PER_RESOURCE,
+  SLOTLOCK_MAX_LOCATION_DEPTH,
+  SLOTLOCK_MAX_LOCATIONS,
+  SLOTLOCK_MAX_RESOURCE_GROUPS,
+  SLOTLOCK_RESOURCE_KINDS,
+  SLOTLOCK_RESOURCE_PROFILE_LIMITS,
+  type SlotlockLocation,
+  type SlotlockResourceGroup,
+  type SlotlockResourceKind,
+  type SlotlockResourceProfileInput,
+} from './resource-profile.js';
+import { slotlockQuotaPeriod } from './quotas.js';
+import { type SlotlockUsageRow, slotlockUsageMonthToDate, summarizeSlotlockUsage } from './usage.js';
 import {
   type CreateWebhookEndpointResult,
   SLOTLOCK_CHANGE_TYPES,
@@ -67,9 +94,19 @@ import {
   type SlotlockWebhookEndpoint,
 } from './event-feed.js';
 import type { SlotlockSql, SlotlockStore, SlotlockWaitlistEntry } from './store.js';
+import { SlotlockAgentOperationError } from './agent-server.js';
+import { runSlotlockApprovalGrant } from './agent-store-backend.js';
+import {
+  SLOTLOCK_SANDBOX_SCENARIOS,
+  type SlotlockSandboxScenario,
+  fastForwardSlotlockSandbox,
+  resetSlotlockSandbox,
+  seedSlotlockSandbox,
+} from './sandbox.js';
 import type {
   Interval,
   SlotlockAgendaEntry,
+  SlotlockApproval,
   SlotlockResource,
   SlotlockBookingRuleDefaults,
   WeeklyAvailabilityRule,
@@ -84,9 +121,16 @@ import {
 } from './weekly-hours.js';
 
 /** Resources one dashboard tenant may hold. */
-export const SLOTLOCK_DASHBOARD_MAX_RESOURCES = 100;
+export const SLOTLOCK_DASHBOARD_MAX_RESOURCES = 500;
 const SESSION_TTL_MS = 12 * 3_600_000;
 const SIGN_IN_TTL_MS = 10 * 60_000;
+/**
+ * How recent a sign-in must be to turn an organization on or off: who owns it is read from GitHub
+ * as one signs in, so a change of owners reaches the dashboard by signing in again.
+ */
+const FRESH_SIGN_IN_MS = 15 * 60_000;
+/** How long Google's signing keys are kept when its answer does not say (Cache-Control max-age). */
+const GOOGLE_KEYS_DEFAULT_TTL_MS = 3_600_000;
 const MAX_FORM_BYTES = 8_192;
 /** A message to the assistant: 2,000 characters, each up to 9 bytes as a form encodes it. */
 const MAX_ASSISTANT_FORM_BYTES = 24_576;
@@ -106,27 +150,47 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/keys',
   '/keys/rotate',
   '/keys/revoke',
+  '/keys/limits',
   '/resources',
   '/resources/rules',
   '/resources/pool',
+  '/resources/profile',
+  '/resources/place',
+  '/resources/parent',
+  '/locations',
+  '/locations/delete',
+  '/groups',
+  '/groups/delete',
   '/webhooks',
   '/webhooks/delete',
   '/webhooks/enable',
   '/waitlist/leave',
+  '/approvals/decide',
+  '/sandbox/seed',
+  '/sandbox/reset',
+  '/sandbox/fast-forward',
   '/hours',
   '/organization',
+  '/environment',
+  '/teams/enable',
+  '/teams/disable',
   '/assistant',
   '/assistant/approve',
   '/assistant/dismiss',
   '/assistant/reset',
   '/settings/assistant',
   '/settings/assistant/test',
+  '/settings/assistant/models',
   '/settings/assistant/remove',
+  '/plan/upgrade',
+  '/plan/manage',
 ]);
 const SIGN_IN_AGAIN = 'That sign-in did not finish here, or took too long. Sign in again.';
 const GITHUB_ERROR_CODE = /^[a-z0-9_]{1,64}$/;
 const MAX_COOKIE_CHARACTERS = 4_096;
 const GITHUB_TIMEOUT_MS = 10_000;
+/** A Google account's subject: ASCII, at most 255 characters (OpenID Connect); Google's are digits. */
+const GOOGLE_SUBJECT = /^[A-Za-z0-9._-]{1,255}$/;
 /** The REST API version GitHub documents for GET /user (docs.github.com, read 2026-10-10). */
 const GITHUB_API_VERSION = '2026-03-10';
 const USER_AGENT = 'slotlock-dashboard';
@@ -157,12 +221,36 @@ const REFERRER_POLICY = 'same-origin';
 const CONTENT_SECURITY_POLICY =
   "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
+/** The policy, with billing's origins allowed as form targets so Upgrade and Manage can redirect. */
+function policyFor(billing: SlotlockDashboardBilling | undefined): string {
+  if (!billing) return CONTENT_SECURITY_POLICY;
+  const contact = new URL(billing.contact);
+  if (contact.protocol !== 'https:' && contact.protocol !== 'mailto:') {
+    throw new Error('billing.contact must be an https or mailto URL');
+  }
+  const origins = billing.formOrigins.map((value) => {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'https:' || parsed.origin !== value.replace(/\/$/, '')) {
+      throw new Error(`billing.formOrigins must be https origins: ${value}`);
+    }
+    return parsed.origin;
+  });
+  return CONTENT_SECURITY_POLICY.replace(
+    "form-action 'self'",
+    ["form-action 'self'", ...origins].join(' '),
+  );
+}
+
 /**
  * A tenant's calendar resources, as the dashboard lists and adds them. Each write takes, last, the
  * person who made it (`github:<user id>`) as `actor`, to record on the event feed.
  */
 export interface SlotlockDashboardResources {
   list(tenantRef: string): Promise<SlotlockResource[]>;
+  /** How many resources the tenant has, archived ones included, as a resource limit counts them. */
+  count?(tenantRef: string): Promise<number>;
+  /** The tenant's metered usage from `from` to `to`, UTC days inclusive (usage.ts). */
+  usage?(tenantRef: string, from: string, to: string): Promise<SlotlockUsageRow[]>;
   /**
    * Create the resource, or re-zone the tenant's resource with that reference. Refuse a new one
    * (an error with `code: 'resource_limit_reached'`) once the tenant has
@@ -201,6 +289,22 @@ export interface SlotlockDashboardResources {
   ): Promise<SlotlockResource | null>;
   /** The tenant's default booking rules and its pools', which a resource's own rules overlay. */
   ruleDefaults?(tenantRef: string): Promise<SlotlockBookingRuleDefaults>;
+  /**
+   * Change one of the tenant's resources' profile (resource-profile.ts): the fields given, keeping
+   * the rest. As setRules; `code: 'invalid_resource_profile'`, with the `field`.
+   */
+  setProfile?(
+    tenantRef: string,
+    id: string,
+    profile: SlotlockResourceProfileInput,
+    actor?: string,
+  ): Promise<SlotlockResource | null>;
+  /**
+   * Make one of the tenant's resources a part of a composite (RFC 0003 G8), or no part. A refusal
+   * carries the store's `code`: `parent_not_found`, `composite_too_deep`, `composite_parts_limit`
+   * or `composite_busy`.
+   */
+  setParent?(tenantRef: string, id: string, parentId: string | null, actor?: string): Promise<SlotlockResource | null>;
   /** Put one of the tenant's resources in a pool, or none: as setRules; `code: 'invalid_pool'`. */
   setPool?(
     tenantRef: string,
@@ -208,6 +312,67 @@ export interface SlotlockDashboardResources {
     pool: string | null,
     actor?: string,
   ): Promise<SlotlockResource | null>;
+  /**
+   * The tenant's locations and groups (RFC 0003 G2, G3), and where each resource is in them. A
+   * refusal carries the store's `code`: `invalid_location` or `invalid_group` (with the `field`),
+   * `location_not_found`, `location_too_deep`, `location_cycle`, `location_limit_reached`,
+   * `location_in_use`, `group_not_found`, `group_limit_reached` or `resource_group_limit_reached`.
+   */
+  grouping?: {
+    /** Each under its parent, depth first, with how many resources are at each. */
+    locations(tenantRef: string): Promise<SlotlockLocation[]>;
+    /** Create the location with this reference, or change its name, parent and time zone. */
+    putLocation(
+      tenantRef: string,
+      location: { ref: string; name: string; parentRef: string | null; timezone: string | null },
+      actor?: string,
+    ): Promise<SlotlockLocation>;
+    /** False when the tenant has no such location. */
+    deleteLocation(tenantRef: string, ref: string, actor?: string): Promise<boolean>;
+    /** By reference, with how many resources are in each. */
+    groups(tenantRef: string): Promise<SlotlockResourceGroup[]>;
+    /** Create the group with this reference, or change its name and description. */
+    putGroup(
+      tenantRef: string,
+      group: { ref: string; name: string; description: string | null },
+      actor?: string,
+    ): Promise<SlotlockResourceGroup>;
+    /** Delete a group, its resources left as they are: false when the tenant has no such group. */
+    deleteGroup(tenantRef: string, ref: string, actor?: string): Promise<boolean>;
+    /**
+     * Put one of the tenant's resources at a location (or none) and in exactly these groups, in one
+     * transaction: the resource as it then is, or null when it is not the tenant's.
+     */
+    place(
+      tenantRef: string,
+      id: string,
+      place: { location: string | null; groups: readonly string[] },
+      actor?: string,
+    ): Promise<SlotlockResource | null>;
+  };
+  /**
+   * The tenant's approvals (RFC 0004 A4), newest first, and deciding one: a grant makes the booking
+   * as the agent asked for it; a refusal says why (approval_not_pending, overlap, a booking rule).
+   */
+  approvals?: {
+    list(tenantRef: string, limit: number): Promise<SlotlockApproval[]>;
+    decide(
+      tenantRef: string,
+      id: string,
+      decision: 'grant' | 'decline',
+      actor?: string,
+      reason?: string,
+    ): Promise<{ ok: true } | { ok: false; code: string }>;
+  };
+  /**
+   * The sandbox (RFC 0004 A6), for a test environment only: fill it with a scenario, empty it, and
+   * make what would lapse within some minutes lapse now. Each refuses a live tenant.
+   */
+  sandbox?: {
+    seed(tenantRef: string, scenario: SlotlockSandboxScenario): Promise<{ resources: number; bookings: number }>;
+    reset(tenantRef: string): Promise<void>;
+    fastForward(tenantRef: string, minutes: number): Promise<{ holds: number; approvals: number }>;
+  };
   /** The tenant's waitlist, oldest first, and leaving it (false when the entry is not the tenant's). */
   waitlist?: {
     list(tenantRef: string, limit: number): Promise<SlotlockWaitlistEntry[]>;
@@ -267,6 +432,18 @@ export interface SlotlockDashboardState {
 export interface SlotlockDashboardAssistantOptions {
   /** Seals each tenant's API key (SLOTLOCK_ASSISTANT_SECRET): 32+ random characters. */
   secret: string;
+  /**
+   * Secrets keys may still be sealed under (SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS), newest first, at
+   * most SLOTLOCK_ASSISTANT_MAX_PREVIOUS_SECRETS: a key one of them opens is used, and sealed again
+   * under `secret` in the same request, so changing the secret makes no owner enter a key again.
+   * Drop an old secret once every tenant has used the assistant since the change, or keys still
+   * sealed under it stop opening.
+   */
+  previousSecrets?: readonly string[];
+  /** Each operation the assistant runs, for usage metering (the agent server's `onUsage`). */
+  onUsage?: (usage: SlotlockAgentUsage) => void;
+  /** Each message a member sends that the assistant answers, for usage metering. Never awaited. */
+  onMessage?: (tenantRef: string) => void;
   backend: SlotlockAgentCalendarBackend;
   /**
    * As the agent server's: false refuses an operation. Every offered operation by default. It also
@@ -312,6 +489,47 @@ export interface SlotlockDashboardAssistantOptions {
   conversationTtlMs?: number;
 }
 
+/**
+ * Hosted Slotlock's plans (plans.ts) and their billing: a Plan page with the tenant's plan and use,
+ * Upgrade (to a checkout page) and Manage (to a billing portal). Off unless set.
+ */
+export interface SlotlockDashboardBilling {
+  /** The tenant's plan (its own, or the default), or null when it has none (the server's limits apply). */
+  plan(tenantRef: string): Promise<SlotlockTenantPlan | null>;
+  /**
+   * Puts a tenant new to plans on the default plan before it adds a key, resource or webhook
+   * endpoint, while the default does not yet apply to every tenant (plans.ts).
+   */
+  enrol?(tenantRef: string): Promise<void>;
+  /** A checkout URL for the Developer plan, or the Team plan for an organization (with `teamPrices`). */
+  checkout(input: {
+    tenantRef: string;
+    interval: 'month' | 'year';
+    plan?: 'developer' | 'team';
+    customer: string | null;
+    successUrl: string;
+    cancelUrl: string;
+  }): Promise<string>;
+  /** A billing portal URL for the tenant's customer. */
+  portal(input: { customer: string; returnUrl: string }): Promise<string>;
+  /** The Developer plan's prices as shown, such as `$10`. */
+  prices: { month: string; year: string };
+  /**
+   * The Team plan's prices as shown (Teams on Cloud). With them, an organization's workspace is
+   * offered Team instead of Developer.
+   */
+  teamPrices?: { month: string; year: string };
+  /**
+   * Metered overage on Developer (SLOTLOCK_OVERAGE, overage.ts): its price as shown, such as `$2
+   * per 10,000 operations`, and the percent of the quota where use is refused.
+   */
+  overage?: { price: string; stopPercent: number };
+  /** Where a Custom (self-hosted) enquiry goes: an https or mailto URL. */
+  contact: string;
+  /** The https origins Upgrade and Manage redirect to, allowed in the policy's form-action. */
+  formOrigins: readonly string[];
+}
+
 export interface SlotlockDashboardOptions {
   /** Where people reach the server; the dashboard lives at `<publicUrl>/dashboard`. */
   publicUrl: string;
@@ -342,9 +560,25 @@ export interface SlotlockDashboardOptions {
     userUrl?: string;
     membershipsUrl?: string;
   };
+  /**
+   * Sign-in with Google (OpenID Connect), beside GitHub, for people without a GitHub account: each
+   * is their own tenant, `google:<subject>`. Not offered with a fixed list of `organizations`,
+   * which are GitHub's. Its redirect URI is the same `<publicUrl>/dashboard/callback`.
+   */
+  google?: {
+    clientId: string;
+    clientSecret: string;
+    authorizeUrl?: string;
+    tokenUrl?: string;
+    /** Google's signing keys (JWKS); https://www.googleapis.com/oauth2/v3/certs by default. */
+    jwksUrl?: string;
+  };
   /** Seals sessions and sign-in state and derives CSRF tokens: 32+ random characters. */
   sessionSecret: string;
-  /** GitHub user ids (numbers, as strings) that may sign in, or `'*'` for every GitHub account. */
+  /**
+   * GitHub user ids (numbers, as strings) and Google accounts (`google:<subject>`) that may sign in,
+   * or `'*'` for every account.
+   */
   allowedUsers: '*' | readonly string[];
   /**
    * GitHub organization ids (numbers, as strings) this dashboard serves. With them, a tenant is an
@@ -355,8 +589,14 @@ export interface SlotlockDashboardOptions {
    * ends access at the next sign-in, at most a session (12 hours) later, and removing an
    * organization from this list signs its sessions out at once. Without it, each person is their
    * own tenant (`github:<id>`).
+   *
+   * `'enabled'` (Teams on Cloud, with `teams`): each person signs in to their own tenant and may
+   * switch to any organization they belong to that an owner turned on, on the Teams page; turning
+   * one off ends its use at once.
    */
-  organizations?: readonly string[];
+  organizations?: readonly string[] | 'enabled';
+  /** The organizations turned on, with `organizations: 'enabled'` (teams.ts). */
+  teams?: SlotlockDashboardTeams;
   keys: SlotlockApiKeyStore;
   resources: SlotlockDashboardResources;
   /** Shared by every server behind this origin: see SlotlockDashboardState. */
@@ -365,6 +605,18 @@ export interface SlotlockDashboardOptions {
   availability?: readonly WeeklyAvailabilityRule[];
   /** The chat assistant; off unless set. */
   assistant?: SlotlockDashboardAssistantOptions;
+  /** Plans and billing (hosted Slotlock); off unless set. */
+  billing?: SlotlockDashboardBilling;
+  /**
+   * The deployment meters usage (SLOTLOCK_USAGE=on): the Plan page shows this month's, from the
+   * resources adapter's `usage`.
+   */
+  usage?: boolean;
+  /**
+   * The deployment holds tenants to their plans' monthly quotas (SLOTLOCK_QUOTAS=on): the Plan page
+   * shows this month's use against them, and warns from 80%. Needs `usage`.
+   */
+  quotas?: boolean;
   fetch?: typeof fetch;
   now?: () => number;
   /**
@@ -390,15 +642,78 @@ export interface SlotlockDashboard {
  * The dashboard's resources, in the store under each tenant's row-level security. Adds hold the cap
  * in the database (a READ COMMITTED transaction, under a per-tenant lock).
  */
-export function createSlotlockDashboardResources(store: SlotlockStore): SlotlockDashboardResources {
+export function createSlotlockDashboardResources(
+  store: SlotlockStore,
+  options: {
+    /**
+     * The agent backend (`createSlotlockStoreAgentBackend`) a granted approval's booking is made
+     * through: with it, the dashboard lists approvals and decides them.
+     */
+    agentBackend?: SlotlockAgentCalendarBackend;
+  } = {},
+): SlotlockDashboardResources {
   // Every change here is the dashboard's, made by the person signed in (actor) when known.
   const by = (actor: string | undefined) =>
     actor === undefined ? { origin: 'dashboard' as const } : { origin: 'dashboard' as const, actor };
+  const agentBackend = options.agentBackend;
   return {
+    sandbox: {
+      seed: (tenantRef, scenario) => seedSlotlockSandbox(store, tenantRef, scenario),
+      async reset(tenantRef) {
+        await resetSlotlockSandbox(store, tenantRef);
+      },
+      async fastForward(tenantRef, minutes) {
+        const forward = await fastForwardSlotlockSandbox(store, tenantRef, minutes);
+        return { holds: forward.holds, approvals: forward.approvals };
+      },
+    },
+    ...(agentBackend
+      ? {
+          approvals: {
+            list: (tenantRef: string, limit: number) =>
+              store.withTenant(tenantRef, (tenant) => tenant.listApprovals({ tenantRef, limit })),
+            async decide(tenantRef: string, id: string, decision: 'grant' | 'decline', actor?: string, reason?: string) {
+              const decidedBy = actor ?? 'dashboard';
+              if (decision === 'decline') {
+                const declined = await store.withTenant(
+                  tenantRef,
+                  (tenant) => tenant.declineApproval({ tenantRef, id, decidedBy, ...(reason ? { reason } : {}) }),
+                  by(actor),
+                );
+                if (!declined.ok) return declined;
+                // Its held time is free: offer it to the waitlist, as a release does.
+                await store
+                  .withTenant(tenantRef, (tenant) => tenant.offerWaitlist({ tenantRef, limit: 20 }), { origin: 'maintenance' })
+                  .catch(() => undefined);
+                return { ok: true as const };
+              }
+              const approval = await store.withTenant(tenantRef, (tenant) => tenant.getApproval({ tenantRef, id }));
+              if (!approval) return { ok: false as const, code: 'approval_not_found' };
+              if (approval.status !== 'pending') return { ok: false as const, code: 'approval_not_pending' };
+              try {
+                await runSlotlockApprovalGrant(agentBackend, approval, {
+                  tenantRef,
+                  decidedBy,
+                  signal: new AbortController().signal,
+                  origin: 'dashboard',
+                });
+              } catch (error) {
+                if (error instanceof SlotlockAgentOperationError) return { ok: false as const, code: error.code };
+                throw error;
+              }
+              return { ok: true as const };
+            },
+          },
+        }
+      : {}),
     list: (tenantRef) =>
       store.withTenant(tenantRef, (tenant) =>
         tenant.listResources({ tenantRef, limit: SLOTLOCK_DASHBOARD_MAX_RESOURCES + 1 }),
       ),
+    count: (tenantRef) =>
+      store.withTenant(tenantRef, (tenant) => tenant.countResources({ tenantRef })),
+    usage: (tenantRef, from, to) =>
+      store.withTenant(tenantRef, (tenant) => tenant.readUsage({ tenantRef, from, to })),
     add: (tenantRef, externalRef, timezone, actor) =>
       store.withTenant(
         tenantRef,
@@ -435,6 +750,52 @@ export function createSlotlockDashboardResources(store: SlotlockStore): Slotlock
       store.withTenant(tenantRef, (tenant) => tenant.getBookingRuleDefaults({ tenantRef })),
     setPool: (tenantRef, id, pool, actor) =>
       store.withTenant(tenantRef, (tenant) => tenant.setResourcePool({ tenantRef, id, pool }), by(actor)),
+    setParent: (tenantRef, id, parentId, actor) =>
+      store.withTenant(tenantRef, (tenant) => tenant.setResourceParent({ tenantRef, id, parentId }), by(actor)),
+    setProfile: (tenantRef, id, profile, actor) =>
+      store.withTenant(
+        tenantRef,
+        (tenant) => tenant.updateResourceProfile({ tenantRef, id, profile }),
+        by(actor),
+      ),
+    grouping: {
+      locations: (tenantRef) =>
+        store.withTenant(tenantRef, (tenant) => tenant.listLocations({ tenantRef })),
+      putLocation: (tenantRef, location, actor) =>
+        store.withTenant(tenantRef, (tenant) => tenant.putLocation({ tenantRef, ...location }), by(actor)),
+      deleteLocation: (tenantRef, ref, actor) =>
+        store.withTenant(tenantRef, (tenant) => tenant.deleteLocation({ tenantRef, ref }), by(actor)),
+      groups: (tenantRef) => store.withTenant(tenantRef, (tenant) => tenant.listGroups({ tenantRef })),
+      putGroup: (tenantRef, group, actor) =>
+        store.withTenant(tenantRef, (tenant) => tenant.putGroup({ tenantRef, ...group }), by(actor)),
+      deleteGroup: (tenantRef, ref, actor) =>
+        store.withTenant(tenantRef, (tenant) => tenant.deleteGroup({ tenantRef, ref }), by(actor)),
+      place: (tenantRef, id, place, actor) =>
+        store.withTenant(
+          tenantRef,
+          async (tenant) => {
+            // The location first, which finds the resource (null when it is not the tenant's);
+            // then its groups, in the same transaction, so a refused group moves nothing.
+            const moved = await tenant.updateResourceProfile({
+              tenantRef,
+              id,
+              profile: {},
+              location: place.location,
+            });
+            if (!moved) return null;
+            const wanted = new Set(place.groups);
+            const current = new Set(moved.groups ?? []);
+            for (const group of current) {
+              if (!wanted.has(group)) await tenant.removeGroupMember({ tenantRef, group, resourceId: id });
+            }
+            for (const group of wanted) {
+              if (!current.has(group)) await tenant.addGroupMember({ tenantRef, group, resourceId: id });
+            }
+            return tenant.getResource({ tenantRef, id });
+          },
+          by(actor),
+        ),
+    },
     waitlist: {
       list: (tenantRef, limit) =>
         store.withTenant(tenantRef, (tenant) => tenant.listWaitlist({ tenantRef, limit })),
@@ -636,6 +997,10 @@ interface Session {
   /** With organizations: the served ones the person belongs to, read at sign-in, and the one in use. */
   orgs?: Organization[];
   org?: string;
+  /** The test environment (RFC 0003 G9): the workspace's `<tenant>~test`. Live when absent. */
+  env?: 'test';
+  /** Signed in with Google: `uid` is the Google subject, `login` the account's email. GitHub when absent. */
+  idp?: 'google';
 }
 
 interface Organization {
@@ -686,6 +1051,8 @@ const AGENDA_LIMIT = 200;
 const AGENDA_SHOWN = 30;
 const ACTIVITY_LIMIT = 20;
 const WAITLIST_SHOWN = 200;
+/** Approvals the dashboard lists, pending and recent decided together, newest first. */
+const APPROVALS_SHOWN = 100;
 const RESOURCE_PAGE = /^\/resources\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 /** How the booking rules form names each rule. */
 const RULE_LIMITS = SLOTLOCK_BOOKING_RULE_LIMITS;
@@ -766,16 +1133,137 @@ const ICONS = Object.freeze({
   waitlist: icon('<path d="M4 6h16M4 12h10M4 18h6"/><circle cx="18" cy="16" r="3"/>'),
   webhooks: icon('<path d="M9 7a3 3 0 1 1 4 2.8L16 15M6.5 13.5A3 3 0 1 0 9 18h6M15 18a3 3 0 1 0 1.5-5.6"/>'),
   assistant: icon('<path d="M4 5h16v11H9l-5 4z"/><path d="M8 9h8M8 12h5"/>'),
+  plan: icon('<rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h4"/>'),
+  teams: icon('<circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2.5"/><path d="M3 19c0-3.3 2.7-5 6-5s6 1.7 6 5M15 14.5c3 0 6 1.4 6 4.5"/>'),
   settings: icon(
     '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
   ),
   check: icon('<path d="M5 12l5 5L20 7"/>'),
+  approvals: icon('<circle cx="12" cy="12" r="8"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/>'),
   signOut: icon('<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l-5-5 5-5M5 12h11"/>'),
   plus: icon('<path d="M12 5v14M5 12h14"/>'),
+  google: new Html(
+    '<svg class="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path class="fill" d="M15.68 8.18c0-.57-.05-1.11-.15-1.64H8v3.1h4.3a3.68 3.68 0 0 1-1.6 2.41v2h2.58c1.51-1.39 2.4-3.44 2.4-5.87zM8 16c2.16 0 3.97-.72 5.29-1.94l-2.58-2c-.72.48-1.63.76-2.71.76-2.08 0-3.85-1.41-4.48-3.3H.86v2.07A8 8 0 0 0 8 16zM3.52 9.52a4.8 4.8 0 0 1 0-3.04V4.41H.86a8 8 0 0 0 0 7.18zM8 3.18c1.17 0 2.23.4 3.06 1.2l2.29-2.3A8 8 0 0 0 .86 4.41l2.66 2.07C4.15 4.59 5.92 3.18 8 3.18z"/></svg>',
+  ),
   github: new Html(
     '<svg class="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path class="fill" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>',
   ),
 });
+
+/** How the dashboard names each kind of resource. */
+const KIND_NAMES: Readonly<Record<SlotlockResourceKind, string>> = Object.freeze({
+  person: 'Person',
+  room: 'Room',
+  desk: 'Desk',
+  space: 'Space',
+  vehicle: 'Vehicle',
+  machine: 'Machine',
+  equipment: 'Equipment',
+  service: 'Service',
+  other: 'Not said',
+});
+
+/** What a profile field it could not keep must be, in a person's words. */
+const PROFILE_PROBLEMS = Object.freeze({
+  name: `A name is 1 to ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.name} characters on one line.`,
+  description: `A description is at most ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.description.toLocaleString('en')} characters.`,
+  kind: 'Choose a kind from the list.',
+  capacity: `Capacity is a whole number from 1 to ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.capacity.toLocaleString('en')}. Leave it empty for none.`,
+  labels: `Up to ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.labels} labels, each 1 to 64 letters, digits, dots, dashes or underscores.`,
+  attributes: 'Those attributes are not ones Slotlock can keep.',
+  other: 'That profile is not one Slotlock can keep.',
+});
+
+const GROUPING_REF_RULE =
+  'A reference is 1 to 100 lowercase letters, digits, dots, dashes or underscores, starting with a letter or digit.';
+/** What a person is told when a location or group change is refused, by the store's code. */
+const GROUPING_PROBLEMS: Readonly<Record<string, { status: number; text: string }>> = Object.freeze({
+  location_ref: { status: 400, text: GROUPING_REF_RULE },
+  location_name: { status: 400, text: `A name is 1 to ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.name} characters on one line.` },
+  location_parent: { status: 400, text: 'Choose where it is from the list, or nowhere.' },
+  location_timezone: {
+    status: 400,
+    text: 'A time zone is a name such as Europe/London. Leave it empty to take the one of the location it is in.',
+  },
+  location_other: { status: 400, text: 'That location is not one Slotlock can keep.' },
+  location_not_found: { status: 404, text: 'That location is not one of yours.' },
+  location_too_deep: { status: 409, text: `Locations go ${SLOTLOCK_MAX_LOCATION_DEPTH} levels deep at most.` },
+  location_cycle: { status: 409, text: 'A location cannot be inside itself, or inside a location that is inside it.' },
+  location_limit_reached: {
+    status: 409,
+    text: `You have ${SLOTLOCK_MAX_LOCATIONS.toLocaleString('en')} locations, the most there can be.`,
+  },
+  location_in_use: {
+    status: 409,
+    text: 'Move its resources, and the locations inside it, somewhere else first.',
+  },
+  group_ref: { status: 400, text: GROUPING_REF_RULE },
+  group_name: { status: 400, text: `A name is 1 to ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.name} characters on one line.` },
+  group_description: {
+    status: 400,
+    text: `A description is at most ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.description.toLocaleString('en')} characters.`,
+  },
+  group_other: { status: 400, text: 'That group is not one Slotlock can keep.' },
+  group_not_found: { status: 404, text: 'That group is not one of yours.' },
+  group_limit_reached: {
+    status: 409,
+    text: `You have ${SLOTLOCK_MAX_RESOURCE_GROUPS.toLocaleString('en')} groups, the most there can be.`,
+  },
+  resource_group_limit_reached: {
+    status: 409,
+    text: `A resource is in ${SLOTLOCK_MAX_GROUPS_PER_RESOURCE} groups at most.`,
+  },
+});
+
+/** The sentence for a refused location or group change, or null when it is not one. */
+function groupingProblem(error: unknown): { status: number; text: string } | null {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (code === 'invalid_location' || code === 'invalid_group') {
+    const kind = code === 'invalid_location' ? 'location' : 'group';
+    const field = (error as { field?: unknown }).field;
+    return GROUPING_PROBLEMS[`${kind}_${typeof field === 'string' ? field : 'other'}`] ?? GROUPING_PROBLEMS[`${kind}_other`] ?? null;
+  }
+  return typeof code === 'string' ? (GROUPING_PROBLEMS[code] ?? null) : null;
+}
+
+/** Each location's place from the top, as "London › Floor 3", by reference. */
+function locationPaths(locations: readonly SlotlockLocation[]): Map<string, string> {
+  const byRef = new Map(locations.map((location) => [location.ref, location]));
+  const paths = new Map<string, string>();
+  for (const location of locations) {
+    const names: string[] = [];
+    let at: SlotlockLocation | undefined = location;
+    for (let steps = 0; at && steps <= SLOTLOCK_MAX_LOCATION_DEPTH; steps += 1) {
+      names.unshift(at.name);
+      at = at.parentRef === null ? undefined : byRef.get(at.parentRef);
+    }
+    paths.set(location.ref, names.join(' › '));
+  }
+  return paths;
+}
+
+/** Whether `ref` is `ancestor`, or a location inside it. */
+function locationWithin(locations: ReadonlyMap<string, SlotlockLocation>, ref: string, ancestor: string): boolean {
+  let at: string | null = ref;
+  for (let steps = 0; at !== null && steps <= SLOTLOCK_MAX_LOCATION_DEPTH; steps += 1) {
+    if (at === ancestor) return true;
+    at = locations.get(at)?.parentRef ?? null;
+  }
+  return false;
+}
+
+/** The time zone a location gives a resource: its own, or the nearest one above it, and where from. */
+function locationZone(
+  locations: ReadonlyMap<string, SlotlockLocation>,
+  location: SlotlockLocation,
+): { timezone: string; from: SlotlockLocation } | null {
+  let at: SlotlockLocation | undefined = location;
+  for (let steps = 0; at && steps <= SLOTLOCK_MAX_LOCATION_DEPTH; steps += 1) {
+    if (at.timezone !== null) return { timezone: at.timezone, from: at };
+    at = at.parentRef === null ? undefined : locations.get(at.parentRef);
+  }
+  return null;
+}
 
 type Tone = 'good' | 'bad' | 'neutral';
 /** How the overview names each change the feed records. */
@@ -798,7 +1286,12 @@ const CHANGE_LABELS: Readonly<Record<string, { text: string; tone: Tone }>> = Ob
   'coverage.stale': { text: 'Calendar sync is behind', tone: 'bad' },
   'waitlist.offered': { text: 'Waitlist offer sent', tone: 'good' },
   'waitlist.expired': { text: 'Waitlist offer lapsed', tone: 'neutral' },
+  'approval.requested': { text: 'Waiting for approval', tone: 'neutral' },
+  'approval.granted': { text: 'Approved and booked', tone: 'good' },
+  'approval.declined': { text: 'Approval declined', tone: 'bad' },
+  'approval.expired': { text: 'Approval not decided in time', tone: 'bad' },
   'webhook.disabled': { text: 'Webhook disabled', tone: 'bad' },
+  'usage.threshold_reached': { text: 'Monthly quota nearly or fully used', tone: 'bad' },
 });
 
 const zoned = (zone: string, parts: Intl.DateTimeFormatOptions) => {
@@ -1046,6 +1539,8 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const base = publicUrl.pathname.replace(/\/$/, '');
   const root = `${base}/dashboard`;
   const callbackUrl = `${origin}${root}/callback`;
+  const publicRoot = `${origin}${root}`;
+  const contentSecurityPolicy = policyFor(options.billing);
   // Its cookies are Secure, but a first visit over http:// could still be answered by someone else:
   // a browser that has seen this goes straight to https:// for a year. Not for a local http one.
   const hsts: Record<string, string> =
@@ -1060,10 +1555,19 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const membershipsUrl =
     options.github.membershipsUrl ??
     'https://api.github.com/user/memberships/orgs?state=active&per_page=100';
-  const served = options.organizations ? new Set(options.organizations) : null;
+  const served = Array.isArray(options.organizations) ? new Set<string>(options.organizations) : null;
   if (served && (served.size === 0 || [...served].some((id) => !ORGANIZATION_ID.test(id)))) {
     throw new Error('Slotlock dashboard organizations must be GitHub organization ids');
   }
+  // Teams on Cloud: organizations turned on in the database, beside every person's own tenant.
+  const teams = options.organizations === 'enabled' ? (options.teams ?? null) : null;
+  if (options.organizations === 'enabled' && !teams) {
+    throw new Error('Slotlock dashboard organizations "enabled" needs the teams store');
+  }
+  /** Sign-in reads the person's organizations: a fixed list, or those turned on. */
+  const readsOrganizations = served !== null || teams !== null;
+  /** Each session's organizations turned on, read with it (teams mode). */
+  const enabledOf = new WeakMap<Session, ReadonlySet<string>>();
   const brandName = options.name ?? 'Slotlock';
   if (!SLOTLOCK_DASHBOARD_NAME_PATTERN.test(brandName) || brandName.trim() !== brandName) {
     throw new Error('Slotlock dashboard name must be 1-60 characters, without <, > or control or invisible characters');
@@ -1083,9 +1587,11 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   }
   const secret = Buffer.from(options.sessionSecret, 'utf8');
   // A list, or exactly '*': any other string would match ids by substring.
-  const allowed = (uid: string) =>
+  // A GitHub person by their bare id, a Google one as google:<subject>.
+  const allowed = (uid: string, idp?: 'google') =>
     options.allowedUsers === '*' ||
-    (Array.isArray(options.allowedUsers) && options.allowedUsers.includes(uid));
+    (Array.isArray(options.allowedUsers) && options.allowedUsers.includes(idp === 'google' ? `google:${uid}` : uid));
+  const google = served ? null : (options.google ?? null);
   let signInsInFlight = 0;
   /** Sign-ins in flight by client address. */
   const signInsByClient = new Map<string, number>();
@@ -1160,13 +1666,26 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       typeof payload.uid !== 'string' ||
       typeof payload.login !== 'string' ||
       typeof payload.sid !== 'string' ||
-      !allowed(payload.uid) ||
+      (payload.idp !== undefined && (payload.idp !== 'google' || !google)) ||
+      !allowed(payload.uid, payload.idp as 'google' | undefined) ||
       !organizationsHold(payload) ||
+      (payload.env !== undefined && payload.env !== 'test') ||
       (await options.state.sessionEnded(payload.sid, payload.exp as number))
     ) {
       return null;
     }
-    return payload as unknown as Session;
+    const session = payload as unknown as Session;
+    if (teams) {
+      // Which of the person's organizations are on now: one turned off since is left at once.
+      const enabled = session.orgs?.length ? await teams.enabled(session.orgs.map((org) => org.id)) : new Set<string>();
+      if (session.org !== undefined && !enabled.has(session.org)) {
+        const { org: _, ...personal } = session;
+        enabledOf.set(personal, enabled);
+        return personal;
+      }
+      enabledOf.set(session, enabled);
+    }
+    return session;
   }
 
   /**
@@ -1174,6 +1693,14 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
    * them, it names none. A session from the other mode is signed out.
    */
   function organizationsHold(payload: Record<string, unknown>): boolean {
+    if (teams) {
+      if (payload.orgs === undefined) return payload.org === undefined;
+      if (!Array.isArray(payload.orgs)) return false;
+      const listed = (payload.orgs as unknown[]).filter(
+        (org): org is Organization => isRecord(org) && typeof org.id === 'string' && typeof org.login === 'string',
+      );
+      return payload.org === undefined || (typeof payload.org === 'string' && listed.some((org) => org.id === payload.org));
+    }
     if (!served) return payload.org === undefined && payload.orgs === undefined;
     if (typeof payload.org !== 'string' || !served.has(payload.org) || !Array.isArray(payload.orgs)) {
       return false;
@@ -1187,10 +1714,15 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     createHmac('sha256', secret)
       .update(`slotlock-dashboard-csrf-v1.${session.sid}`)
       .digest('base64url');
+  /** The tenant the session acts in: the workspace's, or its test environment's (`~test`). */
   const tenantOf = (session: Session) =>
-    served ? `github-org:${session.org as string}` : `github:${session.uid}`;
+    `${session.org !== undefined ? `github-org:${session.org}` : personOf(session)}${session.env === 'test' ? SLOTLOCK_TEST_TENANT_SUFFIX : ''}`;
   /** Who did something, for the record: the person, whatever tenant they act in. */
-  const personOf = (session: Session) => `github:${session.uid}`;
+  function personOf(session: Session): string {
+    return session.idp === 'google' ? `google:${session.uid}` : `github:${session.uid}`;
+  }
+  /** How the dashboard shows the person: their GitHub login, or their Google account's email. */
+  const shownAs = (session: Session) => (session.idp === 'google' ? session.login : `@${session.login}`);
 
   function respond(
     status: number,
@@ -1202,7 +1734,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       status,
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
-        'Content-Security-Policy': CONTENT_SECURITY_POLICY,
+        'Content-Security-Policy': contentSecurityPolicy,
         'Cache-Control': 'no-store',
         'X-Frame-Options': 'DENY',
         'X-Content-Type-Options': 'nosniff',
@@ -1219,7 +1751,17 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const redirect = (status: number, location: string, cookies: string[] = []) =>
     respond(status, '', { Location: location }, cookies);
 
-  type Section = 'overview' | 'resources' | 'waitlist' | 'keys' | 'webhooks' | 'assistant' | 'settings';
+  type Section =
+    | 'overview'
+    | 'resources'
+    | 'waitlist'
+    | 'approvals'
+    | 'keys'
+    | 'webhooks'
+    | 'assistant'
+    | 'plan'
+    | 'teams'
+    | 'settings';
   // Pages for what the adapter offers, so a custom one without a waitlist shows none. Read per
   // request: on Workers the adapter exists only inside one.
   const nav = (): ReadonlyArray<{ section: Section; label: string; path: string; icon: Html }> => [
@@ -1228,6 +1770,9 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     ...(options.resources.waitlist
       ? [{ section: 'waitlist' as const, label: 'Waitlist', path: '/waitlist', icon: ICONS.waitlist }]
       : []),
+    ...(options.resources.approvals
+      ? [{ section: 'approvals' as const, label: 'Approvals', path: '/approvals', icon: ICONS.approvals }]
+      : []),
     { section: 'keys', label: 'API keys', path: '/keys', icon: ICONS.keys },
     ...(options.resources.webhooks
       ? [{ section: 'webhooks' as const, label: 'Webhooks', path: '/webhooks', icon: ICONS.webhooks }]
@@ -1235,8 +1780,19 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     ...(assistantStore()
       ? [{ section: 'assistant' as const, label: 'Assistant', path: '/assistant', icon: ICONS.assistant }]
       : []),
+    ...(options.billing
+      ? [{ section: 'plan' as const, label: 'Plan', path: '/plan', icon: ICONS.plan }]
+      : []),
+    ...(teams ? [{ section: 'teams' as const, label: 'Teams', path: '/teams', icon: ICONS.teams }] : []),
     { section: 'settings', label: 'Settings', path: '/settings', icon: ICONS.settings },
   ];
+
+  /** Live or Test (RFC 0003 G9): the same workspace, a tenant of its own for trying things. */
+  function environmentSwitch(session: Session): Html {
+    const choice = (value: 'live' | 'test', label: string) =>
+      html`<button type="submit" name="environment" value="${value}"${(session.env === 'test') === (value === 'test') ? html` aria-pressed="true"` : html` aria-pressed="false"`}>${label}</button>`;
+    return html`<form class="environment" method="post" action="${root}/environment" aria-label="Environment"><input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}">${choice('live', 'Live')}${choice('test', 'Test')}</form>`;
+  }
 
   /** The workspace the session acts in: its organization, or the person themselves. */
   function workspace(session: Session): Html {
@@ -1244,6 +1800,10 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     const choices = (session.orgs ?? []).filter((org) => served?.has(org.id));
     const name = current?.login ?? session.login;
     const badge = html`<span class="avatar" aria-hidden="true">${name.slice(0, 1).toUpperCase()}</span>`;
+    const enabled = teams ? (session.orgs ?? []).filter((org) => enabledOf.get(session)?.has(org.id)) : [];
+    if (teams && enabled.length > 0) {
+      return html`<form class="workspace" method="post" action="${root}/organization">${badge}<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="organization">Workspace</label><select id="organization" name="organization" title="${name}"><option value=""${current ? html`` : html` selected`}>${shownAs(session)}</option>${enabled.map((org) => html`<option value="${org.id}"${org.id === current?.id ? html` selected` : html``}>${org.login}</option>`)}</select><button class="quiet" type="submit">Switch</button></form>`;
+    }
     if (current && choices.length > 1) {
       return html`<form class="workspace" method="post" action="${root}/organization">${badge}<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="organization">Organization</label><select id="organization" name="organization" title="${current.login}">${choices.map((org) => html`<option value="${org.id}"${org.id === current.id ? html` selected` : html``}>${org.login}</option>`)}</select><button class="quiet" type="submit">Switch</button></form>`;
     }
@@ -1259,6 +1819,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="${REFERRER_POLICY}">
 <title>${title} · ${brandName}</title>
+<link rel="icon" href="${root}/favicon.svg?v=${ASSET_VERSIONS.icon}" type="image/svg+xml">
 <link rel="stylesheet" href="${root}/style.css?v=${ASSET_VERSIONS.css}">
 <script src="${root}/app.js?v=${ASSET_VERSIONS.js}" defer></script>
 </head>`;
@@ -1285,11 +1846,15 @@ ${live}
 ${skip}
 <div class="app">
 <header class="side">
-<div class="side-top">${brand}${workspace(session)}</div>
+<div class="side-top">${brand}${workspace(session)}${environmentSwitch(session)}</div>
 <nav class="nav" aria-label="Dashboard">${links}</nav>
-<div class="me"><span class="avatar me-avatar" aria-hidden="true">${session.login.slice(0, 1).toUpperCase()}</span><span class="login" title="@${session.login}">@${session.login}</span><form method="post" action="${root}/sign-out"><input type="hidden" name="csrf" value="${csrfToken(session)}"><button class="quiet sign-out" type="submit" title="Sign out">${ICONS.signOut}<span class="sign-out-label">Sign out</span></button></form></div>
+<div class="me"><span class="avatar me-avatar" aria-hidden="true">${session.login.slice(0, 1).toUpperCase()}</span><span class="login" title="${shownAs(session)}">${shownAs(session)}</span><form method="post" action="${root}/sign-out"><input type="hidden" name="csrf" value="${csrfToken(session)}"><button class="quiet sign-out" type="submit" title="Sign out">${ICONS.signOut}<span class="sign-out-label">Sign out</span></button></form></div>
 </header>
-<main class="page" id="main">${content}</main>
+<main class="page" id="main">${
+      session.env === 'test'
+        ? html`<p class="test-banner">Test environment: its own resources, keys, webhooks and history, on your plan's limits and never billed. Its keys start <code>slk_test_</code>.</p>`
+        : html``
+    }${content}</main>
 </div>
 ${live}
 </body>
@@ -1305,7 +1870,9 @@ ${live}
 <h1>Sign in to ${brandName}</h1>
 <p>Create keys for your agents, add what they book, and watch what they do.</p>
 ${noticeOf(notice)}
-<a class="button primary wide" href="${root}/sign-in">${ICONS.github}Continue with GitHub</a>
+<a class="button primary wide" href="${root}/sign-in">${ICONS.github}Continue with GitHub</a>${
+      google ? html`<a class="button wide" href="${root}/sign-in?with=google">${ICONS.google}Continue with Google</a>` : html``
+    }
 ${
       options.termsUrl
         ? html`<p class="fine">By continuing you agree to the <a href="${options.termsUrl}">Terms of Service</a>.${
@@ -1316,13 +1883,33 @@ ${
         : html``
     }
 <p class="fine">${
-      served
+      teams
+        ? `${brandName} reads your GitHub profile and which organizations you belong to, and keeps only your user id, login and up to ${String(MAX_SESSION_ORGANIZATIONS)} of those organizations, for you to work in the ones turned on.`
+        : served
         ? `${brandName} reads your GitHub profile and which organizations you belong to, and keeps only your user id, login and the organizations it serves.`
         : `${brandName} reads only your public GitHub profile, and keeps only your user id and login.`
-    }</p>
+    }${google ? ` With Google, it reads your account's id and email address, and keeps only those.` : ''}</p>
 </section>`;
     return respond(status, layout('Sign in', content, null), {}, cookies);
   }
+
+  /** A key's own limits (RFC 0004 A5) as fields, filled with what it has. */
+  const keyLimitFields = (limits?: SlotlockApiKeyLimits) =>
+    html`<label>Live holds at most<input name="max_holds" inputmode="numeric" pattern="[0-9]*" maxlength="5" value="${limits?.maxHolds !== undefined ? String(limits.maxHolds) : ''}" placeholder="Server's"></label>
+<label>Hours held at most<input name="max_held_hours" inputmode="numeric" pattern="[0-9]*" maxlength="6" value="${limits?.maxHeldHours !== undefined ? String(limits.maxHeldHours) : ''}" placeholder="Server's"></label>
+<label>Requests a minute<input name="requests_per_minute" inputmode="numeric" pattern="[0-9]*" maxlength="6" value="${limits?.requestsPerMinute !== undefined ? String(limits.requestsPerMinute) : ''}" placeholder="Server's"></label>
+<label class="choice"><input type="checkbox" name="requires_approval" value="on"${limits?.requiresApproval ? html` checked` : html``}> Its bookings wait for approval</label>`;
+
+  /** A key's limits in words, for its row. */
+  const keyLimitsText = (limits: SlotlockApiKeyLimits) =>
+    [
+      limits.maxHolds !== undefined ? `${String(limits.maxHolds)} live holds` : '',
+      limits.maxHeldHours !== undefined ? `${String(limits.maxHeldHours)} hours held` : '',
+      limits.requestsPerMinute !== undefined ? `${String(limits.requestsPerMinute)} requests a minute` : '',
+      limits.requiresApproval ? 'bookings need approval' : '',
+    ]
+      .filter(Boolean)
+      .join(', ');
 
   function keyRows(keys: SlotlockApiKey[], token: string, session: Session): Html[] {
     return keys.map((key) => {
@@ -1330,15 +1917,21 @@ ${
       const status = key.revokedAt ? 'Revoked' : expired ? 'Expired' : 'Active';
       const actions =
         status === 'Active'
-          ? html`<details class="act"><summary>Rotate</summary><div class="pop"><p>A new secret replaces this one at once. The key keeps its name, access and bookings.</p>
+          ? html`<details class="act"><summary>Limits</summary><div class="pop"><p>Hold this key below the server's limits. Empty is the server's.</p>
+<form method="post" action="${root}/keys/limits"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${key.id}">${keyLimitFields(key.limits)}<button type="submit">Save limits</button></form></div></details>
+<details class="act"><summary>Rotate</summary><div class="pop"><p>A new secret replaces this one at once. The key keeps its name, access and bookings.</p>
 <form method="post" action="${root}/keys/rotate"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${key.id}"><button type="submit">Rotate key</button></form></div></details>
 <details class="act danger"><summary>Revoke</summary><div class="pop"><p>Requests with this key fail at once. What it booked stays on the calendar.</p>
 <form method="post" action="${root}/keys/revoke"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${key.id}"><button class="danger" type="submit">Revoke key</button></form></div></details>`
           : html``;
       return html`<tr>
-<td data-label="Name" class="strong"><span class="cell"><span class="truncate" title="${key.name}">${key.name}</span>${served ? html`<span class="meta">Created by ${key.createdBy === personOf(session) ? 'you' : key.createdBy?.startsWith('github:') ? `GitHub user ${key.createdBy.slice(7)}` : 'someone unknown'}</span>` : html``}</span></td>
+<td data-label="Name" class="strong"><span class="cell"><span class="truncate" title="${key.name}">${key.name}</span>${session.org !== undefined ? html`<span class="meta">Created by ${key.createdBy === personOf(session) ? 'you' : key.createdBy?.startsWith('github:') ? `GitHub user ${key.createdBy.slice(7)}` : key.createdBy?.startsWith('google:') ? 'a Google user' : 'someone unknown'}</span>` : html``}</span></td>
 <td data-label="Key"><code class="chip">${key.prefix}…</code></td>
-<td data-label="Access">${key.scopes.includes('admin') ? 'Full' : key.scopes.includes('write') ? 'Read and write' : 'Read only'}</td>
+<td data-label="Access">${
+        key.resourceScope || key.limits
+          ? html`<span class="cell"><span>${accessOf(key)}</span>${key.resourceScope ? html`<span class="meta wrap">Only ${[...key.resourceScope.locations, ...key.resourceScope.groups.map((group) => `group ${group}`)].join(', ')}</span>` : html``}${key.limits ? html`<span class="meta wrap">At most ${keyLimitsText(key.limits)}</span>` : html``}</span>`
+          : accessOf(key)
+      }</td>
 <td data-label="Created">${dateCell(key.createdAt)}</td>
 <td data-label="Last used">${key.lastUsedAt ? dateCell(key.lastUsedAt) : html`<span class="muted">Never</span>`}</td>
 <td data-label="Expires">${key.expiresAt ? dateCell(key.expiresAt) : html`<span class="muted">Never</span>`}</td>
@@ -1358,8 +1951,9 @@ ${
     }</div>`;
 
   /** A resource as people name it: its reference, else the start of its id. */
+  // Its profile's name, else its reference, else the start of its id.
   const resourceName = (resource: SlotlockResource | undefined, id: string) =>
-    resource?.externalRef ?? `${id.slice(0, 8)}…`;
+    resource?.name ?? resource?.externalRef ?? `${id.slice(0, 8)}…`;
 
   function agendaPanel(
     entries: readonly SlotlockAgendaEntry[],
@@ -1420,10 +2014,14 @@ ${
                 ? 'A deleted key'
                 : /^github:\d+$/.test(change.actor)
                   ? `GitHub user ${change.actor.slice(7)}`
-                  : /^dashboard-assistant:github:\d+$/.test(change.actor)
+                  : /^google:/.test(change.actor)
+                    ? 'A Google user'
+                  : /^dashboard-assistant:(github|google):/.test(change.actor)
                     ? change.actor === assistantActor(session)
-                      ? `Assistant for @${session.login}`
-                      : `Assistant for GitHub user ${change.actor.slice(27)}`
+                      ? `Assistant for ${shownAs(session)}`
+                      : change.actor.startsWith('dashboard-assistant:google:')
+                        ? 'Assistant for a Google user'
+                        : `Assistant for GitHub user ${change.actor.slice(27)}`
                     : change.actor.slice(0, 60)));
       const where = change.resourceId
         ? resourceName(byId.get(change.resourceId), change.resourceId)
@@ -1473,6 +2071,7 @@ ${agenda ? stat('Live holds', counted(held), `${root}#upcoming`) : html``}
 ${stat('Resources', String(resources.length), `${root}/resources`)}
 ${stat('Active keys', String(active.length), `${root}/keys`)}
 </div>
+${session.env === 'test' && options.resources.sandbox ? sandboxPanel(session, resources.length) : html``}
 <div class="split">
 ${agenda ? html`<section class="panel" id="upcoming"><h2>Upcoming</h2>${agendaPanel(agenda, byId, agenda.length > AGENDA_SHOWN)}</section>` : html``}
 ${changes ? html`<section class="panel"><h2>Agent activity</h2>${activityPanel(changes, byId, keys, session)}</section>` : html``}
@@ -1480,13 +2079,79 @@ ${changes ? html`<section class="panel"><h2>Agent activity</h2>${activityPanel(c
     return respond(status, layout('Overview', content, session, 'overview'));
   }
 
+  /** In Test: load a scenario to try an agent against, move waiting forward, or start again (RFC 0004 A6). */
+  function sandboxPanel(session: Session, resourceCount: number): Html {
+    const token = csrfToken(session);
+    const hidden = html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    const names: Record<SlotlockSandboxScenario, string> = { 'car-rental': 'Car rental', clinic: 'Clinic', desks: 'Desks and a hall' };
+    return html`<section class="panel" id="sandbox"><h2>Sandbox</h2>
+<p class="fine">Test only. Try an agent against sample data, make holds and approvals that would lapse lapse now, or start again. Keys and webhooks stay.</p>
+${
+  resourceCount === 0
+    ? html`<form class="create" method="post" action="${root}/sandbox/seed">${hidden}<label>Sample data<select name="scenario">${SLOTLOCK_SANDBOX_SCENARIOS.map(
+        (scenario) => html`<option value="${scenario}">${names[scenario]}</option>`,
+      )}</select></label><button class="primary" type="submit">Load it</button></form>`
+    : html`<form class="create" method="post" action="${root}/sandbox/fast-forward">${hidden}<label>Move waiting forward<select name="minutes"><option value="15">15 minutes</option><option value="60">An hour</option><option value="1440">A day</option></select></label><button type="submit">Move forward</button></form>
+<details class="act danger"><summary>Start again</summary><div class="pop"><p>Every resource, booking, hold and policy in Test goes. Keys and webhooks stay.</p><form method="post" action="${root}/sandbox/reset">${hidden}<button class="danger" type="submit">Empty Test</button></form></div></details>`
+}
+</section>`;
+  }
+
+  async function sandboxAction(session: Session, form: URLSearchParams, action: 'seed' | 'reset' | 'fast-forward'): Promise<Response> {
+    const sandbox = options.resources.sandbox;
+    if (!sandbox || session.env !== 'test') return overviewPage(session, 400, 'The sandbox is in Test only.');
+    const tenantRef = tenantOf(session);
+    try {
+      if (action === 'seed') {
+        const scenario = form.get('scenario') as SlotlockSandboxScenario;
+        if (!SLOTLOCK_SANDBOX_SCENARIOS.includes(scenario)) return overviewPage(session, 400, 'Choose a sample from the list.');
+        const seeded = await sandbox.seed(tenantRef, scenario);
+        return overviewPage(session, 200, `Loaded ${String(seeded.resources)} resources and ${String(seeded.bookings)} bookings for tomorrow.`);
+      }
+      if (action === 'reset') {
+        await sandbox.reset(tenantRef);
+        return redirect(303, `${root}#sandbox`);
+      }
+      const minutes = Number(form.get('minutes'));
+      if (![15, 60, 1440].includes(minutes)) return overviewPage(session, 400, 'Choose how far from the list.');
+      const moved = await sandbox.fastForward(tenantRef, minutes);
+      return overviewPage(session, 200, `${String(moved.holds)} holds and ${String(moved.approvals)} approvals lapsed.`);
+    } catch (error) {
+      if ((error as { code?: unknown }).code === 'sandbox_not_empty') {
+        return overviewPage(session, 409, 'Test has resources already. Start again first.');
+      }
+      throw error;
+    }
+  }
+
   function endpoints(): Html {
     return html`<dl class="endpoints"><dt>MCP</dt><dd><code id="mcp-url">${mcpUrl}</code><button class="quiet" type="button" data-copy="mcp-url">Copy</button></dd><dt>A2A</dt><dd><code id="a2a-url">${a2aUrl}</code><button class="quiet" type="button" data-copy="a2a-url">Copy</button></dd></dl>`;
   }
 
+  const accessOf = (key: SlotlockApiKey) =>
+    key.scopes.includes('admin') ? 'Full' : key.scopes.includes('write') ? 'Read and write' : 'Read only';
+
   async function keysPage(session: Session, status = 200, notice?: string): Promise<Response> {
-    const keys = await options.keys.list({ tenantRef: tenantOf(session) });
+    const tenantRef = tenantOf(session);
+    const grouping = options.resources.grouping;
+    const [keys, locations, groups] = await Promise.all([
+      options.keys.list({ tenantRef }),
+      grouping?.locations(tenantRef),
+      grouping?.groups(tenantRef),
+    ]);
     const token = csrfToken(session);
+    const paths = locationPaths(locations ?? []);
+    // A key limited to locations or groups (RFC 0003 G6), when the tenant has any to choose.
+    const limitChoices =
+      (locations?.length ?? 0) + (groups?.length ?? 0) > 0
+        ? html`<details class="types"><summary>Limit to locations or groups (optional)</summary><div class="checks">${(locations ?? []).map(
+            (location) =>
+              html`<label class="choice"><input type="checkbox" name="limit_location" value="${location.ref}"> ${paths.get(location.ref) ?? location.name}</label>`,
+          )}${(groups ?? []).map(
+            (group) =>
+              html`<label class="choice"><input type="checkbox" name="limit_group" value="${group.ref}"> Group: ${group.name}</label>`,
+          )}</div><p class="fine">The key then reaches only the resources there (a location with every location in it), read and write only. Developer plan and up.</p></details>`
+        : html``;
     const content = html`${noticeOf(notice)}
 ${pageHead('API keys')}
 <section class="panel">
@@ -1503,22 +2168,49 @@ ${endpoints()}
 <label>Access<select name="access"><option value="read_write">Read and write</option><option value="read">Read only</option><option value="full">Full, with the application API</option></select></label>
 <label>Expires<select name="expires"><option value="90">In 90 days</option><option value="30">In 30 days</option><option value="365">In a year</option><option value="never">Never</option></select></label>
 <button class="primary" type="submit">Create key</button>
+${limitChoices}
+<details class="types"><summary>Agent limits (optional)</summary><div class="checks">${keyLimitFields()}</div><p class="fine">Below the server's own limits, never above them. A key whose bookings wait for approval sends each to the Approvals page.</p></details>
 </form>
 </section>
 ${
   keys.length === 0
     ? emptyState(ICONS.keys, 'No keys yet. Give every agent its own, with the least access it needs.', { href: '#key-name', label: 'Create a key' })
-    : html`${served ? html`<p class="fine">Each key acts in this organization only, and every member can rotate or revoke it.</p>` : html``}<div class="table"><table><thead><tr><th>Name</th><th>Key</th><th>Access</th><th>Created</th><th>Last used</th><th>Expires</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
+    : html`${session.org !== undefined ? html`<p class="fine">Each key acts in this organization only, and every member can rotate or revoke it.</p>` : html``}<div class="table"><table><thead><tr><th>Name</th><th>Key</th><th>Access</th><th>Created</th><th>Last used</th><th>Expires</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
 <tbody>${keyRows(keys, token, session)}</tbody></table></div>`
 }`;
     return respond(status, layout('API keys', content, session, 'keys'));
   }
 
+  /**
+   * How many resources the tenant may have here, and how many it has as that limit counts them: the
+   * dashboard's own limit, or its plan's when lower (archived resources count against a plan).
+   */
+  async function resourceAllowance(
+    tenantRef: string,
+    resources: readonly SlotlockResource[],
+  ): Promise<{ used: number; limit: number; planned: boolean; archived: number }> {
+    const plan = options.billing ? await options.billing.plan(tenantRef) : null;
+    if (!plan || plan.limits.resources >= SLOTLOCK_DASHBOARD_MAX_RESOURCES) {
+      return { used: resources.length, limit: SLOTLOCK_DASHBOARD_MAX_RESOURCES, planned: false, archived: 0 };
+    }
+    const counted = options.resources.count ? await options.resources.count(tenantRef) : resources.length;
+    return {
+      used: counted,
+      limit: plan.limits.resources,
+      planned: true,
+      archived: Math.max(0, counted - resources.length),
+    };
+  }
+
   async function resourcesPage(session: Session, status = 200, notice?: string): Promise<Response> {
     const resources = await options.resources.list(tenantOf(session));
+    const allowance = await resourceAllowance(tenantOf(session), resources);
     const token = csrfToken(session);
     const content = html`${noticeOf(notice)}
-${pageHead('Resources', resources.length > 0 ? html`<a class="button" href="${root}/hours">Set hours for every resource</a>` : undefined)}
+${pageHead(
+  'Resources',
+  html`<div class="row-actions">${options.resources.grouping ? html`<a class="button" href="${root}/locations">Locations and groups</a>` : html``}${resources.length > 0 ? html`<a class="button" href="${root}/hours">Set hours for every resource</a>` : html``}</div>`,
+)}
 <section class="panel" id="add-resource">
 <h2>Add a resource</h2>
 <form class="create" method="post" action="${root}/resources">
@@ -1528,25 +2220,114 @@ ${pageHead('Resources', resources.length > 0 ? html`<a class="button" href="${ro
 <label>Time zone<input name="timezone" required maxlength="64" value="UTC" placeholder="Europe/London"></label>
 <button class="primary" type="submit">Add resource</button>
 </form>
-<p class="fine">${String(resources.length)} of ${String(SLOTLOCK_DASHBOARD_MAX_RESOURCES)}. Adding a reference you have changes its time zone.</p>
+<p class="fine">${String(allowance.used)} of ${String(allowance.limit)}${allowance.planned ? html` on your plan${allowance.archived > 0 ? html`, ${String(allowance.archived)} of them archived (archived resources count until deleted)` : html``}` : html``}. Adding a reference you have changes its time zone.</p>
 </section>
 ${
   resources.length === 0
     ? emptyState(ICONS.resources, 'No resources yet. Agents can only book what is listed here.', { href: '#reference', label: 'Add a resource' })
     : html`<div class="table"><table><thead><tr><th>Reference</th><th>Time zone</th><th>Bookable hours</th><th>Resource id</th></tr></thead><tbody>${resources.map(
         (resource) =>
-          html`<tr><td data-label="Reference" class="strong"><span class="cell"><a class="truncate" href="${root}/resources/${resource.id}" title="${resourceName(resource, resource.id)}">${resourceName(resource, resource.id)}</a>${resource.pool ? html`<span class="meta" title="Pool ${resource.pool}">Pool ${resource.pool}</span>` : html``}</span></td><td data-label="Time zone">${resource.timezone}</td><td data-label="Bookable hours"><span class="cell"><span>${hoursSummary(resource.availabilityRules)}</span><a class="meta-link" href="${root}/hours?resource=${resource.id}">Set hours</a></span></td><td data-label="Resource id"><code class="muted truncate id" title="${resource.id}">${resource.id}</code></td></tr>`,
+          html`<tr><td data-label="Reference" class="strong"><span class="cell"><a class="truncate" href="${root}/resources/${resource.id}" title="${resourceName(resource, resource.id)}">${resourceName(resource, resource.id)}</a>${resource.name && resource.externalRef ? html`<span class="meta" title="Reference ${resource.externalRef}">${resource.externalRef}</span>` : html``}${resource.pool ? html`<span class="meta" title="Pool ${resource.pool}">Pool ${resource.pool}</span>` : html``}</span></td><td data-label="Time zone">${resource.timezone}</td><td data-label="Bookable hours"><span class="cell"><span>${hoursSummary(resource.availabilityRules)}</span><a class="meta-link" href="${root}/hours?resource=${resource.id}">Set hours</a></span></td><td data-label="Resource id"><code class="muted truncate id" title="${resource.id}">${resource.id}</code></td></tr>`,
       )}</tbody></table></div>`
 }`;
     return respond(status, layout('Resources', content, session, 'resources'));
   }
 
-  async function settingsPage(session: Session, status = 200, notice?: string): Promise<Response> {
+  /** The tenant's locations and groups (RFC 0003 G2, G3): what they are, and adding and changing them. */
+  async function locationsPage(session: Session, status = 200, notice?: string): Promise<Response> {
+    const grouping = options.resources.grouping;
+    if (!grouping) return nothingHere(session);
+    const tenantRef = tenantOf(session);
+    const [locations, groups] = await Promise.all([grouping.locations(tenantRef), grouping.groups(tenantRef)]);
+    const token = csrfToken(session);
+    const byRef = new Map(locations.map((location) => [location.ref, location]));
+    const paths = locationPaths(locations);
+    const sent = () =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    // Where a location may be: nowhere, or any location but itself and those inside it.
+    const insideChoices = (selected: string | null, except?: string) =>
+      html`<option value=""${selected === null ? html` selected` : html``}>Nowhere (at the top)</option>${locations
+        .filter((location) => except === undefined || !locationWithin(byRef, location.ref, except))
+        .map(
+          (location) =>
+            html`<option value="${location.ref}"${location.ref === selected ? html` selected` : html``}>${paths.get(location.ref) ?? location.name}</option>`,
+        )}`;
+    const nameLimit = String(SLOTLOCK_RESOURCE_PROFILE_LIMITS.name);
+    const locationRows = locations.map((location) => {
+      const parent = location.parentRef === null ? undefined : paths.get(location.parentRef);
+      const zone = locationZone(byRef, location);
+      return html`<tr>
+<td data-label="Location" class="strong"><span class="cell"><span class="truncate" title="${paths.get(location.ref) ?? location.name}">${location.name}</span><span class="meta">${location.ref}${parent ? ` · in ${parent}` : ''}</span></span></td>
+<td data-label="Time zone">${zone ? (zone.from === location ? zone.timezone : html`<span class="cell"><span>${zone.timezone}</span><span class="meta">from ${zone.from.name}</span></span>`) : html`<span class="muted">None</span>`}</td>
+<td data-label="Resources">${String(location.resources)}</td>
+<td class="actions"><details class="act"><summary>Edit</summary><div class="pop"><form method="post" action="${root}/locations">${sent()}<input type="hidden" name="ref" value="${location.ref}">
+<label>Name<input name="name" required maxlength="${nameLimit}" value="${location.name}"></label>
+<label>Inside<select name="parent">${insideChoices(location.parentRef, location.ref)}</select></label>
+<label>Time zone<input name="timezone" maxlength="100" value="${location.timezone ?? ''}" placeholder="As where it is"></label>
+<button type="submit">Save location</button></form></div></details><details class="act danger"><summary>Delete</summary><div class="pop"><p>${location.resources > 0 ? 'Move its resources somewhere else first.' : 'Locations inside it must be moved or deleted first.'}</p>
+<form method="post" action="${root}/locations/delete">${sent()}<input type="hidden" name="ref" value="${location.ref}"><button class="danger" type="submit">Delete location</button></form></div></details></td>
+</tr>`;
+    });
+    const groupRows = groups.map(
+      (group) => html`<tr>
+<td data-label="Group" class="strong"><span class="cell"><span class="truncate" title="${group.name}">${group.name}</span><span class="meta">${group.ref}</span></span></td>
+<td data-label="Description" class="wrap">${group.description ?? ''}</td>
+<td data-label="Resources">${String(group.members)}</td>
+<td class="actions"><details class="act"><summary>Edit</summary><div class="pop"><form method="post" action="${root}/groups">${sent()}<input type="hidden" name="ref" value="${group.ref}">
+<label>Name<input name="name" required maxlength="${nameLimit}" value="${group.name}"></label>
+<label>Description<textarea name="description" rows="2" maxlength="${String(SLOTLOCK_RESOURCE_PROFILE_LIMITS.description)}">${group.description ?? ''}</textarea></label>
+<button type="submit">Save group</button></form></div></details><details class="act danger"><summary>Delete</summary><div class="pop"><p>Its resources stay as they are, in no group of this name.</p>
+<form method="post" action="${root}/groups/delete">${sent()}<input type="hidden" name="ref" value="${group.ref}"><button class="danger" type="submit">Delete group</button></form></div></details></td>
+</tr>`,
+    );
+    const content = html`${noticeOf(notice)}
+<p><a class="back" href="${root}/resources">Resources</a></p>
+${pageHead('Locations and groups')}
+<section class="panel" id="locations">
+<h2>Locations</h2>
+<form class="create" method="post" action="${root}/locations">${sent()}
+<label>Reference<input id="location-ref" name="ref" required maxlength="100" placeholder="floor-3"></label>
+<label class="grow">Name<input name="name" required maxlength="${nameLimit}" placeholder="Floor 3"></label>
+<label>Inside<select name="parent">${insideChoices(null)}</select></label>
+<label>Time zone<input name="timezone" maxlength="100" placeholder="As where it is"></label>
+<button class="primary" type="submit">Add location</button>
+</form>
+<p class="fine">Where resources are: a site, a building, a floor, up to ${String(SLOTLOCK_MAX_LOCATION_DEPTH)} levels. Agents searching a location search every location inside it too. A resource added at a location over the API without a time zone takes the location's, or the nearest one above it. Adding a reference you have changes that location.</p>
+${
+  locations.length === 0
+    ? html`<p class="empty">No locations yet.</p>`
+    : html`<div class="table"><table><thead><tr><th>Location</th><th>Time zone</th><th>Resources</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${locationRows}</tbody></table></div>`
+}
+</section>
+<section class="panel" id="groups">
+<h2>Groups</h2>
+<form class="create" method="post" action="${root}/groups">${sent()}
+<label>Reference<input id="group-ref" name="ref" required maxlength="100" placeholder="video-rooms"></label>
+<label class="grow">Name<input name="name" required maxlength="${nameLimit}" placeholder="Rooms with video"></label>
+<label class="grow">Description<input name="description" maxlength="${String(SLOTLOCK_RESOURCE_PROFILE_LIMITS.description)}" placeholder="Optional"></label>
+<button class="primary" type="submit">Add group</button>
+</form>
+<p class="fine">Any set of resources, such as a team or the rooms with video, wherever they are. A resource is in up to ${String(SLOTLOCK_MAX_GROUPS_PER_RESOURCE)} groups; choose them on its page. Adding a reference you have changes that group.</p>
+${
+  groups.length === 0
+    ? html`<p class="empty">No groups yet.</p>`
+    : html`<div class="table"><table><thead><tr><th>Group</th><th>Description</th><th>Resources</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${groupRows}</tbody></table></div>`
+}
+</section>`;
+    return respond(status, layout('Locations and groups', content, session, 'resources'));
+  }
+
+  async function settingsPage(
+    session: Session,
+    status = 200,
+    notice?: string,
+    draft?: AssistantDraft,
+  ): Promise<Response> {
     const rules = options.availability ?? [];
     const current = session.orgs?.find((org) => org.id === session.org);
     const content = html`${noticeOf(notice)}
 ${pageHead('Settings')}
-${await assistantSettingsPanel(session)}
+${await assistantSettingsPanel(session, draft)}
 <section class="panel">
 <h2>Endpoints</h2>
 ${endpoints()}
@@ -1565,7 +2346,7 @@ ${
 </section>
 <section class="panel">
 <h2>Account</h2>
-<dl class="facts"><dt>Signed in as</dt><dd>@${session.login}</dd>${
+<dl class="facts"><dt>Signed in as</dt><dd>${shownAs(session)}</dd>${
       current
         ? html`<dt>Organization</dt><dd>${current.login}</dd>${(session.orgs?.length ?? 0) > 1 ? html`<dt>Also a member of</dt><dd>${(session.orgs ?? []).filter((org) => org.id !== current.id).map((org) => org.login).join(', ')}</dd>` : html``}`
         : html`<dt>Workspace</dt><dd>Personal</dd>`
@@ -1587,12 +2368,24 @@ ${current ? html`<p class="fine">Membership is read from GitHub when you sign in
     if (!resource) return notFound(session);
     const start = new Date(now());
     const window = { start, end: new Date(start.getTime() + AGENDA_DAYS * DAY_MS) };
-    const [agenda, changes, keys, defaults] = await Promise.all([
+    const grouping = options.resources.grouping;
+    const [agenda, changes, keys, defaults, locations, groups, everyResource] = await Promise.all([
       options.resources.agenda?.(tenantRef, window, AGENDA_LIMIT),
       options.resources.recentChanges?.(tenantRef, 100),
       options.keys.list({ tenantRef }),
       options.resources.ruleDefaults?.(tenantRef),
+      grouping?.locations(tenantRef),
+      grouping?.groups(tenantRef),
+      // For a composite: its parts, or the wholes it can be a part of.
+      options.resources.setParent ? options.resources.list(tenantRef) : undefined,
     ]);
+    const parts = (everyResource?.filter((other) => other.parentId === resource.id) ?? []).sort(
+      (one, other) => (one.partIndex ?? 0) - (other.partIndex ?? 0),
+    );
+    const wholes =
+      everyResource?.filter((other) => other.id !== resource.id && other.parentId === undefined && other.archivedAt === undefined) ?? [];
+    const paths = locationPaths(locations ?? []);
+    const groupNames = new Map((groups ?? []).map((group) => [group.ref, group.name]));
     const byId = new Map([[resource.id, resource]]);
     const mine = agenda?.filter((entry) => entry.resourceId === resource.id);
     const activity = changes?.filter((change) => change.resourceId === resource.id).slice(0, 10);
@@ -1617,7 +2410,8 @@ ${current ? html`<p class="fine">Membership is read from GitHub when you sign in
     const content = html`${noticeOf(notice)}
 <p><a class="back" href="${root}/resources">Resources</a></p>
 ${pageHead(resourceName(resource, resource.id))}
-<dl class="facts"><dt>Time zone</dt><dd>${resource.timezone}</dd><dt>Bookable hours</dt><dd>${hoursSummary(resource.availabilityRules)} <a href="${root}/hours?resource=${resource.id}">Set hours</a></dd><dt>Resource id</dt><dd><code class="muted">${resource.id}</code></dd></dl>
+${resource.description ? html`<p>${resource.description}</p>` : html``}
+<dl class="facts">${resource.name && resource.externalRef ? html`<dt>Reference</dt><dd>${resource.externalRef}</dd>` : html``}${resource.kind ? html`<dt>Kind</dt><dd>${KIND_NAMES[resource.kind]}</dd>` : html``}${resource.capacity !== undefined ? html`<dt>Capacity</dt><dd>${String(resource.capacity)}</dd>` : html``}${resource.labels ? html`<dt>Labels</dt><dd>${resource.labels.join(', ')}</dd>` : html``}${resource.location ? html`<dt>Location</dt><dd>${paths.get(resource.location) ?? resource.locationName ?? resource.location}</dd>` : html``}${resource.groups ? html`<dt>Groups</dt><dd>${resource.groups.map((ref) => groupNames.get(ref) ?? ref).join(', ')}</dd>` : html``}<dt>Time zone</dt><dd>${resource.timezone}</dd><dt>Bookable hours</dt><dd>${hoursSummary(resource.availabilityRules)} <a href="${root}/hours?resource=${resource.id}">Set hours</a></dd><dt>Resource id</dt><dd><code class="muted">${resource.id}</code></dd></dl>
 <div class="split">
 <div class="stack">
 ${
@@ -1647,6 +2441,30 @@ ${inheritedNote(inherited)}
     : html``
 }
 ${
+  options.resources.setProfile
+    ? html`<section class="panel">
+<h2>Profile</h2>
+<form method="post" action="${root}/resources/profile">
+<input type="hidden" name="csrf" value="${token}">
+<input type="hidden" name="once" value="${formNonce(session)}">
+<input type="hidden" name="id" value="${resource.id}">
+<div class="grid-form">
+<label>Name<input name="name" maxlength="${String(SLOTLOCK_RESOURCE_PROFILE_LIMITS.name)}" value="${resource.name ?? ''}" placeholder="${resource.externalRef ?? ''}"></label>
+<label>Kind<select name="kind">${SLOTLOCK_RESOURCE_KINDS.map(
+        (kind) =>
+          html`<option value="${kind}"${(resource.kind ?? 'other') === kind ? html` selected` : html``}>${KIND_NAMES[kind]}</option>`,
+      )}</select></label>
+<label>Capacity<span class="unit-input"><input type="number" inputmode="numeric" min="1" max="${String(SLOTLOCK_RESOURCE_PROFILE_LIMITS.capacity)}" name="capacity" value="${resource.capacity === undefined ? '' : String(resource.capacity)}"><span>people or seats</span></span></label>
+<label>Labels<input name="labels" value="${(resource.labels ?? []).join(', ')}" placeholder="video, accessible"></label>
+</div>
+<label>Description<textarea name="description" rows="3" maxlength="${String(SLOTLOCK_RESOURCE_PROFILE_LIMITS.description)}">${resource.description ?? ''}</textarea></label>
+<p class="fine">Agents and people see the name instead of the reference. Kind, capacity and labels help them find it, and change nothing about how it is booked.${resource.attributes ? html` Its attributes (${Object.keys(resource.attributes).join(', ')}) are set over the API.` : html``}</p>
+<button class="primary" type="submit">Save profile</button>
+</form>
+</section>`
+    : html``
+}
+${
   options.resources.setPool
     ? html`<section class="panel">
 <h2>Pool</h2>
@@ -1658,6 +2476,58 @@ ${
 <button type="submit">Save pool</button>
 </form>
 <p class="fine">Agents can book any free member of a pool. Leave it empty for none.</p>
+</section>`
+    : html``
+}
+${
+  options.resources.setParent && everyResource
+    ? html`<section class="panel" id="composite">
+<h2>Composite</h2>
+${
+  parts.length > 0
+    ? html`<p>A whole of ${String(parts.length)} part${parts.length === 1 ? '' : 's'}: ${parts.map((part, index) => html`${index > 0 ? ', ' : ''}<a href="${root}/resources/${part.id}">${resourceName(part, part.id)}</a>`)}. Booking it takes every part, and a booking of any part keeps it from being booked.</p>`
+    : html`<form class="create" method="post" action="${root}/resources/parent">
+<input type="hidden" name="csrf" value="${token}">
+<input type="hidden" name="once" value="${formNonce(session)}">
+<input type="hidden" name="id" value="${resource.id}">
+<label>Part of<select name="parent"><option value=""${resource.parentId ? html`` : html` selected`}>Nothing: it stands alone</option>${wholes.map(
+        (whole) =>
+          html`<option value="${whole.id}"${resource.parentId === whole.id ? html` selected` : html``}>${resourceName(whole, whole.id)}</option>`,
+      )}</select></label>
+<button type="submit">Save</button>
+</form>
+<p class="fine">A room of a hall, a half of a court: booking the whole then takes every part, and two parts never get in each other's way. It changes only while neither has a booking or hold to come.</p>`
+}
+</section>`
+    : html``
+}
+${
+  grouping && locations && groups
+    ? html`<section class="panel" id="place">
+<h2>Location and groups</h2>
+${
+  locations.length === 0 && groups.length === 0
+    ? html`<p class="empty">No locations or groups yet. <a href="${root}/locations">Add them</a>, then choose them here.</p>`
+    : html`<form method="post" action="${root}/resources/place">
+<input type="hidden" name="csrf" value="${token}">
+<input type="hidden" name="once" value="${formNonce(session)}">
+<input type="hidden" name="id" value="${resource.id}">
+<label>Location<select name="location"><option value=""${resource.location ? html`` : html` selected`}>None</option>${locations.map(
+        (location) =>
+          html`<option value="${location.ref}"${resource.location === location.ref ? html` selected` : html``}>${paths.get(location.ref) ?? location.name}</option>`,
+      )}</select></label>
+${
+  groups.length > 0
+    ? html`<fieldset class="choices"><legend>Groups</legend><div class="checks">${groups.map(
+        (group) =>
+          html`<label class="choice"><input type="checkbox" name="group" value="${group.ref}"${resource.groups?.includes(group.ref) ? html` checked` : html``}> ${group.name}</label>`,
+      )}</div></fieldset>`
+    : html``
+}
+<button class="primary" type="submit">Save location and groups</button>
+</form>
+<p class="fine">Agents can search a location, with every location inside it, or a group, in one call. <a href="${root}/locations">Locations and groups</a></p>`
+}
 </section>`
     : html``
 }
@@ -1712,6 +2582,166 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
     return redirect(303, `${root}/resources/${id}`);
   }
 
+  async function saveProfile(session: Session, form: URLSearchParams): Promise<Response> {
+    const id = form.get('id') ?? '';
+    const resource = await ownResource(session, id);
+    if (!resource || !options.resources.setProfile) return notFound(session);
+    const text = (key: string) => optionalField(form, key);
+    const capacity = text('capacity');
+    if (capacity !== null && !/^\d{1,6}$/.test(capacity)) {
+      return resourceDetailPage(session, id, 400, PROFILE_PROBLEMS.capacity);
+    }
+    const kind = form.get('kind') ?? 'other';
+    try {
+      await options.resources.setProfile(
+        tenantOf(session),
+        id,
+        {
+          name: text('name'),
+          description: text('description'),
+          kind: kind as SlotlockResourceKind,
+          capacity: capacity === null ? null : Number(capacity),
+          // Commas or spaces between them; a person may type them in capitals.
+          labels: (form.get('labels') ?? '')
+            .split(/[\s,]+/)
+            .map((label) => label.trim().toLowerCase())
+            .filter((label) => label !== ''),
+        },
+        personOf(session),
+      );
+    } catch (error) {
+      if ((error as { code?: unknown }).code !== 'invalid_resource_profile') throw error;
+      const field = (error as { field?: unknown }).field;
+      return resourceDetailPage(
+        session,
+        id,
+        400,
+        PROFILE_PROBLEMS[typeof field === 'string' && field in PROFILE_PROBLEMS ? (field as keyof typeof PROFILE_PROBLEMS) : 'other'],
+      );
+    }
+    return redirect(303, `${root}/resources/${id}`);
+  }
+
+  /** Text from a form, trimmed, or null when empty. */
+  function optionalField(form: URLSearchParams, key: string): string | null {
+    const value = (form.get(key) ?? '').trim();
+    return value === '' ? null : value;
+  }
+
+  async function saveLocation(session: Session, form: URLSearchParams): Promise<Response> {
+    const grouping = options.resources.grouping;
+    if (!grouping) return nothingHere(session);
+    try {
+      await grouping.putLocation(
+        tenantOf(session),
+        {
+          // A person may type a reference in capitals; references are lowercase.
+          ref: (form.get('ref') ?? '').trim().toLowerCase(),
+          name: (form.get('name') ?? '').trim(),
+          parentRef: optionalField(form, 'parent'),
+          timezone: optionalField(form, 'timezone'),
+        },
+        personOf(session),
+      );
+    } catch (error) {
+      const problem = groupingProblem(error);
+      if (!problem) throw error;
+      return locationsPage(session, problem.status, problem.text);
+    }
+    return redirect(303, `${root}/locations`);
+  }
+
+  async function saveGroup(session: Session, form: URLSearchParams): Promise<Response> {
+    const grouping = options.resources.grouping;
+    if (!grouping) return nothingHere(session);
+    try {
+      await grouping.putGroup(
+        tenantOf(session),
+        {
+          ref: (form.get('ref') ?? '').trim().toLowerCase(),
+          name: (form.get('name') ?? '').trim(),
+          description: optionalField(form, 'description'),
+        },
+        personOf(session),
+      );
+    } catch (error) {
+      const problem = groupingProblem(error);
+      if (!problem) throw error;
+      return locationsPage(session, problem.status, problem.text);
+    }
+    return redirect(303, `${root}/locations#groups`);
+  }
+
+  async function deleteGrouping(
+    session: Session,
+    form: URLSearchParams,
+    kind: 'location' | 'group',
+  ): Promise<Response> {
+    const grouping = options.resources.grouping;
+    if (!grouping) return nothingHere(session);
+    const ref = form.get('ref') ?? '';
+    let deleted: boolean;
+    try {
+      deleted =
+        kind === 'location'
+          ? await grouping.deleteLocation(tenantOf(session), ref, personOf(session))
+          : await grouping.deleteGroup(tenantOf(session), ref, personOf(session));
+    } catch (error) {
+      const problem = groupingProblem(error);
+      if (!problem) throw error;
+      return locationsPage(session, problem.status, problem.text);
+    }
+    if (!deleted) {
+      const problem = GROUPING_PROBLEMS[`${kind}_not_found`] as { status: number; text: string };
+      return locationsPage(session, problem.status, problem.text);
+    }
+    return redirect(303, `${root}/locations${kind === 'group' ? '#groups' : ''}`);
+  }
+
+  async function savePlace(session: Session, form: URLSearchParams): Promise<Response> {
+    const id = form.get('id') ?? '';
+    const resource = await ownResource(session, id);
+    const grouping = options.resources.grouping;
+    if (!resource || !grouping) return notFound(session);
+    const groups = [...new Set(form.getAll('group'))];
+    if (groups.length > SLOTLOCK_MAX_GROUPS_PER_RESOURCE) {
+      const problem = GROUPING_PROBLEMS.resource_group_limit_reached as { status: number; text: string };
+      return resourceDetailPage(session, id, problem.status, problem.text);
+    }
+    try {
+      const placed = await grouping.place(
+        tenantOf(session),
+        id,
+        { location: optionalField(form, 'location'), groups },
+        personOf(session),
+      );
+      if (!placed) return notFound(session);
+    } catch (error) {
+      const problem = groupingProblem(error);
+      if (!problem) throw error;
+      return resourceDetailPage(session, id, problem.status, problem.text);
+    }
+    return redirect(303, `${root}/resources/${id}`);
+  }
+
+  async function saveParent(session: Session, form: URLSearchParams): Promise<Response> {
+    const id = form.get('id') ?? '';
+    const resource = await ownResource(session, id);
+    if (!resource || !options.resources.setParent) return notFound(session);
+    const wanted = (form.get('parent') ?? '').trim();
+    const parent = wanted === '' ? null : await ownResource(session, wanted);
+    if (wanted !== '' && !parent) return resourceDetailPage(session, id, 400, 'That is not one of your resources.');
+    try {
+      const changed = await options.resources.setParent(tenantOf(session), id, parent?.id ?? null, personOf(session));
+      if (!changed) return notFound(session);
+    } catch (error) {
+      const text = COMPOSITE_PROBLEMS[String((error as { code?: unknown } | null)?.code)];
+      if (!text) throw error;
+      return resourceDetailPage(session, id, 409, text);
+    }
+    return redirect(303, `${root}/resources/${id}`);
+  }
+
   async function savePool(session: Session, form: URLSearchParams): Promise<Response> {
     const id = form.get('id') ?? '';
     const resource = await ownResource(session, id);
@@ -1736,6 +2766,18 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
     return redirect(303, `${root}/resources/${id}`);
   }
 
+  /** An endpoint's filter (set over the API), in a few words. */
+  function webhookFilterText(filter: NonNullable<SlotlockWebhookEndpoint['filter']>): string {
+    return [
+      filter.resourceIds ? `${filter.resourceIds.length} resource${filter.resourceIds.length === 1 ? '' : 's'}` : null,
+      filter.pools ? `pools ${filter.pools.join(', ')}` : null,
+      filter.locations ? `locations ${filter.locations.join(', ')}` : null,
+      filter.groups ? `groups ${filter.groups.join(', ')}` : null,
+    ]
+      .filter((part) => part !== null)
+      .join('; ');
+  }
+
   function endpointState(endpoint: SlotlockWebhookEndpoint): { text: string; tone: string } {
     if (endpoint.disabledAt) return { text: 'Disabled', tone: 'revoked' };
     if (endpoint.failingSince) return { text: 'Failing', tone: 'held' };
@@ -1758,7 +2800,7 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
           : '';
       return html`<tr>
 <td data-label="URL" class="strong"><code class="truncate url" title="${endpoint.url}">${endpoint.url}</code></td>
-<td data-label="Events" class="wrap">${endpoint.eventTypes ? endpoint.eventTypes.join(', ') : 'All'}</td>
+<td data-label="Events" class="wrap">${endpoint.eventTypes ? endpoint.eventTypes.join(', ') : 'All'}${endpoint.filter ? html`<span class="meta">Only ${webhookFilterText(endpoint.filter)}</span>` : html``}</td>
 <td data-label="Status"><span class="cell"><span class="pill ${state.tone}">${state.text}</span>${problem ? html`<span class="meta wrap">${problem}</span>` : html``}</span></td>
 <td data-label="Added">${dateCell(endpoint.createdAt)}</td>
 <td class="actions">${
@@ -1811,7 +2853,7 @@ ${
     if (!created.ok) {
       const message =
         created.code === 'webhook_limit_reached'
-          ? `You have ${String(created.limit)} webhooks, as many as Slotlock allows. Delete one first.`
+          ? `You have ${String(created.limit)} webhooks, as many as ${options.billing ? 'your plan' : 'Slotlock'} allows. Delete one first${options.billing ? ', or see Plan' : ''}.`
           : created.code === 'invalid_webhook_url'
             ? 'Give an https URL, with no user name, password or #fragment.'
             : 'Choose events from the list.';
@@ -1910,6 +2952,97 @@ ${
     return redirect(303, `${root}/waitlist`);
   }
 
+  // ---- Approvals (RFC 0004 A4) ----
+
+  async function approvalsPage(session: Session, status = 200, notice?: string): Promise<Response> {
+    const approvals = options.resources.approvals;
+    if (!approvals) return notFound(session);
+    const tenantRef = tenantOf(session);
+    const [entries, resources] = await Promise.all([
+      approvals.list(tenantRef, APPROVALS_SHOWN),
+      options.resources.list(tenantRef),
+    ]);
+    const byId = new Map(resources.map((resource) => [resource.id, resource]));
+    const token = csrfToken(session);
+    const pending = entries.filter((entry) => entry.status === 'pending' && entry.expiresAt.getTime() > now());
+    const decided = entries.filter((entry) => !pending.includes(entry));
+    const what = (entry: SlotlockApproval) =>
+      entry.resourceIds.map((id) => resourceName(byId.get(id), id)).join(', ');
+    const when = (entry: SlotlockApproval) => {
+      const zone = byId.get(entry.resourceIds[0] ?? '')?.timezone ?? 'UTC';
+      const day = dayLabel(entry.start, zone, now());
+      return `${day.label} ${clock(entry.start, zone)}–${clock(entry.end, zone)}`;
+    };
+    const KINDS: Record<SlotlockApproval['operation'], string> = {
+      slotlock_create_event: 'Booking',
+      slotlock_book_together: 'Bundle',
+      slotlock_update_event: 'Move',
+    };
+    const form = (entry: SlotlockApproval, decision: 'grant' | 'decline', body: Html) =>
+      html`<form method="post" action="${root}/approvals/decide"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${entry.id}"><input type="hidden" name="decision" value="${decision}">${body}</form>`;
+    const pendingRows = pending.map(
+      (entry) => html`<tr>
+<td data-label="When" class="strong">${when(entry)}</td>
+<td data-label="What"><span class="cell"><span class="truncate" title="${what(entry)}">${what(entry)}</span><span class="meta">${KINDS[entry.operation]}, policy ${entry.policyRef}</span></span></td>
+<td data-label="Asked by"><code class="truncate" title="${entry.requestedBy ?? ''}">${entry.requestedBy ?? 'unknown'}</code></td>
+<td data-label="Decide by">${clock(entry.expiresAt, 'UTC')} UTC, ${dayLabel(entry.expiresAt, 'UTC', now()).label}</td>
+<td class="actions">${form(entry, 'grant', html`<button type="submit">Approve</button>`)}<details class="act danger"><summary>Decline</summary><div class="pop"><p>The held time is freed. The agent is told on its next try.</p>${form(entry, 'decline', html`<label>Reason (optional)<input name="reason" maxlength="500" autocomplete="off"></label><button class="danger" type="submit">Decline</button>`)}</div></details></td>
+</tr>`,
+    );
+    const STATUS: Record<SlotlockApproval['status'], { text: string; tone: string }> = {
+      pending: { text: 'Lapsed', tone: 'revoked' },
+      granted: { text: 'Approved', tone: 'active' },
+      declined: { text: 'Declined', tone: 'revoked' },
+      expired: { text: 'Expired', tone: 'revoked' },
+    };
+    const decidedRows = decided.map(
+      (entry) => html`<tr>
+<td data-label="When" class="strong">${when(entry)}</td>
+<td data-label="What"><span class="truncate" title="${what(entry)}">${what(entry)}</span></td>
+<td data-label="Status"><span class="cell"><span class="pill ${STATUS[entry.status].tone}">${STATUS[entry.status].text}</span>${entry.reason ? html`<span class="meta" title="${entry.reason}">${entry.reason}</span>` : html``}</span></td>
+<td data-label="Decided by"><code class="truncate" title="${entry.decidedBy ?? ''}">${entry.decidedBy ?? '—'}</code></td>
+<td data-label="Asked">${ago(entry.createdAt, now())}</td>
+</tr>`,
+    );
+    const content = html`${noticeOf(notice)}
+${pageHead('Approvals')}
+<p class="fine">Bookings an approval policy holds for a person. Their time stays held until you decide or the wait ends. Policies are set through the API (slotlock_put_approval_policy).</p>
+<div class="stats">
+<div class="stat"><span class="stat-label">Waiting for you</span><span class="stat-value">${String(pending.length)}</span></div>
+</div>
+${
+  pending.length === 0
+    ? emptyState(ICONS.approvals, 'Nothing is waiting. A policy that holds bookings for a person sends them here.')
+    : html`<div class="table"><table><thead><tr><th>When</th><th>What</th><th>Asked by</th><th>Decide by</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${pendingRows}</tbody></table></div>`
+}
+${
+  decided.length === 0
+    ? html``
+    : html`<h2>Decided</h2><div class="table"><table><thead><tr><th>When</th><th>What</th><th>Status</th><th>Decided by</th><th>Asked</th></tr></thead><tbody>${decidedRows}</tbody></table></div>`
+}`;
+    return respond(status, layout('Approvals', content, session, 'approvals'));
+  }
+
+  async function decideApproval(session: Session, form: URLSearchParams): Promise<Response> {
+    const approvals = options.resources.approvals;
+    if (!approvals) return notFound(session);
+    const decision = form.get('decision');
+    if (decision !== 'grant' && decision !== 'decline') return approvalsPage(session, 400, 'Choose approve or decline.');
+    const reason = (form.get('reason') ?? '').trim().slice(0, 500);
+    const decided = await approvals.decide(tenantOf(session), form.get('id') ?? '', decision, personOf(session), reason || undefined);
+    if (!decided.ok) {
+      const messages: Record<string, string> = {
+        approval_not_found: 'That approval is not one of yours.',
+        approval_not_pending: 'That approval was already decided.',
+        approval_expired: 'The wait for that approval ended: its time is no longer held.',
+        overlap: 'That time is taken now, so it cannot be booked. Decline it instead.',
+        revision_conflict: 'The agent changed that event since it asked. Decline this one; it can ask again.',
+      };
+      return approvalsPage(session, 409, messages[decided.code] ?? `That booking cannot be made now (${decided.code}). Decline it instead.`);
+    }
+    return redirect(303, `${root}/approvals`);
+  }
+
 
   // ---- The assistant ----
 
@@ -1941,6 +3074,27 @@ ${
   if (assistantOptions && assistantOptions.secret === options.sessionSecret) {
     throw new Error('Slotlock dashboard assistant secret must differ from the session secret');
   }
+  const previousSecrets = [...(assistantOptions?.previousSecrets ?? [])];
+  if (previousSecrets.length > SLOTLOCK_ASSISTANT_MAX_PREVIOUS_SECRETS) {
+    throw new Error(
+      `Slotlock dashboard assistant takes at most ${String(SLOTLOCK_ASSISTANT_MAX_PREVIOUS_SECRETS)} previous secrets`,
+    );
+  }
+  for (const previous of previousSecrets) {
+    if (Buffer.byteLength(previous, 'utf8') < 32) {
+      throw new Error('Slotlock dashboard assistant previous secrets must each be at least 32 bytes');
+    }
+    if (previous === assistantOptions?.secret || previous === options.sessionSecret) {
+      throw new Error(
+        'Slotlock dashboard assistant previous secrets must differ from the assistant and session secrets',
+      );
+    }
+  }
+  if (new Set(previousSecrets).size !== previousSecrets.length) {
+    throw new Error('Slotlock dashboard assistant previous secrets must differ from each other');
+  }
+  /** The current secret, then the previous ones: a stored key is tried with each in turn. */
+  const assistantSecrets = assistantOptions ? [assistantOptions.secret, ...previousSecrets] : [];
   const memberMessages = createSlotlockRateLimiter(
     assistantOptions?.rate ?? { perSecond: 10 / 60, burst: 10 },
     now,
@@ -1969,7 +3123,7 @@ ${
    * Who the assistant acts as, for the record and for ownership: the member by GitHub user id,
    * which a rename does not change. Shown as "Assistant for @login".
    */
-  const assistantActor = (session: Session) => `dashboard-assistant:github:${session.uid}`;
+  const assistantActor = (session: Session) => `dashboard-assistant:${personOf(session)}`;
   const CONFIRMED_WRITES: ReadonlySet<string> = new Set<SlotlockAgentWriteOperation>([
     'slotlock_create_event',
     'slotlock_update_event',
@@ -2009,6 +3163,12 @@ ${
       text = `Hold ${slots.join('; ')} for ${String(input.ttl_seconds ?? '')} seconds, as alternatives.`;
     } else if (operation === 'slotlock_release_slots') {
       text = `Release the hold ${String(input.hold_id)} and every slot held with it.`;
+    } else if (operation === 'slotlock_confirm_slot') {
+      text = `Book the time held by ${String(input.hold_id)}${input.title ? `, as "${String(input.title)}"` : ''}, and release the other holds made with it.`;
+    } else if (operation === 'slotlock_reschedule') {
+      text = `Move the event ${String(input.event_id)} to ${String(input.starts_at)} to ${String(input.ends_at)}${input.resource_id ? ` on resource ${String(input.resource_id)}` : ''}.`;
+    } else if (operation === 'slotlock_cancel') {
+      text = `Cancel the event ${String(input.event_id)}.`;
     } else {
       text = '';
     }
@@ -2017,8 +3177,9 @@ ${
   }
 
   /** Owners of the organization in use may change its assistant; a person always may their own. */
+  /** An owner of the workspace: the person in their own, an organization's owner in its. */
   const isAdmin = (session: Session) =>
-    !served || session.orgs?.find((org) => org.id === session.org)?.role === 'admin';
+    session.org === undefined || session.orgs?.find((org) => org.id === session.org)?.role === 'admin';
   const assistantPrincipal = (session: Session): SlotlockAgentPrincipal => ({
     subject: assistantActor(session),
     tenantRef: tenantOf(session),
@@ -2062,6 +3223,8 @@ ${
           ? { consumeRateLimit: assistant.consumeRateLimit }
           : {}),
         ...(confirm ? { confirm } : {}),
+        // A proposal halts at `confirm` and never reaches the backend, so only what runs counts.
+        ...(assistant.onUsage ? { onUsage: assistant.onUsage } : {}),
         onError: (error) => {
           try {
             ignoreRejection(options.onError?.(error));
@@ -2088,12 +3251,27 @@ ${
     }
     let apiKey: string | null = null;
     if (settings.sealedKey !== null) {
-      apiKey = await openSlotlockAssistantKey(assistantOptions.secret, tenantOf(session), settings.sealedKey);
-      if (apiKey === null) {
+      const tenantRef = tenantOf(session);
+      const opened = await openSlotlockAssistantKeyWithAny(assistantSecrets, tenantRef, settings.sealedKey);
+      if (opened === null) {
         return {
           problem:
             'The stored API key cannot be opened: the server’s assistant secret changed. An admin can enter the key again in Settings.',
         };
+      }
+      apiKey = opened.apiKey;
+      // Sealed under a previous secret: sealed again under the current one, unless an owner saved
+      // another key meanwhile. Best effort: the key opened either way.
+      if (opened.secretIndex > 0 && store?.resealKey) {
+        try {
+          const resealed = await sealSlotlockAssistantKey(assistantOptions.secret, tenantRef, apiKey);
+          await store.resealKey(tenantRef, settings.sealedKey, resealed);
+        } catch (error) {
+          // A suspended tenant reads and writes nothing, this included: it opens the old way.
+          if ((error as { code?: unknown } | null)?.code !== 'tenant_suspended') {
+            ignoreRejection(options.onError?.(error));
+          }
+        }
       }
     }
     return {
@@ -2213,7 +3391,16 @@ ${
     return respond(status, layout('Assistant', content, session, 'assistant'));
   }
 
-  async function assistantSettingsPanel(session: Session): Promise<Html> {
+  /** The assistant form as a preset or a model list leaves it, not yet saved. */
+  type AssistantDraft = {
+    provider: 'anthropic' | 'openai';
+    baseUrl: string;
+    model?: string;
+    /** The models the provider listed, offered for the Model field. */
+    models?: readonly string[];
+  };
+
+  async function assistantSettingsPanel(session: Session, draft?: AssistantDraft): Promise<Html> {
     const store = assistantStore();
     if (!store) return html``;
     const settings = await store.getSettings(tenantOf(session));
@@ -2226,21 +3413,33 @@ ${
       }</section>`;
     }
     const token = csrfToken(session);
-    const selected = (provider: string) => (settings?.provider === provider ? html` selected` : html``);
+    // What the form shows: a draft (a preset, or a model list) over what is saved.
+    const provider = draft?.provider ?? settings?.provider;
+    const baseUrl = draft ? draft.baseUrl : (settings?.baseUrl ?? '');
+    const model = draft?.model ?? settings?.model ?? '';
+    const selected = (value: string) => (provider === value ? html` selected` : html``);
+    const models = draft?.models ?? [];
     return html`<section class="panel" id="assistant">
 <h2>Assistant</h2>
+<form class="presets" method="get" action="${root}/settings"><span class="fine">Fill in for</span>${SLOTLOCK_ASSISTANT_PRESETS.map(
+      (preset) => html`<button type="submit" name="preset" value="${preset.id}">${preset.name}</button>`,
+    )}</form>
 <form method="post" action="${root}/settings/assistant">
 <input type="hidden" name="csrf" value="${token}">
 <input type="hidden" name="once" value="${formNonce(session)}">
 <div class="grid-form">
 <label>Provider<select name="provider"><option value="anthropic"${selected('anthropic')}>Anthropic Messages API</option><option value="openai"${selected('openai')}>OpenAI-compatible</option></select></label>
-<label>Base URL<input name="base_url" required maxlength="2048" value="${settings?.baseUrl ?? ''}" placeholder="https://api.anthropic.com"></label>
-<label>Model<input name="model" required maxlength="200" value="${settings?.model ?? ''}" placeholder="your-model"></label>
+<label>Base URL<input name="base_url" required maxlength="2048" value="${baseUrl}" placeholder="https://api.anthropic.com"></label>
+<label>Model<input name="model" required maxlength="200" value="${model}" placeholder="your-model"${models.length > 0 ? html` list="assistant-models"` : html``}></label>${
+      models.length > 0
+        ? html`<datalist id="assistant-models">${models.map((id) => html`<option value="${id}"></option>`)}</datalist>`
+        : html``
+    }
 <label>API key<input name="api_key" type="password" autocomplete="off" maxlength="4096" placeholder="${settings?.keyHint ? 'Leave empty to keep it' : 'Optional for a local model'}"></label>
 </div>
 <p class="fine">Key: ${settings?.keyHint ? html`set, ending in <code>${settings.keyHint}</code>` : 'none'}. OpenAI-compatible covers OpenAI, OpenRouter, vLLM, Ollama and LM Studio; give the URL that ends in <code>/v1</code>.</p>
 ${settings?.keyHint ? html`<label class="choice"><input type="checkbox" name="clear_key" value="1"> Remove the key</label>` : html``}
-<button class="primary" type="submit">Save</button>
+<div class="row-actions"><button class="primary" type="submit">Save</button><button type="submit" formaction="${root}/settings/assistant/models">Load models</button></div>
 </form>
 ${sentTo}
 ${
@@ -2305,6 +3504,78 @@ ${
     return redirect(303, `${root}/settings#assistant`);
   }
 
+  /**
+   * The provider's models for the Model field (Load models): the form's provider and base URL,
+   * checked as saving checks them, with the key given, or the saved one when it is for that same
+   * provider and URL. Saves nothing; counted as a message to the assistant.
+   */
+  async function loadAssistantModels(session: Session, form: URLSearchParams): Promise<Response> {
+    const store = assistantStore();
+    if (!store || !assistantOptions) return notFound(session);
+    if (!isAdmin(session)) return adminOnly(session);
+    if (!memberMessages.take(`${tenantOf(session)}\0${session.uid}`)) {
+      return tooManyMessages(session, settingsPage);
+    }
+    const provider = form.get('provider');
+    if (provider !== 'anthropic' && provider !== 'openai') {
+      return settingsPage(session, 400, 'Choose a provider from the list.');
+    }
+    const typedModel = (form.get('model') ?? '').trim();
+    const draft: AssistantDraft = {
+      provider,
+      baseUrl: (form.get('base_url') ?? '').trim(),
+      ...(typedModel !== '' ? { model: typedModel } : {}),
+    };
+    const checkedUrl = readSlotlockAssistantBaseUrl(draft.baseUrl, { privateUrls });
+    if (!checkedUrl.ok) {
+      return settingsPage(
+        session,
+        400,
+        checkedUrl.reason === 'private'
+          ? PRIVATE_URL_REFUSAL
+          : 'Give an https base URL (http only for localhost or 127.0.0.1), with no user name, query or #fragment.',
+        draft,
+      );
+    }
+    const baseUrl = checkedUrl.url;
+    if (namesOwnHost(baseUrl)) return settingsPage(session, 400, OWN_HOST_REFUSAL, draft);
+    if (!(await checkSlotlockAssistantHost(baseUrl, { privateUrls, resolve: resolveHost }))) {
+      return settingsPage(session, 400, PRIVATE_URL_REFUSAL, draft);
+    }
+    const typedKey = (form.get('api_key') ?? '').trim();
+    if (typedKey !== '' && !SLOTLOCK_ASSISTANT_API_KEY.test(typedKey)) {
+      return settingsPage(session, 400, 'An API key is up to 4,096 characters without spaces.', draft);
+    }
+    // The saved key only for the provider and URL it was entered for, as a model call sends it.
+    let apiKey: string | null = typedKey !== '' ? typedKey : null;
+    if (apiKey === null) {
+      const found = await assistantModel(session);
+      if (found && !('problem' in found) && found.model.provider === provider && found.model.baseUrl === baseUrl) {
+        apiKey = found.model.apiKey;
+      }
+    }
+    try {
+      const listed = await listSlotlockAssistantModels({
+        provider,
+        baseUrl,
+        apiKey,
+        fetch: assistantFetch,
+        timeoutMs: assistantTimeout,
+      });
+      return settingsPage(
+        session,
+        200,
+        listed.length > 0
+          ? `${listed.length.toLocaleString('en')} model${listed.length === 1 ? '' : 's'} listed: choose one for Model, then Save.${typedKey !== '' ? ' Enter the API key again when you save.' : ''}`
+          : 'The provider listed no models. Type the model name.',
+        { ...draft, baseUrl, models: listed },
+      );
+    } catch (error) {
+      report(error instanceof Error ? error.message : 'assistant model list failed');
+      return settingsPage(session, 502, slotlockAssistantProviderMessage(error), { ...draft, baseUrl });
+    }
+  }
+
   async function removeAssistantSettings(session: Session): Promise<Response> {
     const store = assistantStore();
     if (!store) return notFound(session);
@@ -2363,6 +3634,11 @@ ${
     if ('problem' in found) return assistantPage(session, 409, found.problem);
     const tenantRef = tenantOf(session);
     const member = personOf(session);
+    try {
+      ignoreRejection(assistantOptions?.onMessage?.(tenantRef));
+    } catch {
+      // Metering never changes an answer.
+    }
     const stored = await store.getConversation(tenantRef, member);
     const entries = boundSlotlockAssistantEntries([
       ...readSlotlockAssistantEntries(stored?.messages),
@@ -2516,14 +3792,229 @@ ${
     return redirect(303, `${root}/assistant`);
   }
 
+  async function planPage(
+    session: Session,
+    status = 200,
+    notice?: string,
+    thanks = false,
+  ): Promise<Response> {
+    const billing = options.billing;
+    if (!billing) return notFound(session);
+    if (session.env === 'test') {
+      // Its own use, counted apart from Live's and never billed.
+      const range = slotlockUsageMonthToDate(now());
+      const tested =
+        options.usage && options.resources.usage
+          ? summarizeSlotlockUsage(await options.resources.usage(tenantOf(session), range.from, range.to))
+          : null;
+      const stat = (label: string, value: number) =>
+        html`<div class="stat"><span class="stat-label">${label}</span><span class="stat-value">${value.toLocaleString('en-GB')}</span></div>`;
+      return respond(
+        status,
+        layout(
+          'Plan',
+          html`${pageHead('Plan')}${noticeOf(notice)}<p>The test environment is on your live plan's limits and is never billed. Switch to Live to see your plan, or to change it.</p>${
+            tested
+              ? html`<section class="panel" id="usage"><h2>Test usage this month</h2><div class="stats">${stat('Operations', tested.totals.operations)}${stat('Bookings', tested.totals.bookings)}${stat('Holds', tested.totals.holds)}</div><p class="fine">Since ${range.from}, in UTC, counted apart from Live, against the same monthly quotas.</p></section>`
+              : html``
+          }`,
+          session,
+          'plan',
+        ),
+      );
+    }
+    const tenantRef = tenantOf(session);
+    const [plan, resourceCount, keys, webhooks] = await Promise.all([
+      billing.plan(tenantRef),
+      // As the limit counts them: archived resources included.
+      options.resources.count
+        ? options.resources.count(tenantRef)
+        : options.resources.list(tenantRef).then((listed) => listed.length),
+      options.keys.list({ tenantRef }),
+      options.resources.webhooks?.list(tenantRef),
+    ]);
+    const month = slotlockUsageMonthToDate(now());
+    const used =
+      options.usage && options.resources.usage
+        ? summarizeSlotlockUsage(await options.resources.usage(tenantRef, month.from, month.to))
+        : null;
+    const keyName = new Map(keys.map((key) => [key.id, key.name]));
+    const active = keys.filter(
+      (key) => !key.revokedAt && (key.expiresAt === null || key.expiresAt.getTime() > now()),
+    );
+    const token = csrfToken(session);
+    const paying = plan !== null && plan.plan !== 'free';
+    const name = plan ? PLAN_NAMES[plan.plan] : 'No plan';
+    // An organization is offered Team where the deployment sells it; a person, Developer.
+    const offered: 'developer' | 'team' = session.org !== undefined && billing.teamPrices ? 'team' : 'developer';
+    const offeredPrices = offered === 'team' ? (billing.teamPrices as { month: string; year: string }) : billing.prices;
+    const counted = (value: number) => value.toLocaleString('en-GB');
+    const use = (label: string, used: number, limit: number | undefined) =>
+      html`<div class="stat"><span class="stat-label">${label}</span><span class="stat-value">${counted(used)}${limit === undefined ? html`` : html`<span class="meta"> of ${counted(limit)}</span>`}</span></div>`;
+    // This month's quotas, when the deployment holds tenants to them.
+    const quotas = options.quotas && plan ? SLOTLOCK_PLAN_QUOTAS[plan.plan] : null;
+    const resets = formatDate(slotlockQuotaPeriod(now()).resetsAt);
+    const quotaWarnings = quotas && used
+      ? (['operations', 'bookings'] as const).flatMap((metric) => {
+          const quota = quotas[metric];
+          const stop = Math.floor((quota * quotas.stopPercent) / 100);
+          const spent = used.totals[metric];
+          const what = metric === 'operations' ? 'operations' : 'bookings';
+          const refused = metric === 'operations' ? 'every call but reading usage' : 'new bookings and holds';
+          if (spent >= stop) {
+            return [html`<p class="notice warn" role="alert">This month's ${what} are used up: Slotlock refuses ${refused} with quota_exceeded until ${resets}.${paying ? html`` : html` Upgrade for more.`}</p>`];
+          }
+          if (spent >= quota) {
+            const billed = metric === 'operations' && billing.overage && plan?.plan === 'developer' && paying;
+            return [html`<p class="notice warn" role="alert">You have used this month's ${counted(quota)} ${what}.${billed ? ` Those past it are billed at ${billing.overage?.price ?? ''}.` : ''} Slotlock refuses ${refused} past ${counted(stop)}, until ${resets}.</p>`];
+          }
+          if (spent * 100 >= quota * 80) {
+            return [html`<p class="notice warn" role="status">You have used ${String(Math.floor((spent * 100) / quota))}% of this month's ${what}. They start again on ${resets}.</p>`];
+          }
+          return [];
+        })
+      : [];
+    const warning = html`${
+      plan?.status === 'past_due'
+        ? html`<p class="notice warn" role="alert">Your last payment failed. Update your payment method to keep the ${name} plan.</p>`
+        : html``
+    }${quotaWarnings}`;
+    const free = SLOTLOCK_PLAN_LIMITS.free;
+    const developer = SLOTLOCK_PLAN_LIMITS[offered];
+    const upgrade = paying || !isAdmin(session)
+      ? html``
+      : html`<section class="panel" id="upgrade">
+<h2>${PLAN_NAMES[offered]}</h2>
+<p>${String(developer.resources)} resources, ${String(developer.apiKeys)} API keys and ${String(developer.webhookEndpoints)} webhook endpoints${options.quotas ? html`, with ${counted(SLOTLOCK_PLAN_QUOTAS[offered].operations)} operations and ${counted(SLOTLOCK_PLAN_QUOTAS[offered].bookings)} bookings a month${offered === 'team' ? ' shared by the organization' : ''}` : html``}.${
+  offered === 'developer' && billing.overage && options.quotas
+    ? ` Operations past them are billed at ${billing.overage.price}, up to ${String(billing.overage.stopPercent)}% of them.`
+    : ''
+}</p>
+<form method="post" action="${root}/plan/upgrade">
+<input type="hidden" name="csrf" value="${token}">
+<input type="hidden" name="once" value="${formNonce(session)}">
+<fieldset class="modes"><legend>Billed</legend>
+<label class="choice"><input type="radio" name="interval" value="month" checked> Monthly, ${offeredPrices.month} a month</label>
+<label class="choice"><input type="radio" name="interval" value="year"> Yearly, ${offeredPrices.year} a year</label>
+</fieldset>
+<button class="primary" type="submit">Upgrade to ${PLAN_NAMES[offered]}</button>
+</form>
+<p class="fine">Paid through Stripe, in your currency, with tax added where it applies. Cancel at any time.</p>
+</section>`;
+    const manage = plan?.stripeCustomer && isAdmin(session)
+      ? html`<form class="inline" method="post" action="${root}/plan/manage"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><button type="submit">Manage billing</button></form>`
+      : html``;
+    const renews =
+      paying && plan?.currentPeriodEnd
+        ? html`<p class="fine">${plan.status === 'past_due' ? 'Payment due since' : 'Renews'} ${formatDate(plan.currentPeriodEnd)}.</p>`
+        : html``;
+    const usageSection = used
+      ? html`<section class="panel" id="usage">
+<h2>Usage this month</h2>
+<div class="stats">
+${use('Operations', used.totals.operations, quotas?.operations)}
+${use('Bookings', used.totals.bookings, quotas?.bookings)}
+${use('Holds', used.totals.holds, undefined)}
+${use('Webhook deliveries', used.totals.webhook_deliveries, undefined)}
+${use('Assistant messages', used.totals.assistant_messages, undefined)}
+</div>
+<p class="fine">Since ${month.from}, in UTC. An operation is a call that reached Slotlock, whatever it answered; it shows here within 15 seconds. A booking is a reservation, a calendar event or a confirmed hold, and with holds shows within the hour.</p>
+${
+  used.keys.length === 0
+    ? html``
+    : html`<div class="table"><table><thead><tr><th>Used by</th><th>Operations</th><th>Bookings</th><th>Holds</th></tr></thead><tbody>${used.keys.map(
+        (row) =>
+          html`<tr><td data-label="Used by">${row.keyId === null ? 'The dashboard and its assistant' : (keyName.get(row.keyId) ?? 'A deleted key')}</td><td data-label="Operations">${String(row.operations)}</td><td data-label="Bookings">${String(row.bookings)}</td><td data-label="Holds">${String(row.holds)}</td></tr>`,
+      )}</tbody></table></div>`
+}
+</section>`
+      : html``;
+    const content = html`${thanks ? html`<p class="notice">${notice ?? ''}</p>` : noticeOf(notice)}
+${warning}
+${pageHead(`Plan: ${name}`, manage)}
+<div class="stats">
+${use('Resources', resourceCount, plan?.limits.resources)}
+${use('Active API keys', active.length, plan?.limits.apiKeys)}
+${webhooks ? use('Webhooks', webhooks.length, plan?.limits.webhookEndpoints) : html``}
+</div>
+${renews}
+${usageSection}
+${plan ? html`` : html`<p class="fine">Free allows ${String(free.resources)} resources, ${String(free.apiKeys)} API keys and ${String(free.webhookEndpoints)} webhook endpoints${options.quotas ? html`, with ${counted(SLOTLOCK_PLAN_QUOTAS.free.operations)} operations and ${counted(SLOTLOCK_PLAN_QUOTAS.free.bookings)} bookings a month` : html``}.</p>`}
+${upgrade}
+<section class="panel" id="custom">
+<h2>Custom</h2>
+<p>Slotlock on your own servers, with support from the people who build it.</p>
+<a class="button" href="${billing.contact}">Talk to the founder</a>
+</section>`;
+    return respond(status, layout('Plan', content, session, 'plan'));
+  }
+
+  async function upgradePlan(session: Session, form: URLSearchParams): Promise<Response> {
+    const billing = options.billing;
+    if (!billing) return notFound(session);
+    if (session.env === 'test') return planPage(session, 400, 'Plans are changed in Live.');
+    if (!isAdmin(session)) return planPage(session, 403, 'Only owners of the organization can change its plan.');
+    const interval = form.get('interval') === 'year' ? 'year' : 'month';
+    const tenantRef = tenantOf(session);
+    const plan = await billing.plan(tenantRef);
+    if (plan && plan.plan !== 'free') {
+      return planPage(session, 409, `You are on the ${PLAN_NAMES[plan.plan]} plan already.`);
+    }
+    let url: string;
+    try {
+      url = await billing.checkout({
+        tenantRef,
+        interval,
+        ...(session.org !== undefined && billing.teamPrices ? { plan: 'team' as const } : {}),
+        customer: plan?.stripeCustomer ?? null,
+        successUrl: `${publicRoot}/plan?checkout=done`,
+        cancelUrl: `${publicRoot}/plan`,
+      });
+    } catch (error) {
+      if ((error as { code?: unknown } | null)?.code === 'subscription_exists') {
+        return planPage(
+          session,
+          409,
+          'You pay for a subscription already. Its plan shows here once Stripe confirms it; to change it, use Manage billing.',
+        );
+      }
+      ignoreRejection(options.onError?.(error));
+      return planPage(session, 502, 'The payment page did not open. Try again in a minute.');
+    }
+    return redirect(303, url);
+  }
+
+  async function manageBilling(session: Session): Promise<Response> {
+    const billing = options.billing;
+    if (!billing) return notFound(session);
+    if (session.env === 'test') return planPage(session, 400, 'Billing is managed in Live.');
+    if (!isAdmin(session)) return planPage(session, 403, 'Only owners of the organization can manage its billing.');
+    const plan = await billing.plan(tenantOf(session));
+    if (!plan?.stripeCustomer) return planPage(session, 409, 'There is no billing to manage yet.');
+    let url: string;
+    try {
+      url = await billing.portal({ customer: plan.stripeCustomer, returnUrl: `${publicRoot}/plan` });
+    } catch (error) {
+      ignoreRejection(options.onError?.(error));
+      return planPage(session, 502, 'Billing did not open. Try again in a minute.');
+    }
+    return redirect(303, url);
+  }
+
   /** The page a form was sent from, to show what went wrong with it. */
   function pageFor(route: string) {
     if (route.startsWith('/keys')) return keysPage;
     if (route.startsWith('/webhooks') && options.resources.webhooks) return webhooksPage;
     if (route.startsWith('/waitlist') && options.resources.waitlist) return waitlistPage;
+    if (route.startsWith('/approvals') && options.resources.approvals) return approvalsPage;
+    if ((route.startsWith('/locations') || route.startsWith('/groups')) && options.resources.grouping) {
+      return locationsPage;
+    }
     if (route.startsWith('/resources') || route === '/hours') return resourcesPage;
     if (route.startsWith('/assistant') && assistantStore()) return assistantPage;
     if (route.startsWith('/settings')) return settingsPage;
+    if (route.startsWith('/plan') && options.billing) return planPage;
+    if (route.startsWith('/teams') && teams) return teamsPage;
     return overviewPage;
   }
 
@@ -2602,6 +4093,8 @@ ${
       404,
       layout('Not found', html`<p class="notice">That resource is not one of yours.</p>`, session),
     );
+  const nothingHere = (session: Session) =>
+    respond(404, layout('Not found', html`<p class="notice">Nothing is here.</p>`, session));
 
   async function hoursEditor(session: Session, url: URL): Promise<Response> {
     const id = url.searchParams.get('resource');
@@ -2699,8 +4192,93 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
   }
 
   /** Act in another of the session's organizations: the same session, sealed again. */
-  function switchOrganization(session: Session, form: URLSearchParams): Response {
+  function switchEnvironment(session: Session, form: URLSearchParams): Response {
+    const wanted = form.get('environment');
+    if (wanted !== 'live' && wanted !== 'test') {
+      return respond(400, layout('Refused', html`<p class="notice">Choose Live or Test.</p>`, session));
+    }
+    const { env: _, ...rest } = session;
+    const sealed = seal('slotlock-dashboard-session-v1', wanted === 'test' ? { ...rest, env: 'test' } : rest);
+    const left = Math.max(1, Math.floor((session.exp - now()) / 1000));
+    return redirect(303, root, [setCookie(SESSION_COOKIE, sealed, left)]);
+  }
+
+  /**
+   * Teams on Cloud: the person's GitHub organizations, as read at sign-in, each on or off. An owner
+   * turns one on or off; a member asks an owner; one that is on is a workspace to switch to.
+   */
+  async function teamsPage(session: Session, status = 200, notice?: string): Promise<Response> {
+    if (!teams) return nothingHere(session);
+    const orgs = session.orgs ?? [];
+    const enabled = orgs.length > 0 ? await teams.enabled(orgs.map((org) => org.id)) : new Set<string>();
+    enabledOf.set(session, enabled);
+    const token = csrfToken(session);
+    const hidden = (org: Organization) =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="organization" value="${org.id}">`;
+    const rows = orgs.map((org) => {
+      const on = enabled.has(org.id);
+      const owner = org.role === 'admin';
+      const actions = on
+        ? html`${org.id === session.org ? html`<span class="muted">In use</span>` : html`<form class="inline" method="post" action="${root}/organization">${hidden(org)}<button type="submit">Switch to it</button></form>`}${
+            owner
+              ? html`<details class="act danger"><summary>Turn off</summary><div class="pop"><p>Its keys stop at once and no member can open it. What it holds stays until an owner turns it on again or erases it.</p>
+<form method="post" action="${root}/teams/disable">${hidden(org)}<label for="confirm-${org.id}">Type ${org.login} to confirm</label><input id="confirm-${org.id}" name="confirm" autocomplete="off" required><button class="danger" type="submit">Turn off</button></form></div></details>`
+              : html``
+          }`
+        : owner
+          ? html`<form class="inline" method="post" action="${root}/teams/enable">${hidden(org)}<button class="primary" type="submit">Turn on</button></form>`
+          : html`<span class="muted">An owner can turn it on</span>`;
+      return html`<tr><td data-label="Organization" class="strong">${org.login}</td><td data-label="You are">${owner ? 'Owner' : 'Member'}</td><td data-label="Slotlock"><span class="pill ${on ? 'active' : 'revoked'}">${on ? 'On' : 'Off'}</span></td><td class="actions">${actions}</td></tr>`;
+    });
+    const content = html`${noticeOf(notice)}${pageHead('Teams')}
+<p>Work with the people in a GitHub organization: once an owner turns Slotlock on for it, every owner and member shares its resources, keys and history, and picks it from the workspace menu. Your own workspace stays yours.</p>
+${
+  rows.length === 0
+    ? emptyState(ICONS.teams, 'Slotlock sees none of your GitHub organizations. It reads them as you sign in: after joining one, sign out and in again. An organization that restricts OAuth apps needs an owner to approve this one.')
+    : html`<div class="table"><table><thead><tr><th>Organization</th><th>You are</th><th>Slotlock</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>
+<p class="fine">Who owns an organization is read from GitHub as you sign in. Leaving one ends your access at your next sign-in.</p>`
+}`;
+    return respond(status, layout('Teams', content, session, 'teams'));
+  }
+
+  async function changeTeam(session: Session, form: URLSearchParams, on: boolean): Promise<Response> {
+    if (!teams) return nothingHere(session);
+    const org = session.orgs?.find((candidate) => candidate.id === form.get('organization'));
+    if (!org) return teamsPage(session, 400, 'That is not one of your organizations.');
+    if (org.role !== 'admin') return teamsPage(session, 403, `Only an owner of ${org.login} can turn Slotlock ${on ? 'on' : 'off'} for it.`);
+    // Who owns it was read as the person signed in: only a recent sign-in is trusted to say so.
+    if (now() - (session.exp - SESSION_TTL_MS) > FRESH_SIGN_IN_MS) {
+      return teamsPage(
+        session,
+        403,
+        `To turn Slotlock ${on ? 'on' : 'off'} for ${org.login}, sign out and in again: who owns it is read from GitHub as you sign in.`,
+      );
+    }
+    if (on) {
+      await teams.enable({ id: org.id, login: org.login }, personOf(session));
+      return teamsPage(session, 200, `Slotlock is on for ${org.login}. Its members pick it from the workspace menu.`);
+    }
+    if (form.get('confirm') !== org.login) return teamsPage(session, 400, `Type ${org.login} to turn it off.`);
+    await teams.disable(org.id, personOf(session));
+    return teamsPage(session, 200, `Slotlock is off for ${org.login}: its keys stopped. What it holds stays until it is turned on again or erased.`);
+  }
+
+  async function switchOrganization(session: Session, form: URLSearchParams): Promise<Response> {
     const wanted = form.get('organization') ?? '';
+    if (teams) {
+      // Their own tenant, or an organization of theirs that is turned on now.
+      const org = session.orgs?.find((candidate) => candidate.id === wanted);
+      if (wanted !== '' && (!org || !(await teams.enabled([wanted])).has(wanted))) {
+        return respond(
+          400,
+          layout('Refused', html`<p class="notice">You cannot act for that organization. An owner turns it on from Teams.</p>`, session),
+        );
+      }
+      const { org: _, ...personal } = session;
+      const sealed = seal('slotlock-dashboard-session-v1', wanted === '' ? personal : { ...personal, org: wanted });
+      const left = Math.max(1, Math.floor((session.exp - now()) / 1000));
+      return redirect(303, root, [setCookie(SESSION_COOKIE, sealed, left)]);
+    }
     const org = session.orgs?.find(
       (candidate) => candidate.id === wanted && served?.has(candidate.id),
     );
@@ -2727,7 +4305,7 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       code_challenge: challenge,
       code_challenge_method: 'S256',
       // Reading organization membership needs read:org; a personal tenant needs no scope at all.
-      ...(served ? { scope: 'read:org' } : {}),
+      ...(readsOrganizations ? { scope: 'read:org' } : {}),
     }).toString();
     const sealed = seal('slotlock-dashboard-sign-in-v1', {
       state,
@@ -2842,13 +4420,154 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         continue;
       }
       const id = String(organization.id);
-      if (served?.has(id)) {
+      if (teams || served?.has(id)) {
         found.set(id, { id, login: organization.login, role: membership.role === 'admin' ? 'admin' : 'member' });
       }
     }
     return [...found.values()]
       .sort((a, b) => a.login.localeCompare(b.login))
       .slice(0, MAX_SESSION_ORGANIZATIONS);
+  }
+
+  /** Google's sign-in (OpenID Connect, code flow with PKCE and a nonce), back to the same callback. */
+  async function startGoogleSignIn(provider: NonNullable<typeof google>): Promise<Response> {
+    const state = randomBytes(32).toString('base64url');
+    const verifier = randomBytes(32).toString('base64url');
+    const nonce = randomBytes(24).toString('base64url');
+    const target = new URL(provider.authorizeUrl ?? 'https://accounts.google.com/o/oauth2/v2/auth');
+    target.search = new URLSearchParams({
+      client_id: provider.clientId,
+      redirect_uri: callbackUrl,
+      response_type: 'code',
+      scope: 'openid email',
+      state,
+      nonce,
+      code_challenge: createHash('sha256').update(verifier).digest('base64url'),
+      code_challenge_method: 'S256',
+    }).toString();
+    const sealed = seal('slotlock-dashboard-sign-in-v1', {
+      state,
+      verifier,
+      nonce,
+      idp: 'google',
+      exp: now() + SIGN_IN_TTL_MS,
+    });
+    return redirect(302, target.href, [setCookie(SIGN_IN_COOKIE, sealed, SIGN_IN_TTL_MS / 1000)]);
+  }
+
+  /** Google's signing keys by key id, kept for as long as its answer says (an hour by default). */
+  let googleKeys: { keys: Map<string, CryptoKey>; until: number } | null = null;
+
+  async function readGoogleKeys(provider: NonNullable<typeof google>, refresh: boolean): Promise<Map<string, CryptoKey>> {
+    if (googleKeys && !refresh && googleKeys.until > now()) return googleKeys.keys;
+    const response = await fetchImpl(provider.jwksUrl ?? 'https://www.googleapis.com/oauth2/v3/certs', {
+      headers: { Accept: 'application/json' },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
+    });
+    if (!response.ok) throw new Error(`Google keys answered HTTP ${response.status}`);
+    const body: unknown = await response.json();
+    const keys = new Map<string, CryptoKey>();
+    for (const jwk of isRecord(body) && Array.isArray(body.keys) ? body.keys : []) {
+      if (!isRecord(jwk) || jwk.kty !== 'RSA' || typeof jwk.kid !== 'string' || (jwk.alg !== undefined && jwk.alg !== 'RS256')) continue;
+      const key = await globalThis.crypto.subtle
+        .importKey('jwk', { kty: 'RSA', n: jwk.n as string, e: jwk.e as string, alg: 'RS256', ext: true }, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify'])
+        .catch(() => null);
+      if (key) keys.set(jwk.kid, key);
+    }
+    const maxAge = Number(/max-age=(\d+)/.exec(response.headers.get('cache-control') ?? '')?.[1]);
+    googleKeys = { keys, until: now() + (Number.isFinite(maxAge) && maxAge > 0 ? Math.min(maxAge * 1000, 86_400_000) : GOOGLE_KEYS_DEFAULT_TTL_MS) };
+    return keys;
+  }
+
+  /** Whether an ID token's signature is Google's: RS256, by a key id Google publishes (read again once when unknown, as Google rotates them). */
+  async function googleSigned(provider: NonNullable<typeof google>, header: string, payload: string, signature: string): Promise<boolean> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(Buffer.from(header, 'base64url').toString('utf8'));
+    } catch {
+      return false;
+    }
+    if (!isRecord(parsed) || parsed.alg !== 'RS256' || typeof parsed.kid !== 'string') return false;
+    let key = (await readGoogleKeys(provider, false)).get(parsed.kid);
+    if (!key) key = (await readGoogleKeys(provider, true)).get(parsed.kid);
+    if (!key) return false;
+    return globalThis.crypto.subtle.verify(
+      'RSASSA-PKCS1-v1_5',
+      key,
+      Buffer.from(signature, 'base64url'),
+      Buffer.from(`${header}.${payload}`, 'ascii'),
+    );
+  }
+
+  /**
+   * The person Google signed in, from the ID token its token endpoint returned for this code. The
+   * token's signature is checked against Google's published keys, and its issuer, audience (and
+   * azp), expiry and nonce (OpenID Connect Core 1.0, 3.1.3.7).
+   */
+  async function askGoogle(
+    provider: NonNullable<typeof google>,
+    code: string,
+    verifier: string,
+    nonce: string,
+  ): Promise<{ uid: string; login: string; idp: 'google' } | null> {
+    try {
+      const response = await fetchImpl(provider.tokenUrl ?? 'https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+        body: new URLSearchParams({
+          code,
+          client_id: provider.clientId,
+          client_secret: provider.clientSecret,
+          redirect_uri: callbackUrl,
+          grant_type: 'authorization_code',
+          code_verifier: verifier,
+        }).toString(),
+        redirect: 'manual',
+        signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
+      });
+      if (!response.ok) {
+        report(`Google token exchange failed: HTTP ${response.status}`);
+        return null;
+      }
+      const body: unknown = await response.json().catch(() => null);
+      const token = isRecord(body) && typeof body.id_token === 'string' ? body.id_token : null;
+      const [header, payload, signature, ...extra] = token?.split('.') ?? [];
+      if (!header || !payload || !signature || extra.length > 0 || ![header, payload, signature].every((part) => BASE64URL.test(part))) {
+        return null;
+      }
+      // Signed by Google, with one of the keys it publishes (RS256), whichever way the token came.
+      if (!(await googleSigned(provider, header, payload, signature))) {
+        report('Google sign-in refused: the ID token is not signed by Google');
+        return null;
+      }
+      const claims: unknown = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+      if (!isRecord(claims)) return null;
+      const audience = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+      if (
+        (claims.iss !== 'https://accounts.google.com' && claims.iss !== 'accounts.google.com') ||
+        !audience.includes(provider.clientId) ||
+        (audience.length > 1 && claims.azp !== provider.clientId) ||
+        typeof claims.exp !== 'number' ||
+        claims.exp * 1000 <= now() ||
+        typeof claims.nonce !== 'string' ||
+        !safeEqual(claims.nonce, nonce) ||
+        typeof claims.sub !== 'string' ||
+        !GOOGLE_SUBJECT.test(claims.sub)
+      ) {
+        report('Google sign-in refused: the ID token did not check out');
+        return null;
+      }
+      // The email names the person on the page only, and only once Google has verified it.
+      const email =
+        claims.email_verified === true && typeof claims.email === 'string' && claims.email.length <= 254 && !/[<>\p{Cc}]/u.test(claims.email)
+          ? claims.email
+          : 'Google account';
+      return { uid: claims.sub, login: email, idp: 'google' };
+    } catch (error) {
+      report(`Google sign-in failed: ${error instanceof Error ? error.name : 'unknown error'}`);
+      return null;
+    }
   }
 
   async function askGitHub(
@@ -2859,7 +4578,7 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       const token = await exchangeCode(code, verifier);
       if (token === null) return null;
       const user = await readGitHubUser(token);
-      if (!user || !served) return user;
+      if (!user || !readsOrganizations) return user;
       const orgs = await readMemberships(token);
       return orgs === null ? null : { ...user, orgs };
     } catch (error) {
@@ -2904,13 +4623,18 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
     const verifier = pending.verifier;
     signInsInFlight += 1;
     if (client !== undefined) signInsByClient.set(client, fromClient + 1);
-    let user: { uid: string; login: string; orgs?: Organization[] } | null;
+    let user: { uid: string; login: string; orgs?: Organization[]; idp?: 'google' } | null;
     try {
       // Recorded before GitHub is asked, so a replayed callback is refused on every server unasked.
       if (!(await options.state.use('sign_in', pending.state, pending.exp as number))) {
         return signedOutPage(400, SIGN_IN_AGAIN, [clearSignIn]);
       }
-      user = await askGitHub(code, verifier);
+      user =
+        pending.idp === 'google'
+          ? google && typeof pending.nonce === 'string'
+            ? await askGoogle(google, code, verifier, pending.nonce)
+            : null
+          : await askGitHub(code, verifier);
     } finally {
       signInsInFlight -= 1;
       if (client !== undefined) {
@@ -2920,12 +4644,18 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       }
     }
     if (!user) {
-      return signedOutPage(502, 'GitHub did not complete the sign-in. Try again.', [clearSignIn]);
+      return signedOutPage(
+        502,
+        `${pending.idp === 'google' ? 'Google' : 'GitHub'} did not complete the sign-in. Try again.`,
+        [clearSignIn],
+      );
     }
-    if (!allowed(user.uid)) {
-      return signedOutPage(403, `This Slotlock server does not let @${user.login} sign in.`, [
-        clearSignIn,
-      ]);
+    if (!allowed(user.uid, user.idp)) {
+      return signedOutPage(
+        403,
+        `This Slotlock server does not let ${user.idp === 'google' ? user.login : `@${user.login}`} sign in.`,
+        [clearSignIn],
+      );
     }
     const orgs = user.orgs ?? [];
     if (served && orgs.length === 0) {
@@ -2940,7 +4670,8 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       login: user.login,
       sid: randomBytes(24).toString('base64url'),
       exp: now() + SESSION_TTL_MS,
-      ...(served ? { orgs, org: (orgs[0] as Organization).id } : {}),
+      ...(user.idp === 'google' ? { idp: 'google' } : {}),
+      ...(served ? { orgs, org: (orgs[0] as Organization).id } : teams && user.idp !== 'google' ? { orgs } : {}),
     });
     return redirect(303, root, [
       clearSignIn,
@@ -2981,6 +4712,24 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       return keysPage(session, 400, 'Choose an access level and an expiry from the lists.');
     }
     const days = KEY_EXPIRY_DAYS[expiry];
+    const limited = {
+      locations: [...new Set(form.getAll('limit_location'))],
+      groups: [...new Set(form.getAll('limit_group'))],
+    };
+    const resourceScope = limited.locations.length + limited.groups.length > 0 ? limited : undefined;
+    const limits = keyLimitsOf(form);
+    if (typeof limits === 'string') return keysPage(session, 400, limits);
+    if (resourceScope) {
+      if (scopes.includes('admin')) {
+        return keysPage(session, 400, 'A key limited to locations or groups reads and writes only: choose that access.');
+      }
+      // Keys limited to part of the tenant come with Developer (RFC 0003 pricing); a server without
+      // plans allows them.
+      const plan = options.billing ? await options.billing.plan(tenantOf(session)) : null;
+      if (plan?.plan === 'free') {
+        return keysPage(session, 403, 'Keys limited to locations or groups come with the Developer and Team plans. See Plan.');
+      }
+    }
     try {
       const created = await options.keys.create({
         tenantRef: tenantOf(session),
@@ -2988,6 +4737,8 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         scopes,
         createdBy: personOf(session),
         origin: 'dashboard',
+        ...(resourceScope ? { resourceScope } : {}),
+        ...(Object.keys(limits).length > 0 ? { limits } : {}),
         ...(typeof days === 'number' ? { expiresAt: new Date(now() + days * DAY_MS) } : {}),
       });
       return shownOncePage(session, created.key, created.apiKey, false);
@@ -2996,11 +4747,16 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       if (code === 'invalid_api_key_name') {
         return keysPage(session, 400, 'Give the key a name of 1 to 100 characters.');
       }
+      if (code === 'invalid_api_key_resource_scope') {
+        return keysPage(session, 400, 'Choose up to 20 locations and 20 groups from the lists.');
+      }
       if (code === 'api_key_limit_reached') {
         return keysPage(
           session,
           409,
-          'You have as many keys as Slotlock allows. Revoke one first.',
+          options.billing
+            ? 'You have as many active keys as your plan allows. Revoke one first, or see Plan.'
+            : 'You have as many keys as Slotlock allows. Revoke one first.',
         );
       }
       throw error;
@@ -3013,6 +4769,39 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
     actor: personOf(session),
     origin: 'dashboard' as const,
   });
+
+  /** A key's limits from its form (RFC 0004 A5): each empty field the server's; else what is wrong. */
+  function keyLimitsOf(form: URLSearchParams): SlotlockApiKeyLimits | string {
+    const whole = (name: string, most: number): number | undefined | null => {
+      const text = (form.get(name) ?? '').trim();
+      if (text === '') return undefined;
+      const value = /^[0-9]{1,7}$/.test(text) ? Number(text) : Number.NaN;
+      return Number.isSafeInteger(value) && value >= 1 && value <= most ? value : null;
+    };
+    const maxHolds = whole('max_holds', 10_000);
+    const maxHeldHours = whole('max_held_hours', 876_000);
+    const requestsPerMinute = whole('requests_per_minute', 100_000);
+    if (maxHolds === null || maxHeldHours === null || requestsPerMinute === null) {
+      return 'Give each limit as a whole number: live holds 1 to 10,000, hours held 1 to 876,000, requests a minute 1 to 100,000. Leave one empty for the server’s.';
+    }
+    return {
+      ...(maxHolds !== undefined ? { maxHolds } : {}),
+      ...(maxHeldHours !== undefined ? { maxHeldHours } : {}),
+      ...(requestsPerMinute !== undefined ? { requestsPerMinute } : {}),
+      ...(form.get('requires_approval') === 'on' ? { requiresApproval: true } : {}),
+    };
+  }
+
+  async function saveKeyLimits(session: Session, form: URLSearchParams): Promise<Response> {
+    const id = form.get('id') ?? '';
+    if (!UUID_PATTERN.test(id)) return keysPage(session, 404, 'That key is not one of yours.');
+    const limits = keyLimitsOf(form);
+    if (typeof limits === 'string') return keysPage(session, 400, limits);
+    if (!(await options.keys.setLimits({ tenantRef: tenantOf(session), id, limits }))) {
+      return keysPage(session, 404, 'That key is not an active key of yours.');
+    }
+    return redirect(303, `${root}/keys`);
+  }
 
   async function changeKey(session: Session, form: URLSearchParams, change: 'rotate' | 'revoke') {
     const id = form.get('id') ?? '';
@@ -3038,10 +4827,13 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
     } catch (error) {
       const code = (error as { code?: unknown }).code;
       if (code === 'resource_limit_reached') {
+        const limit = (error as { limit?: unknown }).limit;
         return resourcesPage(
           session,
           409,
-          `You have ${SLOTLOCK_DASHBOARD_MAX_RESOURCES} resources, as many as the dashboard allows.`,
+          typeof limit === 'number' && limit < SLOTLOCK_DASHBOARD_MAX_RESOURCES
+            ? `You have ${String(limit)} resources, archived ones included, as many as your plan allows. Delete one, or see Plan.`
+            : `You have ${SLOTLOCK_DASHBOARD_MAX_RESOURCES} resources, as many as the dashboard allows.`,
         );
       }
       if (code === 'invalid_timezone') {
@@ -3126,7 +4918,7 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       try {
         first =
           checked === 'ok' &&
-          (await options.state.use('form', once, session.exp, session.uid));
+          (await options.state.use('form', once, session.exp, session.idp === 'google' ? personOf(session) : session.uid));
       } catch (error) {
         if ((error as { code?: unknown }).code !== 'dashboard_form_limit') throw error;
         return pageFor(route)(
@@ -3143,6 +4935,10 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         );
       }
     }
+    // A tenant new to plans is put on the default plan before it adds what plans limit.
+    if (route === '/keys' || route === '/resources' || route === '/webhooks') {
+      await options.billing?.enrol?.(tenantOf(session));
+    }
     switch (route) {
       case '/sign-out':
         await options.state.endSession(session.sid, session.exp);
@@ -3153,16 +4949,34 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         return changeKey(session, form, 'rotate');
       case '/keys/revoke':
         return changeKey(session, form, 'revoke');
+      case '/keys/limits':
+        return saveKeyLimits(session, form);
       case '/resources':
         return addResource(session, form);
       case '/hours':
         return saveHours(session, form);
       case '/organization':
         return switchOrganization(session, form);
+      case '/environment':
+        return switchEnvironment(session, form);
       case '/resources/rules':
         return saveRules(session, form);
       case '/resources/pool':
         return savePool(session, form);
+      case '/resources/profile':
+        return saveProfile(session, form);
+      case '/resources/place':
+        return savePlace(session, form);
+      case '/resources/parent':
+        return saveParent(session, form);
+      case '/locations':
+        return saveLocation(session, form);
+      case '/locations/delete':
+        return deleteGrouping(session, form, 'location');
+      case '/groups':
+        return saveGroup(session, form);
+      case '/groups/delete':
+        return deleteGrouping(session, form, 'group');
       case '/webhooks':
         return addWebhook(session, form);
       case '/webhooks/delete':
@@ -3171,6 +4985,14 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         return changeWebhook(session, form, 'enable');
       case '/waitlist/leave':
         return leaveWaitlist(session, form);
+      case '/approvals/decide':
+        return decideApproval(session, form);
+      case '/sandbox/seed':
+        return sandboxAction(session, form, 'seed');
+      case '/sandbox/reset':
+        return sandboxAction(session, form, 'reset');
+      case '/sandbox/fast-forward':
+        return sandboxAction(session, form, 'fast-forward');
       case '/assistant':
         return sendToAssistant(session, form);
       case '/assistant/approve':
@@ -3181,10 +5003,20 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         return resetAssistant(session);
       case '/settings/assistant':
         return saveAssistantSettings(session, form);
+      case '/settings/assistant/models':
+        return loadAssistantModels(session, form);
       case '/settings/assistant/test':
         return testAssistant(session);
       case '/settings/assistant/remove':
         return removeAssistantSettings(session);
+      case '/plan/upgrade':
+        return upgradePlan(session, form);
+      case '/plan/manage':
+        return manageBilling(session);
+      case '/teams/enable':
+        return changeTeam(session, form, true);
+      case '/teams/disable':
+        return changeTeam(session, form, false);
       default:
         return respond(
           404,
@@ -3213,28 +5045,60 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
             case '/resources':
             case '/webhooks':
             case '/waitlist':
+            case '/approvals':
             case '/assistant':
+            case '/plan':
+            case '/teams':
             case '/settings': {
               const session = await readSession(request);
               if (!session) return redirect(303, root);
+              if (route === '/teams') return await teamsPage(session);
+              if (route === '/plan') {
+                return await planPage(
+                  session,
+                  200,
+                  url.searchParams.get('checkout') === 'done'
+                    ? 'Thank you. Your plan changes here once Stripe confirms the payment, usually within a minute.'
+                    : undefined,
+                  url.searchParams.get('checkout') === 'done',
+                );
+              }
               if (route === '/keys') return await keysPage(session);
               if (route === '/resources') return await resourcesPage(session);
               if (route === '/webhooks') return await webhooksPage(session);
               if (route === '/waitlist') return await waitlistPage(session);
+              if (route === '/approvals') return await approvalsPage(session);
               if (route === '/assistant') return await assistantPage(session);
-              return await settingsPage(session);
+              // A provider preset fills the assistant's form; nothing is saved until Save.
+              const preset = SLOTLOCK_ASSISTANT_PRESETS.find(
+                (candidate) => candidate.id === url.searchParams.get('preset'),
+              );
+              return await settingsPage(
+                session,
+                200,
+                undefined,
+                preset ? { provider: preset.provider, baseUrl: preset.baseUrl } : undefined,
+              );
             }
             case '/style.css':
               return asset(DASHBOARD_CSS, 'text/css; charset=utf-8', url, ASSET_VERSIONS.css);
             case '/app.js':
               return asset(DASHBOARD_JS, 'text/javascript; charset=utf-8', url, ASSET_VERSIONS.js);
+            case '/favicon.svg':
+              return asset(SLOTLOCK_DASHBOARD_ICON_SVG, 'image/svg+xml', url, ASSET_VERSIONS.icon);
             case '/sign-in':
-              return await startSignIn();
+              return google && url.searchParams.get('with') === 'google'
+                ? await startGoogleSignIn(google)
+                : await startSignIn();
             case '/callback':
               return await finishSignIn(request, url);
             case '/hours': {
               const session = await readSession(request);
               return session ? await hoursEditor(session, url) : redirect(303, root);
+            }
+            case '/locations': {
+              const session = await readSession(request);
+              return session ? await locationsPage(session) : redirect(303, root);
             }
             default: {
               const resourceId = RESOURCE_PAGE.exec(route)?.[1];
@@ -3404,6 +5268,12 @@ code, pre, kbd, input[readonly] { font-family: var(--mono); font-size: 12.5px; }
 .workspace select { flex: 1; min-width: 0; height: 26px; border: 0; padding: 0 18px 0 2px; font-weight: 600; font-size: var(--text-md); background-color: transparent; box-shadow: none; text-overflow: ellipsis; }
 .workspace select:focus { box-shadow: none; }
 .workspace:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
+.environment { display: flex; gap: 2px; margin: calc(-1 * var(--space-2)) 0 0; padding: 2px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.environment button { flex: 1; height: 26px; padding: 0 var(--space-2); border: 0; border-radius: calc(var(--radius) - 2px); background: none; box-shadow: none; color: var(--muted); font-size: var(--text-sm); font-weight: 600; }
+.environment button[aria-pressed="true"] { background: var(--surface-2); color: var(--ink); box-shadow: 0 0 0 1px var(--line); }
+.environment button[aria-pressed="true"][value="test"] { background: var(--warn-wash); color: var(--warn); box-shadow: 0 0 0 1px var(--warn-line); }
+.test-banner { margin: 0 0 var(--space-4); padding: var(--space-2) var(--space-3); border: 1px dashed var(--warn-line); border-radius: var(--radius); background: var(--warn-wash); color: var(--warn); font-size: var(--text-md); }
+.test-banner code { background: none; padding: 0; }
 .avatar { display: inline-grid; place-items: center; width: 24px; height: 24px; flex: none; border-radius: var(--radius-sm); background: var(--ink); color: var(--surface); font-size: 11px; font-weight: 700; }
 .nav { display: grid; gap: 1px; }
 .nav a { position: relative; display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 10px; border-radius: var(--radius); color: var(--ink-2); font-weight: 500; font-size: var(--text-md); transition: background-color var(--fast) var(--ease), color var(--fast) var(--ease); }
@@ -3504,9 +5374,13 @@ textarea { padding: 10px var(--space-3); resize: vertical; min-height: 72px; lin
 .create { display: flex; flex-wrap: wrap; align-items: end; gap: var(--space-3); margin: 0; }
 .create .grow { flex: 1 1 220px; }
 label > input, label > select, label > .unit-input { width: 100%; }
+label > textarea { width: 100%; padding: var(--space-2) var(--space-3); resize: vertical; }
+.presets { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: 0 0 var(--space-3); }
+.presets button { height: 28px; padding: 0 var(--space-3); font-size: var(--text-sm); }
 label.choice > input { width: 16px; }
 .create label:not(.grow) { flex: 0 1 auto; }
 form > label { margin-bottom: var(--space-3); }
+.create > label { margin-bottom: 0; }
 .grid-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-4) var(--space-3); margin-bottom: var(--space-4); align-items: end; }
 .unit-input { display: flex; align-items: center; gap: var(--space-2); }
 .unit-input input { width: 100%; }
@@ -3521,6 +5395,12 @@ form .choice { margin: var(--space-1) 0 var(--space-3); }
 .types summary { cursor: pointer; color: var(--ink-2); font-size: var(--text-md); width: fit-content; }
 .checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: var(--space-2) var(--space-4); margin-top: var(--space-3); padding: var(--space-4); border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-2); }
 .checks .choice { font-size: var(--text-md); margin: 0; }
+.choices { border: 0; padding: 0; margin: var(--space-4) 0; min-width: 0; }
+.choices legend { font-size: var(--text-sm); font-weight: 500; color: var(--ink-2); padding: 0; }
+.choices .checks { margin-top: 6px; }
+.fine + .table, .fine + .empty { margin-top: var(--space-4); }
+.pop label { margin-bottom: var(--space-3); }
+.pop textarea { width: 100%; }
 
 /* Buttons */
 button, .button { font: inherit; font-size: var(--text-md); font-weight: 500; height: 36px; padding: 0 var(--space-4); border-radius: var(--radius); border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); white-space: nowrap; transition: background-color var(--fast) var(--ease), border-color var(--fast) var(--ease), color var(--fast) var(--ease), transform var(--fast) var(--ease); }
@@ -3651,6 +5531,7 @@ pre { background: var(--surface-2); border: 1px solid var(--line); border-radius
   .side-top .brand .name { display: none; }
   .workspace { flex: 1; min-width: 0; padding: 3px 4px; }
   .workspace .avatar { display: none; }
+  .environment { margin: 0; flex: none; }
   .me { grid-column: 2; grid-row: 1; margin: 0; padding: 0; border: 0; }
   .me-avatar, .me .login { display: none; }
   .sign-out { width: 36px; height: 36px; padding: 0; }
@@ -3689,6 +5570,7 @@ pre { background: var(--surface-2); border: 1px solid var(--line); border-radius
   .week th[scope="row"] { display: block; padding: var(--space-2) var(--space-4) 0; }
   .actions { text-align: left; width: auto; padding-top: var(--space-2); }
   .act { margin: 0 var(--space-2) 0 0; }
+  .actions form.inline { margin-right: var(--space-2); }
   .act:first-child, form.inline + .act { margin-left: 0; }
   .act summary { border: 1px solid var(--line-strong); height: 32px; }
   .act.danger summary { border-color: var(--bad-line); }
@@ -3708,7 +5590,19 @@ pre { background: var(--surface-2); border: 1px solid var(--line); border-radius
 }
 `;
 
+/** A composite the store refused, in a person's words. */
+const COMPOSITE_PROBLEMS: Readonly<Record<string, string>> = Object.freeze({
+  parent_not_found: 'That is not one of your resources.',
+  composite_too_deep: 'A part has no parts of its own, and a whole is no part: choose a resource that stands alone.',
+  composite_parts_limit: 'A whole has at most 50 parts.',
+  composite_busy: 'One of them has a booking or hold still to come. A composite changes only while neither does.',
+});
+
+/** What the Plan page calls each plan. */
+const PLAN_NAMES: Readonly<Record<SlotlockPlan, string>> = Object.freeze({ free: 'Free', developer: 'Developer', team: 'Team' });
+
 const ASSET_VERSIONS = Object.freeze({
   css: createHash('sha256').update(DASHBOARD_CSS).digest('base64url').slice(0, 12),
   js: createHash('sha256').update(DASHBOARD_JS).digest('base64url').slice(0, 12),
+  icon: createHash('sha256').update(SLOTLOCK_DASHBOARD_ICON_SVG).digest('base64url').slice(0, 12),
 });

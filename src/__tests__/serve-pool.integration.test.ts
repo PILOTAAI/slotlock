@@ -66,11 +66,17 @@ describe.skipIf(!url)("serve's shared pool under one tenant's lock waits (real P
     const start = new Date(horizon.start.getTime() + 2 * DAY_MS);
 
     let seriesDone = false;
+    // The series' transaction keeps its locks until tenant B has been timed, however fast the
+    // series itself is written.
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     const series = store
       .withTenant(
         tenantA,
-        (tenant) =>
-          tenant.putCalendarEvent({
+        async (tenant) => {
+          const put = await tenant.putCalendarEvent({
             tenantRef: tenantA,
             ownerRef,
             externalRef: 'series',
@@ -84,7 +90,10 @@ describe.skipIf(!url)("serve's shared pool under one tenant's lock waits (real P
             transparency: 'opaque',
             recurrence: { rrule: 'FREQ=DAILY;BYHOUR=0,2,4,6,8,10,12,14,16,18,20,22;COUNT=2000' },
             materializationWindow: horizon,
-          }),
+          });
+          await held;
+          return put;
+        },
         WRITE,
       )
       .finally(() => {
@@ -117,6 +126,7 @@ describe.skipIf(!url)("serve's shared pool under one tenant's lock waits (real P
     // Started while tenant A's series still holds its locks.
     expect(seriesDone).toBe(false);
     expect(await timeTransaction(tenantB)).toBeLessThan(150);
+    release();
     expect((await series).ok).toBe(true);
     expect((await Promise.all(singles)).every((put) => put.ok)).toBe(true);
   });

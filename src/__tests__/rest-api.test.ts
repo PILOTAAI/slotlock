@@ -193,6 +193,7 @@ describe('the OpenAPI document', () => {
     expect(removal.parameters.map(({ name, in: where }) => `${where}:${name}`).sort()).toEqual([
       'header:Idempotency-Key',
       'path:event_id',
+      'query:dry_run',
       'query:expected_revision',
       'query:idempotency_key',
     ]);

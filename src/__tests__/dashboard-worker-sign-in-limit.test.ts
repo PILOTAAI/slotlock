@@ -199,3 +199,68 @@ describe('SEC-12: sign-ins are limited per client, under a higher ceiling for al
     }
   });
 });
+
+describe('the Worker with usage metering', () => {
+  it('takes SLOTLOCK_USAGE on or off, and refuses anything else', async () => {
+    const ctx = { waitUntil: (_promise: Promise<unknown>) => undefined };
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const refused = await createSlotlockDashboardWorker().fetch(
+        new Request(`${APP}/dashboard`),
+        { ...environment(limiter()), SLOTLOCK_USAGE: 'yes' },
+        ctx,
+      );
+      expect(refused.status).toBe(503);
+      expect(JSON.stringify(error.mock.calls)).toContain('SLOTLOCK_USAGE must be on or off');
+    } finally {
+      error.mockRestore();
+    }
+  });
+});
+
+describe('the Worker with Stripe billing', () => {
+  const ctx = { waitUntil: (_promise: Promise<unknown>) => undefined };
+  const billed = (extra: Record<string, string> = {}) => ({
+    ...environment(limiter()),
+    STRIPE_SECRET_KEY: 'rk_test_fake',
+    SLOTLOCK_STRIPE_PRICE_MONTHLY: 'price_month',
+    SLOTLOCK_STRIPE_PRICE_YEARLY: 'price_year',
+    STRIPE_WEBHOOK_SECRET: 'whsec_test_only',
+    ...extra,
+  });
+
+  it('refuses an unsigned Stripe delivery before reaching the database or the rate limits', async () => {
+    const env = billed();
+    const response = await createSlotlockDashboardWorker().fetch(
+      new Request(`${APP}/stripe/webhook`, { method: 'POST', body: '{}' }),
+      env,
+      ctx,
+    );
+    expect(response.status).toBe(400);
+    expect((env.SLOTLOCK_CLIENT_RATE_LIMIT as ReturnType<typeof limiter>).asked).toEqual([]);
+  });
+
+  it('has no webhook without its secret, and refuses the retired free-plan date setting', async () => {
+    const { STRIPE_WEBHOOK_SECRET: _secret, ...env } = billed();
+    const response = await createSlotlockDashboardWorker().fetch(
+      new Request(`${APP}/stripe/webhook`, { method: 'POST', body: '{}' }),
+      env,
+      ctx,
+    );
+    expect(response.status).toBe(404);
+    // The default plan lives in the database now (slotlock plan default): a Worker still given the
+    // date would let its operator believe it applies.
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const misconfigured = await createSlotlockDashboardWorker().fetch(
+        new Request(`${APP}/dashboard`),
+        billed({ SLOTLOCK_FREE_PLAN_FROM: '2026-12-09' }),
+        ctx,
+      );
+      expect(misconfigured.status).toBe(503);
+      expect(JSON.stringify(error.mock.calls)).toContain('slotlock plan default');
+    } finally {
+      error.mockRestore();
+    }
+  });
+});

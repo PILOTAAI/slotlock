@@ -14,6 +14,7 @@ import {
   type SlotlockAgentCalendarBackend,
   type SlotlockAgentOperation,
   type SlotlockAgentPrincipal,
+  type SlotlockAgentUsage,
   slotlockAgentOperationScope,
 } from '../../src/agent-server.js';
 import { createSlotlockStoreAgentBackend } from '../../src/agent-store-backend.js';
@@ -35,11 +36,31 @@ import {
   createSlotlockDashboardState,
 } from '../../src/dashboard.js';
 import {
+  createSlotlockStripe,
+  handleSlotlockStripeWebhook,
+  type SlotlockStripe,
+} from '../../src/billing.js';
+import { enrolSlotlockTenantPlan, readSlotlockTenantPlan, readSlotlockTenantQuotas } from '../../src/plans.js';
+import {
+  type SlotlockQuotas,
+  createSlotlockQuotas,
+  noteSlotlockQuotaThreshold,
+  readSlotlockQuotaUse,
+  slotlockQuotaRefusal,
+} from '../../src/quotas.js';
+import {
+  type SlotlockUsageMeter,
+  createSlotlockUsageMeter,
+  recordSlotlockUsage,
+} from '../../src/usage.js';
+import {
   createSlotlockRateLimiter,
   slotlockClientKey,
   slotlockClientNetwork,
 } from '../../src/rate-limit.js';
 import { createSlotlockStore } from '../../src/store.js';
+import { createSlotlockDashboardTeams } from '../../src/teams.js';
+import { SLOTLOCK_DEFAULT_OVERAGE_STOP_PERCENT } from '../../src/overage.js';
 
 /**
  * A Workers rate limiting binding (developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit,
@@ -78,11 +99,16 @@ export interface SlotlockDashboardWorkerOptions {
 }
 
 interface RequestScope {
+  sql: ReturnType<typeof postgres>;
   keys: SlotlockApiKeyStore;
   /** The assistant's agent backend, on the request's own client. */
   agent: SlotlockAgentCalendarBackend;
   /** Agent operations this request has run, for the per-request cap. */
   agentCalls: { count: number };
+  /** The assistant's operations this request ran, recorded as it ends (SLOTLOCK_USAGE=on). */
+  usage: SlotlockUsageMeter | null;
+  /** The tenant's monthly quotas, read for this request (SLOTLOCK_QUOTAS=on). */
+  quotas: SlotlockQuotas | null;
   resources: SlotlockDashboardResources;
   state: SlotlockDashboardState;
 }
@@ -109,6 +135,97 @@ export function createSlotlockWorkerAgentLimiter(vars: SlotlockEnv) {
     if (calls.count > SLOTLOCK_WORKER_AGENT_CALLS_PER_REQUEST) return false;
     const bucket = slotlockAgentOperationScope(args.operation) === 'write' ? writes : reads;
     return bucket ? bucket.take(args.principal.tenantRef) : true;
+  };
+}
+
+/** SLOTLOCK_USAGE: on to record the assistant's operations in each tenant's usage, as serve does. */
+function readWorkerUsage(vars: SlotlockEnv): boolean {
+  const value = vars.SLOTLOCK_USAGE?.trim() || 'off';
+  if (value !== 'on' && value !== 'off') throw new SlotlockConfigError('SLOTLOCK_USAGE must be on or off');
+  return value === 'on';
+}
+
+/** SLOTLOCK_QUOTAS: on to hold the assistant's operations to each tenant's quotas, as serve does. */
+function readWorkerQuotas(vars: SlotlockEnv, usage: boolean): boolean {
+  const value = vars.SLOTLOCK_QUOTAS?.trim() || 'off';
+  if (value !== 'on' && value !== 'off') throw new SlotlockConfigError('SLOTLOCK_QUOTAS must be on or off');
+  if (value === 'on' && !usage) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_QUOTAS=on needs SLOTLOCK_USAGE=on: a quota is held against the usage it counts',
+    );
+  }
+  return value === 'on';
+}
+
+/** Where Talk to the founder goes without SLOTLOCK_PLAN_CONTACT: the founder's Pylota address (MAINTAINERS.md). */
+export const SLOTLOCK_DEFAULT_PLAN_CONTACT = 'mailto:clever.eziogor@pylota.io';
+
+/**
+ * Hosted plans and Stripe billing, on when STRIPE_SECRET_KEY and both price ids are set:
+ * SLOTLOCK_STRIPE_PRICE_MONTHLY and SLOTLOCK_STRIPE_PRICE_YEARLY (the Developer plan's), and
+ * STRIPE_WEBHOOK_SECRET for the webhook at `<base>/stripe/webhook`. The plan a tenant without one of
+ * its own is on is the database's (`slotlock plan default`), so both servers apply the same one; a
+ * new tenant is put on it before it adds a key, resource or webhook endpoint.
+ */
+/** SLOTLOCK_OVERAGE on the Worker, as on serve: off, on (300), or a stop percent of 111-1000. */
+function readWorkerOverage(vars: SlotlockEnv): number | undefined {
+  const value = vars.SLOTLOCK_OVERAGE?.trim() || 'off';
+  if (value === 'off') return undefined;
+  const percent = value === 'on' ? SLOTLOCK_DEFAULT_OVERAGE_STOP_PERCENT : Number(value);
+  if (!Number.isSafeInteger(percent) || percent < 111 || percent > 1_000) {
+    throw new SlotlockConfigError('SLOTLOCK_OVERAGE must be off, on, or a percent of 111-1000');
+  }
+  return percent;
+}
+
+function readBilling(vars: SlotlockEnv) {
+  const secretKey = vars.STRIPE_SECRET_KEY?.trim();
+  const month = vars.SLOTLOCK_STRIPE_PRICE_MONTHLY?.trim();
+  const year = vars.SLOTLOCK_STRIPE_PRICE_YEARLY?.trim();
+  if (!secretKey || !month || !year) return null;
+  // The Worker no longer reads it: a deployment that still sets it would believe it does.
+  if (vars.SLOTLOCK_FREE_PLAN_FROM?.trim()) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_FREE_PLAN_FROM is replaced by the database default plan: remove it and run slotlock plan default free --from <date> as the schema owner',
+    );
+  }
+  const apiVersion = vars.STRIPE_API_VERSION?.trim();
+  // The Team plan (Teams on Cloud): an organization's checkout, once the owner has made its prices.
+  const teamMonth = vars.SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY?.trim();
+  const teamYear = vars.SLOTLOCK_STRIPE_PRICE_TEAM_YEARLY?.trim();
+  const teamShownMonth = vars.SLOTLOCK_PLAN_PRICE_TEAM_MONTHLY?.trim();
+  const teamShownYear = vars.SLOTLOCK_PLAN_PRICE_TEAM_YEARLY?.trim();
+  if (Boolean(teamMonth) !== Boolean(teamYear)) {
+    throw new SlotlockConfigError(
+      'the Team plan needs SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY and SLOTLOCK_STRIPE_PRICE_TEAM_YEARLY together',
+    );
+  }
+  const teamPrices = teamMonth && teamYear ? { month: teamMonth, year: teamYear } : undefined;
+  // Metered overage (overage.ts): off unless SLOTLOCK_OVERAGE is on and its metered price is set.
+  const overage = readWorkerOverage(vars);
+  const overagePrice = vars.SLOTLOCK_STRIPE_PRICE_OVERAGE?.trim();
+  if (overage !== undefined && !overagePrice) {
+    throw new SlotlockConfigError('SLOTLOCK_OVERAGE needs SLOTLOCK_STRIPE_PRICE_OVERAGE, the metered price overage is billed at');
+  }
+  return {
+    stripe: createSlotlockStripe({
+      secretKey,
+      prices: { month, year },
+      ...(teamPrices ? { teamPrices } : {}),
+      ...(overage !== undefined && overagePrice ? { overagePrice } : {}),
+      ...(apiVersion ? { apiVersion } : {}),
+    }),
+    // As the Terms and the hosted page name them, unless the deployment shows its own.
+    ...(teamPrices ? { teamPrices: { month: teamShownMonth || '$40', year: teamShownYear || '$400' } } : {}),
+    ...(overage !== undefined
+      ? { overage: { price: vars.SLOTLOCK_PLAN_PRICE_OVERAGE?.trim() || 'the metered price', stopPercent: overage } }
+      : {}),
+    webhookSecret: vars.STRIPE_WEBHOOK_SECRET?.trim() || null,
+    contact: vars.SLOTLOCK_PLAN_CONTACT?.trim() || SLOTLOCK_DEFAULT_PLAN_CONTACT,
+    prices: {
+      month: vars.SLOTLOCK_PLAN_PRICE_MONTHLY?.trim() || '$10',
+      year: vars.SLOTLOCK_PLAN_PRICE_YEARLY?.trim() || '$100',
+    },
   };
 }
 
@@ -166,6 +283,12 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
         root: string;
         availability: ReturnType<typeof readAvailability>;
         signInPaths: Set<string>;
+        stripeWebhook: { path: string; secret: string; stripe: SlotlockStripe } | null;
+        /** SLOTLOCK_USAGE=on: the assistant's operations are recorded (usage.ts). */
+        usage: boolean;
+        /** SLOTLOCK_QUOTAS=on: the assistant's operations are held to the tenant's quotas. */
+        quotas: boolean;
+        overageStopPercent: number | undefined;
         limits: {
           client: SlotlockRateLimit;
           signIn: SlotlockRateLimit;
@@ -208,13 +331,30 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       throw new SlotlockConfigError('the HYPERDRIVE binding is required');
     }
     const agentLimiter = createSlotlockWorkerAgentLimiter(vars);
+    const billing = readBilling(vars);
+    const metering = readWorkerUsage(vars);
+    const quotaMode = readWorkerQuotas(vars, metering);
+    // Read once, with the rest of the configuration: a bad value stops the build, not a request.
+    const overageStopPercent = readWorkerOverage(vars);
     const dashboard = createSlotlockDashboard({
       publicUrl,
       serviceUrl,
       github: { clientId: config.githubClientId, clientSecret: config.githubClientSecret },
       sessionSecret: config.sessionSecret,
       allowedUsers: config.allowedUsers,
+      ...(config.google ? { google: config.google } : {}),
       ...(config.organizations ? { organizations: config.organizations } : {}),
+      // Teams on Cloud: the organizations turned on, through the request's client.
+      ...(config.organizations === 'enabled'
+        ? {
+            teams: {
+              enabled: (ids: readonly string[]) => createSlotlockDashboardTeams(current().sql).enabled(ids),
+              enable: (org: { id: string; login: string }, by: string) =>
+                createSlotlockDashboardTeams(current().sql).enable(org, by),
+              disable: (id: string, by: string) => createSlotlockDashboardTeams(current().sql).disable(id, by),
+            },
+          }
+        : {}),
       ...(config.name ? { name: config.name } : {}),
       ...(config.termsUrl ? { termsUrl: config.termsUrl } : {}),
       ...(config.privacyUrl ? { privacyUrl: config.privacyUrl } : {}),
@@ -225,6 +365,9 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
         ? {
             assistant: {
               secret: config.assistantSecret,
+              ...(config.assistantPreviousSecrets
+                ? { previousSecrets: config.assistantPreviousSecrets }
+                : {}),
               backend: perRequest(() => current().agent),
               // A Worker's fetch reaches no private network (nor this isolate's loopback), so the
               // literal URL check is the one that applies; names are not resolved here.
@@ -234,7 +377,48 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
                 principal: SlotlockAgentPrincipal;
                 operation: SlotlockAgentOperation;
               }) => agentLimiter(current().agentCalls, args),
+              ...(metering
+                ? {
+                    onUsage: (usage: SlotlockAgentUsage) => current().usage?.count(usage),
+                    onMessage: (tenantRef: string) =>
+                      current().usage?.add({ tenantRef, metric: 'assistant_messages', origin: 'dashboard-assistant' }),
+                  }
+                : {}),
+              // A read, or an approved write, over the tenant's monthly quota is refused.
+              ...(quotaMode
+                ? {
+                    admit: async (args: {
+                      principal: SlotlockAgentPrincipal;
+                      operation: SlotlockAgentOperation;
+                    }) => {
+                      const verdict = await current().quotas?.check({
+                        tenantRef: args.principal.tenantRef,
+                        operation: args.operation,
+                      });
+                      if (verdict && !verdict.ok) throw slotlockQuotaRefusal(verdict.exceeded);
+                    },
+                  }
+                : {}),
               ...(config.assistantPrivateUrls ? { privateUrls: true } : {}),
+            },
+          }
+        : {}),
+      ...(metering ? { usage: true } : {}),
+      ...(quotaMode ? { quotas: true } : {}),
+      ...(billing
+        ? {
+            billing: {
+              plan: (tenantRef: string) => readSlotlockTenantPlan(current().sql, tenantRef),
+              async enrol(tenantRef: string) {
+                await enrolSlotlockTenantPlan(current().sql, tenantRef);
+              },
+              checkout: (input) => billing.stripe.checkout(input),
+              portal: (input) => billing.stripe.portal(input),
+              prices: billing.prices,
+              ...(billing.teamPrices ? { teamPrices: billing.teamPrices } : {}),
+              ...(billing.overage ? { overage: billing.overage } : {}),
+              contact: billing.contact,
+              formOrigins: ['https://checkout.stripe.com', 'https://billing.stripe.com'],
             },
           }
         : {}),
@@ -259,6 +443,17 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       root,
       availability: readAvailability(vars),
       signInPaths: new Set([`${base}/sign-in`, `${base}/callback`]),
+      stripeWebhook:
+        billing?.webhookSecret
+          ? {
+              path: `${new URL(publicUrl).pathname.replace(/\/$/, '')}/stripe/webhook`,
+              secret: billing.webhookSecret,
+              stripe: billing.stripe,
+            }
+          : null,
+      usage: metering,
+      quotas: quotaMode,
+      overageStopPercent,
       limits: { client, signIn, signInCeiling },
     };
   }
@@ -282,9 +477,38 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
           headers: { 'content-type': 'text/plain; charset=utf-8' },
         });
       }
-      const { dashboard, root, signInPaths, limits, availability } = built;
+      const { dashboard, root, signInPaths, limits, availability, stripeWebhook, usage, quotas, overageStopPercent } = built;
       const path = new URL(request.url).pathname;
       if (path === '/') return Response.redirect(root, 302);
+      // Stripe's deliveries: the client connects only once the signature has been checked.
+      if (stripeWebhook && path === stripeWebhook.path) {
+        const sql = postgres(env.HYPERDRIVE.connectionString, { max: 1, onnotice: () => {} });
+        try {
+          return await handleSlotlockStripeWebhook(request, {
+            secret: stripeWebhook.secret,
+            stripe: stripeWebhook.stripe,
+            sql,
+            onError: (error) =>
+              console.error(
+                JSON.stringify({
+                  message: 'slotlock stripe webhook failed',
+                  error: error instanceof Error ? `${error.name}: ${error.message}` : 'unknown',
+                }),
+              ),
+            // Stripe ids only: the owner finds the tenant in Stripe and refunds the second purchase.
+            onDuplicate: (subscriptions) =>
+              console.error(
+                JSON.stringify({ message: 'slotlock billing duplicate subscription', subscriptions }),
+              ),
+          });
+        } finally {
+          ctx.waitUntil(sql.end({ timeout: 5 }));
+        }
+      }
+      // Browsers and crawlers ask the origin's root for its icon; the dashboard serves it.
+      if (path === '/favicon.ico' || path === '/favicon.svg') {
+        return Response.redirect(`${root}/favicon.svg`, 301);
+      }
       if (!dashboard.handles(request)) {
         return new Response('Not found', {
           status: 404,
@@ -313,20 +537,60 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
         max: MAX_CONNECTIONS,
         onnotice: () => {},
       });
+      let requestScope: RequestScope | undefined;
       try {
         const store = createSlotlockStore(sql);
-        const requestScope: RequestScope = {
+        // Recorded once, when the response is sent: a Worker keeps nothing between requests.
+        const meter = usage
+          ? createSlotlockUsageMeter({
+              intervalMs: 0,
+              record: (flushId, rows) => recordSlotlockUsage(sql, flushId, rows),
+              onError: (error) =>
+                console.error(
+                  JSON.stringify({
+                    message: 'slotlock usage record failed',
+                    error: error instanceof Error ? error.message : 'unknown',
+                  }),
+                ),
+            })
+          : null;
+        const agentBackend = createSlotlockStoreAgentBackend(store, {
+          availabilityRules: async () => availability.map((rule) => ({ ...rule })),
+        });
+        requestScope = {
+          sql,
           keys: createSlotlockApiKeyStore(sql),
           agentCalls: { count: 0 },
-          agent: createSlotlockStoreAgentBackend(store, {
-            availabilityRules: async () => availability.map((rule) => ({ ...rule })),
-          }),
-          resources: createSlotlockDashboardResources(store),
+          usage: meter,
+          // Read once a request, with this request's own counts on top.
+          quotas:
+            quotas && meter
+              ? createSlotlockQuotas({
+                  plan: (tenantRef) =>
+                    readSlotlockTenantQuotas(sql, tenantRef, overageStopPercent !== undefined ? { overageStopPercent } : {}),
+                  used: (tenantRef, fromDay) => readSlotlockQuotaUse(sql, tenantRef, fromDay),
+                  local: (tenantRef, metric, fromDay) => meter.local(tenantRef, metric, fromDay),
+                  notice: (notice) => noteSlotlockQuotaThreshold(sql, notice),
+                  onError: (error) =>
+                    console.error(
+                      JSON.stringify({
+                        message: 'slotlock quota check failed',
+                        error: error instanceof Error ? error.message : 'unknown',
+                      }),
+                    ),
+                })
+              : null,
+          agent: agentBackend,
+          // Approvals (RFC 0004 A4) are granted through the same backend the assistant books with.
+          resources: createSlotlockDashboardResources(store, { agentBackend }),
           state: createSlotlockDashboardState(sql),
         };
         return await scope.run(requestScope, () => dashboard.fetch(request));
       } finally {
-        ctx.waitUntil(sql.end({ timeout: 5 }));
+        const counted = requestScope?.usage;
+        ctx.waitUntil(
+          (counted ? counted.close() : Promise.resolve()).finally(() => sql.end({ timeout: 5 })),
+        );
       }
     },
   };

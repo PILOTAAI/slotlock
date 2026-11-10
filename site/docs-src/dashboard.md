@@ -35,8 +35,8 @@ the server, see [Dashboard on Cloudflare Workers](/docs/dashboard-workers/).
 
 - Its pages: an Overview with the coming week's bookings, events and live holds across every
   resource (each in its resource's time zone) and the latest changes agents made, named by key;
-  Resources, each with its own page for bookable hours, booking rules, pool, coming bookings and
-  activity; Waitlist, to see who waits and remove an entry; API keys, with the MCP and A2A
+  Resources, each with its own page for bookable hours, booking rules, profile, pool, location and
+  groups, coming bookings and activity; Locations and groups, to add, move and delete them; Waitlist, to see who waits and remove an entry; API keys, with the MCP and A2A
   endpoints; Webhooks, to add, delete and re-enable endpoints and see which are failing; and
   Settings. Everything on them is read from the tenant's own data. `SLOTLOCK_DASHBOARD_NAME` sets
   what the dashboard calls the deployment (Slotlock by default).
@@ -45,8 +45,9 @@ the server, see [Dashboard on Cloudflare Workers](/docs/dashboard-workers/).
   no terms.
 - Keys for their agents (read only, read and write, or Full), which they can rotate or revoke. Keys
   made with `slotlock key create` act in `SLOTLOCK_TENANT` instead.
-- A person may add 100 resources. The database holds the cap, so adds racing on any number of
-  servers stop at 100; a resource they already have can still change time zone.
+- A person may add 500 resources, or as many as their plan allows on a hosted server. The
+  database holds the cap, so adds racing on any number of servers stop at it; a resource they
+  already have can still change time zone.
 - Each resource uses the server's bookable hours (`SLOTLOCK_AVAILABILITY`) until its owner sets its
   own on the hours page: two windows a day, overnight or all day, or closed. One form sets them for
   every resource at once.
@@ -72,6 +73,29 @@ that its members share: keys, resources and hours.
   an organization, which go with the organization's erasure.
 - Only the first 100 memberships GitHub lists, and the first 20 served organizations by login, are
   read.
+- **People and their organizations (Teams on Cloud)**: set `SLOTLOCK_DASHBOARD_ORGS=enabled`.
+  Every person signs in to their own tenant, `github:<user id>`, and the dashboard reads which
+  GitHub organizations they belong to (`read:org`, up to 20, kept in the session). On its Teams
+  page an owner of one turns Slotlock on for it (within 15 minutes of signing in, since who owns
+  it is read from GitHub as one signs in); then each owner and member picks it from the
+  workspace menu and shares its tenant, `github-org:<id>`, as above. Turning it off (the owner types
+  its name) ends every session's use of it at once and stops its keys within 30 seconds on every
+  server; what it holds stays, for an owner to turn it on again and erase it. The organizations
+  turned on are in `slotlock.dashboard_organizations` (who turned each on or off, and when),
+  erased with the organization's tenant. Set it on the server too, which checks the database
+  before taking an organization's key.
+- **Sign-in with Google too**, for people without a GitHub account: set `SLOTLOCK_GOOGLE_CLIENT_ID`
+  and `SLOTLOCK_GOOGLE_CLIENT_SECRET` (an OAuth client of a Google Cloud project, of type Web
+  application, with the same redirect URI, `<SLOTLOCK_PUBLIC_URL>/dashboard/callback`). The sign-in
+  page then offers Continue with Google. Each such person is their own tenant,
+  `google:<subject>` (Google's stable account id); `SLOTLOCK_DASHBOARD_USERS` names them as
+  `google:<subject>` beside GitHub ids, or `*` lets every account in. Sign-in asks for `openid
+  email`, uses `state`, PKCE and a nonce, and checks the ID token Google's token endpoint returns:
+  its RS256 signature against Google's published keys (kept as long as Google's answer says, and
+  read again for a key id it does not know), then its issuer, audience, expiry and nonce. It keeps the subject, and the email only once Google has
+  verified it, to show who is signed in. Google sign-in does not go with a list of
+  `SLOTLOCK_DASHBOARD_ORGS` (GitHub's organizations); with `enabled`, a Google person has their own
+  tenant only.
 
 ## Assistant
 
@@ -102,7 +126,13 @@ its own model.
 - **The key** is stored sealed with AES-256-GCM under a key derived from
   `SLOTLOCK_ASSISTANT_SECRET`, bound to the organization, in `slotlock.assistant_settings` (forced
   row-level security, erased with the tenant). The dashboard shows only that it is set and its last
-  four characters. Changing the secret makes stored keys unreadable: owners enter them again.
+  four characters.
+- **Changing the secret** without losing the keys: set the new value as `SLOTLOCK_ASSISTANT_SECRET`
+  and the old one in `SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS` (up to three, comma-separated, newest
+  first). A key sealed under an old secret still opens, and is sealed again under the new one the
+  next time its organization uses the assistant, only if no owner has saved another key since.
+  Remove an old secret once every organization has used the assistant since; a key still sealed
+  under a secret no longer listed cannot be opened, and its owners enter it again.
 - **Reads run, writes wait.** The server runs the tool loop, up to 8 model calls a message, with a
   fixed list of the agent tools (the reads: resources, free-busy, next free time, slots, pool
   availability, events; the writes: holds, bookings, pool and bundle bookings, changes and
@@ -130,6 +160,13 @@ its own model.
   `tenant_write` of `SLOTLOCK_LIMITS` in each isolate.
 - A provider's failure is shown as a plain message, never with the key or the provider's answer.
 - It works as plain forms: no script is needed.
+
+## Plan
+
+On hosted Slotlock, **Plan** shows the workspace's plan and how much of it is used, with
+**Upgrade to Developer** (paid through Stripe, in your currency, with tax added where it applies) and
+**Manage billing** for invoices, the payment method and cancelling. Free allows 10 resources, 10 API
+keys and 2 webhook endpoints; Developer 100, 100 and 10. A self-hosted dashboard has no Plan page.
 
 ## Before you go live
 

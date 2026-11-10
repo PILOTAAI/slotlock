@@ -17,6 +17,26 @@ export {
   parseBookingRules,
 } from './booking-rules.js';
 export {
+  SLOTLOCK_GROUPING_REF,
+  SLOTLOCK_MAX_GROUPS_PER_RESOURCE,
+  SLOTLOCK_MAX_LOCATION_DEPTH,
+  SLOTLOCK_MAX_LOCATIONS,
+  SLOTLOCK_MAX_RESOURCE_GROUPS,
+  SLOTLOCK_RESOURCE_KINDS,
+  SLOTLOCK_RESOURCE_LABEL,
+  SLOTLOCK_RESOURCE_PROFILE_FIELDS,
+  SLOTLOCK_RESOURCE_PROFILE_LIMITS,
+  parseSlotlockLocation,
+  parseSlotlockResourceGroup,
+  parseSlotlockResourceProfile,
+  type SlotlockLocation,
+  type SlotlockResourceGroup,
+  type SlotlockResourceAttributes,
+  type SlotlockResourceKind,
+  type SlotlockResourceProfileChange,
+  type SlotlockResourceProfileInput,
+} from './resource-profile.js';
+export {
   type CreateWebhookEndpointResult,
   type ListChangesResult,
   SLOTLOCK_CHANGE_ORIGINS,
@@ -104,6 +124,7 @@ export {
   SLOTLOCK_A2A_TASK_STATES,
   SLOTLOCK_AGENT_OPERATION_LEGACY_NAMES,
   SLOTLOCK_AGENT_SERVER_VERSION,
+  SLOTLOCK_MAX_ALTERNATIVES,
   SLOTLOCK_MCP_LEGACY_PROTOCOL_VERSION,
   SLOTLOCK_MCP_PROTOCOL_VERSION,
   SLOTLOCK_MCP_RATE_LIMITED_ERROR_CODE,
@@ -131,6 +152,7 @@ export type {
   SlotlockAgentServerOptions,
   SlotlockAgentSubscriptionOptions,
   SlotlockAgentWriteOperation,
+  SlotlockAlternative,
   SlotlockArgumentIssue,
   SlotlockMcpToolResult,
   SlotlockTraceContext,
@@ -187,6 +209,10 @@ export {
   createSlotlockApiKeyStore,
   generateSlotlockApiKey,
   isSlotlockApiKey,
+  isSlotlockTestTenant,
+  slotlockLiveTenant,
+  SLOTLOCK_TEST_API_KEY_PREFIX,
+  SLOTLOCK_TEST_TENANT_SUFFIX,
   slotlockApiKeyDigest,
   SLOTLOCK_API_KEY_ACTIVE_LIMIT,
   SLOTLOCK_API_KEY_MAX_LIFETIME_DAYS,
@@ -215,6 +241,39 @@ export {
   SLOTLOCK_ASSISTANT_TOOL_USE,
 } from './assistant.js';
 export type { SlotlockAssistantStore } from './assistant.js';
+export {
+  createSlotlockPartnerKeyAuthenticator,
+  createSlotlockPartnerStore,
+  parseSlotlockPartnerContract,
+  slotlockPartnerTenantRef,
+  SLOTLOCK_PARTNER_ACCOUNT,
+  SLOTLOCK_PARTNER_ID,
+  SLOTLOCK_PARTNER_SCOPE,
+} from './partners.js';
+export { createSlotlockDashboardTeams, createSlotlockOrganizationCheck } from './teams.js';
+export { reportSlotlockOverage, SLOTLOCK_DEFAULT_OVERAGE_STOP_PERCENT } from './overage.js';
+export type { SlotlockOverageReport } from './overage.js';
+export { createSlotlockOtlpExporter, readSlotlockOtlpConfig, slotlockCallSpan } from './otel.js';
+export type { SlotlockOtlpConfig, SlotlockTraceExporter } from './otel.js';
+export type { SlotlockDashboardTeams } from './teams.js';
+export {
+  closeSlotlockPartnerMonth,
+  priceSlotlockPartnerMonth,
+  slotlockClientLabel,
+  slotlockPartnerMonthChecksum,
+} from './partner-billing.js';
+export type {
+  SlotlockPartnerAccountMonth,
+  SlotlockPartnerInvoiceLine,
+  SlotlockPartnerMonthClose,
+} from './partner-billing.js';
+export type {
+  SlotlockPartnerAccount,
+  SlotlockPartnerContract,
+  SlotlockPartnerPlan,
+  SlotlockPartnerPricing,
+  SlotlockPartnerStore,
+} from './partners.js';
 export type {
   CreateSlotlockApiKeyInput,
   SlotlockApiKey,
@@ -328,6 +387,7 @@ export type {
   SlotlockAgendaEntry,
   SlotlockHold,
   SlotlockCalendarEvent,
+  SlotlockBookingDescription,
   SlotlockReservation,
   SlotlockResource,
   SlotlockTenantErasure,

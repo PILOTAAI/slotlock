@@ -140,6 +140,7 @@ never cached. W3C `traceparent`, `tracestate` and `baggage` reach your backend a
 | `GET /v1/available-slots` | `slotlock_find_available_slots` |
 | `POST /v1/slot-holds` | `slotlock_hold_slots` |
 | `DELETE /v1/slot-holds/{hold_id}` | `slotlock_release_slots` |
+| `POST /v1/slot-holds/{hold_id}/confirm` | `slotlock_confirm_slot` |
 | `POST /v1/bundles` | `slotlock_book_together` |
 | `POST /v1/pool-bookings` | `slotlock_book_pool` |
 | `GET /v1/pool-availability` | `slotlock_get_pool_availability` |
@@ -147,6 +148,8 @@ never cached. W3C `traceparent`, `tracestate` and `baggage` reach your backend a
 | `POST /v1/events` | `slotlock_create_event` |
 | `GET /v1/events/{event_id}` | `slotlock_get_event` |
 | `PATCH /v1/events/{event_id}` | `slotlock_update_event` |
+| `POST /v1/events/{event_id}/reschedule` | `slotlock_reschedule` |
+| `POST /v1/events/{event_id}/cancel` | `slotlock_cancel` |
 | `DELETE /v1/events/{event_id}` | `slotlock_delete_event` |
 
 ```sh
@@ -190,8 +193,13 @@ waits for a confirmation.
 
 | Request | Does |
 | --- | --- |
-| `POST /v1/resources` | Create the resource with this `external_ref`, or update its `timezone`; `visibility: "private"` hides it from agents |
-| `GET /v1/resources/{resource_id}` | One resource, with its own weekly hours, visibility and `archived_at` |
+| `POST /v1/resources` | Create the resource with this `external_ref`, or update its `timezone` and the profile fields given; `visibility: "private"` hides it from agents |
+| `PATCH /v1/resources/{resource_id}` | Change its profile: `name`, `description`, `kind`, `capacity`, `labels`, `attributes`, and its `location`, the fields given (`null` clears) |
+| `GET /v1/locations` | The tenant's locations, depth first, with how many resources are at each; `POST` creates or updates one (`ref`, `name`, `parent_ref`, `timezone`) |
+| `PATCH /v1/locations/{location_ref}` | Change its name, parent or time zone; `DELETE` removes it (`409 location_in_use` while anything is at or in it) |
+| `GET /v1/groups` | The tenant's groups, with how many resources are in each; `POST` creates or updates one (`ref`, `name`, `description`); `DELETE /v1/groups/{group_ref}` removes it |
+| `PUT /v1/groups/{group_ref}/members/{resource_id}` | Put a resource in a group; `DELETE` takes it out |
+| `GET /v1/resources/{resource_id}` | One resource, with its own weekly hours, visibility, `archived_at` and profile |
 | `POST /v1/resources/{resource_id}/archive` | Take it out of use; `…/restore` puts it back |
 | `DELETE /v1/resources/{resource_id}` | Delete it with its history (`409 resource_in_use` while anything on it is live) |
 | `GET /v1/resources/{resource_id}/busy?start=…&end=…` | Its occupied time, private resources included |
@@ -259,8 +267,8 @@ webhook URLs or secrets.
   `reservation.created`, `.updated`, `.cancelled`, `.checked_in`, `.no_show`; `event.created`,
   `.updated`, `.cancelled`, `.timezone_shifted`, `.timezone_conflict`; `waitlist.offered`,
   `.expired`; `coverage.stale`; and configuration: `resource.created`, `resource.updated` (booking
-  and check-in rules, pool, bookable hours, time zone or reference, with `before` and `after` of
-  only the fields that changed), `resource.archived`, `.restored`, `.deleted`; `coverage.recorded`
+  and check-in rules, pool, location, groups, bookable hours, time zone or reference, with `before`
+  and `after` of only the fields that changed, and the profile fields' names in `profile_changed`), `resource.archived`, `.restored`, `.deleted`; `coverage.recorded`
   (a source's first read; reading it again is not a change) and `coverage.deleted`. A `coverage.*`
   change names its source by `source_id` (also its `subject`), never the source itself, which can
   be an iCalendar URL with a token or an address: `src_` and 32 random hex digits, made when the
@@ -296,6 +304,12 @@ webhook URLs or secrets.
   change's id, the same on every retry), `webhook-timestamp` and `webhook-signature`, keyed by the
   `whsec_` secret the call returns once. `event_types` takes any of the types above. Verify it with any Standard Webhooks library, and use
   `webhook-id` to drop a repeat: delivery is at least once.
+- A webhook can also take only the changes about some resources: `resource_ids` (up to 100),
+  `pools`, `locations` (each with every location in it) or `groups` (up to 20 of each), matched
+  against the resource as it is when the change is delivered, or as the change says it was: a
+  resource's deletion (`resource.deleted` names its pool, location and groups) and its move out of
+  them (`resource.updated`'s `before`) still reach it. With any of them, a change about no resource
+  (a key, a webhook, a usage notice) is not sent to it.
 - Changes go to each webhook in order, one at a time, until one fails; that one is retried after
   5 seconds, 5 minutes, 30 minutes, 2, 5, then every 10 hours. After a day of failures, or a `410`,
   the webhook is disabled and the feed records `webhook.disabled`; `POST /v1/webhooks/{id}/enable`

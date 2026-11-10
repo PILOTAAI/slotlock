@@ -301,8 +301,9 @@ function boundedDefault(source, name) {
 
 /**
  * Hosted Slotlock's plans, for the landing page's Pricing band: each plan's limits and monthly
- * quotas from src/plans.ts, and its price from the Plans table in docs/hosted/README.md. Null while
- * the release has no src/plans.ts, so the page offers only plans the code sells.
+ * quotas from src/plans.ts, and its price from the Plans table in docs/hosted/README.md, with the
+ * Custom column's contact link. Null while the release has no src/plans.ts, so the page offers only
+ * plans the code sells.
  */
 async function readPlans() {
   let source;
@@ -345,7 +346,7 @@ async function readPlans() {
       'the Price row of the Plans table in docs/hosted/README.md',
     ),
   );
-  return Object.keys(limits).map((plan) => {
+  const plans = Object.keys(limits).map((plan) => {
     const column = names.indexOf(plan);
     const price = must(column > 0 ? prices[column] : undefined, `${plan}'s price in docs/hosted/README.md`);
     const money = /\$([0-9,]+) a month, or \$([0-9,]+) a year/.exec(price);
@@ -353,6 +354,9 @@ async function readPlans() {
       plan === 'free' ? 0 : must(money && Number(money[index].replace(/,/g, '')), `${plan}'s price`);
     return { id: plan, monthly: amount(1), yearly: amount(2), ...limits[plan], ...(quotas[plan] ?? {}) };
   });
+  const custom = names.indexOf('custom');
+  const link = custom > 0 ? /^\[([^\]]+)\]\((mailto:[^)\s]+)\)$/.exec(prices[custom] ?? '') : null;
+  return { plans, contact: link ? { label: link[1], href: link[2] } : null };
 }
 
 async function readFacts() {
@@ -616,7 +620,9 @@ async function readBenchmark() {
 
 async function main() {
   const facts = await readFacts();
-  facts.plans = await readPlans();
+  const hosted = await readPlans();
+  facts.plans = hosted?.plans ?? null;
+  facts.planContact = hosted?.contact ?? null;
   facts.benchmarkResults = await readBenchmark();
   const { page: toolsPage, toolExamples } = await readToolsReference(facts);
   // The prompt for a coding agent: a docs page shows it and /slotlock-setup-prompt.md serves it.

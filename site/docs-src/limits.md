@@ -69,6 +69,35 @@ the proxy. Where something else can reach it (another container on kamal-proxy's
 request (a Cloudflare request header transform rule): the field is then believed only beside that
 exact value, and any other request is counted by its connection's address.
 
+## Usage and monthly quotas
+
+With `SLOTLOCK_USAGE=on` (off by default) the server meters each tenant's use in
+`slotlock.usage_daily`, by UTC day, API key and surface: every operation that runs (MCP, A2A,
+REST, the application API and the dashboard assistant), counted in memory and recorded every 15
+seconds and when the server stops, each batch once however often it is sent; and the bookings
+(`reservation.created`, `event.created`, `hold.confirmed`) and holds (`hold.created`) its feed
+shows committed, rolled up by maintenance before the feed is pruned, so a write that rolled back
+is never counted and maintenance's own changes never are. Counts only, never what was asked; kept
+400 days, erased with the tenant. It also counts webhook deliveries endpoints accepted, messages to
+the assistant, and each day's resources (a count, archived included). Every answer carries
+`Slotlock-Request-Id`; with metering on, one whose operations ran carries
+`Slotlock-Usage: operations=<n>`. Read it back with `GET /v1/usage` (an admin key: totals, by day,
+by key and by surface), `readSlotlockTenantUsage` (usage.ts), and on the dashboard's Plan page.
+Writes from
+before the release that created the tables are not counted. The dashboard Worker takes the same
+setting for the assistant's operations.
+
+With `SLOTLOCK_QUOTAS=on` too (off by default), a tenant on a hosted plan is held to that plan's
+monthly quotas (`SLOTLOCK_PLAN_QUOTAS` in plans.ts; a tenant on no plan, as on a self-hosted
+server, has none): past its operations this UTC month every operation is refused but reading its
+usage and erasing it, past its bookings only those that can book, with `429 quota_exceeded` and `Retry-After` at the month's end.
+Each operation's answer lists the quotas in `RateLimit` and `RateLimit-Policy`
+(`"operations_month"`, `"bookings_month"`), and the feed records `usage.threshold_reached` once at
+80% and at 100% of each. A server reads the month so far at most every 30 seconds (every 2 near
+the stop) and adds its own unrecorded operations, so a tenant can pass its stop by what other
+servers counted in the last few seconds; a count it cannot read lets the operation run. The
+dashboard Worker takes the same setting for the assistant's operations.
+
 ## What a tenant may store
 
 The server also bounds what one tenant may store, whichever key, agent or application writes it:
