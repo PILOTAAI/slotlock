@@ -1,4 +1,5 @@
 import type { SlotlockBookingRule, SlotlockBookingRules } from './booking-rules.js';
+import type { SlotlockResourceAttributes, SlotlockResourceKind } from './resource-profile.js';
 // Every interval is half-open `[start, end)`: back-to-back reservations do not conflict, matching
 // RFC 5545 and PostgreSQL range semantics.
 
@@ -44,6 +45,89 @@ export interface SlotlockResource {
    * (`slotlock_book_pool`).
    */
   pool?: string;
+  /**
+   * The composite it is a part of (RFC 0003 G8), and its place there: a booking of the whole
+   * conflicts with every part. Absent when it is no part.
+   */
+  parentId?: string;
+  partIndex?: number;
+  /** Its name, shown instead of `externalRef` (resource-profile.ts). Absent when it has none. */
+  name?: string;
+  /** What it is, in a sentence or a paragraph. Absent when it has none. */
+  description?: string;
+  /** What kind of thing it is, a hint for filtering that changes no booking. Absent: `other`. */
+  kind?: SlotlockResourceKind;
+  /** How many people or seats it holds, said for people to read; never enforced. Absent: not said. */
+  capacity?: number;
+  /** Labels to find it by, sorted. Absent when it has none. */
+  labels?: string[];
+  /** What the integrator keeps on it. Absent when it has none. */
+  attributes?: SlotlockResourceAttributes;
+  /** The reference of the location it is at (resource-profile.ts). Absent when not said. */
+  location?: string;
+  /** That location's name. */
+  locationName?: string;
+  /** The references of the groups it is in, sorted. Absent when it is in none. */
+  groups?: string[];
+}
+
+/** Which writes an approval policy covers (RFC 0004 A4); none named is every write it applies to. */
+export type SlotlockApprovalKind = 'single' | 'pool' | 'bundle' | 'move';
+
+/** A tenant's approval policy (RFC 0004 A4). */
+export interface SlotlockApprovalPolicy {
+  ref: string;
+  name: string;
+  /** The resources it applies to; every one when all are empty. */
+  appliesTo: { resourceIds?: string[]; pools?: string[]; locations?: string[]; groups?: string[] };
+  /** What makes a write need it; a write meets it when it meets every condition given. */
+  conditions: { longerThanMinutes?: number; outsideHours?: boolean; kinds?: SlotlockApprovalKind[] };
+  outcome: 'require_approval' | 'refuse';
+  /** How long a person has to decide, before the booking's start less `leadMinutes`. */
+  approvalTtlMinutes: number;
+  leadMinutes: number;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** A write waiting for a person, or decided (RFC 0004 A4). */
+export interface SlotlockApproval {
+  id: string;
+  policyRef: string;
+  status: 'pending' | 'granted' | 'declined' | 'expired';
+  /** The agent operation it runs when granted, and its arguments. */
+  operation: 'slotlock_create_event' | 'slotlock_book_together' | 'slotlock_update_event';
+  request: Record<string, unknown>;
+  /** Who asked, as the history names an actor (the principal's subject, at most 200 characters). */
+  requestedBy: string | null;
+  /** The resources and time it holds while it waits. */
+  holdIds: string[];
+  resourceIds: string[];
+  start: Date;
+  end: Date;
+  expiresAt: Date;
+  decidedBy: string | null;
+  decidedAt: Date | null;
+  reason: string | null;
+  createdAt: Date;
+}
+
+/**
+ * A booking, hold or event occurrence as a refusal can name it (`describeBooking`): the time it
+ * occupies, buffers included, and whose it is, so a caller is told only what it may see.
+ */
+export interface SlotlockBookingDescription {
+  id: string;
+  resourceId: string;
+  status: 'held' | 'confirmed';
+  /** The holder of a hold, as the store was given it; null otherwise. */
+  holderRef: string | null;
+  /** The calendar event this is an occurrence of (its id and reference), and its owner; null for a booking. */
+  eventId: string | null;
+  eventRef: string | null;
+  eventOwnerRef: string | null;
+  start: Date;
+  end: Date;
 }
 
 /** A confirmed occupation of a resource. The DB EXCLUDE constraint is the overlap arbiter. */
@@ -363,8 +447,10 @@ export type PutCalendarEventResult =
   | { ok: false; code: 'resource_archived' }
   | { ok: false; code: 'event_cancelled'; currentRevision: number }
   | { ok: false; code: 'revision_conflict'; currentRevision: number }
-  /** `fromHold` names no live hold of that holder's: released, booked, expired, or another's. */
+  /** `fromHold` names no hold of that holder's: released, booked, reaped, or another's. */
   | { ok: false; code: 'hold_not_found' }
+  /** `fromHold`'s hold is the holder's, but it lapsed before it was booked. */
+  | { ok: false; code: 'hold_expired' }
   /** `fromHold`'s hold is on another resource, or does not cover the event. */
   | { ok: false; code: 'hold_mismatch' }
   /**

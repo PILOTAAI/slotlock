@@ -37,6 +37,8 @@ export interface SlotlockMaintenanceResult {
   noShows: number;
   /** Waitlist entries whose window came free, each now holding it (`waitlist.offered`). */
   waitlistOffers: number;
+  /** Approvals no one decided in time, their held time freed (`approval.expired`). */
+  approvalsExpired: number;
   /** More was left than one pass does: run another. */
   capped: boolean;
   /**
@@ -54,7 +56,17 @@ export interface SlotlockMaintenanceResult {
 export async function maintainSlotlockTenant(
   store: SlotlockStore,
   tenantRef: string,
-  options: { batches?: number; signal?: AbortSignal; followZoneRules?: boolean } = {},
+  options: {
+    batches?: number;
+    signal?: AbortSignal;
+    followZoneRules?: boolean;
+    /**
+     * Roll the tenant's committed bookings and holds up into its usage first (usage.ts), before
+     * pruning can delete feed changes it has not counted. For a deployment that meters
+     * (SLOTLOCK_USAGE=on).
+     */
+    usage?: boolean;
+  } = {},
 ): Promise<SlotlockMaintenanceResult> {
   const batches = options.batches ?? 10;
   if (!(Number.isSafeInteger(batches) && batches >= 1 && batches <= 100)) {
@@ -62,6 +74,13 @@ export async function maintainSlotlockTenant(
   }
   const withTenant = <T>(callback: (tenant: SlotlockTenantStore) => Promise<T>) =>
     store.withTenant(tenantRef, callback, { origin: 'maintenance' });
+  if (options.usage) {
+    for (let batch = 0; batch < batches; batch++) {
+      options.signal?.throwIfAborted();
+      const read = await withTenant((tenant) => tenant.rollUpUsage({ tenantRef, limit: USAGE_ROLL_UP_BATCH }));
+      if (read < USAGE_ROLL_UP_BATCH) break;
+    }
+  }
   const window = calendarEventRollingHorizon();
   let extended = 0;
   let conflicts = 0;
@@ -127,7 +146,9 @@ export async function maintainSlotlockTenant(
     tenant.followZoneRules({ tenantRef, move: options.followZoneRules === true }),
   );
   const staleSources = await withTenant((tenant) => tenant.reportStaleCoverage({ tenantRef }));
-  // No-shows first: the time they free is offered to the waitlist in the same pass.
+  // Approvals past their wait, and no-shows, first: the time they free is offered to the waitlist
+  // in the same pass.
+  const approvals = await withTenant((tenant) => tenant.expireApprovals({ tenantRef, limit: 100 }));
   const noShows = await withTenant((tenant) => tenant.releaseNoShows({ tenantRef }));
   // The whole waitlist in join order, a page per transaction, so a later free entry is offered
   // however many wait before it.
@@ -153,7 +174,8 @@ export async function maintainSlotlockTenant(
     staleSources,
     noShows,
     waitlistOffers,
-    capped: rollCapped || eventsLeft || bookingsLeft || changesLeft,
+    approvalsExpired: approvals.expired,
+    capped: rollCapped || eventsLeft || bookingsLeft || changesLeft || approvals.expired === 100,
     rollPending: rollCapped && after !== null && (after.rollRetryAt ?? null) === null,
   };
 }
@@ -167,6 +189,9 @@ const SWEEP_INTERVAL_MS = 15 * 60_000;
 
 /** Feed changes past the retention deleted per batch. */
 const CHANGE_PRUNE_BATCH = 1_000;
+
+/** Feed changes rolled up into usage per batch. */
+const USAGE_ROLL_UP_BATCH = 5_000;
 
 /** The advisory lock key for one tenant's maintenance (64-bit, from the tenant reference). */
 const LOCK_NAMESPACE = 'slotlock.maintenance:';
@@ -223,6 +248,8 @@ export interface SlotlockMaintenanceSchedulerOptions {
   maxTenants?: number;
   /** Batches of each task per pass (maintainSlotlockTenant). */
   batches?: number;
+  /** Roll each tenant's bookings and holds up into its usage, first (maintainSlotlockTenant `usage`). */
+  usage?: boolean;
   /** A pass that ran: counts only, never the tenant. Not awaited; what it throws is ignored. */
   onPass?: (result: SlotlockMaintenanceResult) => void;
   /**
@@ -274,6 +301,7 @@ export function startSlotlockMaintenance(
           const result = await withSlotlockMaintenanceLock(options.sql, tenantRef, () =>
             maintainSlotlockTenant(options.store, tenantRef, {
               ...(options.batches !== undefined ? { batches: options.batches } : {}),
+              ...(options.usage ? { usage: true } : {}),
               signal: controller.signal,
             }),
           );

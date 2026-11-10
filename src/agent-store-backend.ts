@@ -1,8 +1,31 @@
+import {
+  SLOTLOCK_RESOURCE_PROFILE_FIELDS,
+  type SlotlockLocation,
+  type SlotlockPoolOrder,
+  type SlotlockResourceGroup,
+  type SlotlockResourceKind,
+  type SlotlockResourceProfileInput,
+  SLOTLOCK_RECONCILE_TOLERANCE_PERCENT,
+  slotlockResourceHasLabels,
+} from './resource-profile.js';
 import type { Sql } from 'postgres';
+import {
+  SLOTLOCK_USAGE_RETENTION_DAYS,
+  slotlockUsageDay,
+  slotlockUsageMonthToDate,
+  slotlockUsageSpanDays,
+  summarizeSlotlockUsage,
+} from './usage.js';
 import type { SlotlockAgentChangeSource } from './change-watch.js';
 import { type SlotlockChangeOrigin, type SlotlockWebhookEndpoint, slotlockChangeFeedHead } from './event-feed.js';
 import { slotlockCloudEvent } from './webhooks.js';
 import { createHash } from 'node:crypto';
+import {
+  SLOTLOCK_DEFAULT_APPROVAL_MINUTES,
+  SLOTLOCK_KEY_APPROVAL_POLICY,
+  SLOTLOCK_MAX_APPROVAL_MINUTES,
+  SlotlockApprovalPolicyError,
+} from './approvals.js';
 import {
   type SlotlockAgentCalendarBackend,
   type SlotlockAgentInvocationContext,
@@ -35,6 +58,9 @@ import type {
   CalendarRecurrenceException,
   CalendarReminder,
   Interval,
+  SlotlockApproval,
+  SlotlockApprovalKind,
+  SlotlockApprovalPolicy,
   SlotlockCalendarEvent,
   SlotlockHold,
   SlotlockReservation,
@@ -42,6 +68,33 @@ import type {
   WeeklyAvailabilityRule,
 } from './types.js';
 import { maintainSlotlockTenant } from './maintenance.js';
+import {
+  type SlotlockSandboxScenario,
+  fastForwardSlotlockSandbox,
+  raceSlotlockSandbox,
+  resetSlotlockSandbox,
+  seedSlotlockSandbox,
+} from './sandbox.js';
+import { SLOTLOCK_TEST_TENANT_SUFFIX, type SlotlockApiKeyScope } from './api-keys.js';
+import {
+  type SlotlockPartnerAccount,
+  type SlotlockPartnerStore,
+  slotlockPartnerKeyOutput,
+  slotlockPrincipalPartner,
+} from './partners.js';
+
+/** A partner's account as the partner API shows it. */
+function partnerAccountOutput(account: SlotlockPartnerAccount): Record<string, unknown> {
+  return {
+    account: account.account,
+    plan: account.plan,
+    status: account.status,
+    created_at: account.createdAt.toISOString(),
+    updated_at: account.updatedAt.toISOString(),
+    ...(account.resources !== undefined ? { resources: account.resources } : {}),
+    ...(account.apiKeys !== undefined ? { api_keys: account.apiKeys } : {}),
+  };
+}
 import { parseAvailabilityRules } from './weekly-hours.js';
 
 export interface SlotlockStoreAgentBackendOptions {
@@ -59,6 +112,12 @@ export interface SlotlockStoreAgentBackendOptions {
     resource: SlotlockResource,
   ): Promise<readonly string[]>;
   coverageMaxAgeMs?: number;
+  /**
+   * The longest an approval policy may hold a write for a person (RFC 0004 A4), in minutes: each
+   * policy sets its own wait, bounded by the booking's start less its lead time and by this. 1 to
+   * 43,200 (30 days, the default).
+   */
+  maxApprovalMinutes?: number;
 }
 
 interface AgentAttendeeInput {
@@ -106,11 +165,42 @@ interface AgentEventInput {
  */
 const WRITE = { isolation: 'read committed' } as const;
 
+/**
+ * Keys a context carries only from inside this module: a request cannot set a symbol, and spreading
+ * a context (`{ ...context, operation }`) keeps them.
+ */
+const APPROVAL_GRANT = Symbol('slotlock.approvalGrant');
+const OCCUPANCY_PROBE = Symbol('slotlock.occupancyProbe');
+
+/** The approval a granted write runs for: its holds give way, and it is marked, in the write's transaction. */
+interface ApprovalGrant {
+  id: string;
+  decidedBy: string;
+  /** A pool booking's pool, whose round-robin place moves on as a direct booking's would. */
+  pool?: string;
+}
+
 interface TenantCallContext {
-  principal: { tenantRef: string; subject?: string; keyId?: string };
+  principal: {
+    tenantRef: string;
+    subject?: string;
+    keyId?: string;
+    resourceScope?: { readonly locations: readonly string[]; readonly groups: readonly string[] };
+  };
   signal: AbortSignal;
   /** The surface the call came through, recorded with its changes. */
   origin?: SlotlockChangeOrigin;
+  /** A dry run (RFC 0004 A3): every transaction this call opens is rolled back. */
+  dryRun?: boolean;
+  /** A grant running its approval's write (RFC 0004 A4); internal, never from a request. */
+  [APPROVAL_GRANT]?: ApprovalGrant;
+  /** Read what a dry run's write would occupy, in its transaction, before it is undone. */
+  [OCCUPANCY_PROBE]?: (tenantStore: SlotlockTenantStore) => Promise<void>;
+}
+
+/** Thrown out of a dry run's transaction, with its answer, so the transaction rolls back. */
+class DryRunRollback {
+  constructor(readonly value: unknown) {}
 }
 
 // The UUIDs withTenant takes as a keyId (versions 1-5); any other from a custom authenticator is
@@ -140,14 +230,49 @@ async function withTenant<T>(
   try {
     const actor = actorOf(context);
     const keyId = context.principal.keyId;
-    value = await store.withTenant(context.principal.tenantRef, callback, {
+    // A granted approval's write: its holds give way and it is marked granted in the same
+    // transaction, so the time passes from the approval to the booking with no gap between.
+    const grant = context[APPROVAL_GRANT];
+    const write: typeof callback = grant
+      ? async (tenantStore) => {
+          const tenantRef = context.principal.tenantRef;
+          const begun = await tenantStore.beginApprovalGrant({ tenantRef, id: grant.id });
+          if (!begun.ok) {
+            throw new SlotlockAgentOperationError(begun.code, begun.code === 'approval_not_found' ? 404 : 409);
+          }
+          const value = await callback(tenantStore);
+          const booked = (value as { event?: { resource_id?: unknown } }).event?.resource_id;
+          if (grant.pool !== undefined && typeof booked === 'string') {
+            await tenantStore.notePoolBooking({ tenantRef, pool: grant.pool, resourceId: booked });
+          }
+          await tenantStore.finishApprovalGrant({ tenantRef, id: grant.id, decidedBy: grant.decidedBy });
+          return value;
+        }
+      : callback;
+    // A dry run's transaction does everything, constraints included, then is undone: its answer
+    // is carried out of it by the rollback.
+    const probe = context[OCCUPANCY_PROBE];
+    const run: typeof callback = context.dryRun
+      ? async (tenantStore) => {
+          const value = await write(tenantStore);
+          if (probe) await probe(tenantStore);
+          throw new DryRunRollback(value);
+        }
+      : write;
+    value = await store.withTenant(context.principal.tenantRef, run, {
       ...options,
       signal: context.signal,
       ...(actor !== undefined ? { actor } : {}),
       ...(context.origin !== undefined ? { origin: context.origin } : {}),
       ...(typeof keyId === 'string' && KEY_ID.test(keyId) ? { keyId } : {}),
+      // A key limited to part of the tenant reaches only its resources, by the database's policies.
+      ...(context.principal.resourceScope ? { resourceScope: context.principal.resourceScope } : {}),
     });
   } catch (error) {
+    if (error instanceof DryRunRollback) {
+      assertActive(context);
+      return error.value as T;
+    }
     const code = (error as { code?: unknown } | null)?.code;
     // A suspended tenant may read; a write it asks for is forbidden, not a server failure.
     if (code === 'tenant_suspended') throw new SlotlockAgentOperationError('tenant_suspended', 403);
@@ -381,6 +506,7 @@ const BOOKING_RULE_CODES: Readonly<Record<SlotlockBookingRule, string>> = Object
 
 function operationError(
   refusal: string | { code: string; rule?: string },
+  details?: Record<string, string>,
 ): SlotlockAgentOperationError {
   const code =
     typeof refusal === 'string'
@@ -389,11 +515,38 @@ function operationError(
         ? (BOOKING_RULE_CODES[refusal.rule as SlotlockBookingRule] ?? refusal.code)
         : refusal.code;
   const status = slotlockAgentErrorStatus(code);
-  // A gone hold (expired or another holder's) is named, so the agent holds again.
+  // A gone hold (another holder's, released or reaped) is named, so the agent holds again.
   return new SlotlockAgentOperationError(
     status === 404 && code !== 'hold_not_found' ? 'not_found' : code,
     status,
+    details,
   );
+}
+
+/**
+ * What an agent may be told about the booking in the way of its write: when that time is busy
+ * (as free/busy shows anyone who may read the resource), and the booking itself only when it is
+ * the agent's own hold or event, so it can release or move it. Nothing for another refusal, or for
+ * a booking the key may not see (its scope, or another tenant's).
+ */
+async function overlapDetails(
+  tenantStore: SlotlockTenantStore,
+  context: SlotlockAgentInvocationContext,
+  refusal: { code: string; conflictingReservationId?: string | null },
+): Promise<Record<string, string>> {
+  if (refusal.code !== 'overlap' || typeof refusal.conflictingReservationId !== 'string') return {};
+  const booking = await tenantStore.describeBooking({
+    tenantRef: context.principal.tenantRef,
+    id: refusal.conflictingReservationId,
+  });
+  if (!booking) return {};
+  const owner = agentOwnerRef(context);
+  return {
+    busy_start: booking.start.toISOString(),
+    busy_end: booking.end.toISOString(),
+    ...(booking.status === 'held' && booking.holderRef === owner ? { conflicting_hold_id: booking.id } : {}),
+    ...(booking.eventRef !== null && booking.eventOwnerRef === owner ? { conflicting_event_id: booking.eventRef } : {}),
+  };
 }
 
 /** Resource and event ids: the UUIDs the store issues and validates. */
@@ -502,11 +655,23 @@ export function createSlotlockStoreAgentBackend(
   store: SlotlockStore,
   options: SlotlockStoreAgentBackendOptions,
 ): SlotlockAgentCalendarBackend {
-  return {
+  const maxApprovalMinutes = options.maxApprovalMinutes ?? SLOTLOCK_MAX_APPROVAL_MINUTES;
+  if (!(Number.isSafeInteger(maxApprovalMinutes) && maxApprovalMinutes >= 1 && maxApprovalMinutes <= SLOTLOCK_MAX_APPROVAL_MINUTES)) {
+    throw new RangeError(`maxApprovalMinutes must be a whole number from 1 to ${SLOTLOCK_MAX_APPROVAL_MINUTES}`);
+  }
+  const backend: SlotlockAgentCalendarBackend = {
     async holdSlots(context, input) {
       const slots = input.slots as { resource_id: string; start: string; end: string }[];
       const key = input.idempotency_key as string;
       const holderRef = agentOwnerRef(context);
+      const limits = context.principal.limits;
+      const holderCaps =
+        limits?.maxHolds !== undefined || limits?.maxHeldHours !== undefined
+          ? {
+              ...(limits.maxHolds !== undefined ? { maxHolds: limits.maxHolds } : {}),
+              ...(limits.maxHeldHours !== undefined ? { maxHeldHours: limits.maxHeldHours } : {}),
+            }
+          : undefined;
       // One group per agent and key, so a retry answers with the same holds and group.
       const groupId = uuidFromDigest(`slotlock-hold-group\0${holderRef}\0${key}`);
       return withTenant(store, context, async (tenantStore) => {
@@ -531,6 +696,8 @@ export function createSlotlockStoreAgentBackend(
             end: new Date(slot.end),
             ttlMs: (input.ttl_seconds as number) * 1_000,
             source: 'agent-server',
+            // The key's own caps, below the server's (RFC 0004 A5).
+            ...(holderCaps ? { holderCaps } : {}),
           });
           if (result.ok) {
             holds.push({
@@ -596,13 +763,23 @@ export function createSlotlockStoreAgentBackend(
           if (!replay.ok) throw operationError(replay);
           return answer(replay);
         }
-        const members = await tenantStore.listPoolMembers({ tenantRef, pool: input.pool, visibility: 'shared' });
+        // In the pool's order (stable, least booked first, or round robin).
+        const members = await tenantStore.listPoolMembers({
+          tenantRef,
+          pool: input.pool,
+          visibility: 'shared',
+          ordered: true,
+          forBooking: true,
+        });
         if (members.length === 0) throw new SlotlockAgentOperationError('pool_not_found', 404);
         // Each member in turn, each in its own savepoint: one taken or refused by its rules is
         // passed over; the exclusion constraint still decides.
         for (const member of members) {
           const result = await put(member.id);
-          if (result.ok) return answer(result);
+          if (result.ok) {
+            await tenantStore.notePoolBooking({ tenantRef, pool: input.pool, resourceId: member.id });
+            return answer(result);
+          }
           if (result.code !== 'overlap' && result.code !== 'booking_rule_violated') {
             throw operationError(result);
           }
@@ -746,7 +923,10 @@ export function createSlotlockStoreAgentBackend(
           // Thrown, so the whole transaction rolls back with the events already put.
           if (!result.ok) {
             const refusal = operationError(result);
-            throw new SlotlockAgentOperationError(refusal.code, refusal.status, { resource_id: resourceId });
+            throw new SlotlockAgentOperationError(refusal.code, refusal.status, {
+              resource_id: resourceId,
+              ...(await overlapDetails(tenantStore, context, result)),
+            });
           }
           const created = await tenantStore.getCalendarEvent({
             tenantRef: context.principal.tenantRef,
@@ -761,6 +941,74 @@ export function createSlotlockStoreAgentBackend(
       }, WRITE);
     },
 
+    async confirmHold(this: SlotlockAgentCalendarBackend, context, rawInput) {
+      const input = rawInput as {
+        hold_id: string;
+        title?: string;
+        description?: string;
+        location?: string;
+        timezone?: string;
+        idempotency_key: string;
+      };
+      // The holder's own hold, lapsed or live, and its resource's zone; then the booking exactly
+      // as create_event with its hold_id makes it, which judges the hold again under its lock.
+      const found = await withTenant(store, context, async (tenantStore) => {
+        const held = await tenantStore.getHolderHold({
+          tenantRef: context.principal.tenantRef,
+          holdId: input.hold_id,
+          holderRef: agentOwnerRef(context),
+        });
+        if (!held) return null;
+        const resource = await requireAgentResource(tenantStore, context.principal.tenantRef, held.hold.resourceId);
+        return { ...held, timezone: resource.timezone };
+      });
+      if (!found) {
+        // Booked already: a retry answers the event this key made (the store compares the
+        // request, so another one with the same key is idempotency_conflict).
+        const booked = await withTenant(store, context, (tenantStore) =>
+          tenantStore.getCalendarEvent({
+            tenantRef: context.principal.tenantRef,
+            ownerRef: agentOwnerRef(context),
+            externalRef: agentExternalRef(context, input.idempotency_key),
+          }),
+        );
+        if (!booked) throw new SlotlockAgentOperationError('hold_not_found', 404);
+        return this.createEvent(
+          { ...context, operation: 'slotlock_create_event' },
+          {
+            resource_id: booked.resourceId,
+            starts_at: booked.start.toISOString(),
+            ends_at: booked.end.toISOString(),
+            timezone: input.timezone ?? booked.timezone,
+            ...(input.title !== undefined ? { title: input.title } : {}),
+            ...(input.description !== undefined ? { description: input.description } : {}),
+            ...(input.location !== undefined ? { location: input.location } : {}),
+            transparency: 'opaque',
+            status: 'confirmed',
+            hold_id: input.hold_id,
+            idempotency_key: input.idempotency_key,
+          },
+        );
+      }
+      if (!found.live) throw new SlotlockAgentOperationError('hold_expired', 409);
+      return this.createEvent(
+        { ...context, operation: 'slotlock_create_event' },
+        {
+          resource_id: found.hold.resourceId,
+          starts_at: found.hold.start.toISOString(),
+          ends_at: found.hold.end.toISOString(),
+          timezone: input.timezone ?? found.timezone,
+          ...(input.title !== undefined ? { title: input.title } : {}),
+          ...(input.description !== undefined ? { description: input.description } : {}),
+          ...(input.location !== undefined ? { location: input.location } : {}),
+          transparency: 'opaque',
+          status: 'confirmed',
+          hold_id: input.hold_id,
+          idempotency_key: input.idempotency_key,
+        },
+      );
+    },
+
     async releaseSlots(context, input) {
       const id = input.hold_id as string;
       if (!STORE_ID_PATTERN.test(id)) return { released: false };
@@ -770,7 +1018,7 @@ export function createSlotlockStoreAgentBackend(
           holderRef: agentOwnerRef(context),
         }).then(({ released }) => ({ released })),
       );
-      if (result.released) await offerFreedTime(store, context.principal.tenantRef);
+      if (result.released) await offerFreedTime(store, context);
       return result;
     },
 
@@ -782,31 +1030,95 @@ export function createSlotlockStoreAgentBackend(
           id: resourceId,
           visibility: 'shared',
         });
+        // Its profile's name when it has one, as a person reading a confirmation knows it.
         return resource
-          ? { name: resource.externalRef ?? null, timezone: resource.timezone }
+          ? { name: resource.name ?? resource.externalRef ?? null, timezone: resource.timezone }
           : null;
+      });
+    },
+
+    async selectResources(context, selection) {
+      return withTenant(store, context, async (tenantStore) => {
+        let resources: SlotlockResource[];
+        try {
+          // Shared and in use, as an agent may search them, in the store's stable order.
+          resources = await tenantStore.listResources({
+            tenantRef: context.principal.tenantRef,
+            visibility: 'shared',
+            limit: selection.limit + 1,
+            ...(selection.kind !== undefined ? { kind: selection.kind as SlotlockResourceKind } : {}),
+            ...(selection.labels !== undefined ? { labels: selection.labels } : {}),
+            ...(selection.location !== undefined ? { location: selection.location } : {}),
+            ...(selection.group !== undefined ? { group: selection.group } : {}),
+            ...(selection.pool !== undefined ? { pool: selection.pool } : {}),
+          });
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+        if (resources.length > selection.limit) {
+          throw new SlotlockAgentOperationError('selection_too_large', 400, { limit: String(selection.limit) });
+        }
+        return resources.map((resource) => resource.id);
       });
     },
 
     async listResources(context, input) {
       const cursor = parseResourceCursor(input.cursor);
+      const kind = input.kind as SlotlockResource['kind'] | 'other' | undefined;
+      const labels = input.labels as string[] | undefined;
+      const location = input.location as string | undefined;
+      const group = input.group as string | undefined;
+      // What a resource says about itself, for an agent to show and choose by; its attributes are
+      // the integrator's, and stay on the application API.
       const output = (resource: SlotlockResource) => ({
         id: resource.id,
         external_ref: resource.externalRef,
         timezone: resource.timezone,
         ...(resource.pool !== undefined ? { pool: resource.pool } : {}),
+        ...(resource.name !== undefined ? { name: resource.name } : {}),
+        ...(resource.description !== undefined
+          ? {
+              description:
+                [...resource.description].length > 500
+                  ? `${[...resource.description].slice(0, 500).join('')}…`
+                  : resource.description,
+            }
+          : {}),
+        ...(resource.kind !== undefined ? { kind: resource.kind } : {}),
+        ...(resource.capacity !== undefined ? { capacity: resource.capacity } : {}),
+        ...(resource.labels !== undefined ? { labels: resource.labels } : {}),
+        ...(resource.location !== undefined
+          ? { location: { ref: resource.location, name: resource.locationName ?? resource.location } }
+          : {}),
+        ...(resource.groups !== undefined ? { groups: resource.groups } : {}),
+        ...(resource.parentId !== undefined ? { part_of: resource.parentId } : {}),
       });
       if (typeof input.pool === 'string') {
-        return withTenant(store, context, async (tenantStore) => ({
-          resources: (
-            await tenantStore.listPoolMembers({
-              tenantRef: context.principal.tenantRef,
-              pool: input.pool as string,
-              visibility: 'shared',
-            })
-          ).map(output),
-          next_cursor: null,
-        }));
+        return withTenant(store, context, async (tenantStore) => {
+          // A pool's members are filtered here: a location filter takes the locations under it.
+          const places =
+            location === undefined
+              ? null
+              : locationAndBelow(await tenantStore.listLocations({ tenantRef: context.principal.tenantRef }), location);
+          return {
+            resources: (
+              await tenantStore.listPoolMembers({
+                tenantRef: context.principal.tenantRef,
+                pool: input.pool as string,
+                visibility: 'shared',
+              })
+            )
+              .filter(
+                (resource) =>
+                  (kind === undefined || (resource.kind ?? 'other') === kind) &&
+                  (labels === undefined || slotlockResourceHasLabels(resource.labels, labels)) &&
+                  (places === null || (resource.location !== undefined && places.has(resource.location))) &&
+                  (group === undefined || resource.groups?.includes(group) === true),
+              )
+              .map(output),
+            next_cursor: null,
+          };
+        });
       }
       return withTenant(store, context, async (tenantStore) => {
         const limit = input.limit as number;
@@ -815,6 +1127,10 @@ export function createSlotlockStoreAgentBackend(
           visibility: 'shared',
           limit: limit + 1,
           ...(cursor !== undefined ? { after: cursor } : {}),
+          ...(kind !== undefined ? { kind } : {}),
+          ...(labels !== undefined ? { labels } : {}),
+          ...(location !== undefined ? { location } : {}),
+          ...(group !== undefined ? { group } : {}),
         });
         const page = resources.slice(0, limit);
         return {
@@ -857,6 +1173,50 @@ export function createSlotlockStoreAgentBackend(
           });
         }
         return { resources };
+      });
+    },
+
+    async findNextSlots(context, input) {
+      const window = interval(input);
+      const durationMs = input.duration_minutes * 60_000;
+      const charge = busyBudget();
+      return withTenant(store, context, async (tenantStore) => {
+        const resource = await requireAgentResource(tenantStore, context.principal.tenantRef, input.resource_id);
+        const search = bookingSearch({
+          rules: resource.effectiveBookingRules,
+          timezone: resource.timezone,
+          window,
+          now: new Date(),
+        });
+        const sources = await requiredSources(options, context, resource);
+        const freeBusy = await readFreeBusy(tenantStore, {
+          tenantRef: context.principal.tenantRef,
+          resourceId: input.resource_id,
+          window: search ? bookingSearchReach({ ...search, window }) : window,
+          requiredSources: [...sources],
+          ...(options.coverageMaxAgeMs !== undefined ? { coverageMaxAgeMs: options.coverageMaxAgeMs } : {}),
+        });
+        charge(freeBusy.busy.length);
+        if (freeBusy.coverage.state !== 'complete') return { slots: [], certain: false };
+        if (!search) return { slots: [], certain: true };
+        const rules = resource.availabilityRules ?? (await options.availabilityRules(context, resource));
+        const windows = expandRules(rules, search.window, resource.timezone);
+        if (windows.length > MAX_REQUEST_RULE_WINDOWS) throw new SlotlockAgentOperationError('calendar_work_limit', 400);
+        const busy = bookingSearchBlocked(freeBusy.busy, search);
+        // Each next slot as a search from where the last one ended would find it: the same busy
+        // time and hours, with the hours before that end left out.
+        const slots: { start: string; end: string }[] = [];
+        let from = search.window.start.getTime();
+        while (slots.length < input.limit) {
+          const open = windows
+            .map((hours) => ({ start: new Date(Math.max(hours.start.getTime(), from)), end: hours.end }))
+            .filter((hours) => hours.end.getTime() - hours.start.getTime() >= durationMs);
+          const found = findNextAvailable({ busy, windows: open, durationMs, ...(search.align ? { align: search.align } : {}) });
+          if (!found) break;
+          slots.push({ start: found.start.toISOString(), end: found.end.toISOString() });
+          from = found.end.getTime();
+        }
+        return { slots, certain: true };
       });
     },
 
@@ -976,7 +1336,7 @@ export function createSlotlockStoreAgentBackend(
             ? { fromHold: { holdId: input.hold_id, holderRef: agentOwnerRef(context) } }
             : {}),
         });
-        if (!result.ok) throw operationError(result);
+        if (!result.ok) throw operationError(result, await overlapDetails(tenantStore, context, result));
         const created = await tenantStore.getCalendarEvent({
           tenantRef: context.principal.tenantRef,
           ownerRef: agentOwnerRef(context),
@@ -1127,7 +1487,7 @@ export function createSlotlockStoreAgentBackend(
           // An agent's event is a booking made now: the resource's booking rules apply.
           enforceBookingRules: true,
         });
-        if (!result.ok) throw operationError(result);
+        if (!result.ok) throw operationError(result, await overlapDetails(tenantStore, context, result));
         const updated = await tenantStore.getCalendarEvent({
           tenantRef: context.principal.tenantRef,
           ownerRef: agentOwnerRef(context),
@@ -1136,7 +1496,7 @@ export function createSlotlockStoreAgentBackend(
         if (!updated) throw new SlotlockAgentOperationError('store_inconsistent', 503);
         return { event: projectSlotlockCalendarEvent(updated), replayed: result.idempotent };
       }, WRITE);
-      if (!moved.replayed) await offerFreedTime(store, context.principal.tenantRef);
+      if (!moved.replayed) await offerFreedTime(store, context);
       return moved;
     },
 
@@ -1148,12 +1508,13 @@ export function createSlotlockStoreAgentBackend(
           ownerRef: agentOwnerRef(context),
           externalRef,
         });
-        if (!current) throw new SlotlockAgentOperationError('event_not_found', 404);
+        // Gone already: a retry of a cancellation that succeeded, answered from its key, or
+        // event_not_found from the store when there was none.
         const result = await tenantStore.cancelCalendarEvent({
           tenantRef: context.principal.tenantRef,
           ownerRef: agentOwnerRef(context),
           externalRef,
-          expectedResourceId: current.resourceId,
+          ...(current ? { expectedResourceId: current.resourceId } : {}),
           idempotencyKey: agentCommandIdempotencyKey(context, input.idempotency_key as string),
           expectedRevision: input.expected_revision as number,
         });
@@ -1165,10 +1526,11 @@ export function createSlotlockStoreAgentBackend(
           replayed: result.idempotent,
         };
       }, WRITE);
-      if (!deleted.replayed) await offerFreedTime(store, context.principal.tenantRef);
+      if (!deleted.replayed) await offerFreedTime(store, context);
       return deleted;
     },
   };
+  return withApprovalPolicies(store, options, maxApprovalMinutes, backend);
 }
 
 export interface SlotlockStoreApplicationBackendOptions {
@@ -1185,15 +1547,48 @@ export interface SlotlockStoreApplicationBackendOptions {
    * undone, and an operator may owe a tenant's data a retention or review first.
    */
   tenantErasure?: boolean;
+  /**
+   * The partner API (RFC 0003 P3): the partner store (partners.ts) its operations run through, for
+   * the partner a partner key names. Unset: they answer 404 partner_api_not_served.
+   */
+  partners?: SlotlockPartnerStore;
+  /**
+   * The agent backend (`createSlotlockStoreAgentBackend`) a granted approval's booking is made
+   * through (RFC 0004 A4), as the agent that asked. Unset: a grant answers 409
+   * approvals_unavailable; declining still works.
+   */
+  agentBackend?: SlotlockAgentCalendarBackend;
 }
 
 function storeRefusal(error: unknown): unknown {
   const code = (error as { code?: unknown } | null)?.code;
   if (typeof code !== 'string') return error;
+  if (code === 'invalid_resource_profile' || code === 'invalid_location' || code === 'invalid_group') {
+    // Which field, so a client can say what to change.
+    const field = (error as { field?: unknown }).field;
+    return new SlotlockAgentOperationError(code, 400, typeof field === 'string' ? { field } : undefined);
+  }
+  if (code === 'location_not_found' || code === 'group_not_found' || code === 'resource_not_found' || code === 'parent_not_found') {
+    return new SlotlockAgentOperationError(code, 404);
+  }
+  if (
+    code === 'location_in_use' ||
+    code === 'location_too_deep' ||
+    code === 'location_cycle' ||
+    code === 'location_limit_reached' ||
+    code === 'group_limit_reached' ||
+    code === 'resource_group_limit_reached'
+  ) {
+    return new SlotlockAgentOperationError(code, 409);
+  }
   if (
     code === 'resource_limit_reached' ||
     code === 'resource_visibility_conflict' ||
-    code === 'pool_rules_limit_reached'
+    code === 'pool_rules_limit_reached' ||
+    code === 'pool_order_limit_reached' ||
+    code === 'composite_too_deep' ||
+    code === 'composite_parts_limit' ||
+    code === 'composite_busy'
   ) {
     return new SlotlockAgentOperationError(code, 409);
   }
@@ -1201,6 +1596,93 @@ function storeRefusal(error: unknown): unknown {
     return new SlotlockAgentOperationError(code, 400);
   }
   return error;
+}
+
+/** A key's limits as the API takes them (snake_case), as the key store takes them. */
+function keyLimitsFromInput(value: unknown) {
+  const given = value as { max_holds?: number; max_held_hours?: number; requests_per_minute?: number; requires_approval?: boolean };
+  return {
+    ...(given.max_holds !== undefined ? { maxHolds: given.max_holds } : {}),
+    ...(given.max_held_hours !== undefined ? { maxHeldHours: given.max_held_hours } : {}),
+    ...(given.requests_per_minute !== undefined ? { requestsPerMinute: given.requests_per_minute } : {}),
+    ...(given.requires_approval === true ? { requiresApproval: true } : {}),
+  };
+}
+
+/** A sandbox refusal as the API answers it: 403 for a live tenant, 409 for one not empty. */
+function sandboxRefusal(error: unknown): unknown {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (code === 'sandbox_test_only') return new SlotlockAgentOperationError(code, 403);
+  if (code === 'sandbox_not_empty') return new SlotlockAgentOperationError(code, 409);
+  return error;
+}
+
+/** An approval decision refused: 404 for none, 409 for one decided or past its wait. */
+function approvalRefusal(code: 'approval_not_found' | 'approval_not_pending' | 'approval_expired'): SlotlockAgentOperationError {
+  return new SlotlockAgentOperationError(code, code === 'approval_not_found' ? 404 : 409);
+}
+
+function approvalPolicyOutput(policy: SlotlockApprovalPolicy) {
+  const applies = policy.appliesTo;
+  const conditions = policy.conditions;
+  return {
+    policy_ref: policy.ref,
+    name: policy.name,
+    applies_to: {
+      ...(applies.resourceIds ? { resource_ids: applies.resourceIds } : {}),
+      ...(applies.pools ? { pools: applies.pools } : {}),
+      ...(applies.locations ? { locations: applies.locations } : {}),
+      ...(applies.groups ? { groups: applies.groups } : {}),
+    },
+    conditions: {
+      ...(conditions.longerThanMinutes !== undefined ? { longer_than_minutes: conditions.longerThanMinutes } : {}),
+      ...(conditions.outsideHours !== undefined ? { outside_hours: conditions.outsideHours } : {}),
+      ...(conditions.kinds ? { kinds: conditions.kinds } : {}),
+    },
+    outcome: policy.outcome,
+    approval_ttl_minutes: policy.approvalTtlMinutes,
+    lead_minutes: policy.leadMinutes,
+    created_at: policy.createdAt.toISOString(),
+    updated_at: policy.updatedAt.toISOString(),
+  };
+}
+
+function approvalAppliesTo(value: unknown): SlotlockApprovalPolicy['appliesTo'] {
+  const given = value as { resource_ids?: string[]; pools?: string[]; locations?: string[]; groups?: string[] };
+  return {
+    ...(given.resource_ids ? { resourceIds: given.resource_ids } : {}),
+    ...(given.pools ? { pools: given.pools } : {}),
+    ...(given.locations ? { locations: given.locations } : {}),
+    ...(given.groups ? { groups: given.groups } : {}),
+  };
+}
+
+function approvalConditions(value: unknown): SlotlockApprovalPolicy['conditions'] {
+  const given = value as { longer_than_minutes?: number; outside_hours?: boolean; kinds?: SlotlockApprovalKind[] };
+  return {
+    ...(given.longer_than_minutes !== undefined ? { longerThanMinutes: given.longer_than_minutes } : {}),
+    ...(given.outside_hours !== undefined ? { outsideHours: given.outside_hours } : {}),
+    ...(given.kinds ? { kinds: given.kinds } : {}),
+  };
+}
+
+function approvalOutput(approval: SlotlockApproval) {
+  return {
+    approval_id: approval.id,
+    policy_ref: approval.policyRef,
+    status: approval.status,
+    operation: approval.operation,
+    request: approval.request,
+    requested_by: approval.requestedBy,
+    resource_ids: approval.resourceIds,
+    starts_at: approval.start.toISOString(),
+    ends_at: approval.end.toISOString(),
+    expires_at: approval.expiresAt.toISOString(),
+    decided_by: approval.decidedBy,
+    decided_at: approval.decidedAt?.toISOString() ?? null,
+    reason: approval.reason,
+    created_at: approval.createdAt.toISOString(),
+  };
 }
 
 function applicationRefusal(code: string): SlotlockAgentOperationError {
@@ -1229,11 +1711,458 @@ function waitlistOutput(entry: SlotlockWaitlistEntry) {
   };
 }
 
+/** Occupied time as eventOccupancy reads it. */
+interface Occupation {
+  resourceId: string;
+  start: Date;
+  end: Date;
+  recurring: boolean;
+}
+
+/** The writes a policy can hold for a person, and the operation each is kept as. */
+type GatedOperation = 'slotlock_create_event' | 'slotlock_book_pool' | 'slotlock_book_together' | 'slotlock_update_event';
+
+/** What one write asks, for its policies: found before it is tried. */
+interface ApprovalPlan {
+  kind: SlotlockApprovalKind;
+  stored: SlotlockApproval['operation'];
+  /** The resources it may take: a pool's members, before one is chosen. */
+  resourceIds: string[];
+  /** The events it writes, by external reference, to read what they occupy. */
+  externalRefs: string[];
+  start: Date;
+  end: Date;
+  series: boolean;
+  /** A move's event as it is: its own time is not held again. */
+  before: Occupation[];
+  consumeHold?: { holdId: string; holderRef: string };
+  pool?: string;
+  policies: SlotlockApprovalPolicy[];
+  /** The key's own approval (RFC 0004 A5), beside the tenant's policies. */
+  keyPolicy?: SlotlockApprovalPolicy;
+}
+
+/**
+ * The policy a key whose bookings wait for a person (`requiresApproval`, RFC 0004 A5) is held by:
+ * every resource, a day's wait. A tenant cannot name a policy of its own `api-key`.
+ */
+function keyApprovalPolicy(): SlotlockApprovalPolicy {
+  return {
+    ref: SLOTLOCK_KEY_APPROVAL_POLICY,
+    name: 'Bookings by this API key',
+    appliesTo: {},
+    conditions: {},
+    outcome: 'require_approval',
+    approvalTtlMinutes: SLOTLOCK_DEFAULT_APPROVAL_MINUTES,
+    leadMinutes: 0,
+    createdAt: new Date(0),
+    updatedAt: new Date(0),
+  };
+}
+
+/** A JSON value with its object keys sorted, so two requests compare by content. */
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.keys(value as Record<string, unknown>)
+        .sort()
+        .map((key) => [key, canonical((value as Record<string, unknown>)[key])]),
+    );
+  }
+  return value;
+}
+
+/** Each interval of `wanted` less the parts `kept` already covers on the same resource. */
+function uncovered(wanted: readonly Occupation[], kept: readonly Occupation[]): (Interval & { resourceId: string })[] {
+  const pieces: (Interval & { resourceId: string })[] = [];
+  for (const want of wanted) {
+    let open: Interval[] = [{ start: want.start, end: want.end }];
+    for (const own of kept) {
+      if (own.resourceId !== want.resourceId) continue;
+      open = open.flatMap((piece) => {
+        if (own.end <= piece.start || own.start >= piece.end) return [piece];
+        return [
+          ...(own.start > piece.start ? [{ start: piece.start, end: own.start }] : []),
+          ...(own.end < piece.end ? [{ start: own.end, end: piece.end }] : []),
+        ];
+      });
+    }
+    pieces.push(...open.map((piece) => ({ ...piece, resourceId: want.resourceId })));
+  }
+  return pieces;
+}
+
+/** How a request already put to a person answers its retry: waiting, declined or expired. */
+function approvalAnswer(approval: SlotlockApproval): SlotlockAgentOperationError {
+  const id = { approval_id: approval.id, policy_ref: approval.policyRef };
+  if (approval.status === 'declined') {
+    return new SlotlockAgentOperationError('approval_declined', 403, {
+      ...id,
+      ...(approval.reason ? { reason: approval.reason.slice(0, 200) } : {}),
+    });
+  }
+  if (approval.status === 'expired' || approval.expiresAt.getTime() <= Date.now()) {
+    return new SlotlockAgentOperationError('approval_expired', 409, id);
+  }
+  return new SlotlockAgentOperationError('approval_pending', 409, {
+    ...id,
+    expires_at: approval.expiresAt.toISOString(),
+  });
+}
+
+/**
+ * Approval policies (RFC 0004 A4) in front of the backend's writes. A write a policy covers is
+ * tried first as a dry run, so it meets every check and the database's constraints as it would;
+ * a `refuse` policy then refuses it, and a `require_approval` one holds the exact time it would
+ * occupy for the approval and answers `approval_pending`. A retry with the same idempotency key
+ * answers as the request stands, and once granted, with the booking itself. Tenants with no policy
+ * pay one indexed read per write.
+ */
+function withApprovalPolicies(
+  store: SlotlockStore,
+  options: SlotlockStoreAgentBackendOptions,
+  maxApprovalMinutes: number,
+  backend: SlotlockAgentCalendarBackend,
+): SlotlockAgentCalendarBackend {
+  type Method = (
+    this: SlotlockAgentCalendarBackend,
+    context: SlotlockAgentInvocationContext,
+    input: Record<string, unknown>,
+  ) => Promise<Record<string, unknown>>;
+
+  const requestKeyOf = (context: SlotlockAgentInvocationContext, stored: string, key: string) =>
+    createHash('sha256')
+      .update(JSON.stringify(['slotlock-approval', context.principal.tenantRef, agentOwnerRef(context), stored, key]))
+      .digest('hex');
+
+  /** Whether [start, end) on the resource falls outside its bookable hours. */
+  async function outsideHours(
+    tenantStore: SlotlockTenantStore,
+    context: SlotlockAgentInvocationContext,
+    resourceId: string,
+    start: Date,
+    end: Date,
+  ): Promise<boolean> {
+    const resource = await requireAgentResource(tenantStore, context.principal.tenantRef, resourceId);
+    const hours = resource.availabilityRules ?? (await options.availabilityRules(context, resource));
+    const windows = mergeIntervals(
+      expandRules(hours, { start: new Date(start.getTime() - 86_400_000), end: new Date(end.getTime() + 86_400_000) }, resource.timezone),
+    );
+    return !windows.some((window) => window.start <= start && window.end >= end);
+  }
+
+  /** The write's ask and the policies that may cover it, or null when none can. */
+  async function plan(
+    tenantStore: SlotlockTenantStore,
+    context: SlotlockAgentInvocationContext,
+    operation: GatedOperation,
+    input: Record<string, unknown>,
+  ): Promise<ApprovalPlan | null> {
+    const tenantRef = context.principal.tenantRef;
+    const ownerRef = agentOwnerRef(context);
+    const key = input.idempotency_key as string;
+    // A key whose bookings all wait for a person (RFC 0004 A5) is a policy of its own.
+    const keyPolicy = context.principal.limits?.requiresApproval === true ? keyApprovalPolicy() : undefined;
+    // Most tenants have none: one small indexed read, and nothing else looked up.
+    if (!keyPolicy && (await tenantStore.listApprovalPolicies({ tenantRef })).length === 0) return null;
+    let asked: Omit<ApprovalPlan, 'policies'>;
+    if (operation === 'slotlock_create_event') {
+      asked = {
+        kind: 'single',
+        stored: 'slotlock_create_event',
+        resourceIds: [input.resource_id as string],
+        externalRefs: [agentExternalRef(context, key)],
+        start: new Date(input.starts_at as string),
+        end: new Date(input.ends_at as string),
+        series: typeof input.recurrence_rule === 'string',
+        before: [],
+        ...(typeof input.hold_id === 'string' ? { consumeHold: { holdId: input.hold_id, holderRef: ownerRef } } : {}),
+      };
+    } else if (operation === 'slotlock_book_pool') {
+      const members = await tenantStore.listPoolMembers({ tenantRef, pool: input.pool as string, visibility: 'shared' });
+      if (members.length === 0) return null;
+      asked = {
+        kind: 'pool',
+        stored: 'slotlock_create_event',
+        resourceIds: members.map((member) => member.id),
+        externalRefs: [agentExternalRef(context, key)],
+        start: new Date(input.starts_at as string),
+        end: new Date(input.ends_at as string),
+        series: false,
+        before: [],
+        pool: input.pool as string,
+      };
+    } else if (operation === 'slotlock_book_together') {
+      const resourceIds = [...new Set(input.resource_ids as string[])].sort();
+      asked = {
+        kind: 'bundle',
+        stored: 'slotlock_book_together',
+        resourceIds,
+        externalRefs: resourceIds.map((resourceId) => agentExternalRef(context, `${key}\0${resourceId}`)),
+        start: new Date(input.starts_at as string),
+        end: new Date(input.ends_at as string),
+        series: false,
+        before: [],
+      };
+    } else {
+      const current = await tenantStore.getCalendarEvent({ tenantRef, ownerRef, externalRef: input.event_id as string });
+      if (!current) return null;
+      const resourceId = (input.resource_id as string | undefined) ?? current.resourceId;
+      const start = input.starts_at ? new Date(input.starts_at as string) : current.start;
+      const end = input.ends_at ? new Date(input.ends_at as string) : current.end;
+      // Only a move to another time or resource is a booking a policy can be about.
+      if (resourceId === current.resourceId && start.getTime() === current.start.getTime() && end.getTime() === current.end.getTime()) {
+        return null;
+      }
+      asked = {
+        kind: 'move',
+        stored: 'slotlock_update_event',
+        resourceIds: [resourceId],
+        externalRefs: [current.externalRef],
+        start,
+        end,
+        series:
+          input.recurrence_rule !== undefined ? typeof input.recurrence_rule === 'string' : current.recurrence !== undefined,
+        before: await tenantStore.eventOccupancy({ tenantRef, ownerRef, externalRefs: [current.externalRef] }),
+      };
+    }
+    const minutes = (asked.end.getTime() - asked.start.getTime()) / 60_000;
+    // What the ask alone decides; hours wait for the resource the write takes.
+    const policies = (await tenantStore.approvalPoliciesFor({ tenantRef, resourceIds: asked.resourceIds })).filter(
+      (policy) =>
+        (policy.conditions.kinds === undefined || policy.conditions.kinds.includes(asked.kind)) &&
+        (policy.conditions.longerThanMinutes === undefined || minutes > policy.conditions.longerThanMinutes),
+    );
+    if (policies.length === 0 && !keyPolicy) return null;
+    return { ...asked, policies, ...(keyPolicy ? { keyPolicy } : {}) };
+  }
+
+  function gated(operation: GatedOperation, method: Method): Method {
+    return async function (this: SlotlockAgentCalendarBackend, context, input) {
+      // The grant itself, or a write a person already approved and its retries.
+      if ((context as TenantCallContext)[APPROVAL_GRANT]) return method.call(this, context, input);
+      const tenantRef = context.principal.tenantRef;
+      const stored = operation === 'slotlock_book_together' || operation === 'slotlock_update_event' ? operation : 'slotlock_create_event';
+      const requestKey = requestKeyOf(context, stored, input.idempotency_key as string);
+      const asked = await withTenant(store, { ...context, dryRun: false }, async (tenantStore) => {
+        const prior = await tenantStore.findApproval({ tenantRef, requestKey });
+        if (prior) return { prior };
+        return { plan: await plan(tenantStore, context, operation, input) };
+      });
+      if (asked.prior) {
+        const { hold_id: _held, ...request } = input;
+        // Granted: the booking was made with this key, so the write answers it as a replay (and
+        // the store refuses another request with it). Without the hold the approval took over,
+        // as the grant made it.
+        if (asked.prior.status === 'granted') return method.call(this, context, request);
+        const kept: Record<string, unknown> = { ...asked.prior.request };
+        // A pool booking is kept as the member it would take.
+        if (operation === 'slotlock_book_pool') delete kept.resource_id;
+        if (JSON.stringify(canonical(kept)) !== JSON.stringify(canonical(request))) {
+          throw new SlotlockAgentOperationError('idempotency_conflict', 409);
+        }
+        throw approvalAnswer(asked.prior);
+      }
+      const ask = asked.plan;
+      if (!ask) return method.call(this, context, input);
+      // Tried as a dry run, reading what it would occupy before it is undone: a write that would be
+      // refused is refused as it would be.
+      let occupied: Occupation[] = [];
+      const probed = await method.call(
+        this,
+        {
+          ...context,
+          dryRun: true,
+          [OCCUPANCY_PROBE]: async (tenantStore: SlotlockTenantStore) => {
+            occupied = await tenantStore.eventOccupancy({
+              tenantRef,
+              ownerRef: agentOwnerRef(context),
+              externalRefs: ask.externalRefs,
+            });
+          },
+        } as SlotlockAgentInvocationContext,
+        input,
+      );
+      // Made already (before the policy, say), or takes no time (a transparent event): nothing to hold.
+      if (probed.replayed === true || occupied.length === 0) {
+        return context.dryRun ? probed : method.call(this, context, input);
+      }
+      const written = [...new Set(occupied.map((occupation) => occupation.resourceId))];
+      const decided = await withTenant(store, { ...context, dryRun: false }, async (tenantStore) => {
+        // A pool's policies are those of the member the write would take, and its pool.
+        const candidates = [
+          ...(ask.pool
+            ? (await tenantStore.approvalPoliciesFor({ tenantRef, resourceIds: written })).filter((policy) =>
+                ask.policies.some((known) => known.ref === policy.ref),
+              )
+            : ask.policies),
+          ...(ask.keyPolicy ? [ask.keyPolicy] : []),
+        ];
+        const applying: SlotlockApprovalPolicy[] = [];
+        for (const policy of candidates) {
+          if (policy.conditions.outsideHours === true) {
+            let outside = false;
+            for (const resourceId of written) {
+              if (await outsideHours(tenantStore, context, resourceId, ask.start, ask.end)) outside = true;
+            }
+            if (!outside) continue;
+          }
+          applying.push(policy);
+        }
+        return applying;
+      });
+      if (decided.length === 0) return context.dryRun ? probed : method.call(this, context, input);
+      const refusing = decided.find((policy) => policy.outcome === 'refuse');
+      if (refusing) throw new SlotlockAgentOperationError('approval_policy_refused', 403, { policy_ref: refusing.ref });
+      // The strictest wait: the earliest a person must decide by, under each policy's own wait, its
+      // lead before the start, and the server's ceiling.
+      const now = Date.now();
+      const deadline = (policy: SlotlockApprovalPolicy) =>
+        Math.min(
+          now + Math.min(policy.approvalTtlMinutes, maxApprovalMinutes) * 60_000,
+          ask.start.getTime() - policy.leadMinutes * 60_000,
+        );
+      const policy = [...decided].sort((left, right) => deadline(left) - deadline(right) || left.ref.localeCompare(right.ref))[0] as SlotlockApprovalPolicy;
+      const expiresAt = new Date(deadline(policy));
+      if (ask.series || occupied.some((occupation) => occupation.recurring)) {
+        throw new SlotlockAgentOperationError('approval_series_unsupported', 409, { policy_ref: policy.ref });
+      }
+      if (expiresAt.getTime() < now + 60_000) {
+        throw new SlotlockAgentOperationError('approval_too_late', 409, { policy_ref: policy.ref });
+      }
+      if (context.dryRun) {
+        throw new SlotlockAgentOperationError('approval_required', 409, {
+          policy_ref: policy.ref,
+          expires_at: expiresAt.toISOString(),
+        });
+      }
+      const holds = uncovered(occupied, ask.before);
+      if (holds.length === 0) return method.call(this, context, input);
+      const chosen = ask.pool ? written[0] : undefined;
+      const { hold_id: _hold, ...request } = input;
+      const principal = context.principal;
+      const result = await withTenant(store, context, (tenantStore) =>
+        tenantStore.requestApproval({
+          tenantRef,
+          policyRef: policy.ref,
+          operation: ask.stored,
+          request: canonical(chosen ? { ...request, resource_id: chosen } : request) as Record<string, unknown>,
+          requester: {
+            subject: principal.subject,
+            ...(principal.scopes ? { scopes: [...principal.scopes] } : {}),
+            ...(principal.keyId !== undefined ? { key_id: principal.keyId } : {}),
+            ...(principal.resourceScope
+              ? { resource_scope: { locations: [...principal.resourceScope.locations], groups: [...principal.resourceScope.groups] } }
+              : {}),
+            ...(context.origin !== undefined ? { origin: context.origin } : {}),
+            ...(ask.pool !== undefined ? { pool: ask.pool } : {}),
+          },
+          requesterRef: principal.subject,
+          requestKey,
+          holds,
+          start: ask.start,
+          end: ask.end,
+          expiresAt,
+          ...(ask.consumeHold ? { consumeHold: ask.consumeHold } : {}),
+        }),
+      WRITE);
+      if (!result.ok) {
+        if (result.code === 'approval_limit_reached') {
+          throw new SlotlockAgentOperationError('approval_limit_reached', 429, { limit: String(result.limit ?? '') });
+        }
+        throw new SlotlockAgentOperationError(result.code, 409);
+      }
+      throw approvalAnswer(result.approval);
+    };
+  }
+
+  const wrapped: SlotlockAgentCalendarBackend = { ...backend };
+  wrapped.createEvent = gated('slotlock_create_event', backend.createEvent as Method);
+  wrapped.updateEvent = gated('slotlock_update_event', backend.updateEvent as Method);
+  if (backend.bookPool) wrapped.bookPool = gated('slotlock_book_pool', backend.bookPool as Method);
+  if (backend.bookTogether) wrapped.bookTogether = gated('slotlock_book_together', backend.bookTogether as Method);
+  if (backend.confirmHold) {
+    const confirm = backend.confirmHold as Method;
+    // A confirm already put to a person answers as it stands, before its hold (now the
+    // approval's) is looked for; otherwise it books through createEvent, policies and all.
+    wrapped.confirmHold = async function (this: SlotlockAgentCalendarBackend, context, input) {
+      if (!(context as TenantCallContext)[APPROVAL_GRANT]) {
+        const requestKey = requestKeyOf(context, 'slotlock_create_event', input.idempotency_key as string);
+        const prior = await withTenant(store, { ...context, dryRun: false }, (tenantStore) =>
+          tenantStore.findApproval({ tenantRef: context.principal.tenantRef, requestKey }),
+        );
+        if (prior && prior.status !== 'granted') throw approvalAnswer(prior);
+      }
+      return confirm.call(this, context, input);
+    };
+  }
+  return wrapped;
+}
+
+/**
+ * Run a granted approval's write as the agent that asked for it, in one transaction with the grant:
+ * its holds give way, the write is made, and the approval is marked granted.
+ */
+export async function runSlotlockApprovalGrant(
+  agentBackend: SlotlockAgentCalendarBackend,
+  approval: SlotlockApproval & { requester: Record<string, unknown> },
+  grant: {
+    tenantRef: string;
+    decidedBy: string;
+    signal: AbortSignal;
+    origin?: SlotlockChangeOrigin;
+    /** Make the booking and the grant, then roll both back (RFC 0004 A3). */
+    dryRun?: boolean;
+  },
+): Promise<Record<string, unknown>> {
+  const requester = approval.requester as {
+    subject?: unknown;
+    scopes?: unknown;
+    key_id?: unknown;
+    resource_scope?: { locations?: unknown; groups?: unknown };
+    pool?: unknown;
+  };
+  if (typeof requester.subject !== 'string') throw new SlotlockAgentOperationError('store_inconsistent', 503);
+  const scope = requester.resource_scope;
+  const context = {
+    principal: {
+      subject: requester.subject,
+      tenantRef: grant.tenantRef,
+      ...(Array.isArray(requester.scopes) ? { scopes: requester.scopes as string[] } : {}),
+      ...(typeof requester.key_id === 'string' ? { keyId: requester.key_id } : {}),
+      ...(scope && Array.isArray(scope.locations) && Array.isArray(scope.groups)
+        ? { resourceScope: { locations: scope.locations as string[], groups: scope.groups as string[] } }
+        : {}),
+    },
+    operation: approval.operation,
+    signal: grant.signal,
+    ...(grant.origin !== undefined ? { origin: grant.origin } : {}),
+    ...(grant.dryRun ? { dryRun: true } : {}),
+    [APPROVAL_GRANT]: {
+      id: approval.id,
+      decidedBy: grant.decidedBy,
+      ...(typeof requester.pool === 'string' ? { pool: requester.pool } : {}),
+    },
+  } as SlotlockAgentInvocationContext;
+  const method =
+    approval.operation === 'slotlock_book_together'
+      ? agentBackend.bookTogether
+      : approval.operation === 'slotlock_update_event'
+        ? agentBackend.updateEvent
+        : agentBackend.createEvent;
+  if (!method) throw new SlotlockAgentOperationError('approvals_unavailable', 409);
+  return method.call(agentBackend, context, approval.request);
+}
+
 /**
  * Offer what a cancel or release just freed to the waitlist now. Best effort, after commit:
  * maintenance offers whatever this misses.
  */
-async function offerFreedTime(store: SlotlockStore, tenantRef: string): Promise<void> {
+async function offerFreedTime(store: SlotlockStore, context: TenantCallContext): Promise<void> {
+  // A dry run freed nothing.
+  if (context.dryRun) return;
+  const tenantRef = context.principal.tenantRef;
   try {
     await store.withTenant(tenantRef, (tenant) => tenant.offerWaitlist({ tenantRef, limit: 20 }), {
       origin: 'maintenance',
@@ -1255,6 +2184,14 @@ function webhookOutput(endpoint: SlotlockWebhookEndpoint) {
     last_error: endpoint.lastError,
     disabled_at: endpoint.disabledAt?.toISOString() ?? null,
     disabled_reason: endpoint.disabledReason as 'gone' | 'failing' | null,
+    filter: endpoint.filter
+      ? {
+          ...(endpoint.filter.resourceIds ? { resource_ids: endpoint.filter.resourceIds } : {}),
+          ...(endpoint.filter.pools ? { pools: endpoint.filter.pools } : {}),
+          ...(endpoint.filter.locations ? { locations: endpoint.filter.locations } : {}),
+          ...(endpoint.filter.groups ? { groups: endpoint.filter.groups } : {}),
+        }
+      : null,
   };
 }
 
@@ -1327,7 +2264,55 @@ function resourceOutput(resource: SlotlockResource) {
     visibility: resource.visibility ?? 'shared',
     archived_at: resource.archivedAt?.toISOString() ?? null,
     pool: resource.pool ?? null,
+    name: resource.name ?? null,
+    description: resource.description ?? null,
+    kind: resource.kind ?? 'other',
+    capacity: resource.capacity ?? null,
+    labels: resource.labels ?? [],
+    attributes: resource.attributes ?? {},
+    location: resource.location ?? null,
+    groups: resource.groups ?? [],
+    parent_id: resource.parentId ?? null,
+    part_index: resource.partIndex ?? null,
   };
+}
+
+function locationOutput(location: SlotlockLocation) {
+  return {
+    ref: location.ref,
+    name: location.name,
+    parent_ref: location.parentRef,
+    timezone: location.timezone,
+    resources: location.resources,
+  };
+}
+
+function groupOutput(group: SlotlockResourceGroup) {
+  return { ref: group.ref, name: group.name, description: group.description, members: group.members };
+}
+
+/** The references of a location and every location under it, from the tenant's whole tree. */
+function locationAndBelow(locations: readonly SlotlockLocation[], ref: string): Set<string> {
+  const found = new Set([ref]);
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const location of locations) {
+      if (location.parentRef !== null && found.has(location.parentRef) && !found.has(location.ref)) {
+        found.add(location.ref);
+        grew = true;
+      }
+    }
+  }
+  return found;
+}
+
+/** The profile fields of an operation's input, as the store takes them; absent ones left out. */
+function profileInput(input: Record<string, unknown>): SlotlockResourceProfileInput {
+  const profile: Record<string, unknown> = {};
+  for (const field of SLOTLOCK_RESOURCE_PROFILE_FIELDS) {
+    if (input[field] !== undefined) profile[field] = input[field];
+  }
+  return profile as SlotlockResourceProfileInput;
 }
 
 /** Any of a tenant's events: the store's id, which the tenant-event routes take, and its owner's. */
@@ -1442,6 +2427,23 @@ export function createSlotlockStoreApplicationBackend(
     });
   }
 
+  /** The partner store and the partner a partner key names; any other caller is forbidden. */
+  function partnerOf(context: SlotlockApplicationInvocationContext) {
+    assertActive(context);
+    const partners = options.partners;
+    if (!partners) throw new SlotlockAgentOperationError('partner_api_not_served', 404);
+    return { partners, partner: slotlockPrincipalPartner(context.principal) };
+  }
+
+  /** As partnerOf, with the account's tenant: 404 account_not_found for one the partner lacks. */
+  async function partnerAccount(context: SlotlockApplicationInvocationContext, input: Record<string, unknown>) {
+    const { partners, partner } = partnerOf(context);
+    const tenantRef = await partners.tenantOf(partner, input.account as string);
+    if (!tenantRef) throw new SlotlockAgentOperationError('account_not_found', 404);
+    // Its test environment (RFC 0003 G9): a tenant of its own, on the same plan, never billed.
+    return { partners, partner, tenantRef: input.environment === 'test' ? `${tenantRef}${SLOTLOCK_TEST_TENANT_SUFFIX}` : tenantRef };
+  }
+
   return {
     async createResource(context, input) {
       // A capped create counts under READ COMMITTED; withTenant opens it for the call.
@@ -1453,11 +2455,15 @@ export function createSlotlockStoreApplicationBackend(
             const resource = await tenant.createResource({
               tenantRef: tenantOf(context),
               externalRef: input.external_ref as string,
-              timezone: input.timezone as string,
+              ...(input.timezone !== undefined ? { timezone: input.timezone as string } : {}),
+              ...(input.location !== undefined ? { location: input.location as string } : {}),
               ...(input.visibility !== undefined
                 ? { visibility: input.visibility as 'shared' | 'private' }
                 : {}),
               ...(max !== undefined ? { maxTenantResources: max } : {}),
+              ...(SLOTLOCK_RESOURCE_PROFILE_FIELDS.some((field) => input[field] !== undefined)
+                ? { profile: profileInput(input) }
+                : {}),
             });
             return { resource: resourceOutput(resource) };
           } catch (error) {
@@ -1466,6 +2472,148 @@ export function createSlotlockStoreApplicationBackend(
         },
         max !== undefined ? { isolation: 'read committed' } : undefined,
       );
+    },
+
+    async updateResource(context, input) {
+      const id = input.resource_id as string;
+      if (!STORE_ID_PATTERN.test(id)) throw new SlotlockAgentOperationError('resource_not_found', 404);
+      return withTenant(store, context, async (tenant) => {
+        let resource: SlotlockResource | null;
+        try {
+          resource = await tenant.updateResourceProfile({
+            tenantRef: tenantOf(context),
+            id,
+            profile: profileInput(input),
+            ...(input.location !== undefined ? { location: input.location as string | null } : {}),
+          });
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+        if (!resource) throw new SlotlockAgentOperationError('resource_not_found', 404);
+        return { resource: resourceOutput(resource) };
+      }, WRITE);
+    },
+
+    async listLocations(context) {
+      return withTenant(store, context, async (tenant) => ({
+        locations: (await tenant.listLocations({ tenantRef: tenantOf(context) })).map(locationOutput),
+      }));
+    },
+
+    async createLocation(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        try {
+          const location = await tenant.putLocation({
+            tenantRef: tenantOf(context),
+            ref: input.ref as string,
+            name: input.name as string,
+            ...(input.parent_ref !== undefined ? { parentRef: input.parent_ref as string | null } : {}),
+            ...(input.timezone !== undefined ? { timezone: input.timezone as string | null } : {}),
+          });
+          return { location: locationOutput(location) };
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+      }, WRITE);
+    },
+
+    async updateLocation(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        let location: SlotlockLocation | null;
+        try {
+          location = await tenant.updateLocation({
+            tenantRef: tenantOf(context),
+            ref: input.location_ref as string,
+            ...(input.name !== undefined ? { name: input.name as string } : {}),
+            ...(input.parent_ref !== undefined ? { parentRef: input.parent_ref as string | null } : {}),
+            ...(input.timezone !== undefined ? { timezone: input.timezone as string | null } : {}),
+          });
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+        if (!location) throw new SlotlockAgentOperationError('location_not_found', 404);
+        return { location: locationOutput(location) };
+      }, WRITE);
+    },
+
+    async deleteLocation(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        try {
+          return {
+            deleted: await tenant.deleteLocation({ tenantRef: tenantOf(context), ref: input.location_ref as string }),
+          };
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+      }, WRITE);
+    },
+
+    async listGroups(context) {
+      return withTenant(store, context, async (tenant) => ({
+        groups: (await tenant.listGroups({ tenantRef: tenantOf(context) })).map(groupOutput),
+      }));
+    },
+
+    async createGroup(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        try {
+          const group = await tenant.putGroup({
+            tenantRef: tenantOf(context),
+            ref: input.ref as string,
+            name: input.name as string,
+            ...(input.description !== undefined ? { description: input.description as string | null } : {}),
+          });
+          return { group: groupOutput(group) };
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+      }, WRITE);
+    },
+
+    async deleteGroup(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        try {
+          return { deleted: await tenant.deleteGroup({ tenantRef: tenantOf(context), ref: input.group_ref as string }) };
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+      }, WRITE);
+    },
+
+    async addGroupMember(context, input) {
+      const resourceId = input.resource_id as string;
+      if (!STORE_ID_PATTERN.test(resourceId)) throw new SlotlockAgentOperationError('resource_not_found', 404);
+      return withTenant(store, context, async (tenant) => {
+        try {
+          return {
+            added: await tenant.addGroupMember({
+              tenantRef: tenantOf(context),
+              group: input.group_ref as string,
+              resourceId,
+            }),
+          };
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+      }, WRITE);
+    },
+
+    async removeGroupMember(context, input) {
+      const resourceId = input.resource_id as string;
+      if (!STORE_ID_PATTERN.test(resourceId)) return { removed: false };
+      return withTenant(store, context, async (tenant) => {
+        try {
+          return {
+            removed: await tenant.removeGroupMember({
+              tenantRef: tenantOf(context),
+              group: input.group_ref as string,
+              resourceId,
+            }),
+          };
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+      }, WRITE);
     },
 
     async getResource(context, input) {
@@ -1620,6 +2768,23 @@ export function createSlotlockStoreApplicationBackend(
       }, WRITE);
     },
 
+    async setResourceParent(context, input) {
+      const id = input.resource_id as string;
+      const parentId = input.parent_id as string | null;
+      if (!STORE_ID_PATTERN.test(id)) throw new SlotlockAgentOperationError('resource_not_found', 404);
+      if (parentId !== null && !STORE_ID_PATTERN.test(parentId)) throw new SlotlockAgentOperationError('parent_not_found', 404);
+      return withTenant(store, context, async (tenant) => {
+        let resource: SlotlockResource | null;
+        try {
+          resource = await tenant.setResourceParent({ tenantRef: tenantOf(context), id, parentId });
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+        if (!resource) throw new SlotlockAgentOperationError('resource_not_found', 404);
+        return { resource: resourceOutput(resource) };
+      }, WRITE);
+    },
+
     async getResourceHistory(context, input) {
       return history(context, input);
     },
@@ -1636,6 +2801,21 @@ export function createSlotlockStoreApplicationBackend(
       return withTenant(store, context, async (tenant) => ({
         pools: await tenant.listPools({ tenantRef: tenantOf(context) }),
       }));
+    },
+
+    async setPoolOrder(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        try {
+          const order = await tenant.setPoolOrder({
+            tenantRef: tenantOf(context),
+            pool: input.pool as string,
+            order: input.order as SlotlockPoolOrder,
+          });
+          return { pool: input.pool as string, order };
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+      }, WRITE);
     },
 
     async getBookingRuleDefaults(context) {
@@ -1762,7 +2942,7 @@ export function createSlotlockStoreApplicationBackend(
       const released = await withTenant(store, context, async (tenant) => ({
         released: (await tenant.releaseHold(id, { tenantRef: tenantOf(context) })).released,
       }));
-      if (released.released) await offerFreedTime(store, tenantOf(context));
+      if (released.released) await offerFreedTime(store, context);
       return released;
     },
 
@@ -1817,7 +2997,7 @@ export function createSlotlockStoreApplicationBackend(
         return { reservation: reservationOutput(result.reservation), replayed: result.idempotent };
       }, WRITE);
       if ((input.revision as number) > 1 && !put.replayed) {
-        await offerFreedTime(store, tenantOf(context));
+        await offerFreedTime(store, context);
       }
       return put;
     },
@@ -1832,7 +3012,7 @@ export function createSlotlockStoreApplicationBackend(
         if (!result.ok) throw applicationRefusal(result.code);
         return { cancelled: result.cancelled, revision: result.revision };
       }, WRITE);
-      if (cancelled.cancelled) await offerFreedTime(store, tenantOf(context));
+      if (cancelled.cancelled) await offerFreedTime(store, context);
       return cancelled;
     },
 
@@ -1858,9 +3038,10 @@ export function createSlotlockStoreApplicationBackend(
           end: new Date(input.end as string),
           holderRef: input.holder_ref as string,
           ...(ttl !== undefined ? { offerTtlMs: ttl * 1000 } : {}),
+          ...(input.idempotency_key !== undefined ? { idempotencyKey: input.idempotency_key as string } : {}),
         });
         if (!result.ok) throw applicationRefusal(result.code);
-        return { entry: waitlistOutput(result.entry) };
+        return { entry: waitlistOutput(result.entry), replayed: result.replayed };
       });
     },
 
@@ -1882,7 +3063,7 @@ export function createSlotlockStoreApplicationBackend(
       const left = await withTenant(store, context, async (tenant) => ({
         left: await tenant.leaveWaitlist({ tenantRef: tenantOf(context), id: input.entry_id as string }),
       }));
-      if (left.left) await offerFreedTime(store, tenantOf(context));
+      if (left.left) await offerFreedTime(store, context);
       return left;
     },
 
@@ -2013,7 +3194,7 @@ export function createSlotlockStoreApplicationBackend(
           replayed: result.idempotent,
         };
       }, WRITE);
-      if (!cancelled.replayed) await offerFreedTime(store, tenantOf(context));
+      if (!cancelled.replayed) await offerFreedTime(store, context);
       return cancelled;
     },
 
@@ -2038,7 +3219,13 @@ export function createSlotlockStoreApplicationBackend(
         if (await tenant.isTenantSuspended({ tenantRef: tenantOf(context) })) {
           throw new SlotlockAgentOperationError('tenant_suspended', 403);
         }
-        const erased = await tenant.eraseTenant({ tenantRef: tenantOf(context) });
+        const erased = await tenant.eraseTenant({ tenantRef: tenantOf(context) }).catch((error: unknown) => {
+          // A paid hosted plan is cancelled first, so it does not renew for an erased tenant.
+          if ((error as { code?: unknown } | null)?.code === 'billing_active') {
+            throw new SlotlockAgentOperationError('billing_active', 409);
+          }
+          throw error;
+        });
         return { total: erased.total, rows: erased.rows };
       }, WRITE);
     },
@@ -2063,14 +3250,29 @@ export function createSlotlockStoreApplicationBackend(
           tenantRef: tenantOf(context),
           url: input.url as string,
           ...(input.event_types !== undefined ? { eventTypes: input.event_types as string[] } : {}),
+          ...(['resource_ids', 'pools', 'locations', 'groups'].some((field) => input[field] !== undefined)
+            ? {
+                filter: {
+                  ...(input.resource_ids !== undefined ? { resourceIds: input.resource_ids as string[] } : {}),
+                  ...(input.pools !== undefined ? { pools: input.pools as string[] } : {}),
+                  ...(input.locations !== undefined ? { locations: input.locations as string[] } : {}),
+                  ...(input.groups !== undefined ? { groups: input.groups as string[] } : {}),
+                },
+              }
+            : {}),
+          ...(input.idempotency_key !== undefined ? { idempotencyKey: input.idempotency_key as string } : {}),
         });
         if (!created.ok) {
           throw new SlotlockAgentOperationError(
             created.code,
-            created.code === 'webhook_limit_reached' ? 409 : 400,
+            created.code === 'webhook_limit_reached' || created.code === 'idempotency_conflict' ? 409 : 400,
           );
         }
-        return { webhook: webhookOutput(created.endpoint), secret: created.secret };
+        return {
+          webhook: webhookOutput(created.endpoint),
+          secret: created.secret,
+          replayed: created.replayed === true,
+        };
       }, WRITE);
     },
 
@@ -2086,6 +3288,197 @@ export function createSlotlockStoreApplicationBackend(
       WRITE);
     },
 
+    // The partner API (RFC 0003 P3): the partner the key names, its own accounts only.
+    async partnerPutAccount(context, input) {
+      const { partners, partner } = partnerOf(context);
+      const put = await partners.putAccount(partner, input.account as string, input.plan as string);
+      if (!put) throw new SlotlockAgentOperationError('forbidden', 403);
+      return { account: partnerAccountOutput(put.account), created: put.created };
+    },
+
+    async partnerListAccounts(context) {
+      const { partners, partner } = partnerOf(context);
+      return { accounts: (await partners.listAccounts(partner)).map(partnerAccountOutput) };
+    },
+
+    async partnerGetAccount(context, input) {
+      const { partners, partner } = partnerOf(context);
+      const found = await partners.getAccount(partner, input.account as string);
+      if (!found) throw new SlotlockAgentOperationError('account_not_found', 404);
+      return { account: partnerAccountOutput(found) };
+    },
+
+    async partnerListKeys(context, input) {
+      const { partners, tenantRef } = await partnerAccount(context, input);
+      return { keys: (await partners.keys.list({ tenantRef })).map(slotlockPartnerKeyOutput) };
+    },
+
+    async partnerCreateKey(context, input) {
+      const { partners, partner, tenantRef } = await partnerAccount(context, input);
+      const contract = await partners.contract(partner);
+      if (!contract) throw new SlotlockAgentOperationError('forbidden', 403);
+      const scopes = (input.scopes as SlotlockApiKeyScope[] | undefined) ?? [...contract.keyScopes];
+      if (scopes.some((scope) => !contract.keyScopes.includes(scope))) {
+        throw new SlotlockAgentOperationError('scope_not_in_contract', 403);
+      }
+      const days = input.expires_in_days as number | undefined;
+      try {
+        const created = await partners.keys.create({
+          tenantRef,
+          name: input.name as string,
+          scopes,
+          createdBy: `partner:${partner}`,
+          actor: context.principal.subject,
+          origin: 'application',
+          ...(days !== undefined ? { expiresAt: new Date(Date.now() + days * 86_400_000) } : {}),
+          ...(input.limits !== undefined ? { limits: keyLimitsFromInput(input.limits) } : {}),
+        });
+        return { key: created.key, api_key: slotlockPartnerKeyOutput(created.apiKey) };
+      } catch (error) {
+        const code = (error as { code?: unknown }).code;
+        if (code === 'api_key_limit_reached') throw new SlotlockAgentOperationError(code, 409);
+        if (code === 'tenant_suspended') throw new SlotlockAgentOperationError(code, 403);
+        throw error;
+      }
+    },
+
+    async partnerRotateKey(context, input) {
+      const { partners, tenantRef } = await partnerAccount(context, input);
+      const rotated = await partners.keys
+        .rotate({ tenantRef, id: input.key_id as string, actor: context.principal.subject, origin: 'application' })
+        .catch((error: unknown) => {
+          if ((error as { code?: unknown }).code === 'tenant_suspended') {
+            throw new SlotlockAgentOperationError('tenant_suspended', 403);
+          }
+          throw error;
+        });
+      if (!rotated) throw new SlotlockAgentOperationError('key_not_found', 404);
+      return { key: rotated.key, api_key: slotlockPartnerKeyOutput(rotated.apiKey) };
+    },
+
+    async partnerRevokeKey(context, input) {
+      const { partners, tenantRef } = await partnerAccount(context, input);
+      const revoked = await partners.keys.revoke({
+        tenantRef,
+        id: input.key_id as string,
+        actor: context.principal.subject,
+        origin: 'application',
+      });
+      if (!revoked) throw new SlotlockAgentOperationError('key_not_found', 404);
+      return { api_key: slotlockPartnerKeyOutput(revoked) };
+    },
+
+    async partnerSuspendAccount(context, input) {
+      const { partners, partner } = partnerOf(context);
+      const changed = await partners.setSuspended(partner, input.account as string, true, input.reason as string | undefined);
+      if (changed === null) throw new SlotlockAgentOperationError('account_not_found', 404);
+      return { suspended: changed };
+    },
+
+    async partnerUnsuspendAccount(context, input) {
+      const { partners, partner } = partnerOf(context);
+      const changed = await partners.setSuspended(partner, input.account as string, false);
+      if (changed === null) throw new SlotlockAgentOperationError('account_not_found', 404);
+      return { unsuspended: changed };
+    },
+
+    async partnerEraseAccount(context, input) {
+      const { partners, partner } = partnerOf(context);
+      if (input.confirm !== input.account) throw new SlotlockAgentOperationError('confirmation_mismatch', 400);
+      const erased = await partners.eraseAccount(partner, input.account as string);
+      if (!erased.erased) throw new SlotlockAgentOperationError('account_not_found', 404);
+      return { erased: true, rows: erased.total };
+    },
+
+    async partnerGetUsage(context, input) {
+      const { partners, partner } = partnerOf(context);
+      const now = Date.now();
+      const range = slotlockUsageMonthToDate(now);
+      const from = (input.from as string | undefined) ?? range.from;
+      const to = (input.to as string | undefined) ?? range.to;
+      const span = slotlockUsageSpanDays(from, to);
+      if (span < 0 || span > SLOTLOCK_USAGE_RETENTION_DAYS || slotlockUsageSpanDays(to, slotlockUsageDay(now)) < 0) {
+        throw new SlotlockAgentOperationError('invalid_usage_range', 400);
+      }
+      const rows = await partners.usage(partner, from, to, input.account as string | undefined);
+      return { from, to, usage: rows };
+    },
+
+    async partnerReconcileUsage(context, input) {
+      const { partners, partner } = partnerOf(context);
+      const day = input.day as string;
+      // An ended day: today's counts are still arriving.
+      if (slotlockUsageSpanDays(day, slotlockUsageDay(Date.now())) < 1) {
+        throw new SlotlockAgentOperationError('invalid_usage_range', 400);
+      }
+      const theirs = new Map<string, { operations: number; bookings?: number }>();
+      for (const row of input.accounts as { account: string; operations: number; bookings?: number }[]) {
+        theirs.set(row.account, { operations: row.operations, ...(row.bookings !== undefined ? { bookings: row.bookings } : {}) });
+      }
+      const ours = new Map<string, { operations: number; bookings: number }>();
+      for (const row of await partners.usage(partner, day, day)) {
+        if (row.metric !== 'operations' && row.metric !== 'bookings') continue;
+        const counted = ours.get(row.account) ?? { operations: 0, bookings: 0 };
+        counted[row.metric] += row.count;
+        ours.set(row.account, counted);
+      }
+      const accounts = [...new Set([...ours.keys(), ...theirs.keys()])].sort();
+      const lines: { account: string; metric: 'operations' | 'bookings'; ours: number; theirs: number | null; difference_percent: number | null }[] = [];
+      const mismatched = new Set<string>();
+      let worst = 0;
+      for (const account of accounts) {
+        for (const metric of ['operations', 'bookings'] as const) {
+          const mine = ours.get(account)?.[metric] ?? 0;
+          const told = theirs.get(account)?.[metric];
+          if (told === undefined && (metric === 'bookings' || !theirs.has(account)) && mine === 0) continue;
+          // Not sent by them, where we counted some: a difference of all of it.
+          const theirCount = told ?? null;
+          const difference =
+            theirCount === null
+              ? mine === 0 ? 0 : 100
+              : Math.max(mine, theirCount) === 0 ? 0 : (Math.abs(mine - theirCount) * 100) / Math.max(mine, theirCount);
+          if (theirCount === null && metric === 'bookings') {
+            lines.push({ account, metric, ours: mine, theirs: null, difference_percent: null });
+            continue;
+          }
+          const rounded = Math.round(difference * 100) / 100;
+          if (difference > SLOTLOCK_RECONCILE_TOLERANCE_PERCENT) mismatched.add(account);
+          worst = Math.max(worst, rounded);
+          lines.push({ account, metric, ours: mine, theirs: theirCount, difference_percent: rounded });
+        }
+      }
+      await partners.recordReconciliation(partner, day, accounts.length, mismatched.size, worst);
+      return {
+        day,
+        within_tolerance: mismatched.size === 0,
+        tolerance_percent: SLOTLOCK_RECONCILE_TOLERANCE_PERCENT,
+        accounts: lines,
+      };
+    },
+
+    async getUsage(context, input) {
+      const now = Date.now();
+      const range = slotlockUsageMonthToDate(now);
+      const from = (input.from as string | undefined) ?? range.from;
+      const to = (input.to as string | undefined) ?? range.to;
+      const span = slotlockUsageSpanDays(from, to);
+      if (span < 0 || span > SLOTLOCK_USAGE_RETENTION_DAYS || slotlockUsageSpanDays(to, slotlockUsageDay(now)) < 0) {
+        throw new SlotlockAgentOperationError('invalid_usage_range', 400);
+      }
+      const rows = await withTenant(store, context, (tenant) =>
+        tenant.readUsage({ tenantRef: tenantOf(context), from, to }),
+      );
+      const summary = summarizeSlotlockUsage(rows);
+      return {
+        from,
+        to,
+        totals: summary.totals,
+        days: summary.days,
+        keys: summary.keys.map(({ keyId, ...totals }) => ({ key_id: keyId, ...totals })),
+        surfaces: summary.surfaces,
+      };
+    },
+
     async enableWebhook(context, input) {
       return withTenant(store, context, async (tenant) => {
         const enabled = await tenant.enableWebhookEndpoint({
@@ -2098,10 +3491,155 @@ export function createSlotlockStoreApplicationBackend(
       }, WRITE);
     },
 
+    async listApprovalPolicies(context) {
+      return withTenant(store, context, async (tenant) => ({
+        policies: (await tenant.listApprovalPolicies({ tenantRef: tenantOf(context) })).map(approvalPolicyOutput),
+      }));
+    },
+
+    async putApprovalPolicy(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        let policy: SlotlockApprovalPolicy | null;
+        try {
+          policy = await tenant.putApprovalPolicy({
+            tenantRef: tenantOf(context),
+            ref: input.policy_ref as string,
+            name: input.name as string,
+            outcome: input.outcome as SlotlockApprovalPolicy['outcome'],
+            ...(input.applies_to !== undefined ? { appliesTo: approvalAppliesTo(input.applies_to) } : {}),
+            ...(input.conditions !== undefined ? { conditions: approvalConditions(input.conditions) } : {}),
+            ...(input.approval_ttl_minutes !== undefined ? { approvalTtlMinutes: input.approval_ttl_minutes as number } : {}),
+            ...(input.lead_minutes !== undefined ? { leadMinutes: input.lead_minutes as number } : {}),
+          });
+        } catch (error) {
+          if (error instanceof SlotlockApprovalPolicyError) {
+            throw new SlotlockAgentOperationError(error.code, 400, { reason: error.message.slice(0, 200) });
+          }
+          throw error;
+        }
+        if (!policy) throw new SlotlockAgentOperationError('approval_policy_limit_reached', 409);
+        return { policy: approvalPolicyOutput(policy) };
+      }, WRITE);
+    },
+
+    async deleteApprovalPolicy(context, input) {
+      return withTenant(store, context, (tenant) =>
+        tenant.deleteApprovalPolicy({ tenantRef: tenantOf(context), ref: input.policy_ref as string }),
+      );
+    },
+
+    async listApprovals(context, input) {
+      return withTenant(store, context, async (tenant) => ({
+        approvals: (
+          await tenant.listApprovals({
+            tenantRef: tenantOf(context),
+            limit: input.limit as number,
+            ...(input.status !== undefined ? { status: input.status as SlotlockApproval['status'] } : {}),
+          })
+        ).map(approvalOutput),
+      }));
+    },
+
+    async getApproval(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const approval = await tenant.getApproval({ tenantRef: tenantOf(context), id: input.approval_id as string });
+        if (!approval) throw new SlotlockAgentOperationError('approval_not_found', 404);
+        return { approval: approvalOutput(approval) };
+      });
+    },
+
+    async decideApproval(context, input) {
+      const tenantRef = tenantOf(context);
+      const id = input.approval_id as string;
+      const decidedBy = actorOf(context) ?? 'unknown';
+      if (input.decision === 'decline') {
+        const declined = await withTenant(store, context, (tenant) =>
+          tenant.declineApproval({
+            tenantRef,
+            id,
+            decidedBy,
+            ...(input.reason !== undefined ? { reason: input.reason as string } : {}),
+          }),
+        WRITE);
+        if (!declined.ok) throw approvalRefusal(declined.code);
+        await offerFreedTime(store, context);
+        return { approval: approvalOutput(declined.approval), booking: null };
+      }
+      if (!options.agentBackend) throw new SlotlockAgentOperationError('approvals_unavailable', 409);
+      const approval = await withTenant(store, context, (tenant) => tenant.getApproval({ tenantRef, id }));
+      if (!approval) throw approvalRefusal('approval_not_found');
+      if (approval.status !== 'pending') throw approvalRefusal('approval_not_pending');
+      // A dry run's grant is a dry run of the booking: rolled back with it.
+      const booking = await runSlotlockApprovalGrant(options.agentBackend, approval, {
+        tenantRef,
+        decidedBy,
+        signal: context.signal,
+        ...(context.origin !== undefined ? { origin: context.origin } : {}),
+        ...(context.dryRun ? { dryRun: true } : {}),
+      });
+      const granted = context.dryRun
+        ? { ...approval, status: 'granted' as const, decidedBy, decidedAt: new Date() }
+        : await withTenant(store, context, (tenant) => tenant.getApproval({ tenantRef, id }));
+      if (!granted) throw new SlotlockAgentOperationError('store_inconsistent', 503);
+      return { approval: approvalOutput(granted), booking };
+    },
+
+    async sandboxSeed(context, input) {
+      try {
+        return { ...(await seedSlotlockSandbox(store, tenantOf(context), input.scenario as SlotlockSandboxScenario)) };
+      } catch (error) {
+        throw sandboxRefusal(error);
+      }
+    },
+
+    async sandboxReset(context) {
+      try {
+        return { removed: await resetSlotlockSandbox(store, tenantOf(context)) };
+      } catch (error) {
+        throw sandboxRefusal(error);
+      }
+    },
+
+    async sandboxFastForward(context, input) {
+      try {
+        const forward = await fastForwardSlotlockSandbox(store, tenantOf(context), input.minutes as number);
+        const { rollPending: _, ...maintenance } = forward.maintenance;
+        return { minutes: forward.minutes, holds: forward.holds, approvals: forward.approvals, maintenance };
+      } catch (error) {
+        throw sandboxRefusal(error);
+      }
+    },
+
+    async sandboxRace(context, input) {
+      if (!options.agentBackend) throw new SlotlockAgentOperationError('sandbox_unavailable', 409);
+      try {
+        const raced = await raceSlotlockSandbox({
+          backend: options.agentBackend,
+          tenantRef: tenantOf(context),
+          resourceId: input.resource_id as string,
+          start: new Date(input.starts_at as string),
+          end: new Date(input.ends_at as string),
+          ...(input.agents !== undefined ? { agents: input.agents as number } : {}),
+        });
+        return {
+          agents: raced.agents,
+          booked: raced.booked,
+          refused: raced.refused,
+          with_alternatives: raced.withAlternatives,
+          server_errors: raced.serverErrors,
+          p50_ms: raced.p50Ms,
+          p99_ms: raced.p99Ms,
+          max_ms: raced.maxMs,
+        };
+      } catch (error) {
+        throw sandboxRefusal(error);
+      }
+    },
+
     async runMaintenance(context) {
       assertActive(context);
       try {
-        const { rollPending: _, zoneShifts, staleSources, noShows, waitlistOffers, ...result } = await maintainSlotlockTenant(store, tenantOf(context), {
+        const { rollPending: _, zoneShifts, staleSources, noShows, waitlistOffers, approvalsExpired, ...result } = await maintainSlotlockTenant(store, tenantOf(context), {
           batches,
           signal: context.signal,
         });
@@ -2111,6 +3649,7 @@ export function createSlotlockStoreApplicationBackend(
           stale_sources: staleSources,
           no_shows: noShows,
           waitlist_offers: waitlistOffers,
+          approvals_expired: approvalsExpired,
         };
       } catch (error) {
         if (context.signal.aborted) throw new SlotlockAgentOperationError('request_aborted', 503);

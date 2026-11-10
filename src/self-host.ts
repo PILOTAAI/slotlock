@@ -9,7 +9,7 @@ import {
   deliverSlotlockWebhooks,
   startSlotlockWebhookDelivery,
 } from './webhooks.js';
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import postgres from 'postgres';
 import {
@@ -29,11 +29,23 @@ import {
   SLOTLOCK_API_KEY_MAX_LIFETIME_DAYS,
   SLOTLOCK_API_KEY_SCOPES,
   type SlotlockApiKey,
+  type SlotlockApiKeyLimits,
   type SlotlockApiKeyScope,
   createSlotlockApiKeyAuthenticator,
   createSlotlockApiKeyStore,
+  SLOTLOCK_TEST_TENANT_SUFFIX,
   slotlockBearerCredential,
+  slotlockLiveTenant,
 } from './api-keys.js';
+import {
+  SLOTLOCK_SANDBOX_MAX_RACERS,
+  SLOTLOCK_SANDBOX_SCENARIOS,
+  type SlotlockSandboxScenario,
+  fastForwardSlotlockSandbox,
+  raceSlotlockSandbox,
+  resetSlotlockSandbox,
+  seedSlotlockSandbox,
+} from './sandbox.js';
 import {
   createSlotlockDashboard,
   createSlotlockDashboardResources,
@@ -61,8 +73,39 @@ import {
   slotlockKeySubscriptions,
 } from './config.js';
 import { type SlotlockBookingRules, parseBookingRules } from './booking-rules.js';
-import { SLOTLOCK_APPLICATION_SCOPE } from './application-api.js';
-import { SLOTLOCK_DASHBOARD_FUNCTIONS, SLOTLOCK_TENANT_TABLES } from './ddl.js';
+import {
+  SLOTLOCK_APPLICATION_SCOPE,
+  slotlockApplicationOperation,
+  slotlockApplicationScope,
+} from './application-api.js';
+import {
+  SLOTLOCK_ACCOUNT_FIELD,
+  createSlotlockPartnerKey,
+  createSlotlockPartnerKeyAuthenticator,
+  createSlotlockPartnerStore,
+  listSlotlockPartners,
+  putSlotlockPartner,
+  revokeSlotlockPartnerKey,
+  setSlotlockPartnerBilling,
+  setSlotlockPartnerStatus,
+  slotlockPartnerContractJson,
+} from './partners.js';
+import { closeSlotlockPartnerMonth, slotlockClientLabel, slotlockPreviousMonth } from './partner-billing.js';
+import { createSlotlockDashboardTeams, createSlotlockOrganizationCheck } from './teams.js';
+import { SLOTLOCK_DEFAULT_OVERAGE_STOP_PERCENT, reportSlotlockOverage, slotlockMonthOf } from './overage.js';
+import {
+  type SlotlockOtlpConfig,
+  createSlotlockOtlpExporter,
+  createSlotlockOtlpMetricsExporter,
+  readSlotlockOtlpConfig,
+} from './otel.js';
+import { readFile } from 'node:fs/promises';
+import {
+  SLOTLOCK_DASHBOARD_FUNCTIONS,
+  SLOTLOCK_QUOTA_FUNCTIONS,
+  SLOTLOCK_TENANT_TABLES,
+  SLOTLOCK_USAGE_FUNCTIONS,
+} from './ddl.js';
 import {
   type SlotlockMaintenanceResult,
   type SlotlockMaintenanceScheduler,
@@ -78,7 +121,17 @@ import {
 } from './node-server.js';
 import { type SlotlockMetrics, createSlotlockMetrics } from './metrics.js';
 import { slotlockPackageVersion } from './package-version.js';
+import {
+  type SlotlockPlan,
+  readSlotlockPlanDefault,
+  readSlotlockTenantPlan,
+  readSlotlockTenantQuotas,
+  setSlotlockPlanDefault,
+} from './plans.js';
+import { type SlotlockResourceScope, isSlotlockResourceScope } from './resource-profile.js';
+import { createSlotlockQuotas, noteSlotlockQuotaThreshold, readSlotlockQuotaUse } from './quotas.js';
 import { createSlotlockRequestLimits } from './rate-limit.js';
+import { createSlotlockUsageMeter, recordSlotlockUsage } from './usage.js';
 import {
   type SlotlockSql,
   type SlotlockStore,
@@ -91,7 +144,10 @@ import { parseAvailabilityRules } from './weekly-hours.js';
 
 export { SlotlockConfigError, type SlotlockEnv, type SlotlockServeDashboardConfig };
 
-/** Every variable the commands read. The README, `.env.example` and `server.json` document these. */
+/**
+ * Every variable the commands read. The README, `.env.example` and `server.json` document these.
+ * Not STRIPE_SECRET_KEY, which only the owner's `partner close` reads, to bill partners.
+ */
 export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'DATABASE_URL',
   'SLOTLOCK_MIGRATE_DATABASE_URL',
@@ -106,13 +162,25 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_RETENTION_DAYS',
   'SLOTLOCK_WEBHOOKS',
   'SLOTLOCK_SHARED_LIMITS',
+  'SLOTLOCK_USAGE',
+  'SLOTLOCK_QUOTAS',
+  'SLOTLOCK_OVERAGE',
   'SLOTLOCK_LIMITS',
   'SLOTLOCK_TRUSTED_PROXY_HEADER',
   'SLOTLOCK_TRUSTED_PROXY_SECRET',
+  'SLOTLOCK_KNOWN_CLIENTS',
+  'OTEL_EXPORTER_OTLP_ENDPOINT',
+  'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT',
+  'OTEL_EXPORTER_OTLP_METRICS_ENDPOINT',
+  'OTEL_EXPORTER_OTLP_HEADERS',
+  'OTEL_SERVICE_NAME',
   'SLOTLOCK_GITHUB_CLIENT_ID',
   'SLOTLOCK_GITHUB_CLIENT_SECRET',
+  'SLOTLOCK_GOOGLE_CLIENT_ID',
+  'SLOTLOCK_GOOGLE_CLIENT_SECRET',
   'SLOTLOCK_SESSION_SECRET',
   'SLOTLOCK_ASSISTANT_SECRET',
+  'SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS',
   'SLOTLOCK_ASSISTANT_PRIVATE_URLS',
   'SLOTLOCK_DASHBOARD_USERS',
   'SLOTLOCK_DASHBOARD_ORGS',
@@ -164,6 +232,9 @@ const SERVED_OPERATIONS: ReadonlySet<SlotlockAgentOperation> = new Set([
   'slotlock_list_events',
   'slotlock_update_event',
   'slotlock_delete_event',
+  'slotlock_confirm_slot',
+  'slotlock_reschedule',
+  'slotlock_cancel',
 ]);
 const HEALTH_QUERY_TIMEOUT_MS = 2_000;
 /** How long one database check answers /healthz, so a flood of health checks is not one of queries. */
@@ -216,9 +287,10 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
   dashboard?: SlotlockServeDashboardConfig;
   /**
    * GitHub organization ids (SLOTLOCK_DASHBOARD_ORGS) whose `github-org:<id>` tenants this server's
-   * keys may act for, whether it serves the dashboard or another server (a Worker) does.
+   * keys may act for, whether it serves the dashboard or another server (a Worker) does; or
+   * `'enabled'`, those an owner turned on from the dashboard (teams.ts), checked in the database.
    */
-  organizations?: string[];
+  organizations?: string[] | 'enabled';
   /**
    * GitHub user ids (SLOTLOCK_DASHBOARD_USERS), or `'*'`, whose `github:<id>` tenants this server's
    * keys may act for, whether it serves the dashboard or another server (a Worker) does.
@@ -233,10 +305,32 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
   webhooks: 'on' | 'off' | 'private';
   /** Tenant request budgets shared with every server through PostgreSQL (SLOTLOCK_SHARED_LIMITS=on). */
   sharedLimits: boolean;
+  /**
+   * Usage metering (SLOTLOCK_USAGE=on; off by default): each tenant's operations, bookings and
+   * holds counted by day, key and surface in slotlock.usage_daily (usage.ts).
+   */
+  usage: boolean;
+  /**
+   * Monthly quotas (SLOTLOCK_QUOTAS=on, which needs SLOTLOCK_USAGE=on; off by default): a tenant on
+   * a plan is refused `quota_exceeded` past its plan's operations or bookings this month (quotas.ts).
+   */
+  quotas: boolean;
+  /**
+   * Metered overage (SLOTLOCK_OVERAGE: off, or the percent of its quota a paying Developer tenant
+   * is refused at, 111-1000; needs SLOTLOCK_QUOTAS=on). Off by default: overage.ts.
+   */
+  overageStopPercent?: number;
   /** Request limits (SLOTLOCK_LIMITS over SLOTLOCK_DEFAULT_LIMITS): the server's only rate limit. */
   limits: SlotlockLimits;
   /** The lower-case request field a trusted proxy sets to the client address; else the socket's. */
   trustedProxyHeader?: string;
+  /**
+   * Integrators metrics count by name from the `Slotlock-Client` field (SLOTLOCK_KNOWN_CLIENTS,
+   * RFC 0003 P5); any other is `other`. Empty: every named client is `other`.
+   */
+  knownClients?: readonly string[];
+  /** OpenTelemetry trace export (OTEL_EXPORTER_OTLP_ENDPOINT and the other OTEL_* variables). */
+  otlp?: SlotlockOtlpConfig;
   /** The value that must accompany trustedProxyHeader in x-slotlock-proxy-proof; else the socket's. */
   trustedProxySecret?: string;
 }
@@ -345,6 +439,45 @@ function readSharedLimits(env: SlotlockEnv): boolean {
   return value === 'on';
 }
 
+/** SLOTLOCK_USAGE: on to meter each tenant's use (usage.ts); off, the default, records nothing. */
+function readUsageMetering(env: SlotlockEnv): boolean {
+  const value = optional(env, 'SLOTLOCK_USAGE') ?? 'off';
+  if (value !== 'on' && value !== 'off') {
+    throw new SlotlockConfigError('SLOTLOCK_USAGE must be on or off');
+  }
+  return value === 'on';
+}
+
+/** SLOTLOCK_QUOTAS: on to hold each tenant on a plan to its monthly quotas; it counts with usage. */
+function readQuotas(env: SlotlockEnv, usage: boolean): boolean {
+  const value = optional(env, 'SLOTLOCK_QUOTAS') ?? 'off';
+  if (value !== 'on' && value !== 'off') {
+    throw new SlotlockConfigError('SLOTLOCK_QUOTAS must be on or off');
+  }
+  if (value === 'on' && !usage) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_QUOTAS=on needs SLOTLOCK_USAGE=on: a quota is held against the usage it counts',
+    );
+  }
+  return value === 'on';
+}
+
+/**
+ * SLOTLOCK_KNOWN_CLIENTS: the integrators metrics name (comma-separated, lower-case names like
+ * stackapi or n8n), at most 50, so a scrape stays bounded and names only those the deployment chose.
+ */
+function readKnownClients(env: SlotlockEnv): string[] {
+  const value = optional(env, 'SLOTLOCK_KNOWN_CLIENTS');
+  if (value === undefined) return [];
+  const names = value.split(',').map((name) => name.trim());
+  if (names.length > 50 || names.some((name) => !/^[a-z][a-z0-9_.-]{0,39}$/.test(name) || name === 'other' || name === 'none')) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_KNOWN_CLIENTS must be up to 50 comma-separated lower-case names (letters, digits, _ . -), not other or none',
+    );
+  }
+  return [...new Set(names)];
+}
+
 function readRestApi(env: SlotlockEnv): boolean {
   const value = optional(env, 'SLOTLOCK_REST_API') ?? 'on';
   if (value !== 'on' && value !== 'off') {
@@ -383,12 +516,33 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
     restApi: readRestApi(env),
     webhooks: readWebhooks(env),
     sharedLimits: readSharedLimits(env),
+    usage: readUsageMetering(env),
+    quotas: false,
     limits: readLimits(env),
   };
+  config.quotas = readQuotas(env, config.usage);
+  const overage = optional(env, 'SLOTLOCK_OVERAGE') ?? 'off';
+  if (overage !== 'off') {
+    const percent = overage === 'on' ? SLOTLOCK_DEFAULT_OVERAGE_STOP_PERCENT : Number(overage);
+    if (!Number.isSafeInteger(percent) || percent < 111 || percent > 1_000) {
+      throw new SlotlockConfigError('SLOTLOCK_OVERAGE must be off, on, or the percent of its quota a paying Developer tenant is refused at (111-1000)');
+    }
+    if (!config.quotas) throw new SlotlockConfigError('SLOTLOCK_OVERAGE needs SLOTLOCK_QUOTAS=on: overage is what is used past a quota');
+    config.overageStopPercent = percent;
+  }
   const trustedProxyHeader = readTrustedProxyHeader(env);
   if (trustedProxyHeader !== undefined) config.trustedProxyHeader = trustedProxyHeader;
   const trustedProxySecret = readTrustedProxySecret(env, trustedProxyHeader);
   if (trustedProxySecret !== undefined) config.trustedProxySecret = trustedProxySecret;
+  const knownClients = readKnownClients(env);
+  if (knownClients.length > 0) config.knownClients = knownClients;
+  let otlp: SlotlockOtlpConfig | undefined;
+  try {
+    otlp = readSlotlockOtlpConfig(env);
+  } catch (error) {
+    throw new SlotlockConfigError((error as Error).message);
+  }
+  if (otlp !== undefined) config.otlp = otlp;
   if (authToken !== undefined) config.authToken = authToken;
   const metricsToken = readSecret(env, 'SLOTLOCK_METRICS_TOKEN');
   if (metricsToken !== undefined) {
@@ -398,6 +552,7 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
       env.SLOTLOCK_SESSION_SECRET?.trim(),
       env.SLOTLOCK_GITHUB_CLIENT_SECRET?.trim(),
       env.SLOTLOCK_ASSISTANT_SECRET?.trim(),
+      ...(env.SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS?.split(',').map((part) => part.trim()) ?? []),
     ];
     if (others.includes(metricsToken)) {
       throw new SlotlockConfigError('SLOTLOCK_METRICS_TOKEN must differ from every other secret');
@@ -497,6 +652,12 @@ function secretsIn(env: SlotlockEnv): string[] {
   ]) {
     const value = env[name]?.trim();
     if (value) secrets.push(value);
+  }
+  // A list: each secret in it, as well as the whole.
+  const previous = env.SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS?.trim();
+  if (previous) {
+    secrets.push(previous);
+    for (const part of previous.split(',')) if (part.trim()) secrets.push(part.trim());
   }
   for (const name of ['DATABASE_URL', 'SLOTLOCK_MIGRATE_DATABASE_URL']) {
     const value = env[name]?.trim();
@@ -713,11 +874,16 @@ export function slotlockServeAllowsTenant(
   config: Pick<SlotlockServeConfig, 'organizations' | 'allowedUsers'>,
   tenantRef: string,
 ): boolean {
-  const orgId = /^github-org:(\d+)$/.exec(tenantRef)?.[1];
-  if (orgId !== undefined) return config.organizations?.includes(orgId) === true;
+  // A test environment (RFC 0003 G9) is let through exactly as its live tenant.
+  const live = slotlockLiveTenant(tenantRef);
+  const orgId = /^github-org:(\d+)$/.exec(live)?.[1];
+  // With `enabled`, the database decides, as serve's authenticate asks (createSlotlockOrganizationCheck).
+  if (orgId !== undefined) return config.organizations === 'enabled' || config.organizations?.includes(orgId) === true;
   const users = config.allowedUsers;
   if (users === undefined || users === '*') return true;
-  const githubId = /^github:(\d+)$/.exec(tenantRef)?.[1];
+  // A Google person (google:<subject>) only while the list names them so.
+  if (live.startsWith('google:')) return users.includes(live);
+  const githubId = /^github:(\d+)$/.exec(live)?.[1];
   return githubId === undefined || users.includes(githubId);
 }
 
@@ -881,10 +1047,54 @@ export async function startSlotlockServer(
         );
       }
     }
+    if (config.usage) {
+      for (const signature of [...SLOTLOCK_USAGE_FUNCTIONS, ...(config.quotas ? SLOTLOCK_QUOTA_FUNCTIONS : [])]) {
+        const [granted] = await sql<{ ready: boolean }[]>`
+          SELECT CASE WHEN to_regprocedure(${signature}) IS NULL THEN false
+                      ELSE has_function_privilege(to_regprocedure(${signature}), 'EXECUTE') END AS ready`;
+        if (!granted?.ready) {
+          throw Object.assign(
+            new Error(
+              `${(SLOTLOCK_USAGE_FUNCTIONS as readonly string[]).includes(signature) ? 'SLOTLOCK_USAGE' : 'SLOTLOCK_QUOTAS'} needs ${signature}, which this database role cannot run: run \`slotlock migrate\` (or \`slotlock serve --migrate\`) with this release`,
+            ),
+            { code: 'schema_outdated' },
+          );
+        }
+      }
+    }
+    // Each tenant's operations, recorded every 15 seconds and when the server stops (usage.ts).
+    const usage = config.usage
+      ? createSlotlockUsageMeter({
+          record: (flushId, rows) => recordSlotlockUsage(sql, flushId, rows),
+          onError: (error) =>
+            log.error('usage_record_failed', {
+              error: error instanceof Error ? error.message : 'unknown',
+            }),
+        })
+      : undefined;
+    // Each tenant on a plan held to its monthly quotas, counted with the meter (quotas.ts).
+    const quotas =
+      config.quotas && usage
+        ? createSlotlockQuotas({
+            plan: (tenantRef) =>
+              readSlotlockTenantQuotas(
+                sql,
+                tenantRef,
+                config.overageStopPercent !== undefined ? { overageStopPercent: config.overageStopPercent } : {},
+              ),
+            used: (tenantRef, fromDay) => readSlotlockQuotaUse(sql, tenantRef, fromDay),
+            local: (tenantRef, metric, fromDay) => usage.local(tenantRef, metric, fromDay),
+            notice: (notice) => noteSlotlockQuotaThreshold(sql, notice),
+            onError: (error) =>
+              log.error('quota_failed', { error: error instanceof Error ? error.message : 'unknown' }),
+          })
+        : undefined;
     const { caps } = config.limits;
     const store = createSlotlockServeStore(sql, caps, config.availability, config.retentionDays);
     const retention = config.retentionDays !== undefined ? { retentionDays: config.retentionDays } : {};
     const publicUrl = new URL(config.publicUrl);
+    // Partner keys (`slk_partner_…`, RFC 0003 P1): the partner API, for the partner's accounts only.
+    const authenticatePartner = createSlotlockPartnerKeyAuthenticator(sql);
     const authenticateKey = createSlotlockApiKeyAuthenticator(createSlotlockApiKeyStore(sql), {
       maxConcurrentLookups: caps.key_lookups,
       maxWaitingLookups: caps.key_lookup_queue,
@@ -903,13 +1113,31 @@ export async function startSlotlockServer(
     let maintenance: SlotlockMaintenanceScheduler | undefined;
     let webhooks: SlotlockWebhookScheduler | undefined;
     const basePath = publicUrl.pathname.replace(/\/$/, '');
+    // Counted for the scrape (SLOTLOCK_METRICS_TOKEN), an OpenTelemetry collector, or both.
     const metrics =
-      config.metricsToken === undefined
+      config.metricsToken === undefined && config.otlp?.metricsUrl === undefined
         ? undefined
         : createSlotlockMetrics({
             version: slotlockPackageVersion(),
             ...(process.versions.tz ? { tzdata: process.versions.tz } : {}),
           });
+    const knownClients: ReadonlySet<string> = new Set(config.knownClients ?? []);
+    // The same counters to an OpenTelemetry collector each minute, when one is configured.
+    const metricsExport =
+      metrics && config.otlp?.metricsUrl
+        ? createSlotlockOtlpMetricsExporter({ ...config.otlp, metricsUrl: config.otlp.metricsUrl }, metrics, {
+            onError: (reason) => log.warn('metrics_export_failed', { reason }),
+          })
+        : undefined;
+    // A span per call to an OpenTelemetry collector, when one is configured.
+    const tracer = config.otlp?.tracesUrl
+      ? createSlotlockOtlpExporter(config.otlp, {
+          onError: (reason) => log.warn('trace_export_failed', { reason }),
+        })
+      : undefined;
+    // Teams on Cloud: an organization's keys work while an owner has it turned on.
+    const organizationEnabled =
+      config.organizations === 'enabled' ? createSlotlockOrganizationCheck(sql) : null;
     const limits = createSlotlockRequestLimits({
       limits: config.limits,
       ...(config.sharedLimits
@@ -932,13 +1160,24 @@ export async function startSlotlockServer(
         ? { trustedProxySecret: config.trustedProxySecret }
         : {}),
       basePath,
+      ...(quotas ? { quotas } : {}),
       signInPaths: config.dashboard ? ['/dashboard/sign-in', '/dashboard/callback'] : [],
       // The token is compared in constant time first; only then is a key looked up. A person the
       // dashboard no longer allows loses their keys with their session.
       authenticate: async (request) => {
-        const principal = (await authenticateToken?.(request)) ?? (await authenticateKey(request));
+        const principal =
+          (await authenticateToken?.(request)) ??
+          (await authenticatePartner(request)) ??
+          (await authenticateKey(request));
         if (!principal || !slotlockServeAllowsTenant(config, principal.tenantRef)) return null;
-        maintenance?.touch(principal.tenantRef);
+        const orgId = organizationEnabled ? /^github-org:(\d+)$/.exec(slotlockLiveTenant(principal.tenantRef))?.[1] : undefined;
+        if (orgId !== undefined && !(await organizationEnabled?.(orgId))) return null;
+        // Slotlock-Account is a partner key's alone (RFC 0003 P3): with any other credential, or one
+        // that could not act for that account, the request is refused rather than run elsewhere.
+        if (request.headers.has(SLOTLOCK_ACCOUNT_FIELD) && principal.onBehalfOf === undefined) return null;
+        // A partner key's own tenant holds nothing to maintain; its accounts' keys are as any key.
+        if (principal.partnerId === undefined) maintenance?.touch(principal.tenantRef);
+        metrics?.client(slotlockClientLabel(request.headers.get('slotlock-client'), knownClients));
         return principal;
       },
       // Counts and pseudonyms only: never an address, a credential or a tenant.
@@ -955,6 +1194,7 @@ export async function startSlotlockServer(
       availabilityRules: async () => config.availability.map((rule) => ({ ...rule })),
     });
     const agentServer = createSlotlockAgentServer({
+      ...(usage ? { onUsage: usage.count } : {}),
       publicBaseUrl: config.publicUrl,
       // readPublicUrl admits plain HTTP only on a loopback host, which is all this permits anyway.
       allowInsecureLocalhost: publicUrl.protocol === 'http:',
@@ -965,6 +1205,7 @@ export async function startSlotlockServer(
       // tenant's expansions cannot hold the event loop from every other tenant's requests.
       authorize: async ({ principal, operation, input }) => {
         if (!authorizeSlotlockServeOperation({ principal, operation })) return false;
+        await limits.quota({ principal, operation });
         await limits.admit({ principal, operation, input });
         return true;
       },
@@ -983,9 +1224,12 @@ export async function startSlotlockServer(
           ? { ready: true, checks: ['database'] }
           : { ready: false, checks: ['database_unreachable'] };
       },
+      ...(tracer ? { onCallTrace: (event, trace) => tracer.record(event, trace.parentSpanId) } : {}),
       // Outcomes and counts only: the server never reports arguments or identities.
       onEvent: (event) => {
         metrics?.event(event);
+        // A traced call's span is made from onCallTrace, as a child of the caller's.
+        if (!('traceId' in event && event.traceId !== undefined)) tracer?.record(event);
         const { type, ...fields } = event;
         log.info(type, snakeCaseKeys(fields));
       },
@@ -1000,9 +1244,18 @@ export async function startSlotlockServer(
             application: {
               backend: createSlotlockStoreApplicationBackend(store, {
                 maxTenantResources: SERVE_MAX_TENANT_RESOURCES,
+                // A granted approval's booking is made as an agent's would be (RFC 0004 A4).
+                agentBackend,
+                partners: createSlotlockPartnerStore(sql, {
+                  keys: createSlotlockApiKeyStore(sql),
+                  eraseTenant: (tenantRef) => store.eraseTenant({ tenantRef }),
+                }),
               }),
               authorize: async ({ principal, operation, input }) => {
-                if (principal.scopes?.includes(SLOTLOCK_APPLICATION_SCOPE) !== true) return false;
+                // admin, or a partner key's partner scope for the partner API: never either for the other.
+                const needed = slotlockApplicationScope(slotlockApplicationOperation(operation));
+                if (principal.scopes?.includes(needed) !== true) return false;
+                await limits.quota({ principal, operation });
                 await limits.admit({ principal, operation, input });
                 return true;
               },
@@ -1030,20 +1283,34 @@ export async function startSlotlockServer(
             },
             sessionSecret: config.dashboard.sessionSecret,
             allowedUsers: config.dashboard.allowedUsers,
+            ...(config.dashboard.google ? { google: config.dashboard.google } : {}),
             ...(config.dashboard.name ? { name: config.dashboard.name } : {}),
             ...(config.dashboard.organizations
               ? { organizations: config.dashboard.organizations }
               : {}),
+            ...(config.dashboard.organizations === 'enabled' ? { teams: createSlotlockDashboardTeams(sql) } : {}),
             keys: createSlotlockApiKeyStore(sql),
-            resources: createSlotlockDashboardResources(store),
+            resources: createSlotlockDashboardResources(store, { agentBackend }),
             state: createSlotlockDashboardState(sql),
             availability: config.availability,
+            ...(config.usage ? { usage: true } : {}),
+            ...(config.quotas ? { quotas: true } : {}),
             ...(config.dashboard.assistantSecret !== undefined
               ? {
                   // The assistant's reads and approved writes are agent calls: the same backend,
                   // operations, rate limits and series-write slots as an API key's.
                   assistant: {
                     secret: config.dashboard.assistantSecret,
+                    ...(usage
+                      ? {
+                          onUsage: usage.count,
+                          onMessage: (tenantRef: string) =>
+                            usage.add({ tenantRef, metric: 'assistant_messages', origin: 'dashboard-assistant' }),
+                        }
+                      : {}),
+                    ...(config.dashboard.assistantPreviousSecrets
+                      ? { previousSecrets: config.dashboard.assistantPreviousSecrets }
+                      : {}),
                     ...(config.dashboard.assistantPrivateUrls ? { privateUrls: true } : {}),
                     backend: agentBackend,
                     consumeRateLimit: limits.consumeRateLimit,
@@ -1051,7 +1318,11 @@ export async function startSlotlockServer(
                     // token are taken when an approved change runs (admit, consumeRateLimit).
                     authorize: async ({ principal, operation }) =>
                       authorizeSlotlockServeOperation({ principal, operation }),
-                    admit: (args) => limits.admit(args),
+                    // A read, or an approved write, over the tenant's monthly quota is refused.
+                    admit: async (args) => {
+                      await limits.quota(args);
+                      await limits.admit(args);
+                    },
                   },
                 }
               : {}),
@@ -1087,6 +1358,7 @@ export async function startSlotlockServer(
         pageTenants((after) => sql<{ tenant: string }[]>`
           SELECT slotlock.maintenance_tenants(${after}::text) AS tenant`),
       intervalMs: SERVE_MAINTENANCE_INTERVAL_MS,
+      ...(config.usage ? { usage: true } : {}),
       // Counts only, never the tenant.
       onPass: (result) => {
         metrics?.maintenance(result);
@@ -1115,10 +1387,11 @@ export async function startSlotlockServer(
                 }),
             },
           }),
-        // Counts only, never the tenant or a URL.
-        onPass: (_tenant, result) => {
+        // Counts only, never the tenant or a URL; the tenant's own count goes to its usage.
+        onPass: (tenantRef, result) => {
           metrics?.webhooks(result);
           log.info('webhooks', { ...result });
+          usage?.add({ tenantRef, metric: 'webhook_deliveries', origin: 'webhooks', count: result.delivered });
         },
         onError: (error) => log.error('webhooks_failed', describeError(error)),
       });
@@ -1135,6 +1408,8 @@ export async function startSlotlockServer(
       rest: config.restApi ? `${config.publicUrl}/openapi.json` : null,
       webhooks: config.webhooks,
       shared_limits: config.sharedLimits,
+      usage: config.usage,
+      quotas: config.quotas,
       tzdata: process.versions.tz ?? null,
       maintenance_interval_minutes: SERVE_MAINTENANCE_INTERVAL_MS / 60_000,
       limits: {
@@ -1153,6 +1428,10 @@ export async function startSlotlockServer(
       async close() {
         const result = await listener.close();
         limits.close();
+        // What the last requests counted is recorded before the pool closes.
+        await usage?.close();
+        await tracer?.shutdown();
+        await metricsExport?.shutdown();
         await maintenance?.close();
         await webhooks?.close();
         await sql.end({ timeout: 5 });
@@ -1174,6 +1453,100 @@ function resourceLine(resource: SlotlockResource): string {
 }
 
 /** `resource add`: create (or, for an existing reference, re-zone) one resource in the tenant. */
+/**
+ * `slotlock sandbox …` (RFC 0004 A6), in the tenant SLOTLOCK_TENANT names, which must be a test
+ * environment (`<tenant>~test`): seed a scenario, reset, fast-forward, or race agents for one slot.
+ */
+async function runSandboxCommand(
+  subcommand: 'sandbox seed' | 'sandbox reset' | 'sandbox fast-forward' | 'sandbox race',
+  operands: readonly string[],
+  values: { agents?: string; start?: string },
+  io: SlotlockCliIo,
+): Promise<number> {
+  const config = readSlotlockDatabaseConfig(io.env);
+  if (!config.tenantRef.endsWith(SLOTLOCK_TEST_TENANT_SUFFIX)) {
+    io.stderr.write(`slotlock: the sandbox works only in a test environment: SLOTLOCK_TENANT=${config.tenantRef}${SLOTLOCK_TEST_TENANT_SUFFIX}\n`);
+    return 2;
+  }
+  const line = (value: unknown) => io.stdout.write(`${JSON.stringify(value)}\n`);
+  const sql = connect(config.databaseUrl, subcommand === 'sandbox race' ? 20 : 1);
+  const store = createSlotlockStore(sql);
+  try {
+    if (subcommand === 'sandbox seed') {
+      const scenario = operands[1] as SlotlockSandboxScenario;
+      if (!(SLOTLOCK_SANDBOX_SCENARIOS as readonly string[]).includes(scenario)) {
+        io.stderr.write(`slotlock: the scenarios are ${SLOTLOCK_SANDBOX_SCENARIOS.join(', ')}\n`);
+        return 2;
+      }
+      line(await seedSlotlockSandbox(store, config.tenantRef, scenario));
+      return 0;
+    }
+    if (subcommand === 'sandbox reset') {
+      line({ removed: await resetSlotlockSandbox(store, config.tenantRef) });
+      return 0;
+    }
+    if (subcommand === 'sandbox fast-forward') {
+      const minutes = /^[1-9][0-9]{0,5}$/.test(operands[1] ?? '') ? Number(operands[1]) : Number.NaN;
+      if (!(minutes >= 1 && minutes <= 525_600)) {
+        io.stderr.write('slotlock: fast-forward takes whole minutes, 1 to 525,600\n');
+        return 2;
+      }
+      const forward = await fastForwardSlotlockSandbox(store, config.tenantRef, minutes);
+      line({ minutes, holds: forward.holds, approvals: forward.approvals, pruned: forward.maintenance.pruned, approvals_expired: forward.maintenance.approvalsExpired });
+      return 0;
+    }
+    // A race: on the resource named, from --start (an hour from tomorrow's 10:00 UTC by default).
+    const agents = values.agents === undefined ? 100 : /^[0-9]{1,3}$/.test(values.agents) ? Number(values.agents) : Number.NaN;
+    if (!(agents >= 2 && agents <= SLOTLOCK_SANDBOX_MAX_RACERS)) {
+      io.stderr.write(`slotlock: --agents must be 2 to ${SLOTLOCK_SANDBOX_MAX_RACERS}\n`);
+      return 2;
+    }
+    const tomorrow = new Date(Date.now() + 86_400_000);
+    const start = values.start !== undefined
+      ? new Date(values.start)
+      : new Date(Date.UTC(tomorrow.getUTCFullYear(), tomorrow.getUTCMonth(), tomorrow.getUTCDate(), 10));
+    if (!Number.isFinite(start.getTime())) {
+      io.stderr.write('slotlock: --start must be a date and time, like 2027-03-02T10:00:00Z\n');
+      return 2;
+    }
+    const resource = (
+      await store.withTenant(config.tenantRef, (tenant) => tenant.listResources({ tenantRef: config.tenantRef, limit: 1000 }))
+    ).find((candidate) => candidate.externalRef === operands[1] || candidate.id === operands[1]);
+    if (!resource) {
+      io.stderr.write('slotlock: no resource with that reference in the test environment\n');
+      return 1;
+    }
+    const raced = await raceSlotlockSandbox({
+      backend: createSlotlockStoreAgentBackend(store, { availabilityRules: async () => [...readAvailability(io.env)] }),
+      tenantRef: config.tenantRef,
+      resourceId: resource.id,
+      start,
+      end: new Date(start.getTime() + 3_600_000),
+      agents,
+    });
+    line({
+      agents: raced.agents,
+      booked: raced.booked,
+      refused: raced.refused,
+      with_alternatives: raced.withAlternatives,
+      server_errors: raced.serverErrors,
+      p50_ms: raced.p50Ms,
+      p99_ms: raced.p99Ms,
+      max_ms: raced.maxMs,
+    });
+    return raced.booked === 1 && raced.serverErrors === 0 ? 0 : 1;
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    if (code === 'sandbox_not_empty') {
+      io.stderr.write('slotlock: the test environment has resources already; run slotlock sandbox reset first\n');
+      return 1;
+    }
+    throw error;
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
 async function addResource(
   config: SlotlockDatabaseConfig,
   externalRef: string,
@@ -1380,6 +1753,242 @@ async function changeResource(
 }
 
 /**
+ * `billing daily`: everything billing needs once a day, idempotent, for a cron job. Last month is
+ * closed for each active partner only once it has been over for BILLING_GRACE_MS, as late counts
+ * (bookings roll up hourly) settle first; overage goes for last month and this one; and each
+ * partner's reconciliation mismatches of the last week are listed. Exit 1 when anything waits or
+ * differs, so the cron job's failure is the incident.
+ */
+async function runBillingDaily(
+  owner: postgres.Sql,
+  io: { stdout: OutputStream; stderr: OutputStream },
+  options: { now: number; stripeSecretKey: string | undefined; overage: boolean },
+): Promise<number> {
+  const line = (value: unknown) => io.stdout.write(`${JSON.stringify(value)}\n`);
+  let attention = false;
+  const month = slotlockPreviousMonth(options.now);
+  const today = new Date(options.now);
+  const monthBegan = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1);
+  if (options.now - monthBegan < BILLING_GRACE_MS) {
+    line({ job: 'partner_close', month, waiting_until: new Date(monthBegan + BILLING_GRACE_MS).toISOString() });
+  } else {
+    for (const partner of await listSlotlockPartners(owner)) {
+      if (partner.status !== 'active') continue;
+      const closed = await closeSlotlockPartnerMonth(owner, {
+        partnerId: partner.id,
+        month,
+        now: options.now,
+        ...(options.stripeSecretKey ? { stripe: { secretKey: options.stripeSecretKey } } : {}),
+      });
+      line({ job: 'partner_close', partner: partner.id, month, webhook: closed.webhook, invoiced: closed.invoiced, pending: closed.pending });
+      if (closed.webhook === 'failed' || closed.pending > 0) attention = true;
+    }
+  }
+  if (options.overage) {
+    if (!options.stripeSecretKey) {
+      line({ job: 'overage', skipped: 'no STRIPE_SECRET_KEY' });
+      attention = true;
+    } else {
+      for (const reported of [month, slotlockMonthOf(options.now)]) {
+        const report = await reportSlotlockOverage(owner, {
+          month: reported,
+          now: options.now,
+          stripe: { secretKey: options.stripeSecretKey, eventName: 'slotlock_operations' },
+        });
+        line({ job: 'overage', month: reported, sent: report.sent, failed: report.failed });
+        if (report.failed > 0) attention = true;
+      }
+    }
+  }
+  const mismatches = await owner<{ partner_id: string; day: string; mismatched: number; worst: number }[]>`
+    SELECT partner_id, day::text, mismatched, worst_percent::float AS worst
+      FROM slotlock.partner_reconciliations
+     WHERE mismatched > 0 AND day >= current_date - 7
+     ORDER BY day, partner_id`;
+  for (const mismatch of mismatches) {
+    line({ job: 'reconciliation', partner: mismatch.partner_id, day: mismatch.day, mismatched: mismatch.mismatched, worst_percent: mismatch.worst });
+    attention = true;
+  }
+  line({ job: 'done', month, attention });
+  if (attention) io.stderr.write('slotlock: billing needs attention: see the lines above; run billing daily again once it is resolved\n');
+  return attention ? 1 : 0;
+}
+
+/** How long after a month ends billing daily waits to close it: late counts settle first. */
+const BILLING_GRACE_MS = 6 * 3_600_000;
+
+/**
+ * `resource parent <ref> <parent-ref | none>` (RFC 0003 G8): make a resource a part of a composite,
+ * or no part. The refusal's code when the database refuses it, false for no such resource.
+ */
+async function setResourceParent(
+  config: SlotlockDatabaseConfig,
+  out: OutputStream,
+  name: string,
+  parentName: string,
+): Promise<boolean | string> {
+  const sql = connect(config.databaseUrl, 1);
+  try {
+    const store = createSlotlockStore(sql);
+    const tenantRef = config.tenantRef;
+    const resources = await tenantResources(store, tenantRef, true);
+    const find = (wanted: string) =>
+      resources.find((resource) => resource.id === wanted) ?? resources.find((resource) => resource.externalRef === wanted);
+    const named = find(name);
+    if (!named) return false;
+    const parent = parentName === 'none' ? null : find(parentName);
+    if (parent === undefined) return 'parent_not_found';
+    try {
+      const changed = await store.withTenant(tenantRef, (tenant) =>
+        tenant.setResourceParent({ tenantRef, id: named.id, parentId: parent?.id ?? null }),
+      );
+      if (!changed) return false;
+      out.write(
+        `${JSON.stringify({ id: changed.id, external_ref: changed.externalRef, parent_id: changed.parentId ?? null, part_index: changed.partIndex ?? null })}\n`,
+      );
+      return true;
+    } catch (error) {
+      const code = (error as { code?: unknown } | null)?.code;
+      if (typeof code === 'string' && (code.startsWith('composite_') || code === 'parent_not_found')) return code;
+      throw error;
+    }
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
+/**
+ * `partner …` (RFC 0003 part 4), as the schema owner (SLOTLOCK_MIGRATE_DATABASE_URL when set): make
+ * a partner with its contract, list them, suspend one (every account with it) or make it active,
+ * make or revoke its keys (shown once), and set its Stripe customer and its webhook (whose secret
+ * is made here and shown once).
+ */
+async function runPartnerCommand(
+  config: SlotlockDatabaseConfig,
+  io: { stdout: OutputStream; stderr: OutputStream },
+  action: string,
+  operands: readonly string[],
+  contractGiven: string | undefined,
+  close: { month: string | undefined; stripeSecretKey: string | undefined } = { month: undefined, stripeSecretKey: undefined },
+): Promise<number> {
+  const owner = connect(config.migrateDatabaseUrl ?? config.databaseUrl, 1);
+  const [id = '', second = ''] = operands;
+  const line = (value: unknown) => io.stdout.write(`${JSON.stringify(value)}\n`);
+  try {
+    switch (action) {
+      case 'create': {
+        const text = contractGiven?.startsWith('@')
+          ? await readFile(contractGiven.slice(1), 'utf8')
+          : (contractGiven ?? '');
+        let contract: unknown;
+        try {
+          contract = JSON.parse(text);
+        } catch {
+          throw Object.assign(new Error('Slotlock partner contract: --contract is not JSON'), { code: 'invalid_partner_contract' });
+        }
+        const partner = await putSlotlockPartner(owner, { id, name: second, contract });
+        line({ id: partner.id, name: partner.name, status: partner.status, contract: slotlockPartnerContractJson(partner.contract) });
+        return 0;
+      }
+      case 'list':
+        for (const partner of await listSlotlockPartners(owner)) {
+          line({
+            id: partner.id,
+            name: partner.name,
+            status: partner.status,
+            stripe_customer: partner.stripeCustomer,
+            webhook_url: partner.webhookUrl,
+            plans: Object.keys(partner.contract.plans),
+          });
+        }
+        return 0;
+      case 'suspend':
+      case 'unsuspend': {
+        const changed = await setSlotlockPartnerStatus(owner, id, action === 'suspend' ? 'suspended' : 'active');
+        if (!changed) {
+          io.stderr.write('slotlock: no partner with that id\n');
+          return 1;
+        }
+        line({ id, status: action === 'suspend' ? 'suspended' : 'active' });
+        return 0;
+      }
+      case 'key': {
+        const created = await createSlotlockPartnerKey(owner, id, second);
+        line({ partner: id, id: created.id, prefix: created.prefix, key: created.key });
+        io.stderr.write('slotlock: the partner key is shown once and only its SHA-256 is stored; send it to the partner securely\n');
+        return 0;
+      }
+      case 'revoke-key': {
+        if (!(await revokeSlotlockPartnerKey(owner, id, second))) {
+          io.stderr.write('slotlock: no key with that id for that partner\n');
+          return 1;
+        }
+        line({ partner: id, id: second, revoked: true });
+        return 0;
+      }
+      case 'customer': {
+        if (!(await setSlotlockPartnerBilling(owner, id, { stripeCustomer: second }))) {
+          io.stderr.write('slotlock: no partner with that id\n');
+          return 1;
+        }
+        line({ id, stripe_customer: second });
+        return 0;
+      }
+      case 'webhook': {
+        const secret = `whsec_${randomBytes(32).toString('base64')}`;
+        if (!(await setSlotlockPartnerBilling(owner, id, { webhookUrl: second, webhookSecret: secret }))) {
+          io.stderr.write('slotlock: no partner with that id\n');
+          return 1;
+        }
+        line({ id, webhook_url: second, webhook_secret: secret });
+        io.stderr.write('slotlock: the webhook secret is shown once; the partner verifies usage.period_closed with it\n');
+        return 0;
+      }
+      case 'close': {
+        const closed = await closeSlotlockPartnerMonth(owner, {
+          partnerId: id,
+          month: close.month ?? slotlockPreviousMonth(Date.now()),
+          ...(close.stripeSecretKey ? { stripe: { secretKey: close.stripeSecretKey } } : {}),
+        });
+        line({
+          partner: closed.partner,
+          month: closed.month,
+          accounts: closed.accounts.length,
+          lines: closed.lines.map((entry) => ({
+            line: entry.line,
+            quantity: entry.quantity,
+            amount: entry.amount,
+            currency: entry.currency,
+            stripe_item: entry.stripeItem,
+          })),
+          checksum: closed.checksum,
+          closed_now: closed.closedNow,
+          webhook: closed.webhook,
+          ...(closed.webhookStatus !== undefined ? { webhook_status: closed.webhookStatus } : {}),
+          invoiced: closed.invoiced,
+          pending: closed.pending,
+        });
+        if (closed.webhook === 'failed') {
+          io.stderr.write('slotlock: the partner\'s endpoint did not take usage.period_closed; run partner close again for the same month\n');
+        }
+        if (closed.pending > 0) {
+          io.stderr.write(
+            close.stripeSecretKey
+              ? 'slotlock: some lines did not reach Stripe; run partner close again for the same month\n'
+              : 'slotlock: lines recorded, not invoiced: set STRIPE_SECRET_KEY (and partner customer) and run it again\n',
+          );
+        }
+        return closed.pending > 0 || closed.webhook === 'failed' ? 1 : 0;
+      }
+      default:
+        return 2;
+    }
+  } finally {
+    await owner.end({ timeout: 5 });
+  }
+}
+
+/**
  * `tenant status|suspend|unsuspend|erase` for SLOTLOCK_TENANT. Suspending and lifting a suspension
  * are the deployment role's alone, so they connect as SLOTLOCK_MIGRATE_DATABASE_URL when it is set;
  * the serving role reads a suspension and may erase.
@@ -1417,6 +2026,58 @@ async function runTenantCommand(
   }
 }
 
+/**
+ * `plan status` prints the default plan and SLOTLOCK_TENANT's own; `plan default` sets or removes
+ * the default, as the deployment role (SLOTLOCK_MIGRATE_DATABASE_URL when set), and then prints both.
+ */
+async function runPlanCommand(
+  config: SlotlockDatabaseConfig,
+  out: OutputStream,
+  planDefault: { plan: SlotlockPlan; appliesFrom: Date } | null,
+  set: boolean,
+): Promise<void> {
+  if (set) {
+    const owner = connect(config.migrateDatabaseUrl ?? config.databaseUrl, 1);
+    try {
+      await setSlotlockPlanDefault(owner, planDefault);
+    } finally {
+      await owner.end({ timeout: 5 });
+    }
+  }
+  const sql = connect(config.databaseUrl, 1);
+  try {
+    const fallback = await readSlotlockPlanDefault(sql);
+    const own = await readSlotlockTenantPlan(sql, config.tenantRef);
+    out.write(
+      `${JSON.stringify({
+        default: fallback
+          ? {
+              plan: fallback.plan,
+              applies_from: fallback.appliesFrom.toISOString(),
+              resources: fallback.limits.resources,
+              api_keys: fallback.limits.apiKeys,
+              webhook_endpoints: fallback.limits.webhookEndpoints,
+            }
+          : null,
+        tenant: config.tenantRef,
+        plan: own
+          ? {
+              plan: own.plan,
+              status: own.status,
+              resources: own.limits.resources,
+              api_keys: own.limits.apiKeys,
+              webhook_endpoints: own.limits.webhookEndpoints,
+              paid: own.stripeSubscription !== null,
+              current_period_end: own.currentPeriodEnd?.toISOString() ?? null,
+            }
+          : null,
+      })}\n`,
+    );
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
 /** One key as `key create`, `key list` and `key revoke` print it: never the digest. */
 function apiKeyLine(apiKey: SlotlockApiKey, key?: string): string {
   return `${JSON.stringify({
@@ -1429,8 +2090,64 @@ function apiKeyLine(apiKey: SlotlockApiKey, key?: string): string {
     expires_at: apiKey.expiresAt?.toISOString() ?? null,
     last_used_at: apiKey.lastUsedAt?.toISOString() ?? null,
     revoked_at: apiKey.revokedAt?.toISOString() ?? null,
+    ...(apiKey.resourceScope ? { resource_scope: apiKey.resourceScope } : {}),
+    ...(apiKey.limits ? { limits: apiKeyLimitsJson(apiKey.limits) } : {}),
     ...(key !== undefined ? { key } : {}),
   })}\n`;
+}
+
+/** A key's limits as the CLI prints them: snake_case, as the API names them. */
+function apiKeyLimitsJson(limits: SlotlockApiKeyLimits) {
+  return {
+    ...(limits.maxHolds !== undefined ? { max_holds: limits.maxHolds } : {}),
+    ...(limits.maxHeldHours !== undefined ? { max_held_hours: limits.maxHeldHours } : {}),
+    ...(limits.requestsPerMinute !== undefined ? { requests_per_minute: limits.requestsPerMinute } : {}),
+    ...(limits.requiresApproval ? { requires_approval: true } : {}),
+  };
+}
+
+/** `--max-holds`, `--max-held-hours`, `--requests-per-minute`, `--requires-approval` (RFC 0004 A5). */
+function parseKeyLimits(values: {
+  'max-holds'?: string;
+  'max-held-hours'?: string;
+  'requests-per-minute'?: string;
+  'requires-approval'?: boolean;
+}): SlotlockApiKeyLimits {
+  const whole = (option: string, value: string | undefined, most: number) => {
+    if (value === undefined) return undefined;
+    const parsed = /^[0-9]{1,7}$/.test(value) ? Number(value) : Number.NaN;
+    if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > most) {
+      throw new Error(`--${option} must be a whole number from 1 to ${most.toLocaleString('en-US')}`);
+    }
+    return parsed;
+  };
+  const maxHolds = whole('max-holds', values['max-holds'], 10_000);
+  const maxHeldHours = whole('max-held-hours', values['max-held-hours'], 876_000);
+  const requestsPerMinute = whole('requests-per-minute', values['requests-per-minute'], 100_000);
+  return {
+    ...(maxHolds !== undefined ? { maxHolds } : {}),
+    ...(maxHeldHours !== undefined ? { maxHeldHours } : {}),
+    ...(requestsPerMinute !== undefined ? { requestsPerMinute } : {}),
+    ...(values['requires-approval'] === true ? { requiresApproval: true } : {}),
+  };
+}
+
+/** `--locations` and `--groups`: references, comma-separated; neither for a key of the whole tenant. */
+function parseKeyResourceScope(
+  locations: string | undefined,
+  groups: string | undefined,
+): SlotlockResourceScope | undefined {
+  if (locations === undefined && groups === undefined) return undefined;
+  const list = (value: string | undefined) =>
+    (value ?? '')
+      .split(',')
+      .map((ref) => ref.trim())
+      .filter((ref) => ref !== '');
+  const scope = { locations: list(locations), groups: list(groups) };
+  if (!isSlotlockResourceScope(scope)) {
+    throw new Error('--locations and --groups take up to 20 location or group references each, at least one in all');
+  }
+  return scope;
 }
 
 /** `--scope`: read, write and admin, comma-separated; read,write unless given. */
@@ -1469,6 +2186,7 @@ async function maintainTenant(
         staleSources: 0,
         noShows: 0,
         waitlistOffers: 0,
+        approvalsExpired: 0,
         capped: true,
         passes: 0,
       };
@@ -1483,6 +2201,7 @@ async function maintainTenant(
         sum.staleSources += pass.staleSources;
         sum.noShows += pass.noShows;
         sum.waitlistOffers += pass.waitlistOffers;
+        sum.approvalsExpired += pass.approvalsExpired;
         // A capped pass that got nowhere met only series it cannot extend. While its roll stopped
         // before the series it had put back, the next pass meets new ones (and perhaps a healthy
         // one); once it reached them, another pass would meet them again.
@@ -1558,6 +2277,10 @@ Commands:
   resource archive <ref>   Take a resource out of use: no new bookings, holds or events, and
                            no longer listed; what is on it stays
   resource restore <ref>   Put an archived resource back in use
+  resource parent <ref> (<parent-ref> | none)
+                           Make a resource a part of a composite (a room of a hall): booking
+                           the whole then takes every part, and a part's booking keeps the
+                           whole from being booked; none makes it no part
   resource delete <ref>    Delete a resource and its history; refused while a booking, hold
                            or event on it has not ended
   hours show [--resource <ref>]
@@ -1572,13 +2295,63 @@ Commands:
   rules clear --resource <ref>
                            Remove the resource's booking rules
   key create <name> [--scope read,write,admin] [--expires-in-days <n>]
+             [--locations <ref,...>] [--groups <ref,...>]
                            Create an API key for the tenant (default scope read,write, no
                            expiry; admin adds the application API) and print it once; only its
-                           SHA-256 is stored
+                           SHA-256 is stored. With --locations or --groups, the key reaches
+                           only the resources there (each location with those in it), read and
+                           write only
+             [--max-holds <n>] [--max-held-hours <n>] [--requests-per-minute <n>]
+             [--requires-approval]
+                           ... and hold the key below the server's limits: its live holds, the
+                           hours they hold, its requests a minute, and every booking it makes
+                           waiting for a person (the dashboard's Approvals)
+  key limits <id> [--max-holds <n>] [--max-held-hours <n>] [--requests-per-minute <n>]
+             [--requires-approval]
+                           Replace an active key's limits; none at all gives it the server's
   key list                 Print the tenant's API keys, one JSON object per line
   key rotate <id>          Give an active key a new secret and print it once; the old one stops
                            working at once, and the key keeps its id and what it booked
   key revoke <id>          Revoke one of the tenant's API keys at once
+  sandbox seed <car-rental|clinic|desks>
+                           Fill an empty test environment (SLOTLOCK_TENANT=<tenant>~test) with a
+                           scenario: locations, groups, resources, hours, rules and bookings
+  sandbox reset            Empty the test environment; its keys, webhooks and plan stay
+  sandbox fast-forward <minutes>
+                           Make what would lapse in the test environment within that time lapse
+                           now (holds, offers, approvals), then run maintenance
+  sandbox race <resource-ref> [--agents <n>] [--start <date-time>]
+                           Race agents (default 100) for one hour on a test resource and print who
+                           booked, who was refused and why, and how long the answers took
+  partner create <id> <name> --contract <json | @file>
+                           Create a partner reselling Slotlock, or change its name and contract:
+                           its plans (limits and quotas), its accounts' key scopes and its prices
+                           (as the schema owner, SLOTLOCK_MIGRATE_DATABASE_URL)
+  partner list             Print the partners, one JSON object per line
+  partner suspend <id>     Suspend a partner: every account with it, and its keys stop
+  partner unsuspend <id>   Make a suspended partner active again
+  partner key <id> <name>  Create a partner key (slk_partner_…) and print it once
+  partner revoke-key <id> <key-id>
+                           Revoke one of a partner's keys at once
+  partner customer <id> <cus_…>
+                           The Stripe customer its monthly invoice goes to
+  partner webhook <id> <https-url>
+                           Where usage.period_closed goes; prints its signing secret once
+  billing daily            Once a day (cron), as the schema owner: close last month for every
+                           active partner once it has been over for 6 hours, report overage
+                           when SLOTLOCK_OVERAGE is on (with STRIPE_SECRET_KEY), and list the
+                           partners' reconciliation mismatches of the last 7 days; exits 1 when
+                           anything waits or differs. Safe to run again
+  overage report [--month <YYYY-MM>] [--event <name>]
+                           With SLOTLOCK_OVERAGE: send Stripe each paying Developer tenant's
+                           operations above its quota this month (or --month) not yet sent, as
+                           Billing Meter events (--event, default slotlock_operations), once
+                           (as the schema owner, with STRIPE_SECRET_KEY)
+  partner close <id> [--month <YYYY-MM>]
+                           Close an ended month (default: last month): price its accounts' use
+                           with the contract, record the lines once, send usage.period_closed,
+                           and with STRIPE_SECRET_KEY add the lines to the partner's next Stripe
+                           invoice; safe to run again
   tenant status            Print whether the tenant is suspended
   tenant suspend [--reason <text>]
                            Suspend the tenant: it may read, and writes nothing; its keys get
@@ -1587,7 +2360,13 @@ Commands:
   tenant unsuspend         Lift the tenant's suspension (as the schema owner, likewise)
   tenant erase --confirm <tenant>
                            Delete everything the tenant has, its API keys included, for good;
-                           --confirm repeats SLOTLOCK_TENANT
+                           --confirm repeats SLOTLOCK_TENANT; refused while its hosted plan is
+                           paid for (cancel the subscription first)
+  plan status              Print the deployment's default plan and the tenant's own (hosted)
+  plan default (free | developer | none) [--from <date>]
+                           Put every tenant without a plan of its own on this one from --from
+                           (an ISO date or time; default now), or none for no default; a new
+                           tenant gets it at once (as the schema owner, like tenant suspend)
   healthcheck              Exit 0 when the local server reports ready
 
 Options:
@@ -1617,6 +2396,16 @@ Environment:
   SLOTLOCK_RETENTION_DAYS        Days of history kept: the change feed, ended waitlist entries,
                                  and retired answers (never under 30) (1-3650, default 30;
                                  serve and maintain)
+  SLOTLOCK_USAGE                 on: count each tenant's operations, bookings and holds by day, API
+                                 key and surface (slotlock.usage_daily, kept 400 days); off
+                                 (default): record nothing
+  SLOTLOCK_QUOTAS                on (needs SLOTLOCK_USAGE=on): refuse a tenant on a plan past its
+                                 operations or bookings this month (quota_exceeded, 429); off
+                                 (default): no quota
+  SLOTLOCK_OVERAGE               off (default), or on (300) or a percent (111-1000): a paying
+                                 Developer tenant is refused only past that share of its
+                                 operations, and the rest above its quota is billed (overage
+                                 report); needs SLOTLOCK_QUOTAS=on
   SLOTLOCK_SHARED_LIMITS         on: tenant request budgets are shared by every server through the
                                  database, so N servers allow a tenant its rate once; off (default):
                                  each server keeps its own
@@ -1647,6 +2436,14 @@ Environment:
   SLOTLOCK_TRUSTED_PROXY_SECRET  A secret the proxy adds to every request in x-slotlock-proxy-proof,
                                  32+ random characters: without it there, the field above is
                                  ignored and the connection's address counts
+  SLOTLOCK_KNOWN_CLIENTS         Comma-separated integrator names /metrics counts requests by, from
+                                 their Slotlock-Client field (any other: other; none sent: none)
+  OTEL_EXPORTER_OTLP_ENDPOINT    An OpenTelemetry collector (OTLP over HTTP, JSON): a span per
+                                 call is sent to <endpoint>/v1/traces (off without it)
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT The full traces URL instead of <endpoint>/v1/traces
+  OTEL_EXPORTER_OTLP_METRICS_ENDPOINT The full metrics URL instead of <endpoint>/v1/metrics (sent each minute)
+  OTEL_EXPORTER_OTLP_HEADERS     name=value pairs sent with each export, such as an API key
+  OTEL_SERVICE_NAME              service.name of the spans (default slotlock)
   SLOTLOCK_GITHUB_CLIENT_ID      Serve the dashboard at $SLOTLOCK_PUBLIC_URL/dashboard: the Client ID
                                  of a GitHub OAuth app with callback .../dashboard/callback
   SLOTLOCK_GITHUB_CLIENT_SECRET  That app's client secret (dashboard)
@@ -1654,12 +2451,20 @@ Environment:
   SLOTLOCK_ASSISTANT_SECRET      Turns on the dashboard assistant and seals each organization's
                                  model API key with it, 32+ random characters (dashboard; off
                                  without it)
+  SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS Up to three earlier SLOTLOCK_ASSISTANT_SECRET values,
+                                 comma-separated, newest first: keys sealed under one still open
+                                 and are sealed again under the current secret when next used
   SLOTLOCK_ASSISTANT_PRIVATE_URLS off (default): refuse an assistant model URL whose host is, or
                                  resolves to, a loopback, private, link-local, CGNAT, unique-local
                                  or metadata address; on: allow them, for a self-hosted model
                                  (Ollama, vLLM) on this machine or network
-  SLOTLOCK_DASHBOARD_USERS       * or comma-separated GitHub user ids that may sign in and whose keys work
-  SLOTLOCK_DASHBOARD_ORGS        comma-separated GitHub organization ids: each is one shared tenant
+  SLOTLOCK_GOOGLE_CLIENT_ID      Sign-in with Google too: the client id of a Google OAuth client with
+                                 redirect URI .../dashboard/callback (not with organization ids)
+  SLOTLOCK_GOOGLE_CLIENT_SECRET  Its client secret
+  SLOTLOCK_DASHBOARD_USERS       * or comma-separated GitHub user ids (and google:<subject>) that may sign in and whose keys work
+  SLOTLOCK_DASHBOARD_ORGS        comma-separated GitHub organization ids: each is one shared tenant;
+                                 or enabled: each person's own tenant, plus the organizations an
+                                 owner turns on from the dashboard's Teams page
   SLOTLOCK_DASHBOARD_NAME        What the dashboard calls this deployment (default Slotlock)
   HOST                           Listen address (default 127.0.0.1)
   PORT                           Listen port (default 8080)
@@ -1702,7 +2507,12 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     command === 'key' ||
     command === 'hours' ||
     command === 'rules' ||
-    command === 'tenant'
+    command === 'tenant' ||
+    command === 'plan' ||
+    command === 'partner' ||
+    command === 'overage' ||
+    command === 'billing' ||
+    command === 'sandbox'
       ? `${command} ${operands[0] ?? ''}`.trim()
       : command;
   const expectedOperands: Record<string, number> = {
@@ -1713,21 +2523,40 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     'resource add': 2,
     'resource list': 1,
     'resource archive': 2,
+    'resource parent': 3,
     'resource restore': 2,
     'resource delete': 2,
     'tenant status': 1,
     'tenant suspend': 1,
     'tenant unsuspend': 1,
     'tenant erase': 1,
+    'plan status': 1,
+    'plan default': 2,
     'key create': 2,
     'key list': 1,
     'key rotate': 2,
     'key revoke': 2,
+    'key limits': 2,
+    'sandbox seed': 2,
+    'sandbox reset': 1,
+    'sandbox fast-forward': 2,
+    'sandbox race': 2,
     'hours show': 1,
     'hours set': 2,
     'hours clear': 1,
     'rules set': 2,
     'rules clear': 1,
+    'partner create': 3,
+    'partner list': 1,
+    'partner suspend': 2,
+    'partner unsuspend': 2,
+    'partner key': 3,
+    'partner revoke-key': 3,
+    'partner customer': 3,
+    'partner webhook': 3,
+    'partner close': 2,
+    'overage report': 1,
+    'billing daily': 1,
   };
   const expected = expectedOperands[subcommand];
   if (expected === undefined) return usage(`unknown command "${subcommand}"`);
@@ -1741,11 +2570,42 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
       return usage(`--${option} applies only to key create`);
     }
   }
+  if (values.month !== undefined && subcommand !== 'partner close' && subcommand !== 'overage report') {
+    return usage('--month applies only to partner close and overage report');
+  }
+  if (values.event !== undefined && subcommand !== 'overage report') {
+    return usage('--event applies only to overage report');
+  }
+  if (values.month !== undefined && !/^\d{4}-(0[1-9]|1[0-2])$/.test(values.month)) {
+    return usage('--month must be a month, like 2026-10');
+  }
+  if (values.contract !== undefined && subcommand !== 'partner create') {
+    return usage('--contract applies only to partner create');
+  }
+  if (subcommand === 'partner create' && values.contract === undefined) {
+    return usage('partner create needs --contract <json>, or --contract @<file>');
+  }
   if (values.reason !== undefined && subcommand !== 'tenant suspend') {
     return usage('--reason applies only to tenant suspend');
   }
   if (values.confirm !== undefined && subcommand !== 'tenant erase') {
     return usage('--confirm applies only to tenant erase');
+  }
+  if (values.from !== undefined && subcommand !== 'plan default') {
+    return usage('--from applies only to plan default');
+  }
+  let planDefault: { plan: SlotlockPlan; appliesFrom: Date } | null = null;
+  if (subcommand === 'plan default') {
+    const named = operands[1];
+    if (named !== 'free' && named !== 'developer' && named !== 'none') {
+      return usage('plan default takes free, developer or none');
+    }
+    if (named === 'none' && values.from !== undefined) return usage('--from applies only to a plan');
+    const appliesFrom = values.from === undefined ? new Date() : new Date(values.from);
+    if (Number.isNaN(appliesFrom.getTime()) || !/^\d{4}-\d{2}-\d{2}/.test(values.from ?? '2000-01-01')) {
+      return usage('--from must be an ISO date or time, like 2026-12-09 or 2026-12-09T00:00:00Z');
+    }
+    if (named !== 'none') planDefault = { plan: named, appliesFrom };
   }
   if (subcommand === 'tenant erase' && values.confirm === undefined) {
     return usage('tenant erase needs --confirm <tenant>, the tenant it erases (SLOTLOCK_TENANT)');
@@ -1799,13 +2659,31 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
   }
   let keyScopes: SlotlockApiKeyScope[] = [];
   let keyLifetimeDays: number | undefined;
+  let keyResourceScope: SlotlockResourceScope | undefined;
+  let keyLimits: SlotlockApiKeyLimits = {};
   if (subcommand === 'key create') {
     try {
       keyScopes = parseKeyScopes(values.scope);
       keyLifetimeDays = parseKeyLifetime(values['expires-in-days']);
+      keyResourceScope = parseKeyResourceScope(values.locations, values.groups);
     } catch (error) {
       return usage((error as Error).message);
     }
+  } else if (values.locations !== undefined || values.groups !== undefined) {
+    return usage('--locations and --groups are for key create');
+  }
+  if ((values.agents !== undefined || values.start !== undefined) && subcommand !== 'sandbox race') {
+    return usage('--agents and --start apply only to sandbox race');
+  }
+  const limitOptions = ['max-holds', 'max-held-hours', 'requests-per-minute', 'requires-approval'] as const;
+  if (subcommand === 'key create' || subcommand === 'key limits') {
+    try {
+      keyLimits = parseKeyLimits(values);
+    } catch (error) {
+      return usage((error as Error).message);
+    }
+  } else if (limitOptions.some((option) => values[option] !== undefined)) {
+    return usage('--max-holds, --max-held-hours, --requests-per-minute and --requires-approval are for key create and key limits');
   }
 
   const log = createLogger(io);
@@ -1834,6 +2712,11 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
         io.stdout.write(`${JSON.stringify(result)}\n`);
         return 0;
       }
+      case 'sandbox seed':
+      case 'sandbox reset':
+      case 'sandbox fast-forward':
+      case 'sandbox race':
+        return await runSandboxCommand(subcommand, operands, values, io);
       case 'resource add': {
         const config = readSlotlockDatabaseConfig(io.env);
         const resource = await addResource(config, operands[1] as string, values.timezone ?? 'UTC');
@@ -1843,6 +2726,82 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
       case 'resource list':
         await listResources(readSlotlockDatabaseConfig(io.env), io.stdout);
         return 0;
+      case 'billing daily': {
+        const database = readSlotlockDatabaseConfig(io.env);
+        const owner = connect(database.migrateDatabaseUrl ?? database.databaseUrl, 1);
+        try {
+          return await runBillingDaily(owner, io, {
+            now: Date.now(),
+            stripeSecretKey: io.env.STRIPE_SECRET_KEY?.trim() || undefined,
+            overage: (io.env.SLOTLOCK_OVERAGE?.trim() || 'off') !== 'off',
+          });
+        } catch (error) {
+          if ((error as { code?: unknown } | null)?.code === '42501') {
+            io.stderr.write('slotlock: only the schema owner runs billing; set SLOTLOCK_MIGRATE_DATABASE_URL to its URL\n');
+            return 1;
+          }
+          throw error;
+        } finally {
+          await owner.end({ timeout: 5 });
+        }
+      }
+      case 'overage report': {
+        const secretKey = io.env.STRIPE_SECRET_KEY?.trim();
+        if (!secretKey) {
+          io.stderr.write('slotlock: overage report needs STRIPE_SECRET_KEY, with write access to meter events\n');
+          return 1;
+        }
+        const database = readSlotlockDatabaseConfig(io.env);
+        const owner = connect(database.migrateDatabaseUrl ?? database.databaseUrl, 1);
+        try {
+          const report = await reportSlotlockOverage(owner, {
+            month: values.month ?? slotlockMonthOf(Date.now()),
+            stripe: { secretKey, eventName: values.event ?? 'slotlock_operations' },
+          });
+          io.stdout.write(`${JSON.stringify({ month: report.month, tenants: report.tenants.length, sent: report.sent, failed: report.failed })}\n`);
+          if (report.failed > 0) {
+            io.stderr.write('slotlock: Stripe did not take some events; run overage report again\n');
+            return 1;
+          }
+          return 0;
+        } catch (error) {
+          const code = (error as { code?: unknown } | null)?.code;
+          if (code === 'invalid_meter_event' || code === 'invalid_month') {
+            io.stderr.write(`slotlock: ${(error as Error).message}\n`);
+            return 2;
+          }
+          if (code === '42501') {
+            io.stderr.write('slotlock: only the schema owner reports overage; set SLOTLOCK_MIGRATE_DATABASE_URL to its URL\n');
+            return 1;
+          }
+          throw error;
+        } finally {
+          await owner.end({ timeout: 5 });
+        }
+      }
+      case 'resource parent': {
+        const changed = await setResourceParent(
+          readSlotlockDatabaseConfig(io.env),
+          io.stdout,
+          operands[1] as string,
+          operands[2] as string,
+        );
+        if (changed === true) return 0;
+        io.stderr.write(
+          `slotlock: ${
+            changed === false
+              ? 'no resource with that reference or id in this tenant'
+              : changed === 'parent_not_found'
+                ? 'no parent resource with that reference or id in this tenant'
+                : changed === 'composite_busy'
+                  ? 'one side has a booking or live hold still to come; a composite changes only while neither does'
+                  : changed === 'composite_too_deep'
+                    ? 'composites are one level deep: a part has no parts, and a parent is no part'
+                    : 'a composite has at most 50 parts'
+          }\n`,
+        );
+        return 1;
+      }
       case 'resource archive':
       case 'resource restore':
       case 'resource delete': {
@@ -1891,6 +2850,62 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
           if (code === 'invalid_suspension_reason') {
             return usage('--reason must be 1-500 characters without control characters');
           }
+          if (code === 'billing_active') {
+            io.stderr.write(
+              'slotlock: the tenant has a live subscription; cancel it in Stripe first (its webhook moves the tenant to Free), then erase\n',
+            );
+            return 1;
+          }
+          throw error;
+        }
+        return 0;
+      }
+      case 'partner create':
+      case 'partner list':
+      case 'partner suspend':
+      case 'partner unsuspend':
+      case 'partner key':
+      case 'partner revoke-key':
+      case 'partner customer':
+      case 'partner webhook':
+      case 'partner close': {
+        try {
+          return await runPartnerCommand(
+            readSlotlockDatabaseConfig(io.env),
+            io,
+            subcommand.slice('partner '.length),
+            operands.slice(1),
+            values.contract,
+            { month: values.month, stripeSecretKey: io.env.STRIPE_SECRET_KEY?.trim() || undefined },
+          );
+        } catch (error) {
+          const code = (error as { code?: unknown } | null)?.code;
+          if (code === 'partner_not_found') {
+            io.stderr.write('slotlock: no partner with that id\n');
+            return 1;
+          }
+          if (code === 'invalid_partner_contract' || code === 'invalid_partner' || code === 'month_not_ended' || code === 'invalid_month') {
+            io.stderr.write(`slotlock: ${(error as Error).message}\n`);
+            return 2;
+          }
+          if (code === '42501') {
+            io.stderr.write('slotlock: only the schema owner runs partner commands; set SLOTLOCK_MIGRATE_DATABASE_URL to its URL\n');
+            return 1;
+          }
+          throw error;
+        }
+      }
+      case 'plan status':
+      case 'plan default': {
+        try {
+          await runPlanCommand(readSlotlockDatabaseConfig(io.env), io.stdout, planDefault, subcommand === 'plan default');
+        } catch (error) {
+          if ((error as { code?: unknown } | null)?.code === 'plan_default_not_permitted') {
+            io.stderr.write(
+              'slotlock: only the schema owner sets the default plan; set SLOTLOCK_MIGRATE_DATABASE_URL to its URL\n',
+            );
+            return 1;
+          }
           throw error;
         }
         return 0;
@@ -1938,6 +2953,8 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
             name: operands[1] as string,
             scopes: keyScopes,
             createdBy: CLI_KEY_CREATOR,
+            ...(keyResourceScope ? { resourceScope: keyResourceScope } : {}),
+            ...(Object.keys(keyLimits).length > 0 ? { limits: keyLimits } : {}),
             ...(keyLifetimeDays !== undefined
               ? { expiresAt: new Date(Date.now() + keyLifetimeDays * DAY_MS) }
               : {}),
@@ -1970,6 +2987,19 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
         io.stderr.write(
           'slotlock: the new key is shown once and the old one no longer works; keep it in a secret manager\n',
         );
+        return 0;
+      }
+      case 'key limits': {
+        const config = readSlotlockDatabaseConfig(io.env);
+        const id = operands[1] as string;
+        const set = await withApiKeys(config, (keys) =>
+          keys.setLimits({ tenantRef: config.tenantRef, id, limits: keyLimits }),
+        );
+        if (!set) {
+          io.stderr.write('slotlock: no active API key with that id in this tenant\n');
+          return 1;
+        }
+        io.stdout.write(`${JSON.stringify({ id, limits: apiKeyLimitsJson(keyLimits) })}\n`);
         return 0;
       }
       case 'key revoke': {
@@ -2007,10 +3037,22 @@ function parseCliArguments(argv: readonly string[]) {
       timezone: { type: 'string' },
       scope: { type: 'string' },
       'expires-in-days': { type: 'string' },
+      locations: { type: 'string' },
+      groups: { type: 'string' },
+      'max-holds': { type: 'string' },
+      'max-held-hours': { type: 'string' },
+      'requests-per-minute': { type: 'string' },
+      'requires-approval': { type: 'boolean' },
+      agents: { type: 'string' },
+      start: { type: 'string' },
+      contract: { type: 'string' },
+      month: { type: 'string' },
+      event: { type: 'string' },
       resource: { type: 'string' },
       all: { type: 'boolean' },
       reason: { type: 'string' },
       confirm: { type: 'string' },
+      from: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
     },

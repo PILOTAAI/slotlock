@@ -13,12 +13,13 @@ account can sign in. Self-hosting stays fully supported: see
 | REST | `https://slotlock-api.pylota.io/v1`, described at `/openapi.json` |
 | Dashboard | `https://app.slotlock.pylota.io/dashboard` |
 | Status | [Open `status` issues](https://github.com/PILOTAAI/slotlock/issues?q=is%3Aissue%20label%3Astatus%20is%3Aopen), and [how they are raised](/docs/hosted/status.md) |
-| Price | Free, or Developer at $10 a month or $100 a year: see [Plans](#plans). Best effort, with no service level agreement |
+| Price | Free, Developer at $10 a month or $100 a year, or, for a GitHub organization, Team at $40 a month or $400 a year: see [Plans](#plans). Best effort, with no service level agreement |
 
 ## Start
 
 1. Sign in at `https://app.slotlock.pylota.io/dashboard` with your GitHub account. Slotlock asks
-   GitHub for no permissions and keeps only your user id and login. By signing in you agree to the
+   GitHub only to read which organizations you belong to (`read:org`), so you can work in the ones
+   turned on, and keeps only your user id and login, and those organizations in your session. By signing in you agree to the
    [Terms of Service](/TERMS.md) and the [Acceptable Use Policy](/ACCEPTABLE-USE.md).
 2. Add your resources and their weekly hours, then create an API key: **Read only** for an agent
    that only looks, **Read and write** for an agent that books, **Full** for an application that
@@ -35,20 +36,73 @@ account can sign in. Self-hosting stays fully supported: see
 
 ## Plans
 
-| | Free | Developer | Custom |
-| --- | --- | --- | --- |
-| Price | Free | $10 a month, or $100 a year | [Talk to the founder](mailto:clever.eziogor@gmail.com) |
-| Resources | 10 | 100 | On your own servers |
-| Active API keys | 10 | 100 | |
-| Webhook endpoints | 2 | 10 | |
+| | Free | Developer | Team | Custom |
+| --- | --- | --- | --- | --- |
+| Price | Free | $10 a month, or $100 a year | $40 a month, or $400 a year, for the whole organization | [Talk to the founder](mailto:clever.eziogor@pylota.io) |
+| Resources | 10 | 100 | 500 | On your own servers |
+| Active API keys | 10 | 100 | 100 | |
+| Webhook endpoints | 2 | 10 | 25 | |
+| Operations a month | 25,000 | 500,000 | 2,000,000, shared | |
+| Bookings a month | 1,000 | 25,000 | 100,000, shared | |
+
+**Team** is for a GitHub organization an owner has turned Slotlock on for (the dashboard's Teams
+page): every owner and member shares its resources, keys and history, and its price does not change
+with how many people use it. Only an owner of the organization buys or manages it.
 
 Every account starts on Free. Upgrade on the dashboard's **Plan** page: Stripe takes the payment as
 merchant of record, in your currency, with any sales tax or VAT added. **Manage billing** on the same
 page shows invoices, changes the payment method, switches between monthly and yearly, and cancels.
 A cancelled plan runs to the end of the period it was paid for. When a plan ends or a payment is not
 made, the account returns to Free: nothing is deleted, but nothing more can be added while it holds
-more than Free allows. Accounts created before 9 November 2026 move to the Free limits on
-9 December 2026. Custom is Slotlock on your own infrastructure, under its own agreement.
+more than Free allows. Archived resources count until they are deleted. The limits hold however you
+add things: in the dashboard, over the API or from the language clients. Accounts created before
+9 November 2026 move to the Free limits on 9 December 2026. An account on Developer is erased only
+once its plan is cancelled, so it is never charged again. Custom is Slotlock on your own
+infrastructure, under its own agreement.
+
+### Monthly allowances
+
+From 10 December 2026, each plan allows so many operations and bookings a calendar month, in UTC:
+
+- **An operation** is a call that runs: an MCP tool call, an A2A task or a REST request, the
+  assistant's included. A request refused before it runs (bad arguments, a rate limit) is not one.
+- **A booking** is a reservation, a calendar event (a whole recurring series is one) or a confirmed
+  hold.
+- At 80% and 100% of either, your account's change feed records `usage.threshold_reached`, which
+  your webhooks receive, and the Plan page says so.
+- **On Free**, past an allowance, calls are refused with `429 quota_exceeded` and a `Retry-After`
+  header until the month ends: every call once the operations are used up, except reading your
+  usage (`GET /v1/usage`) and erasing your account, and only new bookings and holds once the
+  bookings are, so you can still read and cancel. **On Developer and Team** the same
+  happens at 110% of an allowance. Nothing is charged for use past one.
+- Every answer to an operation lists what is left this month in its `RateLimit` and
+  `RateLimit-Policy` headers (`"operations_month"` and `"bookings_month"`), and `GET /v1/usage`
+  and the Plan page show the month so far.
+
+## Assistant
+
+The dashboard's **Assistant** page lets you operate Slotlock by chat ("what's free tomorrow on
+room-3?", "book it for Ana") with a model you bring:
+
+- **Connect your own model** in Settings, Assistant: the Anthropic Messages API, or any
+  OpenAI-compatible API (OpenAI, OpenRouter, and others that answer tool calls), with its base
+  URL, the model name and your API key. A preset (Anthropic, OpenAI, OpenRouter, Google, Mistral,
+  Groq, Together) fills in the URL; **Load models** asks your provider which models it offers.
+  **Test connection** makes one real request. You pay your provider for what the model uses;
+  Slotlock does not charge for it.
+- **Your key** is stored encrypted (AES-256-GCM) and never shown again: only that it is set, and its
+  last four characters.
+- **What goes to your provider:** your messages, and the resources and bookings the assistant reads
+  to answer them, under your own agreement with that provider.
+- **Reads run, writes wait.** The assistant looks things up at once, up to 8 model calls a message.
+  A booking, hold, change or cancellation appears as a card to **Approve** or **Dismiss**, and runs
+  once, when approved, under the same booking rules and limits as an agent, recorded as "Assistant
+  for @login". It cannot touch API keys, webhooks, booking rules, pools or erasure.
+- **Bounds:** 10 messages a minute per person; a conversation is kept for 2 hours after its last
+  message.
+- **The model must be reachable from the internet.** Slotlock Cloud refuses model addresses on
+  loopback, private and metadata networks, so a model on your own machine (Ollama, LM Studio) needs
+  a public HTTPS address, or a hosted provider.
 
 ## How it differs from running it yourself
 
@@ -78,7 +132,8 @@ more than Free allows. Accounts created before 9 November 2026 move to the Free 
 
 Requests are also rate limited, per client address, per key and per account: a request over a limit
 gets `429 rate_limited` with a `Retry-After` header. A write that would pass a limit is refused with
-an error code that names it.
+an error code that names it. Each plan's [monthly allowances](#monthly-allowances) are refused with
+`429 quota_exceeded`.
 
 ## Rules and data
 

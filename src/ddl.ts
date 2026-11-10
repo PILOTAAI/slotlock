@@ -8,7 +8,25 @@
 // role can write to ("$user", public) would run with that ownership. The DDL pins search_path to
 // pg_catalog and pg_temp while it runs and restores the caller's at the end. Apply it in one
 // transaction: under autocommit the pin ends with its own statement.
-import { SLOTLOCK_CHANGE_ORIGINS, legacyCoverageSourceDigestSql } from './event-feed.js';
+import {
+  SLOTLOCK_MAX_GROUPS_PER_RESOURCE,
+  SLOTLOCK_MAX_LOCATION_DEPTH,
+  SLOTLOCK_MAX_LOCATIONS,
+  SLOTLOCK_MAX_RESOURCE_GROUPS,
+  SLOTLOCK_MAX_KEY_SCOPE_REFS,
+  SLOTLOCK_MAX_COMPOSITE_PARTS,
+  SLOTLOCK_RECONCILE_TOLERANCE_PERCENT,
+  SLOTLOCK_MAX_POOL_SETTINGS,
+  SLOTLOCK_POOL_ORDERS,
+  SLOTLOCK_RESOURCE_KINDS,
+  SLOTLOCK_RESOURCE_PROFILE_LIMITS,
+} from './resource-profile.js';
+import {
+  SLOTLOCK_CHANGE_ORIGINS,
+  SLOTLOCK_WEBHOOK_FILTER_REFS,
+  SLOTLOCK_WEBHOOK_FILTER_RESOURCES,
+  legacyCoverageSourceDigestSql,
+} from './event-feed.js';
 import { SLOTLOCK_MAX_AVAILABILITY_RULES } from './weekly-hours.js';
 
 const CALLER_SEARCH_PATH_SETTING = 'slotlock.caller_search_path';
@@ -204,6 +222,8 @@ export const SLOTLOCK_API_KEY_RETAINED_LIMIT = 1_000;
 export const SLOTLOCK_API_KEY_TABLES = Object.freeze([
   'api_keys',
   'api_key_retired_digests',
+  'api_key_resource_scopes',
+  'api_key_limits',
 ] as const);
 
 /**
@@ -217,18 +237,28 @@ export const SLOTLOCK_API_KEY_FUNCTIONS = Object.freeze([
   'slotlock.revoke_api_key(text, uuid)',
   'slotlock.authenticate_api_key(bytea)',
   'slotlock.erase_api_keys(text)',
+  'slotlock.set_api_key_resource_scope(text, uuid, text[], text[])',
+  'slotlock.authenticate_scoped_api_key(bytea)',
+  'slotlock.list_api_key_resource_scopes(text)',
+  'slotlock.set_api_key_limits(text, uuid, integer, integer, integer, boolean)',
+  'slotlock.list_api_key_limits(text)',
+  'slotlock.authenticate_limited_api_key(bytea)',
 ] as const);
+
 
 /**
  * The table behind the dashboard's shared records (dashboard.ts). No role but its owner holds a
  * right on it; it is reached only through SLOTLOCK_DASHBOARD_FUNCTIONS.
  */
-export const SLOTLOCK_DASHBOARD_TABLES = Object.freeze(['dashboard_tokens'] as const);
+export const SLOTLOCK_DASHBOARD_TABLES = Object.freeze(['dashboard_tokens', 'dashboard_organizations'] as const);
 
 /** The SECURITY DEFINER functions through which the serving role reaches the dashboard's records. */
 export const SLOTLOCK_DASHBOARD_FUNCTIONS = Object.freeze([
   'slotlock.use_dashboard_token(text, bytea, timestamptz, bytea)',
   'slotlock.dashboard_session_ended(bytea, timestamptz)',
+  'slotlock.enabled_organizations(text)',
+  'slotlock.enable_organization(text, text, text)',
+  'slotlock.disable_organization(text, text)',
 ] as const);
 
 /** Live form records one person may leave in the dashboard's records (12 hours of forms). */
@@ -246,6 +276,13 @@ export const SLOTLOCK_SCHEMA_FUNCTIONS = Object.freeze([
 export const SLOTLOCK_TENANT_ADMIN_TABLES = Object.freeze([
   'tenant_suspensions',
   'tenant_plans',
+  'plan_defaults',
+  'usage_daily',
+  'usage_flushes',
+  'usage_cursors',
+  'usage_meter_start',
+  'usage_notices',
+  'overage_reports',
   'webhook_tenants',
   'rate_buckets',
   'assistant_tenants',
@@ -269,20 +306,105 @@ export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.maintenance_tenants(text)',
   'slotlock.tenant_plan(text)',
   'slotlock.set_tenant_plan(text, text, text, integer, integer, integer, text, text, timestamptz)',
+  'slotlock.plan_default()',
+  'slotlock.enrol_tenant_plan(text)',
+  'slotlock.record_usage(uuid, jsonb)',
+  'slotlock.roll_up_usage(text, integer)',
+  'slotlock.tenant_usage(text, date, date)',
+  'slotlock.tenant_quota_usage(text, date)',
+  'slotlock.note_usage_threshold(text, date, text, integer, bigint, bigint)',
+  'slotlock.tenant_plan_quotas(text)',
+  'slotlock.reset_test_tenant(text)',
 ] as const);
 
+/** The functions usage metering runs (SLOTLOCK_USAGE=on): serve checks it may, before it starts. */
+export const SLOTLOCK_USAGE_FUNCTIONS = Object.freeze([
+  'slotlock.record_usage(uuid, jsonb)',
+  'slotlock.roll_up_usage(text, integer)',
+  'slotlock.tenant_usage(text, date, date)',
+] as const);
+
+/** The functions quotas run (SLOTLOCK_QUOTAS=on, quotas.ts): serve checks it may, before it starts. */
+export const SLOTLOCK_QUOTA_FUNCTIONS = Object.freeze([
+  'slotlock.tenant_plan(text)',
+  'slotlock.tenant_quota_usage(text, date)',
+  'slotlock.note_usage_threshold(text, date, text, integer, bigint, bigint)',
+] as const);
+
+/** What a plan's monthly quotas count (quotas.ts): operations run and bookings made. */
+export const SLOTLOCK_QUOTA_METRICS = Object.freeze(['operations', 'bookings'] as const);
+
+/** The shares of a quota, in percent, at which a tenant is told once a month (usage.threshold_reached). */
+export const SLOTLOCK_QUOTA_NOTICE_PERCENTS = Object.freeze([80, 100] as const);
+
+/** The most bookings past the roll-up cursor one quota read counts: more than any plan allows. */
+export const SLOTLOCK_QUOTA_UNROLLED_LIMIT = 100_000;
+
 /**
- * Functions only the deployment role runs: suspending and lifting a suspension. No other role is
- * granted them, so a serving role cannot lift a suspension.
+ * What usage.ts meters, per tenant and day: operations run, bookings and holds committed, webhook
+ * deliveries accepted, messages to the dashboard assistant, and resources held (a count each day, not
+ * a sum).
+ */
+export const SLOTLOCK_USAGE_METRICS = Object.freeze([
+  'operations',
+  'bookings',
+  'holds',
+  'webhook_deliveries',
+  'assistant_messages',
+  'resources',
+] as const);
+/** The metrics a server counts and records (slotlock.record_usage); the rest the database counts. */
+export const SLOTLOCK_RECORDED_USAGE_METRICS = Object.freeze([
+  'operations',
+  'webhook_deliveries',
+  'assistant_messages',
+] as const);
+/** Days a tenant's daily usage is kept: a yearly plan, and a month for disputes after it. */
+export const SLOTLOCK_USAGE_RETENTION_DAYS = 400;
+
+/**
+ * Functions only the deployment role runs: suspending and lifting a suspension, and setting the
+ * hosted plan every tenant without one of its own is on. No other role is granted them, so a serving
+ * role cannot lift a suspension or change the default plan.
  */
 export const SLOTLOCK_OPERATOR_FUNCTIONS = Object.freeze([
   'slotlock.suspend_tenant(text, text)',
   'slotlock.unsuspend_tenant(text)',
+  'slotlock.set_plan_default(text, integer, integer, integer, timestamptz)',
 ] as const);
 
 /** Every SECURITY DEFINER function the serving role may execute, by signature. */
+/**
+ * Partner accounts (RFC 0003 part 4): what the serving role may call for a partner key and the
+ * partner API. A partner, its keys and its contract are made by the schema owner (`slotlock partner`).
+ */
+export const SLOTLOCK_PARTNER_FUNCTIONS = Object.freeze([
+  'slotlock.partner_tenant_blocked(text)',
+  'slotlock.authenticate_partner_key(bytea)',
+  'slotlock.partner_contract(text)',
+  'slotlock.put_partner_account(text, text, text)',
+  'slotlock.list_partner_accounts(text)',
+  'slotlock.get_partner_account(text, text)',
+  'slotlock.set_partner_account_suspended(text, text, boolean, text)',
+  'slotlock.partner_usage(text, date, date, text)',
+  'slotlock.partner_account_tenant(text, text)',
+  'slotlock.record_partner_reconciliation(text, date, integer, integer, numeric)',
+] as const);
+
+/** The partner tables: owner-only, reached through SLOTLOCK_PARTNER_FUNCTIONS. */
+export const SLOTLOCK_PARTNER_TABLES = Object.freeze([
+  'partners',
+  'partner_keys',
+  'partner_accounts',
+  'partner_invoices',
+  'partner_month_closes',
+  'partner_erased_usage',
+  'partner_reconciliations',
+] as const);
+
 export const SLOTLOCK_DEFINER_FUNCTIONS = Object.freeze([
   ...SLOTLOCK_API_KEY_FUNCTIONS,
+  ...SLOTLOCK_PARTNER_FUNCTIONS,
   ...SLOTLOCK_DASHBOARD_FUNCTIONS,
   ...SLOTLOCK_SCHEMA_FUNCTIONS,
   ...SLOTLOCK_TENANT_ADMIN_FUNCTIONS,
@@ -291,6 +413,7 @@ export const SLOTLOCK_DEFINER_FUNCTIONS = Object.freeze([
 /** Tables no role but their owner reads or writes, reached only through SLOTLOCK_DEFINER_FUNCTIONS. */
 export const SLOTLOCK_DEFINER_TABLES = Object.freeze([
   ...SLOTLOCK_API_KEY_TABLES,
+  ...SLOTLOCK_PARTNER_TABLES,
   ...SLOTLOCK_DASHBOARD_TABLES,
   ...SLOTLOCK_SCHEMA_TABLES,
   ...SLOTLOCK_TENANT_ADMIN_TABLES,
@@ -346,7 +469,8 @@ CREATE TABLE IF NOT EXISTS slotlock.api_keys (
     CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500 AND tenant_ref !~ '[[:cntrl:]]'),
   CONSTRAINT slotlock_api_keys_name_valid
     CHECK (char_length(name) BETWEEN 1 AND 100 AND name !~ '[[:cntrl:]]'),
-  CONSTRAINT slotlock_api_keys_prefix_valid CHECK (prefix ~ '^slk_[0-9A-Za-z]{8}$'),
+  -- A test environment's key (RFC 0003 G9) says so: slk_test_, and only there (the DO block below).
+  CONSTRAINT slotlock_api_keys_prefix_valid CHECK (prefix ~ '^slk_(test_)?[0-9A-Za-z]{8}$'),
   -- A non-empty list of read, write and admin, each once, in that order (api-keys.ts).
   CONSTRAINT slotlock_api_keys_scopes_known
     CHECK (scopes IN (
@@ -365,6 +489,23 @@ CREATE TABLE IF NOT EXISTS slotlock.api_keys (
 CREATE INDEX IF NOT EXISTS slotlock_api_keys_tenant_idx
   ON slotlock.api_keys (tenant_ref, created_at DESC, id DESC);
 ALTER TABLE slotlock.api_keys ENABLE ROW LEVEL SECURITY;
+-- A tenant reference ending in ~test is the test environment of the one before it (RFC 0003 G9):
+-- its keys start slk_test_, and no other tenant's do, so a key says where it acts. Added NOT VALID
+-- (DEPLOYMENT_VALIDATE_CONSTRAINTS); the prefix check it widens is replaced with it.
+DO $slotlock_api_keys_environment$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint
+     WHERE conrelid = 'slotlock.api_keys'::regclass AND conname = 'slotlock_api_keys_environment_valid'
+  ) THEN
+    ALTER TABLE slotlock.api_keys DROP CONSTRAINT IF EXISTS slotlock_api_keys_prefix_valid;
+    ALTER TABLE slotlock.api_keys ADD CONSTRAINT slotlock_api_keys_prefix_valid
+      CHECK (prefix ~ '^slk_(test_)?[0-9A-Za-z]{8}$') NOT VALID;
+    ALTER TABLE slotlock.api_keys ADD CONSTRAINT slotlock_api_keys_environment_valid
+      CHECK ((prefix ~ '^slk_test_') = (tenant_ref ~ '~test$')) NOT VALID;
+  END IF;
+END
+$slotlock_api_keys_environment$;
 
 -- Schemas from 0.1 allow only read and write. The CHECK with admin admits every row the old one
 -- did, so it is added NOT VALID (no table scan under the lock) and the old one dropped in the same
@@ -441,8 +582,8 @@ BEGIN
              AND active.revoked_at IS NULL
              AND (active.expires_at IS NULL OR active.expires_at > now())
          ) < LEAST(${SLOTLOCK_API_KEY_ACTIVE_LIMIT}, COALESCE(
-           (SELECT plan.max_api_keys FROM slotlock.tenant_plans plan
-             WHERE plan.tenant_ref = requested_tenant_ref), ${SLOTLOCK_API_KEY_ACTIVE_LIMIT}))
+           (SELECT plan.max_api_keys FROM slotlock.tenant_plan(requested_tenant_ref) plan),
+           ${SLOTLOCK_API_KEY_ACTIVE_LIMIT}))
      AND (SELECT count(*) FROM slotlock.api_keys kept
            WHERE kept.tenant_ref = requested_tenant_ref
          ) < ${SLOTLOCK_API_KEY_RETAINED_LIMIT}
@@ -572,6 +713,190 @@ AS $slotlock_erase_api_keys$
   SELECT count(*) FROM erased;
 $slotlock_erase_api_keys$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[5]} FROM PUBLIC;
+
+-- Keys limited to part of their tenant (RFC 0003 G6): the locations (each with every location in
+-- it) and groups whose resources the key reaches, and no other. Set when the key is made and kept
+-- through rotation; gone with the key. Owner-only, reached through the functions below; the
+-- database enforces it (withTenant's slotlock.resource_scope and the resource_scope_v1 policies).
+CREATE TABLE IF NOT EXISTS slotlock.api_key_resource_scopes (
+  key_id uuid PRIMARY KEY REFERENCES slotlock.api_keys (id) ON DELETE CASCADE,
+  tenant_ref text NOT NULL,
+  locations text[] NOT NULL DEFAULT '{}',
+  groups text[] NOT NULL DEFAULT '{}',
+  CONSTRAINT slotlock_api_key_resource_scopes_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND cardinality(locations) + cardinality(groups) >= 1
+    AND cardinality(locations) <= ${SLOTLOCK_MAX_KEY_SCOPE_REFS}
+    AND cardinality(groups) <= ${SLOTLOCK_MAX_KEY_SCOPE_REFS}
+    AND array_position(locations, NULL) IS NULL AND array_position(groups, NULL) IS NULL
+  )
+);
+ALTER TABLE slotlock.api_key_resource_scopes ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.api_key_resource_scopes FROM PUBLIC;
+
+-- Limit one of the tenant's active keys, once: true when set, false when the tenant has no such
+-- active key or it is limited already. Each reference as locations and groups take them.
+CREATE OR REPLACE FUNCTION slotlock.set_api_key_resource_scope(
+  requested_tenant_ref text, requested_id uuid, requested_locations text[], requested_groups text[]
+)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_set_api_key_resource_scope$
+BEGIN
+  IF requested_locations IS NULL OR requested_groups IS NULL
+     OR EXISTS (SELECT 1 FROM unnest(requested_locations || requested_groups) named(ref)
+                 WHERE named.ref IS NULL OR named.ref !~ '^[a-z0-9][a-z0-9._-]{0,99}$') THEN
+    RAISE EXCEPTION 'Slotlock key scope references must be location and group references'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM slotlock.api_keys limited
+                  WHERE limited.tenant_ref = requested_tenant_ref AND limited.id = requested_id
+                    AND limited.revoked_at IS NULL) THEN
+    RETURN false;
+  END IF;
+  INSERT INTO slotlock.api_key_resource_scopes (key_id, tenant_ref, locations, groups)
+  VALUES (
+    requested_id, requested_tenant_ref,
+    ARRAY(SELECT DISTINCT ref FROM unnest(requested_locations) ref ORDER BY ref),
+    ARRAY(SELECT DISTINCT ref FROM unnest(requested_groups) ref ORDER BY ref))
+  ON CONFLICT (key_id) DO NOTHING;
+  RETURN FOUND;
+END
+$slotlock_set_api_key_resource_scope$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[6]} FROM PUBLIC;
+
+-- As authenticate_api_key, with the key's scope: null locations and groups for a key with none.
+-- A key of a partner's account whose partner is not active (RFC 0003 P2) authenticates as nothing.
+CREATE OR REPLACE FUNCTION slotlock.authenticate_scoped_api_key(presented_secret_hash bytea)
+RETURNS TABLE (key_id uuid, key_tenant_ref text, key_scopes text[], scope_locations text[], scope_groups text[])
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_authenticate_scoped_api_key$
+BEGIN
+  RETURN QUERY
+  SELECT found.key_id, found.key_tenant_ref, found.key_scopes, scope.locations, scope.groups
+    FROM slotlock.authenticate_api_key(presented_secret_hash) found
+    LEFT JOIN slotlock.api_key_resource_scopes scope ON scope.key_id = found.key_id
+   WHERE NOT slotlock.partner_tenant_blocked(found.key_tenant_ref);
+END
+$slotlock_authenticate_scoped_api_key$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[7]} FROM PUBLIC;
+
+-- The scopes of the tenant's limited keys, for its key list.
+CREATE OR REPLACE FUNCTION slotlock.list_api_key_resource_scopes(requested_tenant_ref text)
+RETURNS TABLE (key_id uuid, locations text[], groups text[])
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_list_api_key_resource_scopes$
+  SELECT scope.key_id, scope.locations, scope.groups
+    FROM slotlock.api_key_resource_scopes scope
+   WHERE scope.tenant_ref = requested_tenant_ref;
+$slotlock_list_api_key_resource_scopes$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[8]} FROM PUBLIC;
+
+-- What one agent's key may do, below the server's limits (RFC 0004 A5): its live holds and the
+-- hours they hold, its requests a minute, and whether its bookings wait for a person. Null is the
+-- server's. Kept through rotation (the key keeps its id); gone with the key. Owner-only, reached
+-- through the functions below.
+CREATE TABLE IF NOT EXISTS slotlock.api_key_limits (
+  key_id uuid PRIMARY KEY REFERENCES slotlock.api_keys (id) ON DELETE CASCADE,
+  tenant_ref text NOT NULL,
+  max_holds integer,
+  max_held_hours integer,
+  requests_per_minute integer,
+  requires_approval boolean NOT NULL DEFAULT false,
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_api_key_limits_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND (max_holds IS NULL OR max_holds BETWEEN 1 AND 10000)
+    AND (max_held_hours IS NULL OR max_held_hours BETWEEN 1 AND 876000)
+    AND (requests_per_minute IS NULL OR requests_per_minute BETWEEN 1 AND 100000)
+  )
+);
+ALTER TABLE slotlock.api_key_limits ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.api_key_limits FROM PUBLIC;
+
+-- Set one of the tenant's active keys' limits, replacing what it had; none at all removes them.
+-- False when the tenant has no such active key.
+CREATE OR REPLACE FUNCTION slotlock.set_api_key_limits(
+  requested_tenant_ref text, requested_id uuid, requested_max_holds integer,
+  requested_max_held_hours integer, requested_requests_per_minute integer, requested_approval boolean
+)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_set_api_key_limits$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM slotlock.api_keys limited
+                  WHERE limited.tenant_ref = requested_tenant_ref AND limited.id = requested_id
+                    AND limited.revoked_at IS NULL) THEN
+    RETURN false;
+  END IF;
+  IF requested_max_holds IS NULL AND requested_max_held_hours IS NULL
+     AND requested_requests_per_minute IS NULL AND requested_approval IS NOT TRUE THEN
+    DELETE FROM slotlock.api_key_limits WHERE key_id = requested_id;
+    RETURN true;
+  END IF;
+  INSERT INTO slotlock.api_key_limits (
+    key_id, tenant_ref, max_holds, max_held_hours, requests_per_minute, requires_approval
+  ) VALUES (
+    requested_id, requested_tenant_ref, requested_max_holds, requested_max_held_hours,
+    requested_requests_per_minute, requested_approval IS TRUE
+  )
+  ON CONFLICT (key_id) DO UPDATE
+    SET max_holds = EXCLUDED.max_holds, max_held_hours = EXCLUDED.max_held_hours,
+        requests_per_minute = EXCLUDED.requests_per_minute,
+        requires_approval = EXCLUDED.requires_approval, updated_at = statement_timestamp();
+  RETURN true;
+END
+$slotlock_set_api_key_limits$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[9]} FROM PUBLIC;
+
+-- The limits of the tenant's keys that have any, for its key list.
+CREATE OR REPLACE FUNCTION slotlock.list_api_key_limits(requested_tenant_ref text)
+RETURNS TABLE (key_id uuid, max_holds integer, max_held_hours integer, requests_per_minute integer, requires_approval boolean)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_list_api_key_limits$
+  SELECT limits.key_id, limits.max_holds, limits.max_held_hours, limits.requests_per_minute,
+         limits.requires_approval
+    FROM slotlock.api_key_limits limits
+   WHERE limits.tenant_ref = requested_tenant_ref;
+$slotlock_list_api_key_limits$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[10]} FROM PUBLIC;
+
+-- As authenticate_scoped_api_key, with the key's limits (null for the server's).
+CREATE OR REPLACE FUNCTION slotlock.authenticate_limited_api_key(presented_secret_hash bytea)
+RETURNS TABLE (
+  key_id uuid, key_tenant_ref text, key_scopes text[], scope_locations text[], scope_groups text[],
+  max_holds integer, max_held_hours integer, requests_per_minute integer, requires_approval boolean
+)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_authenticate_limited_api_key$
+BEGIN
+  RETURN QUERY
+  SELECT found.key_id, found.key_tenant_ref, found.key_scopes, found.scope_locations,
+         found.scope_groups, limits.max_holds, limits.max_held_hours, limits.requests_per_minute,
+         COALESCE(limits.requires_approval, false)
+    FROM slotlock.authenticate_scoped_api_key(presented_secret_hash) found
+    LEFT JOIN slotlock.api_key_limits limits ON limits.key_id = found.key_id;
+END
+$slotlock_authenticate_limited_api_key$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[11]} FROM PUBLIC;
 
 -- A key created, given a new secret or revoked appends to its tenant's feed (key.created,
 -- key.rotated, key.revoked): its id, scopes and expiry, never its digest, prefix or name. Only the
@@ -750,6 +1075,79 @@ AS $slotlock_dashboard_session_ended$
               AND ended.expires_at > now());
 $slotlock_dashboard_session_ended$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[1]} FROM PUBLIC;
+
+-- GitHub organizations an owner turned Slotlock on for (Teams on Cloud, RFC 0003, with
+-- SLOTLOCK_DASHBOARD_ORGS=enabled): their github-org:<id> tenants are served while enabled. Turning
+-- one off stops its keys at once and keeps its data, which the organization can turn back on to
+-- reach, or erase. Owner-only; read and written through the functions below.
+CREATE TABLE IF NOT EXISTS slotlock.dashboard_organizations (
+  org_id text PRIMARY KEY,
+  login text NOT NULL,
+  enabled boolean NOT NULL,
+  changed_by text NOT NULL,
+  changed_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_dashboard_organizations_valid CHECK (
+    org_id ~ '^[1-9][0-9]{0,19}$'
+    AND login ~ '^[A-Za-z0-9][A-Za-z0-9-]{0,38}$'
+    AND changed_by ~ '^github:[1-9][0-9]{0,19}$'
+  )
+);
+ALTER TABLE slotlock.dashboard_organizations ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.dashboard_organizations FROM PUBLIC;
+
+-- Of these organization ids (comma-separated), the ones turned on.
+CREATE OR REPLACE FUNCTION slotlock.enabled_organizations(requested_ids text)
+RETURNS SETOF text
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_enabled_organizations$
+  SELECT org.org_id FROM slotlock.dashboard_organizations org
+   WHERE org.enabled
+     AND org.org_id = ANY (pg_catalog.string_to_array(requested_ids, ','));
+$slotlock_enabled_organizations$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[2]} FROM PUBLIC;
+
+-- Turn Slotlock on for an organization; true when it was not on. Who may (an owner of it, read from
+-- GitHub at sign-in) is the dashboard's to check.
+CREATE OR REPLACE FUNCTION slotlock.enable_organization(requested_org text, requested_login text, requested_by text)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_enable_organization$
+DECLARE
+  was boolean;
+BEGIN
+  SELECT org.enabled INTO was FROM slotlock.dashboard_organizations org
+   WHERE org.org_id = requested_org FOR UPDATE;
+  INSERT INTO slotlock.dashboard_organizations AS org (org_id, login, enabled, changed_by)
+  VALUES (requested_org, requested_login, true, requested_by)
+  ON CONFLICT (org_id) DO UPDATE
+    SET login = EXCLUDED.login, enabled = true,
+        changed_by = CASE WHEN org.enabled THEN org.changed_by ELSE EXCLUDED.changed_by END,
+        changed_at = CASE WHEN org.enabled THEN org.changed_at ELSE statement_timestamp() END;
+  RETURN was IS NOT TRUE;
+END
+$slotlock_enable_organization$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[3]} FROM PUBLIC;
+
+-- Turn it off; true when it was on.
+CREATE OR REPLACE FUNCTION slotlock.disable_organization(requested_org text, requested_by text)
+RETURNS boolean
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_disable_organization$
+  UPDATE slotlock.dashboard_organizations org
+     SET enabled = false, changed_by = requested_by, changed_at = statement_timestamp()
+   WHERE org.org_id = requested_org AND org.enabled
+  RETURNING true;
+$slotlock_disable_organization$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[4]} FROM PUBLIC;
 `;
 
 // The schema's version: one row, written by the DDL itself, so running SLOTLOCK_CORE_DDL directly
@@ -816,15 +1214,18 @@ STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_tenant_suspended$
+  -- Its own suspension, its live tenant's (a test environment, RFC 0003 G9), or its partner's (a
+  -- partner's account, RFC 0003 P2).
   SELECT EXISTS (
     SELECT 1 FROM slotlock.tenant_suspensions suspended
-     WHERE suspended.tenant_ref = requested_tenant_ref
-  );
+     WHERE suspended.tenant_ref IN (requested_tenant_ref, regexp_replace(requested_tenant_ref, '~test$', ''))
+  ) OR slotlock.partner_tenant_blocked(requested_tenant_ref);
 $slotlock_tenant_suspended$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[0]} FROM PUBLIC;
 
 -- A hosted tenant's plan (plans.ts): the limits it buys, set from its Stripe subscription. A tenant
--- with no row has no plan limits; self-hosted Slotlock never writes one.
+-- with no row is on the deployment's default plan (plan_defaults) once that applies, and otherwise
+-- has no plan limits; self-hosted Slotlock writes neither.
 CREATE TABLE IF NOT EXISTS slotlock.tenant_plans (
   tenant_ref text PRIMARY KEY,
   plan text NOT NULL,
@@ -838,7 +1239,7 @@ CREATE TABLE IF NOT EXISTS slotlock.tenant_plans (
   updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
   CONSTRAINT slotlock_tenant_plans_tenant_ref_valid
     CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500),
-  CONSTRAINT slotlock_tenant_plans_plan_valid CHECK (plan IN ('free', 'developer')),
+  CONSTRAINT slotlock_tenant_plans_plan_valid CHECK (plan IN ('free', 'developer', 'team')),
   CONSTRAINT slotlock_tenant_plans_status_valid CHECK (status IN ('active', 'past_due', 'canceled')),
   CONSTRAINT slotlock_tenant_plans_limits_valid CHECK (
     max_resources BETWEEN 1 AND 100000
@@ -851,8 +1252,60 @@ CREATE TABLE IF NOT EXISTS slotlock.tenant_plans (
   )
 );
 ALTER TABLE slotlock.tenant_plans ENABLE ROW LEVEL SECURITY;
+-- A partner's account (RFC 0003 P4) is on one of its contract's plans: its own name and numbers,
+-- quotas included, set by put_partner_account. Every other row is a plan Pylota sells.
+ALTER TABLE slotlock.tenant_plans
+  ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'direct',
+  ADD COLUMN IF NOT EXISTS partner_id text,
+  ADD COLUMN IF NOT EXISTS quota_operations bigint,
+  ADD COLUMN IF NOT EXISTS quota_bookings bigint,
+  ADD COLUMN IF NOT EXISTS quota_stop_percent integer;
+DO $slotlock_tenant_plans_source$
+BEGIN
+  -- Replaced too when it predates the Team plan (Teams on Cloud), whose name it must take.
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint
+     WHERE conrelid = 'slotlock.tenant_plans'::regclass AND conname = 'slotlock_tenant_plans_source_valid'
+       AND pg_catalog.pg_get_constraintdef(oid) LIKE '%team%'
+  ) THEN
+    ALTER TABLE slotlock.tenant_plans DROP CONSTRAINT IF EXISTS slotlock_tenant_plans_source_valid;
+    -- Wider than the plan check it replaces, so added NOT VALID (DEPLOYMENT_VALIDATE_CONSTRAINTS).
+    ALTER TABLE slotlock.tenant_plans DROP CONSTRAINT IF EXISTS slotlock_tenant_plans_plan_valid;
+    ALTER TABLE slotlock.tenant_plans ADD CONSTRAINT slotlock_tenant_plans_source_valid CHECK (
+      (source = 'direct' AND partner_id IS NULL AND plan IN ('free', 'developer', 'team')
+       AND quota_operations IS NULL AND quota_bookings IS NULL AND quota_stop_percent IS NULL)
+      OR (source = 'partner' AND partner_id ~ '^[a-z][a-z0-9-]{1,39}$' AND plan ~ '^[a-z][a-z0-9_]{0,40}$'
+          AND quota_operations BETWEEN 1 AND 1000000000000 AND quota_bookings BETWEEN 1 AND 1000000000000
+          AND quota_stop_percent BETWEEN 100 AND 1000)
+    ) NOT VALID;
+  END IF;
+END
+$slotlock_tenant_plans_source$;
 REVOKE ALL ON slotlock.tenant_plans FROM PUBLIC;
 
+-- The plan a hosted deployment puts every tenant without a row of its own on, from applies_from:
+-- one row or none. Both servers read it through tenant_plan, so a limit holds whichever one a write
+-- comes through. Only the deployment role sets it (set_plan_default, \`slotlock plan default\`).
+CREATE TABLE IF NOT EXISTS slotlock.plan_defaults (
+  only_row boolean PRIMARY KEY DEFAULT true,
+  plan text NOT NULL,
+  max_resources integer NOT NULL,
+  max_api_keys integer NOT NULL,
+  max_webhook_endpoints integer NOT NULL,
+  applies_from timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_plan_defaults_one_row CHECK (only_row),
+  CONSTRAINT slotlock_plan_defaults_plan_valid CHECK (plan IN ('free', 'developer')),
+  CONSTRAINT slotlock_plan_defaults_limits_valid CHECK (
+    max_resources BETWEEN 1 AND 100000
+    AND max_api_keys BETWEEN 1 AND ${SLOTLOCK_API_KEY_ACTIVE_LIMIT}
+    AND max_webhook_endpoints BETWEEN 1 AND 1000
+  )
+);
+ALTER TABLE slotlock.plan_defaults ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.plan_defaults FROM PUBLIC;
+
+-- The tenant's own plan, or the default once it applies; no row when neither does.
 CREATE OR REPLACE FUNCTION slotlock.tenant_plan(requested_tenant_ref text)
 RETURNS TABLE (
   plan text, status text, max_resources integer, max_api_keys integer,
@@ -864,13 +1317,130 @@ STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_tenant_plan$
+  -- A test environment (<tenant>~test, RFC 0003 G9) is on its live tenant's plan, with no billing.
+  WITH live AS (
+    SELECT regexp_replace(requested_tenant_ref, '~test$', '') AS tenant_ref,
+           requested_tenant_ref ~ '~test$' AS test
+  )
   SELECT current.plan, current.status, current.max_resources, current.max_api_keys,
-         current.max_webhook_endpoints, current.stripe_customer, current.stripe_subscription,
-         current.current_period_end
-    FROM slotlock.tenant_plans current
-   WHERE current.tenant_ref = requested_tenant_ref;
+         current.max_webhook_endpoints,
+         CASE WHEN live.test THEN NULL ELSE current.stripe_customer END,
+         CASE WHEN live.test THEN NULL ELSE current.stripe_subscription END,
+         CASE WHEN live.test THEN NULL ELSE current.current_period_end END
+    FROM live JOIN slotlock.tenant_plans current ON current.tenant_ref = live.tenant_ref
+  UNION ALL
+  SELECT fallback.plan, 'active', fallback.max_resources, fallback.max_api_keys,
+         fallback.max_webhook_endpoints, NULL, NULL, NULL
+    FROM live, slotlock.plan_defaults fallback
+   WHERE fallback.applies_from <= statement_timestamp()
+     AND NOT EXISTS (SELECT 1 FROM slotlock.tenant_plans current
+                      WHERE current.tenant_ref = live.tenant_ref);
 $slotlock_tenant_plan$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[10]} FROM PUBLIC;
+
+-- The default plan and when it applies, for the dashboard and \`slotlock plan status\`.
+CREATE OR REPLACE FUNCTION slotlock.plan_default()
+RETURNS TABLE (
+  plan text, max_resources integer, max_api_keys integer, max_webhook_endpoints integer,
+  applies_from timestamptz
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_plan_default$
+  SELECT fallback.plan, fallback.max_resources, fallback.max_api_keys,
+         fallback.max_webhook_endpoints, fallback.applies_from
+    FROM slotlock.plan_defaults fallback;
+$slotlock_plan_default$;
+
+-- The tenant's plan and its own quotas, when it has them (a partner's account, RFC 0003 P4): null
+-- quotas are the plan's (plans.ts SLOTLOCK_PLAN_QUOTAS).
+CREATE OR REPLACE FUNCTION slotlock.tenant_plan_quotas(requested_tenant_ref text)
+RETURNS TABLE (plan text, operations bigint, bookings bigint, stop_percent integer)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_tenant_plan_quotas$
+  SELECT given.plan, own.quota_operations, own.quota_bookings, own.quota_stop_percent
+    FROM slotlock.tenant_plan(requested_tenant_ref) given
+    LEFT JOIN slotlock.tenant_plans own
+           ON own.tenant_ref = regexp_replace(requested_tenant_ref, '~test$', '');
+$slotlock_tenant_plan_quotas$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[19]} FROM PUBLIC;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[12]} FROM PUBLIC;
+
+-- Before the default applies to every tenant, a new one is put on it at once: one with no API key
+-- (ever), no row in the feed or anything maintenance lists, and no webhook. Existing tenants keep
+-- what they had until applies_from, as the notice given to them says. True when a plan was written.
+-- Under the key lock, so a key being issued is either counted here or sees the plan.
+CREATE OR REPLACE FUNCTION slotlock.enrol_tenant_plan(requested_tenant_ref text)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_enrol_tenant_plan$
+BEGIN
+  -- A test environment's plan is its live tenant's (RFC 0003 G9): that is the one enrolled.
+  requested_tenant_ref := regexp_replace(requested_tenant_ref, '~test$', '');
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || requested_tenant_ref, 0));
+  INSERT INTO slotlock.tenant_plans (
+    tenant_ref, plan, status, max_resources, max_api_keys, max_webhook_endpoints
+  )
+  SELECT requested_tenant_ref, fallback.plan, 'active', fallback.max_resources,
+         fallback.max_api_keys, fallback.max_webhook_endpoints
+    FROM slotlock.plan_defaults fallback
+   WHERE fallback.applies_from > statement_timestamp()
+     AND NOT EXISTS (SELECT 1 FROM slotlock.api_keys issued
+                      WHERE issued.tenant_ref = requested_tenant_ref)
+     AND NOT EXISTS (SELECT 1 FROM slotlock.maintenance_tenants listed
+                      WHERE listed.tenant_ref = requested_tenant_ref)
+     AND NOT EXISTS (SELECT 1 FROM slotlock.webhook_tenants hooked
+                      WHERE hooked.tenant_ref = requested_tenant_ref)
+  ON CONFLICT (tenant_ref) DO NOTHING;
+  RETURN FOUND;
+END
+$slotlock_enrol_tenant_plan$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[13]} FROM PUBLIC;
+
+-- Sets the default plan, or removes it with a null plan. Runs as its caller: only the deployment
+-- role, which owns the table, can.
+CREATE OR REPLACE FUNCTION slotlock.set_plan_default(
+  requested_plan text,
+  requested_max_resources integer,
+  requested_max_api_keys integer,
+  requested_max_webhook_endpoints integer,
+  requested_applies_from timestamptz
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_set_plan_default$
+BEGIN
+  IF requested_plan IS NULL THEN
+    DELETE FROM slotlock.plan_defaults;
+    RETURN;
+  END IF;
+  INSERT INTO slotlock.plan_defaults AS current (
+    only_row, plan, max_resources, max_api_keys, max_webhook_endpoints, applies_from, updated_at
+  )
+  VALUES (
+    true, requested_plan, requested_max_resources, requested_max_api_keys,
+    requested_max_webhook_endpoints, requested_applies_from, statement_timestamp()
+  )
+  ON CONFLICT (only_row) DO UPDATE
+  SET plan = EXCLUDED.plan,
+      max_resources = EXCLUDED.max_resources,
+      max_api_keys = EXCLUDED.max_api_keys,
+      max_webhook_endpoints = EXCLUDED.max_webhook_endpoints,
+      applies_from = EXCLUDED.applies_from,
+      updated_at = EXCLUDED.updated_at;
+END
+$slotlock_set_plan_default$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_OPERATOR_FUNCTIONS[2]} FROM PUBLIC;
 
 -- Sets the tenant's plan as its billing says it is now (the dashboard's Stripe webhook). Under the
 -- key lock, so a key being issued counts against the plan before or after, never between.
@@ -915,6 +1485,417 @@ BEGIN
 END
 $slotlock_set_tenant_plan$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[11]} FROM PUBLIC;
+
+-- A tenant's use of the service (usage.ts), by UTC day: operations its keys and the assistant ran
+-- (recorded by the servers), and the bookings and holds it committed (rolled up from its feed). By
+-- API key ('' for none) and surface. Counts only, never what was asked; owner-only, read and written
+-- through the functions below, erased with the tenant, kept ${SLOTLOCK_USAGE_RETENTION_DAYS} days.
+CREATE TABLE IF NOT EXISTS slotlock.usage_daily (
+  tenant_ref text NOT NULL,
+  day date NOT NULL,
+  metric text NOT NULL,
+  key_id text NOT NULL DEFAULT '',
+  origin text NOT NULL,
+  count bigint NOT NULL,
+  CONSTRAINT slotlock_usage_daily_pkey PRIMARY KEY (tenant_ref, day, metric, key_id, origin),
+  CONSTRAINT slotlock_usage_daily_tenant_ref_valid CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500),
+  CONSTRAINT slotlock_usage_daily_key_id_valid
+    CHECK (key_id = '' OR key_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'),
+  CONSTRAINT slotlock_usage_daily_origin_valid CHECK (origin ~ '^[a-z][a-z-]{0,39}$'),
+  CONSTRAINT slotlock_usage_daily_count_valid CHECK (count > 0)
+);
+-- The metrics it takes, and no other. Its comment is the list it was built from: a release that
+-- adds a metric replaces it (NOT VALID, so nothing is scanned under the lock; validated after).
+DO $slotlock_usage_daily_metric$
+BEGIN
+  ALTER TABLE slotlock.usage_daily DROP CONSTRAINT IF EXISTS slotlock_usage_daily_metric_valid;
+  IF (
+    SELECT pg_catalog.obj_description(oid, 'pg_constraint') FROM pg_catalog.pg_constraint
+     WHERE conrelid = 'slotlock.usage_daily'::regclass AND conname = 'slotlock_usage_daily_metric_known'
+  ) IS DISTINCT FROM '${SLOTLOCK_USAGE_METRICS.join(' ')}' THEN
+    ALTER TABLE slotlock.usage_daily DROP CONSTRAINT IF EXISTS slotlock_usage_daily_metric_known;
+    ALTER TABLE slotlock.usage_daily
+      ADD CONSTRAINT slotlock_usage_daily_metric_known
+      CHECK (metric IN (${SLOTLOCK_USAGE_METRICS.map((metric) => `'${metric}'`).join(', ')})) NOT VALID;
+    COMMENT ON CONSTRAINT slotlock_usage_daily_metric_known ON slotlock.usage_daily
+      IS '${SLOTLOCK_USAGE_METRICS.join(' ')}';
+  END IF;
+END
+$slotlock_usage_daily_metric$;
+ALTER TABLE slotlock.usage_daily ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.usage_daily FROM PUBLIC;
+
+-- Each batch of operation counts a server recorded, by the id it chose for it, so a batch sent again
+-- (its answer lost) adds nothing. Kept a week.
+CREATE TABLE IF NOT EXISTS slotlock.usage_flushes (
+  flush_id uuid PRIMARY KEY,
+  at timestamptz NOT NULL DEFAULT statement_timestamp()
+);
+ALTER TABLE slotlock.usage_flushes ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.usage_flushes FROM PUBLIC;
+
+-- How far each tenant's feed has been rolled up into usage_daily, as a feed position (txid, id).
+CREATE TABLE IF NOT EXISTS slotlock.usage_cursors (
+  tenant_ref text PRIMARY KEY,
+  txid xid8 NOT NULL,
+  id bigint NOT NULL,
+  CONSTRAINT slotlock_usage_cursors_tenant_ref_valid CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500)
+);
+ALTER TABLE slotlock.usage_cursors ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.usage_cursors FROM PUBLIC;
+
+-- Where metering began: a tenant with no cursor yet starts its roll-up here, so the feed written
+-- before this release is never counted. Recorded once, as the oldest transaction still running when
+-- the table is created: a change at or after it is counted, one before it never.
+CREATE TABLE IF NOT EXISTS slotlock.usage_meter_start (
+  only_row boolean PRIMARY KEY DEFAULT true,
+  txid xid8 NOT NULL,
+  CONSTRAINT slotlock_usage_meter_start_one_row CHECK (only_row)
+);
+-- The one row, written the first time and never moved by a later migration.
+INSERT INTO slotlock.usage_meter_start (txid)
+VALUES (pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot()))
+ON CONFLICT (only_row) DO NOTHING;
+ALTER TABLE slotlock.usage_meter_start ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.usage_meter_start FROM PUBLIC;
+
+-- The quota notices a tenant was sent (usage.threshold_reached, quotas.ts): one per UTC month,
+-- metric and share of the plan's quota, so each goes once however many servers see the count pass
+-- it. Owner-only, erased with the tenant; a month's rows go when the next month's first is noted.
+CREATE TABLE IF NOT EXISTS slotlock.usage_notices (
+  tenant_ref text NOT NULL,
+  month date NOT NULL,
+  metric text NOT NULL,
+  percent integer NOT NULL,
+  noticed_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_usage_notices_pkey PRIMARY KEY (tenant_ref, month, metric, percent),
+  CONSTRAINT slotlock_usage_notices_tenant_ref_valid CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500),
+  CONSTRAINT slotlock_usage_notices_month_valid CHECK (extract(day FROM month) = 1),
+  CONSTRAINT slotlock_usage_notices_metric_valid CHECK (metric IN (${SLOTLOCK_QUOTA_METRICS.map((metric) => `'${metric}'`).join(', ')})),
+  CONSTRAINT slotlock_usage_notices_percent_valid CHECK (percent IN (${SLOTLOCK_QUOTA_NOTICE_PERCENTS.join(', ')}))
+);
+ALTER TABLE slotlock.usage_notices ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.usage_notices FROM PUBLIC;
+
+-- Metered overage (off unless SLOTLOCK_OVERAGE=on, overage.ts): how many operations above its
+-- quota each tenant's month has been reported to Stripe as, so each is reported once however often
+-- the report runs. Owner-only: \`slotlock overage report\` runs as the schema owner.
+CREATE TABLE IF NOT EXISTS slotlock.overage_reports (
+  tenant_ref text NOT NULL,
+  month date NOT NULL,
+  reported bigint NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_overage_reports_pkey PRIMARY KEY (tenant_ref, month),
+  CONSTRAINT slotlock_overage_reports_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500 AND extract(day FROM month) = 1 AND reported >= 0
+  )
+);
+ALTER TABLE slotlock.overage_reports ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.overage_reports FROM PUBLIC;
+
+-- Adds a server's batch of counts, once per flush id: true when added, false when that batch was
+-- added before. Each row names a tenant, a day within a day of today, a metric a server counts
+-- (operations, webhook deliveries, assistant messages), a key ('' for none), a surface and a count;
+-- rows for the same day, metric, key and surface are summed first.
+CREATE OR REPLACE FUNCTION slotlock.record_usage(requested_flush_id uuid, requested_rows jsonb)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_record_usage$
+BEGIN
+  IF requested_flush_id IS NULL OR requested_rows IS NULL OR jsonb_typeof(requested_rows) <> 'array'
+     OR jsonb_array_length(requested_rows) NOT BETWEEN 1 AND 10000 THEN
+    RAISE EXCEPTION 'Slotlock usage batch must be 1-10,000 rows with a flush id'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM jsonb_array_elements(requested_rows) given
+     WHERE jsonb_typeof(given) <> 'object'
+        OR COALESCE(given ->> 'metric', '') NOT IN (${SLOTLOCK_RECORDED_USAGE_METRICS.map((metric) => `'${metric}'`).join(', ')})
+        OR (given ->> 'day') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+        OR (given ->> 'day')::date NOT BETWEEN current_date - 1 AND current_date + 1
+        OR jsonb_typeof(given -> 'count') <> 'number'
+        OR (given ->> 'count')::numeric NOT BETWEEN 1 AND 1000000000
+  ) THEN
+    RAISE EXCEPTION 'Slotlock usage rows must be counts a server records, 1-1,000,000,000, within a day of today'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  INSERT INTO slotlock.usage_flushes (flush_id) VALUES (requested_flush_id) ON CONFLICT DO NOTHING;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+  -- Each tenant's shared lock, as withTenant takes it: an erasure in flight commits first, and the
+  -- check below then sees it.
+  PERFORM pg_advisory_xact_lock_shared(hashtextextended('slotlock:tenant:' || named.tenant_ref, 0))
+     FROM (SELECT DISTINCT given ->> 'tenant_ref' AS tenant_ref
+             FROM jsonb_array_elements(requested_rows) given
+            ORDER BY 1) named;
+  -- Only for a tenant that still exists, one with an API key or a feed: counts a server held while
+  -- the tenant was erased are dropped rather than recreate rows for it.
+  INSERT INTO slotlock.usage_daily AS kept (tenant_ref, day, metric, key_id, origin, count)
+  SELECT given ->> 'tenant_ref', (given ->> 'day')::date, given ->> 'metric',
+         COALESCE(given ->> 'key_id', ''), given ->> 'origin', sum((given ->> 'count')::bigint)
+    FROM jsonb_array_elements(requested_rows) given
+   WHERE EXISTS (SELECT 1 FROM slotlock.api_keys issued WHERE issued.tenant_ref = given ->> 'tenant_ref')
+      OR EXISTS (SELECT 1 FROM slotlock.maintenance_tenants listed
+                  WHERE listed.tenant_ref = given ->> 'tenant_ref')
+   GROUP BY 1, 2, 3, 4, 5
+  ON CONFLICT (tenant_ref, day, metric, key_id, origin) DO UPDATE SET count = kept.count + EXCLUDED.count;
+  -- Now and then, batches older than a week (never sent again by then) are forgotten.
+  IF random() < 0.01 THEN
+    DELETE FROM slotlock.usage_flushes WHERE at < statement_timestamp() - interval '7 days';
+  END IF;
+  RETURN true;
+END
+$slotlock_record_usage$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[14]} FROM PUBLIC;
+
+-- Rolls up to max_rows of the tenant's feed past its cursor into usage_daily: each committed
+-- reservation.created, event.created (a whole series is one) and hold.confirmed is a booking, each
+-- hold.created a hold, and maintenance's own changes count for nothing. The feed is read as its readers read it, in (txid, id) order and
+-- only from transactions below this snapshot's xmin, every one of which has ended, so no change is
+-- counted twice or skipped, and one that rolled back is never counted. The counts and the cursor
+-- move in one transaction. Also deletes the tenant's usage older than the retention. Returns how
+-- many changes it read: fewer than max_rows means it has caught up.
+CREATE OR REPLACE FUNCTION slotlock.roll_up_usage(requested_tenant_ref text, max_rows integer)
+RETURNS integer
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_roll_up_usage$
+DECLARE
+  setting text;
+  previous jsonb := '{}'::jsonb;
+  from_txid xid8;
+  from_id bigint;
+  horizon xid8 := pg_snapshot_xmin(pg_current_snapshot());
+  last_txid xid8;
+  last_id bigint;
+  scanned integer;
+BEGIN
+  IF requested_tenant_ref IS NULL OR octet_length(requested_tenant_ref) NOT BETWEEN 1 AND 500
+     OR max_rows IS NULL OR max_rows NOT BETWEEN 1 AND 100000 THEN
+    RAISE EXCEPTION 'Slotlock usage roll-up arguments are invalid' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  -- As every tenant transaction does (withTenant): an erasure waits for it, and it for an erasure,
+  -- so it never counts into a tenant just erased. Then one roll-up of a tenant at a time.
+  PERFORM pg_advisory_xact_lock_shared(hashtextextended('slotlock:tenant:' || requested_tenant_ref, 0));
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:usage:' || requested_tenant_ref, 0));
+  SELECT cursor.txid, cursor.id INTO from_txid, from_id
+    FROM slotlock.usage_cursors cursor WHERE cursor.tenant_ref = requested_tenant_ref;
+  IF NOT FOUND THEN
+    SELECT start.txid, 0 INTO from_txid, from_id FROM slotlock.usage_meter_start start;
+  END IF;
+  -- The feed has forced row-level security, its owner bound too: read it in the tenant's context.
+  FOR setting IN
+    SELECT DISTINCT contract.tenant_context_setting FROM slotlock.rls_policy_contracts contract
+  LOOP
+    previous := previous || jsonb_build_object(setting, current_setting(setting, true));
+    PERFORM set_config(setting, requested_tenant_ref, true);
+  END LOOP;
+  WITH batch AS MATERIALIZED (
+    SELECT change.txid, change.id, change.type, change.origin, change.key_id, change.occurred_at
+      FROM slotlock.outbox change
+     WHERE change.tenant_ref = requested_tenant_ref
+       AND (change.txid, change.id) > (from_txid, from_id)
+       AND change.txid < horizon
+     ORDER BY change.txid, change.id
+     LIMIT max_rows
+  ), counted AS (
+    INSERT INTO slotlock.usage_daily AS kept (tenant_ref, day, metric, key_id, origin, count)
+    SELECT requested_tenant_ref, (batch.occurred_at AT TIME ZONE 'UTC')::date,
+           CASE batch.type WHEN 'hold.created' THEN 'holds' ELSE 'bookings' END,
+           COALESCE(batch.key_id::text, ''), COALESCE(batch.origin, 'library'), count(*)
+      FROM batch
+     WHERE batch.type IN ('reservation.created', 'event.created', 'hold.confirmed', 'hold.created')
+       AND COALESCE(batch.origin, 'library') <> 'maintenance'
+     GROUP BY 1, 2, 3, 4, 5
+    ON CONFLICT (tenant_ref, day, metric, key_id, origin) DO UPDATE SET count = kept.count + EXCLUDED.count
+  )
+  SELECT (SELECT batch.txid FROM batch ORDER BY batch.txid DESC, batch.id DESC LIMIT 1),
+         (SELECT batch.id FROM batch ORDER BY batch.txid DESC, batch.id DESC LIMIT 1),
+         (SELECT count(*) FROM batch)::integer
+    INTO last_txid, last_id, scanned;
+  -- How many resources the tenant holds today (archived ones included, as a plan counts them): the
+  -- day's last pass leaves the count at the end of the day. A count, so it replaces, never adds.
+  INSERT INTO slotlock.usage_daily AS kept (tenant_ref, day, metric, key_id, origin, count)
+  SELECT requested_tenant_ref, (statement_timestamp() AT TIME ZONE 'UTC')::date, 'resources', '',
+         'maintenance', count(*)
+    FROM slotlock.resources held
+   WHERE held.tenant_ref = requested_tenant_ref
+  HAVING count(*) > 0
+  ON CONFLICT (tenant_ref, day, metric, key_id, origin) DO UPDATE SET count = EXCLUDED.count;
+  IF scanned > 0 THEN
+    INSERT INTO slotlock.usage_cursors AS kept (tenant_ref, txid, id)
+    VALUES (requested_tenant_ref, last_txid, last_id)
+    ON CONFLICT (tenant_ref) DO UPDATE SET txid = EXCLUDED.txid, id = EXCLUDED.id;
+  END IF;
+  DELETE FROM slotlock.usage_daily
+   WHERE tenant_ref = requested_tenant_ref
+     AND day < current_date - ${SLOTLOCK_USAGE_RETENTION_DAYS};
+  FOR setting IN SELECT jsonb_object_keys(previous) LOOP
+    PERFORM set_config(setting, coalesce(previous ->> setting, ''), true);
+  END LOOP;
+  RETURN scanned;
+END
+$slotlock_roll_up_usage$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[15]} FROM PUBLIC;
+
+-- The tenant's usage from from_day to to_day (inclusive, at most 400 days), by day, metric, key and
+-- surface.
+CREATE OR REPLACE FUNCTION slotlock.tenant_usage(
+  requested_tenant_ref text, from_day date, to_day date
+)
+RETURNS TABLE (day date, metric text, key_id text, origin text, count bigint)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_tenant_usage$
+  SELECT used.day, used.metric, used.key_id, used.origin, used.count
+    FROM slotlock.usage_daily used
+   WHERE used.tenant_ref = requested_tenant_ref
+     AND used.day BETWEEN from_day AND to_day
+     AND to_day - from_day BETWEEN 0 AND ${SLOTLOCK_USAGE_RETENTION_DAYS}
+   ORDER BY used.day, used.metric, used.key_id, used.origin;
+$slotlock_tenant_usage$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[16]} FROM PUBLIC;
+
+-- The tenant's operations and bookings from from_day (its quota month's first day, UTC) until now,
+-- for its plan's quotas (quotas.ts): what usage_daily holds, plus the bookings in its feed past the
+-- roll-up cursor, counted as roll_up_usage will count them (at most ${SLOTLOCK_QUOTA_UNROLLED_LIMIT.toLocaleString('en-US')} of those, more
+-- than any quota). One statement, so a roll-up that commits meanwhile is counted once, never twice
+-- or not at all.
+CREATE OR REPLACE FUNCTION slotlock.tenant_quota_usage(requested_tenant_ref text, from_day date)
+RETURNS TABLE (operations bigint, bookings bigint)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_tenant_quota_usage$
+DECLARE
+  setting text;
+  previous jsonb := '{}'::jsonb;
+  today date := (statement_timestamp() AT TIME ZONE 'UTC')::date;
+BEGIN
+  IF requested_tenant_ref IS NULL OR octet_length(requested_tenant_ref) NOT BETWEEN 1 AND 500
+     OR from_day IS NULL OR from_day NOT BETWEEN today - 31 AND today + 1 THEN
+    RAISE EXCEPTION 'Slotlock quota usage arguments are invalid' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  -- The feed has forced row-level security, its owner bound too: read it in the tenant's context.
+  FOR setting IN
+    SELECT DISTINCT contract.tenant_context_setting FROM slotlock.rls_policy_contracts contract
+  LOOP
+    previous := previous || jsonb_build_object(setting, current_setting(setting, true));
+    PERFORM set_config(setting, requested_tenant_ref, true);
+  END LOOP;
+  RETURN QUERY
+  WITH rolled_to AS (
+    SELECT COALESCE(
+             (SELECT kept.txid FROM slotlock.usage_cursors kept WHERE kept.tenant_ref = requested_tenant_ref),
+             (SELECT start.txid FROM slotlock.usage_meter_start start)) AS txid,
+           COALESCE(
+             (SELECT kept.id FROM slotlock.usage_cursors kept WHERE kept.tenant_ref = requested_tenant_ref),
+             0) AS id
+  ), unrolled AS (
+    SELECT 1
+      FROM slotlock.outbox change, rolled_to
+     WHERE change.tenant_ref = requested_tenant_ref
+       AND (change.txid, change.id) > (rolled_to.txid, rolled_to.id)
+       AND change.type IN ('reservation.created', 'event.created', 'hold.confirmed')
+       AND COALESCE(change.origin, 'library') <> 'maintenance'
+       AND change.occurred_at >= from_day::timestamp AT TIME ZONE 'UTC'
+     LIMIT ${SLOTLOCK_QUOTA_UNROLLED_LIMIT}
+  ), rolled AS (
+    SELECT COALESCE(sum(used.count) FILTER (WHERE used.metric = 'operations'), 0) AS operations,
+           COALESCE(sum(used.count) FILTER (WHERE used.metric = 'bookings'), 0) AS bookings
+      FROM slotlock.usage_daily used
+     WHERE used.tenant_ref = requested_tenant_ref
+       AND used.day >= from_day
+       AND used.metric IN ('operations', 'bookings')
+  )
+  SELECT rolled.operations::bigint, (rolled.bookings + (SELECT count(*) FROM unrolled))::bigint
+    FROM rolled;
+  FOR setting IN SELECT jsonb_object_keys(previous) LOOP
+    PERFORM set_config(setting, coalesce(previous ->> setting, ''), true);
+  END LOOP;
+END
+$slotlock_tenant_quota_usage$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[17]} FROM PUBLIC;
+
+-- Notes that the tenant's use of a quota reached a share of it in a month, once: true the first
+-- time, when it also appends usage.threshold_reached to the tenant's feed (the metric, the share,
+-- the count, the quota and when the month ends), which its webhooks deliver as any change. Only for
+-- a tenant that still exists (one with an API key or a feed, as record_usage), under its shared lock.
+CREATE OR REPLACE FUNCTION slotlock.note_usage_threshold(
+  requested_tenant_ref text,
+  requested_month date,
+  requested_metric text,
+  requested_percent integer,
+  requested_used bigint,
+  requested_quota bigint
+)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_note_usage_threshold$
+DECLARE
+  setting text;
+  previous jsonb := '{}'::jsonb;
+  today date := (statement_timestamp() AT TIME ZONE 'UTC')::date;
+BEGIN
+  IF requested_tenant_ref IS NULL OR octet_length(requested_tenant_ref) NOT BETWEEN 1 AND 500
+     OR requested_month IS NULL OR extract(day FROM requested_month) <> 1
+     OR requested_month NOT BETWEEN today - 31 AND today + 1
+     OR requested_metric IS NULL
+     OR requested_metric NOT IN (${SLOTLOCK_QUOTA_METRICS.map((metric) => `'${metric}'`).join(', ')})
+     OR requested_percent IS NULL OR requested_percent NOT IN (${SLOTLOCK_QUOTA_NOTICE_PERCENTS.join(', ')})
+     OR requested_used IS NULL OR requested_used < 0
+     OR requested_quota IS NULL OR requested_quota < 1 THEN
+    RAISE EXCEPTION 'Slotlock usage notice arguments are invalid' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  -- As withTenant: an erasure in flight commits first, and the check below then sees it.
+  PERFORM pg_advisory_xact_lock_shared(hashtextextended('slotlock:tenant:' || requested_tenant_ref, 0));
+  IF NOT EXISTS (SELECT 1 FROM slotlock.api_keys issued WHERE issued.tenant_ref = requested_tenant_ref)
+     AND NOT EXISTS (SELECT 1 FROM slotlock.maintenance_tenants listed
+                      WHERE listed.tenant_ref = requested_tenant_ref) THEN
+    RETURN false;
+  END IF;
+  INSERT INTO slotlock.usage_notices (tenant_ref, month, metric, percent)
+  VALUES (requested_tenant_ref, requested_month, requested_metric, requested_percent)
+  ON CONFLICT DO NOTHING;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+  DELETE FROM slotlock.usage_notices
+   WHERE tenant_ref = requested_tenant_ref AND month < requested_month;
+  FOR setting IN
+    SELECT DISTINCT contract.tenant_context_setting FROM slotlock.rls_policy_contracts contract
+  LOOP
+    previous := previous || jsonb_build_object(setting, current_setting(setting, true));
+    PERFORM set_config(setting, requested_tenant_ref, true);
+  END LOOP;
+  INSERT INTO slotlock.outbox (tenant_ref, type, subject, data)
+  VALUES (
+    requested_tenant_ref, 'usage.threshold_reached',
+    'usage_' || requested_metric || '_' || to_char(requested_month, 'YYYY_MM') || '_' || requested_percent,
+    jsonb_build_object(
+      'metric', requested_metric, 'percent', requested_percent, 'used', requested_used,
+      'quota', requested_quota, 'period_start', to_char(requested_month, 'YYYY-MM-DD'),
+      'resets_at', to_char((requested_month + interval '1 month'), 'YYYY-MM-DD"T"00:00:00"Z"'))
+  );
+  FOR setting IN SELECT jsonb_object_keys(previous) LOOP
+    PERFORM set_config(setting, coalesce(previous ->> setting, ''), true);
+  END LOOP;
+  RETURN true;
+END
+$slotlock_note_usage_threshold$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[18]} FROM PUBLIC;
 
 -- True when the tenant was not suspended already; a second suspension keeps the first's reason.
 CREATE OR REPLACE FUNCTION slotlock.suspend_tenant(requested_tenant_ref text, requested_reason text)
@@ -967,6 +1948,7 @@ AS $slotlock_erase_tenant$
 DECLARE
   setting text;
   previous jsonb := '{}'::jsonb;
+  tested record;
 BEGIN
   IF requested_tenant_ref IS NULL OR octet_length(requested_tenant_ref) NOT BETWEEN 1 AND 500 THEN
     RAISE EXCEPTION 'Slotlock tenant reference must be 1-500 UTF-8 bytes'
@@ -975,6 +1957,15 @@ BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:tenant:' || requested_tenant_ref, 0));
   -- A key being issued commits first, so its row is deleted below with the rest.
   PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || requested_tenant_ref, 0));
+  -- A paid plan is cancelled first (plans.ts): erasing the tenant would leave its subscription
+  -- renewing for an account that no longer exists. Cancelling it in Stripe moves the plan to Free
+  -- (the dashboard's webhook), and then erasure runs. Under the key lock, which set_tenant_plan takes.
+  IF EXISTS (SELECT 1 FROM slotlock.tenant_plans billed
+              WHERE billed.tenant_ref = requested_tenant_ref
+                AND billed.stripe_subscription IS NOT NULL) THEN
+    RAISE EXCEPTION 'Slotlock tenant has a live subscription: cancel it before erasing the tenant'
+      USING ERRCODE = 'object_in_use', HINT = 'billing_active';
+  END IF;
   FOR setting IN
     SELECT DISTINCT contract.tenant_context_setting FROM slotlock.rls_policy_contracts contract
   LOOP
@@ -999,6 +1990,18 @@ BEGIN
   RETURN NEXT;
   erased_table := 'calendar_event_occurrences';
   DELETE FROM slotlock.calendar_event_occurrences WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'composite_claims';
+  DELETE FROM slotlock.composite_claims WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'approvals';
+  DELETE FROM slotlock.approvals WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'approval_policies';
+  DELETE FROM slotlock.approval_policies WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
   erased_table := 'reservations';
@@ -1044,8 +2047,40 @@ BEGIN
   DELETE FROM slotlock.booking_rule_defaults WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  erased_table := 'pool_settings';
+  DELETE FROM slotlock.pool_settings WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'tenant_plans';
   DELETE FROM slotlock.tenant_plans WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  -- A partner's account: what it used in months its partner has not closed is kept for billing
+  -- first (by the partner's account reference only), then its partner's record of it goes too.
+  INSERT INTO slotlock.partner_erased_usage AS kept (partner_id, account, plan, month, metric, count)
+  SELECT owned.partner_id, owned.account, owned.plan, monthly.month, monthly.metric, monthly.count
+    FROM slotlock.partner_accounts owned
+    JOIN (
+      SELECT daily.month, daily.metric,
+             CASE WHEN daily.metric = 'resources' THEN max(daily.count) ELSE sum(daily.count) END::bigint AS count
+        FROM (
+          SELECT date_trunc('month', used.day)::date AS month, used.day, used.metric, sum(used.count) AS count
+            FROM slotlock.usage_daily used
+           WHERE used.tenant_ref = requested_tenant_ref
+             AND used.day >= (date_trunc('month', statement_timestamp()) - interval '1 month')::date
+           GROUP BY 1, used.day, used.metric
+        ) daily
+       GROUP BY daily.month, daily.metric
+    ) monthly ON true
+   WHERE owned.tenant_ref = requested_tenant_ref
+     AND NOT EXISTS (SELECT 1 FROM slotlock.partner_month_closes closed
+                      WHERE closed.partner_id = owned.partner_id AND closed.month = monthly.month)
+  ON CONFLICT (partner_id, account, month, metric) DO UPDATE
+    SET count = CASE WHEN kept.metric = 'resources' THEN GREATEST(kept.count, EXCLUDED.count)
+                     ELSE kept.count + EXCLUDED.count END,
+        plan = EXCLUDED.plan, erased_at = statement_timestamp();
+  erased_table := 'partner_accounts';
+  DELETE FROM slotlock.partner_accounts WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
   erased_table := 'assistant_conversations';
@@ -1056,8 +2091,22 @@ BEGIN
   DELETE FROM slotlock.assistant_settings WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  -- A resource's group memberships, then the resource; its location after it, as resources and
+  -- locations under it name it.
+  erased_table := 'resource_group_members';
+  DELETE FROM slotlock.resource_group_members WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'resources';
   DELETE FROM slotlock.resources WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'resource_groups';
+  DELETE FROM slotlock.resource_groups WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'locations';
+  DELETE FROM slotlock.locations WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
   -- After every booking table: what their deletion just appended goes with the rest.
@@ -1085,6 +2134,31 @@ BEGIN
   DELETE FROM slotlock.maintenance_tenants WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  erased_table := 'usage_daily';
+  DELETE FROM slotlock.usage_daily WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'usage_cursors';
+  DELETE FROM slotlock.usage_cursors WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'usage_notices';
+  DELETE FROM slotlock.usage_notices WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'overage_reports';
+  DELETE FROM slotlock.overage_reports WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  -- Before the keys, so their count is reported (the key's deletion would take them too).
+  erased_table := 'api_key_limits';
+  DELETE FROM slotlock.api_key_limits WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'api_key_resource_scopes';
+  DELETE FROM slotlock.api_key_resource_scopes WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'api_keys';
   WITH erased AS (
     DELETE FROM slotlock.api_keys WHERE tenant_ref = requested_tenant_ref RETURNING secret_hash
@@ -1095,6 +2169,13 @@ BEGIN
   )
   SELECT count(*) INTO erased_rows FROM erased;
   RETURN NEXT;
+  -- An organization's record of being turned on goes with its tenant (Teams on Cloud).
+  erased_table := 'dashboard_organizations';
+  DELETE FROM slotlock.dashboard_organizations org
+   WHERE requested_tenant_ref ~ '^github-org:[1-9][0-9]{0,19}$'
+     AND org.org_id = substr(requested_tenant_ref, 12);
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'dashboard_tokens';
   erased_rows := 0;
   IF requested_tenant_ref LIKE 'github:%' THEN
@@ -1103,8 +2184,28 @@ BEGIN
        AND owner_hash = sha256(convert_to(
              'slotlock-dashboard-owner.' || substr(requested_tenant_ref, 8), 'UTF8'));
     GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  ELSIF requested_tenant_ref LIKE 'google:%' THEN
+    -- A Google person's form records are under their whole reference (dashboard.ts).
+    DELETE FROM slotlock.dashboard_tokens
+     WHERE kind = 'form'
+       AND owner_hash = sha256(convert_to('slotlock-dashboard-owner.' || requested_tenant_ref, 'UTF8'));
+    GET DIAGNOSTICS erased_rows = ROW_COUNT;
   END IF;
   RETURN NEXT;
+
+  -- A live tenant goes with its test environment (RFC 0003 G9), reported as test.<table>.
+  IF requested_tenant_ref !~ '~test$' AND octet_length(requested_tenant_ref) <= 495 THEN
+    FOR tested IN
+      SELECT inner_erased.erased_table AS name, inner_erased.erased_rows AS count
+        FROM slotlock.erase_tenant(requested_tenant_ref || '~test') inner_erased
+    LOOP
+      IF tested.count > 0 THEN
+        erased_table := 'test.' || tested.name;
+        erased_rows := tested.count;
+        RETURN NEXT;
+      END IF;
+    END LOOP;
+  END IF;
 
   FOR setting IN SELECT jsonb_object_keys(previous) LOOP
     PERFORM set_config(setting, coalesce(previous ->> setting, ''), true);
@@ -1112,6 +2213,76 @@ BEGIN
 END
 $slotlock_erase_tenant$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[1]} FROM PUBLIC;
+
+-- Empty a test environment (RFC 0004 A6 sandbox reset): its resources, locations and groups, every
+-- booking, event, hold and waitlist entry, its approval policies, booking rule defaults and pool
+-- settings, and its feed, as if it were new. What sets it up is kept: its API keys (and their
+-- scopes and limits), webhook endpoints, plan, usage and assistant. Only a test environment
+-- (a tenant ending ~test, api-keys.ts), and only the one the caller acts in (its tenant context), so
+-- a server resets nothing it was not asked to; a live tenant is never touched.
+CREATE OR REPLACE FUNCTION slotlock.reset_test_tenant(requested_tenant_ref text)
+RETURNS TABLE (reset_table text, reset_rows bigint)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_reset_test_tenant$
+DECLARE
+  emptied text;
+  gone bigint;
+BEGIN
+  IF requested_tenant_ref IS NULL OR octet_length(requested_tenant_ref) NOT BETWEEN 1 AND 500
+     OR right(requested_tenant_ref, 5) <> '~test' THEN
+    RAISE EXCEPTION 'Slotlock resets only a test environment (a tenant ending ~test)'
+      USING ERRCODE = 'insufficient_privilege', HINT = 'sandbox_test_only';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM slotlock.rls_policy_contracts contract
+                  WHERE current_setting(contract.tenant_context_setting, true) = requested_tenant_ref) THEN
+    RAISE EXCEPTION 'Slotlock resets only the tenant the caller acts in'
+      USING ERRCODE = 'insufficient_privilege', HINT = 'sandbox_test_only';
+  END IF;
+  -- Waits for the tenant's transactions under way, as erasure does.
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:tenant:' || requested_tenant_ref, 0));
+  -- Nothing reset is a change anyone is told of: the feed goes with what it described.
+  PERFORM set_config('slotlock.erasing', requested_tenant_ref, true);
+  reset_table := 'reservations';
+  DELETE FROM slotlock.reservations
+   WHERE tenant_ref = requested_tenant_ref
+      OR resource_id IN (SELECT owned.id FROM slotlock.resources owned
+                          WHERE owned.tenant_ref = requested_tenant_ref);
+  GET DIAGNOSTICS reset_rows = ROW_COUNT;
+  RETURN NEXT;
+  FOREACH emptied IN ARRAY ARRAY[
+    'calendar_event_attendees', 'calendar_event_reminders', 'calendar_event_exceptions',
+    'calendar_event_occurrences', 'composite_claims', 'approvals', 'approval_policies',
+    'calendar_events', 'calendar_event_tombstones', 'calendar_event_commands',
+    'reservation_tombstones', 'reservation_conflict_archive', 'calendar_coverage', 'hold_commands',
+    'waitlist_entries', 'booking_rule_defaults', 'pool_settings', 'resource_group_members',
+    'resources', 'resource_groups', 'outbox'
+  ] LOOP
+    reset_table := emptied;
+    EXECUTE format('DELETE FROM slotlock.%I WHERE tenant_ref = $1', emptied) USING requested_tenant_ref;
+    GET DIAGNOSTICS reset_rows = ROW_COUNT;
+    RETURN NEXT;
+  END LOOP;
+  -- Locations last: one may be inside another, so the innermost go first.
+  reset_table := 'locations';
+  reset_rows := 0;
+  LOOP
+    DELETE FROM slotlock.locations place
+     WHERE place.tenant_ref = requested_tenant_ref
+       AND NOT EXISTS (SELECT 1 FROM slotlock.locations inner_place
+                        WHERE inner_place.tenant_ref = requested_tenant_ref
+                          AND inner_place.parent_ref = place.ref);
+    GET DIAGNOSTICS gone = ROW_COUNT;
+    EXIT WHEN gone = 0;
+    reset_rows := reset_rows + gone;
+  END LOOP;
+  RETURN NEXT;
+  PERFORM set_config('slotlock.erasing', '', true);
+END
+$slotlock_reset_test_tenant$;
+REVOKE ALL ON FUNCTION slotlock.reset_test_tenant(text) FROM PUBLIC;
 
 -- The tenants with a webhook endpoint, which a server delivers for. Row-level security hides every
 -- other tenant's endpoints from the serving role, so this list (names only) is how a server that
@@ -1579,7 +2750,68 @@ CREATE TABLE IF NOT EXISTS slotlock.webhook_endpoints (
     last_error IS NULL OR char_length(last_error) <= 500
   )
 );
+-- A create's retry identity (RFC 0004 P0-5), kept as long as the endpoint: the same key and
+-- request answer the endpoint (and its secret) the first made, another is idempotency_conflict.
+ALTER TABLE slotlock.webhook_endpoints ADD COLUMN IF NOT EXISTS idempotency_key text;
+ALTER TABLE slotlock.webhook_endpoints ADD COLUMN IF NOT EXISTS payload_hash text;
+DO $slotlock_webhook_key$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'slotlock_webhook_endpoints_key_valid'
+                    AND conrelid = 'slotlock.webhook_endpoints'::regclass) THEN
+    ALTER TABLE slotlock.webhook_endpoints ADD CONSTRAINT slotlock_webhook_endpoints_key_valid CHECK (
+      (idempotency_key IS NULL AND payload_hash IS NULL)
+      OR (octet_length(idempotency_key) BETWEEN 1 AND 500 AND payload_hash ~ '^[0-9a-f]{64}$')
+    ) NOT VALID;
+  END IF;
+END
+$slotlock_webhook_key$;
+CREATE UNIQUE INDEX IF NOT EXISTS slotlock_webhook_endpoints_key_idx
+  ON slotlock.webhook_endpoints (tenant_ref, idempotency_key) WHERE idempotency_key IS NOT NULL;
 ALTER TABLE slotlock.webhook_endpoints ADD COLUMN IF NOT EXISTS changes_pruned boolean NOT NULL DEFAULT false;
+-- Which resources' changes an endpoint receives (RFC 0003 G5): with any of these, only changes about
+-- a resource it names, or one in a pool, at a location (or a location in it) or in a group it names,
+-- matched as the change is delivered. Null: no such filter.
+ALTER TABLE slotlock.webhook_endpoints ADD COLUMN IF NOT EXISTS filter_resource_ids uuid[];
+ALTER TABLE slotlock.webhook_endpoints ADD COLUMN IF NOT EXISTS filter_pools text[];
+ALTER TABLE slotlock.webhook_endpoints ADD COLUMN IF NOT EXISTS filter_locations text[];
+ALTER TABLE slotlock.webhook_endpoints ADD COLUMN IF NOT EXISTS filter_groups text[];
+DO $slotlock_webhook_filter$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint
+     WHERE conrelid = 'slotlock.webhook_endpoints'::regclass
+       AND conname = 'slotlock_webhook_endpoints_filter_valid'
+  ) THEN
+    ALTER TABLE slotlock.webhook_endpoints
+      ADD CONSTRAINT slotlock_webhook_endpoints_filter_valid CHECK (
+        (filter_resource_ids IS NULL
+         OR cardinality(filter_resource_ids) BETWEEN 1 AND ${SLOTLOCK_WEBHOOK_FILTER_RESOURCES})
+        AND (filter_pools IS NULL OR cardinality(filter_pools) BETWEEN 1 AND ${SLOTLOCK_WEBHOOK_FILTER_REFS})
+        AND (filter_locations IS NULL OR cardinality(filter_locations) BETWEEN 1 AND ${SLOTLOCK_WEBHOOK_FILTER_REFS})
+        AND (filter_groups IS NULL OR cardinality(filter_groups) BETWEEN 1 AND ${SLOTLOCK_WEBHOOK_FILTER_REFS})
+      ) NOT VALID;
+  END IF;
+END
+$slotlock_webhook_filter$;
+
+-- A location and every location it is in, by reference (none for none): what a location filter
+-- matches a resource's location against. Run as its caller, in the tenant's context.
+CREATE OR REPLACE FUNCTION slotlock.location_path(requested_tenant_ref text, requested_ref text)
+RETURNS text[]
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_location_path$
+  WITH RECURSIVE up(ref, parent_ref, steps) AS (
+    SELECT place.ref, place.parent_ref, 1 FROM slotlock.locations place
+     WHERE place.tenant_ref = requested_tenant_ref AND place.ref = requested_ref
+    UNION ALL
+    SELECT place.ref, place.parent_ref, up.steps + 1
+      FROM slotlock.locations place JOIN up ON place.tenant_ref = requested_tenant_ref AND place.ref = up.parent_ref
+     WHERE up.steps <= ${SLOTLOCK_MAX_LOCATION_DEPTH}
+  )
+  SELECT COALESCE(array_agg(up.ref), '{}'::text[]) FROM up;
+$slotlock_location_path$;
 -- 0.5 allowed a filter of at most 20 types, fewer than there are now. The wider CHECK admits every
 -- row the old one did, so it is added NOT VALID (no scan under the lock), and the old one dropped.
 DO $slotlock_webhook_type_count$
@@ -1632,6 +2864,23 @@ CREATE TABLE IF NOT EXISTS slotlock.waitlist_entries (
 );
 CREATE INDEX IF NOT EXISTS slotlock_waitlist_entries_queue_idx
   ON slotlock.waitlist_entries (tenant_ref, created_at, id) WHERE status = 'waiting';
+-- A join's retry identity (RFC 0004 P0-5), kept as long as the entry: the same key and request
+-- answer the entry the first made, another request is idempotency_conflict.
+ALTER TABLE slotlock.waitlist_entries ADD COLUMN IF NOT EXISTS idempotency_key text;
+ALTER TABLE slotlock.waitlist_entries ADD COLUMN IF NOT EXISTS payload_hash text;
+DO $slotlock_waitlist_key$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'slotlock_waitlist_entries_key_valid'
+                    AND conrelid = 'slotlock.waitlist_entries'::regclass) THEN
+    ALTER TABLE slotlock.waitlist_entries ADD CONSTRAINT slotlock_waitlist_entries_key_valid CHECK (
+      (idempotency_key IS NULL AND payload_hash IS NULL)
+      OR (octet_length(idempotency_key) BETWEEN 1 AND 500 AND payload_hash ~ '^[0-9a-f]{64}$')
+    ) NOT VALID;
+  END IF;
+END
+$slotlock_waitlist_key$;
+CREATE UNIQUE INDEX IF NOT EXISTS slotlock_waitlist_entries_key_idx
+  ON slotlock.waitlist_entries (tenant_ref, idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS slotlock_waitlist_entries_tenant_idx
   ON slotlock.waitlist_entries (tenant_ref, starts_at);
 
@@ -1651,6 +2900,46 @@ CREATE TABLE IF NOT EXISTS slotlock.booking_rule_defaults (
     jsonb_typeof(rules) = 'object' AND octet_length(rules::text) <= 4096
   )
 );
+
+-- The order a pool booking tries a pool's members in (RFC 0003 G7): stable (by id), least_booked
+-- (fewest bookings made on each in the last 30 days first) or round_robin (from the one after the
+-- member booked last). A pool without a row is stable.
+CREATE TABLE IF NOT EXISTS slotlock.pool_settings (
+  tenant_ref text NOT NULL,
+  pool_ref text NOT NULL,
+  member_order text NOT NULL DEFAULT 'stable',
+  last_member uuid,
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_pool_settings_pkey PRIMARY KEY (tenant_ref, pool_ref),
+  CONSTRAINT slotlock_pool_settings_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND pool_ref ~ '^[a-z0-9][a-z0-9._-]{0,99}$'
+    AND member_order IN (${SLOTLOCK_POOL_ORDERS.map((order) => `'${order}'`).join(', ')})
+  )
+);
+
+-- At most SLOTLOCK_MAX_POOL_SETTINGS pools a tenant set an order for, under the tenant's lock.
+CREATE OR REPLACE FUNCTION slotlock.pool_settings_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_pool_settings_guard$
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:pool-settings:' || NEW.tenant_ref, 0));
+  -- An upsert of a pool the tenant has set fires this before its conflict is found.
+  IF NOT EXISTS (SELECT 1 FROM slotlock.pool_settings kept
+                  WHERE kept.tenant_ref = NEW.tenant_ref AND kept.pool_ref = NEW.pool_ref)
+     AND (SELECT count(*) FROM slotlock.pool_settings kept WHERE kept.tenant_ref = NEW.tenant_ref)
+         >= ${SLOTLOCK_MAX_POOL_SETTINGS} THEN
+    RAISE EXCEPTION 'Slotlock keeps an order for at most ${SLOTLOCK_MAX_POOL_SETTINGS} pools a tenant'
+      USING ERRCODE = 'check_violation', HINT = 'pool_order_limit_reached';
+  END IF;
+  RETURN NEW;
+END
+$slotlock_pool_settings_guard$;
+CREATE OR REPLACE TRIGGER slotlock_pool_settings_guard
+  BEFORE INSERT ON slotlock.pool_settings
+  FOR EACH ROW EXECUTE FUNCTION slotlock.pool_settings_guard();
 
 -- The model a tenant's dashboard assistant uses (dashboard.ts, assistant.ts), one row a tenant.
 -- The API key is stored only sealed (AES-256-GCM under the deployment's SLOTLOCK_ASSISTANT_SECRET,
@@ -1740,7 +3029,11 @@ BEGIN
       kind := CASE WHEN NEW.status = 'held' THEN 'hold.updated' ELSE 'reservation.updated' END;
     END IF;
   ELSE
+    -- A no-show release (releaseNoShows) names its deletion, so the feed has one change for it,
+    -- not a cancellation as well. The marker only renames: a deletion is always recorded.
     kind := CASE
+      WHEN OLD.status <> 'held' AND current_setting('slotlock.ending', true) = 'no_show'
+        THEN 'reservation.no_show'
       WHEN OLD.status <> 'held' THEN 'reservation.cancelled'
       WHEN OLD.expires_at <= statement_timestamp() THEN 'hold.expired'
       ELSE 'hold.released'
@@ -1757,7 +3050,12 @@ BEGIN
       'start', changed.starts_at,
       'end', changed.ends_at,
       'buffer_after_ms', changed.buffer_after_ms,
-      'revision', CASE WHEN changed.status = 'held' THEN NULL ELSE changed.revision END,
+      -- A no-show carries the revision its reference is retired at, and the check-in window.
+      'revision', CASE WHEN changed.status = 'held' THEN NULL
+                       WHEN kind = 'reservation.no_show' THEN changed.revision + 1
+                       ELSE changed.revision END,
+      'check_in_minutes', CASE WHEN kind = 'reservation.no_show'
+                               THEN NULLIF(current_setting('slotlock.ending_detail', true), '')::int END,
       'expires_at', CASE WHEN changed.status = 'held' THEN changed.expires_at END,
       -- A move says where it came from.
       'before', CASE WHEN TG_OP = 'UPDATE' THEN jsonb_build_object(
@@ -1907,9 +3205,11 @@ LANGUAGE sql
 STABLE
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_outbox_erasing$
-  SELECT owner = current_setting('slotlock.erasing', true)
+  -- Never null: the erasing setting is unset outside erasure, and a null here would read as neither
+  -- erasing nor not to a caller that writes NOT outbox_erasing(...).
+  SELECT COALESCE(owner = current_setting('slotlock.erasing', true)
      AND current_user = (SELECT pg_catalog.pg_get_userbyid(nspowner) FROM pg_catalog.pg_namespace
-                          WHERE nspname = 'slotlock');
+                          WHERE nspname = 'slotlock'), false);
 $slotlock_outbox_erasing$;
 
 CREATE OR REPLACE FUNCTION slotlock.outbox_resource_change()
@@ -1922,6 +3222,8 @@ DECLARE
   kind text;
   before jsonb := '{}'::jsonb;
   after jsonb := '{}'::jsonb;
+  -- The profile fields that changed, by name only: a name or description is calendar content.
+  profile_changed text[] := '{}';
   details jsonb;
 BEGIN
   changed := CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
@@ -1929,7 +3231,7 @@ BEGIN
   IF TG_OP = 'INSERT' THEN
     kind := 'resource.created';
     details := jsonb_build_object(
-      'timezone', NEW.timezone, 'visibility', NEW.visibility, 'pool', NEW.pool_ref,
+      'timezone', NEW.timezone, 'visibility', NEW.visibility, 'pool', NEW.pool_ref, 'location', NEW.location_ref,
       'availability', NEW.availability_rules, 'booking_rules', NEW.booking_rules);
   ELSIF TG_OP = 'DELETE' THEN
     kind := 'resource.deleted';
@@ -1951,6 +3253,16 @@ BEGIN
       before := before || jsonb_build_object('pool', OLD.pool_ref);
       after := after || jsonb_build_object('pool', NEW.pool_ref);
     END IF;
+    IF OLD.location_ref IS DISTINCT FROM NEW.location_ref THEN
+      before := before || jsonb_build_object('location', OLD.location_ref);
+      after := after || jsonb_build_object('location', NEW.location_ref);
+    END IF;
+    -- The composite it is a part of (RFC 0003 G8), read through to_jsonb: a migration that runs
+    -- this before the column exists sees no change rather than an error.
+    IF (to_jsonb(OLD) -> 'parent_id') IS DISTINCT FROM (to_jsonb(NEW) -> 'parent_id') THEN
+      before := before || jsonb_build_object('parent', to_jsonb(OLD) -> 'parent_id');
+      after := after || jsonb_build_object('parent', to_jsonb(NEW) -> 'parent_id');
+    END IF;
     IF OLD.availability_rules IS DISTINCT FROM NEW.availability_rules THEN
       before := before || jsonb_build_object('availability', OLD.availability_rules);
       after := after || jsonb_build_object('availability', NEW.availability_rules);
@@ -1959,9 +3271,24 @@ BEGIN
       before := before || jsonb_build_object('booking_rules', OLD.booking_rules);
       after := after || jsonb_build_object('booking_rules', NEW.booking_rules);
     END IF;
-    IF after = '{}'::jsonb THEN RETURN NULL; END IF;
+    IF OLD.name IS DISTINCT FROM NEW.name THEN profile_changed := profile_changed || 'name'::text; END IF;
+    IF OLD.description IS DISTINCT FROM NEW.description THEN
+      profile_changed := profile_changed || 'description'::text;
+    END IF;
+    IF OLD.kind IS DISTINCT FROM NEW.kind THEN profile_changed := profile_changed || 'kind'::text; END IF;
+    IF OLD.capacity IS DISTINCT FROM NEW.capacity THEN
+      profile_changed := profile_changed || 'capacity'::text;
+    END IF;
+    IF OLD.labels IS DISTINCT FROM NEW.labels THEN profile_changed := profile_changed || 'labels'::text; END IF;
+    IF OLD.attributes IS DISTINCT FROM NEW.attributes THEN
+      profile_changed := profile_changed || 'attributes'::text;
+    END IF;
+    IF after = '{}'::jsonb AND cardinality(profile_changed) = 0 THEN RETURN NULL; END IF;
     kind := 'resource.updated';
-    details := jsonb_build_object('before', before, 'after', after);
+    details := jsonb_build_object('before', before, 'after', after)
+      || CASE WHEN cardinality(profile_changed) > 0
+              THEN jsonb_build_object('profile_changed', to_jsonb(profile_changed))
+              ELSE '{}'::jsonb END;
   END IF;
   INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
   VALUES (
@@ -2033,16 +3360,55 @@ BEGIN
   INSERT INTO slotlock.outbox (tenant_ref, type, subject, data, actor)
   VALUES (
     changed.tenant_ref, kind, changed.id::text,
-    jsonb_build_object('id', changed.id, 'event_types', to_jsonb(changed.event_types)),
+    jsonb_build_object('id', changed.id, 'event_types', to_jsonb(changed.event_types))
+      || CASE WHEN changed.filter_resource_ids IS NULL AND changed.filter_pools IS NULL
+                   AND changed.filter_locations IS NULL AND changed.filter_groups IS NULL
+              THEN '{}'::jsonb
+              ELSE jsonb_build_object('filter', jsonb_strip_nulls(jsonb_build_object(
+                'resource_ids', to_jsonb(changed.filter_resource_ids), 'pools', to_jsonb(changed.filter_pools),
+                'locations', to_jsonb(changed.filter_locations), 'groups', to_jsonb(changed.filter_groups))))
+         END,
     NULLIF(current_setting('slotlock.actor', true), '')
   );
   RETURN NULL;
 END
 $slotlock_outbox_webhook$;
 
+-- A resource deleted: resource.deleted, recorded just before its row goes, while its groups are
+-- still there (a foreign key's cascade takes them before any AFTER trigger of the resource runs),
+-- with where it was: its pool, location and groups, so an endpoint filtered by them still receives
+-- it (event-feed.ts FILTER_MATCH). A delete that fails takes this row back with it.
+CREATE OR REPLACE FUNCTION slotlock.outbox_resource_deleting()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_outbox_resource_deleting$
+DECLARE
+  was_in text[];
+BEGIN
+  IF OLD.tenant_ref IS NULL OR slotlock.outbox_erasing(OLD.tenant_ref) THEN RETURN OLD; END IF;
+  was_in := ARRAY(SELECT member.group_ref FROM slotlock.resource_group_members member
+                   WHERE member.tenant_ref = OLD.tenant_ref AND member.resource_id = OLD.id
+                   ORDER BY member.group_ref);
+  INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+  VALUES (
+    OLD.tenant_ref, OLD.id, 'resource.deleted', OLD.id::text,
+    jsonb_build_object('id', OLD.id, 'reference', OLD.external_ref)
+      || jsonb_strip_nulls(jsonb_build_object('pool', OLD.pool_ref, 'location', OLD.location_ref))
+      || CASE WHEN cardinality(was_in) > 0 THEN jsonb_build_object('groups', to_jsonb(was_in)) ELSE '{}'::jsonb END,
+    NULLIF(current_setting('slotlock.actor', true), '')
+  );
+  RETURN OLD;
+END
+$slotlock_outbox_resource_deleting$;
+
+-- Deletion has its own trigger, before the row goes (outbox_resource_deleting).
 CREATE OR REPLACE TRIGGER slotlock_outbox_resource_change
-  AFTER INSERT OR UPDATE OR DELETE ON slotlock.resources
+  AFTER INSERT OR UPDATE ON slotlock.resources
   FOR EACH ROW EXECUTE FUNCTION slotlock.outbox_resource_change();
+CREATE OR REPLACE TRIGGER slotlock_outbox_resource_deleting
+  BEFORE DELETE ON slotlock.resources
+  FOR EACH ROW EXECUTE FUNCTION slotlock.outbox_resource_deleting();
 CREATE OR REPLACE TRIGGER slotlock_outbox_coverage_change
   AFTER INSERT OR DELETE ON slotlock.calendar_coverage
   FOR EACH ROW EXECUTE FUNCTION slotlock.outbox_coverage_change();
@@ -2072,6 +3438,52 @@ CREATE OR REPLACE TRIGGER slotlock_outbox_coverage_in_shape
   BEFORE INSERT ON slotlock.outbox
   FOR EACH ROW WHEN (NEW.type LIKE 'coverage.%')
   EXECUTE FUNCTION slotlock.outbox_coverage_in_shape();
+-- A resource put in a group or taken out of one (RFC 0003 G3): resource.updated, with the groups
+-- it was in before and is in after, by reference, sorted. Once per statement, from the rows the
+-- statement changed, so each resource it touched has one change, whatever its other groups; adding
+-- a resource to a group it is in changes no row and appends none. Taken out because its group was
+-- deleted is a change; because the resource was deleted (resource.deleted says so) or its tenant
+-- erased is not.
+CREATE OR REPLACE FUNCTION slotlock.outbox_group_membership_change()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_outbox_group_membership$
+BEGIN
+  INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+  SELECT resource.tenant_ref, resource.id, 'resource.updated', resource.id::text,
+         jsonb_build_object(
+           'id', resource.id, 'reference', resource.external_ref,
+           'before', jsonb_build_object('groups', to_jsonb(CASE WHEN TG_OP = 'INSERT'
+             THEN ARRAY(SELECT kept FROM unnest(now_in.refs) kept WHERE kept <> ALL (touched.groups) ORDER BY kept)
+             ELSE ARRAY(SELECT DISTINCT was FROM unnest(now_in.refs || touched.groups) was ORDER BY was) END)),
+           'after', jsonb_build_object('groups', to_jsonb(now_in.refs))),
+         NULLIF(current_setting('slotlock.actor', true), '')
+    FROM (SELECT changed.tenant_ref, changed.resource_id, array_agg(changed.group_ref) AS groups
+            FROM changed_members changed
+           GROUP BY changed.tenant_ref, changed.resource_id) touched
+    JOIN slotlock.resources resource
+      ON resource.id = touched.resource_id AND resource.tenant_ref = touched.tenant_ref
+   CROSS JOIN LATERAL (
+     SELECT ARRAY(SELECT member.group_ref FROM slotlock.resource_group_members member
+                   WHERE member.tenant_ref = touched.tenant_ref AND member.resource_id = touched.resource_id
+                   ORDER BY member.group_ref) AS refs) now_in
+   -- IS NOT TRUE, not NOT: outbox_erasing is null for the schema owner outside erasure, and a
+   -- cascade's trigger runs as the owner on PostgreSQL 18.
+   WHERE slotlock.outbox_erasing(touched.tenant_ref) IS NOT TRUE
+   ORDER BY resource.id;
+  RETURN NULL;
+END
+$slotlock_outbox_group_membership$;
+-- A trigger with a transition table takes one event; both name it changed_members for the function.
+CREATE OR REPLACE TRIGGER slotlock_outbox_group_member_added
+  AFTER INSERT ON slotlock.resource_group_members
+  REFERENCING NEW TABLE AS changed_members
+  FOR EACH STATEMENT EXECUTE FUNCTION slotlock.outbox_group_membership_change();
+CREATE OR REPLACE TRIGGER slotlock_outbox_group_member_removed
+  AFTER DELETE ON slotlock.resource_group_members
+  REFERENCING OLD TABLE AS changed_members
+  FOR EACH STATEMENT EXECUTE FUNCTION slotlock.outbox_group_membership_change();
 CREATE OR REPLACE TRIGGER slotlock_outbox_webhook_change
   AFTER INSERT OR DELETE ON slotlock.webhook_endpoints
   FOR EACH ROW EXECUTE FUNCTION slotlock.outbox_webhook_change();
@@ -2088,6 +3500,435 @@ DROP TRIGGER IF EXISTS slotlock_outbox_calendar_event_change ON slotlock.calenda
 CREATE TRIGGER slotlock_outbox_calendar_event_change
   AFTER INSERT OR UPDATE OR DELETE ON slotlock.calendar_events
   FOR EACH ROW EXECUTE FUNCTION slotlock.outbox_calendar_event_change();
+`;
+
+/**
+ * Partner accounts (RFC 0003 part 4, P1-P4, P6): a partner (stackapi.app, say) creates and runs
+ * Slotlock tenants for its own users, `partner:<partner>:<account>`, with plans from its contract,
+ * and Pylota invoices the partner. Owner-only tables; the serving role reaches them only through
+ * SLOTLOCK_PARTNER_FUNCTIONS, each scoped to the one partner a partner key names.
+ */
+const SLOTLOCK_PARTNER_DDL = `
+CREATE TABLE IF NOT EXISTS slotlock.partners (
+  id text PRIMARY KEY,
+  name text NOT NULL,
+  status text NOT NULL DEFAULT 'active',
+  -- The plans its accounts may be on, the scopes their keys may have, and its prices (partners.ts).
+  contract jsonb NOT NULL,
+  stripe_customer text,
+  -- Where usage.period_closed goes (P5), signed with the secret.
+  webhook_url text,
+  webhook_secret text,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_partners_valid CHECK (
+    id ~ '^[a-z][a-z0-9-]{1,39}$'
+    AND char_length(name) BETWEEN 1 AND 100 AND name !~ '[[:cntrl:]]'
+    AND status IN ('active', 'suspended')
+    AND jsonb_typeof(contract) = 'object'
+    AND (stripe_customer IS NULL OR stripe_customer ~ '^cus_[A-Za-z0-9]{1,250}$')
+    AND (webhook_url IS NULL OR (webhook_url ~ '^https://' AND octet_length(webhook_url) <= 2048))
+    AND (webhook_secret IS NULL OR webhook_secret ~ '^whsec_[A-Za-z0-9+/=]{32,200}$')
+  )
+);
+ALTER TABLE slotlock.partners ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.partners FROM PUBLIC;
+
+CREATE TABLE IF NOT EXISTS slotlock.partner_keys (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  partner_id text NOT NULL REFERENCES slotlock.partners (id) ON DELETE CASCADE,
+  name text NOT NULL,
+  prefix text NOT NULL,
+  secret_hash bytea NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  last_used_at timestamptz,
+  revoked_at timestamptz,
+  CONSTRAINT slotlock_partner_keys_secret_hash_key UNIQUE (secret_hash),
+  CONSTRAINT slotlock_partner_keys_valid CHECK (
+    octet_length(secret_hash) = 32
+    AND char_length(name) BETWEEN 1 AND 100 AND name !~ '[[:cntrl:]]'
+    AND prefix ~ '^slk_partner_[0-9A-Za-z]{6}$'
+  )
+);
+ALTER TABLE slotlock.partner_keys ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.partner_keys FROM PUBLIC;
+
+CREATE TABLE IF NOT EXISTS slotlock.partner_accounts (
+  partner_id text NOT NULL REFERENCES slotlock.partners (id) ON DELETE RESTRICT,
+  account text NOT NULL,
+  tenant_ref text NOT NULL,
+  plan text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_partner_accounts_pkey PRIMARY KEY (partner_id, account),
+  CONSTRAINT slotlock_partner_accounts_tenant_key UNIQUE (tenant_ref),
+  CONSTRAINT slotlock_partner_accounts_valid CHECK (
+    account ~ '^[A-Za-z0-9._-]{1,128}$'
+    AND tenant_ref = 'partner:' || partner_id || ':' || account
+    AND plan ~ '^[a-z][a-z0-9_]{0,40}$'
+  )
+);
+ALTER TABLE slotlock.partner_accounts ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.partner_accounts FROM PUBLIC;
+
+-- Each line of a partner's month (P6), recorded before it is sent to Stripe and with its Stripe id
+-- after, so a month is billed once however often the job runs.
+CREATE TABLE IF NOT EXISTS slotlock.partner_invoices (
+  partner_id text NOT NULL REFERENCES slotlock.partners (id) ON DELETE RESTRICT,
+  month date NOT NULL,
+  line text NOT NULL,
+  description text NOT NULL,
+  quantity bigint NOT NULL,
+  amount bigint NOT NULL,
+  currency text NOT NULL,
+  stripe_item text,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  sent_at timestamptz,
+  CONSTRAINT slotlock_partner_invoices_pkey PRIMARY KEY (partner_id, month, line),
+  CONSTRAINT slotlock_partner_invoices_valid CHECK (
+    extract(day FROM month) = 1
+    AND line ~ '^[a-z][a-z0-9_]{0,60}$'
+    AND char_length(description) BETWEEN 1 AND 500
+    AND quantity >= 0 AND amount >= 0
+    AND currency ~ '^[a-z]{3}$'
+    AND (stripe_item IS NULL OR stripe_item ~ '^ii_[A-Za-z0-9]{1,250}$')
+  )
+);
+ALTER TABLE slotlock.partner_invoices ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.partner_invoices FROM PUBLIC;
+
+-- A partner's month as it was first closed (P5, P6): each account's totals and the checksum the
+-- usage.period_closed webhook carries. Every later run sends the same body under the same id, and
+-- the month's invoice lines are priced from these totals only, once.
+CREATE TABLE IF NOT EXISTS slotlock.partner_month_closes (
+  partner_id text NOT NULL REFERENCES slotlock.partners (id) ON DELETE RESTRICT,
+  month date NOT NULL,
+  accounts jsonb NOT NULL,
+  checksum text NOT NULL,
+  closed_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  webhook_status integer,
+  webhook_delivered_at timestamptz,
+  CONSTRAINT slotlock_partner_month_closes_pkey PRIMARY KEY (partner_id, month),
+  CONSTRAINT slotlock_partner_month_closes_valid CHECK (
+    extract(day FROM month) = 1 AND checksum ~ '^[0-9a-f]{64}$' AND jsonb_typeof(accounts) = 'array'
+    AND (webhook_status IS NULL OR webhook_status BETWEEN 100 AND 599)
+  )
+);
+ALTER TABLE slotlock.partner_month_closes ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.partner_month_closes FROM PUBLIC;
+
+-- What an account of a partner's used in a month not yet closed, kept when the account is erased
+-- (erase_tenant), so its month is still billed. By the partner's own account reference: the tenant
+-- and everything in it are gone.
+CREATE TABLE IF NOT EXISTS slotlock.partner_erased_usage (
+  partner_id text NOT NULL REFERENCES slotlock.partners (id) ON DELETE RESTRICT,
+  account text NOT NULL,
+  plan text NOT NULL,
+  month date NOT NULL,
+  metric text NOT NULL,
+  count bigint NOT NULL,
+  erased_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_partner_erased_usage_pkey PRIMARY KEY (partner_id, account, month, metric),
+  CONSTRAINT slotlock_partner_erased_usage_valid CHECK (extract(day FROM month) = 1 AND count >= 0)
+);
+ALTER TABLE slotlock.partner_erased_usage ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.partner_erased_usage FROM PUBLIC;
+
+-- Each day a partner compared its counts with Slotlock's (P5, the partner API's reconcile call):
+-- how many accounts, how many differed by more than ${SLOTLOCK_RECONCILE_TOLERANCE_PERCENT}%, and by
+-- how much at most. A day with any is an incident on our side: \`slotlock billing daily\` lists it.
+CREATE TABLE IF NOT EXISTS slotlock.partner_reconciliations (
+  partner_id text NOT NULL REFERENCES slotlock.partners (id) ON DELETE CASCADE,
+  day date NOT NULL,
+  accounts integer NOT NULL,
+  mismatched integer NOT NULL,
+  worst_percent numeric NOT NULL,
+  reconciled_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_partner_reconciliations_pkey PRIMARY KEY (partner_id, day),
+  CONSTRAINT slotlock_partner_reconciliations_valid CHECK (
+    accounts BETWEEN 0 AND 100000 AND mismatched BETWEEN 0 AND accounts AND worst_percent >= 0
+  )
+);
+ALTER TABLE slotlock.partner_reconciliations ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.partner_reconciliations FROM PUBLIC;
+
+-- Whether the tenant is a partner's account whose partner is not active: its keys authenticate as
+-- nothing and it is suspended with its partner (tenant_suspended). Any other tenant reference, one
+-- that merely starts with partner: included, is never blocked here.
+CREATE OR REPLACE FUNCTION slotlock.partner_tenant_blocked(requested_tenant_ref text)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_partner_tenant_blocked$
+  SELECT EXISTS (
+    SELECT 1 FROM slotlock.partner_accounts owned
+      JOIN slotlock.partners partner ON partner.id = owned.partner_id
+     WHERE owned.tenant_ref = regexp_replace(requested_tenant_ref, '~test$', '')
+       AND partner.status <> 'active'
+  );
+$slotlock_partner_tenant_blocked$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[0]} FROM PUBLIC;
+
+-- A partner key's partner, while the key is not revoked and the partner is active; last_used_at
+-- moves at most once a minute.
+CREATE OR REPLACE FUNCTION slotlock.authenticate_partner_key(presented_secret_hash bytea)
+RETURNS TABLE (key_id uuid, partner_id text)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_authenticate_partner_key$
+#variable_conflict use_column
+BEGIN
+  UPDATE slotlock.partner_keys used
+     SET last_used_at = now()
+   WHERE used.secret_hash = presented_secret_hash AND used.revoked_at IS NULL
+     AND (used.last_used_at IS NULL OR used.last_used_at < now() - interval '1 minute');
+  RETURN QUERY
+  SELECT found.id, found.partner_id
+    FROM slotlock.partner_keys found
+    JOIN slotlock.partners partner ON partner.id = found.partner_id
+   WHERE found.secret_hash = presented_secret_hash AND found.revoked_at IS NULL
+     AND partner.status = 'active';
+END
+$slotlock_authenticate_partner_key$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[1]} FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION slotlock.partner_contract(requested_partner_id text)
+RETURNS jsonb
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_partner_contract$
+  SELECT partner.contract FROM slotlock.partners partner
+   WHERE partner.id = requested_partner_id AND partner.status = 'active';
+$slotlock_partner_contract$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[2]} FROM PUBLIC;
+
+-- Create the partner's account, or put it on another of its contract's plans: the account's tenant
+-- gets that plan's limits and quotas (tenant_plans, source partner). Refused (invalid_parameter_value)
+-- for a plan the contract does not have; nothing for a partner that is not active.
+CREATE OR REPLACE FUNCTION slotlock.put_partner_account(
+  requested_partner_id text, requested_account text, requested_plan text
+)
+RETURNS TABLE (account text, tenant_ref text, plan text, created_at timestamptz, updated_at timestamptz, created boolean)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_put_partner_account$
+#variable_conflict use_column
+DECLARE
+  terms jsonb;
+  chosen jsonb;
+  tenant text := 'partner:' || requested_partner_id || ':' || requested_account;
+  existed boolean;
+BEGIN
+  SELECT partner.contract INTO terms FROM slotlock.partners partner
+   WHERE partner.id = requested_partner_id AND partner.status = 'active';
+  IF NOT FOUND THEN RETURN; END IF;
+  IF requested_account IS NULL OR requested_account !~ '^[A-Za-z0-9._-]{1,128}$' THEN
+    RAISE EXCEPTION 'Slotlock partner account must be 1-128 letters, digits, dots, dashes or underscores'
+      USING ERRCODE = 'invalid_parameter_value', HINT = 'invalid_partner_account';
+  END IF;
+  chosen := terms -> 'plans' -> requested_plan;
+  IF requested_plan IS NULL OR chosen IS NULL OR jsonb_typeof(chosen) <> 'object' THEN
+    RAISE EXCEPTION 'Slotlock partner plan is not one of the contract''s'
+      USING ERRCODE = 'invalid_parameter_value', HINT = 'invalid_partner_plan';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:tenant:' || tenant, 0));
+  existed := EXISTS (SELECT 1 FROM slotlock.partner_accounts kept
+                      WHERE kept.partner_id = requested_partner_id AND kept.account = requested_account);
+  INSERT INTO slotlock.partner_accounts AS kept (partner_id, account, tenant_ref, plan)
+  VALUES (requested_partner_id, requested_account, tenant, requested_plan)
+  ON CONFLICT (partner_id, account) DO UPDATE
+    SET plan = EXCLUDED.plan,
+        updated_at = CASE WHEN kept.plan = EXCLUDED.plan THEN kept.updated_at ELSE statement_timestamp() END;
+  INSERT INTO slotlock.tenant_plans AS kept (
+    tenant_ref, plan, status, max_resources, max_api_keys, max_webhook_endpoints,
+    source, partner_id, quota_operations, quota_bookings, quota_stop_percent
+  ) VALUES (
+    tenant, requested_plan, 'active',
+    (chosen ->> 'resources')::integer, (chosen ->> 'api_keys')::integer, (chosen ->> 'webhook_endpoints')::integer,
+    'partner', requested_partner_id,
+    (chosen ->> 'operations')::bigint, (chosen ->> 'bookings')::bigint, (chosen ->> 'stop_percent')::integer
+  )
+  ON CONFLICT (tenant_ref) DO UPDATE
+    SET plan = EXCLUDED.plan, status = 'active',
+        max_resources = EXCLUDED.max_resources, max_api_keys = EXCLUDED.max_api_keys,
+        max_webhook_endpoints = EXCLUDED.max_webhook_endpoints,
+        source = 'partner', partner_id = EXCLUDED.partner_id,
+        quota_operations = EXCLUDED.quota_operations, quota_bookings = EXCLUDED.quota_bookings,
+        quota_stop_percent = EXCLUDED.quota_stop_percent,
+        stripe_customer = NULL, stripe_subscription = NULL, current_period_end = NULL,
+        updated_at = statement_timestamp();
+  RETURN QUERY
+  SELECT kept.account, kept.tenant_ref, kept.plan, kept.created_at, kept.updated_at, NOT existed
+    FROM slotlock.partner_accounts kept
+   WHERE kept.partner_id = requested_partner_id AND kept.account = requested_account;
+END
+$slotlock_put_partner_account$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[3]} FROM PUBLIC;
+
+-- PL/pgSQL, as partner_usage: these read tables created after this section, which a SQL function's
+-- body may not name when it is created on a new schema.
+CREATE OR REPLACE FUNCTION slotlock.list_partner_accounts(requested_partner_id text)
+RETURNS TABLE (account text, plan text, suspended boolean, created_at timestamptz, updated_at timestamptz)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_list_partner_accounts$
+#variable_conflict use_column
+BEGIN
+  RETURN QUERY
+  SELECT owned.account, owned.plan,
+         EXISTS (SELECT 1 FROM slotlock.tenant_suspensions held WHERE held.tenant_ref = owned.tenant_ref),
+         owned.created_at, owned.updated_at
+    FROM slotlock.partner_accounts owned
+   WHERE owned.partner_id = requested_partner_id
+   ORDER BY owned.account
+   LIMIT 10000;
+END
+$slotlock_list_partner_accounts$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[4]} FROM PUBLIC;
+
+-- One account, with how many resources (archived ones included) and active keys it holds.
+CREATE OR REPLACE FUNCTION slotlock.get_partner_account(requested_partner_id text, requested_account text)
+RETURNS TABLE (account text, tenant_ref text, plan text, suspended boolean, created_at timestamptz,
+               updated_at timestamptz, resources bigint, api_keys bigint)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_get_partner_account$
+#variable_conflict use_column
+DECLARE
+  owned slotlock.partner_accounts%ROWTYPE;
+  setting text;
+  previous jsonb := '{}'::jsonb;
+  counted bigint;
+BEGIN
+  SELECT * INTO owned FROM slotlock.partner_accounts kept
+   WHERE kept.partner_id = requested_partner_id AND kept.account = requested_account;
+  IF NOT FOUND THEN RETURN; END IF;
+  -- Resources have forced row-level security, their owner bound too: counted in the account's context.
+  FOR setting IN SELECT DISTINCT contract.tenant_context_setting FROM slotlock.rls_policy_contracts contract
+  LOOP
+    previous := previous || jsonb_build_object(setting, current_setting(setting, true));
+    PERFORM set_config(setting, owned.tenant_ref, true);
+  END LOOP;
+  SELECT count(*) INTO counted FROM slotlock.resources held WHERE held.tenant_ref = owned.tenant_ref;
+  FOR setting IN SELECT jsonb_object_keys(previous) LOOP
+    PERFORM set_config(setting, coalesce(previous ->> setting, ''), true);
+  END LOOP;
+  RETURN QUERY
+  SELECT owned.account, owned.tenant_ref, owned.plan,
+         EXISTS (SELECT 1 FROM slotlock.tenant_suspensions held WHERE held.tenant_ref = owned.tenant_ref),
+         owned.created_at, owned.updated_at, counted,
+         (SELECT count(*) FROM slotlock.api_keys issued
+           WHERE issued.tenant_ref = owned.tenant_ref AND issued.revoked_at IS NULL
+             AND (issued.expires_at IS NULL OR issued.expires_at > now()));
+END
+$slotlock_get_partner_account$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[5]} FROM PUBLIC;
+
+-- Suspend an account of the partner's, or lift a suspension the partner made: one Pylota made (for
+-- abuse, say) the partner cannot lift. True when it changed something; null for no such account.
+CREATE OR REPLACE FUNCTION slotlock.set_partner_account_suspended(
+  requested_partner_id text, requested_account text, requested_suspended boolean, requested_reason text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_set_partner_account_suspended$
+DECLARE
+  tenant text;
+BEGIN
+  SELECT owned.tenant_ref INTO tenant FROM slotlock.partner_accounts owned
+    JOIN slotlock.partners partner ON partner.id = owned.partner_id AND partner.status = 'active'
+   WHERE owned.partner_id = requested_partner_id AND owned.account = requested_account;
+  IF NOT FOUND THEN RETURN NULL; END IF;
+  -- As suspend_tenant: the tenant's lock and its key lock, so writes in flight finish first.
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:tenant:' || tenant, 0));
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || tenant, 0));
+  IF requested_suspended THEN
+    INSERT INTO slotlock.tenant_suspensions (tenant_ref, reason)
+    VALUES (tenant, 'partner: ' || COALESCE(left(requested_reason, 200), 'suspended by its partner'))
+    ON CONFLICT (tenant_ref) DO NOTHING;
+    RETURN FOUND;
+  END IF;
+  DELETE FROM slotlock.tenant_suspensions held
+   WHERE held.tenant_ref = tenant AND held.reason LIKE 'partner: %';
+  RETURN FOUND;
+END
+$slotlock_set_partner_account_suspended$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[6]} FROM PUBLIC;
+
+-- The partner's accounts' usage (P5), from usage_daily, by account, UTC day and metric, from
+-- from_day to to_day (at most the retention); one account, or all of them.
+CREATE OR REPLACE FUNCTION slotlock.partner_usage(
+  requested_partner_id text, from_day date, to_day date, requested_account text
+)
+RETURNS TABLE (account text, day date, metric text, count bigint)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_partner_usage$
+#variable_conflict use_column
+BEGIN
+  RETURN QUERY
+  SELECT owned.account, used.day, used.metric,
+         CASE WHEN used.metric = 'resources' THEN max(used.count) ELSE sum(used.count) END::bigint
+    FROM slotlock.partner_accounts owned
+    JOIN slotlock.usage_daily used ON used.tenant_ref = owned.tenant_ref
+   WHERE owned.partner_id = requested_partner_id
+     AND (requested_account IS NULL OR owned.account = requested_account)
+     AND used.day BETWEEN from_day AND to_day
+     AND to_day - from_day BETWEEN 0 AND ${SLOTLOCK_USAGE_RETENTION_DAYS}
+   GROUP BY owned.account, used.day, used.metric
+   ORDER BY owned.account, used.day, used.metric;
+END
+$slotlock_partner_usage$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[7]} FROM PUBLIC;
+
+-- The tenant of a partner's account, for a partner key acting for it (Slotlock-Account, RFC 0003
+-- P3): one indexed read, on every such request.
+CREATE OR REPLACE FUNCTION slotlock.partner_account_tenant(requested_partner_id text, requested_account text)
+RETURNS text
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_partner_account_tenant$
+  SELECT owned.tenant_ref FROM slotlock.partner_accounts owned
+   WHERE owned.partner_id = requested_partner_id AND owned.account = requested_account;
+$slotlock_partner_account_tenant$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[8]} FROM PUBLIC;
+
+-- Record a partner's comparison of one day (the latest one stands).
+CREATE OR REPLACE FUNCTION slotlock.record_partner_reconciliation(
+  requested_partner_id text, requested_day date, requested_accounts integer, requested_mismatched integer,
+  requested_worst numeric
+)
+RETURNS void
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_record_partner_reconciliation$
+  INSERT INTO slotlock.partner_reconciliations AS kept (partner_id, day, accounts, mismatched, worst_percent)
+  VALUES (requested_partner_id, requested_day, requested_accounts, requested_mismatched, requested_worst)
+  ON CONFLICT (partner_id, day) DO UPDATE
+    SET accounts = EXCLUDED.accounts, mismatched = EXCLUDED.mismatched,
+        worst_percent = EXCLUDED.worst_percent, reconciled_at = statement_timestamp();
+$slotlock_record_partner_reconciliation$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[9]} FROM PUBLIC;
 `;
 
 // btree_gist is created in slotlock when it is missing; one installed elsewhere stays where it is.
@@ -2189,6 +4030,18 @@ CREATE INDEX IF NOT EXISTS slotlock_resources_pool_idx
 ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS visibility text NOT NULL DEFAULT 'shared';
 -- When the tenant archived it: listed nowhere and booked no more, its history kept. NULL: in use.
 ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS archived_at timestamptz;
+-- Its profile (resource-profile.ts, RFC 0003 G1), each part optional: a name shown instead of the
+-- reference, a description, what kind of thing it is (a hint for filtering, never a rule), how many
+-- people or seats it holds (informational, never enforced), labels to find it by, and attributes
+-- the integrator wants back. Calendar content: the feed names the fields that changed, never their
+-- values. Added with constant defaults, so no row is rewritten.
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS name text;
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS description text;
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'other';
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS capacity integer;
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS labels text[] NOT NULL DEFAULT '{}';
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS attributes jsonb NOT NULL DEFAULT '{}'::jsonb;
+CREATE INDEX IF NOT EXISTS slotlock_resources_labels_idx ON slotlock.resources USING gin (labels);
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS tenant_ref text;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS external_ref text;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS buffer_after_ms bigint NOT NULL DEFAULT 0;
@@ -2475,6 +4328,30 @@ BEGIN
     ALTER TABLE slotlock.resources
       ADD CONSTRAINT slotlock_resources_visibility_valid CHECK (visibility IN ('shared', 'private'));
   END IF;
+  -- The profile's bounds (SLOTLOCK_RESOURCE_PROFILE_LIMITS), NOT VALID so adding them scans
+  -- nothing under the lock; DEPLOYMENT_VALIDATE_CONSTRAINTS validates them after the migration.
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'slotlock_resources_profile_valid'
+       AND conrelid = 'slotlock.resources'::regclass
+  ) THEN
+    ALTER TABLE slotlock.resources
+      ADD CONSTRAINT slotlock_resources_profile_valid CHECK (
+        (name IS NULL OR (char_length(name) BETWEEN 1 AND ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.name}
+                          AND btrim(name) <> ''))
+        AND (description IS NULL
+             OR (char_length(description) BETWEEN 1 AND ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.description}
+                 AND btrim(description) <> ''))
+        AND kind IN (${SLOTLOCK_RESOURCE_KINDS.map((kind) => `'${kind}'`).join(', ')})
+        AND (capacity IS NULL OR capacity BETWEEN 1 AND ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.capacity})
+        AND cardinality(labels) <= ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.labels}
+        AND array_position(labels, NULL) IS NULL
+        AND (cardinality(labels) = 0
+             OR array_to_string(labels, ',') ~ '^[a-z0-9][a-z0-9._-]{0,63}(,[a-z0-9][a-z0-9._-]{0,63})*$')
+        AND jsonb_typeof(attributes) = 'object'
+        AND octet_length(attributes::text) <= ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.attributeBytes * 2}
+      ) NOT VALID;
+  END IF;
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
      WHERE conname = 'slotlock_reservations_revision_valid'
@@ -2583,6 +4460,406 @@ BEGIN
       ) NOT VALID;
   END IF;
 END $$;
+
+-- Where a tenant's resources are (RFC 0003 G2, resource-profile.ts): a tree of at most
+-- ${SLOTLOCK_MAX_LOCATION_DEPTH} levels (a region, a site, a building, a floor, a zone, or whatever the
+-- tenant's are), at most ${SLOTLOCK_MAX_LOCATIONS} a tenant, each named by a reference of the tenant's own.
+-- A location something is in (a resource, or a location under it) cannot be deleted: the foreign
+-- keys are NO ACTION, checked at the end of the statement, so erasing a whole tenant's tree in one
+-- statement passes. Its time zone, when it has one, is the one a resource created there without
+-- its own takes (the nearest location above that has one).
+CREATE TABLE IF NOT EXISTS slotlock.locations (
+  tenant_ref text NOT NULL,
+  ref text NOT NULL,
+  name text NOT NULL,
+  parent_ref text,
+  timezone text,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_locations_pkey PRIMARY KEY (tenant_ref, ref),
+  CONSTRAINT slotlock_locations_parent_fkey FOREIGN KEY (tenant_ref, parent_ref)
+    REFERENCES slotlock.locations (tenant_ref, ref),
+  CONSTRAINT slotlock_locations_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND ref ~ '^[a-z0-9][a-z0-9._-]{0,99}$'
+    AND char_length(name) BETWEEN 1 AND ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.name} AND btrim(name) <> ''
+    AND (parent_ref IS NULL OR parent_ref <> ref)
+    AND (timezone IS NULL OR char_length(timezone) BETWEEN 1 AND 100)
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_locations_parent_idx
+  ON slotlock.locations (tenant_ref, parent_ref) WHERE parent_ref IS NOT NULL;
+
+-- A location's depth, a loop through its parents, and the tenant's count, under the tenant's
+-- location lock, so two writers never each pass a check the other then breaks.
+CREATE OR REPLACE FUNCTION slotlock.locations_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_locations_guard$
+DECLARE
+  above integer := 0;
+  below integer := 0;
+  looped boolean := false;
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:locations:' || NEW.tenant_ref, 0));
+  -- An upsert of a location the tenant has fires this before its conflict is found: not a new one.
+  IF TG_OP = 'INSERT'
+     AND NOT EXISTS (SELECT 1 FROM slotlock.locations kept
+                      WHERE kept.tenant_ref = NEW.tenant_ref AND kept.ref = NEW.ref)
+     AND (SELECT count(*) FROM slotlock.locations kept WHERE kept.tenant_ref = NEW.tenant_ref)
+         >= ${SLOTLOCK_MAX_LOCATIONS} THEN
+    RAISE EXCEPTION 'Slotlock keeps at most ${SLOTLOCK_MAX_LOCATIONS} locations a tenant'
+      USING ERRCODE = 'check_violation', HINT = 'location_limit_reached';
+  END IF;
+  IF NEW.parent_ref IS NOT NULL THEN
+    WITH RECURSIVE up(at, parent, steps) AS (
+      SELECT kept.ref, kept.parent_ref, 1 FROM slotlock.locations kept
+       WHERE kept.tenant_ref = NEW.tenant_ref AND kept.ref = NEW.parent_ref
+      UNION ALL
+      SELECT kept.ref, kept.parent_ref, up.steps + 1
+        FROM slotlock.locations kept JOIN up ON kept.tenant_ref = NEW.tenant_ref AND kept.ref = up.parent
+       WHERE up.steps <= ${SLOTLOCK_MAX_LOCATION_DEPTH}
+    )
+    SELECT coalesce(max(up.steps), 0), coalesce(bool_or(up.at = NEW.ref), false)
+      INTO above, looped FROM up;
+    IF looped THEN
+      RAISE EXCEPTION 'Slotlock location cannot be under itself'
+        USING ERRCODE = 'check_violation', HINT = 'location_cycle';
+    END IF;
+  END IF;
+  IF TG_OP = 'UPDATE' THEN
+    WITH RECURSIVE down(at, steps) AS (
+      SELECT kept.ref, 1 FROM slotlock.locations kept
+       WHERE kept.tenant_ref = NEW.tenant_ref AND kept.parent_ref = NEW.ref
+      UNION ALL
+      SELECT kept.ref, down.steps + 1
+        FROM slotlock.locations kept JOIN down ON kept.tenant_ref = NEW.tenant_ref AND kept.parent_ref = down.at
+       WHERE down.steps <= ${SLOTLOCK_MAX_LOCATION_DEPTH}
+    )
+    SELECT coalesce(max(down.steps), 0) INTO below FROM down;
+  END IF;
+  IF above + 1 + below > ${SLOTLOCK_MAX_LOCATION_DEPTH} THEN
+    RAISE EXCEPTION 'Slotlock locations are at most ${SLOTLOCK_MAX_LOCATION_DEPTH} levels deep'
+      USING ERRCODE = 'check_violation', HINT = 'location_too_deep';
+  END IF;
+  RETURN NEW;
+END
+$slotlock_locations_guard$;
+CREATE OR REPLACE TRIGGER slotlock_locations_guard
+  BEFORE INSERT OR UPDATE OF parent_ref ON slotlock.locations
+  FOR EACH ROW EXECUTE FUNCTION slotlock.locations_guard();
+
+-- The location a resource is at, one at most; null when not said.
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS location_ref text;
+CREATE INDEX IF NOT EXISTS slotlock_resources_location_idx
+  ON slotlock.resources (tenant_ref, location_ref) WHERE location_ref IS NOT NULL;
+DO $slotlock_resources_location$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'slotlock_resources_location_fkey'
+       AND conrelid = 'slotlock.resources'::regclass
+  ) THEN
+    -- NOT VALID: the column is new, and DEPLOYMENT_VALIDATE_CONSTRAINTS validates it after.
+    ALTER TABLE slotlock.resources
+      ADD CONSTRAINT slotlock_resources_location_fkey FOREIGN KEY (tenant_ref, location_ref)
+      REFERENCES slotlock.locations (tenant_ref, ref) NOT VALID;
+  END IF;
+END
+$slotlock_resources_location$;
+
+-- Any set of resources a tenant wants (RFC 0003 G3): a team, a department, a contract, "Saturday
+-- clinic", "airport vans". Many a resource, at most ${SLOTLOCK_MAX_GROUPS_PER_RESOURCE}, and at most
+-- ${SLOTLOCK_MAX_RESOURCE_GROUPS} a tenant. No booking rule reads them: a pool is how resources are
+-- booked as a class.
+CREATE TABLE IF NOT EXISTS slotlock.resource_groups (
+  tenant_ref text NOT NULL,
+  ref text NOT NULL,
+  name text NOT NULL,
+  description text,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_resource_groups_pkey PRIMARY KEY (tenant_ref, ref),
+  CONSTRAINT slotlock_resource_groups_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND ref ~ '^[a-z0-9][a-z0-9._-]{0,99}$'
+    AND char_length(name) BETWEEN 1 AND ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.name} AND btrim(name) <> ''
+    AND (description IS NULL
+         OR (char_length(description) BETWEEN 1 AND ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.description}
+             AND btrim(description) <> ''))
+  )
+);
+CREATE TABLE IF NOT EXISTS slotlock.resource_group_members (
+  tenant_ref text NOT NULL,
+  group_ref text NOT NULL,
+  resource_id uuid NOT NULL,
+  added_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_resource_group_members_pkey PRIMARY KEY (tenant_ref, group_ref, resource_id),
+  CONSTRAINT slotlock_resource_group_members_group_fkey FOREIGN KEY (tenant_ref, group_ref)
+    REFERENCES slotlock.resource_groups (tenant_ref, ref) ON DELETE CASCADE,
+  CONSTRAINT slotlock_resource_group_members_resource_fkey FOREIGN KEY (resource_id, tenant_ref)
+    REFERENCES slotlock.resources (id, tenant_ref) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS slotlock_resource_group_members_resource_idx
+  ON slotlock.resource_group_members (tenant_ref, resource_id);
+
+-- The counts, under the tenant's group lock.
+CREATE OR REPLACE FUNCTION slotlock.resource_groups_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_resource_groups_guard$
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:groups:' || NEW.tenant_ref, 0));
+  -- An upsert of a group, or a membership, the tenant has fires this before its conflict is found.
+  IF TG_TABLE_NAME = 'resource_groups' THEN
+    IF NOT EXISTS (SELECT 1 FROM slotlock.resource_groups kept
+                    WHERE kept.tenant_ref = NEW.tenant_ref AND kept.ref = NEW.ref)
+       AND (SELECT count(*) FROM slotlock.resource_groups kept WHERE kept.tenant_ref = NEW.tenant_ref)
+           >= ${SLOTLOCK_MAX_RESOURCE_GROUPS} THEN
+      RAISE EXCEPTION 'Slotlock keeps at most ${SLOTLOCK_MAX_RESOURCE_GROUPS} groups a tenant'
+        USING ERRCODE = 'check_violation', HINT = 'group_limit_reached';
+    END IF;
+  ELSIF NOT EXISTS (SELECT 1 FROM slotlock.resource_group_members kept
+                     WHERE kept.tenant_ref = NEW.tenant_ref AND kept.group_ref = NEW.group_ref
+                       AND kept.resource_id = NEW.resource_id)
+        AND (SELECT count(*) FROM slotlock.resource_group_members kept
+              WHERE kept.tenant_ref = NEW.tenant_ref AND kept.resource_id = NEW.resource_id)
+            >= ${SLOTLOCK_MAX_GROUPS_PER_RESOURCE} THEN
+    RAISE EXCEPTION 'Slotlock puts a resource in at most ${SLOTLOCK_MAX_GROUPS_PER_RESOURCE} groups'
+      USING ERRCODE = 'check_violation', HINT = 'resource_group_limit_reached';
+  END IF;
+  RETURN NEW;
+END
+$slotlock_resource_groups_guard$;
+CREATE OR REPLACE TRIGGER slotlock_resource_groups_guard
+  BEFORE INSERT ON slotlock.resource_groups
+  FOR EACH ROW EXECUTE FUNCTION slotlock.resource_groups_guard();
+CREATE OR REPLACE TRIGGER slotlock_resource_group_members_guard
+  BEFORE INSERT ON slotlock.resource_group_members
+  FOR EACH ROW EXECUTE FUNCTION slotlock.resource_groups_guard();
+
+-- Composite resources (RFC 0003 G8): a parent made of parts (a hall of three rooms), one level
+-- deep. A part has its parent and its place among the parent's parts. A booking of a part also
+-- claims its place on the parent ([i, i+1)); a booking of the parent claims every place ([0, ∞)).
+-- composite_claims keeps those apart by PostgreSQL's own exclusion constraint: the whole conflicts
+-- with every part, and two parts never with each other. A resource that is neither has no claims.
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS parent_id uuid;
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS part_index integer;
+DO $slotlock_resources_parent$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint
+     WHERE conrelid = 'slotlock.resources'::regclass AND conname = 'slotlock_resources_parent_fkey'
+  ) THEN
+    -- Deleting a parent sets its parts free (the store refuses it while anything on it is live).
+    ALTER TABLE slotlock.resources ADD CONSTRAINT slotlock_resources_parent_fkey
+      FOREIGN KEY (parent_id, tenant_ref) REFERENCES slotlock.resources (id, tenant_ref)
+      ON DELETE SET NULL (parent_id) NOT VALID;
+    ALTER TABLE slotlock.resources ADD CONSTRAINT slotlock_resources_part_valid CHECK (
+      (parent_id IS NULL OR part_index IS NOT NULL)
+      AND (part_index IS NULL OR part_index BETWEEN 0 AND ${SLOTLOCK_MAX_COMPOSITE_PARTS - 1})
+      AND parent_id IS DISTINCT FROM id
+    ) NOT VALID;
+  END IF;
+END
+$slotlock_resources_parent$;
+CREATE UNIQUE INDEX IF NOT EXISTS slotlock_resources_part_idx
+  ON slotlock.resources (parent_id, part_index) WHERE parent_id IS NOT NULL;
+
+-- One level, ${SLOTLOCK_MAX_COMPOSITE_PARTS} parts at most, and never while either side holds a
+-- booking or live hold that has not ended: claims are made as bookings are, never backfilled.
+CREATE OR REPLACE FUNCTION slotlock.resources_parent_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_resources_parent_guard$
+BEGIN
+  IF NEW.parent_id IS NOT DISTINCT FROM OLD.parent_id THEN
+    RETURN NEW;
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:composite:' || COALESCE(NEW.parent_id, OLD.parent_id)::text, 0));
+  IF NEW.parent_id IS NOT NULL THEN
+    IF EXISTS (SELECT 1 FROM slotlock.resources parent WHERE parent.id = NEW.parent_id AND parent.parent_id IS NOT NULL)
+       OR EXISTS (SELECT 1 FROM slotlock.resources part WHERE part.parent_id = NEW.id) THEN
+      RAISE EXCEPTION 'Slotlock composites are one level deep: a part has no parts, and a parent is no part'
+        USING ERRCODE = 'check_violation', HINT = 'composite_too_deep';
+    END IF;
+    IF (SELECT count(*) FROM slotlock.resources part WHERE part.parent_id = NEW.parent_id)
+       >= ${SLOTLOCK_MAX_COMPOSITE_PARTS} THEN
+      RAISE EXCEPTION 'Slotlock composites have at most ${SLOTLOCK_MAX_COMPOSITE_PARTS} parts'
+        USING ERRCODE = 'check_violation', HINT = 'composite_parts_limit';
+    END IF;
+    NEW.part_index := COALESCE(
+      (SELECT min(free.slot) FROM pg_catalog.generate_series(0, ${SLOTLOCK_MAX_COMPOSITE_PARTS - 1}) AS free(slot)
+        WHERE NOT EXISTS (SELECT 1 FROM slotlock.resources part
+                           WHERE part.parent_id = NEW.parent_id AND part.part_index = free.slot)),
+      0);
+  ELSE
+    NEW.part_index := NULL;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM slotlock.reservations booked
+     WHERE booked.resource_id IN (NEW.id, NEW.parent_id, OLD.parent_id)
+       AND COALESCE(booked.occupied_ends_at, booked.ends_at) > statement_timestamp()
+       AND (booked.status <> 'held' OR booked.expires_at > statement_timestamp())
+  ) THEN
+    RAISE EXCEPTION 'Slotlock changes a composite only while neither side has a booking or live hold to come'
+      USING ERRCODE = 'check_violation', HINT = 'composite_busy';
+  END IF;
+  RETURN NEW;
+END
+$slotlock_resources_parent_guard$;
+CREATE OR REPLACE TRIGGER slotlock_resources_parent_guard
+  BEFORE UPDATE OF parent_id ON slotlock.resources
+  FOR EACH ROW EXECUTE FUNCTION slotlock.resources_parent_guard();
+
+CREATE TABLE IF NOT EXISTS slotlock.composite_claims (
+  reservation_id uuid PRIMARY KEY REFERENCES slotlock.reservations (id) ON DELETE CASCADE,
+  tenant_ref text NOT NULL,
+  -- The composite: the parent, whichever of its resources the booking is on.
+  resource_id uuid NOT NULL REFERENCES slotlock.resources (id) ON DELETE CASCADE,
+  booked_resource_id uuid NOT NULL,
+  span int4range NOT NULL,
+  during tstzrange NOT NULL,
+  status text NOT NULL,
+  expires_at timestamptz,
+  CONSTRAINT slotlock_composite_claims_valid CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500 AND NOT isempty(span)),
+  CONSTRAINT slotlock_composite_claims_no_overlap EXCLUDE USING gist (
+    resource_id WITH =,
+    during WITH &&,
+    span WITH &&
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_composite_claims_booked_idx
+  ON slotlock.composite_claims (booked_resource_id);
+
+-- Each booking or hold on a part or a parent claims its place on the composite, in the same
+-- statement: a claim that overlaps another fails it with 23P01, as a booking that overlaps one on
+-- its own resource does.
+CREATE OR REPLACE FUNCTION slotlock.composite_claim()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_composite_claim$
+DECLARE
+  booked record;
+  composite uuid;
+  claimed int4range;
+BEGIN
+  -- An update that moves nothing the claim holds leaves it (no column list on the trigger, so an
+  -- upgrade that adds a column later in the DDL never finds one here first).
+  IF TG_OP = 'UPDATE'
+     AND NEW.resource_id = OLD.resource_id
+     AND NEW.starts_at = OLD.starts_at AND NEW.ends_at = OLD.ends_at
+     AND NEW.occupied_starts_at IS NOT DISTINCT FROM OLD.occupied_starts_at
+     AND NEW.occupied_ends_at IS NOT DISTINCT FROM OLD.occupied_ends_at
+     AND NEW.status = OLD.status
+     AND NEW.expires_at IS NOT DISTINCT FROM OLD.expires_at THEN
+    RETURN NULL;
+  END IF;
+  IF TG_OP <> 'INSERT' THEN
+    DELETE FROM slotlock.composite_claims claim WHERE claim.reservation_id = OLD.id;
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+    RETURN NULL;
+  END IF;
+  SELECT resource.parent_id, resource.part_index, resource.tenant_ref,
+         EXISTS (SELECT 1 FROM slotlock.resources part WHERE part.parent_id = resource.id) AS whole
+    INTO booked
+    FROM slotlock.resources resource WHERE resource.id = NEW.resource_id;
+  IF booked.parent_id IS NOT NULL THEN
+    composite := booked.parent_id;
+    claimed := int4range(booked.part_index, booked.part_index + 1);
+  ELSIF booked.whole THEN
+    composite := NEW.resource_id;
+    claimed := int4range(0, NULL);
+  ELSE
+    RETURN NULL;
+  END IF;
+  INSERT INTO slotlock.composite_claims (
+    reservation_id, tenant_ref, resource_id, booked_resource_id, span, during, status, expires_at
+  ) VALUES (
+    NEW.id, booked.tenant_ref, composite, NEW.resource_id, claimed,
+    tstzrange(COALESCE(NEW.occupied_starts_at, NEW.starts_at), COALESCE(NEW.occupied_ends_at, NEW.ends_at), '[)'),
+    NEW.status, NEW.expires_at
+  );
+  RETURN NULL;
+END
+$slotlock_composite_claim$;
+CREATE OR REPLACE TRIGGER slotlock_reservations_composite_claim
+  AFTER INSERT OR UPDATE OR DELETE ON slotlock.reservations
+  FOR EACH ROW EXECUTE FUNCTION slotlock.composite_claim();
+
+-- Approval policies (RFC 0004 A4): which writes a person approves before they are made, or
+-- refuses outright. applies_to names resources, pools, locations (each with the locations in it)
+-- or groups ({} is every resource); conditions name what makes a write need it: longer than some
+-- minutes, outside the resource's hours, or a kind of write. The wait is the policy's own, bounded
+-- by the booking's start less lead_minutes and by the server's maximum.
+CREATE TABLE IF NOT EXISTS slotlock.approval_policies (
+  tenant_ref text NOT NULL,
+  ref text NOT NULL,
+  name text NOT NULL,
+  applies_to jsonb NOT NULL DEFAULT '{}'::jsonb,
+  conditions jsonb NOT NULL DEFAULT '{}'::jsonb,
+  outcome text NOT NULL,
+  approval_ttl_minutes integer NOT NULL DEFAULT 1440,
+  lead_minutes integer NOT NULL DEFAULT 0,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  PRIMARY KEY (tenant_ref, ref),
+  CONSTRAINT slotlock_approval_policies_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND ref ~ '^[a-z0-9][a-z0-9_-]{0,62}$'
+    AND char_length(name) BETWEEN 1 AND 200
+    AND jsonb_typeof(applies_to) = 'object' AND jsonb_typeof(conditions) = 'object'
+    AND outcome IN ('require_approval', 'refuse')
+    AND approval_ttl_minutes BETWEEN 1 AND 43200
+    AND lead_minutes BETWEEN 0 AND 43200
+  )
+);
+
+-- A write waiting for a person: its time held by holds whose holder is the approval (never the
+-- agent, so it cannot release them and they do not count against its caps), and the request to run
+-- as its requester when granted, in the same transaction that lets the holds go.
+CREATE TABLE IF NOT EXISTS slotlock.approvals (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_ref text NOT NULL,
+  policy_ref text NOT NULL,
+  status text NOT NULL DEFAULT 'pending',
+  operation text NOT NULL,
+  request jsonb NOT NULL,
+  requester jsonb NOT NULL,
+  hold_ids uuid[] NOT NULL,
+  -- What it holds, kept for the record once the holds are gone.
+  resource_ids uuid[] NOT NULL,
+  starts_at timestamptz NOT NULL,
+  ends_at timestamptz NOT NULL,
+  -- The requester, operation and idempotency key, hashed: a retry finds the approval it made.
+  request_key text NOT NULL,
+  expires_at timestamptz NOT NULL,
+  decided_by text,
+  decided_at timestamptz,
+  reason text,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_approvals_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND status IN ('pending', 'granted', 'declined', 'expired')
+    AND operation IN ('slotlock_create_event', 'slotlock_book_together', 'slotlock_update_event')
+    AND jsonb_typeof(request) = 'object' AND jsonb_typeof(requester) = 'object'
+    AND cardinality(hold_ids) BETWEEN 1 AND 20
+    AND cardinality(resource_ids) BETWEEN 1 AND 20 AND ends_at > starts_at
+    AND request_key ~ '^[0-9a-f]{64}$'
+    AND (decided_by IS NULL OR octet_length(decided_by) BETWEEN 1 AND 500)
+    AND (reason IS NULL OR char_length(reason) <= 500)
+    AND ((status = 'pending') = (decided_at IS NULL))
+  )
+);
+CREATE UNIQUE INDEX IF NOT EXISTS slotlock_approvals_request_idx
+  ON slotlock.approvals (tenant_ref, request_key);
+CREATE INDEX IF NOT EXISTS slotlock_approvals_pending_idx
+  ON slotlock.approvals (tenant_ref, created_at, id) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS slotlock_approvals_expiry_idx
+  ON slotlock.approvals (expires_at) WHERE status = 'pending';
 
 -- Every row occupies from its start to its occupied end: its end plus its turnaround buffer. Up to
 -- 0.1 the buffer bound only tenant-owned bookings to each other (slotlock_reservations_buffered_no_overlap),
@@ -3397,7 +5674,7 @@ CREATE INDEX IF NOT EXISTS slotlock_calendar_event_occurrences_resource_time_idx
   ON slotlock.calendar_event_occurrences (tenant_ref, starts_at, ends_at);
 CREATE INDEX IF NOT EXISTS slotlock_reservations_calendar_event_idx
   ON slotlock.reservations (calendar_event_id) WHERE calendar_event_id IS NOT NULL;
-${SLOTLOCK_OUTBOX_DDL}${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_DASHBOARD_DDL}${SLOTLOCK_TENANT_ADMIN_DDL}${DEPLOYMENT_RECORD_VERSION}`;
+${SLOTLOCK_OUTBOX_DDL}${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_PARTNER_DDL}${SLOTLOCK_DASHBOARD_DDL}${SLOTLOCK_TENANT_ADMIN_DDL}${DEPLOYMENT_RECORD_VERSION}`;
 
 /**
  * Whether the outbox row `row` (a coverage change) is in this release's shape: named by a source_id
@@ -3536,6 +5813,13 @@ export const SLOTLOCK_TENANT_TABLES = Object.freeze([
   'booking_rule_defaults',
   'assistant_settings',
   'assistant_conversations',
+  'locations',
+  'resource_groups',
+  'resource_group_members',
+  'pool_settings',
+  'composite_claims',
+  'approval_policies',
+  'approvals',
 ] as const);
 
 const POSTGRES_SETTING_NAME = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/;
@@ -3568,6 +5852,56 @@ GRANT EXECUTE ON FUNCTION ${SLOTLOCK_DEFINER_FUNCTIONS.join(', ')} TO "${role}";
  * `slotlock.tenant_ref`; adapters may supply an established transaction-local setting name.
  * Every policy fails closed when the setting is absent or empty, and FORCE binds the table owner.
  */
+/**
+ * The transaction-local setting withTenant sets for a key limited to part of its tenant (RFC 0003
+ * G6): the ids of the resources it reaches, as a uuid[] literal; empty for every other caller.
+ */
+export const SLOTLOCK_RESOURCE_SCOPE_SETTING = 'slotlock.resource_scope';
+
+const RESOURCE_SCOPE_OPEN = `NULLIF(current_setting('${SLOTLOCK_RESOURCE_SCOPE_SETTING}', true), '') IS NULL`;
+const resourceScopeAllows = (column: string) =>
+  `(${RESOURCE_SCOPE_OPEN} OR ${column} = ANY (NULLIF(current_setting('${SLOTLOCK_RESOURCE_SCOPE_SETTING}', true), '')::uuid[]))`;
+
+/**
+ * The tables a key limited to part of its tenant is held to, and how each row names its resource:
+ * the resource itself, or the event it belongs to. Tombstones and archives name none and stay as the
+ * tenant policy leaves them.
+ */
+export const SLOTLOCK_RESOURCE_SCOPED_TABLES: Readonly<Record<string, string>> = Object.freeze({
+  resources: resourceScopeAllows('id'),
+  reservations: resourceScopeAllows('resource_id'),
+  calendar_events: resourceScopeAllows('resource_id'),
+  calendar_coverage: resourceScopeAllows('resource_id'),
+  hold_commands: resourceScopeAllows('resource_id'),
+  resource_group_members: resourceScopeAllows('resource_id'),
+  // A change or a waitlist entry about no one resource (a key, a pool) is not the key's.
+  outbox: resourceScopeAllows('resource_id'),
+  waitlist_entries: resourceScopeAllows('resource_id'),
+  ...Object.fromEntries(
+    [
+      'calendar_event_attendees',
+      'calendar_event_reminders',
+      'calendar_event_exceptions',
+      'calendar_event_occurrences',
+      'calendar_event_commands',
+    ].map((table) => [
+      table,
+      `(${RESOURCE_SCOPE_OPEN} OR EXISTS (SELECT 1 FROM slotlock.calendar_events scoped_event WHERE scoped_event.id = event_id))`,
+    ]),
+  ),
+});
+
+/**
+ * One restrictive policy on each table SLOTLOCK_RESOURCE_SCOPED_TABLES names: it only narrows what
+ * the tenant policy allows, for reads and writes alike, and is open when no scope is set.
+ */
+const SLOTLOCK_RESOURCE_SCOPE_POLICIES = Object.entries(SLOTLOCK_RESOURCE_SCOPED_TABLES)
+  .map(
+    ([table, allows]) =>
+      `CREATE POLICY resource_scope_v1 ON slotlock.${table} AS RESTRICTIVE USING ${allows} WITH CHECK ${allows};`,
+  )
+  .join('\n');
+
 export function createSlotlockTenantRlsDdl(
   tenantContextSetting = SLOTLOCK_TENANT_CONTEXT_SETTING,
 ): string {
@@ -3624,6 +5958,20 @@ ALTER TABLE slotlock.assistant_settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.assistant_settings FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.assistant_conversations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.assistant_conversations FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.locations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.locations FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.resource_groups ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.resource_groups FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.resource_group_members ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.resource_group_members FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.pool_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.pool_settings FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.composite_claims ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.composite_claims FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.approval_policies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.approval_policies FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.approvals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.approvals FORCE ROW LEVEL SECURITY;
 
 -- One database must have one tenant-context contract. Re-applying with an adapter-specific
 -- setting deliberately rebinds the stable policies instead of silently keeping a prior setting.
@@ -3655,7 +6003,14 @@ BEGIN
          'waitlist_entries',
          'booking_rule_defaults',
          'assistant_settings',
-         'assistant_conversations'
+         'assistant_conversations',
+         'locations',
+         'resource_groups',
+         'resource_group_members',
+         'pool_settings',
+         'composite_claims',
+         'approval_policies',
+         'approvals'
        )
   LOOP
     EXECUTE format(
@@ -3896,6 +6251,76 @@ BEGIN
       USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
       WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
   END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'locations'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.locations
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'resource_groups'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.resource_groups
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'resource_group_members'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.resource_group_members
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'pool_settings'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.pool_settings
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'composite_claims'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.composite_claims
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'approval_policies'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.approval_policies
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'approvals'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.approvals
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
 END
 $slotlock_rls$;
 
@@ -3939,6 +6364,21 @@ COMMENT ON POLICY tenant_isolation_v1 ON slotlock.assistant_settings
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.assistant_conversations
   IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.locations
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.resource_groups
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.resource_group_members
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.pool_settings
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.composite_claims
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.approval_policies
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.approvals
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+${SLOTLOCK_RESOURCE_SCOPE_POLICIES}
 
 INSERT INTO slotlock.rls_policy_contracts (
   table_name, tenant_context_setting, policy_fingerprint, installed_at
@@ -3981,7 +6421,14 @@ WHERE schemaname = 'slotlock'
     'waitlist_entries',
     'booking_rule_defaults',
     'assistant_settings',
-    'assistant_conversations'
+    'assistant_conversations',
+    'locations',
+    'resource_groups',
+    'resource_group_members',
+    'pool_settings',
+    'composite_claims',
+    'approval_policies',
+    'approvals'
   )
   AND policyname = 'tenant_isolation_v1'
 ON CONFLICT (table_name) DO UPDATE

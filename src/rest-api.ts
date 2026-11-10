@@ -51,6 +51,12 @@ export const SLOTLOCK_REST_ROUTES: readonly SlotlockRestRoute[] = Object.freeze(
     operation: 'slotlock_release_slots',
     refusals: [409],
   },
+  {
+    method: 'POST',
+    path: '/v1/slot-holds/{hold_id}/confirm',
+    operation: 'slotlock_confirm_slot',
+    refusals: [404, 409],
+  },
   { method: 'GET', path: '/v1/events', operation: 'slotlock_list_events', refusals: [404] },
   { method: 'POST', path: '/v1/events', operation: 'slotlock_create_event', refusals: [404, 409] },
   { method: 'GET', path: '/v1/events/{event_id}', operation: 'slotlock_get_event', refusals: [404] },
@@ -64,6 +70,18 @@ export const SLOTLOCK_REST_ROUTES: readonly SlotlockRestRoute[] = Object.freeze(
     method: 'DELETE',
     path: '/v1/events/{event_id}',
     operation: 'slotlock_delete_event',
+    refusals: [404, 409],
+  },
+  {
+    method: 'POST',
+    path: '/v1/events/{event_id}/reschedule',
+    operation: 'slotlock_reschedule',
+    refusals: [404, 409],
+  },
+  {
+    method: 'POST',
+    path: '/v1/events/{event_id}/cancel',
+    operation: 'slotlock_cancel',
     refusals: [404, 409],
   },
 ]);
@@ -94,6 +112,7 @@ const PROBLEM_TITLES: Readonly<Record<string, string>> = Object.freeze({
   revision_conflict: 'The revision is stale',
   confirmation_required: 'A person must confirm this write',
   rate_limited: 'Too many requests',
+  quota_exceeded: 'The monthly quota is used up',
   authentication_required: 'Authentication required',
   forbidden: 'Not allowed',
   invalid_arguments: 'The arguments are not valid',
@@ -287,6 +306,8 @@ export interface SlotlockOpenApiOperation {
   description: string;
   inputSchema: JsonSchema;
   outputSchema: JsonSchema;
+  /** An operation's own scope: a tool's, or the partner API's (else the application scope). */
+  scope?: string;
 }
 
 /** The OpenAPI operation object for one route. */
@@ -398,8 +419,8 @@ export function slotlockOpenApiDocument(args: {
     add(
       route,
       openApiOperation(route, operation, {
-        tag: 'Application',
-        scope: SLOTLOCK_APPLICATION_SCOPE,
+        tag: operation.scope === 'partner' ? 'Partner' : 'Application',
+        scope: operation.scope === 'partner' ? 'partner' : SLOTLOCK_APPLICATION_SCOPE,
         responses: {
           '400': ERROR_RESPONSE,
           '401': ERROR_RESPONSE,
@@ -449,6 +470,11 @@ export function slotlockOpenApiDocument(args: {
               description:
                 'What the application around the agents does. Needs the admin scope; never offered to agents.',
             },
+            {
+              name: 'Partner',
+              description:
+                "What a partner reselling Slotlock does for its own users' accounts. Needs a partner key (`slk_partner_…`), whose `partner` scope reaches nothing else.",
+            },
           ]
         : []),
     ],
@@ -459,7 +485,7 @@ export function slotlockOpenApiDocument(args: {
           type: 'http',
           scheme: 'bearer',
           description:
-            'A Slotlock API key (`slk_…`) or the server token. `x-slotlock-scope` on each operation names the scope it needs.',
+            'A Slotlock API key (`slk_…`, or `slk_test_…` for a test environment), a partner key (`slk_partner_…`; with a `Slotlock-Account` field naming one of its accounts, where its contract allows, it acts as that account) or the server token. `x-slotlock-scope` on each operation names the scope it needs.',
         },
       },
       schemas: {
@@ -475,6 +501,50 @@ export function slotlockOpenApiDocument(args: {
             resource_id: { type: 'string', description: 'An overlap: the resource it refused.' },
             start: { type: 'string', description: 'An overlap: the start it refused.' },
             end: { type: 'string', description: 'An overlap: the end it refused.' },
+            busy_start: {
+              type: 'string',
+              description: 'An overlap: when the booking in the way makes the time busy, from (buffers included).',
+            },
+            busy_end: { type: 'string', description: 'An overlap: until when that booking makes it busy.' },
+            conflicting_hold_id: {
+              type: 'string',
+              description: 'An overlap with a hold of your own: its id, to book or release it.',
+            },
+            conflicting_event_id: {
+              type: 'string',
+              description: 'An overlap with an event of your own: its id, to move or cancel it.',
+            },
+            approval_id: {
+              type: 'string',
+              description:
+                'approval_pending, approval_declined or approval_expired: the approval a policy made of the booking. Retry with the same idempotency_key to learn how it was decided.',
+            },
+            policy_ref: { type: 'string', description: 'An approval refusal: the policy that applies.' },
+            expires_at: {
+              type: 'string',
+              description: 'approval_pending or approval_required: until when a person may decide (the time is held until then).',
+            },
+            reason: { type: 'string', description: 'approval_declined: what the person who declined it said, if anything.' },
+            alternatives: {
+              type: 'array',
+              maxItems: 3,
+              description:
+                'A refusal another time can answer (overlap, pool_full, a booking rule): the earliest free times of the same length, within 7 days of the time asked for, checked as slotlock_find_available_slots checks them. Suggestions, not holds. Empty when none was found.',
+              items: {
+                type: 'object',
+                required: ['resource_id', 'start', 'end'],
+                properties: {
+                  resource_id: { type: 'string' },
+                  start: { type: 'string', format: 'date-time' },
+                  end: { type: 'string', format: 'date-time' },
+                  resource_ids: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'A bundle or pool booking: the resources free together then.',
+                  },
+                },
+              },
+            },
             issues: {
               type: 'array',
               description:

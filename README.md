@@ -45,6 +45,14 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
   duration in `slotlock_call_duration_seconds`), confirmations, subscriptions, refusals, maintenance
   and webhook deliveries. No label names a tenant, key or client. `createSlotlockMetrics` builds
   them for a server of your own, from its hooks.
+- Traces: with `OTEL_EXPORTER_OTLP_ENDPOINT` (an OpenTelemetry collector, such as
+  `http://collector:4318`), each call is also a span sent over OTLP/HTTP as JSON, a child of the
+  caller's span when it sent a `traceparent`, and the metrics go there too each minute (cumulative
+  sums, the call-duration histogram, the open subscriptions), with or without
+  `SLOTLOCK_METRICS_TOKEN`; `OTEL_EXPORTER_OTLP_HEADERS` carries a collector's API key. A span says
+  what the metrics say, and a collector that is down costs spans, never calls.
+  [docs/hosted/slo-rules.yml](docs/hosted/slo-rules.yml) has Prometheus rules for the objectives on
+  the [status page](docs/hosted/status.md#objectives).
 - The server runs as a role that owns nothing and cannot bypass row-level security; a one-off
   `migrate` service applies the schema as the owner.
 - `SLOTLOCK_AVAILABILITY` sets the default bookable hours. A resource can have its own
@@ -91,6 +99,31 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
   the proxy set `X-Slotlock-Proxy-Proof` to it on every request (a Cloudflare request header
   transform rule): the field is then believed only beside that exact value, and any other request
   is counted by its connection's address.
+- With `SLOTLOCK_USAGE=on` (off by default) the server meters each tenant's use in
+  `slotlock.usage_daily`, by UTC day, API key and surface: every operation that runs (MCP, A2A,
+  REST, the application API and the dashboard assistant), counted in memory and recorded every 15
+  seconds and when the server stops, each batch once however often it is sent; and the bookings
+  (`reservation.created`, `event.created`, `hold.confirmed`) and holds (`hold.created`) its feed
+  shows committed, rolled up by maintenance before the feed is pruned, so a write that rolled back
+  is never counted and maintenance's own changes never are. Counts only, never what was asked; kept
+  400 days, erased with the tenant. It also counts webhook deliveries endpoints accepted, messages to
+  the assistant, and each day's resources (a count, archived included). Every answer carries
+  `Slotlock-Request-Id`; with metering on, one whose operations ran carries
+  `Slotlock-Usage: operations=<n>`. Read it back with `GET /v1/usage` (an admin key: totals, by day,
+  by key and by surface), `readSlotlockTenantUsage` (usage.ts), and on the dashboard's Plan page.
+  Writes from
+  before the release that created the tables are not counted. The dashboard Worker takes the same
+  setting for the assistant's operations.
+- With `SLOTLOCK_QUOTAS=on` too (off by default), a tenant on a hosted plan is held to that plan's
+  monthly quotas (`SLOTLOCK_PLAN_QUOTAS` in plans.ts; a tenant on no plan, as on a self-hosted
+  server, has none): past its operations this UTC month every operation is refused but reading its
+  usage and erasing it, past its bookings only those that can book, with `429 quota_exceeded` and `Retry-After` at the month's end.
+  Each operation's answer lists the quotas in `RateLimit` and `RateLimit-Policy`
+  (`"operations_month"`, `"bookings_month"`), and the feed records `usage.threshold_reached` once at
+  80% and at 100% of each. A server reads the month so far at most every 30 seconds (every 2 near
+  the stop) and adds its own unrecorded operations, so a tenant can pass its stop by what other
+  servers counted in the last few seconds; a count it cannot read lets the operation run. The
+  dashboard Worker takes the same setting for the assistant's operations.
 - The server also bounds what one tenant may store, whichever key, agent or application writes
   it: 10,000 holds, and 100,000 each of bookings, calendar events and coverage rows, counted as
   the store's `tenantLimits` count them, besides 10,000 resources. A write past one answers 409
@@ -188,6 +221,9 @@ Give each agent its own key instead of sharing the server token:
 slotlock key create "Booking agent"
 slotlock key create "Availability bot" --scope read --expires-in-days 90
 slotlock key create "Booking site" --scope read,write,admin
+slotlock key create "North desk" --locations north --groups night-shift
+slotlock key create "Trial agent" --max-holds 3 --requests-per-minute 60 --requires-approval
+slotlock key limits <id> --max-held-hours 48
 slotlock key list
 slotlock key rotate <id>
 slotlock key revoke <id>
@@ -198,8 +234,114 @@ slotlock key revoke <id>
 - `read` covers the seven tools that only look; `write` covers create, update and delete; `admin`
   covers the [application API](#application-api), which no agent needs. Default: read and write.
 - `rotate` keeps the key's id, scopes and bookings; `revoke` stops it on its next request.
+- A key can be limited to part of its tenant: `--locations` (each with every location in it) and
+  `--groups`, up to 20 of each, or the dashboard's "Limit to locations or groups" (Developer plan and
+  up on a hosted server). It then reaches only those resources, as they are when each call starts,
+  and nothing else is there for it: another resource is `resource_not_found`, never `forbidden`, and
+  the feed shows it only changes about its resources. The database holds it to that, not the
+  server: `withTenant` sets the key's resources for the transaction and a restrictive row-level
+  security policy (`resource_scope_v1`) on every table keyed by resource narrows each read and
+  write to them. A limited key reads and writes only (no `admin`), and keeps its limit for good.
+- A key can be held below the server's limits, never above them: `--max-holds` (its live holds,
+  under `holder_holds`), `--max-held-hours` (under `holder_held_hours`), `--requests-per-minute`
+  (reads and writes alike, beside the server's per-key rates; a refusal names `key_limit`) and
+  `--requires-approval` (every booking it makes waits for a person, as an
+  [approval policy](#tools) named `api-key` would hold it). `slotlock key limits <id>`
+  replaces them, and none at all gives the key the server's again; the dashboard's key form and
+  "Limits" do the same, and so does the partner API's `limits` for an account's key. They apply
+  from the key's next request and are kept through rotation. A role granted before them
+  authenticates keys without their limits until `grantApplicationRole` (`slotlock migrate`) runs.
 - A tenant may hold 100 active keys. The last six characters are a checksum secret scanners can
   verify offline.
+- Every tenant has a test environment, `<tenant>~test`: a tenant of its own (its own resources,
+  keys, webhooks and history), on its live tenant's plan limits and quotas and never billed. Its
+  keys start `slk_test_`, and only its keys do (the database holds that). Make one with
+  `SLOTLOCK_TENANT=<tenant>~test slotlock key create …` or the dashboard's Live/Test switch. It is
+  suspended with its live tenant and erased with it, and a server that refuses a person's keys
+  refuses their test keys too.
+- A test environment is a sandbox to try an agent against (`SLOTLOCK_TENANT=<tenant>~test`, a
+  `slk_test_` key, or the dashboard's Test overview). `slotlock sandbox seed car-rental` (or
+  `clinic`, `desks`) fills an empty one with locations, groups, resources with profiles, hours,
+  booking rules, pools, a composite and three bookings tomorrow. `slotlock sandbox race car-1
+  --agents 100` races that many agents for one hour on a resource and prints who booked, who was
+  refused and why, and how long the answers took. `slotlock sandbox fast-forward 60` makes the
+  holds, waitlist offers and approvals that would lapse within an hour lapse now and runs
+  maintenance, so an agent's handling of a lapsed hold or an expired approval can be tried
+  without waiting; bookings and events keep their times. `slotlock sandbox reset` empties it,
+  keeping its keys, webhooks and plan. The same are `POST /v1/sandbox/seed`, `/race`,
+  `/fast-forward` and `/reset` for an admin test key. Each refuses a live tenant
+  (`sandbox_test_only`), and so does the database's reset.
+
+### Partner accounts
+
+A platform that resells Slotlock to its own users (a partner) runs a Slotlock tenant for each of
+them, `partner:<partner>:<account>`, and pays the deployment for them:
+
+```sh
+# As the schema owner (SLOTLOCK_MIGRATE_DATABASE_URL): the partner, its contract and its key.
+slotlock partner create stackapi "stackapi.app" --contract @stackapi-contract.json
+slotlock partner key stackapi "Main"
+slotlock partner list
+slotlock partner suspend stackapi        # every account with it; its keys stop
+```
+
+- A contract names the plans its accounts may be on (`plans`: each with `resources`, `api_keys`,
+  `webhook_endpoints`, monthly `operations` and `bookings`, and `stop_percent`), the scopes their
+  keys may carry (`key_scopes`, `read` and `write` unless it says) and the partner's prices
+  (`pricing`, for its monthly invoice).
+- A partner key (`slk_partner_…`, stored as a SHA-256 like any key) carries the `partner` scope,
+  which reaches the partner API under `/v1/partner` and nothing else: no calendar data and no
+  tenant's tools. No tenant key reaches the partner API.
+- With it the partner creates an account and puts it on a contract plan (`PUT
+  /v1/partner/accounts/{account}`: the account's limits and quotas are that plan's), lists and
+  reads them, makes, rotates and revokes their keys (`/v1/partner/accounts/{account}/keys`, shown
+  once, scopes capped by the contract), suspends one and lifts its own suspension (never one the
+  deployment made), erases one, and reads their usage (`GET /v1/partner/usage`, the counts the
+  partner is invoiced from). Another partner's accounts are not there for it.
+- An account is an ordinary tenant: forced row-level security keeps each from every other, and its
+  keys work over MCP, A2A and REST as any key. A suspended partner suspends its accounts and their
+  keys stop authenticating.
+- A partner that cannot keep a key per account may act for one with its own key and a
+  `Slotlock-Account: <account>` field, where its contract says `"act_on_behalf": true`: the
+  request then runs as that account, with the contract's key scopes, and never reaches the partner
+  API. An account it does not have, a contract without it, or the field with any other credential
+  is refused (401).
+
+Each month is closed once it has ended, by the schema owner (the 1st is a good day):
+
+```sh
+slotlock partner customer stackapi cus_…                 # the Stripe customer it is billed as
+slotlock partner webhook stackapi https://stackapi.app/hooks/slotlock   # prints the signing secret once
+STRIPE_SECRET_KEY=sk_live_… slotlock partner close stackapi              # last month; or --month 2026-10
+```
+
+- `partner close` reads the month's usage of every account, prices it with the contract (active
+  accounts, each account's operations and bookings above its plan's quota, the minimum's
+  shortfall) and records those lines in `slotlock.partner_invoices`. The first run freezes the month
+  (`slotlock.partner_month_closes`): every later run uses the same totals and lines, whatever
+  arrived or changed since. An account erased before its month is closed is still billed: erasure
+  keeps what it used in unclosed months (`slotlock.partner_erased_usage`, by the partner's account
+  name only).
+- It then sends the partner `usage.period_closed`, signed as any Slotlock webhook (`webhook-id`,
+  `webhook-timestamp`, `webhook-signature`): each account's totals by metric, the lines, and a
+  SHA-256 of both, so the two sides can check they hold the same numbers. Every run sends the same
+  body under the same id until the endpoint answers 2xx; after that, none.
+- With `STRIPE_SECRET_KEY`, each line Stripe has not taken becomes an invoice item on the partner's
+  next invoice, and its id is kept. An item Stripe made in a run that stopped before recording it
+  is found by its metadata and adopted, never made twice. It exits 1 while a line waits or the
+  webhook was not taken: run it again for the same month.
+- A partner checks its counts against Slotlock's each day with `POST /v1/partner/usage/reconcile`
+  (one ended UTC day, each account's operations and, if it keeps them, bookings): the answer gives
+  both counts and the difference, and a day off by more than 0.5% for any account is recorded
+  (`slotlock.partner_reconciliations`) as an incident on our side.
+- `slotlock billing daily`, run once a day by the schema owner (cron), does the rest: it closes
+  last month for every active partner once the month has been over for 6 hours, reports overage
+  when `SLOTLOCK_OVERAGE` is on, and lists the last week's reconciliation mismatches, exiting 1
+  when anything waits or differs. For example, `15 7 * * * slotlock billing daily` with
+  `SLOTLOCK_MIGRATE_DATABASE_URL` and `STRIPE_SECRET_KEY` set.
+- `/metrics` counts authenticated requests by the integrator their `Slotlock-Client` field names
+  (`slotlock_requests_by_client_total`): the names in `SLOTLOCK_KNOWN_CLIENTS`, else `other`, or
+  `none` without the field.
 
 ### Retiring resources and tenants
 
@@ -237,8 +379,8 @@ resources, so you can give each person API keys without running `slotlock key cr
 
 - Its pages: an Overview with the coming week's bookings, events and live holds across every
   resource (each in its resource's time zone) and the latest changes agents made, named by key;
-  Resources, each with its own page for bookable hours, booking rules, pool, coming bookings and
-  activity; Waitlist, to see who waits and remove an entry; API keys, with the MCP and A2A
+  Resources, each with its own page for bookable hours, booking rules, profile, pool, location and
+  groups, coming bookings and activity; Locations and groups, to add, move and delete them; Waitlist, to see who waits and remove an entry; API keys, with the MCP and A2A
   endpoints; Webhooks, to add, delete and re-enable endpoints and see which are failing; and
   Settings.
   Everything on them is read from the tenant's own data. `SLOTLOCK_DASHBOARD_NAME` sets what the
@@ -259,9 +401,33 @@ resources, so you can give each person API keys without running `slotlock key cr
   key records the person who created it (`github:<user id>`): erasing that person's own tenant
   leaves it on keys they made in an organization, which go with the organization's erasure. Only the
   first 100 memberships GitHub lists, and the first 20 served organizations by login, are read.
+- **People and their organizations (Teams on Cloud)**: set `SLOTLOCK_DASHBOARD_ORGS=enabled`.
+  Every person signs in to their own tenant, `github:<user id>`, and the dashboard reads which
+  GitHub organizations they belong to (`read:org`, up to 20, kept in the session). On its Teams
+  page an owner of one turns Slotlock on for it (within 15 minutes of signing in, since who owns
+  it is read from GitHub as one signs in); then each owner and member picks it from the
+  workspace menu and shares its tenant, `github-org:<id>`, as above. Turning it off (the owner types
+  its name) ends every session's use of it at once and stops its keys within 30 seconds on every
+  server; what it holds stays, for an owner to turn it on again and erase it. The organizations
+  turned on are in `slotlock.dashboard_organizations` (who turned each on or off, and when),
+  erased with the organization's tenant. Set it on the server too, which checks the database
+  before taking an organization's key.
 - Sign-in uses `state` and PKCE, and keeps nothing from GitHub but the user id and login (and, with
-  organizations, the served ones the person belongs to): the GitHub token is used once and dropped.
+  organizations, the served ones the person belongs to, or with `enabled` up to 20 of theirs): the
+  GitHub token is used once and dropped.
   It asks for no scope, or `read:org` with organizations.
+- **Sign-in with Google too**, for people without a GitHub account: set `SLOTLOCK_GOOGLE_CLIENT_ID`
+  and `SLOTLOCK_GOOGLE_CLIENT_SECRET` (an OAuth client of a Google Cloud project, of type Web
+  application, with the same redirect URI, `<SLOTLOCK_PUBLIC_URL>/dashboard/callback`). The sign-in
+  page then offers Continue with Google. Each such person is their own tenant,
+  `google:<subject>` (Google's stable account id); `SLOTLOCK_DASHBOARD_USERS` names them as
+  `google:<subject>` beside GitHub ids, or `*` lets every account in. Sign-in asks for `openid
+  email`, uses `state`, PKCE and a nonce, and checks the ID token Google's token endpoint returns:
+  its RS256 signature against Google's published keys (kept as long as Google's answer says, and
+  read again for a key id it does not know), then its issuer, audience, expiry and nonce. It keeps the subject, and the email only once Google has
+  verified it, to show who is signed in. Google sign-in does not go with a list of
+  `SLOTLOCK_DASHBOARD_ORGS` (GitHub's organizations); with `enabled`, a Google person has their own
+  tenant only.
 - A session is a signed, HttpOnly cookie that lasts 12 hours. The allowlist is checked on every
   request, dashboard and API alike: removing an id and restarting the server signs that person out
   and stops every key in their tenant at once.
@@ -281,7 +447,7 @@ resources, so you can give each person API keys without running `slotlock key cr
 - Each form carries a single-use value bound to its session. A person may have 1,000 forms
   recorded at once (12 hours' worth); past that the dashboard answers 429 until the oldest expire.
   Signing out always works.
-- A person may add 100 resources. The database holds the cap, so adds racing on any number of servers
+- A person may add 500 resources (as many as their plan allows, on a hosted server). The database holds the cap, so adds racing on any number of servers
   stop at 100; a resource they already have can still change time zone.
 - Each resource uses the server's bookable hours (`SLOTLOCK_AVAILABILITY`) until its owner sets its
   own on the hours page: two windows a day, overnight or all day, or closed. One form sets them
@@ -311,8 +477,13 @@ of clicking. Each organization brings its own model:
   reads, are sent to the provider it configures.
 - **The key** is stored sealed with AES-256-GCM under a key derived from `SLOTLOCK_ASSISTANT_SECRET`,
   bound to the organization, in `slotlock.assistant_settings` (forced row-level security, erased
-  with the tenant). The dashboard shows only that it is set and its last four characters. Changing
-  the secret makes stored keys unreadable: owners enter them again.
+  with the tenant). The dashboard shows only that it is set and its last four characters.
+- **Changing the secret** without losing the keys: set the new value as `SLOTLOCK_ASSISTANT_SECRET`
+  and the old one in `SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS` (up to three, comma-separated, newest
+  first). A key sealed under an old secret still opens, and is sealed again under the new one the
+  next time its organization uses the assistant, only if no owner has saved another key since.
+  Remove an old secret once every organization has used the assistant since; a key still sealed
+  under a secret no longer listed cannot be opened, and its owners enter it again.
 - **Reads run, writes wait.** The server runs the tool loop, up to 8 model calls a message, with a
   fixed list of the agent tools (the reads: resources, free-busy, next free time, slots, pool
   availability, events; the writes: holds, bookings, pool and bundle bookings, changes and
@@ -389,6 +560,7 @@ Hosted Slotlock sells plans; self-hosted Slotlock writes no plan and keeps the s
 | --- | --- | --- | --- | --- |
 | Free | 10 | 10 | 2 | Free |
 | Developer | 100 | 100 | 10 | $10 a month or $100 a year |
+| Team (an organization's) | 500 | 100 | 25 | $40 a month or $400 a year, for the organization |
 | Custom | Your servers | | | Talk to the founder |
 
 With `STRIPE_SECRET_KEY`, `SLOTLOCK_STRIPE_PRICE_MONTHLY` and `SLOTLOCK_STRIPE_PRICE_YEARLY` (the
@@ -401,10 +573,55 @@ Stripe and set the tenant's plan: `active` or `trialing` gives Developer, `past_
 Stripe retries, anything else returns the tenant to Free. Nothing is deleted when a plan ends; the
 tenant cannot add more until it is under the Free limits.
 
-Optional variables: `SLOTLOCK_FREE_PLAN_FROM` (an ISO date; from then a tenant with no plan is put
-on Free the next time it adds a key, resource or webhook), `SLOTLOCK_PLAN_CONTACT` (where Custom
-enquiries go, an https or mailto URL), `SLOTLOCK_PLAN_PRICE_MONTHLY` and `SLOTLOCK_PLAN_PRICE_YEARLY`
-(the prices as shown, `$10` and `$100` by default) and `STRIPE_API_VERSION`.
+**Metered overage for Developer** is off. Stripe's test mode takes it: a Managed Payments Checkout
+Session with the Developer price and a metered price on a Billing Meter is created, with Managed
+Payments on and its own parameter checks passed, and a meter event in Slotlock's form is taken
+(checked 2026-11-10). It stays off until the owner pays one test checkout (card 4242 4242 4242
+4242), sends a meter event and sees it on the subscription's upcoming invoice, and the Terms say
+what overage costs. With `SLOTLOCK_OVERAGE=on` (or a percent,
+111-1000; `on` is 300) on the server and the Worker, beside `SLOTLOCK_QUOTAS=on`, a paying Developer
+tenant is refused only past that share of its monthly operations; the Worker adds the metered price
+`SLOTLOCK_STRIPE_PRICE_OVERAGE` (on a Stripe Billing Meter) to a Developer checkout and shows
+`SLOTLOCK_PLAN_PRICE_OVERAGE` on the Plan page. The schema owner then runs, daily and on the 1st for
+the month before:
+
+```sh
+STRIPE_SECRET_KEY=sk_live_… slotlock overage report                 # this month so far
+STRIPE_SECRET_KEY=sk_live_… slotlock overage report --month 2026-10 --event slotlock_operations
+```
+
+It sends Stripe a meter event for each paying Developer tenant's operations above its quota that
+have not been sent, and records the total in `slotlock.overage_reports` first, so an operation is
+never billed twice (a run that stops halfway bills too little, and the next run does not catch up
+on it). An event Stripe already took, whose answer was lost, counts as sent when it is sent again.
+It exits 1 while an event was not taken; run it again.
+
+The Team plan is an organization's (Teams on Cloud, `SLOTLOCK_DASHBOARD_ORGS=enabled`): 500
+resources, 100 keys and 25 webhook endpoints, and monthly quotas its members share (2,000,000
+operations and 100,000 bookings, stopping at 110%), for $40 a month or $400 a year whatever the
+number of members. It is offered once `SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY` and
+`SLOTLOCK_STRIPE_PRICE_TEAM_YEARLY` (its price ids) are set; `SLOTLOCK_PLAN_PRICE_TEAM_MONTHLY` and
+`SLOTLOCK_PLAN_PRICE_TEAM_YEARLY` change the prices shown ($40 and $400 by default); an
+organization's owner then sees Upgrade to Team instead of Developer, and a subscription at a Team
+price gives Team, including one changed to it in the customer portal.
+
+Optional variables: `SLOTLOCK_PLAN_CONTACT` (where Custom enquiries go, an https or mailto URL),
+`SLOTLOCK_PLAN_PRICE_MONTHLY` and `SLOTLOCK_PLAN_PRICE_YEARLY` (the prices as shown, `$10` and `$100`
+by default) and `STRIPE_API_VERSION` (default `2026-04-22.dahlia`, a version that has Managed
+Payments).
+
+The plan a tenant without one of its own is on is kept in the database, so `slotlock serve` and the
+Worker enforce the same limits whichever one a write comes through. Set it once, as the schema owner:
+
+```sh
+slotlock plan default free --from 2026-12-09   # every tenant without a plan is on Free from then
+slotlock plan status                           # the default, and SLOTLOCK_TENANT's own plan
+```
+
+Until `--from`, tenants that already have a key, a resource or a webhook keep the server's limits; a
+new tenant is put on the default plan before it adds its first one. `slotlock plan default none`
+removes the default. A tenant on a paid plan cannot be erased until the subscription is cancelled
+(`billing_active`).
 
 - Each request opens its own database client, at most five connections, and closes it when the
   response is sent; Hyperdrive keeps the pool.
@@ -425,8 +642,8 @@ enquiries go, an https or mailto URL), `SLOTLOCK_PLAN_PRICE_MONTHLY` and `SLOTLO
   binding's limit to one client's. The example configuration also removes query strings (a
   callback's OAuth code) from the URLs Workers Logs keep.
 - With organizations, set `SLOTLOCK_DASHBOARD_ORGS` on both the Worker and the server: the server
-  takes an organization's keys only while its own list names it, whether or not it serves the
-  dashboard.
+  takes an organization's keys only while its own list names it (or, with `enabled`, while an
+  owner has it turned on), whether or not it serves the dashboard.
 - Set `SLOTLOCK_DASHBOARD_USERS` on both the Worker and the server too: the server takes a person's
   keys only while its own list allows them, whether or not it serves the dashboard, so removing a
   person from both lists signs them out and stops their keys. A server without it takes every
@@ -980,12 +1197,13 @@ export async function startCalendarServer(config: CalendarServerConfig) {
 
 | Tool | Does | Hints |
 | --- | --- | --- |
-| `slotlock_list_resources` | Resources visible to the tenant | read-only |
+| `slotlock_list_resources` | Resources visible to the tenant, with each one's name, kind, capacity and labels; by `kind` or `labels` | read-only |
 | `slotlock_get_free_busy` | Busy intervals plus coverage certainty | read-only |
 | `slotlock_find_next_available` | Earliest *certain* slot across resources | read-only |
 | `slotlock_find_available_slots` | Up to 50 *certain* slots, earliest first, to offer a choice | read-only |
 | `slotlock_hold_slots` | Hold up to 5 candidates for 30-900 seconds while a person chooses | write |
 | `slotlock_release_slots` | Release a hold and the rest of its group | write |
+| `slotlock_confirm_slot` | Book a held time exactly, releasing the rest of its group (idempotent) | write |
 | `slotlock_book_together` | Book the same time on 2-20 resources, all or none | write |
 | `slotlock_book_pool` | Book any one free member of a pool (a vehicle class, a room type) | write |
 | `slotlock_get_pool_availability` | How many of a pool's members are free across a window | read |
@@ -994,9 +1212,49 @@ export async function startCalendarServer(config: CalendarServerConfig) {
 | `slotlock_create_event` | Create an event of up to 3,660 days (idempotent) | write |
 | `slotlock_update_event` | Patch at an expected revision, optionally fenced to `expected_resource_id` | write |
 | `slotlock_delete_event` | Tombstone at an expected revision | write, destructive |
+| `slotlock_reschedule` | Move an event to a new time (and resource) at an expected revision (idempotent) | write |
+| `slotlock_cancel` | Cancel an event at an expected revision (idempotent) | write, destructive |
 
 A query window is at most 367 days. Each caller sees only the events it created, but everyone's
 events count as busy time.
+
+A refused write another time can answer (`overlap`, `pool_full`, or a booking rule other than
+`booking_rule_uncertain`) carries `alternatives`: up to three free times of the same length from the
+time asked for, within seven days, found as `slotlock_find_available_slots` finds them (on a
+bundle, times when every resource is free; on a pool, when any member is). They are suggestions,
+not holds. An `overlap` also says when the booking in the way makes the time busy (`busy_start`,
+`busy_end`), and names it when it is the agent's own (`conflicting_hold_id`,
+`conflicting_event_id`).
+
+Every write takes `dry_run: true` to check it without making it: it runs in its transaction with
+every check, the database's constraints included, and is then rolled back, so nothing is stored,
+recorded on the feed or sent. The answer is what it would have been, with `dry_run: true` (ids in
+it are never stored), or the refusal it would have met, with its alternatives. A dry run is never
+put to a person to confirm, and is charged as a read (on REST, when `dry_run=true` is in the query
+string). Tenant erasure, maintenance and the partner API refuse one (`dry_run_not_supported`); a
+read takes no `dry_run`.
+
+An approval policy puts a person in front of the bookings it names (`slotlock_put_approval_policy`,
+an admin operation): by resource, pool, location or group, narrowed by length
+(`longer_than_minutes`), time outside the resource's bookable hours (`outside_hours`) and kind
+(`single`, `pool`, `bundle`, `move`). A covered `slotlock_create_event`, `slotlock_confirm_slot`,
+`slotlock_book_pool`, `slotlock_book_together`, or move by `slotlock_update_event` or
+`slotlock_reschedule`, is first tried as a dry run, so it meets every check it would. Under
+`require_approval` its exact time is then held for the approval (a move holds only the time its
+event does not already take), and the agent is answered `409 approval_pending` with the
+`approval_id` and `expires_at`; under `refuse` it is `403 approval_policy_refused`. A person decides
+in the dashboard's Approvals page or with `slotlock_decide_approval`: granting makes the booking as
+the agent asked for it, as that agent, in the transaction that lets the hold go; declining frees the
+time. The agent learns the outcome by retrying with the same `idempotency_key`: the booking with
+`replayed: true` once granted, `403 approval_declined` (with the person's `reason`) or
+`409 approval_expired`. The wait is each policy's own (`approval_ttl_minutes`, a day by default, up
+to 30 days, and the backend's `maxApprovalMinutes`), ending `lead_minutes` before the booking
+starts; a booking too close to its start for that is `approval_too_late`. Where several policies
+apply, `refuse` wins, then the one that must be decided soonest. A dry run of a covered write
+answers `approval_required`; a recurring series cannot be held whole and is
+`approval_series_unsupported`; one agent may have 50 approvals waiting and a tenant 500
+(`approval_limit_reached`). Maintenance expires what no one decided. The feed records
+`approval.requested`, `approval.granted`, `approval.declined` and `approval.expired`.
 
 An agent offering a person several times holds them first, so none is taken while the person
 decides: `slotlock_hold_slots` holds each free candidate in one group (and lists the taken ones in
@@ -1015,6 +1273,52 @@ per resource in one transaction, all or none. A refusal names the `resource_id` 
 MCP and A2A in the error beside its `code`, on REST in the problem. Bundles take their resources
 in one order, so two racing over the same ones end with one booked, never a deadlock.
 
+A resource says what it is through its profile, each part optional: a `name` agents and people see
+instead of the reference, a `description`, its `kind` (`person`, `room`, `desk`, `space`, `vehicle`,
+`machine`, `equipment`, `service` or `other`), its `capacity` (people or seats), up to 20 `labels`
+(`ev`, `wheelchair`, `projector`) and `attributes` you want back (a staff number, a plate, a floor
+plan link: text, numbers and booleans, 4 KiB at most). Set it when you create the resource, or with
+`PATCH /v1/resources/{id}` (`updateResourceProfile`); `slotlock_list_resources` shows agents the
+name, description, kind, capacity and labels, and narrows by `kind` and `labels`. None of it changes
+how a resource is booked: a kind is a hint and a capacity is said, never enforced. The feed's
+`resource.updated` names the profile fields that changed (`profile_changed`), never what they say.
+
+Where a resource is, and the sets it is in, are kept apart from its pool, which is how it is booked:
+
+- A **location** is a place in a tree of the tenant's own, at most 5 levels (a region, a site, a
+  building, a floor, a zone) and 1,000 locations (`POST /v1/locations`). A resource is at one at
+  most (`location` when created, or `PATCH`), and created without a time zone it takes the nearest
+  one its location, or one above it, has. A location filter includes every location under it.
+  A location something is at or in cannot be deleted (`409 location_in_use`), nor one moved under
+  itself (`location_cycle`) or past 5 levels (`location_too_deep`).
+- A **group** is any set the tenant wants: a team, a department, a contract, "Saturday clinic"
+  (`POST /v1/groups`, then `PUT /v1/groups/{ref}/members/{resource_id}`). A resource is in up to
+  20 of the tenant's 500 groups. Deleting a group leaves its resources as they were. A resource
+  joining or leaving a group, its group's deletion included, is a `resource.updated` on the feed
+  with its `groups` before and after, by reference.
+- `slotlock_list_resources` shows agents each resource's `location` (with its name) and `groups`,
+  and narrows by `location` and `group`, with or without a `pool`.
+- The searches (`slotlock_get_free_busy`, `slotlock_find_next_available`,
+  `slotlock_find_available_slots`) take a selection in place of `resource_ids`: any of `location`,
+  `group`, `labels`, `kind` and `pool`, every one given matched. It covers the shared resources in
+  use that match, in a stable order, at most 100 (20 for slots): more answers `400
+  selection_too_large`, none `404 selection_empty`, so a search is never partial; the answer names
+  them in `selected_resource_ids`. "A room for ten with video on floor 3" is one call.
+
+A hall that is also its rooms, or a court that is also its halves, is a **composite**: make each
+part a part of the whole (`PUT /v1/resources/{id}/parent` with `parent_id`, `setResourceParent`, or
+`slotlock resource parent <room> <hall>`). Booking the whole then conflicts with a booking of any
+of its parts, and two parts never with each other, held by PostgreSQL itself: each booking or hold
+on a part also claims its place on the whole, `[i, i+1)`, and one on the whole claims every place,
+in `slotlock.composite_claims` under `EXCLUDE (resource_id WITH =, during WITH &&, span WITH &&)`.
+A part's free/busy (and next-free search) shows the whole's bookings, and the whole's shows its
+parts'; agents see a part's `part_of`; a booking refused by the composite names the booking in its
+way (`conflicting_reservation_id`); the feed's `resource.updated` carries `parent` before and
+after; and the dashboard's resource page sets it, or lists a whole's parts. One level deep, at most 50 parts. A composite changes only
+while neither side has a booking or live hold still to come (`409 composite_busy`); one level only
+(`composite_too_deep`). A resource that is neither a part nor a whole has no claims, and nothing
+about it changes.
+
 Rentals sell a class, not a plate. Put interchangeable resources in a pool
 (`PUT /v1/resources/{id}/pool`, `setResourcePool`); agents see each resource's `pool`, list a pool's
 members with `slotlock_list_resources` and `pool`, and book the class with `slotlock_book_pool`,
@@ -1024,7 +1328,12 @@ free, `slotlock_get_pool_availability` splits a window where that number changes
 member busy over its bookings' occupied time, buffers included, but not the buffers a new booking
 would keep, so a member it counts free may still refuse a booking that abuts another); to see which,
 search the members with `slotlock_find_available_slots` and `require_free: 1`: each slot names the
-members free in `resource_ids`. `GET /v1/pools` lists the pools with their capacity. The older names `calendar.<verb>` and `calendar_<verb>` still work and
+members free in `resource_ids`. `GET /v1/pools` lists the pools with their capacity and `order`:
+which member `slotlock_book_pool` tries first, set with `PUT /v1/pools/{pool}/order`
+(`setPoolOrder`, for up to 1,000 pools a tenant: `pool_order_limit_reached`, 409, for one more).
+`stable` (the default) tries them by id; `least_booked` the one with the fewest
+confirmed bookings made in the last 30 days; `round_robin` the one after the member it booked last,
+to share bookings across vans, rooms or a team of people. The older names `calendar.<verb>` and `calendar_<verb>` still work and
 are no longer advertised.
 
 ### Errors
@@ -1039,6 +1348,7 @@ A refusal is a result the model can act on:
 | `invalid_arguments` | Input failed the schema, or a window is inverted or longer than 367 days. A schema failure adds `issues`, up to 20 `{"path":[…],"message":"…"}`, each naming a field by its path in the arguments (`["rules",0,"start_minutes"]`; `[]` is the arguments as a whole): in `error` on MCP and A2A, beside `code` in REST's problem details |
 | `forbidden` | `authorize` refused the call |
 | `rate_limited` | `consumeRateLimit` refused the call |
+| `quota_exceeded` | The tenant's plan's monthly quota is used up (`SLOTLOCK_QUOTAS=on`): `metric`, `quota`, `stop`, `used` and `resets_at` say which and until when |
 | `not_found`, `resource_not_found`, `event_not_found` | Not visible to this caller, or no such id: a resource id is the `id` `slotlock_list_resources` returns, not its `external_ref` |
 | `overlap` | The time is taken |
 | `revision_conflict`, `idempotency_conflict`, `event_cancelled` | Re-read, then retry with the current revision or a new key |
@@ -1173,6 +1483,7 @@ never cached. W3C `traceparent`, `tracestate` and `baggage` reach your backend a
 | `GET /v1/available-slots` | `slotlock_find_available_slots` |
 | `POST /v1/slot-holds` | `slotlock_hold_slots` |
 | `DELETE /v1/slot-holds/{hold_id}` | `slotlock_release_slots` |
+| `POST /v1/slot-holds/{hold_id}/confirm` | `slotlock_confirm_slot` |
 | `POST /v1/bundles` | `slotlock_book_together` |
 | `POST /v1/pool-bookings` | `slotlock_book_pool` |
 | `GET /v1/pool-availability` | `slotlock_get_pool_availability` |
@@ -1180,6 +1491,8 @@ never cached. W3C `traceparent`, `tracestate` and `baggage` reach your backend a
 | `POST /v1/events` | `slotlock_create_event` |
 | `GET /v1/events/{event_id}` | `slotlock_get_event` |
 | `PATCH /v1/events/{event_id}` | `slotlock_update_event` |
+| `POST /v1/events/{event_id}/reschedule` | `slotlock_reschedule` |
+| `POST /v1/events/{event_id}/cancel` | `slotlock_cancel` |
 | `DELETE /v1/events/{event_id}` | `slotlock_delete_event` |
 
 ```sh
@@ -1223,8 +1536,13 @@ waits for a confirmation.
 
 | Request | Does |
 | --- | --- |
-| `POST /v1/resources` | Create the resource with this `external_ref`, or update its `timezone`; `visibility: "private"` hides it from agents |
-| `GET /v1/resources/{resource_id}` | One resource, with its own weekly hours, visibility and `archived_at` |
+| `POST /v1/resources` | Create the resource with this `external_ref`, or update its `timezone` and the profile fields given; `visibility: "private"` hides it from agents |
+| `PATCH /v1/resources/{resource_id}` | Change its profile: `name`, `description`, `kind`, `capacity`, `labels`, `attributes`, and its `location`, the fields given (`null` clears) |
+| `GET /v1/locations` | The tenant's locations, depth first, with how many resources are at each; `POST` creates or updates one (`ref`, `name`, `parent_ref`, `timezone`) |
+| `PATCH /v1/locations/{location_ref}` | Change its name, parent or time zone; `DELETE` removes it (`409 location_in_use` while anything is at or in it) |
+| `GET /v1/groups` | The tenant's groups, with how many resources are in each; `POST` creates or updates one (`ref`, `name`, `description`); `DELETE /v1/groups/{group_ref}` removes it |
+| `PUT /v1/groups/{group_ref}/members/{resource_id}` | Put a resource in a group; `DELETE` takes it out |
+| `GET /v1/resources/{resource_id}` | One resource, with its own weekly hours, visibility, `archived_at` and profile |
 | `POST /v1/resources/{resource_id}/archive` | Take it out of use; `…/restore` puts it back |
 | `DELETE /v1/resources/{resource_id}` | Delete it with its history (`409 resource_in_use` while anything on it is live) |
 | `GET /v1/resources/{resource_id}/busy?start=…&end=…` | Its occupied time, private resources included |
@@ -1292,8 +1610,8 @@ webhook URLs or secrets.
   `reservation.created`, `.updated`, `.cancelled`, `.checked_in`, `.no_show`; `event.created`,
   `.updated`, `.cancelled`, `.timezone_shifted`, `.timezone_conflict`; `waitlist.offered`,
   `.expired`; `coverage.stale`; and configuration: `resource.created`, `resource.updated` (booking
-  and check-in rules, pool, bookable hours, time zone or reference, with `before` and `after` of
-  only the fields that changed), `resource.archived`, `.restored`, `.deleted`; `coverage.recorded`
+  and check-in rules, pool, location, groups, bookable hours, time zone or reference, with `before`
+  and `after` of only the fields that changed, and the profile fields' names in `profile_changed`), `resource.archived`, `.restored`, `.deleted`; `coverage.recorded`
   (a source's first read; reading it again is not a change) and `coverage.deleted`. A `coverage.*`
   change names its source by `source_id` (also its `subject`), never the source itself, which can
   be an iCalendar URL with a token or an address: `src_` and 32 random hex digits, made when the
@@ -1329,6 +1647,12 @@ webhook URLs or secrets.
   change's id, the same on every retry), `webhook-timestamp` and `webhook-signature`, keyed by the
   `whsec_` secret the call returns once. `event_types` takes any of the types above. Verify it with any Standard Webhooks library, and use
   `webhook-id` to drop a repeat: delivery is at least once.
+- A webhook can also take only the changes about some resources: `resource_ids` (up to 100),
+  `pools`, `locations` (each with every location in it) or `groups` (up to 20 of each), matched
+  against the resource as it is when the change is delivered, or as the change says it was: a
+  resource's deletion (`resource.deleted` names its pool, location and groups) and its move out of
+  them (`resource.updated`'s `before`) still reach it. With any of them, a change about no resource
+  (a key, a webhook, a usage notice) is not sent to it.
 - Changes go to each webhook in order, one at a time, until one fails; that one is retried after
   5 seconds, 5 minutes, 30 minutes, 2, 5, then every 10 hours. After a day of failures, or a `410`,
   the webhook is disabled and the feed records `webhook.disabled`; `POST /v1/webhooks/{id}/enable`

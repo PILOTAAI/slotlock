@@ -1,7 +1,8 @@
 // The dashboard without a database: GitHub sign-in (state + PKCE), sealed sessions, CSRF and origin
 // checks, the key shown once, escaping, and the allowlist. GitHub is a fake `fetch`; keys and
 // resources are in-memory stores with the same contracts as the real ones.
-import { createHash, randomUUID } from 'node:crypto';
+import { type SlotlockResourceProfileInput, parseSlotlockResourceProfile } from '../resource-profile.js';
+import { createHash, createSign, generateKeyPairSync, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -55,6 +56,8 @@ function memoryKeys() {
         expiresAt: input.expiresAt ?? null,
         lastUsedAt: null,
         revokedAt: null,
+        ...(input.resourceScope ? { resourceScope: input.resourceScope } : {}),
+        ...(input.limits ? { limits: input.limits } : {}),
       });
     }),
     list: vi.fn(async ({ tenantRef }: { tenantRef: string }) =>
@@ -74,6 +77,13 @@ function memoryKeys() {
     }),
     authenticate: vi.fn(async () => null),
     erase: vi.fn(async () => 0),
+    setLimits: vi.fn(async ({ tenantRef, id, limits }: { tenantRef: string; id: string; limits: Record<string, unknown> }) => {
+      const row = rows.get(id);
+      if (!row || row.tenantRef !== tenantRef || row.revokedAt) return false;
+      if (Object.keys(limits).length === 0) delete (row as { limits?: unknown }).limits;
+      else (row as { limits?: unknown }).limits = limits;
+      return true;
+    }),
   } satisfies SlotlockApiKeyStore;
   return { store, rows };
 }
@@ -645,6 +655,41 @@ describe('API keys in the dashboard', () => {
     expect(html).not.toContain('<img src=x');
   });
 
+  it("holds a key below the server's limits, from its form and later (RFC 0004 A5)", async () => {
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const token = await csrf(target, session);
+    const made = await post(
+      target,
+      '/base/dashboard/keys',
+      { csrf: token, name: 'Bounded', access: 'read_write', expires: 'never', max_holds: '3', requests_per_minute: '60' },
+      session,
+    );
+    expect(made.status).toBe(200);
+    expect(keys.store.create).toHaveBeenLastCalledWith(expect.objectContaining({ limits: { maxHolds: 3, requestsPerMinute: 60 } }));
+    const [row] = [...keys.rows.values()];
+    expect(await (await get(target, '/base/dashboard/keys', session)).text()).toContain(
+      '<span class="meta wrap">At most 3 live holds, 60 requests a minute</span>',
+    );
+    const saved = await post(
+      target,
+      '/base/dashboard/keys/limits',
+      { csrf: token, id: row?.id as string, max_held_hours: '48', requires_approval: 'on' },
+      session,
+    );
+    expect(saved.status).toBe(303);
+    expect(keys.store.setLimits).toHaveBeenLastCalledWith({
+      tenantRef: 'github:4242',
+      id: row?.id,
+      limits: { maxHeldHours: 48, requiresApproval: true },
+    });
+    const bad = await post(target, '/base/dashboard/keys/limits', { csrf: token, id: row?.id as string, max_holds: '0' }, session);
+    expect(bad.status).toBe(400);
+    expect(await bad.text()).toContain('Give each limit as a whole number');
+    const elsewhere = await post(target, '/base/dashboard/keys/limits', { csrf: token, id: randomUUID(), max_holds: '2' }, session);
+    expect(elsewhere.status).toBe(404);
+  });
+
   it("rotates and revokes keys in the person's tenant only", async () => {
     const target = dashboard();
     const { session } = await signIn(target);
@@ -704,6 +749,38 @@ describe('API keys in the dashboard', () => {
 });
 
 describe('resources in the dashboard', () => {
+  it('makes a resource a part of a whole, shows a whole its parts, and says why one is refused', async () => {
+    const setParent = vi.fn(async (_tenantRef: string, id: string, parentId: string | null) => {
+      if (parentId === 'busy') throw Object.assign(new Error('busy'), { code: 'composite_busy' });
+      const row = resources.rows.find((candidate) => candidate.id === id) as SlotlockResource;
+      if (parentId === null) delete row.parentId;
+      else Object.assign(row, { parentId, partIndex: 0 });
+      return row;
+    });
+    const target = dashboard({ resources: { ...resources.store, setParent } });
+    const { session } = await signIn(target);
+    const hall = await resources.store.add('github:4242', 'hall', 'UTC');
+    const room = await resources.store.add('github:4242', 'room-1', 'UTC');
+    const page = await (await get(target, `/base/dashboard/resources/${room.id}`, session)).text();
+    expect(page).toContain('id="composite"');
+    expect(page).toContain(`<option value="${hall.id}">hall</option>`);
+    const saved = await post(target, '/base/dashboard/resources/parent', { csrf: await csrf(target, session), id: room.id, parent: hall.id }, session);
+    expect(saved.status).toBe(303);
+    expect(setParent).toHaveBeenCalledWith('github:4242', room.id, hall.id, 'github:4242');
+    // The whole lists its parts instead of a choice.
+    const whole = await (await get(target, `/base/dashboard/resources/${hall.id}`, session)).text();
+    expect(whole).toContain('A whole of 1 part');
+    expect(whole).toContain(`href="/base/dashboard/resources/${room.id}"`);
+    // Parts are listed in their order, not the order they were added.
+    const first = await resources.store.add('github:4242', 'room-0', 'UTC');
+    Object.assign(room, { partIndex: 1 });
+    Object.assign(resources.rows.find((row) => row.id === first.id) as SlotlockResource, { parentId: hall.id, partIndex: 0 });
+    const ordered = await (await get(target, `/base/dashboard/resources/${hall.id}`, session)).text();
+    expect(ordered).toMatch(new RegExp(`A whole of 2 parts: <a href="[^"]+${first.id}">room-0</a>, <a href="[^"]+${room.id}">room-1</a>`));
+    // Another tenant's resource is not a choice, and a refusal is said in words.
+    expect((await post(target, '/base/dashboard/resources/parent', { csrf: await csrf(target, session), id: room.id, parent: randomUUID() }, session)).status).toBe(400);
+  });
+
   it("adds resources to the person's tenant, up to the cap", async () => {
     const target = dashboard();
     const { session } = await signIn(target);
@@ -1454,6 +1531,38 @@ describe('organizations', () => {
     expect(ownerPage).toContain('Manage billing');
   });
 
+  it("offers an organization's owner Team where the deployment sells it, and a person Developer", async () => {
+    const billing = {
+      plan: vi.fn(async () => null),
+      checkout: vi.fn(async () => 'https://checkout.stripe.com/c/pay/cs_1'),
+      portal: vi.fn(async () => 'https://billing.stripe.com/p/session/1'),
+      prices: { month: '$10', year: '$100' },
+      teamPrices: { month: '$40', year: '$400' },
+      contact: 'mailto:founder@example.com',
+      formOrigins: ['https://checkout.stripe.com', 'https://billing.stripe.com'],
+    };
+    const on = new Set([String(ACME.id)]);
+    const teams = {
+      enabled: vi.fn(async (ids: readonly string[]) => new Set(ids.filter((id) => on.has(id)))),
+      enable: vi.fn(async () => true),
+      disable: vi.fn(async () => true),
+    };
+    const target = orgDashboard([{ ...ACME, role: 'admin' }], { organizations: 'enabled', teams, billing });
+    const { session } = await signIn(target);
+    const personal = await (await get(target, '/base/dashboard/plan', session)).text();
+    expect(personal).toContain('Upgrade to Developer');
+    expect(personal).toContain('$10 a month');
+    const switched = await post(target, '/base/dashboard/organization', { csrf: await csrf(target, session), organization: String(ACME.id) }, session);
+    const inOrg = cookie(switched, '__Host-slotlock-session')?.pair as string;
+    const page = await (await get(target, '/base/dashboard/plan', inOrg)).text();
+    expect(page).toContain('Upgrade to Team');
+    expect(page).toContain('$40 a month');
+    await post(target, '/base/dashboard/plan/upgrade', { csrf: await csrf(target, inOrg), interval: 'year' }, inOrg);
+    expect(billing.checkout).toHaveBeenLastCalledWith(
+      expect.objectContaining({ tenantRef: `github-org:${ACME.id}`, interval: 'year', plan: 'team' }),
+    );
+  });
+
   it('asks GitHub for read:org only when the server serves organizations', async () => {
     expect((await signIn(dashboard())).location.searchParams.has('scope')).toBe(false);
     expect((await signIn(orgDashboard([ACME]))).location.searchParams.get('scope')).toBe('read:org');
@@ -1490,6 +1599,60 @@ describe('organizations', () => {
     );
     expect(failed.callback.status).toBe(502);
     expect(failed.session).toBeUndefined();
+  });
+
+  it('lets an owner turn an organization on, its members switch to it, and turning it off end that', async () => {
+    const on = new Set<string>();
+    const teams = {
+      enabled: vi.fn(async (ids: readonly string[]) => new Set(ids.filter((id) => on.has(id)))),
+      enable: vi.fn(async (org: { id: string }) => !on.has(org.id) && Boolean(on.add(org.id))),
+      disable: vi.fn(async (id: string) => on.delete(id)),
+    };
+    const target = orgDashboard([{ ...ACME, role: 'admin' }, GLOBEX], { organizations: 'enabled', teams });
+    const { start, session } = await signIn(target);
+    // Organizations are read at sign-in, and the person starts in their own tenant.
+    expect(new URL(start.headers.get('location') ?? '').searchParams.get('scope')).toBe('read:org');
+    await post(target, '/base/dashboard/keys', { csrf: await csrf(target, session), name: 'Mine', access: 'read', expires: '30' }, session);
+    expect(keys.store.create).toHaveBeenLastCalledWith(expect.objectContaining({ tenantRef: 'github:4242' }));
+    const page = await (await get(target, '/base/dashboard/teams', session)).text();
+    expect(page).toContain('acme-fleet');
+    expect(page).toContain('An owner can turn it on'); // globex: a member only
+    // Nobody switches to an organization that is off, and a member cannot turn one on.
+    const refused = await post(target, '/base/dashboard/organization', { csrf: await csrf(target, session), organization: String(ACME.id) }, session);
+    expect(refused.status).toBe(400);
+    expect((await post(target, '/base/dashboard/teams/enable', { csrf: await csrf(target, session), organization: String(GLOBEX.id) }, session)).status).toBe(403);
+    expect(teams.enable).not.toHaveBeenCalled();
+    // The owner turns it on; then anyone in it can switch to it, and its keys are the organization's.
+    // Who owns it was read at sign-in: 16 minutes on, that is too old to turn it on.
+    now += 16 * 60_000;
+    const stale = await post(target, '/base/dashboard/teams/enable', { csrf: await csrf(target, session), organization: String(ACME.id) }, session);
+    expect(stale.status).toBe(403);
+    expect(await stale.text()).toContain('sign out and in again');
+    expect(teams.enable).not.toHaveBeenCalled();
+    now -= 16 * 60_000;
+    const enabled = await post(target, '/base/dashboard/teams/enable', { csrf: await csrf(target, session), organization: String(ACME.id) }, session);
+    expect(await enabled.text()).toContain('Slotlock is on for acme-fleet');
+    expect(teams.enable).toHaveBeenCalledWith({ id: String(ACME.id), login: 'acme-fleet' }, 'github:4242');
+    const switched = await post(target, '/base/dashboard/organization', { csrf: await csrf(target, session), organization: String(ACME.id) }, session);
+    expect(switched.status).toBe(303);
+    const inOrg = cookie(switched, '__Host-slotlock-session')?.pair as string;
+    await post(target, '/base/dashboard/keys', { csrf: await csrf(target, inOrg), name: 'Shared', access: 'read', expires: '30' }, inOrg);
+    expect(keys.store.create).toHaveBeenLastCalledWith(expect.objectContaining({ tenantRef: `github-org:${ACME.id}` }));
+    // Back to their own, from the workspace menu.
+    const home = await post(target, '/base/dashboard/organization', { csrf: await csrf(target, inOrg), organization: '' }, inOrg);
+    const personal = cookie(home, '__Host-slotlock-session')?.pair as string;
+    await post(target, '/base/dashboard/keys', { csrf: await csrf(target, personal), name: 'Mine again', access: 'read', expires: '30' }, personal);
+    expect(keys.store.create).toHaveBeenLastCalledWith(expect.objectContaining({ tenantRef: 'github:4242' }));
+    // Turning it off needs its name, and then a session still in it is back in its own tenant.
+    expect((await post(target, '/base/dashboard/teams/disable', { csrf: await csrf(target, inOrg), organization: String(ACME.id), confirm: 'acme' }, inOrg)).status).toBe(400);
+    const off = await post(target, '/base/dashboard/teams/disable', { csrf: await csrf(target, inOrg), organization: String(ACME.id), confirm: 'acme-fleet' }, inOrg);
+    expect(await off.text()).toContain('Slotlock is off for acme-fleet');
+    await post(target, '/base/dashboard/keys', { csrf: await csrf(target, inOrg), name: 'After', access: 'read', expires: '30' }, inOrg);
+    expect(keys.store.create).toHaveBeenLastCalledWith(expect.objectContaining({ tenantRef: 'github:4242' }));
+  });
+
+  it('needs the teams store to serve organizations turned on', () => {
+    expect(() => dashboard({ organizations: 'enabled' })).toThrow(/needs the teams store/);
   });
 
   it('lets a member of two served organizations switch, and only between them', async () => {
@@ -1907,6 +2070,108 @@ describe('resource detail, webhooks and the waitlist', () => {
     expect(store.setPool).toHaveBeenLastCalledWith('github:4242', OWN, null, 'github:4242');
   });
 
+  it('offers no locations and groups without a store that keeps them', async () => {
+    const { store } = full();
+    const target = dashboard({ resources: store });
+    const { session } = await signIn(target);
+    const token = await csrf(target, session);
+    expect(await (await get(target, '/base/dashboard/resources', session)).text()).not.toContain('Locations and groups');
+    expect(await (await get(target, `/base/dashboard/resources/${OWN}`, session)).text()).not.toContain('Location and groups');
+    expect((await get(target, '/base/dashboard/locations', session)).status).toBe(404);
+    for (const path of ['/locations', '/locations/delete', '/groups', '/groups/delete']) {
+      expect((await post(target, `/base/dashboard${path}`, { csrf: token, ref: 'x', name: 'X' }, session)).status, path).toBe(404);
+    }
+    expect((await post(target, '/base/dashboard/resources/place', { csrf: token, id: OWN, location: 'x' }, session)).status).toBe(404);
+    // Signed out, the page sends a person to sign in.
+    expect((await get(target, '/base/dashboard/locations')).status).toBe(303);
+  });
+
+  it("edits a resource's profile, shows its name in place of the reference, and says what it could not keep", async () => {
+    const { store } = full();
+    const setProfile = vi.fn(async (tenantRef: string, id: string, profile: SlotlockResourceProfileInput) => {
+      const row = resources.rows.find((r) => r.id === id && r.tenantRef === tenantRef) as SlotlockResource | undefined;
+      if (!row) return null;
+      const change = parseSlotlockResourceProfile(profile);
+      if (change.name !== undefined) {
+        if (change.name === null) delete row.name;
+        else row.name = change.name;
+      }
+      if (change.kind !== undefined) {
+        if (change.kind === 'other') delete row.kind;
+        else row.kind = change.kind;
+      }
+      if (change.capacity !== undefined) {
+        if (change.capacity === null) delete row.capacity;
+        else row.capacity = change.capacity;
+      }
+      if (change.labels !== undefined) {
+        if (change.labels.length === 0) delete row.labels;
+        else row.labels = change.labels;
+      }
+      if (change.description !== undefined) {
+        if (change.description === null) delete row.description;
+        else row.description = change.description;
+      }
+      return row;
+    });
+    const target = dashboard({ resources: { ...store, setProfile } });
+    const { session } = await signIn(target);
+    const token = await csrf(target, session);
+    const saved = await post(
+      target,
+      '/base/dashboard/resources/profile',
+      {
+        csrf: token,
+        id: OWN,
+        name: ' Van 1, white ',
+        kind: 'vehicle',
+        capacity: '3',
+        labels: 'EV, lhr  tow-bar',
+        description: 'Long wheelbase.',
+      },
+      session,
+    );
+    expect(saved.status).toBe(303);
+    expect(setProfile).toHaveBeenLastCalledWith(
+      'github:4242',
+      OWN,
+      {
+        name: 'Van 1, white',
+        description: 'Long wheelbase.',
+        kind: 'vehicle',
+        capacity: 3,
+        labels: ['ev', 'lhr', 'tow-bar'],
+      },
+      'github:4242',
+    );
+    const page = await (await get(target, `/base/dashboard/resources/${OWN}`, session)).text();
+    expect(page).toContain('Van 1, white');
+    expect(page).toContain('<dt>Reference</dt><dd>van-1</dd><dt>Kind</dt><dd>Vehicle</dd><dt>Capacity</dt><dd>3</dd><dt>Labels</dt><dd>ev, lhr, tow-bar</dd>');
+    expect(page).toContain('<option value="vehicle" selected>Vehicle</option>');
+    expect(page).toContain('name="labels" value="ev, lhr, tow-bar"');
+    // The list shows the name, with the reference beside it.
+    const listed = await (await get(target, '/base/dashboard/resources', session)).text();
+    expect(listed).toContain('>Van 1, white</a><span class="meta" title="Reference van-1">van-1</span>');
+    // Out of bounds: said in a person's words, naming the field.
+    const badCapacity = await post(target, '/base/dashboard/resources/profile', { csrf: token, id: OWN, capacity: '0' }, session);
+    expect(badCapacity.status).toBe(400);
+    expect(await badCapacity.text()).toContain('Capacity is a whole number from 1 to 100,000.');
+    const badLabel = await post(target, '/base/dashboard/resources/profile', { csrf: token, id: OWN, labels: 'ok, no!' }, session);
+    expect(badLabel.status).toBe(400);
+    expect(await badLabel.text()).toContain('Up to 20 labels, each 1 to 64 letters');
+    // Empty fields clear it all.
+    await post(target, '/base/dashboard/resources/profile', { csrf: token, id: OWN, kind: 'other' }, session);
+    expect(setProfile).toHaveBeenLastCalledWith(
+      'github:4242',
+      OWN,
+      { name: null, description: null, kind: 'other', capacity: null, labels: [] },
+      'github:4242',
+    );
+    expect(await (await get(target, '/base/dashboard/resources', session)).text()).toContain('>van-1</a>');
+    // Another tenant's resource is not found.
+    expect((await post(target, '/base/dashboard/resources/profile', { csrf: token, id: THEIRS, name: 'x' }, session)).status).toBe(404);
+  });
+
   it('shows which booking rules a resource takes from the pool and tenant defaults, and saves the new ones', async () => {
     const { target, store } = full();
     const ruleDefaults = vi.fn(async () => ({
@@ -1978,6 +2243,12 @@ describe('resource detail, webhooks and the waitlist', () => {
     expect(listed).toContain('Delivering');
 
     const endpoint = endpoints[0] as SlotlockWebhookEndpoint;
+    // A filter set over the API is shown, in a few words.
+    endpoint.filter = { resourceIds: ['0f8b6c1e-2d4a-4c7e-9b1a-3e5f7a9c2d4b'], locations: ['north', 'leeds'] };
+    expect(await (await get(target, '/base/dashboard/webhooks', session)).text()).toContain(
+      '<span class="meta">Only 1 resource; locations north, leeds</span>',
+    );
+    delete endpoint.filter;
     Object.assign(endpoint, { failingSince: new Date(now - 3_600_000), attempts: 4, lastStatus: 503 });
     expect(await (await get(target, '/base/dashboard/webhooks', session)).text()).toMatch(/Failing[\s\S]*4 attempts, last HTTP 503/);
     Object.assign(endpoint, { disabledAt: new Date(now), disabledReason: 'Failing for a day' });
@@ -2156,6 +2427,7 @@ describe('the plan page', () => {
     const calls: Array<{ kind: string; input: unknown }> = [];
     const billing = {
       plan: vi.fn(async (_tenantRef: string) => plan),
+      enrol: vi.fn(async (_tenantRef: string) => undefined),
       checkout: vi.fn(async (input: unknown) => {
         calls.push({ kind: 'checkout', input });
         return 'https://checkout.stripe.com/c/pay/cs_test_1';
@@ -2186,6 +2458,29 @@ describe('the plan page', () => {
     expect((await get(dashboard(), '/base/dashboard/plan', session)).status).toBe(404);
   });
 
+  it('limits a key to locations or groups on Developer, never on Free, and never with full access', async () => {
+    const free: SlotlockTenantPlan = { ...developer, plan: 'free', stripeCustomer: null, stripeSubscription: null, currentPeriodEnd: null };
+    const limited = { name: 'North desk', access: 'read_write', expires: '90', limit_location: 'north', limit_group: 'team' };
+    const onFree = billed(free);
+    const { session } = await signIn(onFree.target);
+    const refused = await post(onFree.target, '/base/dashboard/keys', { csrf: await csrf(onFree.target, session), ...limited }, session);
+    expect(refused.status).toBe(403);
+    expect(await refused.text()).toContain('Keys limited to locations or groups come with the Developer and Team plans.');
+    expect(keys.store.create).not.toHaveBeenCalled();
+    const onDeveloper = billed(developer);
+    const signed = await signIn(onDeveloper.target);
+    const token = await csrf(onDeveloper.target, signed.session);
+    const full = await post(onDeveloper.target, '/base/dashboard/keys', { csrf: token, ...limited, access: 'full' }, signed.session);
+    expect(full.status).toBe(400);
+    expect((await post(onDeveloper.target, '/base/dashboard/keys', { csrf: token, ...limited }, signed.session)).status).toBe(200);
+    expect(keys.store.create).toHaveBeenLastCalledWith(
+      expect.objectContaining({ scopes: ['read', 'write'], resourceScope: { locations: ['north'], groups: ['team'] } }),
+    );
+    expect(await (await get(onDeveloper.target, '/base/dashboard/keys', signed.session)).text()).toContain(
+      '<span class="meta wrap">Only north, group team</span>',
+    );
+  });
+
   it('shows a Free tenant its use against the limits, an upgrade and the founder', async () => {
     const free: SlotlockTenantPlan = {
       plan: 'free',
@@ -2212,6 +2507,45 @@ describe('the plan page', () => {
     expect(html).toContain('Yearly, $100 a year');
     expect(html).not.toContain('Manage billing');
     expect(html).toContain('href="mailto:founder@example.com">Talk to the founder');
+  });
+
+  it('switches to the test environment: its own tenant, never billed, and back to Live', async () => {
+    const { target, calls } = billed(null);
+    const { session } = await signIn(target);
+    expect(await (await get(target, '/base/dashboard', session)).text()).toContain('name="environment" value="live" aria-pressed="true"');
+    const refused = await post(target, '/base/dashboard/environment', { csrf: await csrf(target, session), environment: 'staging' }, session);
+    expect(refused.status).toBe(400);
+    const switched = await post(target, '/base/dashboard/environment', { csrf: await csrf(target, session), environment: 'test' }, session);
+    expect(switched.status).toBe(303);
+    const test = cookie(switched, '__Host-slotlock-session')?.pair as string;
+    const page = await (await get(target, '/base/dashboard', test)).text();
+    expect(page).toContain('name="environment" value="test" aria-pressed="true"');
+    expect(page).toContain('class="test-banner"');
+    await post(
+      target,
+      '/base/dashboard/keys',
+      { csrf: await csrf(target, test), name: 'Test agent', access: 'read', expires: '30' },
+      test,
+    );
+    expect(keys.store.create).toHaveBeenLastCalledWith(expect.objectContaining({ tenantRef: 'github:4242~test' }));
+    // Plans and billing are Live's: the Test plan page says so, and changes nothing.
+    const plan = await (await get(target, '/base/dashboard/plan', test)).text();
+    expect(plan).toContain('never billed');
+    expect(plan).not.toContain('Test usage this month'); // this dashboard does not meter
+    // With metering, the test environment's own use, read from its own tenant.
+    const usage = vi.fn(async () => [{ day: '2026-10-10', metric: 'operations' as const, keyId: '', origin: 'rest', count: 7 }]);
+    const metered = dashboard({ usage: true, resources: { ...resources.store, usage }, billing: { plan: async () => null, checkout: vi.fn(), portal: vi.fn(), prices: { month: '$10', year: '$100' }, contact: 'mailto:founder@example.com', formOrigins: ['https://checkout.stripe.com'] } as never });
+    const testPage = await (await get(metered, '/base/dashboard/plan', test)).text();
+    expect(testPage).toContain('Test usage this month');
+    expect(usage).toHaveBeenCalledWith('github:4242~test', expect.any(String), expect.any(String));
+    expect(plan).not.toContain('action="/base/dashboard/plan/upgrade"');
+    for (const path of ['/base/dashboard/plan/upgrade', '/base/dashboard/plan/manage']) {
+      expect((await post(target, path, { csrf: await csrf(target, test), interval: 'month' }, test)).status).toBe(400);
+    }
+    expect(calls).toEqual([]);
+    const back = await post(target, '/base/dashboard/environment', { csrf: await csrf(target, test), environment: 'live' }, test);
+    const live = cookie(back, '__Host-slotlock-session')?.pair as string;
+    expect(await (await get(target, '/base/dashboard', live)).text()).not.toContain('class="test-banner"');
   });
 
   it('sends Upgrade to a checkout page tagged with the tenant, and back to the plan page', async () => {
@@ -2264,12 +2598,134 @@ describe('the plan page', () => {
     expect(await failed.text()).toContain('Billing did not open');
   });
 
-  it('puts a tenant on a plan before it adds what plans limit', async () => {
+  it('puts a new tenant on the default plan before it adds what plans limit', async () => {
     const { target, billing } = billed(null);
     const { session } = await signIn(target);
-    billing.plan.mockClear();
+    expect(billing.enrol).not.toHaveBeenCalled();
     await post(target, '/base/dashboard/keys', { csrf: await csrf(target, session), name: 'agent', access: 'read', expires: 'never' }, session);
-    expect(billing.plan).toHaveBeenCalledWith(`github:${GITHUB_USER.id}`);
+    expect(billing.enrol).toHaveBeenCalledWith(`github:${GITHUB_USER.id}`);
+    // Reading the Plan page writes nothing.
+    billing.enrol.mockClear();
+    await get(target, '/base/dashboard/plan', session);
+    expect(billing.enrol).not.toHaveBeenCalled();
+  });
+
+  const free: SlotlockTenantPlan = {
+    plan: 'free',
+    status: 'active',
+    limits: { resources: 10, apiKeys: 10, webhookEndpoints: 2 },
+    stripeCustomer: null,
+    stripeSubscription: null,
+    currentPeriodEnd: null,
+  };
+
+  it('counts resources as the plan does, archived ones included, on the Plan and Resources pages', async () => {
+    const counted = { ...resources.store, count: vi.fn(async (_tenantRef: string) => 7) };
+    const { billing } = billed(free);
+    const target = dashboard({ billing, resources: counted });
+    const { session } = await signIn(target);
+    for (const reference of ['van-1', 'van-2', 'van-3']) {
+      await post(target, '/base/dashboard/resources', { csrf: await csrf(target, session), reference, timezone: 'UTC' }, session);
+    }
+    const plan = await (await get(target, '/base/dashboard/plan', session)).text();
+    expect(plan).toContain('7<span class="meta"> of 10</span>');
+    const listed = await (await get(target, '/base/dashboard/resources', session)).text();
+    expect(listed).toContain('7 of 10 on your plan, 4 of them archived (archived resources count until deleted).');
+    expect(listed).not.toContain('of 100');
+  });
+
+  it('shows this month’s usage, by key, when the deployment meters it', async () => {
+    const tenantRef = `github:${GITHUB_USER.id}`;
+    const { apiKey } = await keys.store.create({ tenantRef, name: 'Booking agent', scopes: ['read'] });
+    const gone = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
+    const read = vi.fn(async (_tenantRef: string, _from: string, _to: string) => [
+      { day: '2026-10-10', metric: 'operations' as const, keyId: apiKey.id, origin: 'mcp', count: 40 },
+      { day: '2026-10-10', metric: 'bookings' as const, keyId: apiKey.id, origin: 'mcp', count: 3 },
+      { day: '2026-10-09', metric: 'operations' as const, keyId: '', origin: 'dashboard-assistant', count: 5 },
+      { day: '2026-10-08', metric: 'holds' as const, keyId: gone, origin: 'rest', count: 2 },
+    ]);
+    const { billing } = billed(free);
+    const metered = dashboard({ billing, usage: true, resources: { ...resources.store, usage: read } });
+    const { session } = await signIn(metered);
+    const html = await (await get(metered, '/base/dashboard/plan', session)).text();
+    // The month so far, by the server's UTC clock.
+    expect(read).toHaveBeenCalledWith(tenantRef, '2026-10-01', '2026-10-10');
+    expect(html).toContain('<h2>Usage this month</h2>');
+    expect(html).toContain('<span class="stat-label">Operations</span><span class="stat-value">45</span>');
+    expect(html).toContain('<span class="stat-label">Bookings</span><span class="stat-value">3</span>');
+    expect(html).toContain('<span class="stat-label">Holds</span><span class="stat-value">2</span>');
+    expect(html).toContain('Since 2026-10-01, in UTC.');
+    expect(html).toContain('<td data-label="Used by">Booking agent</td><td data-label="Operations">40</td>');
+    expect(html).toContain('<td data-label="Used by">The dashboard and its assistant</td>');
+    expect(html).toContain('<td data-label="Used by">A deleted key</td>');
+    // Not metered: no usage, and the adapter is not asked.
+    read.mockClear();
+    const unmetered = dashboard({ billing, resources: { ...resources.store, usage: read } });
+    const again = await signIn(unmetered);
+    expect(await (await get(unmetered, '/base/dashboard/plan', again.session)).text()).not.toContain('Usage this month');
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('shows the month’s quotas with SLOTLOCK_QUOTAS=on, and warns from 80% to the stop', async () => {
+    let operations = 20_400;
+    let bookings = 10;
+    const read = vi.fn(async (_tenantRef: string, _from: string, _to: string) => [
+      { day: '2026-10-10', metric: 'operations' as const, keyId: '', origin: 'rest', count: operations },
+      { day: '2026-10-10', metric: 'bookings' as const, keyId: '', origin: 'rest', count: bookings },
+    ]);
+    const { billing } = billed(free);
+    const target = dashboard({ billing, usage: true, quotas: true, resources: { ...resources.store, usage: read } });
+    const { session } = await signIn(target);
+    const page = async () => (await get(target, '/base/dashboard/plan', session)).text();
+    let html = await page();
+    expect(html).toContain(
+      '<span class="stat-label">Operations</span><span class="stat-value">20,400<span class="meta"> of 25,000</span>',
+    );
+    expect(html).toContain('<span class="stat-value">10<span class="meta"> of 1,000</span>');
+    expect(html).toContain("You have used 81% of this month's operations. They start again on 2026-11-01 00:00 UTC.");
+    expect(html).toContain('with 500,000 operations and 25,000 bookings a month');
+    operations = 25_000;
+    bookings = 1_000;
+    html = await page();
+    expect(html).toContain("This month's operations are used up: Slotlock refuses every call but reading usage with quota_exceeded until 2026-11-01 00:00 UTC. Upgrade for more.");
+    expect(html).toContain("This month's bookings are used up: Slotlock refuses new bookings and holds with quota_exceeded until 2026-11-01 00:00 UTC.");
+    // Developer: past the quota, refused only a tenth further on.
+    const developer = billed({ ...free, plan: 'developer', limits: { resources: 100, apiKeys: 100, webhookEndpoints: 10 } });
+    const paid = dashboard({ billing: developer.billing, usage: true, quotas: true, resources: { ...resources.store, usage: read } });
+    const signed = await signIn(paid);
+    operations = 510_000;
+    bookings = 0;
+    html = await (await get(paid, '/base/dashboard/plan', signed.session)).text();
+    expect(html).toContain("You have used this month's 500,000 operations. Slotlock refuses every call but reading usage past 550,000, until 2026-11-01 00:00 UTC.");
+    // Without the setting, no quota is named.
+    const plain = dashboard({ billing, usage: true, resources: { ...resources.store, usage: read } });
+    const third = await signIn(plain);
+    expect(await (await get(plain, '/base/dashboard/plan', third.session)).text()).not.toContain(' of 25,000');
+  });
+
+  it("names the plan's limit when an add is refused at it", async () => {
+    const capped = {
+      ...resources.store,
+      add: vi.fn(async () => {
+        throw Object.assign(new Error('cap'), { code: 'resource_limit_reached', limit: 10 });
+      }),
+    };
+    const target = dashboard({ billing: billed(free).billing, resources: capped });
+    const { session } = await signIn(target);
+    const refused = await post(target, '/base/dashboard/resources', { csrf: await csrf(target, session), reference: 'van-11', timezone: 'UTC' }, session);
+    expect(refused.status).toBe(409);
+    expect(await refused.text()).toContain('You have 10 resources, archived ones included, as many as your plan allows.');
+  });
+
+  it('sends a customer who already pays to Manage billing instead of a second Checkout', async () => {
+    const { target, billing } = billed({ ...free, plan: 'free', stripeCustomer: 'cus_Twice1' });
+    billing.checkout.mockRejectedValueOnce(
+      Object.assign(new Error('The customer has a live subscription already'), { code: 'subscription_exists' }),
+    );
+    const { session } = await signIn(target);
+    const refused = await post(target, '/base/dashboard/plan/upgrade', { csrf: await csrf(target, session), interval: 'month' }, session);
+    expect(refused.status).toBe(409);
+    expect(await refused.text()).toContain('You pay for a subscription already.');
   });
 
   it('refuses billing that would loosen the policy', () => {
@@ -2277,5 +2733,107 @@ describe('the plan page', () => {
     expect(() => dashboard({ billing: { ...billing, formOrigins: ['http://checkout.stripe.com'] } })).toThrow();
     expect(() => dashboard({ billing: { ...billing, formOrigins: ["https://a.com 'unsafe-inline'"] } })).toThrow();
     expect(() => dashboard({ billing: { ...billing, contact: 'javascript:alert(1)' } })).toThrow();
+  });
+});
+
+describe('Google sign-in', () => {
+  const GOOGLE = { clientId: '1234-abc.apps.googleusercontent.com', clientSecret: 'GOCSPX-' + 'g'.repeat(20) + '0123456789' };
+  const SUBJECT = '109876543210987654321';
+  // Google's signing key, and one that is not Google's.
+  const signing = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const forger = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const JWKS = { keys: [{ ...signing.publicKey.export({ format: 'jwk' }), kid: 'google-key-1', alg: 'RS256', use: 'sig' }] };
+  /** Google's token endpoint, answering with an ID token whose claims (and signer) a test chooses. */
+  function fakeGoogle(claims: (nonce: string) => Record<string, unknown>, signer = signing.privateKey, kid = 'google-key-1') {
+    let asked: URLSearchParams | null = null;
+    let nonce = '';
+    const fetch = vi.fn(async (input: string | URL | Request, init: RequestInit = {}) => {
+      if (String(input) === 'https://www.googleapis.com/oauth2/v3/certs') return Response.json(JWKS);
+      if (String(input) === 'https://oauth2.googleapis.com/token') {
+        asked = new URLSearchParams(String(init.body));
+        const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+        const signed = `${part({ alg: 'RS256', kid, typ: 'JWT' })}.${part(claims(nonce))}`;
+        const signature = createSign('RSA-SHA256').update(signed).sign(signer).toString('base64url');
+        return Response.json({ id_token: `${signed}.${signature}`, access_token: 'ya29.fake' });
+      }
+      return github.fetch(input, init);
+    });
+    return { fetch, asked: () => asked, setNonce: (value: string) => (nonce = value) };
+  }
+  const valid = (nonce: string) => ({
+    iss: 'https://accounts.google.com',
+    aud: GOOGLE.clientId,
+    sub: SUBJECT,
+    email: 'desk@clinic.example',
+    email_verified: true,
+    nonce,
+    exp: Math.floor(now / 1000) + 3600,
+  });
+  async function signInWithGoogle(target: ReturnType<typeof dashboard>, fake: ReturnType<typeof fakeGoogle>) {
+    const start = await get(target, '/base/dashboard/sign-in?with=google');
+    const location = new URL(start.headers.get('location') ?? '');
+    fake.setNonce(location.searchParams.get('nonce') ?? '');
+    const callback = await get(
+      target,
+      `/base/dashboard/callback?code=g-code&state=${location.searchParams.get('state')}`,
+      cookie(start, '__Host-slotlock-oauth')?.pair,
+    );
+    return { start, location, callback, session: cookie(callback, '__Host-slotlock-session')?.pair as string };
+  }
+
+  it("signs a person in with Google to a tenant of their own, and keeps only the account's id and email", async () => {
+    const fake = fakeGoogle(valid);
+    const target = dashboard({ google: GOOGLE, allowedUsers: '*', fetch: fake.fetch });
+    expect(await (await get(target, '/base/dashboard')).text()).toContain('Continue with Google');
+    const { location, callback, session } = await signInWithGoogle(target, fake);
+    expect(location.origin + location.pathname).toBe('https://accounts.google.com/o/oauth2/v2/auth');
+    expect(location.searchParams.get('scope')).toBe('openid email');
+    expect(location.searchParams.get('code_challenge_method')).toBe('S256');
+    expect(location.searchParams.get('redirect_uri')).toBe(`${PUBLIC_URL}/dashboard/callback`);
+    expect(callback.status).toBe(303);
+    // The code was exchanged with the verifier PKCE needs.
+    expect(fake.asked()?.get('code_verifier')).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(await (await get(target, '/base/dashboard', session)).text()).toContain('desk@clinic.example');
+    await post(target, '/base/dashboard/keys', { csrf: await csrf(target, session), name: 'Desk', access: 'read', expires: '30' }, session);
+    expect(keys.store.create).toHaveBeenLastCalledWith(
+      expect.objectContaining({ tenantRef: `google:${SUBJECT}`, createdBy: `google:${SUBJECT}` }),
+    );
+  });
+
+  it('refuses an ID token that is not for this sign-in', async () => {
+    for (const change of [
+      { aud: 'someone-else.apps.googleusercontent.com' },
+      { iss: 'https://evil.example' },
+      { exp: Math.floor(now / 1000) - 1 },
+      { nonce: 'replayed' },
+      { sub: 'has spaces' },
+    ]) {
+      const fake = fakeGoogle((nonce) => ({ ...valid(nonce), ...change }));
+      const target = dashboard({ google: GOOGLE, allowedUsers: '*', fetch: fake.fetch });
+      const { callback, session } = await signInWithGoogle(target, fake);
+      expect(callback.status, JSON.stringify(change)).toBe(502);
+      expect(session).toBeUndefined();
+    }
+    // Signed by someone else, or by a key Google does not publish: refused, whatever it claims.
+    for (const fake of [fakeGoogle(valid, forger.privateKey), fakeGoogle(valid, signing.privateKey, 'unknown-key')]) {
+      const target = dashboard({ google: GOOGLE, allowedUsers: '*', fetch: fake.fetch });
+      const { callback, session } = await signInWithGoogle(target, fake);
+      expect(callback.status).toBe(502);
+      expect(session).toBeUndefined();
+    }
+  });
+
+  it('lets in only the Google accounts a list names, and is not offered with GitHub organizations', async () => {
+    const fake = fakeGoogle(valid);
+    const listed = dashboard({ google: GOOGLE, allowedUsers: [String(GITHUB_USER.id), `google:${SUBJECT}`], fetch: fake.fetch });
+    expect((await signInWithGoogle(listed, fake)).callback.status).toBe(303);
+    const other = dashboard({ google: GOOGLE, allowedUsers: [String(GITHUB_USER.id), 'google:42'], fetch: fake.fetch });
+    expect((await signInWithGoogle(other, fake)).callback.status).toBe(403);
+    // A GitHub id that happens to equal the subject lets nobody in with Google.
+    const numeric = dashboard({ google: GOOGLE, allowedUsers: [SUBJECT], fetch: fake.fetch });
+    expect((await signInWithGoogle(numeric, fake)).callback.status).toBe(403);
+    const orgs = dashboard({ google: GOOGLE, allowedUsers: '*', organizations: ['91'], fetch: fake.fetch });
+    expect(await (await get(orgs, '/base/dashboard')).text()).not.toContain('Continue with Google');
+    expect((await get(orgs, '/base/dashboard/sign-in?with=google')).headers.get('location')).toMatch(/^https:\/\/github\.com\//);
   });
 });

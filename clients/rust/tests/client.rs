@@ -156,6 +156,7 @@ fn books_holds_and_reservations_without_double_booking() {
         .set_resource_availability(&SetResourceAvailabilityInput {
             resource_id: id.clone(),
             rules: Some(all_week()),
+            ..Default::default()
         })
         .unwrap();
     assert_eq!(hours["resource"]["availability"], Value::Array(all_week()));
@@ -183,12 +184,17 @@ fn books_holds_and_reservations_without_double_booking() {
     let confirmed = c
         .confirm_hold(&ConfirmHoldInput {
             hold_id: hold_id.clone(),
+            ..Default::default()
         })
         .unwrap()["reservation"]
         .clone();
     assert_eq!(confirmed["id"], hold["id"]);
     assert_eq!(
-        c.confirm_hold(&ConfirmHoldInput { hold_id }).unwrap()["reservation"],
+        c.confirm_hold(&ConfirmHoldInput {
+            hold_id,
+            ..Default::default()
+        })
+        .unwrap()["reservation"],
         confirmed
     );
 
@@ -202,6 +208,7 @@ fn books_holds_and_reservations_without_double_booking() {
         revision: 1,
         buffer_after_minutes: Some(30),
         source: None,
+        ..Default::default()
     };
     let put = c.put_reservation(&booking).unwrap();
     assert_eq!(
@@ -230,6 +237,7 @@ fn books_holds_and_reservations_without_double_booking() {
             resource_ids: vec![id.clone()],
             start: s.at(0.0),
             end: s.at(24.0),
+            ..Default::default()
         })
         .unwrap();
     let busy: Vec<(String, String)> = free_busy["resources"][0]["busy"]
@@ -247,6 +255,7 @@ fn books_holds_and_reservations_without_double_booking() {
         .cancel_reservation(&CancelReservationInput {
             reservation_ref: reference,
             revision: 2,
+            ..Default::default()
         })
         .unwrap();
     assert_eq!(cancelled, json!({"cancelled": true, "revision": 2}));
@@ -257,6 +266,7 @@ fn books_holds_and_reservations_without_double_booking() {
             start: s.at(0.0),
             end: s.at(24.0),
             revision: 1,
+            ..Default::default()
         })
         .unwrap();
     assert_eq!(coverage, json!({"revision": 1, "replayed": false}));
@@ -266,6 +276,7 @@ fn books_holds_and_reservations_without_double_booking() {
     assert_eq!(
         keys,
         [
+            "approvals_expired",
             "capped",
             "conflicts",
             "extended",
@@ -284,7 +295,7 @@ fn books_holds_and_reservations_without_double_booking() {
             .list_resources(&ListResourcesInput {
                 cursor: cursor.clone(),
                 limit: Some(100),
-                pool: None,
+                ..Default::default()
             })
             .unwrap();
         found |= page["resources"]
@@ -318,6 +329,7 @@ fn writes_events_and_clears_a_field_with_null() {
     c.set_resource_availability(&SetResourceAvailabilityInput {
         resource_id: id.clone(),
         rules: Some(all_week()),
+        ..Default::default()
     })
     .unwrap();
     let key = |n: u8| format!("rust-{}-{n}", s.suffix);
@@ -359,6 +371,7 @@ fn writes_events_and_clears_a_field_with_null() {
             event_id: created["id"].as_str().unwrap().to_string(),
             expected_revision: updated["revision"].as_i64().unwrap(),
             idempotency_key: key(3),
+            ..Default::default()
         }),
         428,
         "confirmation_required",
@@ -384,6 +397,7 @@ fn retries_a_keyed_hold_and_retires_a_resource() {
     c.set_resource_availability(&SetResourceAvailabilityInput {
         resource_id: id.clone(),
         rules: Some(all_week()),
+        ..Default::default()
     })
     .unwrap();
     // A keyed hold retried answers the hold the first request made.
@@ -417,6 +431,7 @@ fn retries_a_keyed_hold_and_retires_a_resource() {
     let confirmed = c
         .confirm_hold(&ConfirmHoldInput {
             hold_id: hold_id.clone(),
+            ..Default::default()
         })
         .unwrap()["reservation"]
         .clone();
@@ -430,6 +445,7 @@ fn retries_a_keyed_hold_and_retires_a_resource() {
     c.cancel_reservation(&CancelReservationInput {
         reservation_ref: hold_id.clone(),
         revision: 2,
+        ..Default::default()
     })
     .unwrap();
     refused(
@@ -443,18 +459,21 @@ fn retries_a_keyed_hold_and_retires_a_resource() {
     let archived = c
         .archive_resource(&ArchiveResourceInput {
             resource_id: id.clone(),
+            ..Default::default()
         })
         .unwrap();
     assert!(archived["resource"]["archived_at"].is_string());
     let restored = c
         .restore_resource(&RestoreResourceInput {
             resource_id: id.clone(),
+            ..Default::default()
         })
         .unwrap();
     assert!(restored["resource"]["archived_at"].is_null());
     assert_eq!(
         c.delete_resource(&DeleteResourceInput {
-            resource_id: id.clone()
+            resource_id: id.clone(),
+            ..Default::default()
         })
         .unwrap(),
         json!({ "deleted": true })

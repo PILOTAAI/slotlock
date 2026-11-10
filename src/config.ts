@@ -126,10 +126,15 @@ export interface SlotlockServeDashboardConfig {
   githubClientId: string;
   githubClientSecret: string;
   sessionSecret: string;
-  /** GitHub user ids that may sign in, or `'*'` for every GitHub account. */
+  /** GitHub user ids and Google accounts (`google:<subject>`) that may sign in, or `'*'` for everyone. */
   allowedUsers: '*' | string[];
-  /** GitHub organization ids whose members share a tenant each (SLOTLOCK_DASHBOARD_ORGS). */
-  organizations?: string[];
+  /** Sign-in with Google too (SLOTLOCK_GOOGLE_CLIENT_ID and SLOTLOCK_GOOGLE_CLIENT_SECRET). */
+  google?: { clientId: string; clientSecret: string };
+  /**
+   * GitHub organization ids whose members share a tenant each (SLOTLOCK_DASHBOARD_ORGS), or
+   * `'enabled'`: those an owner turned on from the dashboard (Teams on Cloud, teams.ts).
+   */
+  organizations?: string[] | 'enabled';
   /** What the deployment is called in the dashboard (SLOTLOCK_DASHBOARD_NAME). */
   name?: string;
   /**
@@ -137,6 +142,12 @@ export interface SlotlockServeDashboardConfig {
    * Without it the assistant is off.
    */
   assistantSecret?: string;
+  /**
+   * Secrets model keys may still be sealed under, newest first (SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS,
+   * comma-separated): each key one opens is sealed again under SLOTLOCK_ASSISTANT_SECRET when next
+   * used.
+   */
+  assistantPreviousSecrets?: string[];
   /**
    * Let the assistant reach a model at a local or private network address
    * (SLOTLOCK_ASSISTANT_PRIVATE_URLS=on): a self-hosted model on the same machine or network.
@@ -161,9 +172,10 @@ const DASHBOARD_VARIABLES = [
 export function readDashboardUsers(env: SlotlockEnv): '*' | string[] | undefined {
   const users = optional(env, 'SLOTLOCK_DASHBOARD_USERS')?.replaceAll(' ', '');
   if (users === undefined) return undefined;
-  if (users !== '*' && !/^[1-9]\d{0,19}(,[1-9]\d{0,19})*$/.test(users)) {
+  const person = '(?:[1-9]\\d{0,19}|google:[A-Za-z0-9._-]{1,255})';
+  if (users !== '*' && !new RegExp(`^${person}(,${person})*$`).test(users)) {
     throw new SlotlockConfigError(
-      'SLOTLOCK_DASHBOARD_USERS must be * for every GitHub account, or a comma-separated list of GitHub user ids (gh api users/<login> --jq .id)',
+      'SLOTLOCK_DASHBOARD_USERS must be * for every account, or a comma-separated list of GitHub user ids (gh api users/<login> --jq .id) and Google accounts as google:<subject>',
     );
   }
   return users === '*' ? '*' : [...new Set(users.split(','))];
@@ -188,6 +200,16 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
       'SLOTLOCK_GITHUB_CLIENT_SECRET is required to serve the dashboard: a client secret of that GitHub OAuth app',
     );
   }
+  const googleClientId = optional(env, 'SLOTLOCK_GOOGLE_CLIENT_ID');
+  const googleClientSecret = readSecret(env, 'SLOTLOCK_GOOGLE_CLIENT_SECRET');
+  if ((googleClientId === undefined) !== (googleClientSecret === undefined)) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_GOOGLE_CLIENT_ID and SLOTLOCK_GOOGLE_CLIENT_SECRET go together: an OAuth client of a Google Cloud project whose redirect URI is <SLOTLOCK_PUBLIC_URL>/dashboard/callback',
+    );
+  }
+  if (googleClientId !== undefined && !/^[A-Za-z0-9._-]{1,200}$/.test(googleClientId)) {
+    throw new SlotlockConfigError('SLOTLOCK_GOOGLE_CLIENT_ID must be a Google OAuth client id');
+  }
   const sessionSecret = readSecret(env, 'SLOTLOCK_SESSION_SECRET');
   if (sessionSecret === undefined) {
     throw new SlotlockConfigError(
@@ -198,6 +220,7 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
     env.SLOTLOCK_GITHUB_CLIENT_SECRET,
     env.SLOTLOCK_AUTH_TOKEN,
     env.SLOTLOCK_CONFIRMATION_SECRET,
+    ...(googleClientSecret !== undefined ? [googleClientSecret] : []),
   ];
   if (others.includes(sessionSecret)) {
     throw new SlotlockConfigError('SLOTLOCK_SESSION_SECRET must differ from every other secret');
@@ -220,11 +243,17 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
   ) {
     throw new SlotlockConfigError('SLOTLOCK_ASSISTANT_SECRET must differ from every other secret');
   }
+  const previousSecrets = readAssistantPreviousSecrets(env, assistantSecret, [sessionSecret, ...others]);
   const privateUrls = optional(env, 'SLOTLOCK_ASSISTANT_PRIVATE_URLS') ?? 'off';
   if (privateUrls !== 'on' && privateUrls !== 'off') {
     throw new SlotlockConfigError('SLOTLOCK_ASSISTANT_PRIVATE_URLS must be on or off');
   }
   const orgs = readDashboardOrganizations(env);
+  if (Array.isArray(orgs) && googleClientId !== undefined) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_GOOGLE_CLIENT_ID does not go with a list of SLOTLOCK_DASHBOARD_ORGS: those organizations are GitHub\'s; use SLOTLOCK_DASHBOARD_ORGS=enabled to have both',
+    );
+  }
   const name = optional(env, 'SLOTLOCK_DASHBOARD_NAME')?.trim();
   if (name !== undefined && name !== '' && !SLOTLOCK_DASHBOARD_NAME_PATTERN.test(name)) {
     throw new SlotlockConfigError(
@@ -236,11 +265,52 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
     githubClientSecret,
     sessionSecret,
     allowedUsers: users,
+    ...(googleClientId !== undefined && googleClientSecret !== undefined
+      ? { google: { clientId: googleClientId, clientSecret: googleClientSecret } }
+      : {}),
     ...(orgs !== undefined ? { organizations: orgs } : {}),
     ...(name !== undefined && name !== '' ? { name } : {}),
     ...(assistantSecret !== undefined ? { assistantSecret } : {}),
+    ...(previousSecrets.length > 0 ? { assistantPreviousSecrets: previousSecrets } : {}),
     ...(assistantSecret !== undefined && privateUrls === 'on' ? { assistantPrivateUrls: true } : {}),
   };
+}
+
+/** Previous assistant secrets a deployment may keep (assistant.ts SLOTLOCK_ASSISTANT_MAX_PREVIOUS_SECRETS). */
+const MAX_ASSISTANT_PREVIOUS_SECRETS = 3;
+
+/**
+ * SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS: up to three earlier values of SLOTLOCK_ASSISTANT_SECRET,
+ * comma-separated, newest first, each as strong as a secret must be and unlike every other secret.
+ * Only with SLOTLOCK_ASSISTANT_SECRET: without a current secret nothing would seal the keys again.
+ */
+function readAssistantPreviousSecrets(
+  env: SlotlockEnv,
+  current: string | undefined,
+  others: readonly (string | undefined)[],
+): string[] {
+  const name = 'SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS';
+  const value = env[name];
+  if (value === undefined || value.trim() === '') return [];
+  if (current === undefined) {
+    throw new SlotlockConfigError(
+      `${name} needs SLOTLOCK_ASSISTANT_SECRET: the secret keys are sealed again under`,
+    );
+  }
+  const secrets = value.split(',').map((part) => readSecret({ [name]: part }, name));
+  if (secrets.some((secret) => secret === undefined)) {
+    throw new SlotlockConfigError(`${name} must be comma-separated secrets, with no empty one`);
+  }
+  const listed = secrets as string[];
+  if (listed.length > MAX_ASSISTANT_PREVIOUS_SECRETS) {
+    throw new SlotlockConfigError(`${name} takes at most ${String(MAX_ASSISTANT_PREVIOUS_SECRETS)} secrets`);
+  }
+  if (new Set(listed).size !== listed.length || listed.some((secret) => secret === current || others.includes(secret))) {
+    throw new SlotlockConfigError(
+      `${name} must differ from each other, from SLOTLOCK_ASSISTANT_SECRET and from every other secret`,
+    );
+  }
+  return listed;
 }
 
 /**
@@ -248,12 +318,13 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
  * well: a server whose dashboard runs elsewhere (on Cloudflare Workers) still takes those
  * organizations' keys, and only theirs.
  */
-export function readDashboardOrganizations(env: SlotlockEnv): string[] | undefined {
+export function readDashboardOrganizations(env: SlotlockEnv): string[] | 'enabled' | undefined {
   const orgs = optional(env, 'SLOTLOCK_DASHBOARD_ORGS')?.replaceAll(' ', '');
   if (orgs === undefined) return undefined;
+  if (orgs === 'enabled') return 'enabled';
   if (!/^[1-9]\d{0,19}(,[1-9]\d{0,19})*$/.test(orgs)) {
     throw new SlotlockConfigError(
-      'SLOTLOCK_DASHBOARD_ORGS must be a comma-separated list of GitHub organization ids (gh api orgs/<login> --jq .id)',
+      'SLOTLOCK_DASHBOARD_ORGS must be a comma-separated list of GitHub organization ids (gh api orgs/<login> --jq .id), or enabled',
     );
   }
   return [...new Set(orgs.split(','))];

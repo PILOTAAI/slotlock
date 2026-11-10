@@ -5,6 +5,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { SLOTLOCK_DASHBOARD_MAX_RESOURCES } from '../dashboard.js';
+import { SLOTLOCK_MAX_WEBHOOK_ENDPOINTS } from '../event-feed.js';
 import { SLOTLOCK_API_KEY_ACTIVE_LIMIT, SLOTLOCK_API_KEY_RETAINED_LIMIT } from '../ddl.js';
 import { SLOTLOCK_API_KEY_MAX_LIFETIME_DAYS } from '../api-keys.js';
 import { SLOTLOCK_PLAN_LIMITS } from '../plans.js';
@@ -224,6 +225,30 @@ describe('the hosted service page', () => {
     expect(text).not.toMatch(/opens once|is released;/);
   });
 
+  // The landing page offers the assistant whenever the server reads its secret
+  // (site/scripts/sync-content.mjs); the hosted page says Slotlock Cloud has it, with the bounds
+  // the code sets.
+  it('says Slotlock Cloud has the assistant the landing page offers, with the bounds the code sets', () => {
+    const offered = read('src/self-host.ts').includes("'SLOTLOCK_ASSISTANT_SECRET'");
+    expect(offered, 'canary: the server reads the assistant secret').toBe(true);
+    const assistant = flat(read('docs/hosted/README.md').split('\n## Assistant\n')[1]?.split('\n## ')[0] ?? '');
+    const source = read('src/assistant.ts');
+    const dashboard = read('src/dashboard.ts');
+    const steps = /SLOTLOCK_ASSISTANT_MAX_STEPS = (\d+);/.exec(source)?.[1];
+    const perMinute = /rate \?\? \{ perSecond: (\d+) \/ 60,/.exec(dashboard)?.[1];
+    const hours = /conversationTtlMs \?\? (\d+) \* 3_600_000/.exec(dashboard)?.[1];
+    expect([steps, perMinute, hours]).toEqual(['8', '10', '2']);
+    expect(assistant).toContain('in Settings, Assistant');
+    expect(assistant).toContain('the Anthropic Messages API, or any OpenAI-compatible API');
+    expect(assistant).toContain(`up to ${String(steps)} model calls a message`);
+    expect(assistant).toContain(`${String(perMinute)} messages a minute per person`);
+    expect(assistant).toContain(`kept for ${String(hours)} hours after its last message`);
+    expect(assistant).toContain('**Approve** or **Dismiss**');
+    expect(assistant).toContain('needs a public HTTPS address, or a hosted provider');
+    // Its privacy notice row is the one for a dashboard that offers the assistant.
+    expect(flat(read('PRIVACY.md'))).toContain('if the dashboard offers the assistant and you set it up');
+  });
+
   it('publishes the limits the code enforces', () => {
     const text = page();
     const row = (what: string, limit: string) => expect(text).toContain(`| ${what} | ${limit}`);
@@ -232,12 +257,15 @@ describe('the hosted service page', () => {
       `As the [plan](#plans) allows (${thousands(SLOTLOCK_API_KEY_RETAINED_LIMIT)} kept in all`,
     );
     // Every plan fits under the caps that hold without one.
-    const { free, developer } = SLOTLOCK_PLAN_LIMITS;
-    expect(developer.apiKeys).toBeLessThanOrEqual(SLOTLOCK_API_KEY_ACTIVE_LIMIT);
-    expect(developer.resources).toBeLessThanOrEqual(SLOTLOCK_DASHBOARD_MAX_RESOURCES);
-    row('Resources', `${free.resources} | ${developer.resources} |`);
-    row('Active API keys', `${free.apiKeys} | ${developer.apiKeys} |`);
-    row('Webhook endpoints', `${free.webhookEndpoints} | ${developer.webhookEndpoints} |`);
+    const { free, developer, team } = SLOTLOCK_PLAN_LIMITS;
+    for (const plan of [developer, team]) {
+      expect(plan.apiKeys).toBeLessThanOrEqual(SLOTLOCK_API_KEY_ACTIVE_LIMIT);
+      expect(plan.resources).toBeLessThanOrEqual(SLOTLOCK_DASHBOARD_MAX_RESOURCES);
+      expect(plan.webhookEndpoints).toBeLessThanOrEqual(SLOTLOCK_MAX_WEBHOOK_ENDPOINTS);
+    }
+    row('Resources', `${free.resources} | ${developer.resources} | ${team.resources} |`);
+    row('Active API keys', `${free.apiKeys} | ${developer.apiKeys} | ${team.apiKeys} |`);
+    row('Webhook endpoints', `${free.webhookEndpoints} | ${developer.webhookEndpoints} | ${team.webhookEndpoints} |`);
     row(
       'Events one key can hold, active and cancelled',
       `${thousands(SLOTLOCK_AGENT_OWNER_EVENT_QUOTA)} |`,
@@ -275,7 +303,7 @@ describe('the hosted service page', () => {
     "each named only by a pseudonym: a hash of its IP address, keyed by a secret held only in the running server's memory and replaced when it restarts";
   // Every reason the server counts a refusal for, in the notice's words.
   const REFUSALS =
-    'For each minute in which the server refused requests, they also record how many it refused (over a rate limit, while too busy, too large, or with a credential it did not accept)';
+    'For each minute in which the server refused requests, they also record how many it refused (over a rate limit or a monthly allowance, while too busy, too large, or with a credential it did not accept)';
   it('tells the privacy notice how refused requests are logged', () => {
     const privacy = flat(read('PRIVACY.md'));
     expect(privacy).toContain(PSEUDONYM);
@@ -289,12 +317,14 @@ describe('the hosted service page', () => {
       expect(limits).toContain("createHmac('sha256', pseudonymKey).update(address)");
       expect(limits).toMatch(/const MAX_LOGGED_CLIENTS = 10;/);
       expect(limits).toMatch(/const REFUSAL_LOG_INTERVAL_MS = 60_000;/);
-      // The reasons REFUSALS names: a rate limit, three caps on work at once, size and credentials.
+      // The reasons REFUSALS names: a rate limit, a monthly allowance, three caps on work at once,
+      // size and credentials.
       const reasons = /export type SlotlockRefusalReason =([^;]*);/.exec(limits)?.[1] ?? '';
       expect([...reasons.matchAll(/'(\w+)'/g)].map(([, reason]) => reason).sort()).toEqual([
         'auth_refused',
         'lookup_overflow',
         'maintenance_busy',
+        'quota_exceeded',
         'rate_limited',
         'request_too_large',
         'series_writes_busy',

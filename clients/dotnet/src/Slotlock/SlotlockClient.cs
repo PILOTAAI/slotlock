@@ -42,6 +42,7 @@ public sealed partial class SlotlockClient : IDisposable
     private readonly Uri _baseUrl;
     private readonly string _apiKey;
     private readonly string _userAgent;
+    private readonly string? _account;
     private readonly HttpClient _http;
     private readonly bool _ownsHttp;
 
@@ -80,6 +81,11 @@ public sealed partial class SlotlockClient : IDisposable
         _baseUrl = new Uri(baseUrl.TrimEnd('/'));
         _apiKey = apiKey;
         _userAgent = options.UserAgent ?? $"slotlock-dotnet/{Version}";
+        if (options.Account is not null && !System.Text.RegularExpressions.Regex.IsMatch(options.Account, "^[A-Za-z0-9._-]{1,128}$"))
+        {
+            throw new ArgumentException("Account must be 1-128 letters, digits, dots, dashes or underscores", nameof(options));
+        }
+        _account = options.Account;
         _ownsHttp = options.HttpClient is null;
         // A redirect is answered as it came, so the key goes with no other request; this machine is
         // reached directly, since a proxy would carry the key off it.
@@ -148,6 +154,7 @@ public sealed partial class SlotlockClient : IDisposable
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         request.Headers.TryAddWithoutValidation("User-Agent", _userAgent);
+        if (_account is not null) request.Headers.TryAddWithoutValidation("Slotlock-Account", _account);
         using var response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
         var payload = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
         var status = (int)response.StatusCode;
@@ -239,6 +246,12 @@ public sealed class SlotlockClientOptions
 
     /// <summary>Sent as User-Agent; <c>slotlock-dotnet/&lt;version&gt;</c> unless set.</summary>
     public string? UserAgent { get; init; }
+
+    /// <summary>
+    /// With a partner key (<c>slk_partner_...</c>), one of the partner's accounts to act for, sent as
+    /// <c>Slotlock-Account</c> (where the partner's contract allows it).
+    /// </summary>
+    public string? Account { get; init; }
 
     /// <summary>
     /// Send requests with this HttpClient (handlers, proxies, timeouts); the client never disposes it. Its handler

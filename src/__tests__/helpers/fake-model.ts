@@ -31,6 +31,8 @@ export interface FakeModel {
   baseUrl: string;
   requests: FakeModelRequest[];
   script(...answers: FakeModelAnswer[]): void;
+  /** What `GET /v1/models` answers: the model ids, or an HTTP failure with a body. */
+  models(answer: string[] | { status: number; body: string }): void;
   close(): Promise<void>;
 }
 
@@ -91,6 +93,7 @@ export function fakeModelBody(
 export async function startFakeModel(format: FakeModelFormat): Promise<FakeModel> {
   const requests: FakeModelRequest[] = [];
   let answers: FakeModelAnswer[] = [{ text: 'Hello.' }];
+  let modelList: string[] | { status: number; body: string } = ['your-model'];
   const server = createServer((incoming, outgoing) => {
     const chunks: Buffer[] = [];
     incoming.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -103,6 +106,19 @@ export async function startFakeModel(format: FakeModelFormat): Promise<FakeModel
       }
       const request = { path: incoming.url ?? '', headers: incoming.headers, body };
       requests.push(request);
+      if (incoming.method === 'GET' && request.path.split('?')[0] === '/v1/models') {
+        if (!Array.isArray(modelList)) {
+          outgoing.writeHead(modelList.status, { 'content-type': 'application/json' }).end(modelList.body);
+          return;
+        }
+        const data = modelList.map((id) =>
+          format === 'anthropic' ? { type: 'model', id, display_name: id } : { id, object: 'model', owned_by: 'fake' },
+        );
+        outgoing
+          .writeHead(200, { 'content-type': 'application/json' })
+          .end(JSON.stringify(format === 'anthropic' ? { data, has_more: false } : { object: 'list', data }));
+        return;
+      }
       const expected = format === 'anthropic' ? '/v1/messages' : '/v1/chat/completions';
       if (request.path !== expected) {
         outgoing.writeHead(404, { 'content-type': 'application/json' }).end('{"error":"not found"}');
@@ -127,6 +143,9 @@ export async function startFakeModel(format: FakeModelFormat): Promise<FakeModel
     requests,
     script(...next) {
       answers = next;
+    },
+    models(answer) {
+      modelList = answer;
     },
     close: () =>
       new Promise<void>((resolve) => {

@@ -63,6 +63,7 @@ public final class SlotlockClient extends SlotlockOperations {
   private final String apiKey;
   private final Duration timeout;
   private final String userAgent;
+  private final String account;
   private final HttpClient http;
 
   private SlotlockClient(Builder builder, boolean loopback) {
@@ -70,6 +71,7 @@ public final class SlotlockClient extends SlotlockOperations {
     this.apiKey = builder.apiKey;
     this.timeout = builder.timeout;
     this.userAgent = builder.userAgent;
+    this.account = builder.account;
     if (builder.http != null) {
       this.http = builder.http;
     } else {
@@ -100,6 +102,7 @@ public final class SlotlockClient extends SlotlockOperations {
     private Duration timeout = Duration.ofSeconds(30);
     private boolean allowInsecure;
     private String userAgent = "slotlock-java/" + VERSION;
+    private String account;
     private HttpClient http;
 
     private Builder(String baseUrl, String apiKey) {
@@ -136,6 +139,22 @@ public final class SlotlockClient extends SlotlockOperations {
      */
     public Builder userAgent(String userAgent) {
       this.userAgent = Objects.requireNonNull(userAgent, "userAgent");
+      return this;
+    }
+
+    /**
+     * Makes a partner key ({@code slk_partner_...}) act for one of the partner's accounts, sent as
+     * {@code Slotlock-Account}, where the partner's contract allows it.
+     *
+     * @param account the partner's account reference: 1-128 letters, digits, dots, dashes or
+     *     underscores
+     * @return this builder
+     */
+    public Builder account(String account) {
+      if (account == null || !account.matches("[A-Za-z0-9._-]{1,128}")) {
+        throw new IllegalArgumentException("account must be 1-128 letters, digits, dots, dashes or underscores");
+      }
+      this.account = account;
       return this;
     }
 
@@ -230,6 +249,7 @@ public final class SlotlockClient extends SlotlockOperations {
             .header("Accept", "application/json")
             .header("User-Agent", userAgent)
             .method(spec.method(), body);
+    if (account != null) request.header("Slotlock-Account", account);
     if (hasBody) request.header("Content-Type", "application/json");
     CompletableFuture<HttpResponse<String>> pending =
         http.sendAsync(request.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));

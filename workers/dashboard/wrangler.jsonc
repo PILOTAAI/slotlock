@@ -10,8 +10,12 @@
 //       SLOTLOCK_GITHUB_CLIENT_ID      the GitHub OAuth app's Client ID
 //       SLOTLOCK_GITHUB_CLIENT_SECRET  a client secret of that app
 //       SLOTLOCK_SESSION_SECRET        32+ random characters (openssl rand -hex 32)
-//     and, to turn on the chat assistant (optional):
-//       SLOTLOCK_ASSISTANT_SECRET      32+ random characters; seals each organization's model key
+//     and, to turn on the chat assistant (optional; Slotlock Cloud sets it):
+//       SLOTLOCK_ASSISTANT_SECRET      32+ random characters; seals each organization's model key.
+//                                      Keep it. To change it, put the old value in
+//       SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS  (a secret too; up to three, comma-separated, newest
+//                                      first): keys sealed under it still open and are sealed
+//                                      again under the new one when next used.
 //     (SLOTLOCK_ASSISTANT_PRIVATE_URLS=on, a var, allows localhost and private-address model URLs;
 //     a Worker cannot reach a private network anyway, so it is for a model behind a public name.)
 //
@@ -73,6 +77,12 @@
     "SLOTLOCK_SERVICE_URL": "https://slotlock.example.com",
     // Who may sign in: "*" for every GitHub account (each gets its own tenant), or GitHub ids.
     "SLOTLOCK_DASHBOARD_USERS": "*"
+    // Meter the assistant's operations in each tenant's usage, as slotlock serve does (off by
+    // default). Uncomment and set:
+    // "SLOTLOCK_USAGE": "on",
+    // Hold the assistant's operations to each tenant's monthly quotas, as slotlock serve does
+    // (off by default; needs SLOTLOCK_USAGE). Uncomment and set:
+    // "SLOTLOCK_QUOTAS": "on",
     // For organizations instead of people: GitHub organization ids, each one tenant its members
     // share (gh api orgs/<login> --jq .id). Uncomment and set:
     // "SLOTLOCK_DASHBOARD_ORGS": "123456",

@@ -83,6 +83,9 @@ function fakeStore() {
         async releaseNoShows() {
           return 0;
         },
+        async expireApprovals() {
+          return { expired: 0 };
+        },
         async pruneAssistantConversations() {
           return 0;
         },
@@ -161,6 +164,7 @@ const result = (overrides: Partial<SlotlockMaintenanceResult> = {}): SlotlockMai
   staleSources: 0,
   noShows: 0,
   waitlistOffers: 0,
+  approvalsExpired: 0,
   extended: 0,
   conflicts: 0,
   refused: 0,

@@ -13,7 +13,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "GET",
         path: "/v1/resources",
         path_params: &[],
-        query: &["cursor", "limit", "pool"],
+        query: &["cursor", "limit", "pool", "kind", "labels", "location", "group"],
     },
     Operation {
         name: "slotlock_create_resource",
@@ -27,21 +27,21 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "GET",
         path: "/v1/free-busy",
         path_params: &[],
-        query: &["resource_ids", "start", "end"],
+        query: &["resource_ids", "location", "group", "labels", "kind", "pool", "start", "end"],
     },
     Operation {
         name: "slotlock_find_next_available",
         method: "GET",
         path: "/v1/next-available",
         path_params: &[],
-        query: &["resource_ids", "start", "end", "duration_minutes"],
+        query: &["resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes"],
     },
     Operation {
         name: "slotlock_find_available_slots",
         method: "GET",
         path: "/v1/available-slots",
         path_params: &[],
-        query: &["resource_ids", "start", "end", "duration_minutes", "limit", "require_free"],
+        query: &["resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes", "limit", "require_free"],
     },
     Operation {
         name: "slotlock_hold_slots",
@@ -75,6 +75,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         name: "slotlock_release_slots",
         method: "DELETE",
         path: "/v1/slot-holds/{hold_id}",
+        path_params: &["hold_id"],
+        query: &["dry_run"],
+    },
+    Operation {
+        name: "slotlock_confirm_slot",
+        method: "POST",
+        path: "/v1/slot-holds/{hold_id}/confirm",
         path_params: &["hold_id"],
         query: &[],
     },
@@ -111,7 +118,21 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/events/{event_id}",
         path_params: &["event_id"],
-        query: &["expected_revision", "idempotency_key"],
+        query: &["expected_revision", "idempotency_key", "dry_run"],
+    },
+    Operation {
+        name: "slotlock_reschedule",
+        method: "POST",
+        path: "/v1/events/{event_id}/reschedule",
+        path_params: &["event_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_cancel",
+        method: "POST",
+        path: "/v1/events/{event_id}/cancel",
+        path_params: &["event_id"],
+        query: &[],
     },
     Operation {
         name: "slotlock_get_resource",
@@ -121,11 +142,81 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
+        name: "slotlock_update_resource",
+        method: "PATCH",
+        path: "/v1/resources/{resource_id}",
+        path_params: &["resource_id"],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_delete_resource",
         method: "DELETE",
         path: "/v1/resources/{resource_id}",
         path_params: &["resource_id"],
+        query: &["dry_run"],
+    },
+    Operation {
+        name: "slotlock_list_locations",
+        method: "GET",
+        path: "/v1/locations",
+        path_params: &[],
         query: &[],
+    },
+    Operation {
+        name: "slotlock_create_location",
+        method: "POST",
+        path: "/v1/locations",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_update_location",
+        method: "PATCH",
+        path: "/v1/locations/{location_ref}",
+        path_params: &["location_ref"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_delete_location",
+        method: "DELETE",
+        path: "/v1/locations/{location_ref}",
+        path_params: &["location_ref"],
+        query: &["dry_run"],
+    },
+    Operation {
+        name: "slotlock_list_groups",
+        method: "GET",
+        path: "/v1/groups",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_create_group",
+        method: "POST",
+        path: "/v1/groups",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_delete_group",
+        method: "DELETE",
+        path: "/v1/groups/{group_ref}",
+        path_params: &["group_ref"],
+        query: &["dry_run"],
+    },
+    Operation {
+        name: "slotlock_add_group_member",
+        method: "PUT",
+        path: "/v1/groups/{group_ref}/members/{resource_id}",
+        path_params: &["group_ref", "resource_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_remove_group_member",
+        method: "DELETE",
+        path: "/v1/groups/{group_ref}/members/{resource_id}",
+        path_params: &["group_ref", "resource_id"],
+        query: &["dry_run"],
     },
     Operation {
         name: "slotlock_archive_resource",
@@ -184,10 +275,24 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
+        name: "slotlock_set_resource_parent",
+        method: "PUT",
+        path: "/v1/resources/{resource_id}/parent",
+        path_params: &["resource_id"],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_list_pools",
         method: "GET",
         path: "/v1/pools",
         path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_set_pool_order",
+        method: "PUT",
+        path: "/v1/pools/{pool}/order",
+        path_params: &["pool"],
         query: &[],
     },
     Operation {
@@ -258,7 +363,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/holds/{hold_id}",
         path_params: &["hold_id"],
-        query: &[],
+        query: &["dry_run"],
     },
     Operation {
         name: "slotlock_list_holds",
@@ -293,7 +398,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/reservations/{reservation_ref}",
         path_params: &["reservation_ref"],
-        query: &["revision"],
+        query: &["revision", "dry_run"],
     },
     Operation {
         name: "slotlock_list_reservations",
@@ -328,7 +433,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/waitlist/{entry_id}",
         path_params: &["entry_id"],
-        query: &[],
+        query: &["dry_run"],
     },
     Operation {
         name: "slotlock_record_coverage",
@@ -342,7 +447,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/resources/{resource_id}/coverage/{source}",
         path_params: &["resource_id", "source"],
-        query: &[],
+        query: &["dry_run"],
     },
     Operation {
         name: "slotlock_get_coverage",
@@ -377,7 +482,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/tenant/events/{event_id}",
         path_params: &["event_id"],
-        query: &["expected_revision", "expected_resource_id", "idempotency_key"],
+        query: &["expected_revision", "expected_resource_id", "idempotency_key", "dry_run"],
     },
     Operation {
         name: "slotlock_export_tenant_event",
@@ -433,13 +538,174 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/webhooks/{webhook_id}",
         path_params: &["webhook_id"],
-        query: &[],
+        query: &["dry_run"],
     },
     Operation {
         name: "slotlock_enable_webhook",
         method: "POST",
         path: "/v1/webhooks/{webhook_id}/enable",
         path_params: &["webhook_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_get_usage",
+        method: "GET",
+        path: "/v1/usage",
+        path_params: &[],
+        query: &["from", "to"],
+    },
+    Operation {
+        name: "slotlock_list_approval_policies",
+        method: "GET",
+        path: "/v1/approval-policies",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_put_approval_policy",
+        method: "PUT",
+        path: "/v1/approval-policies/{policy_ref}",
+        path_params: &["policy_ref"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_delete_approval_policy",
+        method: "DELETE",
+        path: "/v1/approval-policies/{policy_ref}",
+        path_params: &["policy_ref"],
+        query: &["dry_run"],
+    },
+    Operation {
+        name: "slotlock_list_approvals",
+        method: "GET",
+        path: "/v1/approvals",
+        path_params: &[],
+        query: &["status", "limit"],
+    },
+    Operation {
+        name: "slotlock_get_approval",
+        method: "GET",
+        path: "/v1/approvals/{approval_id}",
+        path_params: &["approval_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_decide_approval",
+        method: "POST",
+        path: "/v1/approvals/{approval_id}/decision",
+        path_params: &["approval_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_sandbox_seed",
+        method: "POST",
+        path: "/v1/sandbox/seed",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_sandbox_reset",
+        method: "POST",
+        path: "/v1/sandbox/reset",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_sandbox_fast_forward",
+        method: "POST",
+        path: "/v1/sandbox/fast-forward",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_sandbox_race",
+        method: "POST",
+        path: "/v1/sandbox/race",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_partner_get_account",
+        method: "GET",
+        path: "/v1/partner/accounts/{account}",
+        path_params: &["account"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_partner_put_account",
+        method: "PUT",
+        path: "/v1/partner/accounts/{account}",
+        path_params: &["account"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_partner_list_accounts",
+        method: "GET",
+        path: "/v1/partner/accounts",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_partner_list_keys",
+        method: "GET",
+        path: "/v1/partner/accounts/{account}/keys",
+        path_params: &["account"],
+        query: &["environment"],
+    },
+    Operation {
+        name: "slotlock_partner_create_key",
+        method: "POST",
+        path: "/v1/partner/accounts/{account}/keys",
+        path_params: &["account"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_partner_rotate_key",
+        method: "POST",
+        path: "/v1/partner/accounts/{account}/keys/{key_id}/rotate",
+        path_params: &["account", "key_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_partner_revoke_key",
+        method: "DELETE",
+        path: "/v1/partner/accounts/{account}/keys/{key_id}",
+        path_params: &["account", "key_id"],
+        query: &["environment"],
+    },
+    Operation {
+        name: "slotlock_partner_suspend_account",
+        method: "POST",
+        path: "/v1/partner/accounts/{account}/suspend",
+        path_params: &["account"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_partner_unsuspend_account",
+        method: "POST",
+        path: "/v1/partner/accounts/{account}/unsuspend",
+        path_params: &["account"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_partner_erase_account",
+        method: "POST",
+        path: "/v1/partner/accounts/{account}/erase",
+        path_params: &["account"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_partner_get_usage",
+        method: "GET",
+        path: "/v1/partner/usage",
+        path_params: &[],
+        query: &["from", "to", "account"],
+    },
+    Operation {
+        name: "slotlock_partner_reconcile_usage",
+        method: "POST",
+        path: "/v1/partner/usage/reconcile",
+        path_params: &[],
         query: &[],
     },
 ];
@@ -453,6 +719,14 @@ pub struct ListResourcesInput {
     pub limit: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 /// The arguments of [`Client::create_resource`].
@@ -463,32 +737,91 @@ pub struct CreateResourceInput {
     pub timezone: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visibility: Option<String>,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<Option<String>>,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<Option<i64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::get_free_busy`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct GetFreeBusyInput {
-    pub resource_ids: Vec<String>,
     pub start: String,
     pub end: String,
+    /// Left out when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resource_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
 }
 
 /// The arguments of [`Client::find_next_available`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct FindNextAvailableInput {
-    pub resource_ids: Vec<String>,
     pub start: String,
     pub end: String,
     pub duration_minutes: i64,
+    /// Left out when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resource_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
 }
 
 /// The arguments of [`Client::find_available_slots`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct FindAvailableSlotsInput {
-    pub resource_ids: Vec<String>,
     pub start: String,
     pub end: String,
     pub duration_minutes: i64,
+    /// Left out when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resource_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -502,6 +835,12 @@ pub struct HoldSlotsInput {
     pub idempotency_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl_seconds: Option<i64>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::book_together`].
@@ -514,6 +853,12 @@ pub struct BookTogetherInput {
     pub idempotency_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::book_pool`].
@@ -526,6 +871,12 @@ pub struct BookPoolInput {
     pub idempotency_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::get_pool_availability`].
@@ -540,6 +891,34 @@ pub struct GetPoolAvailabilityInput {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ReleaseSlotsInput {
     pub hold_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::confirm_slot`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ConfirmSlotInput {
+    pub hold_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::list_events`].
@@ -584,6 +963,12 @@ pub struct CreateEventInput {
     pub recurrence_exceptions: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hold_id: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::get_event`].
@@ -633,6 +1018,12 @@ pub struct UpdateEventInput {
     pub recurrence_exceptions: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_resource_id: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::delete_event`].
@@ -641,6 +1032,46 @@ pub struct DeleteEventInput {
     pub event_id: String,
     pub expected_revision: i64,
     pub idempotency_key: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::reschedule`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RescheduleInput {
+    pub event_id: String,
+    pub expected_revision: i64,
+    pub starts_at: String,
+    pub ends_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::cancel`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CancelInput {
+    pub event_id: String,
+    pub expected_revision: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::get_resource`].
@@ -649,22 +1080,185 @@ pub struct GetResourceInput {
     pub resource_id: String,
 }
 
+/// The arguments of [`Client::update_resource`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UpdateResourceInput {
+    pub resource_id: String,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<Option<String>>,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<Option<i64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<Value>,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<Option<String>>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
 /// The arguments of [`Client::delete_resource`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct DeleteResourceInput {
     pub resource_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::list_locations`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ListLocationsInput {
+}
+
+/// The arguments of [`Client::create_location`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CreateLocationInput {
+    pub r#ref: String,
+    pub name: String,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_ref: Option<Option<String>>,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<Option<String>>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::update_location`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UpdateLocationInput {
+    pub location_ref: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_ref: Option<Option<String>>,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<Option<String>>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::delete_location`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DeleteLocationInput {
+    pub location_ref: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::list_groups`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ListGroupsInput {
+}
+
+/// The arguments of [`Client::create_group`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CreateGroupInput {
+    pub r#ref: String,
+    pub name: String,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<Option<String>>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::delete_group`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DeleteGroupInput {
+    pub group_ref: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::add_group_member`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AddGroupMemberInput {
+    pub group_ref: String,
+    pub resource_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::remove_group_member`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RemoveGroupMemberInput {
+    pub group_ref: String,
+    pub resource_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::archive_resource`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ArchiveResourceInput {
     pub resource_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::restore_resource`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct RestoreResourceInput {
     pub resource_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::list_busy`].
@@ -680,6 +1274,12 @@ pub struct ListBusyInput {
 pub struct SetResourceAvailabilityInput {
     pub resource_id: String,
     pub rules: Option<Vec<Value>>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::export_resource_availability`].
@@ -693,6 +1293,12 @@ pub struct ExportResourceAvailabilityInput {
 pub struct ImportResourceAvailabilityInput {
     pub resource_id: String,
     pub icalendar: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::set_resource_booking_rules`].
@@ -700,6 +1306,12 @@ pub struct ImportResourceAvailabilityInput {
 pub struct SetResourceBookingRulesInput {
     pub resource_id: String,
     pub rules: Option<Value>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::set_resource_pool`].
@@ -707,11 +1319,43 @@ pub struct SetResourceBookingRulesInput {
 pub struct SetResourcePoolInput {
     pub resource_id: String,
     pub pool: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::set_resource_parent`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SetResourceParentInput {
+    pub resource_id: String,
+    pub parent_id: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::list_pools`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ListPoolsInput {
+}
+
+/// The arguments of [`Client::set_pool_order`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SetPoolOrderInput {
+    pub pool: String,
+    pub order: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::get_booking_rule_defaults`].
@@ -723,6 +1367,12 @@ pub struct GetBookingRuleDefaultsInput {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SetTenantBookingRulesInput {
     pub rules: Option<Value>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::set_pool_booking_rules`].
@@ -730,6 +1380,12 @@ pub struct SetTenantBookingRulesInput {
 pub struct SetPoolBookingRulesInput {
     pub pool: String,
     pub rules: Option<Value>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::get_resource_history`].
@@ -766,6 +1422,12 @@ pub struct GetTenantEventHistoryInput {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SetTenantAvailabilityInput {
     pub rules: Option<Vec<Value>>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::acquire_hold`].
@@ -783,6 +1445,12 @@ pub struct AcquireHoldInput {
     pub idempotency_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub buffer_after_minutes: Option<i64>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::get_hold`].
@@ -795,6 +1463,12 @@ pub struct GetHoldInput {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ReleaseHoldInput {
     pub hold_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::list_holds`].
@@ -811,6 +1485,12 @@ pub struct ListHoldsInput {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ConfirmHoldInput {
     pub hold_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::get_reservation`].
@@ -831,6 +1511,12 @@ pub struct PutReservationInput {
     pub buffer_after_minutes: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::cancel_reservation`].
@@ -838,6 +1524,12 @@ pub struct PutReservationInput {
 pub struct CancelReservationInput {
     pub reservation_ref: String,
     pub revision: i64,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::list_reservations`].
@@ -856,6 +1548,12 @@ pub struct ListReservationsInput {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct CheckInReservationInput {
     pub reservation_ref: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::list_waitlist`].
@@ -883,12 +1581,28 @@ pub struct JoinWaitlistInput {
     pub pool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offer_ttl_seconds: Option<i64>,
+    /// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
+    /// request answers what the first did; with another request, 422 idempotency_conflict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::leave_waitlist`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct LeaveWaitlistInput {
     pub entry_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::record_coverage`].
@@ -899,6 +1613,12 @@ pub struct RecordCoverageInput {
     pub start: String,
     pub end: String,
     pub revision: i64,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::delete_coverage`].
@@ -906,6 +1626,12 @@ pub struct RecordCoverageInput {
 pub struct DeleteCoverageInput {
     pub resource_id: String,
     pub source: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::get_coverage`].
@@ -920,6 +1646,12 @@ pub struct RecordCoverageFailureInput {
     pub resource_id: String,
     pub source: String,
     pub error: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::list_tenant_events`].
@@ -950,6 +1682,12 @@ pub struct CancelTenantEventInput {
     pub idempotency_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_resource_id: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::export_tenant_event`].
@@ -994,43 +1732,290 @@ pub struct CreateWebhookInput {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_types: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pools: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locations: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<String>>,
+    /// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
+    /// request answers what the first did; with another request, 422 idempotency_conflict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::delete_webhook`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct DeleteWebhookInput {
     pub webhook_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::enable_webhook`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct EnableWebhookInput {
     pub webhook_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::get_usage`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GetUsageInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+}
+
+/// The arguments of [`Client::list_approval_policies`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ListApprovalPoliciesInput {
+}
+
+/// The arguments of [`Client::put_approval_policy`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PutApprovalPolicyInput {
+    pub policy_ref: String,
+    pub name: String,
+    pub outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applies_to: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conditions: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_ttl_minutes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lead_minutes: Option<i64>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::delete_approval_policy`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DeleteApprovalPolicyInput {
+    pub policy_ref: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::list_approvals`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ListApprovalsInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+}
+
+/// The arguments of [`Client::get_approval`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GetApprovalInput {
+    pub approval_id: String,
+}
+
+/// The arguments of [`Client::decide_approval`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DecideApprovalInput {
+    pub approval_id: String,
+    pub decision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::sandbox_seed`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SandboxSeedInput {
+    pub scenario: String,
+}
+
+/// The arguments of [`Client::sandbox_reset`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SandboxResetInput {
+}
+
+/// The arguments of [`Client::sandbox_fast_forward`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SandboxFastForwardInput {
+    pub minutes: i64,
+}
+
+/// The arguments of [`Client::sandbox_race`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SandboxRaceInput {
+    pub resource_id: String,
+    pub starts_at: String,
+    pub ends_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agents: Option<i64>,
+}
+
+/// The arguments of [`Client::partner_get_account`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerGetAccountInput {
+    pub account: String,
+}
+
+/// The arguments of [`Client::partner_put_account`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerPutAccountInput {
+    pub account: String,
+    pub plan: String,
+}
+
+/// The arguments of [`Client::partner_list_accounts`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerListAccountsInput {
+}
+
+/// The arguments of [`Client::partner_list_keys`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerListKeysInput {
+    pub account: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+}
+
+/// The arguments of [`Client::partner_create_key`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerCreateKeyInput {
+    pub account: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_in_days: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limits: Option<Value>,
+}
+
+/// The arguments of [`Client::partner_rotate_key`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerRotateKeyInput {
+    pub account: String,
+    pub key_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+}
+
+/// The arguments of [`Client::partner_revoke_key`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerRevokeKeyInput {
+    pub account: String,
+    pub key_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+}
+
+/// The arguments of [`Client::partner_suspend_account`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerSuspendAccountInput {
+    pub account: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// The arguments of [`Client::partner_unsuspend_account`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerUnsuspendAccountInput {
+    pub account: String,
+}
+
+/// The arguments of [`Client::partner_erase_account`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerEraseAccountInput {
+    pub account: String,
+    pub confirm: String,
+}
+
+/// The arguments of [`Client::partner_get_usage`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerGetUsageInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+}
+
+/// The arguments of [`Client::partner_reconcile_usage`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerReconcileUsageInput {
+    pub day: String,
+    pub accounts: Vec<Value>,
 }
 
 impl Client {
     /// List calendar resources.
     ///
-    /// List resources visible to the authenticated tenant principal, with the pool each belongs
-    /// to (a vehicle class, a room type). With pool, only that pool's members, in the order
-    /// slotlock_book_pool tries them.
+    /// List resources visible to the authenticated tenant principal, with what each says about
+    /// itself: its name (show it rather than the reference), description, kind, capacity and
+    /// labels, where it is (location), the groups it is in (a team, a department), and the pool
+    /// it belongs to (a vehicle class, a room type). With kind, only resources of that kind; with
+    /// labels, only those with every label given; with location, only those there or at a
+    /// location in it; with group, only that group's. With pool, only that pool's members, in the
+    /// order slotlock_book_pool tries them.
     pub fn list_resources(&self, input: &ListResourcesInput) -> Result<Value, Error> {
         self.call("slotlock_list_resources", serde_json::to_value(input)?)
     }
 
     /// Create or update a resource.
     ///
-    /// Create the resource with this external reference, or update its time zone if the tenant
-    /// already has it. Repeating the call changes nothing more. visibility is shared (the
-    /// default: agents list and book it) or private (agents never see it), fixed at creation:
-    /// naming another for an existing resource answers 409 resource_visibility_conflict.
+    /// Create the resource with this external reference, or update its time zone, and the profile
+    /// fields and location given, if the tenant already has it. Without a time zone, a new
+    /// resource takes the nearest one its location, or a location above it, has, else UTC; a
+    /// location the tenant does not have answers 404 location_not_found. Repeating the call
+    /// changes nothing more. visibility is shared (the default: agents list and book it) or
+    /// private (agents never see it), fixed at creation: naming another for an existing resource
+    /// answers 409 resource_visibility_conflict. Its profile is optional: a name agents and
+    /// people see instead of the reference, a description, its kind (person, room, desk, space,
+    /// vehicle, machine, equipment, service or other: a hint, never a rule), its capacity
+    /// (informational), up to 20 labels to find it by, and attributes you want back.
     pub fn create_resource(&self, input: &CreateResourceInput) -> Result<Value, Error> {
         self.call("slotlock_create_resource", serde_json::to_value(input)?)
     }
 
     /// Get free-busy.
     ///
-    /// Return privacy-minimized busy intervals and explicit coverage certainty.
+    /// When each resource is busy in a window, as busy intervals only (never whose or what), and
+    /// whether that is certain (coverage: "uncertain" where a calendar feeding it has not been
+    /// read lately). Name the resources with resource_ids, or select them instead by location
+    /// (and every location in it), group, labels (every one), kind or pool: at most 100 (more
+    /// answers selection_too_large, none selection_empty), named in selected_resource_ids.
     pub fn get_free_busy(&self, input: &GetFreeBusyInput) -> Result<Value, Error> {
         self.call("slotlock_get_free_busy", serde_json::to_value(input)?)
     }
@@ -1038,7 +2023,8 @@ impl Client {
     /// Find next available interval.
     ///
     /// Find the earliest certain interval that satisfies the requested duration (up to the
-    /// 367-day search window, so a multi-month rental slot can be found).
+    /// 367-day search window, so a multi-month rental slot can be found). Name the resources with
+    /// resource_ids, or select them as slotlock_get_free_busy does: at most 100.
     pub fn find_next_available(&self, input: &FindNextAvailableInput) -> Result<Value, Error> {
         self.call("slotlock_find_next_available", serde_json::to_value(input)?)
     }
@@ -1050,7 +2036,8 @@ impl Client {
     /// choice. With require_free, only times when at least that many of the resources are free
     /// together, each slot naming them in resource_ids: every resource for a booking that needs
     /// them all (book it with slotlock_book_together), or any n of them. No slot is listed unless
-    /// every resource's coverage is certain.
+    /// every resource's coverage is certain. Name the resources with resource_ids, or select them
+    /// as slotlock_get_free_busy does: at most 20.
     pub fn find_available_slots(&self, input: &FindAvailableSlotsInput) -> Result<Value, Error> {
         self.call("slotlock_find_available_slots", serde_json::to_value(input)?)
     }
@@ -1061,7 +2048,8 @@ impl Client {
     /// as alternatives in one group: each free one is held, the others are listed with why not.
     /// Book one by passing its hold_id to slotlock_create_event, which releases the rest;
     /// unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at
-    /// once.
+    /// once. A candidate refused for its time comes with alternatives (the earliest free times of
+    /// its length). slotlock_confirm_slot books a held time.
     pub fn hold_slots(&self, input: &HoldSlotsInput) -> Result<Value, Error> {
         self.call("slotlock_hold_slots", serde_json::to_value(input)?)
     }
@@ -1079,7 +2067,8 @@ impl Client {
     /// Book from a pool.
     ///
     /// Book any one member of a pool (a vehicle class, a room type) for a time: members are tried
-    /// in a fixed order and the first that is free and allows the booking is booked, in one
+    /// in the pool's order (by id, fewest bookings in the last 30 days first, or in turn, as the
+    /// tenant sets it) and the first that is free and allows the booking is booked, in one
     /// transaction, so a class sells out exactly at its number of members. The event names the
     /// member booked. 409 pool_full when none is free; 404 pool_not_found when the pool has no
     /// member you may book. A retry with the same idempotency_key answers the same event.
@@ -1105,42 +2094,80 @@ impl Client {
         self.call("slotlock_release_slots", serde_json::to_value(input)?)
     }
 
+    /// Confirm a held slot.
+    ///
+    /// Book a time you hold (a hold_id from slotlock_hold_slots): the held resource and time
+    /// exactly, with the title and details you give, and the rest of its group released. 409
+    /// hold_expired when the hold lapsed first; 404 hold_not_found when it was released, booked
+    /// or is not yours. A retry answers the same event (replayed).
+    pub fn confirm_slot(&self, input: &ConfirmSlotInput) -> Result<Value, Error> {
+        self.call("slotlock_confirm_slot", serde_json::to_value(input)?)
+    }
+
     /// List resource events.
     ///
-    /// List bounded events intersecting a time window.
+    /// List your events that meet a time window, earliest first.
     pub fn list_events(&self, input: &ListEventsInput) -> Result<Value, Error> {
         self.call("slotlock_list_events", serde_json::to_value(input)?)
     }
 
     /// Create resource event.
     ///
-    /// Create an event of up to 3,660 days (a booking, lease or long rental); opaque occurrences
-    /// use the database overlap arbiter.
+    /// Book a resource for a time, as an event of up to 3,660 days (a booking, lease or long
+    /// rental). The database refuses a time already taken: 409 overlap, with alternatives (the
+    /// earliest free times of the same length) and, when the booking in the way is yours, its id.
+    /// A booking rule that refuses the time answers booking_rule_… with alternatives too. To book
+    /// a time you hold, pass its hold_id, or use slotlock_confirm_slot. A retry with the same
+    /// idempotency_key answers the same event.
     pub fn create_event(&self, input: &CreateEventInput) -> Result<Value, Error> {
         self.call("slotlock_create_event", serde_json::to_value(input)?)
     }
 
     /// Get resource event.
     ///
-    /// Read one tenant-scoped event by stable identifier.
+    /// Read one of your events by its id, with its revision (pass it as expected_revision to
+    /// change or cancel it).
     pub fn get_event(&self, input: &GetEventInput) -> Result<Value, Error> {
         self.call("slotlock_get_event", serde_json::to_value(input)?)
     }
 
     /// Update resource event.
     ///
-    /// Apply an expected-revision event patch and rematerialize occupancy atomically. With
-    /// expected_resource_id, the resource you read the event on, an event since moved elsewhere
-    /// is not found.
+    /// Change one of your events at the revision you last read (expected_revision): its time,
+    /// resource or details, all or nothing. A time already taken is 409 overlap with
+    /// alternatives; a stale revision is 409 revision_conflict (read the event again). With
+    /// expected_resource_id, the resource you read it on, an event since moved elsewhere is not
+    /// found. To change only the time, slotlock_reschedule is simpler.
     pub fn update_event(&self, input: &UpdateEventInput) -> Result<Value, Error> {
         self.call("slotlock_update_event", serde_json::to_value(input)?)
     }
 
     /// Delete resource event.
     ///
-    /// Tombstone an event at an expected revision so stale sync cannot resurrect it.
+    /// Cancel one of your events at the revision you last read (expected_revision); a stale one
+    /// is 409 revision_conflict. It cannot come back at that revision, so an old copy synced
+    /// later does not restore it. slotlock_cancel does the same with fewer fields.
     pub fn delete_event(&self, input: &DeleteEventInput) -> Result<Value, Error> {
         self.call("slotlock_delete_event", serde_json::to_value(input)?)
+    }
+
+    /// Reschedule an event.
+    ///
+    /// Move one of your events to a new time, and to another resource if you give one, at the
+    /// revision you last read (expected_revision). A time already taken is 409 overlap with
+    /// alternatives; a stale revision 409 revision_conflict. A retry answers the same move
+    /// (replayed).
+    pub fn reschedule(&self, input: &RescheduleInput) -> Result<Value, Error> {
+        self.call("slotlock_reschedule", serde_json::to_value(input)?)
+    }
+
+    /// Cancel an event.
+    ///
+    /// Cancel one of your events at the revision you last read (expected_revision); a stale one
+    /// is 409 revision_conflict. Its time is free at once. A retry answers the same cancellation
+    /// (replayed).
+    pub fn cancel(&self, input: &CancelInput) -> Result<Value, Error> {
+        self.call("slotlock_cancel", serde_json::to_value(input)?)
     }
 
     /// Get a resource.
@@ -1149,6 +2176,18 @@ impl Client {
     /// visibility.
     pub fn get_resource(&self, input: &GetResourceInput) -> Result<Value, Error> {
         self.call("slotlock_get_resource", serde_json::to_value(input)?)
+    }
+
+    /// Change a resource's profile.
+    ///
+    /// Change a resource's name, description, kind, capacity, labels, attributes or location: the
+    /// fields given, keeping the rest. null clears a name, description, capacity or location; []
+    /// and {} clear labels and attributes. A location the tenant does not have answers 404
+    /// location_not_found. The feed's resource.updated names the fields that changed
+    /// (profile_changed), never their values. 400 invalid_resource_profile outside the bounds,
+    /// naming the field.
+    pub fn update_resource(&self, input: &UpdateResourceInput) -> Result<Value, Error> {
+        self.call("slotlock_update_resource", serde_json::to_value(input)?)
     }
 
     /// Delete a resource.
@@ -1160,6 +2199,81 @@ impl Client {
     /// say.
     pub fn delete_resource(&self, input: &DeleteResourceInput) -> Result<Value, Error> {
         self.call("slotlock_delete_resource", serde_json::to_value(input)?)
+    }
+
+    /// List locations.
+    ///
+    /// The tenant's locations, each after the one it is in (depth first), with how many resources
+    /// are at each. A tree of at most 5 levels and 1000 locations: a region, a site, a building,
+    /// a floor, a zone, or whatever yours are.
+    pub fn list_locations(&self, input: &ListLocationsInput) -> Result<Value, Error> {
+        self.call("slotlock_list_locations", serde_json::to_value(input)?)
+    }
+
+    /// Create or update a location.
+    ///
+    /// Create the location with this reference, or change its name, and the parent and time zone
+    /// given. 404 location_not_found for a parent the tenant does not have; 409 location_too_deep
+    /// past 5 levels, location_cycle under itself, location_limit_reached past 1000.
+    pub fn create_location(&self, input: &CreateLocationInput) -> Result<Value, Error> {
+        self.call("slotlock_create_location", serde_json::to_value(input)?)
+    }
+
+    /// Change a location.
+    ///
+    /// Change a location's name, parent or time zone: the fields given. Refused as creating one
+    /// is.
+    pub fn update_location(&self, input: &UpdateLocationInput) -> Result<Value, Error> {
+        self.call("slotlock_update_location", serde_json::to_value(input)?)
+    }
+
+    /// Delete a location.
+    ///
+    /// Delete a location. Refused with 409 location_in_use while a resource is at it or a
+    /// location is in it: move them first. deleted is false when the tenant has no such location.
+    pub fn delete_location(&self, input: &DeleteLocationInput) -> Result<Value, Error> {
+        self.call("slotlock_delete_location", serde_json::to_value(input)?)
+    }
+
+    /// List groups.
+    ///
+    /// The tenant's groups, by reference, with how many resources are in each: any sets you want
+    /// (a team, a department, a contract), at most 500. A group changes nothing about how its
+    /// resources are booked; a pool does that.
+    pub fn list_groups(&self, input: &ListGroupsInput) -> Result<Value, Error> {
+        self.call("slotlock_list_groups", serde_json::to_value(input)?)
+    }
+
+    /// Create or update a group.
+    ///
+    /// Create the group with this reference, or change its name, and its description when given.
+    /// 409 group_limit_reached past 500.
+    pub fn create_group(&self, input: &CreateGroupInput) -> Result<Value, Error> {
+        self.call("slotlock_create_group", serde_json::to_value(input)?)
+    }
+
+    /// Delete a group.
+    ///
+    /// Delete a group; its resources stay as they are. deleted is false when the tenant has no
+    /// such group.
+    pub fn delete_group(&self, input: &DeleteGroupInput) -> Result<Value, Error> {
+        self.call("slotlock_delete_group", serde_json::to_value(input)?)
+    }
+
+    /// Put a resource in a group.
+    ///
+    /// Put one of the tenant's resources in a group. added is false when it was in it already.
+    /// 404 group_not_found or resource_not_found; 409 resource_group_limit_reached past 20 groups
+    /// a resource.
+    pub fn add_group_member(&self, input: &AddGroupMemberInput) -> Result<Value, Error> {
+        self.call("slotlock_add_group_member", serde_json::to_value(input)?)
+    }
+
+    /// Take a resource out of a group.
+    ///
+    /// Take a resource out of a group. removed is false when it was not in it.
+    pub fn remove_group_member(&self, input: &RemoveGroupMemberInput) -> Result<Value, Error> {
+        self.call("slotlock_remove_group_member", serde_json::to_value(input)?)
     }
 
     /// Archive a resource.
@@ -1242,12 +2356,33 @@ impl Client {
         self.call("slotlock_set_resource_pool", serde_json::to_value(input)?)
     }
 
+    /// Make a resource part of another.
+    ///
+    /// Make a resource a part of a composite (a room of a hall, a half of a court), or no part
+    /// (`null`). A booking of the composite as a whole then conflicts with a booking of any of
+    /// its parts, and two parts never conflict with each other; each part's free/busy shows the
+    /// whole's bookings, and the whole's shows its parts'. One level deep, at most 50 parts;
+    /// refused while either side has a booking or live hold still to come (`composite_busy`).
+    pub fn set_resource_parent(&self, input: &SetResourceParentInput) -> Result<Value, Error> {
+        self.call("slotlock_set_resource_parent", serde_json::to_value(input)?)
+    }
+
     /// List pools.
     ///
-    /// The tenant's pools by name, each with its capacity: how many members it has that are not
-    /// archived.
+    /// The tenant's pools by name, each with its capacity (how many members it has that are not
+    /// archived) and the order slotlock_book_pool tries them in.
     pub fn list_pools(&self, input: &ListPoolsInput) -> Result<Value, Error> {
         self.call("slotlock_list_pools", serde_json::to_value(input)?)
+    }
+
+    /// Set a pool's order.
+    ///
+    /// The order slotlock_book_pool tries a pool's members in: stable (by id, the default),
+    /// least_booked (fewest bookings made on each in the last 30 days first, to share them out)
+    /// or round_robin (from the member after the one booked last). At most 1,000 pools have one:
+    /// one more is 409 pool_order_limit_reached.
+    pub fn set_pool_order(&self, input: &SetPoolOrderInput) -> Result<Value, Error> {
+        self.call("slotlock_set_pool_order", serde_json::to_value(input)?)
     }
 
     /// Get default booking rules.
@@ -1428,7 +2563,10 @@ impl Client {
     /// a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so
     /// (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window
     /// starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409
-    /// waitlist_limit_reached); a window is at most 31 days.
+    /// waitlist_limit_reached); a window is at most 31 days. With an idempotency key (the
+    /// Idempotency-Key header or idempotency_key), a retry answers the entry the first request
+    /// made (replayed: true) for as long as it is kept; the same key with another request is 422
+    /// idempotency_conflict.
     pub fn join_waitlist(&self, input: &JoinWaitlistInput) -> Result<Value, Error> {
         self.call("slotlock_join_waitlist", serde_json::to_value(input)?)
     }
@@ -1538,7 +2676,8 @@ impl Client {
     /// tenant's reference (slotlock_get_tenant), or it answers 400 invalid_confirmation. Off
     /// unless the server allows it (403 tenant_erasure_disabled; slotlock serve does not: its
     /// operator runs slotlock tenant erase). A suspended tenant cannot erase itself (403
-    /// tenant_suspended). Erasing again deletes nothing.
+    /// tenant_suspended), nor can one whose hosted plan is still paid for until it is cancelled
+    /// (409 billing_active). Erasing again deletes nothing.
     pub fn erase_tenant(&self, input: &EraseTenantInput) -> Result<Value, Error> {
         self.call("slotlock_erase_tenant", serde_json::to_value(input)?)
     }
@@ -1582,7 +2721,14 @@ impl Client {
     /// CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature),
     /// in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a
     /// 410, the webhook is disabled and the feed records webhook.disabled. The secret is returned
-    /// here only. At most 10 per tenant.
+    /// here only. At most 25 per tenant, or fewer on a plan (409 webhook_limit_reached). With
+    /// resource_ids, pools, locations (each with every location in it) or groups, only changes
+    /// about a resource that matches one of them, as it is when the change is delivered: a change
+    /// about no resource (a key, a webhook, a usage notice) is not sent. At most 100 resource ids
+    /// and 20 of each other kind (400 invalid_webhook_filter). With an idempotency key (the
+    /// Idempotency-Key header or idempotency_key), a retry answers the webhook and secret the
+    /// first request made (replayed: true) for as long as the webhook is kept; the same key with
+    /// another request is 422 idempotency_conflict.
     pub fn create_webhook(&self, input: &CreateWebhookInput) -> Result<Value, Error> {
         self.call("slotlock_create_webhook", serde_json::to_value(input)?)
     }
@@ -1602,6 +2748,240 @@ impl Client {
     /// it, add it again, and read what it missed from slotlock_list_changes.
     pub fn enable_webhook(&self, input: &EnableWebhookInput) -> Result<Value, Error> {
         self.call("slotlock_enable_webhook", serde_json::to_value(input)?)
+    }
+
+    /// Read usage.
+    ///
+    /// How much the tenant used the service from one UTC day to another (inclusive, at most 400
+    /// days apart; by default the first of this month to today): operations its keys and the
+    /// dashboard assistant ran (each call that reached its operation, whatever it returned),
+    /// bookings (bookings, events and confirmed holds) and holds it made, webhook deliveries its
+    /// endpoints accepted, messages to the dashboard assistant, and the resources it held (each
+    /// day's count, archived ones included; in totals, the last day's, not a sum). Totals, then
+    /// by day, by API key (key_id null for none) and by surface (mcp, a2a, rest, application,
+    /// dashboard-assistant, webhooks); resources are by day only. Counts only, never what was
+    /// asked. Empty unless the server meters usage (SLOTLOCK_USAGE=on); operations, deliveries
+    /// and messages appear within 15 seconds; bookings, holds and resources within the hour. 400
+    /// invalid_usage_range when to is before from, the range is longer than 400 days, or to is
+    /// after today.
+    pub fn get_usage(&self, input: &GetUsageInput) -> Result<Value, Error> {
+        self.call("slotlock_get_usage", serde_json::to_value(input)?)
+    }
+
+    /// List approval policies.
+    ///
+    /// The tenant's approval policies, by reference: which agent bookings wait for a person
+    /// (require_approval) or are refused (refuse).
+    pub fn list_approval_policies(&self, input: &ListApprovalPoliciesInput) -> Result<Value, Error> {
+        self.call("slotlock_list_approval_policies", serde_json::to_value(input)?)
+    }
+
+    /// Create or replace an approval policy.
+    ///
+    /// Which agent bookings (slotlock_create_event, slotlock_confirm_slot, slotlock_book_pool,
+    /// slotlock_book_together, and moves by slotlock_update_event or slotlock_reschedule) a
+    /// person approves first, or are refused. applies_to names resources, pools, locations (with
+    /// the locations in them) and groups; empty, every resource. conditions narrow it:
+    /// longer_than_minutes, outside_hours (outside the resource's bookable hours), kinds (single,
+    /// pool, bundle, move); a booking meets the policy when it meets every condition given.
+    /// outcome require_approval holds the exact time the booking would take, under the approval,
+    /// and answers the agent 409 approval_pending; refuse answers 403 approval_policy_refused. A
+    /// person has approval_ttl_minutes to decide (default 1,440; at most 43,200, and the server's
+    /// ceiling), and must decide lead_minutes before the booking starts: the wait is the earlier
+    /// of the two. Where several apply, refuse wins, then the one that must be decided soonest.
+    /// At most 50 policies: one more is 409 approval_policy_limit_reached.
+    pub fn put_approval_policy(&self, input: &PutApprovalPolicyInput) -> Result<Value, Error> {
+        self.call("slotlock_put_approval_policy", serde_json::to_value(input)?)
+    }
+
+    /// Delete an approval policy.
+    ///
+    /// Stop applying a policy to new bookings. Approvals it already asked for stay as they are,
+    /// to be decided.
+    pub fn delete_approval_policy(&self, input: &DeleteApprovalPolicyInput) -> Result<Value, Error> {
+        self.call("slotlock_delete_approval_policy", serde_json::to_value(input)?)
+    }
+
+    /// List approvals.
+    ///
+    /// The tenant's approvals, newest first: bookings an agent asked for that a policy holds for
+    /// a person (pending, holding their time until expires_at), and those decided (granted,
+    /// declined, expired). Filter by status.
+    pub fn list_approvals(&self, input: &ListApprovalsInput) -> Result<Value, Error> {
+        self.call("slotlock_list_approvals", serde_json::to_value(input)?)
+    }
+
+    /// Get an approval.
+    ///
+    /// One approval by id, with the booking it would make. 404 approval_not_found.
+    pub fn get_approval(&self, input: &GetApprovalInput) -> Result<Value, Error> {
+        self.call("slotlock_get_approval", serde_json::to_value(input)?)
+    }
+
+    /// Grant or decline an approval.
+    ///
+    /// Decide a pending approval. grant makes the booking as the agent asked for it, as that
+    /// agent, in one transaction with letting the approval's hold go, and answers it under
+    /// booking; the agent's retry with its idempotency key then answers the same booking. A write
+    /// refused now (a booking rule changed, say) is refused with its own code and the approval
+    /// stays pending. decline frees the time; the agent's retry answers 403 approval_declined
+    /// with the reason. 404 approval_not_found; 409 approval_not_pending when already decided;
+    /// 409 approval_expired after its wait.
+    pub fn decide_approval(&self, input: &DecideApprovalInput) -> Result<Value, Error> {
+        self.call("slotlock_decide_approval", serde_json::to_value(input)?)
+    }
+
+    /// Seed the test environment.
+    ///
+    /// Fill an empty test environment (a key starting slk_test_) with a scenario to try an agent
+    /// against: car-rental (cars and vans in pools at two branches, 30-minute turnaround), clinic
+    /// (practitioners and treatment rooms, half-hour slots on weekdays) or desks (desks on two
+    /// floors, and a hall that splits in two). Locations, groups, resources with profiles, hours
+    /// and booking rules, and three bookings tomorrow. 409 sandbox_not_empty when it has
+    /// resources: reset it first. 403 sandbox_test_only for a live key.
+    pub fn sandbox_seed(&self, input: &SandboxSeedInput) -> Result<Value, Error> {
+        self.call("slotlock_sandbox_seed", serde_json::to_value(input)?)
+    }
+
+    /// Empty the test environment.
+    ///
+    /// Empty the test environment as if new: its resources, locations, groups, bookings, events,
+    /// holds, waitlist, approval policies and feed. Its API keys, webhooks, plan and usage stay.
+    /// Rows removed, by table. 403 sandbox_test_only for a live key.
+    pub fn sandbox_reset(&self, input: &SandboxResetInput) -> Result<Value, Error> {
+        self.call("slotlock_sandbox_reset", serde_json::to_value(input)?)
+    }
+
+    /// Move the test environment's waiting forward.
+    ///
+    /// Make what would lapse in the test environment within minutes (1-525,600) lapse now: holds
+    /// (a waitlist offer's and an approval's among them) and pending approvals; then a
+    /// maintenance pass reaps them as it would have, releasing holds, passing offers on and
+    /// expiring approvals, on the feed as usual. Bookings and events keep their times; no-shows
+    /// and series follow the real clock. 403 sandbox_test_only for a live key.
+    pub fn sandbox_fast_forward(&self, input: &SandboxFastForwardInput) -> Result<Value, Error> {
+        self.call("slotlock_sandbox_fast_forward", serde_json::to_value(input)?)
+    }
+
+    /// Race agents for one slot in the test environment.
+    ///
+    /// Race agents (2-200, default 100), each an agent of its own, for one time on one resource
+    /// of the test environment, through the same path MCP, A2A and REST use: how many booked
+    /// (one), how many were refused and why (overlap, with alternatives), any server errors, and
+    /// how long the answers took. 403 sandbox_test_only for a live key.
+    pub fn sandbox_race(&self, input: &SandboxRaceInput) -> Result<Value, Error> {
+        self.call("slotlock_sandbox_race", serde_json::to_value(input)?)
+    }
+
+    /// Read an account.
+    ///
+    /// One of the partner's accounts, with how many resources (archived ones included) and active
+    /// API keys it holds. 404 account_not_found for an account the partner does not have.
+    pub fn partner_get_account(&self, input: &PartnerGetAccountInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_get_account", serde_json::to_value(input)?)
+    }
+
+    /// Create or update an account.
+    ///
+    /// Create the partner's account with this id (your own id for your user, 1-128 letters,
+    /// digits, dots, dashes or underscores), or put it on another plan: one of your contract's,
+    /// whose limits and monthly quotas the account then has. Its tenant is
+    /// partner:<partner>:<account>, an ordinary Slotlock tenant of its own. Repeating the call
+    /// changes nothing more. 400 invalid_partner_plan for a plan your contract does not have.
+    pub fn partner_put_account(&self, input: &PartnerPutAccountInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_put_account", serde_json::to_value(input)?)
+    }
+
+    /// List accounts.
+    ///
+    /// The partner's accounts, by id: plan, whether suspended, and when made and last changed.
+    pub fn partner_list_accounts(&self, input: &PartnerListAccountsInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_list_accounts", serde_json::to_value(input)?)
+    }
+
+    /// List an account's keys.
+    ///
+    /// The account's API keys, revoked and expired ones included, newest first; never the keys
+    /// themselves.
+    pub fn partner_list_keys(&self, input: &PartnerListKeysInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_list_keys", serde_json::to_value(input)?)
+    }
+
+    /// Create a key for an account.
+    ///
+    /// An API key for the account, shown once in key and never again; only its SHA-256 is kept.
+    /// Give it to your user's calls: it acts in the account's tenant, over MCP, A2A and REST, as
+    /// any key. environment: test makes it in the account's test environment instead (a tenant of
+    /// its own, on the same plan, never billed; its keys start slk_test_). scopes: some of the
+    /// ones your contract allows (read and write unless it says), by default all of them;
+    /// expires_in_days: 1-3650, or none. limits hold the key's agent below the server's limits:
+    /// max_holds live at once, max_held_hours they hold together, requests_per_minute, and
+    /// requires_approval to make every booking it asks for wait for a person (the account's
+    /// Approvals). 403 scope_not_in_contract for another scope; 409 api_key_limit_reached past
+    /// the account plan's keys.
+    pub fn partner_create_key(&self, input: &PartnerCreateKeyInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_create_key", serde_json::to_value(input)?)
+    }
+
+    /// Rotate an account's key.
+    ///
+    /// A new secret for one of the account's active keys, shown once; the old one stops at once.
+    /// The key keeps its id and what it booked. 404 key_not_found otherwise.
+    pub fn partner_rotate_key(&self, input: &PartnerRotateKeyInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_rotate_key", serde_json::to_value(input)?)
+    }
+
+    /// Revoke an account's key.
+    ///
+    /// Revoke one of the account's keys at once; revoking it again changes nothing. 404
+    /// key_not_found otherwise.
+    pub fn partner_revoke_key(&self, input: &PartnerRevokeKeyInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_revoke_key", serde_json::to_value(input)?)
+    }
+
+    /// Suspend an account.
+    ///
+    /// Suspend the account, as slotlock tenant suspend: it may read, and writes nothing; its keys
+    /// get no new secret. suspended says whether it was not suspended already.
+    pub fn partner_suspend_account(&self, input: &PartnerSuspendAccountInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_suspend_account", serde_json::to_value(input)?)
+    }
+
+    /// Lift a suspension.
+    ///
+    /// Lift a suspension the partner made. One Pylota made stays: unsuspended is false then, as
+    /// when the account was not suspended.
+    pub fn partner_unsuspend_account(&self, input: &PartnerUnsuspendAccountInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_unsuspend_account", serde_json::to_value(input)?)
+    }
+
+    /// Erase an account.
+    ///
+    /// Erase the account's tenant, every row it owns, as /v1/tenant/erase, and the partner's
+    /// record of it. confirm repeats the account. Cannot be undone.
+    pub fn partner_erase_account(&self, input: &PartnerEraseAccountInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_erase_account", serde_json::to_value(input)?)
+    }
+
+    /// Read the accounts' usage.
+    ///
+    /// The partner's accounts' usage, the counts Pylota invoices from, by account, UTC day and
+    /// metric (operations, bookings, holds, webhook_deliveries, resources: each day's count),
+    /// from one UTC day to another (inclusive, at most 400 days apart; by default this month);
+    /// one account, or all. 400 invalid_usage_range otherwise.
+    pub fn partner_get_usage(&self, input: &PartnerGetUsageInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_get_usage", serde_json::to_value(input)?)
+    }
+
+    /// Compare your counts with ours.
+    ///
+    /// Send your count of each account's operations (and, if you keep them, bookings) on one
+    /// ended UTC day, as your daily cross-check: the answer gives ours beside yours for every
+    /// account either of us counted, the difference in percent, and whether every one is within
+    /// 0.5%. A day outside that is recorded as a mismatch, which Pylota looks into. Sending the
+    /// same day again replaces its record.
+    pub fn partner_reconcile_usage(&self, input: &PartnerReconcileUsageInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_reconcile_usage", serde_json::to_value(input)?)
     }
 
 }

@@ -45,7 +45,10 @@ The [Acceptable Use Policy](ACCEPTABLE-USE.md) permits research within these rul
 Slotlock treats all external calendar content as untrusted. The parser has explicit size, component,
 occurrence, exception, work, and expansion-window bounds. Reservation conflicts are arbitrated by a
 PostgreSQL exclusion constraint. Tenant policies are forced and fail closed when their transaction
-context is missing. Embedding applications remain responsible for authentication, authorization,
+context is missing. A key limited to locations or groups is held to its resources by a second,
+restrictive policy (`resource_scope_v1`) on each table keyed by resource, which can only narrow what
+the tenant policy allows; the deployment check accepts exactly those two policies on those tables
+and the tenant policy alone on the rest. Embedding applications remain responsible for authentication, authorization,
 provider-secret storage, webhook verification, network egress, and erasure.
 
 Upgrading repairs data across tenants (expired holds in a turnaround buffer, duplicate resources,
@@ -163,7 +166,7 @@ it is not an authorization boundary. Scopes and `authorize` decide who may write
 
 ## API keys and the application API
 
-An API key is `slk_`, 40 base62 characters from the operating system's random source (about 238
+An API key is `slk_` (`slk_test_` in a test environment, `<tenant>~test`), 40 base62 characters from the operating system's random source (about 238
 bits) and a 6-character checksum, and the database keeps only its SHA-256. A slow password hash
 (bcrypt, scrypt, Argon2) defends a secret a person chose against offline guessing; nobody can guess
 238 random bits, so a fast hash

@@ -9,6 +9,8 @@ import { createSlotlockApiKeyStore } from '../api-keys.js';
 import { createSlotlockDashboardState } from '../dashboard.js';
 import { setSlotlockTenantPlan } from '../plans.js';
 import { type SlotlockStore, createSlotlockStore } from '../store.js';
+import { noteSlotlockQuotaThreshold, slotlockQuotaPeriod } from '../quotas.js';
+import { recordSlotlockUsage, slotlockUsageDay } from '../usage.js';
 
 const url = process.env.DATABASE_URL?.trim();
 const HOUR = 60 * 60 * 1000;
@@ -343,12 +345,25 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
     /** A tenant with a row in every table it can own rows in. */
     async function populate(tenantRef: string, uid: string) {
       await app.withTenant(tenantRef, async (tenant) => {
+        // Where it is and a group it is in (RFC 0003 G2, G3).
+        await tenant.putLocation({ tenantRef, ref: 'depot', name: 'Depot' });
+        await tenant.putGroup({ tenantRef, ref: 'fleet', name: 'Fleet' });
         const resource = await tenant.createResource({
           tenantRef,
           externalRef: 'van-1',
           timezone: 'UTC',
+          location: 'depot',
         });
         const resourceId = resource.id;
+        await tenant.addGroupMember({ tenantRef, group: 'fleet', resourceId });
+        // The order its pool is booked in (RFC 0003 G7).
+        await tenant.setPoolOrder({ tenantRef, pool: 'vans', order: 'round_robin' });
+        // A composite with a part booked (RFC 0003 G8): its claim on the whole.
+        const hall = await tenant.createResource({ tenantRef, externalRef: 'hall', timezone: 'UTC' });
+        const room = await tenant.createResource({ tenantRef, externalRef: 'hall-room-1', timezone: 'UTC' });
+        await tenant.setResourceParent({ tenantRef, id: room.id, parentId: hall.id });
+        const roomHold = await tenant.acquireHold({ tenantRef, resourceId: room.id, ...slot(0), ttlMs: 600_000 });
+        if (!roomHold.ok) throw new Error(roomHold.code);
         const hold = await tenant.acquireHold({
           tenantRef,
           resourceId,
@@ -437,6 +452,21 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
         const waiting = await tenant.joinWaitlist({ tenantRef, resourceId, ...slot(2), holderRef: 'waiting' });
         if (!waiting.ok) throw new Error(waiting.code);
         await tenant.setBookingRuleDefaults({ tenantRef, pool: null, rules: { minNoticeMinutes: 0 } });
+        // A policy, and a booking it holds for a person (RFC 0004 A4).
+        await tenant.putApprovalPolicy({ tenantRef, ref: 'vans', name: 'Vans', outcome: 'require_approval' });
+        const approval = await tenant.requestApproval({
+          tenantRef,
+          policyRef: 'vans',
+          operation: 'slotlock_create_event',
+          request: { resource_id: resourceId },
+          requester: { subject: 'agent-1' },
+          requesterRef: 'agent-1',
+          requestKey: 'a'.repeat(64),
+          holds: [{ resourceId, ...slot(5) }],
+          ...slot(5),
+          expiresAt: new Date(Date.now() + HOUR),
+        });
+        if (!approval.ok) throw new Error(approval.code);
         await tenant.putAssistantSettings({
           tenantRef,
           provider: 'openai',
@@ -473,6 +503,10 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
       await superuser`
         DELETE FROM slotlock.outbox
          WHERE id = (SELECT min(id) FROM slotlock.outbox WHERE tenant_ref = ${tenantRef})`;
+      // Overage it was billed for, which only the owner's overage report writes.
+      await superuser`
+        INSERT INTO slotlock.overage_reports (tenant_ref, month, reported)
+        VALUES (${tenantRef}, date_trunc('month', now())::date, 1)`;
       // A booking an upgrade set aside, which only the deployment DDL writes.
       await superuser`
         INSERT INTO slotlock.reservation_conflict_archive (
@@ -484,11 +518,34 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
         )`;
       const keys = createSlotlockApiKeyStore(application);
       const key = await keys.create({ tenantRef, name: 'Agent key', scopes: ['read', 'write'] });
+      // A key limited to part of the tenant (RFC 0003 G6), whose limit is the tenant's too.
+      await keys.create({
+        tenantRef,
+        name: 'Depot key',
+        scopes: ['read'],
+        resourceScope: { locations: ['depot'], groups: [] },
+        // And held below the server's limits (RFC 0004 A5).
+        limits: { maxHolds: 2 },
+      });
       await keys.revoke({
         tenantRef,
         id: (await keys.create({ tenantRef, name: 'Old key', scopes: ['read'] })).apiKey.id,
       });
       await setSlotlockTenantPlan(application, { tenantRef, plan: 'developer', status: 'active' });
+      // Its usage: operations a server counted, and its feed rolled up (which writes its cursor).
+      await recordSlotlockUsage(application, randomUUID(), [
+        { tenantRef, day: slotlockUsageDay(Date.now()), metric: 'operations', keyId: '', origin: 'rest', count: 1 },
+      ]);
+      await app.withTenant(tenantRef, (tenant) => tenant.rollUpUsage({ tenantRef }));
+      // A notice that it used most of a monthly quota.
+      await noteSlotlockQuotaThreshold(application, {
+        tenantRef,
+        metric: 'operations',
+        percent: 80,
+        used: 400_000,
+        quota: 500_000,
+        periodStart: slotlockQuotaPeriod(Date.now()).periodStart,
+      });
       const dashboard = createSlotlockDashboardState(application);
       expect(await dashboard.use('form', `form-${randomUUID()}`, Date.now() + HOUR, uid)).toBe(
         true,
@@ -508,7 +565,9 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
       const tables = await tenantTables();
       // The suspension is kept on purpose (an erased abuser stays suspended); every other table with
       // a tenant column is the tenant's data and must be erased.
-      const owned = tables.filter((table) => table !== 'tenant_suspensions');
+      // partner_accounts is a partner's record of one of its accounts (partner:<id>:<account>):
+      // erased with it, which partners.integration covers, and never a direct tenant's.
+      const owned = tables.filter((table) => table !== 'tenant_suspensions' && table !== 'partner_accounts');
       expect(tables).toContain('tenant_suspensions');
       const before = await counts(tenantRef, owned);
       const canaryBefore = await counts(canary, owned);

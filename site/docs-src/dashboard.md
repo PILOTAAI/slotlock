@@ -50,7 +50,9 @@ page: every member of an organization can ask in plain words ("what's free tomor
 - **The organization's data is sent to the provider it configures**: members' messages, and the
   resources and bookings the assistant reads for them.
 - The key is stored encrypted (AES-256-GCM) with the deployment's secret, and is never shown again:
-  only that it is set, and its last four characters.
+  only that it is set, and its last four characters. To change the secret, put the old value in
+  `SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS`: each key is sealed again under the new one when next used,
+  so nobody enters a key again.
 - **Reads run; writes wait for you.** The assistant looks things up at once. A booking, hold, change
   or cancellation appears as a card to **Approve** or **Dismiss**, and runs only when approved,
   once, under the same booking rules and limits as an agent. Activity names it
