@@ -23,11 +23,19 @@ function notes030(): string {
 }
 
 describe('hosted safety in the documentation', () => {
-  const readme = read('README.md');
   const security = read('SECURITY.md');
+  const operations = read('site/docs-src/operations.md');
+  /** The docs site's Limits page, where serve's request limits are documented. */
+  const limitsPage = () => {
+    const page = read('site/docs-src/limits.md');
+    expect(page, 'canary: the limits page').toContain(
+      'The server limits requests per client address',
+    );
+    return flat(page);
+  };
 
   it('names the request limits in the production checklist and the security model', () => {
-    const checklist = flat(section(readme, '### Production checklist'));
+    const checklist = flat(section(operations, '## Production checklist'));
     expect(checklist).toContain('SLOTLOCK_LIMITS');
     expect(checklist).toContain('SLOTLOCK_TRUSTED_PROXY_HEADER');
     expect(checklist).toContain('consumeRateLimit');
@@ -36,24 +44,21 @@ describe('hosted safety in the documentation', () => {
   });
 
   it('says which writes wait for a series slot, what the application API counts in, and the stream cap (P11, SURF-1, SURF-3)', () => {
-    const start = readme.indexOf('- The server limits requests per client address');
-    expect(start, 'canary: the limits bullet exists').toBeGreaterThanOrEqual(0);
-    const limits = flat(readme.slice(start, readme.indexOf('\n\n', start)));
+    const limits = limitsPage();
     // Every update waits: an update of a title re-expands a recurring event's series.
     expect(limits).toMatch(/every event update[^.]*waits? for a slot/i);
     expect(limits).toContain('tenant_series_writes');
     expect(limits).toContain('app_write');
     expect(limits).toMatch(/health check[^.]*not counted/i);
-    const live = flat(section(readme, '### Calendar resources and live updates'));
+    const reference = read('site/docs-src/reference.md');
+    const live = flat(section(reference, '## Calendar resources and live updates'));
     expect(live).toContain('maxPerTenant');
     expect(live).toMatch(/`key_subscriptions`[^.]*fewer than its tenant/);
     expect(flat(notes030())).toContain('key_subscriptions');
   });
 
   it('says what a write that waits gets, how a freed slot is shared, and where maintenance waits (P11)', () => {
-    const start = readme.indexOf('- The server limits requests per client address');
-    expect(start, 'canary: the limits bullet exists').toBeGreaterThanOrEqual(0);
-    const limits = flat(readme.slice(start, readme.indexOf('\n\n', start)));
+    const limits = limitsPage();
     // seriesGate answers a timed-out wait 429 while the tenant's own write runs, else 503.
     expect(limits).toMatch(
       /waited two seconds gets 429 while its tenant's own write is still running, otherwise 503 `server_busy`/,
@@ -72,9 +77,7 @@ describe('hosted safety in the documentation', () => {
   });
 
   it('says how a freed slot is shared and what another tenant may still wait for (P11, SEC-3)', () => {
-    const start = readme.indexOf('- The server limits requests per client address');
-    expect(start, 'canary: the limits bullet exists').toBeGreaterThanOrEqual(0);
-    const limits = flat(readme.slice(start, readme.indexOf('\n\n', start)));
+    const limits = limitsPage();
     // The release that brought the fair slots, not whatever is unreleased above it.
     const changelog = read('CHANGELOG.md');
     const added = flat(section(changelog.slice(changelog.indexOf('\n## 0.3.0')), '### Added'));
@@ -88,9 +91,7 @@ describe('hosted safety in the documentation', () => {
   });
 
   it('promises no more fairness than the slots give (P11)', () => {
-    const start = readme.indexOf('- The server limits requests per client address');
-    expect(start, 'canary: the limits bullet exists').toBeGreaterThanOrEqual(0);
-    const limits = flat(readme.slice(start, readme.indexOf('\n\n', start)));
+    const limits = limitsPage();
     // The release that brought the fair slots, not whatever is unreleased above it.
     const changelog = read('CHANGELOG.md');
     const added = flat(section(changelog.slice(changelog.indexOf('\n## 0.3.0')), '### Added'));
@@ -132,19 +133,18 @@ describe('hosted safety in the documentation', () => {
   });
 
   it('says confirmation is attested by the client, not an authorization boundary', () => {
-    const confirm = flat(section(readme, '### Confirm before writing'));
+    const page = read('site/docs-src/security.md');
+    const confirm = flat(section(page, '## Confirmation before writes'));
     expect(confirm).toContain('not an authorization boundary');
     expect(flat(security)).toContain('not an authorization boundary');
-    // The security page says the same in its own section and must not promise more in its summary.
-    const page = flat(read('site/docs-src/security.md'));
-    expect(page).toContain('not an authorization boundary');
-    expect(page).not.toMatch(/A person can confirm each one/);
+    // The security page must not promise more in its summary.
+    expect(flat(page)).not.toMatch(/A person can confirm each one/);
   });
 
   it('tells operators to erase a tenant with the one call that does it, not table by table', () => {
-    const start = readme.indexOf('- **Erasure.**');
+    const start = operations.indexOf('- **Erasure.**');
     expect(start, 'canary: the erasure item exists').toBeGreaterThanOrEqual(0);
-    const item = readme.slice(start, readme.indexOf('\n\n', start));
+    const item = operations.slice(start, operations.indexOf('\n\n', start));
     expect(item).toContain('eraseTenant({ tenantRef })');
     expect(item).toContain('slotlock tenant erase');
     expect(item).not.toMatch(/delete order|in your tenant-erasure workflow and/);

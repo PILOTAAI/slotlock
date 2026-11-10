@@ -319,7 +319,9 @@ async function readFacts() {
   const assistantProviders = [
     ...dashboard.matchAll(/<option value="(?:anthropic|openai)"\$\{selected\('(?:anthropic|openai)'\)\}>([^<]+)<\/option>/g),
   ].map((match) => match[1]);
-  const compatible = /`OpenAI-compatible`, which covers ([A-Za-z ,\n]+?)\),/.exec(await read('README.md'));
+  const compatible = /`OpenAI-compatible`, which covers ([A-Za-z ,\n]+?)\),/.exec(
+    await read('site/docs-src/dashboard.md'),
+  );
   // slotlock_hold_slots' input: how many candidates one call holds, and for how long.
   const holdInput =
     /\.max\(([0-9]+)\),\n\s+ttl_seconds: z\.number\(\)\.int\(\)\.min\(([0-9]+)\)\.max\(([0-9]+)\)/.exec(
@@ -430,7 +432,7 @@ async function readFacts() {
     ),
     assistantCompatible: must(
       compatible?.[1].replace(/\s+/g, ' ').split(/, | and /),
-      'the OpenAI-compatible list in the README',
+      'the OpenAI-compatible list on the dashboard page (site/docs-src/dashboard.md)',
     ),
     dashboardAgendaDays: must(numberConst(dashboard, 'AGENDA_DAYS'), 'AGENDA_DAYS in src/dashboard.ts'),
     // How many resources one tenant may add in the dashboard (the landing page's Cloud steps).

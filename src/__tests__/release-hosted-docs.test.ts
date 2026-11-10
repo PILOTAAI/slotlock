@@ -2,7 +2,7 @@
 // a privacy notice with what UK GDPR Article 13 asks for, terms with the Article 28(3) processing
 // terms, an acceptable-use policy, a hosted service page whose limits are the code's, a versioning
 // policy for /v1, and a site that links them instead of saying there is no hosted service.
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { SLOTLOCK_DASHBOARD_MAX_RESOURCES } from '../dashboard.js';
 import { SLOTLOCK_API_KEY_ACTIVE_LIMIT, SLOTLOCK_API_KEY_RETAINED_LIMIT } from '../ddl.js';
@@ -70,10 +70,10 @@ describe('the published policies', () => {
     );
     expect(privacy).not.toContain('since it last started');
     expect(read('src/self-host.ts')).toContain('SELECT slotlock.maintenance_tenants(');
-    // What erasure leaves: key digests, and a suspension, which outlives it (README).
+    // What erasure leaves: key digests, and a suspension, which outlives it (self-hosting page).
     expect(privacy).toContain('the digests of your erased keys, with nothing about you');
     expect(privacy).toContain('a record that the account was suspended, with the reason we gave, if it was');
-    expect(flat(read('README.md'))).toContain('A suspension outlives it.');
+    expect(flat(read('site/docs-src/self-host.md'))).toContain('A suspension outlives it.');
     // Backups and the log store are named; the old 150 MB cap was never hosted practice.
     expect(privacy).toContain('Backups of the whole database, encrypted');
     expect(privacy).toContain('stores our encrypted backups (R2)');
@@ -361,10 +361,10 @@ describe('the specification and the README', () => {
 
 describe('availability rule spellings (W24)', () => {
   it('names the spelling each surface takes, as their parsers read it', () => {
-    const readme = read('README.md');
-    const rules = /slotlock hours set '(\[[^']+\])'/.exec(readme)?.[1];
-    expect(rules, 'canary: the README hours set example').toBeDefined();
-    // The CLI and SLOTLOCK_AVAILABILITY parse the README's camelCase example.
+    const page = read('site/docs-src/booking-rules.md');
+    const rules = /slotlock hours set '(\[[^']+\])'/.exec(page)?.[1];
+    expect(rules, 'canary: the hours page hours set example').toBeDefined();
+    // The CLI and SLOTLOCK_AVAILABILITY parse the hours page's camelCase example.
     expect(parseAvailabilityRules(JSON.parse(rules ?? '[]'))).toHaveLength(1);
     expect(() =>
       parseAvailabilityRules([{ rrule: 'FREQ=WEEKLY;BYDAY=SA', start_minutes: 600, duration_minutes: 240 }]),
@@ -373,7 +373,7 @@ describe('availability rule spellings (W24)', () => {
     const openApi = read('openapi.json');
     expect(openApi).toContain('"start_minutes"');
     expect(openApi).not.toContain('"startMinutes"');
-    const said = flat(readme);
+    const said = flat(page);
     expect(said).toContain('A rule is `rrule`, `startMinutes` and `durationMinutes` here and in `SLOTLOCK_AVAILABILITY`.');
     expect(said).toContain('`rrule`, `start_minutes` and `duration_minutes`.');
   });
@@ -449,7 +449,15 @@ describe('the site', () => {
       ([, file]) => file as string,
     );
     expect(examples.length, 'the library page shows the tested examples').toBeGreaterThan(0);
-    for (const file of [...included, ...examples, 'openapi.json']) {
+    // Any page may include a document or show an example, not only those above.
+    const everywhere = readdirSync(path('site/docs-src'))
+      .filter((file) => file.endsWith('.md'))
+      .flatMap((file) =>
+        [...read(`site/docs-src/${file}`).matchAll(/<!-- (?:include\??|code) ([^#\s>]+)/g)].map(
+          ([, source]) => source as string,
+        ),
+      );
+    for (const file of [...included, ...examples, ...everywhere, 'openapi.json']) {
       expect(covered(file), file).toBe(true);
     }
   });

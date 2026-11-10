@@ -51,11 +51,13 @@ A check on each pull request fails when a commit lacks the line. To fix earlier 
 
 ## Documentation
 
-Every TypeScript block in README.md is quoted from a region of `examples/*.ts`
-(`// #region <name>` … `// #endregion <name>`) marked `<!-- example: examples/<file>#<name> -->`.
-Edit the example, not the README copy: `readme-examples.test.ts` fails when they differ, and
-`examples.integration.test.ts` runs the examples against PostgreSQL. The website and docs live in
-`site/`.
+Every TypeScript example the docs show is a region of `examples/*.ts`
+(`// #region <name>` … `// #endregion <name>`). README.md quotes one after
+`<!-- example: examples/<file>#<name> -->`; a docs page in `site/docs-src/` names one with
+`<!-- code examples/<file>#<name> -->`, and the site build puts the code in. Edit the example, not
+a copy: `docs-examples.test.ts` fails when a README copy differs, a marker names no region, or a
+region is shown nowhere, and `examples.integration.test.ts` runs the examples against PostgreSQL.
+The website and docs live in `site/`.
 
 ## Pull requests
 

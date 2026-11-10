@@ -1,6 +1,6 @@
-// Suspending and erasing a tenant, deployed as the README's deployment role under forced RLS and
-// served by the LOGIN role grantApplicationRole grants. Erasure covers every table with a tenant
-// column, read from the catalog, so a later table must be covered. Needs a role that creates
+// Suspending and erasing a tenant, deployed as the library page's deployment role under forced RLS
+// and served by the LOGIN role grantApplicationRole grants. Erasure covers every table with a
+// tenant column, read from the catalog, so a later table must be covered. Needs a role that creates
 // databases and roles; skipped without DATABASE_URL.
 import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
