@@ -56,6 +56,7 @@ describe('monthly quotas', () => {
     expect(SLOTLOCK_PLAN_QUOTAS).toEqual({
       free: { operations: 25_000, bookings: 1_000, stopPercent: 100 },
       developer: { operations: 500_000, bookings: 25_000, stopPercent: 110 },
+      team: { operations: 2_000_000, bookings: 100_000, stopPercent: 110 },
     });
   });
 

@@ -1456,6 +1456,38 @@ describe('organizations', () => {
     expect(ownerPage).toContain('Manage billing');
   });
 
+  it("offers an organization's owner Team where the deployment sells it, and a person Developer", async () => {
+    const billing = {
+      plan: vi.fn(async () => null),
+      checkout: vi.fn(async () => 'https://checkout.stripe.com/c/pay/cs_1'),
+      portal: vi.fn(async () => 'https://billing.stripe.com/p/session/1'),
+      prices: { month: '$10', year: '$100' },
+      teamPrices: { month: '$40', year: '$400' },
+      contact: 'mailto:founder@example.com',
+      formOrigins: ['https://checkout.stripe.com', 'https://billing.stripe.com'],
+    };
+    const on = new Set([String(ACME.id)]);
+    const teams = {
+      enabled: vi.fn(async (ids: readonly string[]) => new Set(ids.filter((id) => on.has(id)))),
+      enable: vi.fn(async () => true),
+      disable: vi.fn(async () => true),
+    };
+    const target = orgDashboard([{ ...ACME, role: 'admin' }], { organizations: 'enabled', teams, billing });
+    const { session } = await signIn(target);
+    const personal = await (await get(target, '/base/dashboard/plan', session)).text();
+    expect(personal).toContain('Upgrade to Developer');
+    expect(personal).toContain('$10 a month');
+    const switched = await post(target, '/base/dashboard/organization', { csrf: await csrf(target, session), organization: String(ACME.id) }, session);
+    const inOrg = cookie(switched, '__Host-slotlock-session')?.pair as string;
+    const page = await (await get(target, '/base/dashboard/plan', inOrg)).text();
+    expect(page).toContain('Upgrade to Team');
+    expect(page).toContain('$40 a month');
+    await post(target, '/base/dashboard/plan/upgrade', { csrf: await csrf(target, inOrg), interval: 'year' }, inOrg);
+    expect(billing.checkout).toHaveBeenLastCalledWith(
+      expect.objectContaining({ tenantRef: `github-org:${ACME.id}`, interval: 'year', plan: 'team' }),
+    );
+  });
+
   it('asks GitHub for read:org only when the server serves organizations', async () => {
     expect((await signIn(dashboard())).location.searchParams.has('scope')).toBe(false);
     expect((await signIn(orgDashboard([ACME]))).location.searchParams.get('scope')).toBe('read:org');
@@ -2351,7 +2383,7 @@ describe('the plan page', () => {
     const { session } = await signIn(onFree.target);
     const refused = await post(onFree.target, '/base/dashboard/keys', { csrf: await csrf(onFree.target, session), ...limited }, session);
     expect(refused.status).toBe(403);
-    expect(await refused.text()).toContain('Keys limited to locations or groups come with the Developer plan.');
+    expect(await refused.text()).toContain('Keys limited to locations or groups come with the Developer and Team plans.');
     expect(keys.store.create).not.toHaveBeenCalled();
     const onDeveloper = billed(developer);
     const signed = await signIn(onDeveloper.target);

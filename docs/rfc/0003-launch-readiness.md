@@ -586,17 +586,23 @@ Prices and resource numbers are PR #161's. The quotas are proposed, sized so tha
 Free loop at the rate limit uses its month in about 20 minutes rather than costing us all month.
 The owner sets the final numbers before PR #161 merges (finding 8).
 
-| | Free | Developer | Partner (wholesale) | Custom |
-| --- | --- | --- | --- | --- |
-| Price | $0 | $10 a month or $100 a year | Per active account a month, plus usage above the account's quota, with a monthly minimum (contract) | Agreed in writing |
-| Resources | 10 | 100 | Per contract plan | Own servers |
-| Active API keys | 10 | 100 | Per contract plan | |
-| Webhook endpoints | 2 | 10 | Per contract plan | |
-| Operations a month | 25,000 | 500,000 (stops at 110%) | Per contract plan | |
-| Bookings a month | 1,000 | 25,000 (stops at 110%) | Per contract plan | |
-| Assistant (bring your own model) | Yes | Yes | No (stackapi's users have no Slotlock dashboard) | |
-| Locations and groups | Yes | Yes | Yes | |
-| Keys limited to locations or groups (0.8.0) | No | Yes | Yes | |
+| | Free | Developer | Team (later, proposed) | Partner (wholesale) | Custom |
+| --- | --- | --- | --- | --- | --- |
+| Price | $0 | $10 a month or $100 a year | The owner sets it | Per active account a month, plus usage above the account's quota, with a monthly minimum (contract) | Agreed in writing |
+| Resources | 10 | 100 | 100 | Per contract plan | Own servers |
+| Active API keys | 10 | 100 | 100 | Per contract plan | |
+| Webhook endpoints | 2 | 10 | 10 | Per contract plan | |
+| Operations a month | 25,000 | 500,000 (stops at 110%) | 2,000,000, shared (stops at 110%) | Per contract plan | |
+| Bookings a month | 1,000 | 25,000 (stops at 110%) | 100,000, shared (stops at 110%) | Per contract plan | |
+| Assistant (bring your own model) | Yes | Yes | Yes | No (stackapi's users have no Slotlock dashboard) | |
+| Locations and groups | Yes | Yes | Yes | Yes | |
+| Keys limited to locations or groups (0.8.0) | No | Yes | Yes | Yes | |
+
+Team is an organization's plan (Teams on Cloud). Its resources, keys and webhook endpoints are
+Developer's because those are this release's caps for one tenant (the dashboard lists 100
+resources; a tenant keeps 100 active keys and 10 endpoints); raising them is separate work. It is
+offered only once the owner sets its Stripe prices, and the Terms and the hosted service page need
+it before then.
 
 - An *active account* is a sub-tenant with at least one counted operation in the month, so
   stackapi pays nothing for users who signed up and left.

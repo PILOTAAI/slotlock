@@ -1129,7 +1129,7 @@ CREATE TABLE IF NOT EXISTS slotlock.tenant_plans (
   updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
   CONSTRAINT slotlock_tenant_plans_tenant_ref_valid
     CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500),
-  CONSTRAINT slotlock_tenant_plans_plan_valid CHECK (plan IN ('free', 'developer')),
+  CONSTRAINT slotlock_tenant_plans_plan_valid CHECK (plan IN ('free', 'developer', 'team')),
   CONSTRAINT slotlock_tenant_plans_status_valid CHECK (status IN ('active', 'past_due', 'canceled')),
   CONSTRAINT slotlock_tenant_plans_limits_valid CHECK (
     max_resources BETWEEN 1 AND 100000
@@ -1152,14 +1152,17 @@ ALTER TABLE slotlock.tenant_plans
   ADD COLUMN IF NOT EXISTS quota_stop_percent integer;
 DO $slotlock_tenant_plans_source$
 BEGIN
+  -- Replaced too when it predates the Team plan (Teams on Cloud), whose name it must take.
   IF NOT EXISTS (
     SELECT 1 FROM pg_catalog.pg_constraint
      WHERE conrelid = 'slotlock.tenant_plans'::regclass AND conname = 'slotlock_tenant_plans_source_valid'
+       AND pg_catalog.pg_get_constraintdef(oid) LIKE '%team%'
   ) THEN
+    ALTER TABLE slotlock.tenant_plans DROP CONSTRAINT IF EXISTS slotlock_tenant_plans_source_valid;
     -- Wider than the plan check it replaces, so added NOT VALID (DEPLOYMENT_VALIDATE_CONSTRAINTS).
     ALTER TABLE slotlock.tenant_plans DROP CONSTRAINT IF EXISTS slotlock_tenant_plans_plan_valid;
     ALTER TABLE slotlock.tenant_plans ADD CONSTRAINT slotlock_tenant_plans_source_valid CHECK (
-      (source = 'direct' AND partner_id IS NULL AND plan IN ('free', 'developer')
+      (source = 'direct' AND partner_id IS NULL AND plan IN ('free', 'developer', 'team')
        AND quota_operations IS NULL AND quota_bookings IS NULL AND quota_stop_percent IS NULL)
       OR (source = 'partner' AND partner_id ~ '^[a-z][a-z0-9-]{1,39}$' AND plan ~ '^[a-z][a-z0-9_]{0,40}$'
           AND quota_operations BETWEEN 1 AND 1000000000000 AND quota_bookings BETWEEN 1 AND 1000000000000

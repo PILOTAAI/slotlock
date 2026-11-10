@@ -40,6 +40,8 @@ export interface SlotlockStripeOptions {
   secretKey: string;
   /** The Developer plan's price ids, monthly and yearly. */
   prices: Readonly<Record<SlotlockBillingInterval, string>>;
+  /** The Team plan's price ids, monthly and yearly (Teams on Cloud): an organization's checkout. */
+  teamPrices?: Readonly<Record<SlotlockBillingInterval, string>>;
   /** Sent as Stripe-Version; SLOTLOCK_STRIPE_API_VERSION when unset. */
   apiVersion?: string;
   apiBase?: string;
@@ -54,14 +56,16 @@ export interface SlotlockStripeSubscription {
   customer: string | { id: string };
   metadata?: Record<string, string>;
   current_period_end?: number | null;
-  items?: { data?: Array<{ current_period_end?: number | null }> };
+  items?: { data?: Array<{ current_period_end?: number | null; price?: { id?: string } | string | null }> };
 }
 
 export interface SlotlockStripe {
-  /** A Checkout URL for a Developer subscription, tagged with the tenant. */
+  /** A Checkout URL for a Developer (or, with team prices, Team) subscription, tagged with the tenant. */
   checkout(input: {
     tenantRef: string;
     interval: SlotlockBillingInterval;
+    /** Developer unless `team`, which needs the Team prices. */
+    plan?: 'developer' | 'team';
     customer: string | null;
     successUrl: string;
     cancelUrl: string;
@@ -76,6 +80,8 @@ export interface SlotlockStripe {
    * customer (Stripe's search, which can lag a minute behind a subscription just created).
    */
   liveSubscriptionsOfTenant(tenantRef: string): Promise<SlotlockStripeSubscription[]>;
+  /** The plan a subscription gives, by its price: Team for a Team price, else Developer. */
+  planOf?(subscription: SlotlockStripeSubscription): { plan: SlotlockPlan; status: SlotlockPlanStatus };
 }
 
 /** Statuses in which a subscription gives its tenant the Developer plan (slotlockPlanOfSubscription). */
@@ -136,7 +142,9 @@ export function createSlotlockStripe(options: SlotlockStripeOptions): SlotlockSt
   }
 
   return {
-    async checkout({ tenantRef, interval, customer, successUrl, cancelUrl }) {
+    async checkout({ tenantRef, interval, plan = 'developer', customer, successUrl, cancelUrl }) {
+      if (plan === 'team' && !options.teamPrices) throw new SlotlockBillingError('There is no Team price');
+      const price = plan === 'team' ? (options.teamPrices as Record<SlotlockBillingInterval, string>)[interval] : options.prices[interval];
       // A customer who already pays changes the plan in the portal: a second Checkout would charge
       // twice for one tenant. (A first purchase has no customer yet; the webhook catches that case.)
       if (customer && (await liveSubscriptionsOfCustomer(customer)).length > 0) {
@@ -144,7 +152,7 @@ export function createSlotlockStripe(options: SlotlockStripeOptions): SlotlockSt
       }
       const form = new URLSearchParams({
         mode: 'subscription',
-        'line_items[0][price]': options.prices[interval],
+        'line_items[0][price]': price,
         'line_items[0][quantity]': '1',
         'managed_payments[enabled]': 'true',
         success_url: successUrl,
@@ -172,6 +180,7 @@ export function createSlotlockStripe(options: SlotlockStripeOptions): SlotlockSt
       return call<SlotlockStripeSubscription>('GET', `/v1/subscriptions/${id}`);
     },
     liveSubscriptionsOfCustomer,
+    planOf: (subscription) => slotlockPlanOfSubscription(subscription, options.teamPrices),
     async liveSubscriptionsOfTenant(tenantRef) {
       if (!SEARCHABLE.test(tenantRef)) throw new SlotlockBillingError('Not a searchable tenant');
       const page = await call<{ data?: SlotlockStripeSubscription[] }>(
@@ -219,17 +228,28 @@ export function verifySlotlockStripeSignature(
 }
 
 /** The plan a subscription gives its tenant. */
-export function slotlockPlanOfSubscription(subscription: SlotlockStripeSubscription): {
+export function slotlockPlanOfSubscription(
+  subscription: SlotlockStripeSubscription,
+  teamPrices?: Readonly<Record<SlotlockBillingInterval, string>>,
+): {
   plan: SlotlockPlan;
   status: SlotlockPlanStatus;
 } {
+  // Team when any item is at a Team price: changed to it in the portal, or bought as it.
+  const team =
+    teamPrices !== undefined &&
+    (subscription.items?.data ?? []).some((item) => {
+      const id = typeof item.price === 'string' ? item.price : item.price?.id;
+      return id === teamPrices.month || id === teamPrices.year;
+    });
+  const paid: SlotlockPlan = team ? 'team' : 'developer';
   switch (subscription.status) {
     case 'active':
     case 'trialing':
-      return { plan: 'developer', status: 'active' };
+      return { plan: paid, status: 'active' };
     case 'past_due':
       // Stripe is retrying the payment: keep the plan while it does.
-      return { plan: 'developer', status: 'past_due' };
+      return { plan: paid, status: 'past_due' };
     default:
       // canceled, unpaid, incomplete, incomplete_expired, paused: the Free limits.
       return { plan: 'free', status: 'canceled' };
@@ -307,7 +327,7 @@ export async function handleSlotlockStripeWebhook(
       const previous = await deps.stripe.subscription(named).catch(() => null);
       if (previous && slotlockSubscriptionIsLive(previous)) deps.onDuplicate?.([previous.id, subscription.id]);
     }
-    const { plan, status } = slotlockPlanOfSubscription(chosen);
+    const { plan, status } = deps.stripe.planOf?.(chosen) ?? slotlockPlanOfSubscription(chosen);
     const customer = typeof chosen.customer === 'string' ? chosen.customer : chosen.customer.id;
     const end = chosen.items?.data?.[0]?.current_period_end ?? chosen.current_period_end ?? null;
     await setSlotlockTenantPlan(deps.sql, {

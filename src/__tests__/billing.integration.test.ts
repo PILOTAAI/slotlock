@@ -12,7 +12,7 @@ import {
   slotlockPlanOfSubscription,
   verifySlotlockStripeSignature,
 } from '../billing.js';
-import { readSlotlockTenantPlan } from '../plans.js';
+import { readSlotlockTenantPlan, readSlotlockTenantQuotas } from '../plans.js';
 import { createSlotlockStore } from '../store.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
@@ -58,6 +58,7 @@ function fakeStripe(subscriptions: Map<string, SlotlockStripeSubscription>) {
   const stripe = createSlotlockStripe({
     secretKey: 'rk_test_fake',
     prices: { month: 'price_month', year: 'price_year' },
+    teamPrices: { month: 'price_team_month', year: 'price_team_year' },
     fetch: fetch as typeof globalThis.fetch,
   });
   return { stripe, calls };
@@ -84,6 +85,33 @@ describe('Stripe signatures and plans', () => {
     for (const status of ['canceled', 'unpaid', 'incomplete', 'incomplete_expired', 'paused']) {
       expect(of(status)).toEqual({ plan: 'free', status: 'canceled' });
     }
+  });
+
+  it('gives Team for a subscription at a Team price, however it was bought', () => {
+    const team = { month: 'price_team_month', year: 'price_team_year' };
+    const at = (price: string | { id: string }, status = 'active') =>
+      slotlockPlanOfSubscription({ id: 'sub_1', status, customer: 'cus_1', items: { data: [{ price }] } }, team);
+    expect(at({ id: 'price_team_year' })).toEqual({ plan: 'team', status: 'active' });
+    expect(at('price_team_month', 'past_due')).toEqual({ plan: 'team', status: 'past_due' });
+    expect(at({ id: 'price_year' })).toEqual({ plan: 'developer', status: 'active' });
+    expect(at({ id: 'price_team_year' }, 'canceled')).toEqual({ plan: 'free', status: 'canceled' });
+    // Without Team prices, every paid subscription is Developer.
+    expect(slotlockPlanOfSubscription({ id: 'sub_1', status: 'active', customer: 'cus_1', items: { data: [{ price: 'price_team_year' }] } })).toMatchObject({ plan: 'developer' });
+  });
+
+  it("asks Checkout for the Team price for an organization's Team plan", async () => {
+    const { stripe, calls } = fakeStripe(new Map());
+    await stripe.checkout({
+      tenantRef: 'github-org:91',
+      interval: 'month',
+      plan: 'team',
+      customer: null,
+      successUrl: 'https://app.example.com/dashboard/plan?checkout=done',
+      cancelUrl: 'https://app.example.com/dashboard/plan',
+    });
+    const sent = new URLSearchParams(calls.find((call) => call.url.endsWith('/v1/checkout/sessions'))?.body ?? '');
+    expect(sent.get('line_items[0][price]')).toBe('price_team_month');
+    expect(sent.get('subscription_data[metadata][tenant_ref]')).toBe('github-org:91');
   });
 
   it('asks Checkout for a Managed Payments subscription tagged with the tenant', async () => {
@@ -198,6 +226,27 @@ describe.skipIf(!url)('the Stripe webhook (real Postgres)', () => {
       stripeSubscription: 'sub_A1',
       currentPeriodEnd: new Date(Date.UTC(2026, 11, 9)),
     });
+  });
+
+  it('sets Team from a subscription at a Team price, which the database takes', async () => {
+    subscriptions.set('sub_T1', {
+      ...subscription('sub_T1', 'active'),
+      items: { data: [{ current_period_end: Math.floor(Date.UTC(2026, 11, 9) / 1000), price: { id: 'price_team_year' } }] },
+    });
+    await sql`UPDATE slotlock.tenant_plans SET stripe_subscription = 'sub_T1' WHERE tenant_ref = ${tenant}`;
+    const response = await deliver({ data: { object: { object: 'subscription', id: 'sub_T1' } } });
+    expect(response.status).toBe(200);
+    expect(await readSlotlockTenantPlan(sql, tenant)).toMatchObject({
+      plan: 'team',
+      limits: { resources: 100, apiKeys: 100, webhookEndpoints: 10 },
+      stripeSubscription: 'sub_T1',
+    });
+    expect(await readSlotlockTenantQuotas(sql, tenant)).toEqual({ operations: 2_000_000, bookings: 100_000, stopPercent: 110 });
+    // Back to the subscription the tests below expect.
+    await sql`UPDATE slotlock.tenant_plans SET stripe_subscription = 'sub_A1' WHERE tenant_ref = ${tenant}`;
+    subscriptions.delete('sub_T1');
+    await deliver({ data: { object: { object: 'subscription', id: 'sub_A1' } } });
+    expect(await readSlotlockTenantPlan(sql, tenant)).toMatchObject({ plan: 'developer' });
   });
 
   it('ends the plan when the subscription ends, but not a newer one', async () => {

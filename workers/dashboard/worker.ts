@@ -178,12 +178,25 @@ function readBilling(vars: SlotlockEnv) {
     );
   }
   const apiVersion = vars.STRIPE_API_VERSION?.trim();
+  // The Team plan (Teams on Cloud): an organization's checkout, once the owner has made its prices.
+  const teamMonth = vars.SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY?.trim();
+  const teamYear = vars.SLOTLOCK_STRIPE_PRICE_TEAM_YEARLY?.trim();
+  const teamShownMonth = vars.SLOTLOCK_PLAN_PRICE_TEAM_MONTHLY?.trim();
+  const teamShownYear = vars.SLOTLOCK_PLAN_PRICE_TEAM_YEARLY?.trim();
+  if (Boolean(teamMonth) !== Boolean(teamYear) || (teamMonth && (!teamShownMonth || !teamShownYear))) {
+    throw new SlotlockConfigError(
+      'the Team plan needs SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY, SLOTLOCK_STRIPE_PRICE_TEAM_YEARLY, SLOTLOCK_PLAN_PRICE_TEAM_MONTHLY and SLOTLOCK_PLAN_PRICE_TEAM_YEARLY together',
+    );
+  }
+  const teamPrices = teamMonth && teamYear ? { month: teamMonth, year: teamYear } : undefined;
   return {
     stripe: createSlotlockStripe({
       secretKey,
       prices: { month, year },
+      ...(teamPrices ? { teamPrices } : {}),
       ...(apiVersion ? { apiVersion } : {}),
     }),
+    ...(teamPrices ? { teamPrices: { month: teamShownMonth as string, year: teamShownYear as string } } : {}),
     webhookSecret: vars.STRIPE_WEBHOOK_SECRET?.trim() || null,
     contact: vars.SLOTLOCK_PLAN_CONTACT?.trim() || SLOTLOCK_DEFAULT_PLAN_CONTACT,
     prices: {
@@ -373,6 +386,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
               checkout: (input) => billing.stripe.checkout(input),
               portal: (input) => billing.stripe.portal(input),
               prices: billing.prices,
+              ...(billing.teamPrices ? { teamPrices: billing.teamPrices } : {}),
               contact: billing.contact,
               formOrigins: ['https://checkout.stripe.com', 'https://billing.stripe.com'],
             },

@@ -502,6 +502,7 @@ Hosted Slotlock sells plans; self-hosted Slotlock writes no plan and keeps the s
 | --- | --- | --- | --- | --- |
 | Free | 10 | 10 | 2 | Free |
 | Developer | 100 | 100 | 10 | $10 a month or $100 a year |
+| Team (an organization's, once offered) | 100 | 100 | 10 | Set by the deployment |
 | Custom | Your servers | | | Talk to the founder |
 
 With `STRIPE_SECRET_KEY`, `SLOTLOCK_STRIPE_PRICE_MONTHLY` and `SLOTLOCK_STRIPE_PRICE_YEARLY` (the
@@ -513,6 +514,14 @@ secret as `STRIPE_WEBHOOK_SECRET`. Each signed event makes the Worker read the s
 Stripe and set the tenant's plan: `active` or `trialing` gives Developer, `past_due` keeps it while
 Stripe retries, anything else returns the tenant to Free. Nothing is deleted when a plan ends; the
 tenant cannot add more until it is under the Free limits.
+
+The Team plan is an organization's (Teams on Cloud, `SLOTLOCK_DASHBOARD_ORGS=enabled`): Developer's
+limits, which are this release's caps for one tenant, and larger monthly quotas its members share
+(2,000,000 operations and 100,000 bookings, stopping at 110%). It is offered only with all four of
+`SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY` and `SLOTLOCK_STRIPE_PRICE_TEAM_YEARLY` (its price ids) and
+`SLOTLOCK_PLAN_PRICE_TEAM_MONTHLY` and `SLOTLOCK_PLAN_PRICE_TEAM_YEARLY` (its prices as shown); an
+organization's owner then sees Upgrade to Team instead of Developer, and a subscription at a Team
+price gives Team, including one changed to it in the customer portal.
 
 Optional variables: `SLOTLOCK_PLAN_CONTACT` (where Custom enquiries go, an https or mailto URL),
 `SLOTLOCK_PLAN_PRICE_MONTHLY` and `SLOTLOCK_PLAN_PRICE_YEARLY` (the prices as shown, `$10` and `$100`

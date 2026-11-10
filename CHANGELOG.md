@@ -122,6 +122,14 @@ versioning.
   returns quota numbers). A suspended partner suspends every account (`tenant_suspended`) and
   their keys stop authenticating (`authenticate_scoped_api_key`); erasing an account removes the
   partner's record of it. Run `slotlock migrate`.
+- The Team plan, an organization's (Teams on Cloud): Developer's limits with 2,000,000 operations
+  and 100,000 bookings a month, stopping at 110%. The Worker offers it to an organization's owner
+  once `SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY`, `SLOTLOCK_STRIPE_PRICE_TEAM_YEARLY`,
+  `SLOTLOCK_PLAN_PRICE_TEAM_MONTHLY` and `SLOTLOCK_PLAN_PRICE_TEAM_YEARLY` are all set; a
+  subscription at a Team price gives Team (`slotlockPlanOfSubscription`'s `teamPrices`, the
+  Stripe client's `planOf`). `tenant_plans` takes `team` (its source check is replaced, NOT
+  VALID). `SlotlockPlan` gains `team`; the dashboard's billing gains `teamPrices` and checkout a
+  `plan`. Run `slotlock migrate`.
 - Teams on Cloud (RFC 0003, T2): `SLOTLOCK_DASHBOARD_ORGS=enabled` gives every person their own
   tenant and the GitHub organizations they belong to that an owner turned on, from the dashboard's
   new Teams page (`POST /teams/enable`, `/teams/disable`, the latter confirmed with the

@@ -71,7 +71,7 @@ import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from './ddl.js';
 import { ignoreRejection } from './hooks.js';
 import { SLOTLOCK_BOOKING_RULE_LIMITS, type SlotlockBookingRules } from './booking-rules.js';
 import { SLOTLOCK_DASHBOARD_ICON_SVG } from './dashboard-icon.js';
-import { SLOTLOCK_PLAN_LIMITS, SLOTLOCK_PLAN_QUOTAS, type SlotlockTenantPlan } from './plans.js';
+import { SLOTLOCK_PLAN_LIMITS, SLOTLOCK_PLAN_QUOTAS, type SlotlockPlan, type SlotlockTenantPlan } from './plans.js';
 import {
   SLOTLOCK_MAX_GROUPS_PER_RESOURCE,
   SLOTLOCK_MAX_LOCATION_DEPTH,
@@ -446,10 +446,11 @@ export interface SlotlockDashboardBilling {
    * endpoint, while the default does not yet apply to every tenant (plans.ts).
    */
   enrol?(tenantRef: string): Promise<void>;
-  /** A checkout URL for the Developer plan. */
+  /** A checkout URL for the Developer plan, or the Team plan for an organization (with `teamPrices`). */
   checkout(input: {
     tenantRef: string;
     interval: 'month' | 'year';
+    plan?: 'developer' | 'team';
     customer: string | null;
     successUrl: string;
     cancelUrl: string;
@@ -458,6 +459,11 @@ export interface SlotlockDashboardBilling {
   portal(input: { customer: string; returnUrl: string }): Promise<string>;
   /** The Developer plan's prices as shown, such as `$10`. */
   prices: { month: string; year: string };
+  /**
+   * The Team plan's prices as shown (Teams on Cloud). With them, an organization's workspace is
+   * offered Team instead of Developer.
+   */
+  teamPrices?: { month: string; year: string };
   /** Where a Custom (self-hosted) enquiry goes: an https or mailto URL. */
   contact: string;
   /** The https origins Upgrade and Manage redirect to, allowed in the policy's form-action. */
@@ -3424,8 +3430,11 @@ ${
       (key) => !key.revokedAt && (key.expiresAt === null || key.expiresAt.getTime() > now()),
     );
     const token = csrfToken(session);
-    const paying = plan?.plan === 'developer';
-    const name = paying ? 'Developer' : plan ? 'Free' : 'No plan';
+    const paying = plan !== null && plan.plan !== 'free';
+    const name = plan ? PLAN_NAMES[plan.plan] : 'No plan';
+    // An organization is offered Team where the deployment sells it; a person, Developer.
+    const offered: 'developer' | 'team' = session.org !== undefined && billing.teamPrices ? 'team' : 'developer';
+    const offeredPrices = offered === 'team' ? (billing.teamPrices as { month: string; year: string }) : billing.prices;
     const counted = (value: number) => value.toLocaleString('en-GB');
     const use = (label: string, used: number, limit: number | undefined) =>
       html`<div class="stat"><span class="stat-label">${label}</span><span class="stat-value">${counted(used)}${limit === undefined ? html`` : html`<span class="meta"> of ${counted(limit)}</span>`}</span></div>`;
@@ -3453,24 +3462,24 @@ ${
       : [];
     const warning = html`${
       plan?.status === 'past_due'
-        ? html`<p class="notice warn" role="alert">Your last payment failed. Update your payment method to keep the Developer plan.</p>`
+        ? html`<p class="notice warn" role="alert">Your last payment failed. Update your payment method to keep the ${name} plan.</p>`
         : html``
     }${quotaWarnings}`;
     const free = SLOTLOCK_PLAN_LIMITS.free;
-    const developer = SLOTLOCK_PLAN_LIMITS.developer;
+    const developer = SLOTLOCK_PLAN_LIMITS[offered];
     const upgrade = paying || !isAdmin(session)
       ? html``
       : html`<section class="panel" id="upgrade">
-<h2>Developer</h2>
-<p>${String(developer.resources)} resources, ${String(developer.apiKeys)} API keys and ${String(developer.webhookEndpoints)} webhook endpoints${options.quotas ? html`, with ${counted(SLOTLOCK_PLAN_QUOTAS.developer.operations)} operations and ${counted(SLOTLOCK_PLAN_QUOTAS.developer.bookings)} bookings a month` : html``}.</p>
+<h2>${PLAN_NAMES[offered]}</h2>
+<p>${String(developer.resources)} resources, ${String(developer.apiKeys)} API keys and ${String(developer.webhookEndpoints)} webhook endpoints${options.quotas ? html`, with ${counted(SLOTLOCK_PLAN_QUOTAS[offered].operations)} operations and ${counted(SLOTLOCK_PLAN_QUOTAS[offered].bookings)} bookings a month${offered === 'team' ? ' shared by the organization' : ''}` : html``}.</p>
 <form method="post" action="${root}/plan/upgrade">
 <input type="hidden" name="csrf" value="${token}">
 <input type="hidden" name="once" value="${formNonce(session)}">
 <fieldset class="modes"><legend>Billed</legend>
-<label class="choice"><input type="radio" name="interval" value="month" checked> Monthly, ${billing.prices.month} a month</label>
-<label class="choice"><input type="radio" name="interval" value="year"> Yearly, ${billing.prices.year} a year</label>
+<label class="choice"><input type="radio" name="interval" value="month" checked> Monthly, ${offeredPrices.month} a month</label>
+<label class="choice"><input type="radio" name="interval" value="year"> Yearly, ${offeredPrices.year} a year</label>
 </fieldset>
-<button class="primary" type="submit">Upgrade to Developer</button>
+<button class="primary" type="submit">Upgrade to ${PLAN_NAMES[offered]}</button>
 </form>
 <p class="fine">Paid through Stripe, in your currency, with tax added where it applies. Cancel at any time.</p>
 </section>`;
@@ -3530,14 +3539,15 @@ ${upgrade}
     const interval = form.get('interval') === 'year' ? 'year' : 'month';
     const tenantRef = tenantOf(session);
     const plan = await billing.plan(tenantRef);
-    if (plan?.plan === 'developer') {
-      return planPage(session, 409, 'You are on the Developer plan already.');
+    if (plan && plan.plan !== 'free') {
+      return planPage(session, 409, `You are on the ${PLAN_NAMES[plan.plan]} plan already.`);
     }
     let url: string;
     try {
       url = await billing.checkout({
         tenantRef,
         interval,
+        ...(session.org !== undefined && billing.teamPrices ? { plan: 'team' as const } : {}),
         customer: plan?.stripeCustomer ?? null,
         successUrl: `${publicRoot}/plan?checkout=done`,
         cancelUrl: `${publicRoot}/plan`,
@@ -4135,7 +4145,7 @@ ${
       // plans allows them.
       const plan = options.billing ? await options.billing.plan(tenantOf(session)) : null;
       if (plan?.plan === 'free') {
-        return keysPage(session, 403, 'Keys limited to locations or groups come with the Developer plan. See Plan.');
+        return keysPage(session, 403, 'Keys limited to locations or groups come with the Developer and Team plans. See Plan.');
       }
     }
     try {
@@ -4945,6 +4955,9 @@ pre { background: var(--surface-2); border: 1px solid var(--line); border-radius
   .pill, .chip, .nav a[aria-current="page"] { border: 1px solid CanvasText; }
 }
 `;
+
+/** What the Plan page calls each plan. */
+const PLAN_NAMES: Readonly<Record<SlotlockPlan, string>> = Object.freeze({ free: 'Free', developer: 'Developer', team: 'Team' });
 
 const ASSET_VERSIONS = Object.freeze({
   css: createHash('sha256').update(DASHBOARD_CSS).digest('base64url').slice(0, 12),

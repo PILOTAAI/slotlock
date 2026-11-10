@@ -4,8 +4,12 @@
 // and otherwise has no plan limits, so self-hosted Slotlock, which writes neither, is unchanged.
 import type { SlotlockSql } from './store.js';
 
-/** The plans hosted Slotlock sells. Custom runs on the customer's own servers and needs no row. */
-export type SlotlockPlan = 'free' | 'developer';
+/**
+ * The plans hosted Slotlock sells. Custom runs on the customer's own servers and needs no row. Team
+ * is an organization's (Teams on Cloud): Developer's limits, which are this release's caps for one
+ * tenant, with larger monthly quotas its members share.
+ */
+export type SlotlockPlan = 'free' | 'developer' | 'team';
 
 /** Where the tenant's billing stands. A `canceled` or long-unpaid tenant is on the Free limits. */
 export type SlotlockPlanStatus = 'active' | 'past_due' | 'canceled';
@@ -24,6 +28,7 @@ export const SLOTLOCK_PLAN_LIMITS: Readonly<Record<SlotlockPlan, Readonly<Slotlo
   Object.freeze({
     free: Object.freeze({ resources: 10, apiKeys: 10, webhookEndpoints: 2 }),
     developer: Object.freeze({ resources: 100, apiKeys: 100, webhookEndpoints: 10 }),
+    team: Object.freeze({ resources: 100, apiKeys: 100, webhookEndpoints: 10 }),
   });
 
 /**
@@ -44,6 +49,7 @@ export const SLOTLOCK_PLAN_QUOTAS: Readonly<Record<SlotlockPlan, Readonly<Slotlo
   Object.freeze({
     free: Object.freeze({ operations: 25_000, bookings: 1_000, stopPercent: 100 }),
     developer: Object.freeze({ operations: 500_000, bookings: 25_000, stopPercent: 110 }),
+    team: Object.freeze({ operations: 2_000_000, bookings: 100_000, stopPercent: 110 }),
   });
 
 /** A tenant's plan as the database holds it. */
