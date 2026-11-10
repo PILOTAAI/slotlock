@@ -94,6 +94,7 @@ const PROBLEM_TITLES: Readonly<Record<string, string>> = Object.freeze({
   revision_conflict: 'The revision is stale',
   confirmation_required: 'A person must confirm this write',
   rate_limited: 'Too many requests',
+  quota_exceeded: 'The monthly quota is used up',
   authentication_required: 'Authentication required',
   forbidden: 'Not allowed',
   invalid_arguments: 'The arguments are not valid',

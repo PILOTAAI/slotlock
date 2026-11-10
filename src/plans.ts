@@ -26,6 +26,26 @@ export const SLOTLOCK_PLAN_LIMITS: Readonly<Record<SlotlockPlan, Readonly<Slotlo
     developer: Object.freeze({ resources: 100, apiKeys: 100, webhookEndpoints: 10 }),
   });
 
+/**
+ * What a plan allows a tenant to use each UTC calendar month (quotas.ts, with SLOTLOCK_QUOTAS=on).
+ * They are the plan's, not stored per tenant: the Terms give 30 days' notice of a change, and the
+ * release that makes it applies it to every tenant on the plan.
+ */
+export interface SlotlockPlanQuotas {
+  /** Operations its API keys and the assistant run (MCP, A2A and REST, the application API too). */
+  operations: number;
+  /** Bookings made: reservations, events (a whole series is one) and holds confirmed. */
+  bookings: number;
+  /** Where use is refused, in percent of the quota: 100 stops at it, 110 allows a tenth more. */
+  stopPercent: number;
+}
+
+export const SLOTLOCK_PLAN_QUOTAS: Readonly<Record<SlotlockPlan, Readonly<SlotlockPlanQuotas>>> =
+  Object.freeze({
+    free: Object.freeze({ operations: 25_000, bookings: 1_000, stopPercent: 100 }),
+    developer: Object.freeze({ operations: 500_000, bookings: 25_000, stopPercent: 110 }),
+  });
+
 /** A tenant's plan as the database holds it. */
 export interface SlotlockTenantPlan {
   plan: SlotlockPlan;

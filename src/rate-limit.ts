@@ -10,6 +10,9 @@
 // draft-ietf-httpapi-ratelimit-headers-11 (23 May 2026, read 2026-10-24): `"<policy>";r=<remaining>;
 // t=<seconds>` and `"<policy>";q=<quota>;w=<window seconds>`, or `qu="concurrent-requests"` for a
 // cap on requests at once. Retry-After is never earlier than the end of the effective window (§6).
+// With monthly quotas (quotas.ts), each operation's answer also lists them, `"operations_month"` and
+// `"bookings_month"`, counting down to the stop, and one over its quota is refused `quota_exceeded`
+// with Retry-After at the month's end.
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
@@ -30,6 +33,7 @@ import {
   type SlotlockRateName,
 } from './config.js';
 import type { SlotlockNodeServerConnection, SlotlockNodeServerFetchTarget } from './node-server.js';
+import { type SlotlockQuotas, slotlockQuotaFields, slotlockQuotaRefusal } from './quotas.js';
 import { SLOTLOCK_APPLICATION_REST_ROUTES, matchSlotlockRestRoute } from './rest-api.js';
 
 /** Keys one policy remembers; past this, the least recently used tenth is dropped at once. */
@@ -68,7 +72,8 @@ export type SlotlockRefusalReason =
   | 'lookup_overflow'
   | 'series_writes_busy'
   | 'maintenance_busy'
-  | 'request_too_large';
+  | 'request_too_large'
+  | 'quota_exceeded';
 
 /** One `refusals` log line: counts since the last one, and the most refused clients as pseudonyms. */
 export interface SlotlockRefusalCounts extends Record<SlotlockRefusalReason, number> {
@@ -108,6 +113,14 @@ export interface SlotlockRequestLimitsOptions {
    * through on this process's buckets alone, which still apply.
    */
   shared?: { take(bucket: string, rate: SlotlockRate): Promise<boolean> };
+  /**
+   * Monthly quotas (quotas.ts, SLOTLOCK_QUOTAS=on), checked by `quota`: an operation over its
+   * tenant's quota is refused `quota_exceeded` (429), with Retry-After at the month's end, and
+   * every operation's answer lists the tenant's quotas in its RateLimit fields.
+   */
+  quotas?: SlotlockQuotas;
+  /** Milliseconds since the epoch, for the quotas' reset; defaults to `Date.now`. */
+  clock?: () => number;
 }
 
 export interface SlotlockRequestLimits {
@@ -128,6 +141,15 @@ export interface SlotlockRequestLimits {
     principal: SlotlockAgentPrincipal;
     operation: SlotlockAgentOperation | SlotlockApplicationOperation;
     input: Record<string, unknown>;
+  }): Promise<void>;
+  /**
+   * For `authorize`: with `quotas`, refuse an operation over its tenant's monthly quota, throwing a
+   * `SlotlockAgentOperationError` (`quota_exceeded`, 429) that names the metric, the quota, the stop
+   * and when the month resets. Without `quotas`, or for a tenant on no plan, nothing.
+   */
+  quota(args: {
+    principal: SlotlockAgentPrincipal;
+    operation: SlotlockAgentOperation | SlotlockApplicationOperation;
   }): Promise<void>;
   /** Put the limits in front of `target`: the listener's fetch target. */
   serve(target: SlotlockNodeServerFetchTarget): SlotlockNodeServerFetchTarget;
@@ -170,6 +192,8 @@ interface RequestState {
   charged: { read: boolean; write: boolean };
   refusal?: { reason: SlotlockRefusalReason; fields: Record<string, string> };
   tightest?: Verdict;
+  /** The tenant's quotas as its last operation found them, for the answer's RateLimit fields. */
+  quota?: { rateLimit: string[]; policy: string[] };
   release: Array<() => void>;
 }
 
@@ -573,6 +597,7 @@ export function createSlotlockRequestLimits(
   options: SlotlockRequestLimitsOptions,
 ): SlotlockRequestLimits {
   const now = options.now ?? (() => performance.now());
+  const clock = options.clock ?? Date.now;
   const { rates, caps } = options.limits;
   const policies = new Map<SlotlockRateName, { policy: Policy; buckets: ReturnType<typeof bucketsFor> }>();
   for (const [name, rate] of Object.entries(rates) as [SlotlockRateName, SlotlockRate | null][]) {
@@ -616,6 +641,7 @@ export function createSlotlockRequestLimits(
       series_writes_busy: 0,
       maintenance_busy: 0,
       request_too_large: 0,
+      quota_exceeded: 0,
     };
   }
   const count = (reason: SlotlockRefusalReason, address: string) => {
@@ -820,6 +846,33 @@ export function createSlotlockRequestLimits(
       throw new SlotlockAgentOperationError('server_busy', 503);
     },
 
+    async quota({ principal, operation }) {
+      if (!options.quotas) return;
+      const state = states.getStore();
+      const verdict = await options.quotas.check({ tenantRef: principal.tenantRef, operation });
+      const at = clock();
+      if (verdict.ok) {
+        if (state && verdict.standings.length > 0) {
+          const { rateLimit, policy } = slotlockQuotaFields(verdict.standings, at);
+          state.quota = { rateLimit, policy };
+        }
+        return;
+      }
+      const { exceeded } = verdict;
+      const { rateLimit, policy, retryAfter } = slotlockQuotaFields([exceeded], at);
+      if (state) {
+        state.refusal = {
+          reason: 'quota_exceeded',
+          fields: {
+            'Retry-After': String(retryAfter),
+            RateLimit: rateLimit.join(', '),
+            'RateLimit-Policy': policy.join(', '),
+          },
+        };
+      }
+      throw slotlockQuotaRefusal(exceeded);
+    },
+
     serve(target) {
       const limited: SlotlockNodeServerFetchTarget = {
         async fetch(request, connection) {
@@ -882,11 +935,21 @@ export function createSlotlockRequestLimits(
           if (response.status === 401) count('auth_refused', address);
           if (response.status === 413) count('request_too_large', address);
           if (state.refusal) count(state.refusal.reason, address);
-          const fields =
+          let fields =
             state.refusal?.fields ??
             (state.tightest && (route === 'mcp' || route === 'a2a' || route === 'rest')
               ? fieldsOf(state.tightest, false)
               : undefined);
+          // The tenant's monthly quotas follow the bucket the answer reports, when nothing refused.
+          if (state.quota && !state.refusal) {
+            const join = (first: string | undefined, rest: string[]) =>
+              [...(first ? [first] : []), ...rest].join(', ');
+            fields = {
+              ...fields,
+              RateLimit: join(fields?.RateLimit, state.quota.rateLimit),
+              'RateLimit-Policy': join(fields?.['RateLimit-Policy'], state.quota.policy),
+            };
+          }
           if (!fields) return response;
           // A response's own headers may be immutable (Response.redirect): answer with a copy.
           const headers = new Headers(response.headers);

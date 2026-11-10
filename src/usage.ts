@@ -32,6 +32,8 @@ export interface SlotlockUsageCount {
 const MAX_BATCH_ROWS = 10_000;
 /** Batches kept for another try while the database refuses them; older ones are dropped, and said so. */
 const MAX_HELD_BATCHES = 100;
+/** Tenants whose running totals one meter keeps (`local`); past this they start again from 0. */
+const MAX_TOTALS = 100_000;
 
 export interface SlotlockUsageMeterOptions {
   /** Records one batch once per `flushId`: true when added, false when it was added before. */
@@ -66,6 +68,16 @@ export interface SlotlockUsageMeter {
   close(): Promise<void>;
   /** Rows counted and not yet recorded, held batches included. */
   pending(): number;
+  /**
+   * What this meter has counted of a tenant's metric on `fromDay` (`YYYY-MM-DD`) or later and not
+   * yet recorded, batches held or being sent included, and how much of it it has counted since it
+   * started: quotas.ts adds them to what the database holds.
+   */
+  local(
+    tenantRef: string,
+    metric: SlotlockRecordedUsageMetric,
+    fromDay: string,
+  ): { unrecorded: number; counted: number };
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -79,6 +91,10 @@ export function createSlotlockUsageMeter(options: SlotlockUsageMeterOptions): Sl
   const now = options.now ?? Date.now;
   let counted = new Map<string, SlotlockUsageCount>();
   const held: Array<{ flushId: string; rows: SlotlockUsageCount[] }> = [];
+  // Rows taken from `counted` for the flush under way, until each batch is recorded or held.
+  let sending: SlotlockUsageCount[] = [];
+  // Everything counted since the meter started, by tenant and metric.
+  let totals = new Map<string, number>();
   let running: Promise<void> = Promise.resolve();
 
   const report = (error: unknown) => {
@@ -108,9 +124,15 @@ export function createSlotlockUsageMeter(options: SlotlockUsageMeterOptions): Sl
     if (counted.size === 0) return;
     const rows = [...counted.values()];
     counted = new Map();
-    for (let start = 0; start < rows.length; start += MAX_BATCH_ROWS) {
-      const batch = { flushId: randomUUID(), rows: rows.slice(start, start + MAX_BATCH_ROWS) };
-      if (held.length > 0 || !(await send(batch))) held.push(batch);
+    sending = rows;
+    try {
+      for (let start = 0; start < rows.length; start += MAX_BATCH_ROWS) {
+        const batch = { flushId: randomUUID(), rows: rows.slice(start, start + MAX_BATCH_ROWS) };
+        if (held.length > 0 || !(await send(batch))) held.push(batch);
+        sending = rows.slice(start + MAX_BATCH_ROWS);
+      }
+    } finally {
+      sending = [];
     }
     while (held.length > MAX_HELD_BATCHES) {
       const dropped = held.shift();
@@ -150,6 +172,9 @@ export function createSlotlockUsageMeter(options: SlotlockUsageMeterOptions): Sl
       const found = counted.get(key);
       if (found) found.count += count;
       else counted.set(key, { tenantRef, day, metric, keyId, origin, count });
+      const total = `${tenantRef}\0${metric}`;
+      if (!totals.has(total) && totals.size >= MAX_TOTALS) totals = new Map();
+      totals.set(total, (totals.get(total) ?? 0) + count);
     } catch {
       // Metering never changes a call.
     }
@@ -169,6 +194,18 @@ export function createSlotlockUsageMeter(options: SlotlockUsageMeterOptions): Sl
     },
     pending() {
       return [...counted.values()].length + held.reduce((sum, batch) => sum + batch.rows.length, 0);
+    },
+    local(tenantRef, metric, fromDay) {
+      let unrecorded = 0;
+      const add = (row: SlotlockUsageCount) => {
+        if (row.tenantRef === tenantRef && row.metric === metric && row.day >= fromDay) {
+          unrecorded += row.count;
+        }
+      };
+      for (const row of counted.values()) add(row);
+      for (const row of sending) add(row);
+      for (const batch of held) for (const row of batch.rows) add(row);
+      return { unrecorded, counted: totals.get(`${tenantRef}\0${metric}`) ?? 0 };
     },
   };
 }

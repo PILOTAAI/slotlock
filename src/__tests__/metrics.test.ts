@@ -34,6 +34,7 @@ describe('slotlock metrics', () => {
       series_writes_busy: 0,
       maintenance_busy: 0,
       request_too_large: 1,
+      quota_exceeded: 0,
       clients: [{ client: 'pseudonym', refusals: 4 }],
     });
     metrics.maintenance({

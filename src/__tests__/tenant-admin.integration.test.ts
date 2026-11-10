@@ -9,6 +9,7 @@ import { createSlotlockApiKeyStore } from '../api-keys.js';
 import { createSlotlockDashboardState } from '../dashboard.js';
 import { setSlotlockTenantPlan } from '../plans.js';
 import { type SlotlockStore, createSlotlockStore } from '../store.js';
+import { noteSlotlockQuotaThreshold, slotlockQuotaPeriod } from '../quotas.js';
 import { recordSlotlockUsage, slotlockUsageDay } from '../usage.js';
 
 const url = process.env.DATABASE_URL?.trim();
@@ -495,6 +496,15 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
         { tenantRef, day: slotlockUsageDay(Date.now()), metric: 'operations', keyId: '', origin: 'rest', count: 1 },
       ]);
       await app.withTenant(tenantRef, (tenant) => tenant.rollUpUsage({ tenantRef }));
+      // A notice that it used most of a monthly quota.
+      await noteSlotlockQuotaThreshold(application, {
+        tenantRef,
+        metric: 'operations',
+        percent: 80,
+        used: 400_000,
+        quota: 500_000,
+        periodStart: slotlockQuotaPeriod(Date.now()).periodStart,
+      });
       const dashboard = createSlotlockDashboardState(application);
       expect(await dashboard.use('form', `form-${randomUUID()}`, Date.now() + HOUR, uid)).toBe(
         true,

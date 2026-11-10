@@ -141,6 +141,8 @@ const expectedFiles = new Set([
   'package-version.d.ts',
   'plans.js',
   'plans.d.ts',
+  'quotas.js',
+  'quotas.d.ts',
   'rate-limit.js',
   'rate-limit.d.ts',
   'rest-api.js',

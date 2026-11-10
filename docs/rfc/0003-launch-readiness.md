@@ -72,9 +72,9 @@ subscription back from Stripe rather than trusting the event, and never lets a l
 old subscription end a newer one; Terms and privacy wording; existing accounts move to Free on 9
 December 2026.
 
-Findings, each checked against the branch. Findings 1 to 7 are fixed on
-`claude/inspiring-dijkstra-bfvqif`, which merges PR #161's branch; finding 8 waits on the owner's
-quota numbers.
+Findings, each checked against the branch. All eight are fixed on
+`claude/inspiring-dijkstra-bfvqif`, which merges PR #161's branch: finding 8 with the proposed
+quota numbers, which apply from 10 December 2026 (open question 3 can still change them before then).
 
 1. **Free is enforced only where the dashboard is used.** A tenant with no plan row keeps the
    server's limits. The Worker puts such a tenant on Free only when, after `SLOTLOCK_FREE_PLAN_FROM`,
@@ -319,8 +319,8 @@ reconciliation all need per-tenant counts, so one meter serves all three.
 
 Status: every metric below, `GET /v1/usage`, the Plan page's usage, `Slotlock-Request-Id` and
 `Slotlock-Usage` are built on `claude/inspiring-dijkstra-bfvqif`, off unless `SLOTLOCK_USAGE=on` (a
-self-hoster may not want per-tenant counts kept; Cloud sets it). `RateLimit` fields already carry the
-per-second limits; quotas, which add their monthly policies, wait on the numbers.
+self-hoster may not want per-tenant counts kept; Cloud sets it). Quotas are built too, off unless
+`SLOTLOCK_QUOTAS=on` (which needs `SLOTLOCK_USAGE=on`): see [Enforcement](#enforcement).
 
 | Metric | One unit is | Counted from | Exact? |
 | --- | --- | --- | --- |
@@ -371,6 +371,30 @@ request ─▶ authenticate (tenant, key, partner) ─▶ Slotlock-Request-Id �
   count on its side and compare.
 
 ### Enforcement
+
+Status: built (`src/quotas.ts`, with the numbers of [Pricing](#pricing-and-plans-after-this-rfc)),
+with these differences from the design below:
+
+- The quotas are the plan's (`SLOTLOCK_PLAN_QUOTAS` in `src/plans.ts`), not columns per tenant:
+  nothing sells a custom quota on the hosted plans, and a change reaches every tenant on a plan
+  with the release that makes it, after the Terms' 30 days' notice.
+- A check reads `slotlock.tenant_quota_usage(tenant, month)`, which adds the bookings in the feed
+  past the roll-up cursor to what `usage_daily` holds, in one statement. A booking counts at once,
+  not when maintenance next rolls it up. Between reads, a server adds its operations the meter has
+  not recorded yet and the booking operations it ran, and it reads every 2 s instead of 30 s once
+  a tenant is past 90% of a stop.
+- A count it cannot read lets the operation run, on the last counts of the month if it has any:
+  the quota never takes the service down with the database.
+- The `RateLimit` fields name each quota, `"operations_month"` and `"bookings_month"`, after the
+  tightest per-second bucket. `q` is the stop (Developer's 110%), so `r` counts down to the
+  refusal, and `w` is the month's length in seconds.
+- The notice is a `usage.threshold_reached` change, sent once per tenant, month, metric and share
+  (`slotlock.usage_notices`, erased with the tenant), and a warning on the Plan page rather than on
+  every page. `/metrics` and the refusal log count `quota_exceeded`.
+- The assistant's operations are checked when they run (`admit`), never when the model proposes
+  one, on serve's dashboard and on the Worker.
+
+The design as proposed:
 
 - A plan gains monthly quotas per metric (UTC calendar month, so every tenant resets at the same
   instant and the Plan page can say when).
@@ -541,7 +565,9 @@ The owner sets the final numbers before PR #161 merges (finding 8).
       `SLOTLOCK_STRIPE_PRICE_YEARLY`, `SLOTLOCK_FREE_PLAN_FROM=2026-12-09`, `SLOTLOCK_PLAN_CONTACT`.
 - [ ] A lawyer reviews the Terms and privacy changes of PR #161 and of parts 3 and 4, and the
       partner agreement.
-- [ ] The final quotas, in the Terms before PR #161 merges, so the 30 days' notice covers them.
+- [x] The quotas in the Terms (from 10 December 2026, so the 30 days' notice covers every
+      account), pending the lawyer's review; turn on `SLOTLOCK_QUOTAS=on` for serve and the Worker
+      on that day, not before.
 - [ ] The status probe switched on (`docs/hosted/status.md`: it stays off until the service opens).
 - [ ] A restore from the R2 backups, timed, on a scratch server.
 - [ ] support@, abuse@ and privacy@ watched, with an erasure runbook that cancels Stripe first.

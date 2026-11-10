@@ -63,7 +63,8 @@ import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from './ddl.js';
 import { ignoreRejection } from './hooks.js';
 import { SLOTLOCK_BOOKING_RULE_LIMITS, type SlotlockBookingRules } from './booking-rules.js';
 import { SLOTLOCK_DASHBOARD_ICON_SVG } from './dashboard-icon.js';
-import { SLOTLOCK_PLAN_LIMITS, type SlotlockTenantPlan } from './plans.js';
+import { SLOTLOCK_PLAN_LIMITS, SLOTLOCK_PLAN_QUOTAS, type SlotlockTenantPlan } from './plans.js';
+import { slotlockQuotaPeriod } from './quotas.js';
 import { type SlotlockUsageRow, slotlockUsageMonthToDate, summarizeSlotlockUsage } from './usage.js';
 import {
   type CreateWebhookEndpointResult,
@@ -438,6 +439,11 @@ export interface SlotlockDashboardOptions {
    * resources adapter's `usage`.
    */
   usage?: boolean;
+  /**
+   * The deployment holds tenants to their plans' monthly quotas (SLOTLOCK_QUOTAS=on): the Plan page
+   * shows this month's use against them, and warns from 80%. Needs `usage`.
+   */
+  quotas?: boolean;
   fetch?: typeof fetch;
   now?: () => number;
   /**
@@ -877,6 +883,7 @@ const CHANGE_LABELS: Readonly<Record<string, { text: string; tone: Tone }>> = Ob
   'waitlist.offered': { text: 'Waitlist offer sent', tone: 'good' },
   'waitlist.expired': { text: 'Waitlist offer lapsed', tone: 'neutral' },
   'webhook.disabled': { text: 'Webhook disabled', tone: 'bad' },
+  'usage.threshold_reached': { text: 'Monthly quota nearly or fully used', tone: 'bad' },
 });
 
 const zoned = (zone: string, parts: Intl.DateTimeFormatOptions) => {
@@ -2686,19 +2693,43 @@ ${
     const token = csrfToken(session);
     const paying = plan?.plan === 'developer';
     const name = paying ? 'Developer' : plan ? 'Free' : 'No plan';
+    const counted = (value: number) => value.toLocaleString('en-GB');
     const use = (label: string, used: number, limit: number | undefined) =>
-      html`<div class="stat"><span class="stat-label">${label}</span><span class="stat-value">${String(used)}${limit === undefined ? html`` : html`<span class="meta"> of ${String(limit)}</span>`}</span></div>`;
-    const warning =
+      html`<div class="stat"><span class="stat-label">${label}</span><span class="stat-value">${counted(used)}${limit === undefined ? html`` : html`<span class="meta"> of ${counted(limit)}</span>`}</span></div>`;
+    // This month's quotas, when the deployment holds tenants to them.
+    const quotas = options.quotas && plan ? SLOTLOCK_PLAN_QUOTAS[plan.plan] : null;
+    const resets = formatDate(slotlockQuotaPeriod(now()).resetsAt);
+    const quotaWarnings = quotas && used
+      ? (['operations', 'bookings'] as const).flatMap((metric) => {
+          const quota = quotas[metric];
+          const stop = Math.floor((quota * quotas.stopPercent) / 100);
+          const spent = used.totals[metric];
+          const what = metric === 'operations' ? 'operations' : 'bookings';
+          const refused = metric === 'operations' ? 'every call' : 'new bookings and holds';
+          if (spent >= stop) {
+            return [html`<p class="notice warn" role="alert">This month's ${what} are used up: Slotlock refuses ${refused} with quota_exceeded until ${resets}.${paying ? html`` : html` Upgrade for more.`}</p>`];
+          }
+          if (spent >= quota) {
+            return [html`<p class="notice warn" role="alert">You have used this month's ${counted(quota)} ${what}. Slotlock refuses ${refused} past ${counted(stop)}, until ${resets}.</p>`];
+          }
+          if (spent * 100 >= quota * 80) {
+            return [html`<p class="notice warn" role="status">You have used ${String(Math.floor((spent * 100) / quota))}% of this month's ${what}. They start again on ${resets}.</p>`];
+          }
+          return [];
+        })
+      : [];
+    const warning = html`${
       plan?.status === 'past_due'
         ? html`<p class="notice warn" role="alert">Your last payment failed. Update your payment method to keep the Developer plan.</p>`
-        : html``;
+        : html``
+    }${quotaWarnings}`;
     const free = SLOTLOCK_PLAN_LIMITS.free;
     const developer = SLOTLOCK_PLAN_LIMITS.developer;
     const upgrade = paying || !isAdmin(session)
       ? html``
       : html`<section class="panel" id="upgrade">
 <h2>Developer</h2>
-<p>${String(developer.resources)} resources, ${String(developer.apiKeys)} API keys and ${String(developer.webhookEndpoints)} webhook endpoints.</p>
+<p>${String(developer.resources)} resources, ${String(developer.apiKeys)} API keys and ${String(developer.webhookEndpoints)} webhook endpoints${options.quotas ? html`, with ${counted(SLOTLOCK_PLAN_QUOTAS.developer.operations)} operations and ${counted(SLOTLOCK_PLAN_QUOTAS.developer.bookings)} bookings a month` : html``}.</p>
 <form method="post" action="${root}/plan/upgrade">
 <input type="hidden" name="csrf" value="${token}">
 <input type="hidden" name="once" value="${formNonce(session)}">
@@ -2721,8 +2752,8 @@ ${
       ? html`<section class="panel" id="usage">
 <h2>Usage this month</h2>
 <div class="stats">
-${use('Operations', used.totals.operations, undefined)}
-${use('Bookings', used.totals.bookings, undefined)}
+${use('Operations', used.totals.operations, quotas?.operations)}
+${use('Bookings', used.totals.bookings, quotas?.bookings)}
 ${use('Holds', used.totals.holds, undefined)}
 ${use('Webhook deliveries', used.totals.webhook_deliveries, undefined)}
 ${use('Assistant messages', used.totals.assistant_messages, undefined)}
@@ -2748,7 +2779,7 @@ ${webhooks ? use('Webhooks', webhooks.length, plan?.limits.webhookEndpoints) : h
 </div>
 ${renews}
 ${usageSection}
-${plan ? html`` : html`<p class="fine">Free allows ${String(free.resources)} resources, ${String(free.apiKeys)} API keys and ${String(free.webhookEndpoints)} webhook endpoints.</p>`}
+${plan ? html`` : html`<p class="fine">Free allows ${String(free.resources)} resources, ${String(free.apiKeys)} API keys and ${String(free.webhookEndpoints)} webhook endpoints${options.quotas ? html`, with ${counted(SLOTLOCK_PLAN_QUOTAS.free.operations)} operations and ${counted(SLOTLOCK_PLAN_QUOTAS.free.bookings)} bookings a month` : html``}.</p>`}
 ${upgrade}
 <section class="panel" id="custom">
 <h2>Custom</h2>

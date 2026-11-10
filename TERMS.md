@@ -1,6 +1,6 @@
 # Terms of Service for hosted Slotlock
 
-Last updated: 9 November 2026.
+Last updated: 10 November 2026.
 
 These terms are an agreement between you and TREFT LTD, trading as Pylota (company number 16211391,
 registered office 20 Wenlock Road, London, England, N1 7GU), for hosted Slotlock: the API at
@@ -30,6 +30,12 @@ it yourself, and nothing here limits your rights under that licence.
 
 - **Free** costs nothing and has the limits shown on the [hosted service page](docs/hosted/README.md#plans).
   Accounts created before 9 November 2026 move to those limits on 9 December 2026.
+- From 10 December 2026, each plan also allows a number of operations (calls to the API, the
+  assistant's included) and bookings each calendar month, shown on the
+  [hosted service page](docs/hosted/README.md#monthly-allowances). We tell you in your account's
+  change feed and on the Plan page when you have used 80% and 100% of either. On Free, calls past an
+  allowance are refused until the month ends; on Developer, calls past 110% of it are. Use past an
+  allowance is never charged for.
 - **Developer** costs $10 a month or $100 a year, shown at checkout in your currency with any sales
   tax or VAT added. Stripe sells it to you as merchant of record: Stripe takes the payment, charges
   the tax and issues the invoices, under its own terms for buyers, which it shows at checkout. These

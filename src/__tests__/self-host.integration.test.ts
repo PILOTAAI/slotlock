@@ -9,8 +9,10 @@ import { Webhook } from 'standardwebhooks';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { SLOTLOCK_MCP_LEGACY_PROTOCOL_VERSION } from '../agent-server.js';
 import { SLOTLOCK_DASHBOARD_FUNCTIONS } from '../ddl.js';
+import { setSlotlockTenantPlan } from '../plans.js';
 import { type SlotlockEnv, runSlotlockCli } from '../self-host.js';
 import { createSlotlockStore } from '../store.js';
+import { recordSlotlockUsage } from '../usage.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
 const packageVersion = (
@@ -403,6 +405,90 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       ]);
     } finally {
       await admin`SELECT * FROM slotlock.erase_tenant(${metered}::text)`;
+    }
+  });
+
+  it('holds a tenant on a plan to its monthly quota with SLOTLOCK_QUOTAS=on', async () => {
+    const quoted = `cli-quota-${randomUUID()}`;
+    const quotedEnv: SlotlockEnv = { ...env, SLOTLOCK_TENANT: quoted, SLOTLOCK_USAGE: 'on', SLOTLOCK_QUOTAS: 'on' };
+    expect((await run(['migrate'])).code).toBe(0);
+    const created = output();
+    expect(
+      await runSlotlockCli(['key', 'create', 'quoted agent', '--scope', 'read,admin'], {
+        env: quotedEnv,
+        stdout: created,
+        stderr: output(),
+        signal: new AbortController().signal,
+      }),
+    ).toBe(0);
+    const { key } = JSON.parse(created.text()) as { key: string };
+    await setSlotlockTenantPlan(admin, { tenantRef: quoted, plan: 'free', status: 'active' });
+    // One operation short of Free's 25,000 this month.
+    await recordSlotlockUsage(admin, randomUUID(), [
+      {
+        tenantRef: quoted,
+        day: new Date().toISOString().slice(0, 10),
+        metric: 'operations',
+        keyId: '',
+        origin: 'rest',
+        count: 24_999,
+      },
+    ]);
+    const stdout = output();
+    const shutdown = new AbortController();
+    const serving = runSlotlockCli(['serve', '--migrate'], {
+      env: quotedEnv,
+      stdout,
+      stderr: output(),
+      signal: shutdown.signal,
+    });
+    const reset = new Date();
+    reset.setUTCHours(0, 0, 0, 0);
+    reset.setUTCDate(1);
+    reset.setUTCMonth(reset.getUTCMonth() + 1);
+    try {
+      const listening = await eventually(() => stdout.events().find(({ event }) => event === 'listening'));
+      expect(listening).toMatchObject({ usage: true, quotas: true });
+      const origin = listening.address as string;
+      const headers = { Authorization: `Bearer ${key}` };
+      const last = await fetch(`${origin}/v1/resources`, { headers });
+      expect(last.status).toBe(200);
+      // The tightest bucket, then the month's quotas, counting down to the stop.
+      expect(last.headers.get('ratelimit')).toMatch(/, "operations_month";r=1;t=\d+, "bookings_month";r=1000;t=\d+$/);
+      expect(last.headers.get('ratelimit-policy')).toMatch(
+        /, "operations_month";q=25000;w=\d+, "bookings_month";q=1000;w=\d+$/,
+      );
+      const refused = await fetch(`${origin}/v1/resources`, { headers });
+      expect(refused.status).toBe(429);
+      const seconds = Number(refused.headers.get('retry-after'));
+      expect(Math.abs(seconds - (reset.getTime() - Date.now()) / 1_000)).toBeLessThan(60);
+      expect(refused.headers.get('ratelimit')).toMatch(/^"operations_month";r=0;t=\d+$/);
+      expect(await refused.json()).toMatchObject({
+        code: 'quota_exceeded',
+        title: 'The monthly quota is used up',
+        status: 429,
+        error: { code: 'quota_exceeded' },
+      });
+    } finally {
+      shutdown.abort();
+      expect(await serving).toBe(0);
+    }
+    try {
+      // The refused request ran nothing and is not counted; the feed says the quota is used up.
+      const [counted] = await admin<{ count: string }[]>`
+        SELECT sum(count)::text AS count FROM slotlock.usage_daily
+         WHERE tenant_ref = ${quoted} AND metric = 'operations'`;
+      expect(counted?.count).toBe('25000');
+      const notices = await admin<{ data: { metric: string; percent: number } }[]>`
+        SELECT data FROM slotlock.outbox WHERE tenant_ref = ${quoted} AND type = 'usage.threshold_reached'
+         ORDER BY id`;
+      expect(notices.map(({ data }) => [data.metric, data.percent])).toEqual([
+        ['operations', 80],
+        ['operations', 100],
+      ]);
+    } finally {
+      await admin`DELETE FROM slotlock.tenant_plans WHERE tenant_ref = ${quoted}`;
+      await admin`SELECT * FROM slotlock.erase_tenant(${quoted}::text)`;
     }
   });
 

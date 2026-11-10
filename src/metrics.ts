@@ -15,6 +15,7 @@ const REFUSAL_REASONS: readonly SlotlockRefusalReason[] = [
   'series_writes_busy',
   'maintenance_busy',
   'request_too_large',
+  'quota_exceeded',
 ];
 const MAINTENANCE_COUNTS = [
   'extended',

@@ -33,6 +33,8 @@ export const SLOTLOCK_CHANGE_TYPES = Object.freeze([
   'waitlist.offered',
   'waitlist.expired',
   'webhook.disabled',
+  // A plan's monthly quota 80% or 100% used (quotas.ts): the metric, the share and the counts.
+  'usage.threshold_reached',
   // Configuration changes: ids and states, never a secret or a URL.
   'resource.created',
   'resource.updated',

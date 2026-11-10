@@ -251,6 +251,7 @@ export const SLOTLOCK_TENANT_ADMIN_TABLES = Object.freeze([
   'usage_flushes',
   'usage_cursors',
   'usage_meter_start',
+  'usage_notices',
   'webhook_tenants',
   'rate_buckets',
   'assistant_tenants',
@@ -279,6 +280,8 @@ export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.record_usage(uuid, jsonb)',
   'slotlock.roll_up_usage(text, integer)',
   'slotlock.tenant_usage(text, date, date)',
+  'slotlock.tenant_quota_usage(text, date)',
+  'slotlock.note_usage_threshold(text, date, text, integer, bigint, bigint)',
 ] as const);
 
 /** The functions usage metering runs (SLOTLOCK_USAGE=on): serve checks it may, before it starts. */
@@ -287,6 +290,22 @@ export const SLOTLOCK_USAGE_FUNCTIONS = Object.freeze([
   'slotlock.roll_up_usage(text, integer)',
   'slotlock.tenant_usage(text, date, date)',
 ] as const);
+
+/** The functions quotas run (SLOTLOCK_QUOTAS=on, quotas.ts): serve checks it may, before it starts. */
+export const SLOTLOCK_QUOTA_FUNCTIONS = Object.freeze([
+  'slotlock.tenant_plan(text)',
+  'slotlock.tenant_quota_usage(text, date)',
+  'slotlock.note_usage_threshold(text, date, text, integer, bigint, bigint)',
+] as const);
+
+/** What a plan's monthly quotas count (quotas.ts): operations run and bookings made. */
+export const SLOTLOCK_QUOTA_METRICS = Object.freeze(['operations', 'bookings'] as const);
+
+/** The shares of a quota, in percent, at which a tenant is told once a month (usage.threshold_reached). */
+export const SLOTLOCK_QUOTA_NOTICE_PERCENTS = Object.freeze([80, 100] as const);
+
+/** The most bookings past the roll-up cursor one quota read counts: more than any plan allows. */
+export const SLOTLOCK_QUOTA_UNROLLED_LIMIT = 100_000;
 
 /**
  * What usage.ts meters, per tenant and day: operations run, bookings and holds committed, webhook
@@ -1147,6 +1166,24 @@ ON CONFLICT (only_row) DO NOTHING;
 ALTER TABLE slotlock.usage_meter_start ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON slotlock.usage_meter_start FROM PUBLIC;
 
+-- The quota notices a tenant was sent (usage.threshold_reached, quotas.ts): one per UTC month,
+-- metric and share of the plan's quota, so each goes once however many servers see the count pass
+-- it. Owner-only, erased with the tenant; a month's rows go when the next month's first is noted.
+CREATE TABLE IF NOT EXISTS slotlock.usage_notices (
+  tenant_ref text NOT NULL,
+  month date NOT NULL,
+  metric text NOT NULL,
+  percent integer NOT NULL,
+  noticed_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_usage_notices_pkey PRIMARY KEY (tenant_ref, month, metric, percent),
+  CONSTRAINT slotlock_usage_notices_tenant_ref_valid CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500),
+  CONSTRAINT slotlock_usage_notices_month_valid CHECK (extract(day FROM month) = 1),
+  CONSTRAINT slotlock_usage_notices_metric_valid CHECK (metric IN (${SLOTLOCK_QUOTA_METRICS.map((metric) => `'${metric}'`).join(', ')})),
+  CONSTRAINT slotlock_usage_notices_percent_valid CHECK (percent IN (${SLOTLOCK_QUOTA_NOTICE_PERCENTS.join(', ')}))
+);
+ALTER TABLE slotlock.usage_notices ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.usage_notices FROM PUBLIC;
+
 -- Adds a server's batch of counts, once per flush id: true when added, false when that batch was
 -- added before. Each row names a tenant, a day within a day of today, a metric a server counts
 -- (operations, webhook deliveries, assistant messages), a key ('' for none), a surface and a count;
@@ -1317,6 +1354,139 @@ AS $slotlock_tenant_usage$
    ORDER BY used.day, used.metric, used.key_id, used.origin;
 $slotlock_tenant_usage$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[16]} FROM PUBLIC;
+
+-- The tenant's operations and bookings from from_day (its quota month's first day, UTC) until now,
+-- for its plan's quotas (quotas.ts): what usage_daily holds, plus the bookings in its feed past the
+-- roll-up cursor, counted as roll_up_usage will count them (at most ${SLOTLOCK_QUOTA_UNROLLED_LIMIT.toLocaleString('en-US')} of those, more
+-- than any quota). One statement, so a roll-up that commits meanwhile is counted once, never twice
+-- or not at all.
+CREATE OR REPLACE FUNCTION slotlock.tenant_quota_usage(requested_tenant_ref text, from_day date)
+RETURNS TABLE (operations bigint, bookings bigint)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_tenant_quota_usage$
+DECLARE
+  setting text;
+  previous jsonb := '{}'::jsonb;
+  today date := (statement_timestamp() AT TIME ZONE 'UTC')::date;
+BEGIN
+  IF requested_tenant_ref IS NULL OR octet_length(requested_tenant_ref) NOT BETWEEN 1 AND 500
+     OR from_day IS NULL OR from_day NOT BETWEEN today - 31 AND today + 1 THEN
+    RAISE EXCEPTION 'Slotlock quota usage arguments are invalid' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  -- The feed has forced row-level security, its owner bound too: read it in the tenant's context.
+  FOR setting IN
+    SELECT DISTINCT contract.tenant_context_setting FROM slotlock.rls_policy_contracts contract
+  LOOP
+    previous := previous || jsonb_build_object(setting, current_setting(setting, true));
+    PERFORM set_config(setting, requested_tenant_ref, true);
+  END LOOP;
+  RETURN QUERY
+  WITH rolled_to AS (
+    SELECT COALESCE(
+             (SELECT kept.txid FROM slotlock.usage_cursors kept WHERE kept.tenant_ref = requested_tenant_ref),
+             (SELECT start.txid FROM slotlock.usage_meter_start start)) AS txid,
+           COALESCE(
+             (SELECT kept.id FROM slotlock.usage_cursors kept WHERE kept.tenant_ref = requested_tenant_ref),
+             0) AS id
+  ), unrolled AS (
+    SELECT 1
+      FROM slotlock.outbox change, rolled_to
+     WHERE change.tenant_ref = requested_tenant_ref
+       AND (change.txid, change.id) > (rolled_to.txid, rolled_to.id)
+       AND change.type IN ('reservation.created', 'event.created', 'hold.confirmed')
+       AND COALESCE(change.origin, 'library') <> 'maintenance'
+       AND change.occurred_at >= from_day::timestamp AT TIME ZONE 'UTC'
+     LIMIT ${SLOTLOCK_QUOTA_UNROLLED_LIMIT}
+  ), rolled AS (
+    SELECT COALESCE(sum(used.count) FILTER (WHERE used.metric = 'operations'), 0) AS operations,
+           COALESCE(sum(used.count) FILTER (WHERE used.metric = 'bookings'), 0) AS bookings
+      FROM slotlock.usage_daily used
+     WHERE used.tenant_ref = requested_tenant_ref
+       AND used.day >= from_day
+       AND used.metric IN ('operations', 'bookings')
+  )
+  SELECT rolled.operations::bigint, (rolled.bookings + (SELECT count(*) FROM unrolled))::bigint
+    FROM rolled;
+  FOR setting IN SELECT jsonb_object_keys(previous) LOOP
+    PERFORM set_config(setting, coalesce(previous ->> setting, ''), true);
+  END LOOP;
+END
+$slotlock_tenant_quota_usage$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[17]} FROM PUBLIC;
+
+-- Notes that the tenant's use of a quota reached a share of it in a month, once: true the first
+-- time, when it also appends usage.threshold_reached to the tenant's feed (the metric, the share,
+-- the count, the quota and when the month ends), which its webhooks deliver as any change. Only for
+-- a tenant that still exists (one with an API key or a feed, as record_usage), under its shared lock.
+CREATE OR REPLACE FUNCTION slotlock.note_usage_threshold(
+  requested_tenant_ref text,
+  requested_month date,
+  requested_metric text,
+  requested_percent integer,
+  requested_used bigint,
+  requested_quota bigint
+)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_note_usage_threshold$
+DECLARE
+  setting text;
+  previous jsonb := '{}'::jsonb;
+  today date := (statement_timestamp() AT TIME ZONE 'UTC')::date;
+BEGIN
+  IF requested_tenant_ref IS NULL OR octet_length(requested_tenant_ref) NOT BETWEEN 1 AND 500
+     OR requested_month IS NULL OR extract(day FROM requested_month) <> 1
+     OR requested_month NOT BETWEEN today - 31 AND today + 1
+     OR requested_metric IS NULL
+     OR requested_metric NOT IN (${SLOTLOCK_QUOTA_METRICS.map((metric) => `'${metric}'`).join(', ')})
+     OR requested_percent IS NULL OR requested_percent NOT IN (${SLOTLOCK_QUOTA_NOTICE_PERCENTS.join(', ')})
+     OR requested_used IS NULL OR requested_used < 0
+     OR requested_quota IS NULL OR requested_quota < 1 THEN
+    RAISE EXCEPTION 'Slotlock usage notice arguments are invalid' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  -- As withTenant: an erasure in flight commits first, and the check below then sees it.
+  PERFORM pg_advisory_xact_lock_shared(hashtextextended('slotlock:tenant:' || requested_tenant_ref, 0));
+  IF NOT EXISTS (SELECT 1 FROM slotlock.api_keys issued WHERE issued.tenant_ref = requested_tenant_ref)
+     AND NOT EXISTS (SELECT 1 FROM slotlock.maintenance_tenants listed
+                      WHERE listed.tenant_ref = requested_tenant_ref) THEN
+    RETURN false;
+  END IF;
+  INSERT INTO slotlock.usage_notices (tenant_ref, month, metric, percent)
+  VALUES (requested_tenant_ref, requested_month, requested_metric, requested_percent)
+  ON CONFLICT DO NOTHING;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+  DELETE FROM slotlock.usage_notices
+   WHERE tenant_ref = requested_tenant_ref AND month < requested_month;
+  FOR setting IN
+    SELECT DISTINCT contract.tenant_context_setting FROM slotlock.rls_policy_contracts contract
+  LOOP
+    previous := previous || jsonb_build_object(setting, current_setting(setting, true));
+    PERFORM set_config(setting, requested_tenant_ref, true);
+  END LOOP;
+  INSERT INTO slotlock.outbox (tenant_ref, type, subject, data)
+  VALUES (
+    requested_tenant_ref, 'usage.threshold_reached',
+    'usage_' || requested_metric || '_' || to_char(requested_month, 'YYYY_MM') || '_' || requested_percent,
+    jsonb_build_object(
+      'metric', requested_metric, 'percent', requested_percent, 'used', requested_used,
+      'quota', requested_quota, 'period_start', to_char(requested_month, 'YYYY-MM-DD'),
+      'resets_at', to_char((requested_month + interval '1 month'), 'YYYY-MM-DD"T"00:00:00"Z"'))
+  );
+  FOR setting IN SELECT jsonb_object_keys(previous) LOOP
+    PERFORM set_config(setting, coalesce(previous ->> setting, ''), true);
+  END LOOP;
+  RETURN true;
+END
+$slotlock_note_usage_threshold$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[18]} FROM PUBLIC;
 
 -- True when the tenant was not suspended already; a second suspension keeps the first's reason.
 CREATE OR REPLACE FUNCTION slotlock.suspend_tenant(requested_tenant_ref text, requested_reason text)
@@ -1502,6 +1672,10 @@ BEGIN
   RETURN NEXT;
   erased_table := 'usage_cursors';
   DELETE FROM slotlock.usage_cursors WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'usage_notices';
+  DELETE FROM slotlock.usage_notices WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
   erased_table := 'api_keys';

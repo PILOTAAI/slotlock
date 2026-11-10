@@ -95,6 +95,7 @@ describe('slotlock serve configuration', () => {
       webhooks: 'on',
       sharedLimits: false,
       usage: false,
+      quotas: false,
       limits: SLOTLOCK_DEFAULT_LIMITS,
     });
   });
@@ -104,6 +105,17 @@ describe('slotlock serve configuration', () => {
     expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_USAGE: 'off' })).usage).toBe(false);
     expect(() => readSlotlockServeConfig(serveEnv({ SLOTLOCK_USAGE: 'yes' }))).toThrow(
       'SLOTLOCK_USAGE must be on or off',
+    );
+  });
+
+  it('holds tenants to their quotas only when asked, and only with usage metered', () => {
+    expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_USAGE: 'on', SLOTLOCK_QUOTAS: 'on' })).quotas).toBe(true);
+    expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_USAGE: 'on' })).quotas).toBe(false);
+    expect(() => readSlotlockServeConfig(serveEnv({ SLOTLOCK_QUOTAS: 'on' }))).toThrow(
+      'SLOTLOCK_QUOTAS=on needs SLOTLOCK_USAGE=on',
+    );
+    expect(() => readSlotlockServeConfig(serveEnv({ SLOTLOCK_USAGE: 'on', SLOTLOCK_QUOTAS: 'yes' }))).toThrow(
+      'SLOTLOCK_QUOTAS must be on or off',
     );
   });
 

@@ -42,6 +42,13 @@ import {
 } from '../../src/billing.js';
 import { enrolSlotlockTenantPlan, readSlotlockTenantPlan } from '../../src/plans.js';
 import {
+  type SlotlockQuotas,
+  createSlotlockQuotas,
+  noteSlotlockQuotaThreshold,
+  readSlotlockQuotaUse,
+  slotlockQuotaRefusal,
+} from '../../src/quotas.js';
+import {
   type SlotlockUsageMeter,
   createSlotlockUsageMeter,
   recordSlotlockUsage,
@@ -98,6 +105,8 @@ interface RequestScope {
   agentCalls: { count: number };
   /** The assistant's operations this request ran, recorded as it ends (SLOTLOCK_USAGE=on). */
   usage: SlotlockUsageMeter | null;
+  /** The tenant's monthly quotas, read for this request (SLOTLOCK_QUOTAS=on). */
+  quotas: SlotlockQuotas | null;
   resources: SlotlockDashboardResources;
   state: SlotlockDashboardState;
 }
@@ -131,6 +140,18 @@ export function createSlotlockWorkerAgentLimiter(vars: SlotlockEnv) {
 function readWorkerUsage(vars: SlotlockEnv): boolean {
   const value = vars.SLOTLOCK_USAGE?.trim() || 'off';
   if (value !== 'on' && value !== 'off') throw new SlotlockConfigError('SLOTLOCK_USAGE must be on or off');
+  return value === 'on';
+}
+
+/** SLOTLOCK_QUOTAS: on to hold the assistant's operations to each tenant's quotas, as serve does. */
+function readWorkerQuotas(vars: SlotlockEnv, usage: boolean): boolean {
+  const value = vars.SLOTLOCK_QUOTAS?.trim() || 'off';
+  if (value !== 'on' && value !== 'off') throw new SlotlockConfigError('SLOTLOCK_QUOTAS must be on or off');
+  if (value === 'on' && !usage) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_QUOTAS=on needs SLOTLOCK_USAGE=on: a quota is held against the usage it counts',
+    );
+  }
   return value === 'on';
 }
 
@@ -228,6 +249,8 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
         stripeWebhook: { path: string; secret: string; stripe: SlotlockStripe } | null;
         /** SLOTLOCK_USAGE=on: the assistant's operations are recorded (usage.ts). */
         usage: boolean;
+        /** SLOTLOCK_QUOTAS=on: the assistant's operations are held to the tenant's quotas. */
+        quotas: boolean;
         limits: {
           client: SlotlockRateLimit;
           signIn: SlotlockRateLimit;
@@ -272,6 +295,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
     const agentLimiter = createSlotlockWorkerAgentLimiter(vars);
     const billing = readBilling(vars);
     const metering = readWorkerUsage(vars);
+    const quotaMode = readWorkerQuotas(vars, metering);
     const dashboard = createSlotlockDashboard({
       publicUrl,
       serviceUrl,
@@ -306,11 +330,27 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
                       current().usage?.add({ tenantRef, metric: 'assistant_messages', origin: 'dashboard-assistant' }),
                   }
                 : {}),
+              // A read, or an approved write, over the tenant's monthly quota is refused.
+              ...(quotaMode
+                ? {
+                    admit: async (args: {
+                      principal: SlotlockAgentPrincipal;
+                      operation: SlotlockAgentOperation;
+                    }) => {
+                      const verdict = await current().quotas?.check({
+                        tenantRef: args.principal.tenantRef,
+                        operation: args.operation,
+                      });
+                      if (verdict && !verdict.ok) throw slotlockQuotaRefusal(verdict.exceeded);
+                    },
+                  }
+                : {}),
               ...(config.assistantPrivateUrls ? { privateUrls: true } : {}),
             },
           }
         : {}),
       ...(metering ? { usage: true } : {}),
+      ...(quotaMode ? { quotas: true } : {}),
       ...(billing
         ? {
             billing: {
@@ -356,6 +396,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
             }
           : null,
       usage: metering,
+      quotas: quotaMode,
       limits: { client, signIn, signInCeiling },
     };
   }
@@ -379,7 +420,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
           headers: { 'content-type': 'text/plain; charset=utf-8' },
         });
       }
-      const { dashboard, root, signInPaths, limits, availability, stripeWebhook, usage } = built;
+      const { dashboard, root, signInPaths, limits, availability, stripeWebhook, usage, quotas } = built;
       const path = new URL(request.url).pathname;
       if (path === '/') return Response.redirect(root, 302);
       // Stripe's deliveries: the client connects only once the signature has been checked.
@@ -442,24 +483,42 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       let requestScope: RequestScope | undefined;
       try {
         const store = createSlotlockStore(sql);
+        // Recorded once, when the response is sent: a Worker keeps nothing between requests.
+        const meter = usage
+          ? createSlotlockUsageMeter({
+              intervalMs: 0,
+              record: (flushId, rows) => recordSlotlockUsage(sql, flushId, rows),
+              onError: (error) =>
+                console.error(
+                  JSON.stringify({
+                    message: 'slotlock usage record failed',
+                    error: error instanceof Error ? error.message : 'unknown',
+                  }),
+                ),
+            })
+          : null;
         requestScope = {
           sql,
           keys: createSlotlockApiKeyStore(sql),
           agentCalls: { count: 0 },
-          // Recorded once, when the response is sent: a Worker keeps nothing between requests.
-          usage: usage
-            ? createSlotlockUsageMeter({
-                intervalMs: 0,
-                record: (flushId, rows) => recordSlotlockUsage(sql, flushId, rows),
-                onError: (error) =>
-                  console.error(
-                    JSON.stringify({
-                      message: 'slotlock usage record failed',
-                      error: error instanceof Error ? error.message : 'unknown',
-                    }),
-                  ),
-              })
-            : null,
+          usage: meter,
+          // Read once a request, with this request's own counts on top.
+          quotas:
+            quotas && meter
+              ? createSlotlockQuotas({
+                  plan: async (tenantRef) => (await readSlotlockTenantPlan(sql, tenantRef))?.plan ?? null,
+                  used: (tenantRef, fromDay) => readSlotlockQuotaUse(sql, tenantRef, fromDay),
+                  local: (tenantRef, metric, fromDay) => meter.local(tenantRef, metric, fromDay),
+                  notice: (notice) => noteSlotlockQuotaThreshold(sql, notice),
+                  onError: (error) =>
+                    console.error(
+                      JSON.stringify({
+                        message: 'slotlock quota check failed',
+                        error: error instanceof Error ? error.message : 'unknown',
+                      }),
+                    ),
+                })
+              : null,
           agent: createSlotlockStoreAgentBackend(store, {
             availabilityRules: async () => availability.map((rule) => ({ ...rule })),
           }),

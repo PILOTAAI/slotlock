@@ -62,7 +62,12 @@ import {
 } from './config.js';
 import { type SlotlockBookingRules, parseBookingRules } from './booking-rules.js';
 import { SLOTLOCK_APPLICATION_SCOPE } from './application-api.js';
-import { SLOTLOCK_DASHBOARD_FUNCTIONS, SLOTLOCK_TENANT_TABLES, SLOTLOCK_USAGE_FUNCTIONS } from './ddl.js';
+import {
+  SLOTLOCK_DASHBOARD_FUNCTIONS,
+  SLOTLOCK_QUOTA_FUNCTIONS,
+  SLOTLOCK_TENANT_TABLES,
+  SLOTLOCK_USAGE_FUNCTIONS,
+} from './ddl.js';
 import {
   type SlotlockMaintenanceResult,
   type SlotlockMaintenanceScheduler,
@@ -84,6 +89,7 @@ import {
   readSlotlockTenantPlan,
   setSlotlockPlanDefault,
 } from './plans.js';
+import { createSlotlockQuotas, noteSlotlockQuotaThreshold, readSlotlockQuotaUse } from './quotas.js';
 import { createSlotlockRequestLimits } from './rate-limit.js';
 import { createSlotlockUsageMeter, recordSlotlockUsage } from './usage.js';
 import {
@@ -114,6 +120,7 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_WEBHOOKS',
   'SLOTLOCK_SHARED_LIMITS',
   'SLOTLOCK_USAGE',
+  'SLOTLOCK_QUOTAS',
   'SLOTLOCK_LIMITS',
   'SLOTLOCK_TRUSTED_PROXY_HEADER',
   'SLOTLOCK_TRUSTED_PROXY_SECRET',
@@ -247,6 +254,11 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
    * holds counted by day, key and surface in slotlock.usage_daily (usage.ts).
    */
   usage: boolean;
+  /**
+   * Monthly quotas (SLOTLOCK_QUOTAS=on, which needs SLOTLOCK_USAGE=on; off by default): a tenant on
+   * a plan is refused `quota_exceeded` past its plan's operations or bookings this month (quotas.ts).
+   */
+  quotas: boolean;
   /** Request limits (SLOTLOCK_LIMITS over SLOTLOCK_DEFAULT_LIMITS): the server's only rate limit. */
   limits: SlotlockLimits;
   /** The lower-case request field a trusted proxy sets to the client address; else the socket's. */
@@ -368,6 +380,20 @@ function readUsageMetering(env: SlotlockEnv): boolean {
   return value === 'on';
 }
 
+/** SLOTLOCK_QUOTAS: on to hold each tenant on a plan to its monthly quotas; it counts with usage. */
+function readQuotas(env: SlotlockEnv, usage: boolean): boolean {
+  const value = optional(env, 'SLOTLOCK_QUOTAS') ?? 'off';
+  if (value !== 'on' && value !== 'off') {
+    throw new SlotlockConfigError('SLOTLOCK_QUOTAS must be on or off');
+  }
+  if (value === 'on' && !usage) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_QUOTAS=on needs SLOTLOCK_USAGE=on: a quota is held against the usage it counts',
+    );
+  }
+  return value === 'on';
+}
+
 function readRestApi(env: SlotlockEnv): boolean {
   const value = optional(env, 'SLOTLOCK_REST_API') ?? 'on';
   if (value !== 'on' && value !== 'off') {
@@ -407,8 +433,10 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
     webhooks: readWebhooks(env),
     sharedLimits: readSharedLimits(env),
     usage: readUsageMetering(env),
+    quotas: false,
     limits: readLimits(env),
   };
+  config.quotas = readQuotas(env, config.usage);
   const trustedProxyHeader = readTrustedProxyHeader(env);
   if (trustedProxyHeader !== undefined) config.trustedProxyHeader = trustedProxyHeader;
   const trustedProxySecret = readTrustedProxySecret(env, trustedProxyHeader);
@@ -913,14 +941,14 @@ export async function startSlotlockServer(
       }
     }
     if (config.usage) {
-      for (const signature of SLOTLOCK_USAGE_FUNCTIONS) {
+      for (const signature of [...SLOTLOCK_USAGE_FUNCTIONS, ...(config.quotas ? SLOTLOCK_QUOTA_FUNCTIONS : [])]) {
         const [granted] = await sql<{ ready: boolean }[]>`
           SELECT CASE WHEN to_regprocedure(${signature}) IS NULL THEN false
                       ELSE has_function_privilege(to_regprocedure(${signature}), 'EXECUTE') END AS ready`;
         if (!granted?.ready) {
           throw Object.assign(
             new Error(
-              `SLOTLOCK_USAGE needs ${signature}, which this database role cannot run: run \`slotlock migrate\` (or \`slotlock serve --migrate\`) with this release`,
+              `${(SLOTLOCK_USAGE_FUNCTIONS as readonly string[]).includes(signature) ? 'SLOTLOCK_USAGE' : 'SLOTLOCK_QUOTAS'} needs ${signature}, which this database role cannot run: run \`slotlock migrate\` (or \`slotlock serve --migrate\`) with this release`,
             ),
             { code: 'schema_outdated' },
           );
@@ -937,6 +965,18 @@ export async function startSlotlockServer(
             }),
         })
       : undefined;
+    // Each tenant on a plan held to its monthly quotas, counted with the meter (quotas.ts).
+    const quotas =
+      config.quotas && usage
+        ? createSlotlockQuotas({
+            plan: async (tenantRef) => (await readSlotlockTenantPlan(sql, tenantRef))?.plan ?? null,
+            used: (tenantRef, fromDay) => readSlotlockQuotaUse(sql, tenantRef, fromDay),
+            local: (tenantRef, metric, fromDay) => usage.local(tenantRef, metric, fromDay),
+            notice: (notice) => noteSlotlockQuotaThreshold(sql, notice),
+            onError: (error) =>
+              log.error('quota_failed', { error: error instanceof Error ? error.message : 'unknown' }),
+          })
+        : undefined;
     const { caps } = config.limits;
     const store = createSlotlockServeStore(sql, caps, config.availability, config.retentionDays);
     const retention = config.retentionDays !== undefined ? { retentionDays: config.retentionDays } : {};
@@ -988,6 +1028,7 @@ export async function startSlotlockServer(
         ? { trustedProxySecret: config.trustedProxySecret }
         : {}),
       basePath,
+      ...(quotas ? { quotas } : {}),
       signInPaths: config.dashboard ? ['/dashboard/sign-in', '/dashboard/callback'] : [],
       // The token is compared in constant time first; only then is a key looked up. A person the
       // dashboard no longer allows loses their keys with their session.
@@ -1022,6 +1063,7 @@ export async function startSlotlockServer(
       // tenant's expansions cannot hold the event loop from every other tenant's requests.
       authorize: async ({ principal, operation, input }) => {
         if (!authorizeSlotlockServeOperation({ principal, operation })) return false;
+        await limits.quota({ principal, operation });
         await limits.admit({ principal, operation, input });
         return true;
       },
@@ -1060,6 +1102,7 @@ export async function startSlotlockServer(
               }),
               authorize: async ({ principal, operation, input }) => {
                 if (principal.scopes?.includes(SLOTLOCK_APPLICATION_SCOPE) !== true) return false;
+                await limits.quota({ principal, operation });
                 await limits.admit({ principal, operation, input });
                 return true;
               },
@@ -1096,6 +1139,7 @@ export async function startSlotlockServer(
             state: createSlotlockDashboardState(sql),
             availability: config.availability,
             ...(config.usage ? { usage: true } : {}),
+            ...(config.quotas ? { quotas: true } : {}),
             ...(config.dashboard.assistantSecret !== undefined
               ? {
                   // The assistant's reads and approved writes are agent calls: the same backend,
@@ -1119,7 +1163,11 @@ export async function startSlotlockServer(
                     // token are taken when an approved change runs (admit, consumeRateLimit).
                     authorize: async ({ principal, operation }) =>
                       authorizeSlotlockServeOperation({ principal, operation }),
-                    admit: (args) => limits.admit(args),
+                    // A read, or an approved write, over the tenant's monthly quota is refused.
+                    admit: async (args) => {
+                      await limits.quota(args);
+                      await limits.admit(args);
+                    },
                   },
                 }
               : {}),
@@ -1206,6 +1254,7 @@ export async function startSlotlockServer(
       webhooks: config.webhooks,
       shared_limits: config.sharedLimits,
       usage: config.usage,
+      quotas: config.quotas,
       tzdata: process.versions.tz ?? null,
       maintenance_interval_minutes: SERVE_MAINTENANCE_INTERVAL_MS / 60_000,
       limits: {
@@ -1751,6 +1800,9 @@ Environment:
   SLOTLOCK_USAGE                 on: count each tenant's operations, bookings and holds by day, API
                                  key and surface (slotlock.usage_daily, kept 400 days); off
                                  (default): record nothing
+  SLOTLOCK_QUOTAS                on (needs SLOTLOCK_USAGE=on): refuse a tenant on a plan past its
+                                 operations or bookings this month (quota_exceeded, 429); off
+                                 (default): no quota
   SLOTLOCK_SHARED_LIMITS         on: tenant request budgets are shared by every server through the
                                  database, so N servers allow a tenant its rate once; off (default):
                                  each server keeps its own

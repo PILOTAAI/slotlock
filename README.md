@@ -106,6 +106,16 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
   Writes from
   before the release that created the tables are not counted. The dashboard Worker takes the same
   setting for the assistant's operations.
+- With `SLOTLOCK_QUOTAS=on` too (off by default), a tenant on a hosted plan is held to that plan's
+  monthly quotas (`SLOTLOCK_PLAN_QUOTAS` in plans.ts; a tenant on no plan, as on a self-hosted
+  server, has none): past its operations this UTC month every operation is refused, past its
+  bookings only those that can book, with `429 quota_exceeded` and `Retry-After` at the month's end.
+  Each operation's answer lists the quotas in `RateLimit` and `RateLimit-Policy`
+  (`"operations_month"`, `"bookings_month"`), and the feed records `usage.threshold_reached` once at
+  80% and at 100% of each. A server reads the month so far at most every 30 seconds (every 2 near
+  the stop) and adds its own unrecorded operations, so a tenant can pass its stop by what other
+  servers counted in the last few seconds; a count it cannot read lets the operation run. The
+  dashboard Worker takes the same setting for the assistant's operations.
 - The server also bounds what one tenant may store, whichever key, agent or application writes
   it: 10,000 holds, and 100,000 each of bookings, calendar events and coverage rows, counted as
   the store's `tenantLimits` count them, besides 10,000 resources. A write past one answers 409
@@ -1072,6 +1082,7 @@ A refusal is a result the model can act on:
 | `invalid_arguments` | Input failed the schema, or a window is inverted or longer than 367 days. A schema failure adds `issues`, up to 20 `{"path":[…],"message":"…"}`, each naming a field by its path in the arguments (`["rules",0,"start_minutes"]`; `[]` is the arguments as a whole): in `error` on MCP and A2A, beside `code` in REST's problem details |
 | `forbidden` | `authorize` refused the call |
 | `rate_limited` | `consumeRateLimit` refused the call |
+| `quota_exceeded` | The tenant's plan's monthly quota is used up (`SLOTLOCK_QUOTAS=on`): `metric`, `quota`, `stop`, `used` and `resets_at` say which and until when |
 | `not_found`, `resource_not_found`, `event_not_found` | Not visible to this caller, or no such id: a resource id is the `id` `slotlock_list_resources` returns, not its `external_ref` |
 | `overlap` | The time is taken |
 | `revision_conflict`, `idempotency_conflict`, `event_cancelled` | Re-read, then retry with the current revision or a new key |

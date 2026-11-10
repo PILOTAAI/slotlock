@@ -2333,6 +2333,43 @@ describe('the plan page', () => {
     expect(read).not.toHaveBeenCalled();
   });
 
+  it('shows the month’s quotas with SLOTLOCK_QUOTAS=on, and warns from 80% to the stop', async () => {
+    let operations = 20_400;
+    let bookings = 10;
+    const read = vi.fn(async (_tenantRef: string, _from: string, _to: string) => [
+      { day: '2026-10-10', metric: 'operations' as const, keyId: '', origin: 'rest', count: operations },
+      { day: '2026-10-10', metric: 'bookings' as const, keyId: '', origin: 'rest', count: bookings },
+    ]);
+    const { billing } = billed(free);
+    const target = dashboard({ billing, usage: true, quotas: true, resources: { ...resources.store, usage: read } });
+    const { session } = await signIn(target);
+    const page = async () => (await get(target, '/base/dashboard/plan', session)).text();
+    let html = await page();
+    expect(html).toContain(
+      '<span class="stat-label">Operations</span><span class="stat-value">20,400<span class="meta"> of 25,000</span>',
+    );
+    expect(html).toContain('<span class="stat-value">10<span class="meta"> of 1,000</span>');
+    expect(html).toContain("You have used 81% of this month's operations. They start again on 2026-11-01 00:00 UTC.");
+    expect(html).toContain('with 500,000 operations and 25,000 bookings a month');
+    operations = 25_000;
+    bookings = 1_000;
+    html = await page();
+    expect(html).toContain("This month's operations are used up: Slotlock refuses every call with quota_exceeded until 2026-11-01 00:00 UTC. Upgrade for more.");
+    expect(html).toContain("This month's bookings are used up: Slotlock refuses new bookings and holds with quota_exceeded until 2026-11-01 00:00 UTC.");
+    // Developer: past the quota, refused only a tenth further on.
+    const developer = billed({ ...free, plan: 'developer', limits: { resources: 100, apiKeys: 100, webhookEndpoints: 10 } });
+    const paid = dashboard({ billing: developer.billing, usage: true, quotas: true, resources: { ...resources.store, usage: read } });
+    const signed = await signIn(paid);
+    operations = 510_000;
+    bookings = 0;
+    html = await (await get(paid, '/base/dashboard/plan', signed.session)).text();
+    expect(html).toContain("You have used this month's 500,000 operations. Slotlock refuses every call past 550,000, until 2026-11-01 00:00 UTC.");
+    // Without the setting, no quota is named.
+    const plain = dashboard({ billing, usage: true, resources: { ...resources.store, usage: read } });
+    const third = await signIn(plain);
+    expect(await (await get(plain, '/base/dashboard/plan', third.session)).text()).not.toContain(' of 25,000');
+  });
+
   it("names the plan's limit when an add is refused at it", async () => {
     const capped = {
       ...resources.store,

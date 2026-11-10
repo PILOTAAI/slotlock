@@ -1,6 +1,6 @@
 # Privacy notice for hosted Slotlock
 
-Last updated: 9 November 2026.
+Last updated: 10 November 2026.
 
 This notice covers hosted Slotlock (Slotlock Cloud): the API at `https://slotlock-api.pylota.io`
 (MCP, A2A and REST) and the dashboard at `https://app.slotlock.pylota.io`. Any GitHub account can
@@ -42,7 +42,7 @@ protection officer.
 | The sign-in in progress, in a cookie | The service | 10 minutes |
 | Dashboard assistant settings, if the dashboard offers the assistant and you set it up: the provider, its address, the model, and your provider key, stored only encrypted (AES-256-GCM) with its last four characters to show; and your conversation with it | You | Settings while your account exists or until you remove them; a conversation 2 hours after its last message |
 | Your plan: which plan, its status and renewal date, and the Stripe customer and subscription ids that link your account to its purchase. Your name, email, billing address, tax id and payment details go to Stripe directly and never reach us | The service and Stripe, if you upgrade | While your account exists |
-| How much your account uses the service: for each day (UTC), how many operations your keys and the dashboard assistant ran, how many bookings and holds you made, how many changes your webhooks accepted, how many messages were sent to the assistant, and how many resources you held, by API key and by interface (MCP, A2A, REST, the assistant). Counts only: never what was asked or answered | The service | 400 days, then deleted |
+| How much your account uses the service: for each day (UTC), how many operations your keys and the dashboard assistant ran, how many bookings and holds you made, how many changes your webhooks accepted, how many messages were sent to the assistant, and how many resources you held, by API key and by interface (MCP, A2A, REST, the assistant), and which notices of a monthly allowance used (80%, 100%) your account was sent this month. Counts only: never what was asked or answered | The service | 400 days, then deleted; the notices, until the next month's first |
 | Connection details at Cloudflare: IP addresses, request times, paths and headers | Your browser or client, through Cloudflare | Cloudflare's dashboard request logs: at most 7 days |
 | Connection details at our server: IP address, time, path and user agent of each API request, in the log of the proxy in front of it | Your client, through Cloudflare | One file of at most 10 MB, overwritten as it fills |
 | The API server's own logs | The service | See below |
@@ -50,7 +50,8 @@ protection officer.
 
 The API server's logs record each call's operation and outcome, never its arguments or who made it.
 For each minute in which the server refused requests, they also record how many it refused (over a
-rate limit, while too busy, too large, or with a credential it did not accept) and list the ten
+rate limit or a monthly allowance, while too busy, too large, or with a credential it did not
+accept) and list the ten
 clients refused most, each named only by a pseudonym: a hash of its IP address, keyed by a secret
 held only in the running server's memory and replaced when it restarts. The server keeps a rotating
 copy of these logs of at most 100 MB, and sends them to a log store we run on the same server, which
